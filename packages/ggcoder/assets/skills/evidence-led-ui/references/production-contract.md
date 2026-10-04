@@ -30,6 +30,13 @@ WCAG 2.2 Level AA is the default technical floor for web UI. Conformance means e
 
 ADA is a civil-rights and equal-access obligation, not a technical certification. WCAG 2.2 Level AA is the engineering baseline, but meeting it does not by itself establish full ADA compliance. When ADA applies, verify the current Title II or Title III obligations, scope, exceptions, effective-communication duties, and alternative arrangements with the responsible product or legal owner. Never claim `ADA compliant` or `WCAG conformant` without evidence for a defined scope.
 
+Dated legal and standards context (SNAPSHOT 3 Oct 2026, sources in `references/provenance.md`; re-check before citing to a user):
+
+- WCAG 2.2 is the current W3C Recommendation. WCAG 3.0 is still a Working Draft (latest 10 Sep 2026): do not target or claim it.
+- US ADA Title II web rule (state and local government): technical standard WCAG 2.1 AA. An April 2026 DOJ interim final rule moved compliance dates to 26 April 2027 (population 50,000+) and 26 April 2028 (smaller entities and special districts); substance unchanged. Private-sector (Title III) has no adopted technical standard; the equal-access duty still applies.
+- EU European Accessibility Act: applies since 28 June 2025 to covered products and services (including e-commerce and consumer banking) placed on the EU market. The harmonised technical standard is expected to be EN 301 549 (WCAG-based); confirm the version the applicable national law references.
+- Meeting WCAG 2.2 AA covers the WCAG 2.1 AA criteria these regimes reference. Applicability, exemptions, and legal claims belong to the product or legal owner; this skill never makes them.
+
 - Define the conformance scope before broad implementation: routes/screens, complete user processes, content types, components and states, supported technologies, and the browser, device, input, and assistive-technology matrix. Audit against the current official [WCAG 2.2 Quick Reference](https://www.w3.org/WAI/WCAG22/quickref/), criterion by criterion; this summary is not a substitute. Track every applicable Level A and AA criterion as pass, fail, or not applicable with a rationale and evidence.
 - Satisfy all five WCAG conformance requirements: the claimed level, full pages, every page in each complete process, only accessibility-supported uses of technology, and non-interference from any non-conforming content. One unresolved applicable failure blocks conformance.
 - Use native semantics and controls first. Supply meaningful text alternatives for informative images, controls, and graphics; mark decoration as decorative. Preserve programmatic information and relationships, headings, landmarks, lists, tables, meaningful sequence, page and passage language, reading order, and a bypass route for repeated blocks.
@@ -83,6 +90,7 @@ For web surfaces, use current Core Web Vitals as the shared target at the 75th p
 ## 6. Modern platform features and progressive enhancement
 
 - Set a browser and device support policy from project evidence. Prefer features in the project's Baseline/support range; use feature detection and a simpler fallback for newer capabilities.
+- Verified Baseline status for common modern features is in `references/direction.md` § 8. Do not state a feature's support status from memory.
 - Use native `dialog`, Popover, `inert`, constraint validation, and other platform primitives when their semantics match the job and the support policy allows them. Do not choose a new API merely because it is fashionable.
 - Treat View Transitions and similar enhancements as optional continuity layers. Navigation and state changes must still work without them and under reduced motion.
 - Preserve the essential task when scripts, media, fonts, animation, clipboard access, or a preferred input mode are unavailable whenever progressive enhancement is feasible for the product.

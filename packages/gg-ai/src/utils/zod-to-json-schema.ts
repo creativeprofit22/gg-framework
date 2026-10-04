@@ -3,6 +3,8 @@ import type { Tool } from "../types.js";
 
 type JsonSchema = Record<string, unknown>;
 
+const compositionKeywords = ["oneOf", "anyOf", "allOf", "$ref"] as const;
+
 // Tool schemas are immutable within a session. Cache conversion, not raw MCP input.
 const schemaCache = new WeakMap<z.ZodType, JsonSchema>();
 
@@ -20,9 +22,25 @@ export function zodToJsonSchema(schema: z.ZodType): JsonSchema {
  * pre-built `rawInputSchema`, otherwise use the shared Zod conversion.
  * Adapters may then normalize roots, sanitize fields, or enforce strict schemas;
  * this result is not a guarantee of the final schema sent on the wire.
+ *
+ * A no-argument tool may declare a bare `{ "type": "object" }` root (common
+ * for MCP servers). OpenAI rejects that root with HTTP 400 "object schema
+ * missing properties", failing the whole request, so an object root without
+ * `properties` gets an explicit empty one. JSON Schema meaning is unchanged.
+ * Composed roots (`oneOf`/`anyOf`/`allOf`/`$ref`) are not bare: their branches
+ * carry the properties, and they pass through unchanged so providers that accept
+ * them (e.g. DeepSeek) receive the tool's schema exactly as declared.
  */
 export function resolveToolSchema(tool: Tool): JsonSchema {
-  return tool.rawInputSchema ?? zodToJsonSchema(tool.parameters);
+  const schema = tool.rawInputSchema ?? zodToJsonSchema(tool.parameters);
+  if (
+    schema.type === "object" &&
+    schema.properties === undefined &&
+    !compositionKeywords.some((key) => key in schema)
+  ) {
+    return { ...schema, properties: {} };
+  }
+  return schema;
 }
 
 function isSchema(value: unknown): value is JsonSchema {

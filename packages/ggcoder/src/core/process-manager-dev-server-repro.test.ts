@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { ProcessManager } from "./process-manager.js";
+import { keepAliveWhileOwnerLives } from "../test-support/keep-alive.js";
 
 /**
  * A throwaway background-log directory per manager.
@@ -123,7 +124,7 @@ describe("ProcessManager dev-server lifecycle repro", () => {
     });
     const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "gg-win-taskkill-"));
     const started = await manager.start(
-      `${JSON.stringify(process.execPath)} -e "setInterval(()=>{},1000)"`,
+      `${JSON.stringify(process.execPath)} -e "${keepAliveWhileOwnerLives()}"`,
       tmpDir,
     );
     try {
@@ -211,14 +212,14 @@ describe("ProcessManager dev-server lifecycle repro", () => {
 
       await fs.writeFile(
         childFixture,
-        `console.log('GRANDCHILD_READY ' + process.pid);\n` + `setInterval(() => {}, 1000);\n`,
+        `console.log('GRANDCHILD_READY ' + process.pid);\n` + `${keepAliveWhileOwnerLives()}\n`,
       );
       await fs.writeFile(
         parentFixture,
         `import { spawn } from 'node:child_process';\n` +
           `const child = spawn(process.execPath, [${JSON.stringify(childFixture)}], { stdio: ['ignore', 'inherit', 'inherit'] });\n` +
           `console.log('PARENT_READY ' + process.pid + ' child=' + child.pid);\n` +
-          `setInterval(() => {}, 1000);\n`,
+          `${keepAliveWhileOwnerLives()}\n`,
       );
 
       const started = await manager.start(

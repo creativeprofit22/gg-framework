@@ -1,211 +1,110 @@
-# Anti-Defaults
+# Slop Tells and Replacement Moves
 
 ## Contents
 
-- Purpose and review method
-- Template composition: centered gradient hero, glass cards, equal card grids, eyebrows, metric blocks, pills, soft semantic tint-on-tint treatments, dark-premium assumptions, huge type, fake terminals, floating screenshots, and bento layouts
-- Decoration and truth: ambient motion, icon medallions, false authenticity, emoji, and mixed icon language
-- Craft regressions: generic hover lift, abrupt states, accidental misalignment, reimplemented local styling, generic type, and generated em dashes
-- Final anti-default review
-
-## Purpose
-
-An anti-default is not a ban. It is a prompt to prove that a visual choice belongs to this product, audience, content, and archetype. A choice passes when changing it would weaken the screen’s job or subject-specific identity.
-
-For every flagged pattern, write one sentence: **“This belongs because…”** If the sentence only says “modern,” “premium,” “clean,” “engaging,” or “on brand,” replace the choice.
-
-## Centered gradient hero
-
-**AI tell:** Centered oversized headline, violet/blue glow, two CTAs, product screenshot floating below.
-
-**Default action:** Build hierarchy from the actual claim, proof, and product behavior; choose composition after content.
-
-**Legitimate when:** The brand owns the gradient or light behavior, the page has one conversion job, and the centered pause supports the narrative. `stripe` and `framer` are relevant evidence; neither makes the pattern universal.
-
-## Generic glass cards
-
-**AI tell:** Translucent rounded rectangles with blur and hairlines layered over decorative color fields.
-
-**Default action:** Use a clear material model—flat canvas, tonal surface, border, or measured elevation—with one reason for each layer.
-
-**Legitimate when:** Content conceptually sits over live media/map/video, temporary overlays need context, or translucency is an established local platform material.
-
-## Equal three-card feature grid
-
-**AI tell:** Three interchangeable icon-title-copy cards used because the viewport divides neatly.
-
-**Default action:** Rank the content, then let importance and relationship determine module size and sequence.
-
-**Legitimate when:** Exactly three peer choices exist, comparison is the user’s task, and equal weight is truthful.
-
-## Decorative eyebrow label
-
-**AI tell:** Uppercase mono text above every heading, often paired with a dot or rule, regardless of content.
-
-**Default action:** Remove it unless it names useful hierarchy, sequence, category, status, or technical context.
-
-**Legitimate when:** Editorial taxonomy, step labels, system state, or a real dual-register type system makes the eyebrow informative.
-
-## Random metric blocks
-
-**AI tell:** Large percentages and counts inserted to make a page look credible or data-rich.
-
-**Default action:** Show only metrics with a source, unit, time frame, comparison, and decision consequence.
-
-**Legitimate when:** The metric is auditable and answers a question central to the screen, such as current capacity, conversion, latency, or balance.
-
-## Ubiquitous pills
-
-**AI tell:** Navigation, buttons, filters, badges, cards, and inputs all become capsules.
-
-**Default action:** Reserve full pills for roles that benefit from compact enclosure or toggle/tag semantics; use a smaller local radius vocabulary elsewhere.
-
-**Legitimate when:** The project already uses an orbital/capsule motif, a control’s variable label length needs it, or tactile consumer friendliness is a deliberate material rule.
-
-## Soft semantic tint-on-tint
-
-**AI tell:** Badges, buttons, toasts, cards, selected states, status rows, and icon medallions repeatedly use low-opacity semantic-color backgrounds with saturated same-hue text or icons, sometimes with a matching border. Component libraries often name this formula `soft`, `subtle`, `surface`, or `tonal`.
-
-**Default action:** Replace the formula, then derive the new treatment from the product's actual aesthetic and component role. A neutral surface with one semantic marker, a solid fill with neutral high-contrast text, monochrome styling, product accent, typography, or another coherent local material model can work; none is the universal replacement.
-
-**Legitimate when:** The user explicitly requests tint-on-tint or exact reuse of an established design-system variant is required by scope. Unlike most patterns in this file, this is a binding craft default rather than a pattern justified by generic claims such as `clean`, `friendly`, or `modern`.
-
-## Dark equals premium
-
-**AI tell:** Near-black canvas, purple glow, thin gray borders, and muted text chosen without product evidence.
-
-**Default action:** Choose theme from environment, content, task duration, contrast needs, imagery, and existing brand.
-
-**Legitimate when:** Media needs darkness, the tool is used in low-light environments, the brand is dark-first, or the existing product already supports a tested dark theme.
-
-## Huge type equals distinction
-
-**AI tell:** 96–160px headline doing all the visual work while content hierarchy remains shallow.
-
-**Default action:** Establish contrast through wording, measure, weight, width, placement, and surrounding scale before increasing size.
-
-**Legitimate when:** The surface is campaign/editorial, the phrase is short, localization is tested, and the type itself is the subject or signature.
-
-## Fake terminal or code theater
-
-**AI tell:** Decorative prompts, logs, monospace labels, and syntax colors on any developer-facing page.
-
-**Default action:** Use real commands, code, output, errors, and copy behavior—or use ordinary product evidence.
-
-**Legitimate when:** The user’s task genuinely involves code/CLI output and the example is accurate, selectable, versioned, and useful.
-
-## Floating product screenshot
-
-**AI tell:** Perspective-tilted dashboard image with glow, no readable details, and no relationship to the claim.
-
-**Default action:** Show a focused, legible product state tied to the adjacent proof, or demonstrate the interaction directly.
-
-**Legitimate when:** Spatial overview matters, the screenshot is current and honest, and perspective does not hide evidence users need to judge.
-
-## Bento by default
-
-**AI tell:** Every feature becomes a differently sized rounded tile, producing visual variety without semantic structure.
-
-**Default action:** Map module size to priority, content type, and reading order; simplify any tile that exists only to fill a gap.
-
-**Legitimate when:** The screen is genuinely an overview of heterogeneous modules and tile persistence supports scanning or rearrangement.
-
-## Ambient perpetual motion
-
-**AI tell:** Marquees, floating particles, pulsing glows, or auto-rotating cards that continue without user intent.
-
-**Default action:** Keep the resting screen still; animate state change, spatial continuity, feedback, or a finite narrative beat.
-
-**Legitimate when:** Motion is the content (audio, time, live system activity), remains comprehensible when paused, and has a reduced-motion alternative.
-
-## Generic icon medallions
-
-**AI tell:** Every section starts with a line icon inside the same tinted rounded square.
-
-**Default action:** Remove icons that repeat the heading; use diagrams, imagery, or symbols only where recognition becomes faster.
-
-**Legitimate when:** Icons support repeated navigation, status scanning, compact controls, or a real category system.
-
-## False authenticity
-
-**AI tell:** Invented testimonials, logos, avatars, customer counts, ratings, or precise business data.
-
-**Default action:** Use real project content; if unavailable, label honest illustrative content plainly and avoid claims.
-
-**Legitimate when:** The user explicitly supplies approved fixtures or asks for a clearly marked prototype dataset.
-
-## Emoji used as interface imagery
-
-**AI tell:** Emoji stand in for icons, status marks, bullets, empty-state art, or section decoration, producing platform-dependent color and inconsistent geometry.
-
-**Default action:** Reuse the project's icon system or one coherent icon package, with accessible labels and consistent optical sizing.
-
-**Legitimate when:** The user explicitly requests emoji, emoji is the actual content being entered or discussed, or exact supplied source copy must retain it.
-
-## Mixed or improvised icon language
-
-**AI tell:** Package icons, hand-drawn SVGs, text glyphs, and platform symbols appear together with mismatched stroke, fill, weight, and bounding boxes.
-
-**Default action:** Select one installed family and one wrapper component. Normalize size, stroke/fill, color, target, label, and state treatment.
-
-**Legitimate when:** A required third-party brand mark or native platform symbol carries meaning that the product icon family cannot replace.
-
-## Generic hover lift
-
-**AI tell:** Cards and buttons jump upward, scale, bob, or float on every hover regardless of material or task.
-
-**Default action:** Use a short background, border, underline, icon-fill, opacity, or restrained shadow transition. Keep geometry stable.
-
-**Legitimate when:** Spatial movement communicates actual drag, depth, stacking, or physical direct manipulation, and reduced motion removes non-essential travel.
-
-## Abrupt interactive states
-
-**AI tell:** Hover, press, expand, selection, loading, success, and error snap with no continuity or acknowledgement.
-
-**Default action:** Give every relevant state clear feedback and transition interpolable properties with shared duration/easing tokens. Keep focus visible immediately.
-
-**Legitimate when:** Reduced-motion preference, urgent safety feedback, or an inherently discrete state requires an immediate change; meaning must still remain clear.
-
-## Accidental misalignment
-
-**AI tell:** Almost-shared edges, drifting section widths, mismatched card padding, uneven control heights, and dividers that miss neighboring boundaries.
-
-**Default action:** Establish key lines, grid, spacing tokens, component anatomy, and responsive alignment before adding decoration.
-
-**Legitimate when:** A deliberate editorial or media break communicates hierarchy and remains visibly intentional across viewports.
-
-## Reimplemented local styling
-
-**AI tell:** A new button, modal, card, status color, icon wrapper, or focus ring duplicates an existing project primitive with slightly different values.
-
-**Default action:** Reuse the existing component or extend its documented variant API. Add a new primitive only for a genuinely different semantic role.
-
-**Legitimate when:** The project has no suitable primitive or reuse would corrupt semantics; document the new role and make it reusable.
-
-## Generic type by neglect
-
-**AI tell:** Net-new aesthetic work ships with Arial, Helvetica, or bare `system-ui` because typography was never designed.
-
-**Default action:** Reuse the product type system or choose an intentional, efficiently loaded family/pairing from `craft-rulings.md`. Assign clear display, body, utility, and technical roles.
-
-**Legitimate when:** The existing system requires it, native platform fidelity is the goal, network/self-hosted fonts are prohibited, or performance evidence favors the established stack.
-
-## Generated em dash voice
-
-**AI tell:** UI headings, descriptions, empty states, and helper text repeatedly use em dashes as an LLM writing habit.
-
-**Default action:** Rewrite with a period, comma, colon, parentheses, or two sentences.
-
-**Legitimate when:** The user explicitly wants em dashes or exact supplied, quoted, brand, or legal copy must remain unchanged.
-
-## Anti-default review
-
-Before implementation, flag every pattern above that appears in the thesis. Keep a flagged choice only with its one-sentence product-specific justification.
-
-After the first screenshot:
-
-1. Cover the logo and product name. Identify what still makes the screen specific.
-2. Remove one decorative idea and compare hierarchy.
-3. Replace one block of generic copy with real content.
-4. Check whether the signature survives mobile without becoming clutter.
-5. If another unrelated product could use the same screenshot unchanged, revise the weakest area.
+1. How to use this list
+2. Composition tells
+3. Colour, type, and surface tells
+4. Content and copy tells
+5. Motion and interaction tells
+6. Craft regressions
+7. Calibration: the default clusters
+8. Final slop review
+
+## 1. How to use this list
+
+A tell is not a ban. It is a choice that appears whatever the subject, so it signals "nobody decided this". Where the user's brief or the existing product pins down a direction, follow it exactly, even if it matches a tell. Where an axis is free, do not spend it on a tell.
+
+For each tell found in a plan or render, apply the replacement move, or keep it only if the "Keep when" condition holds and you write one sentence: **"This belongs because…"** naming the product, audience, or content reason. "Modern", "premium", "clean", "engaging", or "on brand" is not a reason.
+
+Run the list twice: on the written design thesis before code, and on desktop + mobile screenshots after.
+
+## 2. Composition tells
+
+| Tell | Replacement move | Keep when |
+| --- | --- | --- |
+| Centered gradient hero: oversized centered headline, violet/blue glow, two CTAs, floating screenshot below | Open with the most characteristic thing in the subject's world: real product state, real data, a working demo, a strong photograph, or a plain typographic claim. Choose alignment after content. | The brand owns the gradient/light, the page has one conversion job, and the centered pause serves the narrative. |
+| Three equal icon-title-copy feature cards | Rank the content; give the main point more space; show the feature working; use a list or table for true peers. | Exactly three peer choices exist and comparison is the task. |
+| Bento grid by default | Map module size to priority and reading order; use a sequence or list otherwise. | A genuine overview of heterogeneous modules that users scan or rearrange. |
+| SaaS card kit: everything in identical rounded cards, one radius, same soft grey shadow | Group with whitespace and alignment. Containers only for real objects (selectable, draggable, separate records). Radius varies by role. | The items really are separate records. |
+| Decorative eyebrow: tracked ALL-CAPS or mono label above every heading | Delete it. | It names real taxonomy, step, status, or technical context. |
+| Numbered markers (01 / 02 / 03) on non-sequential content | Remove numbers. | The content is a real sequence: steps, timeline, ranking. |
+| Big-number stat strip ("10x faster", "99.9%", "50k+") | Show a sourced metric with unit, time frame, and consequence, or remove it. | The metric is auditable and central to the screen's decision. |
+| Floating tilted screenshot or fake dashboard mockup | Real UI at readable scale, cropped to the part that proves the adjacent claim. | Spatial overview matters, the image is current, perspective hides nothing. |
+| Fake terminal or code theatre | Real, copyable, versioned commands and output, or ordinary product evidence. | The user's task is genuinely code/CLI. |
+| Pills everywhere: nav, buttons, filters, badges, inputs | Pills for toggles/tags only; a small radius vocabulary elsewhere. | The product already uses a capsule motif deliberately. |
+| Icon medallion: line icon in the same tinted square above every section | Remove icons that repeat the heading. | Icons speed navigation, status scanning, or a real category system. |
+| Logo wall of invented or unlicensed customers | Real, permitted logos, or no social proof. | Supplied and approved. |
+
+## 3. Colour, type, and surface tells
+
+| Tell | Replacement move | Keep when |
+| --- | --- | --- |
+| Purple/indigo/violet gradient as the default brand; Tailwind `indigo-500`/`violet-600` primary | Derive the hue from the subject, materials, or existing brand; build an OKLCH ramp (`references/direction.md` § Colour). | The existing brand is that hue. |
+| Out-of-box shadcn/Tailwind look: `slate`/`zinc` greys, `rounded-lg` everywhere, `ring-2 ring-offset-2`, default button set | Keep primitives for behaviour; restyle tokens: neutrals tinted toward the brand hue, a deliberate radius scale, the project's own focus treatment. | The project already ships that look; then preserve it. |
+| Inter, Geist, or bare `system-ui` as the whole aesthetic; Arial/Helvetica by neglect | Choose a family or pairing for this subject (`references/direction.md` § Type). | The existing system uses it, native fidelity is the goal, webfonts are prohibited, or it is dense app chrome. |
+| One headline word accented in gradient, italic, or colour | Let the whole headline carry the treatment, or make emphasis carry meaning (a value, a name). | The accented word is data. |
+| Glass cards: blurred translucent panels over colour blobs | One clear material model (flat, tonal, bordered, or measured elevation), one reason per layer. | Content sits over live media/map/video, or translucency is the local platform material. |
+| Dark equals premium; near-black `#0B0B0B`/`#111` with one acid-green or vermilion accent | Choose theme from environment, task duration, and media. If dark, tune OKLCH neutrals and measure contrast in both themes. | Media needs darkness, low-light use, or a tested dark-first brand. |
+| Warm cream (~`#F4F1EA`) + high-contrast serif + terracotta (~`#D97757`) | Anthropic names this its own Claude-interaction look; on a user's brief it reads as a tell. Choose another direction. | The brief asks for it. |
+| Broadsheet pastiche: hairline rules, zero radius, dense columns | Editorial structure only for editorial content. | The surface is editorial. |
+| Soft semantic tint-on-tint (low-opacity hue bg + same-hue text/icon/border) | `references/craft-rulings.md` § No soft semantic tint-on-tint. This one is a binding default, not a style preference. | The user requests it or scope requires reusing an existing variant. |
+| Huge type (96–160px) as the only idea | Build contrast from wording, measure, weight, width, and placement before size. | Campaign/editorial, short phrase, localization tested, type is the signature. |
+| Monospace for small data labels by reflex | Mono only for code and IDs; tabular numerals of the body face for figures. | Technical context the user reads as code. |
+
+## 4. Content and copy tells
+
+| Tell | Replacement move | Keep when |
+| --- | --- | --- |
+| Lorem ipsum or "Feature one / Feature two" in review | Write real copy first (content-first rule in SKILL.md). | Never in review; label fixtures as fixtures. |
+| Fake metrics, testimonials, ratings, avatars, customer names, precise business data | Real content, or plainly labelled example data, or omit. | The user supplies approved fixtures or asks for a clearly marked prototype dataset. |
+| Generic CTAs: "Get started", "Learn more", "Submit", "Unlock the power of…" | Name the outcome ("Create invoice", "Book a table"). Keep the verb through the flow ("Publish" → toast "Published"). | Never as a default. |
+| Hype voice: "seamless", "effortless", "supercharge", "next-level", "revolutionize" | Say what it does in the user's own words. | Supplied brand copy. |
+| Middle-dot meta strings, `WORD — fragment` labels, `→` on every link | Plain sentence-case labels; arrows only where direction is literal. | Supplied copy. |
+| Emoji as icons, bullets, status, empty-state art | One coherent icon family (`references/craft-rulings.md` § 1). | Requested, or emoji is the content itself. |
+| Placeholder illustration: blob people, abstract 3D shapes, generic stock, unrelated generated hero art | Real product imagery, photography, data, or no image. | Requested and appropriate to the subject. |
+| Subtitle under every heading restating it | `references/craft-rulings.md` § Copy must earn its space. | It adds information needed here. |
+| Em dashes in UI copy | Full stop, comma, colon, parentheses, or two sentences. | Requested, or exact supplied/quoted/legal copy. |
+| Apologetic or vague errors ("Oops! Something went wrong") | Say what happened and how to fix it; no apology. | Never. |
+
+## 5. Motion and interaction tells
+
+| Tell | Replacement move | Keep when |
+| --- | --- | --- |
+| Fade-and-slide-up on every section as it scrolls in | At most one orchestrated moment; content readable with motion off. | A single deliberate narrative beat. |
+| Hover lift, bob, or scale on every card/button | Colour, border, underline, icon-fill, opacity, or restrained shadow; stable geometry. | Movement communicates real drag, depth, or direct manipulation. |
+| Ambient perpetual motion: particles, gradient drift, marquees, auto-rotating cards | Still resting screen; animate state change only. Pause control if > 5 s. | Motion is the content (audio, time, live activity) and works paused. |
+| `transition: all` | Name properties; shared duration/easing tokens. | Never. |
+| Abrupt state swaps; layout shift on load | Short transitions on interpolable properties; skeletons matching final geometry; focus visible immediately. | Reduced motion or urgent feedback needs an instant change. |
+| Whole card clickable with nested buttons | One link target per card, or explicit buttons; never nested interactive elements. | Never. |
+
+## 6. Craft regressions
+
+Treat each as a tell when found in a render; fixes live in `references/craft-rulings.md`:
+
+- accidental misalignment and drifting content rails;
+- a local button, modal, card, status colour, or focus ring duplicating an existing primitive with slightly different values;
+- mixed icon families (package icons, hand-drawn SVG, text glyphs together);
+- sticky pointer focus, stacked focus rings, edge-hugging dropdown chevrons.
+
+## 7. Calibration: the default clusters
+
+Generated UI clusters into a few looks that appear whatever the subject (SNAPSHOT/DEDUCED; sources in `references/provenance.md` § Slop-tell sources). Recognise them in your own plan:
+
+1. Purple-to-blue SaaS: centered hero, glow, Inter, three feature cards, logo wall, three-tier pricing.
+2. shadcn default: zinc greys, `rounded-lg` cards, outline buttons, four KPI cards over a line chart.
+3. Dark "premium": near-black, one neon accent, glass cards, grid-line background, mono labels.
+4. Warm editorial: cream, serif display, terracotta accent, hairline rules.
+5. Template chrome: ALL-CAPS eyebrows, middle-dot meta, `→` on links, emoji section markers.
+
+Ask: "Would I produce this same plan for a neighbouring product?" If yes, change the most transferable axis (usually colour, type, or hero composition) and state what changed and why.
+
+## 8. Final slop review
+
+On the rendered desktop and mobile screenshots:
+
+1. Cover the logo and accent colour. Can you still name the product and task?
+2. Does any tell from §§ 2–5 remain without a "This belongs because…" sentence?
+3. Is every number, quote, and logo traceable to real content or labelled as a fixture?
+4. Is there exactly one memorable device, with everything around it quiet, and does it survive mobile without clutter?
+5. Remove one decorative element. If the screen did not get worse, leave it removed.

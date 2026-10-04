@@ -17,6 +17,11 @@ import { ASK_USER_INTERRUPTED_TEXT } from "./ask-user.js";
 import { log } from "./logger.js";
 import { encodeCwd } from "./encode-cwd.js";
 import { getUserSessionPrompt } from "./session-preview.js";
+import {
+  SESSION_SUMMARY_INDEX_FILE,
+  SessionSummaryIndex,
+  type IndexedSessionSummary,
+} from "./session-summary-index.js";
 import type { CompletedItem } from "../ui/app-items.js";
 import { canonicalProjectKey } from "../project-notes-repository.js";
 import {
@@ -520,6 +525,8 @@ export class SessionManager {
   private warnedPersistCodes = new Set<string>();
   /** Session files whose tail this process already checked (see {@link sealTornTail}). */
   private sealedTails = new Set<string>();
+  /** Fingerprint-checked summary caches, one per storage directory. */
+  private summaryIndexes = new Map<string, SessionSummaryIndex>();
   /** Called once per error code when session persistence fails (e.g. ENOSPC). */
   onPersistError?: (error: NodeJS.ErrnoException) => void;
 
@@ -817,24 +824,34 @@ export class SessionManager {
 
   async load(
     sessionPath: string,
-    expected?: { projectKey?: string; resolveCanonical?: boolean },
+    options?: {
+      /** Reject a session whose stored cwd belongs to another project. */
+      projectKey?: string;
+      /** `false` loads this exact checkpoint instead of the conversation tip. */
+      resolveCanonical?: boolean;
+      /** Caller already ran {@link resolveCanonicalSession}; skip the repeat scan. */
+      canonical?: boolean;
+    },
   ): Promise<{
     header: SessionHeader;
     entries: SessionEntry[];
     path: string;
   }> {
     // Normal resume resolves to the conversation tip. Exact checkpoint callers
-    // can opt out while retaining archive thawing and project validation.
+    // (and callers that already resolved the tip) skip the scan while retaining
+    // archive thawing and project validation. Resuming is a write operation, so
+    // transparently thaw a gzip archive and return the effective plain path
+    // every future append must use.
     const selectedPath =
-      expected?.resolveCanonical === false
+      options?.canonical || options?.resolveCanonical === false
         ? sessionPath
         : ((await this.resolveCanonicalSession(sessionPath)) ?? sessionPath);
     const effectivePath = await thawSessionArchive(selectedPath);
     const loaded = await this.loadPhysicalCheckpoint(effectivePath);
     const storedProjectKey = canonicalProjectKey(loaded.header.cwd);
-    if (expected?.projectKey !== undefined && storedProjectKey !== expected.projectKey) {
+    if (options?.projectKey !== undefined && storedProjectKey !== options.projectKey) {
       throw new Error(
-        `Cannot resume a session from another project (requested "${expected.projectKey}", session belongs to "${storedProjectKey}").`,
+        `Cannot resume a session from another project (requested "${options.projectKey}", session belongs to "${storedProjectKey}").`,
       );
     }
     return loaded;
@@ -857,13 +874,7 @@ export class SessionManager {
     // example, a remote ACP client reconnecting from another workspace). The
     // physical ancestry is therefore machine-wide, not confined to the newest
     // checkpoint's encoded-cwd directory.
-    const directories = await this.storageDirectories();
-    const candidates = (
-      await Promise.all(directories.map((directory) => this.sessionCandidates(directory)))
-    ).flat();
-    const summaries = (
-      await Promise.all(candidates.map((candidate) => this.readSessionSummary(candidate)))
-    ).filter(
+    const summaries = (await this.indexedSummariesIn(await this.storageDirectories())).filter(
       (summary): summary is SessionSummary & { conversationId: string; generation: number } =>
         summary !== null,
     );
@@ -1062,6 +1073,31 @@ export class SessionManager {
   }
 
   /**
+   * Summaries of every session in one directory, served from the persisted
+   * fingerprint index so only changed files are re-read.
+   */
+  private async indexedSummaries(directory: string): Promise<Array<IndexedSessionSummary | null>> {
+    const resolved = path.resolve(directory);
+    let index = this.summaryIndexes.get(resolved);
+    if (!index) {
+      index = new SessionSummaryIndex(resolved);
+      this.summaryIndexes.set(resolved, index);
+    }
+    return index.summaries(await this.sessionCandidates(resolved), (candidate) =>
+      this.readSessionSummary(candidate),
+    );
+  }
+
+  /** {@link indexedSummaries} across several directories, flattened. */
+  private async indexedSummariesIn(
+    directories: readonly string[],
+  ): Promise<Array<IndexedSessionSummary | null>> {
+    return (
+      await Promise.all(directories.map((directory) => this.indexedSummaries(directory)))
+    ).flat();
+  }
+
+  /**
    * Read just enough of a session file to summarize it.
    *
    * Stops at the first user prompt (or the first message, when the header
@@ -1198,9 +1234,7 @@ export class SessionManager {
    * and a noticeable stall.
    */
   async listSummaries(cwd: string): Promise<SessionSummary[]> {
-    const candidates = await this.sessionCandidates(this.dirForCwd(cwd));
-    const summaries = await Promise.all(candidates.map((file) => this.readSessionSummary(file)));
-    return SessionManager.dedupeByConversation(summaries);
+    return SessionManager.dedupeByConversation(await this.indexedSummaries(this.dirForCwd(cwd)));
   }
 
   /**
@@ -1213,14 +1247,9 @@ export class SessionManager {
    * where a full parse of each file becomes a multi-second stall.
    */
   async listAllSummaries(): Promise<SessionSummary[]> {
-    const directories = await this.storageDirectories();
-    const candidates = await Promise.all(
-      directories.map((directory) => this.sessionCandidates(directory)),
+    return SessionManager.dedupeByConversation(
+      await this.indexedSummariesIn(await this.storageDirectories()),
     );
-    const summaries = await Promise.all(
-      candidates.flat().map((file) => this.readSessionSummary(file)),
-    );
-    return SessionManager.dedupeByConversation(summaries);
   }
 
   /**
@@ -1243,26 +1272,21 @@ export class SessionManager {
   async resolveCanonicalSession(requested: string, cwd?: string): Promise<string | null> {
     const looksLikePath =
       path.isAbsolute(requested) || requested.includes(path.sep) || isSessionPath(requested);
-    let candidates: string[];
+    let directories: string[];
     let requestedSummary: (SessionSummary & { conversationId: string; generation: number }) | null =
       null;
 
     if (looksLikePath) {
       requestedSummary = await this.readSessionSummary(requested);
       if (!requestedSummary) return null;
-      candidates = await this.sessionCandidates(path.dirname(requestedSummary.path));
+      directories = [path.dirname(requestedSummary.path)];
     } else if (cwd) {
-      candidates = await this.sessionCandidates(this.dirForCwd(cwd));
+      directories = [this.dirForCwd(cwd)];
     } else {
-      const directories = await this.storageDirectories();
-      candidates = (
-        await Promise.all(directories.map((dir) => this.sessionCandidates(dir)))
-      ).flat();
+      directories = await this.storageDirectories();
     }
 
-    const summaries = (
-      await Promise.all(candidates.map((candidate) => this.readSessionSummary(candidate)))
-    ).filter(
+    const summaries = (await this.indexedSummariesIn(directories)).filter(
       (summary): summary is SessionSummary & { conversationId: string; generation: number } =>
         summary !== null,
     );
@@ -1379,6 +1403,12 @@ export class SessionManager {
         } catch {
           // A raced, corrupt, or inaccessible logical group is skipped safely.
         }
+      }
+      // The summary index is only a cache; drop it once no sessions remain so
+      // the emptied directory can still be removed.
+      if ((await this.sessionCandidates(directory)).length === 0) {
+        await fs.unlink(path.join(directory, SESSION_SUMMARY_INDEX_FILE)).catch(() => {});
+        this.summaryIndexes.delete(path.resolve(directory));
       }
       await fs.rmdir(directory).catch(() => {});
     }

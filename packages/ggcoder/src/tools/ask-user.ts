@@ -170,9 +170,9 @@ export function createAskUserTool(ask: AskUserHandler): AgentTool<typeof AskUser
     parameters: AskUserParams,
     // The turn is blocked on a human; nothing else in the batch may run first.
     executionMode: "sequential",
-    // The host's own timeout is the real bound. Without this the loop's 5-min
-    // default would abort the call while the user is still reading the
-    // question, and the answer would land on a tool call that no longer exists.
+    // The host's soft deadline is the real bound (it returns "no answer yet"
+    // and keeps the question open). Without this the loop's 5-min default
+    // would abort the call while the user is still reading the question.
     timeoutMs: ASK_USER_TIMEOUT_MS + 30_000,
     // A question cut off by Stop has no side effect to be unsure about. The
     // generic "outcome UNKNOWN — it may have completed" told the model the user

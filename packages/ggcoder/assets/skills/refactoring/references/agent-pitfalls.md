@@ -11,6 +11,9 @@ LLM agents fail refactoring in specific, repeated ways. Human seniors watch for 
 - **Null/undefined semantics drift** — old code crashed on null; new code defaults it. Or falsy-checks (`x || y`) "simplified" from explicit `!== undefined` where `0`/`""` are valid values.
 - **Scope and visibility drift** — module-level state introduced where locals were; caching added for performance that changes identity or staleness semantics.
 - **Silent feature addition** — validation, logging, or "improvements" smuggled in because the old code "looked wrong". The old behavior was the spec.
+- **Scope creep** — "while I'm here" edits in files outside the agreed target; reformatting mixed with structural change. Split or drop them.
+- **Duplicate helpers** — extracting a new function that already exists elsewhere; search (`code_search`, `grep`) before creating one.
+- **Config/lockfile drift** — a refactor diff must not touch dependency manifests, lockfiles, or lint/tsconfig rules unless that was the agreed step.
 - **Flaky green** — a test fails, passes on rerun, and gets shrugged off. During a refactor, one flaky red invalidates the whole green: rerun it, and if it flakes, quarantine and fix the flakiness before trusting any suite result.
 
 ## Test-healing anti-pattern
@@ -25,7 +28,7 @@ Before deleting code that looks pointless: `git blame`, read the commit message,
 
 Escalate only as far as the risk level demands:
 
-1. **Typecheck** — catches signature/shape drift for freer.
+1. **Typecheck** — catches signature/shape drift for free.
 2. **Lint** — catches dead code, suspicious patterns, unintended scope.
 3. **Unit + characterization suites** — the core proof; smallest relevant suite per step, full suite at close.
 4. **Contract test at the changed boundary** — input/output fixtures frozen before the refactor, diffed after.

@@ -41,6 +41,8 @@ const SettingsSchema = z.object({
     ])
     .default("auto"),
   showTokenUsage: z.boolean().default(true),
+  /** Legacy name: switches loop-break and re-grounding nudges (Ideal review
+   *  itself was removed). Kept so existing settings files keep their meaning. */
   idealReviewEnabled: z.boolean().default(true),
   /** Append LSP diagnostics to edit/write tool results. */
   lspDiagnostics: z.boolean().default(true),
@@ -145,6 +147,12 @@ const SettingsSchema = z.object({
    *  - "baseline": 5-min cache TTL, no pre-warm
    *  - "optimized": 1-h cache TTL, cache pre-warming on first prompt (default) */
   speedProfile: z.enum(["baseline", "optimized"]).default("optimized"),
+  /** Hold an OS idle-sleep assertion while the desktop app's agent works
+   *  (runs, autopilot, Ken, background sub-agents). The display may still sleep. */
+  keepAwake: z.boolean().default(true),
+  /** Pre-warm the Anthropic prompt cache (max_tokens: 1, identical prefix) when the
+   *  desktop app signals the user is about to type after opening a chat / idling. */
+  cachePrewarm: z.boolean().default(true),
 });
 
 export type Settings = z.infer<typeof SettingsSchema>;
@@ -175,6 +183,8 @@ export const DEFAULT_SETTINGS: Settings = {
   trustedProjects: [],
   sessionRetentionDays: 30,
   speedProfile: "optimized",
+  keepAwake: true,
+  cachePrewarm: true,
 };
 
 // ── Settings Manager ───────────────────────────────────────

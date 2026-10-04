@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 import type { Provider, ThinkingLevel } from "@kenkaiiii/gg-ai";
 import type { AgentDefinition } from "../core/agents.js";
 import type { AgentSession } from "../core/agent-session.js";
-import { getFastModel } from "../core/model-registry.js";
+import { getLowestThinkingLevel } from "../core/thinking-level.js";
 import { truncateTail } from "./truncate.js";
 import { getTrustedAgentEnv } from "./safe-env.js";
 import { isUnattendedExecution, UNATTENDED_AGENT_ENV } from "../core/provider-execution-policy.js";
@@ -41,6 +41,8 @@ export interface SubAgentSelection {
   provider: Provider;
   parentModel: string;
   model: string;
+  /** Thinking level the child runs at — see {@link subAgentThinkingLevel}. */
+  thinkingLevel: ThinkingLevel | undefined;
 }
 
 export function resolveAgentDefinition(
@@ -58,33 +60,46 @@ export function selectSubAgent(
   parentModel: string,
 ): SubAgentSelection {
   const agentDef = resolveAgentDefinition(agents, requestedName);
+  const model = resolveAgentModel(agentDef, parentModel);
   return {
     agentDef,
     provider,
     parentModel,
-    model: resolveAgentModel(agentDef, provider, parentModel),
+    model,
+    thinkingLevel: subAgentThinkingLevel(provider, model),
   };
 }
 
 /**
  * Resolve which model a named agent runs on.
  *
- * The choice is declared in the agent's `model:` frontmatter, never inferred.
- * This used to guess: any agent without bash/write/edit was treated as
- * "read-only" and silently routed to the provider's cheapest tier — so every
- * research, recon and audit agent always ran on a Haiku-class model, invisibly
- * and with no way to override it. Defaulting to the parent's model instead
- * makes a downgrade opt-in and one line of frontmatter away.
+ * Sub-agents never get a weaker model of their own: no `model:` frontmatter,
+ * `inherit`, and the legacy `fast` all run on the parent's model. An explicit
+ * model id is honoured as written, since that is a choice the user made in
+ * their own agent definition.
  */
 export function resolveAgentModel(
   agentDef: AgentDefinition | undefined,
-  provider: Provider,
   parentModel: string,
 ): string {
   const preference = agentDef?.model?.trim();
-  if (!preference || preference === "inherit") return parentModel;
-  if (preference === "fast") return getFastModel(provider, parentModel).id;
+  if (!preference || preference === "inherit" || preference === "fast") return parentModel;
   return preference;
+}
+
+/**
+ * The thinking level EVERY sub-agent runs at: the lowest rung of the model it
+ * actually runs on — never off, and never the parent's level. Delegated work
+ * is scoped and briefed, so it reasons briefly on the full-strength model.
+ * Resolved per model (not copied from the parent) because ladders differ: a
+ * model-unavailable retry on the parent model must use the PARENT's lowest
+ * rung, not one the pinned model happened to accept.
+ */
+export function subAgentThinkingLevel(
+  provider: Provider,
+  model: string,
+): ThinkingLevel | undefined {
+  return getLowestThinkingLevel(provider, model);
 }
 
 /**
@@ -100,8 +115,35 @@ export function renderAgentRoster(agents: readonly AgentDefinition[]): string {
   return `\n\nAvailable named agents:\n${list}`;
 }
 
-export function childThinkingLevel(level: ThinkingLevel | undefined): ThinkingLevel | undefined {
-  return level === "ultra" ? "max" : level;
+/** One child started by a recorded `spawn_agent` call. */
+export interface SpawnedTaskArgs {
+  task_name?: string;
+  task?: string;
+  agent?: string;
+}
+
+/**
+ * The children a recorded `spawn_agent` call started, for rebuilding history:
+ * `{ tasks: [...] }` today, or the single `{ task_name, task, agent }` that
+ * sessions saved before batch launch carry. Untrusted session data, so only
+ * string fields are kept.
+ */
+export function spawnedTasks(args: unknown): SpawnedTaskArgs[] {
+  if (typeof args !== "object" || args === null) return [{}];
+  const record = args as Record<string, unknown>;
+  const entries = Array.isArray(record.tasks) ? record.tasks : [record];
+  const tasks = entries
+    .filter(
+      (entry): entry is Record<string, unknown> => typeof entry === "object" && entry !== null,
+    )
+    .map((entry) => {
+      const out: SpawnedTaskArgs = {};
+      if (typeof entry.task_name === "string") out.task_name = entry.task_name;
+      if (typeof entry.task === "string") out.task = entry.task;
+      if (typeof entry.agent === "string") out.agent = entry.agent;
+      return out;
+    });
+  return tasks.length > 0 ? tasks : [{}];
 }
 
 export function subAgentCacheKey(

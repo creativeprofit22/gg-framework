@@ -14,7 +14,7 @@ import {
   applyMissingLeadingWhitespace,
 } from "./edit-diff.js";
 import { localOperations, type ToolOperations } from "./operations.js";
-import { assertFresh, recordWrite, type ReadTracker } from "./read-tracker.js";
+import { isFresh, recordWrite, type ReadTracker } from "./read-tracker.js";
 import { resolveAnchoredEdit } from "../core/hashline.js";
 import { isPlanModeActive, planModeRestriction } from "../core/runtime-mode.js";
 import type { EditSource } from "../core/lsp/edit-telemetry.js";
@@ -274,7 +274,15 @@ export function createEditTool(
         return `Error: ${guard.reason}`;
       }
 
-      await assertFresh(readFiles, resolved, ops);
+      // No prior read is required: every old_text, span and anchor is matched
+      // against the live content below, which proves the model knows the text
+      // it replaces (it may have seen it via `cat`, or changed the file itself
+      // with a script). A read that no longer matches disk is forgotten, so the
+      // file counts as unread again: the edit still validates against live
+      // content, but a later full-file `write` needs a fresh read.
+      if (readFiles?.has(resolved) && !(await isFresh(readFiles, resolved, ops))) {
+        readFiles.delete(resolved);
+      }
 
       const original = await ops.readFile(resolved);
       const hasCRLF = original.includes("\r\n");
@@ -552,8 +560,8 @@ export function createEditTool(
         // the read tracker stays valid. We deliberately do NOT invalidate it
         // here: doing so turned a precise "old_text not found (closest match
         // below)" error into a misleading "File must be read first" on every
-        // following edit, hiding the real fix from the model. assertFresh still
-        // catches genuine on-disk changes (formatter/external edit).
+        // following edit, hiding the real fix from the model. A genuine on-disk
+        // change (formatter/external edit) is caught by the freshness check.
         const header =
           atomic && failures.length > 0
             ? `${failures.length} of ${edits.length} edit${edits.length === 1 ? "" : "s"} failed; no changes written (atomic).\n\n`

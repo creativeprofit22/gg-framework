@@ -44,6 +44,7 @@ const TOOL_NAMES: ReadonlyMap<string, ToolKind> = new Map<string, ToolKind>([
   ["edit", "edit"],
   ["write", "edit"],
   ["bash", "run"],
+  ["debug", "run"],
   ["web_fetch", "web"],
   ["web_search", "web"],
 ]);

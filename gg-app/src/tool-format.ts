@@ -36,6 +36,7 @@ const VERBS: Record<string, VerbPair> = {
   source_path: { running: "Resolving", done: "Resolved" },
   tasks: { running: "Updating tasks", done: "Updated tasks" },
   screenshot: { running: "Capturing", done: "Captured" },
+  debug: { running: "Debugging", done: "Debugged" },
   enter_plan: { running: "Entering plan", done: "Entered plan" },
   exit_plan: { running: "Submitting plan", done: "Submitted plan" },
   steroids: { running: "Reading real code", done: "Read real code" },
@@ -63,7 +64,7 @@ export function getToolTone(name: string): ToolTone {
   )
     return "search";
   if (["write", "edit"].includes(name)) return "write";
-  if (["bash", "task_output", "task_stop"].includes(name)) return "run";
+  if (["bash", "task_output", "task_stop", "debug"].includes(name)) return "run";
   if (["web_fetch", "web_search"].includes(name)) return "web";
   if (["subagent", "skill"].includes(name)) return "agent";
   if (["tasks"].includes(name)) return "state";
@@ -161,6 +162,14 @@ function toolDetail(name: string, args: Record<string, unknown>): { text: string
       return { text: shorten(String(args.skill ?? "")), quote: false };
     case "source_path":
       return { text: shorten(String(args.package ?? "")), quote: false };
+    case "debug": {
+      // "launch src/app.js", "evaluate user.id", "step_over".
+      const target = args.program ?? args.expression ?? args.breakpoint_id ?? args.file;
+      return {
+        text: shorten(`${String(args.action ?? "")}${target ? ` ${String(target)}` : ""}`),
+        quote: false,
+      };
+    }
     default:
       return { text: "", quote: false };
   }

@@ -97,7 +97,7 @@ describe("summarizeCritters", () => {
       2,
       "failed",
     ],
-    ["stopped", [agent("running"), agent("running")], true, CRITTER_LINES.calledBack, 2, "failed"],
+    ["stopped", [agent("running"), agent("running")], true, CRITTER_LINES.calledBack, 2, "stopped"],
   ] as const)("%s", (_name, agents, aborted, lines, n, tone) => {
     const summary = summarizeCritters(agents, aborted);
     expect(summary.tone).toBe(tone);

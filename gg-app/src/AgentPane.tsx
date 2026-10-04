@@ -78,6 +78,7 @@ import {
   openProjectPath,
   getDroppedPathInfo,
   readDroppedFileAttachment,
+  openImageDataUrl,
   type AgentState,
   type WorkspaceMode,
   type ChatAgentId,
@@ -105,8 +106,11 @@ import { KenActivityBar } from "./KenActivityBar";
 import { useTaskActivity } from "./useTaskActivity";
 import { useKenMentor } from "./useKenMentor";
 import { useAutopilot } from "./useAutopilot";
-import { useAgentEvents, HOOK_PRESENTATION, type HookKind } from "./useAgentEvents";
-import { useSmoothText } from "./useSmoothText";
+import { useAgentEvents } from "./useAgentEvents";
+import { HookNotice, type HookKind, type VerificationReason } from "./HookNotice";
+import { PlanDecisionNotice, type PlanDecision } from "./PlanDecisionNotice";
+import { StreamingMarkdown } from "./StreamingMarkdown";
+import { createLiveTextStore, LiveTextContext, useLiveText } from "./live-text";
 import { LiveToolPanel, type LiveToolEntry } from "./LiveToolPanel";
 import { SubAgentFeed, type SubAgentLine } from "./SubAgentFeed";
 import { CritterFloor, type CritterGroup } from "./CritterFloor";
@@ -449,22 +453,33 @@ export type Item =
       guidance?: string;
     }
   // Agent self-correction hook notice (ideal review / loop-break / re-grounding),
-  // rendered like the TUI: a shimmering tone-colored one-liner.
-  | { kind: "hook"; id: number; hook: HookKind; verificationReason?: "recheck" | "check_review" }
+  // rendered as a working critter row with critter-themed wording.
+  | { kind: "hook"; id: number; hook: HookKind; verificationReason?: VerificationReason }
   // Images produced by a tool (screenshot / read of an image file).
   | { kind: "images"; id: number; images: TranscriptImage[]; caption?: string }
   // Image generation in progress — a shimmering square placeholder that gets
   // replaced by the final image when the tool result arrives.
-  | { kind: "generating_image"; id: number; prompt: string }
+  | { kind: "generating_image"; id: number; prompt: string; toolCallId: string }
   // Plan-mode entry banner (ASCII logo + optional reason).
   | { kind: "plan"; id: number; reason: string }
+  // What the user did with a reviewed plan: an amber critter row.
+  | { kind: "plan_decision"; id: number; decision: PlanDecision }
+  // A question from the `ask_user` tool — clickable options rendered in the
+  // thread. The turn is blocked until the answers are sent, or until the run
+  // ends without them (`cancelled`, which closes the band).
   | {
       kind: "ask";
       id: number;
       prompt: AskUserPrompt;
+      /** Answers so far. Partial until every question in the band has one. */
       answers?: Record<string, string | string[]>;
+      /** The complete set reached the blocked tool call. */
       sent?: boolean;
+      /** Answered in this window just now (it moved to the end as a new row). */
+      answeredLive?: boolean;
       cancelled?: boolean;
+      /** Soft deadline passed: the agent went on; an answer is still delivered late. */
+      deferred?: boolean;
     }
   // A task kicked off from the Tasks modal (shown at the top of its session).
   | { kind: "task"; id: number; title: string }
@@ -741,6 +756,9 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   const subscribe = client.subscribe;
   const catalogClient = useMemo(() => createPaneAgentClient("primary"), []);
   const [items, setItems] = useState<Item[]>([]);
+  // Streaming reply text lives outside `items` so each chunk re-renders only
+  // the row that is streaming (see live-text.ts).
+  const [liveText] = useState(createLiveTextStore);
   const lifecycleEpochRef = useRef(0);
   const hydrateEpochRef = useRef(0);
   const mountedRef = useRef(true);
@@ -831,7 +849,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     captureKenTarget,
     captureKenRun,
     captureKenOperation,
-  } = useKenMentor({ setItems, nextId });
+  } = useKenMentor({ setItems, nextId, liveText });
   // Ken's face talks on the reply he is streaming right now: the last row,
   // while his run is live. Only that row's props change, so memo holds.
   const lastItem = items[items.length - 1];
@@ -2188,6 +2206,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       planReviewPathRef,
       pendingPlanTotalRef,
       stickToBottomRef,
+      liveText,
       onSessionReset: onAuthoritativeSessionReset,
       shouldApplySessionReset,
       onContinuationAccepted,
@@ -5065,16 +5084,18 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
                     </div>
                   ))}
                 <KenPromptActionProvider value={kenPromptDispatcher}>
-                  {items.map((it) =>
-                    createElement(TranscriptRow, {
-                      key: it.id,
-                      item: it,
-                      kenTalking: it.id === talkingKenId,
-                      onImageLoad: maybeScrollToBottom,
-                      onAskAnswer: handleAskAnswer,
-                      onAskType: handleAskType,
-                    }),
-                  )}
+                  <LiveTextContext.Provider value={liveText}>
+                    {items.map((it) =>
+                      createElement(TranscriptRow, {
+                        key: it.id,
+                        item: it,
+                        kenTalking: it.id === talkingKenId,
+                        onImageLoad: maybeScrollToBottom,
+                        onAskAnswer: handleAskAnswer,
+                        onAskType: handleAskType,
+                      }),
+                    )}
+                  </LiveTextContext.Provider>
                 </KenPromptActionProvider>
                 {workspaceMode === "code" &&
                   programmaticOpen &&
@@ -5214,7 +5235,11 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
             onHover={setFileIndex}
           />
         )}
-        <AttachmentBar attachments={attachments} onRemove={removeAttachment} />
+        <AttachmentBar
+          attachments={attachments}
+          onRemove={removeAttachment}
+          onOpenImage={(src) => void openImageDataUrl(src)}
+        />
         <ReferencedFiles paths={mentionedPaths} onRemove={removeMentionChip} />
         <QueuedBar messages={visibleQueuedMessages} onCancel={handleCancelQueued} />
         <div className="inputrow">
@@ -5925,28 +5950,94 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   return <PaneIdProvider value={paneId}>{content}</PaneIdProvider>;
 }
 
-/** Smoothly reveals streamed prose and keeps its growing tail visible. */
-function StreamingMarkdown({
-  text,
+/**
+ * A GG Coder reply. While it streams, its text comes from the live-text store
+ * (`useLiveText`), so new chunks re-render this row alone, not the pane.
+ */
+function AssistantReply({
+  id,
+  text: stored,
   onGrow,
 }: {
+  id: number;
   text: string;
   onGrow?: () => void;
 }): React.ReactElement {
-  const { text: revealed, animating } = useSmoothText(text);
-  useLayoutEffect(() => {
-    onGrow?.();
-  }, [revealed, onGrow]);
-  return <Markdown animate={animating}>{revealed}</Markdown>;
+  const { text, streaming } = useLiveText(id, stored);
+  // Split out [DONE:n] plan-step markers so each renders as a "✓ Step n"
+  // completion row instead of leaking the raw marker into the prose.
+  const segments = hasDoneMarker(text)
+    ? segmentDoneMarkers(text)
+    : [{ kind: "text" as const, text }];
+  // Step rows that arrive mid-stream dissolve in; ones already in the reply
+  // when it mounted (restored history) don't.
+  const [mountedSegments] = useState(segments.length);
+  return (
+    <>
+      {segments.map((seg, i) =>
+        seg.kind === "done" ? (
+          <div
+            key={i}
+            className={`plan-step-done${i >= mountedSegments ? " dissolve-in" : ""}`}
+            data-swap-row={`${id}-${i}`}
+          >
+            <span className="plan-step-check" aria-hidden="true">
+              {"\u2713"}
+            </span>
+            <span className="plan-step-label">{`Step ${seg.stepNum} completed`}</span>
+          </div>
+        ) : (
+          <div key={i} className="assistant-msg" data-swap-row={`${id}-${i}`}>
+            <span className="assistant-dot" style={{ color: theme.primary }}>
+              {DOT}
+            </span>
+            <div className="assistant-text">
+              <StreamingMarkdown text={seg.text} streaming={streaming} onGrow={onGrow} />
+            </div>
+          </div>
+        ),
+      )}
+    </>
+  );
+}
+
+/**
+ * Ken Kai's reply: led by his little pixel face (it talks while the reply
+ * streams in) instead of the dot, framed by a teal rule. No badge, no byline.
+ * The Markdown component special-cases ```prompt fences into a "Send to GG
+ * Coder" button. Streams through the live-text store like `AssistantReply`.
+ */
+function KenReply({
+  id,
+  text: stored,
+  talking,
+  onGrow,
+}: {
+  id: number;
+  text: string;
+  talking: boolean;
+  onGrow?: () => void;
+}): React.ReactElement {
+  const { text, streaming } = useLiveText(id, stored);
+  return (
+    <div className="assistant-msg ken-msg" data-swap-row={id}>
+      <span className="assistant-dot ken-face-slot">
+        <KenFace mood="chat" talking={talking} />
+      </span>
+      <div className="assistant-text">
+        <StreamingMarkdown text={text} streaming={streaming} onGrow={onGrow} />
+      </div>
+    </div>
+  );
 }
 
 // ── Row renderers ──────────────────────────────────────────
-// Memoized per row: the streaming run rebuilds the `items` array on every
-// `text_delta`, but `appendAssistant` returns the SAME object reference for
-// every non-streaming row, and `onImageLoad` is a stable useCallback. So a
-// default shallow `memo` re-renders ONLY the row whose `item` reference changed
-// (the one actively streaming) — the rest bail out, keeping per-token cost O(1)
-// instead of O(transcript length).
+// Memoized per row. While a reply streams, its text grows in the live-text
+// store (live-text.ts) and only that row re-renders, via `useLiveText`; `items`
+// changes when rows are added, finished or removed. Those updates keep the SAME
+// object reference for every untouched row, and `onImageLoad` is a stable
+// useCallback, so a default shallow `memo` re-renders only the rows whose
+// `item` actually changed and the rest bail out.
 const TranscriptRow = memo(function TranscriptRow({
   item,
   kenTalking = false,
@@ -6013,7 +6104,16 @@ const TranscriptRow = memo(function TranscriptRow({
           {item.images && item.images.length > 0 && (
             <div className="user-img-row">
               {item.images.map((src, i) => (
-                <img key={i} className="user-img" src={src} alt="attachment" onLoad={onImageLoad} />
+                <button
+                  key={i}
+                  type="button"
+                  className="user-img-open"
+                  aria-label="Open attached image"
+                  title="Open in image viewer"
+                  onClick={() => void openImageDataUrl(src)}
+                >
+                  <img className="user-img" src={src} alt="" onLoad={onImageLoad} />
+                </button>
               ))}
             </div>
           )}
@@ -6034,51 +6134,10 @@ const TranscriptRow = memo(function TranscriptRow({
           )}
         </div>
       );
-    case "assistant": {
-      // Split out [DONE:n] plan-step markers so each renders as a "✓ Step n"
-      // completion row instead of leaking the raw marker into the prose.
-      const segments = hasDoneMarker(item.text)
-        ? segmentDoneMarkers(item.text)
-        : [{ kind: "text" as const, text: item.text }];
-      return (
-        <>
-          {segments.map((seg, i) =>
-            seg.kind === "done" ? (
-              <div key={i} className="plan-step-done" data-swap-row={`${item.id}-${i}`}>
-                <span className="plan-step-check" aria-hidden="true">
-                  {"\u2713"}
-                </span>
-                <span className="plan-step-label">{`Step ${seg.stepNum} completed`}</span>
-              </div>
-            ) : (
-              <div key={i} className="assistant-msg" data-swap-row={`${item.id}-${i}`}>
-                <span className="assistant-dot" style={{ color: theme.primary }}>
-                  {DOT}
-                </span>
-                <div className="assistant-text">
-                  <StreamingMarkdown text={seg.text} onGrow={onImageLoad} />
-                </div>
-              </div>
-            ),
-          )}
-        </>
-      );
-    }
+    case "assistant":
+      return <AssistantReply id={item.id} text={item.text} onGrow={onImageLoad} />;
     case "ken":
-      // Ken Kai's reply: led by his little pixel face (it talks while the reply
-      // streams in) instead of the dot, framed by a teal rule. No badge, no
-      // byline. The Markdown component special-cases ```prompt fences into a
-      // "Send to GG Coder" button.
-      return (
-        <div className="assistant-msg ken-msg" data-swap-row={item.id}>
-          <span className="assistant-dot ken-face-slot">
-            <KenFace mood="chat" talking={kenTalking} />
-          </span>
-          <div className="assistant-text">
-            <StreamingMarkdown text={item.text} onGrow={onImageLoad} />
-          </div>
-        </div>
-      );
+      return <KenReply id={item.id} text={item.text} talking={kenTalking} onGrow={onImageLoad} />;
     case "autopilot": {
       // Autopilot Ken's verdict, rendered like a normal @Ken reply (his face +
       // teal-framed text) rather than its own marker style. The text is his verdict as
@@ -6152,29 +6211,14 @@ const TranscriptRow = memo(function TranscriptRow({
         </div>
       );
     }
-    case "hook": {
-      // Mirrors the TUI IdealHookMessage: assistant-style dot + a shimmering
-      // tone-colored one-liner so the self-correction is obvious.
-      const { text: defaultText, color } = HOOK_PRESENTATION[item.hook];
-      const text =
-        item.verificationReason === "check_review"
-          ? "Hook engaged. Reviewing changes to tests and checks."
-          : item.verificationReason === "recheck"
-            ? "Hook engaged. Re-checking the changes made after verification."
-            : defaultText;
+    case "hook":
       return (
-        <div className="assistant-msg" data-swap-row={item.id}>
-          <span className="assistant-dot" style={{ color }}>
-            {DOT}
-          </span>
-          <div className="assistant-text">
-            <ShimmerText base={color} bright="#ffffff">
-              {text}
-            </ShimmerText>
-          </div>
-        </div>
+        <HookNotice
+          hook={item.hook}
+          variantKey={`hook-${item.id}`}
+          verificationReason={item.verificationReason}
+        />
       );
-    }
     case "images":
       return (
         <div className="img-grid" data-swap-row={item.id}>
@@ -6225,13 +6269,17 @@ const TranscriptRow = memo(function TranscriptRow({
       );
     case "plan":
       return <PlanModeLogo reason={item.reason} />;
+    case "plan_decision":
+      return <PlanDecisionNotice decision={item.decision} variantKey={String(item.id)} />;
     case "ask":
       return (
         <AskBand
           prompt={item.prompt}
           answers={item.answers}
           sent={item.sent}
+          answeredLive={item.answeredLive}
           cancelled={item.cancelled}
+          deferred={item.deferred}
           onAnswer={(delta, sendNow) => onAskAnswer?.(item.id, item.prompt.id, delta, sendNow)}
           onTypeInstead={(questionId, seed) =>
             onAskType?.(item.id, item.prompt.id, questionId, seed)
@@ -6254,6 +6302,7 @@ const TranscriptRow = memo(function TranscriptRow({
       return (
         <CompactionNotice
           status={item.status}
+          variantKey={`compaction-${item.id}`}
           originalCount={item.originalCount}
           newCount={item.newCount}
         />

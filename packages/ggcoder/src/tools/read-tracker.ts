@@ -118,21 +118,33 @@ export async function assertFresh(
   ops: ToolOperations,
 ): Promise<void> {
   if (!tracker) return;
-  const entry = tracker.get(resolvedPath);
-  if (!entry) {
+  if (!tracker.has(resolvedPath)) {
     throw new Error("File must be read first before editing. Use the read tool first.");
   }
-  const stat = await ops.stat(resolvedPath);
-  if (stat.mtimeMs === entry.mtimeMs) return;
-  const current = await ops.readFile(resolvedPath);
-  if (hashContent(current) === entry.hash) {
-    tracker.set(resolvedPath, { ...entry, mtimeMs: stat.mtimeMs });
-    return;
-  }
+  if (await isFresh(tracker, resolvedPath, ops)) return;
   throw new Error(
     "File has been modified since it was read (likely by a formatter, linter, or external tool). " +
       "Re-read the file before editing.",
   );
+}
+
+/**
+ * True when the recorded read still matches disk (mtime, else content hash).
+ * A hash match after an mtime-only change refreshes the recorded mtime.
+ */
+export async function isFresh(
+  tracker: ReadTracker,
+  resolvedPath: string,
+  ops: ToolOperations,
+): Promise<boolean> {
+  const entry = tracker.get(resolvedPath);
+  if (!entry) return false;
+  const stat = await ops.stat(resolvedPath);
+  if (stat.mtimeMs === entry.mtimeMs) return true;
+  const current = await ops.readFile(resolvedPath);
+  if (hashContent(current) !== entry.hash) return false;
+  tracker.set(resolvedPath, { ...entry, mtimeMs: stat.mtimeMs });
+  return true;
 }
 
 /**

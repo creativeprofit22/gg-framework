@@ -6,8 +6,8 @@ let timer;
 // Task text of a "hold" turn: it stays running until a queued message releases it.
 let heldTask;
 let contextTurns = 0;
-let initializeOptions;
-let rejectInterrupt = false;
+// Acceptance checks the parent sent with the current turn.
+let turnChecks = [];
 
 const emit = (frame) => process.stdout.write(`${JSON.stringify(frame)}\n`);
 const ack = (frame, extra = {}) =>
@@ -21,6 +21,10 @@ const complete = (status = "completed", output = `turn-${contextTurns}`) => {
     type: "turn_complete",
     status,
     output,
+    // Stand-in for the engine-built receipt the real worker attaches.
+    receipt: "Receipt (1 call): read a.ts",
+    // Stand-in for the real worker's verdict: echo how many checks arrived.
+    ...(turnChecks.length > 0 ? { acceptance: `0/${turnChecks.length} passed` } : {}),
     ...(status === "interrupted" ? { error: "Interrupted" } : {}),
   });
 };
@@ -28,7 +32,6 @@ const complete = (status = "completed", output = `turn-${contextTurns}`) => {
 createInterface({ input: process.stdin }).on("line", (line) => {
   const frame = JSON.parse(line);
   if (frame.command === "initialize") {
-    initializeOptions = frame.options;
     // Named agents arrive as `agentPrompt` (composed with the standard prompt
     // scaffolding); `systemPrompt` remains the full-replacement path.
     const prompt = frame.options?.agentPrompt ?? frame.options?.systemPrompt;
@@ -50,12 +53,18 @@ createInterface({ input: process.stdin }).on("line", (line) => {
   if (frame.command === "start" || frame.command === "followup") {
     running = true;
     contextTurns++;
+    turnChecks = Array.isArray(frame.checks) ? frame.checks : [];
     ack(frame, { status: "running" });
     emit({ type: "state", state: "running" });
     emit({
       type: "event",
       event: "tool_call_start",
-      payload: { name: "read", args: { file_path: "a.ts" } },
+      payload: { toolCallId: "fake-read", name: "read", args: { file_path: "a.ts" } },
+    });
+    emit({
+      type: "event",
+      event: "tool_call_end",
+      payload: { toolCallId: "fake-read", result: "x", isError: false, durationMs: 1 },
     });
     emit({
       type: "event",
@@ -64,21 +73,6 @@ createInterface({ input: process.stdin }).on("line", (line) => {
         usage: { inputTokens: 10, outputTokens: 2, cacheRead: 20, cacheWrite: 5 },
       },
     });
-    if (frame.task.includes("fixture:reject-interrupt")) {
-      rejectInterrupt = true;
-      return;
-    }
-    if (frame.task.includes("fixture:review-initialize")) {
-      timer = setTimeout(
-        () =>
-          complete(
-            "completed",
-            `VERDICT: ISSUES\nFINDINGS:\n- worker initialization: ${JSON.stringify(initializeOptions)}`,
-          ),
-        15,
-      );
-      return;
-    }
     // A timer only approximates "still running": process startup on a loaded
     // runner can outlast it. A "hold" turn runs until the test releases it.
     if (/hold/.test(frame.task)) {
@@ -95,15 +89,6 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     return;
   }
   if (frame.command === "interrupt") {
-    if (rejectInterrupt) {
-      emit({
-        type: "ack",
-        request_id: frame.request_id,
-        ok: false,
-        error: "fixture interruption refused",
-      });
-      return;
-    }
     ack(frame);
     complete("interrupted", "partial");
     return;

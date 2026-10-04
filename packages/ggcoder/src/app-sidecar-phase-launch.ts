@@ -34,7 +34,6 @@ export interface BoundPhaseSession {
   getState(): BoundPhaseSessionState;
   setActivePhaseContext(context: ActivePhaseContextV1): Promise<void>;
   clearActivePhaseContext?(reason: "binding-compensation"): Promise<void>;
-  setIdealReviewSuppressed(suppressed: boolean): void;
   prompt(text: string): Promise<void>;
   dispose(): void | Promise<void>;
 }
@@ -101,7 +100,6 @@ export interface LaunchBoundPhaseDependencies<TSession extends BoundPhaseSession
   releasePhaseLease(session: TSession, operationId: string): Promise<void>;
   replaceSession(session: TSession): void;
   bindSessionEvents(session: TSession): void;
-  autopilotEnabled: boolean;
   broadcastNotesSnapshot(snapshot: ProjectNotesSnapshot): void;
   broadcast(type: string, data: unknown): void;
   resetSessionState(): void;
@@ -288,7 +286,6 @@ export async function launchBoundPhase<TSession extends BoundPhaseSession>(
     dependencies.replaceSession(candidate.session);
     try {
       dependencies.bindSessionEvents(candidate.session);
-      candidate.session.setIdealReviewSuppressed(dependencies.autopilotEnabled);
       dependencies.resetSessionState();
       dependencies.broadcast("session_reset", {
         operationId: mutation.operationId,

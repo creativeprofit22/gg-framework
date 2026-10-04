@@ -14,6 +14,9 @@ vi.mock("./agent", () => ({
   saveSettings: mocks.saveSettings,
   getPermissionsStatus: vi.fn(async () => ({ applicable: false, granted: false })),
   openPermissionsSettings: vi.fn(),
+  // The Power section's Keep awake switch reads and saves through the sidecar.
+  getKeepAwake: vi.fn(async (): Promise<boolean> => true),
+  setKeepAwake: vi.fn(async (enabled: boolean): Promise<boolean> => enabled),
 }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
 vi.mock("./toast", () => ({ toast: mocks.toast }));
@@ -203,7 +206,7 @@ describe("SettingsModal", () => {
     const pageSections = [...document.querySelectorAll(".settings-section-title")].map(
       (el) => el.textContent,
     );
-    expect(pageSections).toEqual(["Effects", "Project folder"]);
+    expect(pageSections).toEqual(["Effects", "Power", "Project folder"]);
     expect(pageSections).toEqual(dialogSections);
     // No Close on the page (Back leaves), and Save folder is not in the header.
     expect(screen.queryByRole("button", { name: "Close" })).toBeNull();

@@ -194,6 +194,132 @@
       "hash": "46ea789de3400dbfedc2709968d691f10d0e31ad79ab2a1fe64dbd85a7d42f62"
     },
     {
+      "name": "debug",
+      "description": "Debug a Node.js program (JS, or TS run by Node's type stripping) with real breakpoints. Use it when a bug depends on runtime state: launch with breakpoints, read variables at the stop, step, and evaluate expressions in the paused frame — instead of adding prints and re-running. launch, continue, step_* and pause return where it stopped, the source around it and the local variables. It pauses on uncaught exceptions by default. One session at a time; launching again stops the previous program. To debug a node:test file, launch it with node_args [\"--test\", \"--test-isolation=none\"]. Test runners that run tests in worker processes (vitest, jest) do not reach breakpoints this way.",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "launch",
+              "set_breakpoint",
+              "remove_breakpoint",
+              "continue",
+              "step_over",
+              "step_into",
+              "step_out",
+              "pause",
+              "stack",
+              "variables",
+              "evaluate",
+              "output",
+              "stop"
+            ],
+            "description": "What to do. Every action that runs code returns where the program stopped."
+          },
+          "program": {
+            "description": "launch: script to run (.js/.mjs/.cjs/.ts)",
+            "type": "string"
+          },
+          "args": {
+            "description": "launch: arguments passed to the script",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "node_args": {
+            "description": "launch: extra node flags, e.g. [\"--test\", \"--test-isolation=none\"]",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "breakpoints": {
+            "description": "launch: breakpoints armed before the first line runs",
+            "maxItems": 50,
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "file": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "line": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "condition": {
+                  "description": "JS expression; pause only when it is truthy",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "file",
+                "line"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "stop_on_entry": {
+            "description": "launch: stay paused on the first line",
+            "type": "boolean"
+          },
+          "pause_on_exceptions": {
+            "description": "launch: when to pause on a throw (default uncaught)",
+            "type": "string",
+            "enum": [
+              "none",
+              "uncaught",
+              "all"
+            ]
+          },
+          "file": {
+            "description": "set_breakpoint: file path",
+            "type": "string"
+          },
+          "line": {
+            "description": "set_breakpoint: 1-based line",
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 9007199254740991
+          },
+          "condition": {
+            "description": "set_breakpoint: JS condition",
+            "type": "string"
+          },
+          "breakpoint_id": {
+            "description": "remove_breakpoint: id such as bp1",
+            "type": "string"
+          },
+          "frame": {
+            "description": "variables/evaluate: stack frame index (0 = innermost)",
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "expression": {
+            "description": "evaluate: JS expression",
+            "type": "string"
+          },
+          "timeout_ms": {
+            "description": "launch/continue/step/pause: how long to wait for a stop (default 15000)",
+            "type": "integer",
+            "minimum": 100,
+            "maximum": 120000
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "additionalProperties": false
+      },
+      "hash": "2c1944ab5f4829cfd43cd017aed5774d2e9033cca439ad36775c57112c9a5367"
+    },
+    {
       "name": "edit",
       "description": "Replace text in a file. Two edit forms:\n1. TEXT form { old_text, new_text }: copy old_text verbatim from the latest read/diff with enough context to match one location; set replace_all: true only for deliberate global renames. The matcher tolerates safe whitespace/quote/dash drift, but do not paraphrase. For long blocks, a line containing only `...` in BOTH old_text and new_text elides a middle preserved verbatim.\n2. SPAN form { span, lines } (preferred after a read with anchors:true): pin the line range by its line+hash endpoints and supply the full replacement lines — no old_text to retype, and the edit is rejected if the file changed since the read. Span edits apply against the file as read; text edits then run on the result.\nPartial-apply by default: failed edits are listed for retry, successful ones are still written — re-issue ONLY the listed failures, not the whole batch. Returns a unified diff.",
       "schema": {

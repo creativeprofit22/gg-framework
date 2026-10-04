@@ -6,7 +6,7 @@ import {
   type BackgroundStopReason,
   type ProcessManager,
 } from "../core/process-manager.js";
-import { truncateTail } from "./truncate.js";
+import { truncateTail, describeCompressed } from "./truncate.js";
 import { compressToolOutput } from "./compress.js";
 
 const TaskOutputParams = z.object({
@@ -110,7 +110,8 @@ export function createTaskOutputTool(
         if (presentationCapped) {
           const fullOutputNotice = result.logFile ? ` Full output: ${result.logFile}` : "";
           const c = compressToolOutput(output);
-          output = `[${c.notice}${fullOutputNotice}]\n${c.content}`;
+          const what = describeCompressed(output, c.content);
+          output = `[${c.notice}${what ? ` ${what}` : ""}${fullOutputNotice}]\n${c.content}`;
         } else {
           output = truncated.content;
         }

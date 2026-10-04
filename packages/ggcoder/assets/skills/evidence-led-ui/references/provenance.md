@@ -9,6 +9,7 @@
 - Production-practice research
 - Design-process references
 - Skill-architecture research
+- Q4 2026 refresh (3 October 2026): slop tells, platform status, legal dates
 - Refresh policy
 
 ## Included corpus
@@ -47,7 +48,7 @@ Therefore this skill must not bulk-scrape Refero, call undocumented Refero endpo
 - **Web conformance floor:** [Web Content Accessibility Guidelines (WCAG) 2.2](https://www.w3.org/TR/WCAG22/), W3C Recommendation dated 12 December 2024 in the current publication fetched 2026-07-21. The [W3C WCAG overview](https://www.w3.org/WAI/standards-guidelines/wcag/) encourages the latest version and states that WCAG 2.2 conformance is backward compatible with WCAG 2.1 and 2.0.
 - **Native application guidance:** [WCAG2ICT](https://www.w3.org/TR/wcag2ict-22/) explains how Level A and AA criteria apply to non-web software. It is informative guidance, not a normative standard, and native work still needs platform and product-specific accessibility requirements.
 - **U.S. ADA context:** The Department of Justice [ADA web accessibility guidance](https://www.ada.gov/resources/web-guidance/) explains equal access and effective communication under Titles II and III. The current [Title II web and mobile app rule fact sheet](https://www.ada.gov/resources/2024-03-08-web-rule/) names WCAG 2.1 Level AA as its technical standard and documents scope, exceptions, and compliance timing. These sources were checked 2026-07-21.
-- **Not the conformance target:** [W3C Accessibility Guidelines (WCAG) 3.0](https://www.w3.org/TR/wcag-3.0/) is a W3C Working Draft dated 3 March 2026. W3C says publication as a Working Draft does not imply endorsement and that it is inappropriate to cite as anything other than work in progress.
+- **Not the conformance target:** [W3C Accessibility Guidelines (WCAG) 3.0](https://www.w3.org/TR/wcag-3.0/) is a W3C Working Draft (dated 10 September 2026 when re-checked 3 October 2026). W3C says publication as a Working Draft does not imply endorsement and that it is inappropriate to cite as anything other than work in progress.
 
 WCAG 2.2 Level AA is the default engineering floor because it includes and extends WCAG 2.1, but technical WCAG conformance alone does not prove compliance with the ADA or another law. Project, procurement, contractual, platform, and jurisdictional requirements may exceed this floor. Use the current official standard and obtain qualified product or legal review before making a legal-compliance claim.
 
@@ -104,6 +105,28 @@ No source skill text is bundled or renamed. This skill rejects fixed palette/fon
 The package structure was checked against the [Agent Skills specification](https://agentskills.io/specification), [Anthropic skill-authoring best practices](https://platform.claude.com/docs/en/agents-and-tools/agent-skills/best-practices.md), [OpenAI Skills guidance](https://platform.openai.com/docs/guides/tools-skills), and [Agent Skills evaluation guidance](https://agentskills.io/skill-creation/evaluating-skills): loader-visible name/description metadata, a concise directly actionable `SKILL.md`, references one level from the root, focused on-demand documents, self-contained scripts, explicit validation, and evaluation-driven iteration. The installed GG Coder loader reads `name` and `description`; the portable `license` and `compatibility` fields are retained for other Agent Skills clients and safely ignored by GG Coder.
 
 `SKILL.md` remains below the recommended 500-line limit. Reference files over 100 lines include a contents overview so an agent preview exposes the file's scope. Detailed corpus data stays out of runtime context unless a specific claim requires it. The existing external A/B artifacts are unscored and predate the current contracts, so they are benchmark inputs rather than evidence that the current skill improves quality.
+
+## Q4 2026 refresh (3 October 2026)
+
+All accessed 3 October 2026 (SNAPSHOT).
+
+### Slop-tell sources
+
+- [Anthropic `frontend-design` SKILL.md](https://github.com/anthropics/skills/blob/main/skills/frontend-design/SKILL.md) (last changed 3 Sep 2026): named default clusters (cream/serif/terracotta, near-black + single accent, broadsheet, SaaS card kit, template chrome), single-word headline accents, all-caps labels, numbered markers on non-sequences, scattered fade-up entrances, plan-then-review-against-brief process, outcome-named CTAs. Paraphrased, not bundled.
+- [Vercel Web Interface Guidelines](https://github.com/vercel-labs/web-interface-guidelines): no `transition: all`, compositor-friendly motion, reduced motion, focus-visible, hit targets, links are links, loading-state timing, ellipsis conventions.
+- The tells table in `references/anti-defaults.md` merges these with the earlier synthesis; the clusters are DEDUCED, not measured.
+
+### Platform status
+
+- Baseline statuses in `references/direction.md` § 8 read from the [`web-features`](https://www.npmjs.com/package/web-features) package v3.40.1 (published 1 Oct 2026), the data behind [webstatus.dev](https://webstatus.dev).
+- [Interop 2026 focus areas](https://github.com/web-platform-tests/interop/blob/main/2026/README.md) and [WebKit's announcement](https://webkit.org/blog/17818/announcing-interop-2026/): anchor positioning, scroll-driven animations, view transitions, dialogs and popovers, container style queries, among others.
+- [WCAG 2.2](https://www.w3.org/TR/WCAG22/) Recommendation 12 Dec 2024; [WCAG 3.0](https://www.w3.org/TR/wcag-3.0/) Working Draft 10 Sep 2026.
+- [web.dev INP](https://web.dev/articles/inp): good at 200 ms or less, 75th percentile.
+
+### Legal dates
+
+- ADA Title II: DOJ interim final rule published 20 April 2026 (91 Fed. Reg. 20902) extends compliance to 26 April 2027 / 26 April 2028; WCAG 2.1 AA unchanged. Secondary confirmations: [Reed Smith](https://www.reedsmith.com/articles/doj-extends-digital-accessibility-compliance-dates-under-title-ii-of-the-ada/), [Seyfarth](https://www.adatitleiii.com/2026/04/doj-extends-ada-title-ii-website-accessibility-deadlines-for-governmental-entities-but-litigation-and-compliance-risks-remain/). Primary: [ada.gov web rule](https://www.ada.gov/resources/2024-03-08-web-rule/).
+- European Accessibility Act (Directive (EU) 2019/882): applies from 28 June 2025; [European Commission EAA page](https://commission.europa.eu/strategy-and-policy/policies/justice-and-fundamental-rights/disability/union-equality-strategy-rights-persons-disabilities-2021-2030/european-accessibility-act_en).
 
 ## Refresh policy
 

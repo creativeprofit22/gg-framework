@@ -1,4 +1,4 @@
-import { WavesIcon } from "@phosphor-icons/react";
+import { SunHorizonIcon } from "@phosphor-icons/react";
 import { setHomeBackgroundEnabled, useHomeBackgroundEnabled } from "./home-background";
 
 /**
@@ -20,7 +20,7 @@ export function HomeBackgroundButton(): React.ReactElement {
       }
       onClick={() => setHomeBackgroundEnabled(!on)}
     >
-      <WavesIcon size={16} aria-hidden="true" />
+      <SunHorizonIcon size={16} aria-hidden="true" />
       Home background
     </button>
   );

@@ -523,6 +523,17 @@ describe("agentLoop", () => {
     );
   });
 
+  it("forwards prepared-context observation without retaining provider payloads", async () => {
+    mockStream.mockReturnValueOnce(mockOkResult("Done") as unknown as ReturnType<typeof stream>);
+    const onContextPrepared = vi.fn();
+    await collectLoop([{ role: "user", content: "test" }], {
+      provider: "anthropic",
+      model: "claude-test",
+      onContextPrepared,
+    });
+    expect(mockStream).toHaveBeenCalledWith(expect.objectContaining({ onContextPrepared }));
+  });
+
   it("calls transformContext before each LLM call", async () => {
     mockStream.mockReturnValueOnce(mockOkResult("Done") as unknown as ReturnType<typeof stream>);
 

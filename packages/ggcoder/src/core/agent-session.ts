@@ -8,6 +8,7 @@ import {
   agentLoop,
   isAbortError,
   isUsageLimitError,
+  repairToolPairingAdjacent,
   type AgentEvent,
   type AgentTool,
   type AgentTurnEndEvent,
@@ -23,8 +24,11 @@ import {
   type TextContent,
   type ImageContent,
   type VideoContent,
+  type ToolCall,
+  type ToolResult,
 } from "@kenkaiiii/gg-ai";
 import { EventBus, type BusEventMap, type McpToolEventIdentity } from "./event-bus.js";
+import { flagUntrustedToolResult } from "./injection-detect.js";
 import {
   parseContinuationReviewRecord,
   type ContinuationReviewRecord,
@@ -162,13 +166,10 @@ import {
 import { ProgrammaticSetupInspection } from "./programmatic/setup-inspection.js";
 import type { DirectCommandExecutor } from "./programmatic/execution.js";
 import type { BackgroundProcess } from "./process-manager.js";
+import type { DebugManager } from "../tools/debug.js";
 import { buildProcessCompletionFollowUp } from "./process-gate.js";
 import { canonicalProjectKey } from "../project-notes-repository.js";
-import {
-  buildSubAgentCompletionFollowUp,
-  type SubAgentManager,
-  type SubAgentState,
-} from "./subagent-manager.js";
+import { buildSubAgentCompletionFollowUp, type SubAgentManager } from "./subagent-manager.js";
 import { applyAsyncSubagentPolicy } from "./subagent-policy.js";
 import { z } from "zod";
 import { MCPClientManager, getAllMcpServers } from "./mcp/index.js";
@@ -203,26 +204,28 @@ import {
   SessionDiagnosticsRecorder,
 } from "./internal-diagnostics.js";
 import { log } from "./logger.js";
-import { setEstimatorModel, calibrateEstimatorFromUsage } from "./compaction/token-estimator.js";
+import { CacheDiagnostics } from "./cache-diagnostics.js";
+import { assessCacheExpiry, resolveCacheTtl, type CacheExpiryStatus } from "./cache-expiry.js";
+import {
+  setEstimatorModel,
+  calibrateEstimatorFromUsage,
+  estimateConversationTokens,
+} from "./compaction/token-estimator.js";
 import { calculateActiveContextTokens } from "./compaction/active-context.js";
 import { resolveCompactionPolicy } from "./compaction/policy.js";
+import {
+  decidePlanStepCompaction,
+  DEFAULT_CACHE_WRITE_READ_RATIO,
+  PLAN_STEP_KEEP_TOKENS,
+  type PlanStepCompactionDecision,
+} from "./compaction/plan-step-policy.js";
+import { extractPlanSteps, findCompletedMarkers } from "../utils/plan-steps.js";
+import { readFileSync } from "node:fs";
 import { clampThinkingForPlanMode } from "./thinking-level.js";
 import { pruneStaleToolResults } from "./compaction/tool-result-pruner.js";
 import { discoverAgents } from "./agents.js";
 import { enhancePrompt, type EnhanceResult } from "../utils/prompt-enhancer.js";
 import { detectLanguages, detectProjectStack, type LanguageId } from "./language-detector.js";
-import {
-  type IdealReviewDecision,
-  type IdealReviewStats,
-  evaluateIdealReview,
-  buildIdealReviewMessage,
-  buildReviewCoverageEscalationMessage,
-  buildReviewCoverageMessage,
-  MAX_REVIEW_COVERAGE_INJECTIONS,
-  withReviewCoverageRequirements,
-  detectTestDrift,
-  ReviewCoverageTracker,
-} from "./ideal-review.js";
 import {
   evaluateLoopBreak,
   buildLoopBreakMessage,
@@ -242,15 +245,6 @@ import {
   type SemanticCallDigest,
   type SemanticLoopVerdict,
 } from "./semantic-loop-check.js";
-import {
-  buildIndependentReviewMessage,
-  buildReviewerTask,
-  INDEPENDENT_REVIEW_SCORE_THRESHOLD,
-  parseReviewerFindings,
-  REVIEWER_TOOLS,
-  REVIEWER_TURN_TIMEOUT_MS,
-  REVIEWER_WAIT_MS,
-} from "./ideal-review-subagent.js";
 import { buildEnvDeltaMessage } from "./env-delta.js";
 import { wrapSteeringText, buildNotificationSteeringText, STEERING_PREFIX } from "./steering.js";
 import { AgentNotificationQueue } from "./agent-notifications.js";
@@ -274,6 +268,7 @@ import {
   type ActivePhaseExecutionStage,
   type RoadmapPhaseLeaseMarkerV1,
 } from "../phase-context.js";
+import { loadStreamRules } from "./stream-rules.js";
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import type { Stats } from "node:fs";
@@ -298,17 +293,6 @@ export interface SessionAttachment {
   data: string;
   name: string;
   path?: string;
-}
-
-/** Terminal subagent states — mirrors SubAgentManager's private isTerminal. */
-function isTerminalSubAgentState(state: SubAgentState): boolean {
-  return (
-    state === "completed" ||
-    state === "failed" ||
-    state === "interrupted" ||
-    state === "closed" ||
-    state === "reaped"
-  );
 }
 
 /** Per-prompt run controls. */
@@ -470,7 +454,7 @@ export interface AgentSessionOptions {
   reservedCommandIdentities?: readonly string[];
   workspaceCommandCaseInsensitive?: boolean;
   advertiseRegistryCommands?: boolean;
-  /** Enable loop-break, re-grounding, and Ideal review hooks. Defaults to true. */
+  /** Enable loop-break and re-grounding hooks. Defaults to true. */
   selfCorrectionHooks?: boolean;
   /** Override the semantic-loop judge LLM call (tests). Receives the finished
    *  prompt, returns the model's raw reply. Default: one-shot `stream()` call
@@ -627,6 +611,7 @@ export class AgentSession {
   // transcript rows the live run showed.
   private appMarkers: AppMarkerPayload[] = [];
   private turnMetrics: TurnMetricPayload[] = [];
+  private readonly cacheDiagnostics = new CacheDiagnostics();
   /** Internal-only (GG_INTERNAL): live per-session cost/reliability recorder.
    * Absent entirely in public builds — see core/internal-diagnostics.ts. */
   private diagnosticsRecorder?: SessionDiagnosticsRecorder;
@@ -650,20 +635,15 @@ export class AgentSession {
   /** Forgets every file read; called whenever the conversation is replaced or
    *  rewound, so the model must re-read a file before changing it. */
   private clearReadTracker: (() => void) | undefined;
+  private recordBashReads:
+    | ((toolCalls: readonly ToolCall[], toolResults: readonly ToolResult[]) => Promise<void>)
+    | undefined;
   private skills: Skill[] = [];
   private cacheKeyLogged = false;
   // ── Self-correction hook state (mirrors the TUI's useAgentLoop refs) ──
   // Reset at the start of every run; observed from the event stream; read by
-  // the loop-break (mid-loop) and ideal-review (pre-stop) callbacks.
-  private hookStats: IdealReviewStats = {
-    changedLines: 0,
-    toolCalls: 0,
-    toolFailures: 0,
-    turns: 0,
-    writeCalls: 0,
-    editCalls: 0,
-    bashCalls: 0,
-  };
+  // the loop-break (mid-loop) callback.
+  private hookStats = { toolCalls: 0, toolFailures: 0, turns: 0 };
   private hookText = "";
   private hookConsecutiveFailures = 0;
   private hookRepeatedNoProgressCalls = 0;
@@ -682,20 +662,6 @@ export class AgentSession {
     }
   >();
   private readonly verificationEvidenceLedger = new SessionVerificationEvidenceLedger();
-  private idealReviewPhase: "idle" | "reviewing" | "complete" = "idle";
-  /** Runtime-only suppression while Ken owns verification in autopilot mode. */
-  private idealReviewSuppressed = false;
-  /** Mirror of the last `hook_armed` value broadcast this run, so the event
-   *  fires only on a real edge. */
-  private idealReviewArmed = false;
-  /** Cached test-drift probe, keyed by the size of the edited-file set. Drift
-   *  depends only on WHICH files were edited and that set only grows, so this
-   *  keeps the arming check off the filesystem on most tool results — the probe
-   *  is several sync existsSync calls per edited file. */
-  private idealDriftProbe: { files: number; drifted: boolean } | null = null;
-  private readonly reviewCoverage: ReviewCoverageTracker;
-  /** Coverage follow-ups spent this run, capped by MAX_REVIEW_COVERAGE_INJECTIONS. */
-  private reviewCoverageInjected = 0;
   /** 0 = none; 1 = first nudge sent; 2 = final stop-and-report injected. */
   private loopBreakInjected: 0 | 1 | 2 = 0;
   private regroundingInjected = false;
@@ -712,8 +678,6 @@ export class AgentSession {
     injected: boolean;
     controller?: AbortController;
   } = { checksUsed: 0, lastCheckTurn: 0, pending: false, verdict: null, injected: false };
-  /** Independent Ideal reviewer spawned once per run (score-gated). */
-  private independentReviewStarted = false;
   /**
    * The environment as the cached system prompt currently describes it.
    * Re-recorded on every prompt build, so a rebuild (e.g. `/add-dir`) needs no
@@ -724,6 +688,8 @@ export class AgentSession {
   private runStartedAt = 0;
   /** Gate injections spent this run, capped by MAX_PROCESS_GATE_INJECTIONS. */
   private processGateInjected = 0;
+  /** Mirror of the last `hook_armed` value, so the event fires only on an edge. */
+  private preFinalArmed = false;
   private compactionOccurred = false;
   /**
    * Re-grounding carry-over for post-turn compaction. `resetHookState` clears
@@ -736,6 +702,25 @@ export class AgentSession {
   private postTurnCompaction?: Promise<void>;
   private lastCompactionCompacted = false;
   private compactionRetryAfter = 0;
+  /**
+   * SoL-Pi plan-step compaction bookkeeping (see compaction/plan-step-policy.ts).
+   * Step progress comes from `[DONE:n]` markers in assistant text — the same
+   * contract the approved-plan UI tracks.
+   */
+  private planStepState = {
+    planPath: undefined as string | undefined,
+    scanIndex: 0,
+    doneSteps: new Set<number>(),
+    requestsInCompletedSteps: 0,
+    requestsThisStep: 0,
+    requests: 0,
+    grownTokens: 0,
+    lastContextTokens: 0,
+    compactions: 0,
+    writeCostBalance: 0,
+    savingPerRequest: 0,
+    requestsSinceLastCompaction: 0,
+  };
   /** A restored oversized checkpoint must be canonicalized before its first prompt is persisted. */
   private deferredCompactionPending = false;
   /** Latest provider count, anchored to the assistant response it measured. */
@@ -756,11 +741,14 @@ export class AgentSession {
   /** Serializes {@link queuePrompt} so entries are queued in arrival order. */
   private queuePromptChain: Promise<unknown> = Promise.resolve();
   private queueSeq = 0;
+  /** Instant interrupt: the running loop's preempt listeners, fired on queueMessage. */
+  private steeringListeners = new Set<() => void>();
   private processManager?: ProcessManager;
   private lspManager?: LspManager;
   private commandCreation?: CreateToolsResult["commandCreation"];
   private programmaticProfile?: CreateToolsResult["programmaticProfile"];
   private setupInspection?: ProgrammaticSetupInspection;
+  private debugManager?: DebugManager;
   private subAgentManager?: SubAgentManager;
   /**
    * Out-of-band push notifications (finished children, background-process
@@ -905,7 +893,6 @@ export class AgentSession {
     this.model = options.model;
     this.cwd = options.cwd;
     this.readProgrammaticReadiness = createProgrammaticReadinessReader(this.cwd);
-    this.reviewCoverage = new ReviewCoverageTracker(this.cwd);
     this.baseUrl = options.baseUrl;
     this.maxTokens = this.resolveMaxTokens(options.model);
     this.thinkingLevel = options.thinkingLevel;
@@ -987,7 +974,9 @@ export class AgentSession {
       processManager,
       rebuildReadTool,
       clearReadTracker,
+      recordBashReads,
       lspManager,
+      debugManager,
       subAgentManager,
       commandCreation,
       programmaticProfile,
@@ -1075,18 +1064,15 @@ export class AgentSession {
       getUseExternalGrep: () => this.settingsManager.get("grepUseRipgrep"),
       researchSources: this.researchSources,
       authStorage: this.authStorage,
-      onFileRead: (filePath) => this.reviewCoverage.recordRead(filePath),
       onFileMutated: (filePath) => {
         const relative = path.relative(this.cwd, filePath) || path.basename(filePath);
         this.hookFileEditCounts.set(relative, (this.hookFileEditCounts.get(relative) ?? 0) + 1);
-        this.reviewCoverage.recordChanged(filePath);
       },
       onTasksChanged: this.opts.onTasksChanged,
       // Lazy — sessionId/model/provider can change after createTools() runs, so
       // sub-agent spawns read the current parent state at execution time.
       getProvider: () => this.provider,
       getModel: () => this.model,
-      getThinkingLevel: () => this.thinkingLevel,
       getBaseUrl: () => this.baseUrl,
       getCacheKey: () => this.getPromptCacheKey(),
       getMaxPerModel: () => this.settingsManager.get("subagentMaxPerModel"),
@@ -1125,7 +1111,10 @@ export class AgentSession {
       const additionalToolNames = new Set(additionalTools.map((tool) => tool.name));
       const tierableBuiltIns = builtInTools.filter((tool) => !additionalToolNames.has(tool.name));
       const { core, deferred } = partitionToolsByTier(tierableBuiltIns);
-      this.registerTools([...core, ...additionalTools]);
+      this.registerTools([
+        ...core.map((tool) => this.withWaitAgentPromotion(tool)),
+        ...additionalTools,
+      ]);
       if (deferred.length > 0) {
         this.deferredBuiltinToolNames = deferred.map((tool) => tool.name);
         this.deferredBuiltinTools = new Map(deferred.map((tool) => [tool.name, tool]));
@@ -1140,10 +1129,12 @@ export class AgentSession {
     }
     this.rebuildReadTool = rebuildReadTool;
     this.clearReadTracker = clearReadTracker;
+    this.recordBashReads = recordBashReads;
     this.processManager = processManager;
     this.lspManager = lspManager;
     this.commandCreation = commandCreation;
     this.programmaticProfile = programmaticProfile;
+    this.debugManager = debugManager;
     this.subAgentManager = subAgentManager;
     this.bindManagerCancellation(this.opts.signal);
 
@@ -1586,6 +1577,34 @@ export class AgentSession {
     return this.sharedMcpLeases.get(serverName)?.manager ?? this.mcpManager;
   }
 
+  /**
+   * `wait_agent` is deferred, yet nearly every `spawn_agent` is followed by it,
+   * so the model spent a whole turn on `tool_search` just to load it (bench 41:
+   * ~6 s per fan-out). Promote it as soon as a spawn succeeds instead: the tool
+   * list grows exactly as it would after that `tool_search`, one turn earlier,
+   * and sessions that never spawn keep the smaller prefix. Promotion goes
+   * through the guarded registry, so capability policies still apply.
+   */
+  private withWaitAgentPromotion(tool: AgentTool): AgentTool {
+    if (tool.name !== "spawn_agent") return tool;
+    return {
+      ...tool,
+      execute: async (args, context) => {
+        const result = await tool.execute(args, context);
+        if (!this.registeredTools.has("wait_agent")) {
+          const promoted = this.mcpCatalog?.promote(["wait_agent"]) ?? [];
+          for (const promotedTool of promoted) {
+            if (this.deferredBuiltinTools.has(promotedTool.name)) {
+              this.searchedPromotedBuiltinNames.add(promotedTool.name);
+            }
+          }
+          if (promoted.length > 0) this.registerTools(promoted);
+        }
+        return result;
+      },
+    };
+  }
+
   /** Append tools, replacing any same-named entry (cached stub → live tool). */
   private replaceOrPushTools(tools: AgentTool[]): void {
     this.registerTools(tools);
@@ -1995,7 +2014,6 @@ export class AgentSession {
           },
           onFileMutated: (relative) => {
             this.hookFileEditCounts.set(relative, (this.hookFileEditCounts.get(relative) ?? 0) + 1);
-            this.reviewCoverage.recordChanged(path.resolve(this.cwd, relative));
           },
         },
       );
@@ -2347,6 +2365,7 @@ ${content}
     } = {},
   ): Promise<void> {
     if (!content.trim()) return;
+    this.prewarmController?.abort();
     await this.settlePostTurnCompaction();
     await this.adoptDeferredCheckpointBeforePrompt();
     const slash = await this.resolveSlashInput(content);
@@ -2407,6 +2426,7 @@ ${content}
       this.eventBus.emit("text_delta", { text: inputPolicyError + "\n" });
       return;
     }
+    this.prewarmController?.abort();
     await this.settlePostTurnCompaction();
     const parts = this.buildAttachmentParts(text, attachments);
     if (parts.length === 0)
@@ -2518,15 +2538,7 @@ ${content}
     this.semanticLoop.controller?.abort();
     this.opts.completionReview?.begin(originalRequest);
     this.lspManager?.clearPendingDiagnostics();
-    this.hookStats = {
-      changedLines: 0,
-      toolCalls: 0,
-      toolFailures: 0,
-      turns: 0,
-      writeCalls: 0,
-      editCalls: 0,
-      bashCalls: 0,
-    };
+    this.hookStats = { toolCalls: 0, toolFailures: 0, turns: 0 };
     this.hookText = "";
     this.hookConsecutiveFailures = 0;
     this.hookRepeatedNoProgressCalls = 0;
@@ -2535,12 +2547,6 @@ ${content}
     this.hookCyclicPattern = null;
     this.hookFileEditCounts.clear();
     this.hookToolCalls.clear();
-    this.reviewCoverage.reset();
-    this.reviewCoverageInjected = 0;
-    this.idealReviewPhase = "idle";
-    // No event here: clients reset their own hold on run_start.
-    this.idealReviewArmed = false;
-    this.idealDriftProbe = null;
     this.loopBreakInjected = 0;
     this.regroundingInjected = false;
     this.hookRecentCalls = [];
@@ -2551,7 +2557,6 @@ ${content}
       verdict: null,
       injected: false,
     };
-    this.independentReviewStarted = false;
     this.runStartedAt = Date.now();
     this.processGateInjected = 0;
     this.compactionOccurred = false;
@@ -2586,8 +2591,8 @@ ${content}
 
   /**
    * Fold one agent event into the hook stat accumulators. Pure bookkeeping —
-   * the same signals the TUI's useAgentLoop collects, so the loop-break and
-   * ideal-review decisions match across the CLI and the app.
+   * the same signals the TUI's useAgentLoop collects, so loop-break decisions
+   * match across the CLI and the app.
    */
   private async trackHookEvent(event: AgentEvent): Promise<void> {
     if (this.opts.completionReview) {
@@ -2634,9 +2639,6 @@ ${content}
         }
         this.hookStats.toolCalls += 1;
         if (event.isError) this.hookStats.toolFailures += 1;
-        if (name === "write") this.hookStats.writeCalls += 1;
-        if (name === "edit") this.hookStats.editCalls += 1;
-        if (name === "bash") this.hookStats.bashCalls += 1;
         this.hookConsecutiveFailures = event.isError ? this.hookConsecutiveFailures + 1 : 0;
         this.hookRepeatedNoProgressCalls = this.hookProgressTracker.record(
           name,
@@ -2662,12 +2664,6 @@ ${content}
         });
         if (this.hookRecentCalls.length > MAX_SEMANTIC_LOOP_CALLS) {
           this.hookRecentCalls.splice(0, this.hookRecentCalls.length - MAX_SEMANTIC_LOOP_CALLS);
-        }
-        if (name === "edit" && !event.isError) {
-          const diff = (event.details as { diff?: string } | undefined)?.diff ?? event.result;
-          const added = (diff.match(/^\+[^+]/gm) ?? []).length;
-          const removed = (diff.match(/^-[^-]/gm) ?? []).length;
-          this.hookStats.changedLines += added + removed;
         }
         if (this.hookToolCalls.get(event.toolCallId) !== call) break;
         this.hookToolCalls.delete(event.toolCallId);
@@ -2695,6 +2691,7 @@ ${content}
         // Tool results for this step are in the array and their side effects
         // already hit the filesystem. Flushing here is what makes a crash lose
         // at most the in-flight step instead of the entire turn.
+        await this.creditBashReads();
         await this.flushPendingMessages();
         await this.publishAdvisoryPresentation();
         break;
@@ -2724,6 +2721,27 @@ ${content}
     if (this.advisoryTurn !== pending.turn || !pending.turn.active || pending.signal.aborted)
       return;
     this.eventBus.emit("text_delta", { text: pending.text, standalone: true });
+  }
+
+  /**
+   * Count full-file `cat` output from the step that just finished as reads, so
+   * an edit after `cat` does not cost a second read. Uses the step's results as
+   * stored in the transcript (after per-turn trimming): only bytes the model
+   * actually received count.
+   */
+  private async creditBashReads(): Promise<void> {
+    if (!this.recordBashReads) return;
+    const messages = this.activeLoopMessages ?? this.messages;
+    const toolMessage = messages.at(-1);
+    const assistant = messages.at(-2);
+    if (toolMessage?.role !== "tool" || assistant?.role !== "assistant") return;
+    if (typeof assistant.content === "string") return;
+    const calls = assistant.content.filter((part): part is ToolCall => part.type === "tool_call");
+    try {
+      await this.recordBashReads(calls, toolMessage.content);
+    } catch (err) {
+      log("WARN", "agent-session", "Crediting bash reads failed", { error: String(err) });
+    }
   }
 
   /**
@@ -2798,6 +2816,7 @@ ${content}
     // in the same batch when both are pending.
     const diagnosticText = this.drainQueuedDiagnostics(true);
     if (diagnosticText) this.eventBus.emit("diagnostics", { text: diagnosticText });
+    this.refreshHookArming();
     const notified = this.notifications.drain();
     const notificationMessage: Message | null =
       notified.length > 0 || diagnosticText
@@ -2873,6 +2892,7 @@ ${content}
       ];
     }
     if (this.opts.selfCorrectionHooks === false) return null;
+    // Legacy key: the user-facing switch for loop-break and re-grounding nudges.
     if (!this.settingsManager.get("idealReviewEnabled")) return null;
     // Deterministic stuck verdict, computed once and shared: the semantic
     // judge must not spend tokens on a burst the deterministic breaker is
@@ -3088,79 +3108,6 @@ ${content}
       : "";
   }
 
-  /** Independent fresh-context review of the finished work (Codex Guardian
-   *  pattern). Spawns a READ-ONLY child on the ACTIVE model, waits bounded,
-   * and returns findings for the acting agent to address — or nothing when
-   *  the review passes, is unavailable, or fails (in-thread review remains the
-   *  fallback; the feature degrades, never blocks).
-   *
-   *  Runs inside the pre-stop poll, so the candidate final answer is already
-   *  held by arming and this wait cannot race a streamed answer. */
-  private async runIndependentReview(decision: IdealReviewDecision): Promise<Message[]> {
-    if (!this.subAgentManager) return [];
-    if (this.independentReviewStarted) return [];
-    // An allow-listed session (a subagent worker itself) must not spawn
-    // harness-owned grandchildren the tool policy never granted.
-    if (this.opts.allowedTools && !this.opts.allowedTools.includes("spawn_agent")) return [];
-    if (decision.score < INDEPENDENT_REVIEW_SCORE_THRESHOLD) return [];
-    this.independentReviewStarted = true;
-
-    const taskName = `ideal-reviewer-${Math.random().toString(36).slice(2, 8)}`;
-    let agentId: string | undefined;
-    try {
-      const task = buildReviewerTask({
-        originalRequest: this.originalRequest,
-        changedFiles: [...this.hookFileEditCounts.keys()],
-        stats: this.hookStats,
-        triggerReasons: decision.reasons,
-      });
-      // Active model forced at spawn time — never routed to a fast/review model.
-      // The reviewer's own time limit ends it with a verdict on what it read;
-      // the wait below is only a backstop against a hung child.
-      const snapshot = await this.subAgentManager.spawn(taskName, task, undefined, {
-        model: this.model,
-        tools: REVIEWER_TOOLS,
-        turnTimeoutMs: REVIEWER_TURN_TIMEOUT_MS,
-      });
-      agentId = snapshot.agent_id;
-      const waited = await this.subAgentManager.wait([agentId], "all", REVIEWER_WAIT_MS);
-      const agent = waited.agents[0];
-      if (!agent || !isTerminalSubAgentState(agent.state)) {
-        // Timeout: collect the straggler so the completion gate cannot fire on
-        // it later, then fall back to the in-thread review.
-        await this.subAgentManager.interrupt(agentId, true).catch(() => {});
-        log("WARN", "ideal", "Independent reviewer timed out; falling back to in-thread review", {
-          agentId,
-        });
-        return [];
-      }
-      const findings = parseReviewerFindings(agent.output ?? "");
-      if (!findings) {
-        log("WARN", "ideal", "Independent reviewer output unparseable; falling back", {
-          agentId,
-          state: agent.state,
-          ...(agent.error ? { error: agent.error } : {}),
-        });
-        return [];
-      }
-      if (findings.clean) {
-        log("INFO", "ideal", "Independent reviewer verdict: clean", { agentId });
-        return [];
-      }
-      log("INFO", "ideal", "Independent reviewer flagged findings", {
-        agentId,
-        count: String(findings.findings.length),
-      });
-      return [buildIndependentReviewMessage(findings.findings)];
-    } catch (error) {
-      if (agentId) await this.subAgentManager.interrupt(agentId, true).catch(() => {});
-      log("WARN", "ideal", "Independent reviewer failed; falling back to in-thread review", {
-        error: error instanceof Error ? error.message : String(error),
-      });
-      return [];
-    }
-  }
-
   /**
    * Turn-budget extension gate. The loop consults this instead of stopping
    * mid-task when it exhausts `maxTurns`. Grant ONLY on evidence of progress —
@@ -3206,71 +3153,30 @@ ${content}
     return granted;
   }
 
-  /**
-   * Would the stop AFTER the current turn inject the Ideal review? Same inputs
-   * as the pre-stop gate below, evaluated early so clients know a candidate
-   * final answer is a review draft BEFORE it streams.
-   *
-   * The turn count is looked ahead by one on purpose. `hookStats.turns` only
-   * advances at `turn_end`, so while the model is writing the draft the counter
-   * still reads the PREVIOUS turn; the real gate sees one more. Without the
-   * lookahead a run sitting on score 3 crosses to 4 on the draft's own
-   * `turn_end` — after the text already streamed — which is precisely the
-   * appear-then-vanish flash. Over-arming by one turn point costs only live
-   * token streaming on a final answer that then shows whole; under-arming costs
-   * the flash, so this errs toward arming.
-   */
-  private wouldInjectIdealReview(): boolean {
-    if (this.opts.completionReview?.armed) return true;
-    if (this.opts.selfCorrectionHooks === false || this.idealReviewSuppressed) return false;
-    // Mid-review a stop still injects: the coverage follow-up while files are
-    // unread, or its escalation once the budget is spent. Both make the model
-    // answer again, so the candidate answer is a draft exactly as it is before
-    // the review starts — without arming here it paints and the reviewed answer
-    // lands under it as a duplicate.
-    if (this.idealReviewPhase === "reviewing") {
-      return this.reviewCoverage.evidence().missing.length > 0;
-    }
-    if (this.idealReviewPhase !== "idle") return false;
-    if (!this.settingsManager.get("idealReviewEnabled")) return false;
-    if (evaluateIdealReview({ ...this.hookStats, turns: this.hookStats.turns + 1 }).shouldReview) {
-      return true;
-    }
-    const files = this.hookFileEditCounts.size;
-    if (files === 0) return false;
-    if (this.idealDriftProbe?.files !== files) {
-      this.idealDriftProbe = {
-        files,
-        drifted: detectTestDrift(this.hookFileEditCounts.keys(), this.cwd).length > 0,
-      };
-    }
-    return this.idealDriftProbe.drifted;
+  /** Would a stop right now inject a pre-final follow-up that replaces the
+   *  candidate answer? Only a mode-owned completion review does, so clients hold
+   *  the candidate answer only then. Queued LSP diagnostics are delivered to the
+   *  model as passive observations: the Local Fork has no automatic verification
+   *  gate, so they never arm a hold. */
+  private wouldInjectBeforeFinal(): boolean {
+    return this.opts.completionReview?.armed ?? false;
   }
 
   /** Broadcast pre-final hook arming on change. Both edges matter: armed=false
-   *  after the hook fires is what lets a client stream the REVIEWED final
-   *  answer live again.
-   *
-   *  Callable before `initialize()`: the sidecar sets Ken's review suppression
-   *  on a freshly constructed session, and every arming predicate below reads
-   *  settings that `initialize()` has not loaded yet. Nothing can be armed
-   *  before the session can run a turn, and the first `tool_result`/`turn_end`
-   *  recomputes both edges — so skipping is the correct answer, not a patch. */
+   *  after the hook fires is what lets a client stream the final answer live
+   *  again. Callable before `initialize()`. The kind matches the completion
+   *  review's `hook` event (`ideal`); `verification` is never armed. */
   private refreshHookArming(): void {
-    if (!this.settingsManager) return;
-    this.refreshIdealReviewArmed();
-  }
-
-  private refreshIdealReviewArmed(): void {
-    const armed = this.wouldInjectIdealReview();
-    if (armed === this.idealReviewArmed) return;
-    this.idealReviewArmed = armed;
+    const armed = this.wouldInjectBeforeFinal();
+    if (armed === this.preFinalArmed) return;
+    this.preFinalArmed = armed;
     this.eventBus.emit("hook_armed", { kind: "ideal", armed });
   }
 
   /**
-   * Pre-stop Ideal review phase machine. Once review starts, completion is
-   * blocked until harness-owned post-injection reads cover every changed file.
+   * Pre-stop follow-ups: LSP errors, unread child agents and background
+   * processes, and a mode-owned completion review. Verification evidence is
+   * tracked passively for run status; it never forces another turn.
    */
   private async getHookFollowUpMessages(): Promise<Message[] | null> {
     // Exit notifications and task_output refer to the same host process record.
@@ -3282,6 +3188,7 @@ ${content}
     if (this.opts.signal?.aborted) return null;
     const diagnosticText = this.drainQueuedDiagnostics();
     if (diagnosticText) this.eventBus.emit("diagnostics", { text: diagnosticText });
+    this.refreshHookArming();
     const diagnosticMessages: Message[] = diagnosticText
       ? [
           {
@@ -3331,136 +3238,24 @@ ${content}
       }
       this.refreshHookArming();
     }
-    if (this.opts.selfCorrectionHooks === false || this.idealReviewSuppressed) return null;
-
-    if (this.idealReviewPhase === "reviewing") {
-      const coverage = this.reviewCoverage.evidence();
-      const lspEvidence = this.reviewLspEvidence(coverage.expected);
-      log("INFO", "ideal", "Ideal review coverage check", {
-        covered: coverage.covered,
-        missing: coverage.missing,
-        lspLowConfidence: lspEvidence.lowConfidence,
-        lspMissing: lspEvidence.missing,
-      });
-      if (coverage.missing.length > 0) {
-        // Announce like any other pre-final injection: this follow-up makes the
-        // model answer again, so the answer it interrupts is a draft and the
-        // hook event is what tells clients to discard it. Injecting silently is
-        // what let the pre-coverage answer paint above the reviewed one.
-        this.eventBus.emit("hook", {
-          kind: "ideal",
-          coverageExpected: coverage.expected,
-          coverageMissing: coverage.missing,
-        });
-        if (this.reviewCoverageInjected < MAX_REVIEW_COVERAGE_INJECTIONS) {
-          this.reviewCoverageInjected += 1;
-          // Stays armed (coverage is still outstanding) — this call is here so a
-          // client that missed the earlier edge is armed before the next draft.
-          this.refreshIdealReviewArmed();
-          return [
-            this.withReviewLspEvidence(buildReviewCoverageMessage(coverage.missing), lspEvidence),
-          ];
-        }
-        // Budget spent: close the gate so the run cannot spin on a file that
-        // never becomes readable, and require the gap be reported to the user.
-        this.idealReviewPhase = "complete";
-        // The gate is shut, so this is the real disarm: the answer to the
-        // escalation is final and streams live.
-        this.refreshIdealReviewArmed();
-        log("INFO", "ideal", "Ideal review coverage escalated after retry budget", {
-          injected: String(this.reviewCoverageInjected),
-          missing: coverage.missing,
-        });
-        return [buildReviewCoverageEscalationMessage(coverage.missing)];
-      }
-      this.idealReviewPhase = "complete";
-      return null;
-    }
-    if (this.idealReviewPhase === "complete") return null;
-    if (!this.settingsManager.get("idealReviewEnabled")) return null;
-
-    const decision = evaluateIdealReview(this.hookStats);
-    // Test drift fires the review even on a small change the score would skip:
-    // a green-but-stale test is exactly what the volume gate sleeps through.
-    const driftedFiles = detectTestDrift(this.hookFileEditCounts.keys(), this.cwd).slice(0, 5);
-    if (!decision.shouldReview && driftedFiles.length === 0) return null;
-
-    // Independent reviewer first (async, bounded): its findings ride in the
-    // SAME follow-up batch as the in-thread review + coverage requirements, so
-    // addressing everything still costs one extra turn.
-    this.reviewCoverage.start(this.hookFileEditCounts.keys());
-    this.idealReviewPhase = "reviewing";
-    const coverage = this.reviewCoverage.evidence();
-    const lspEvidence = this.reviewLspEvidence(coverage.expected);
-    this.eventBus.emit("hook", {
-      kind: "ideal",
-      coverageExpected: coverage.expected,
-      coverageMissing: coverage.missing,
-    });
-    // Recompute strictly AFTER the hook event: clients release held text on
-    // disarm, so the reverse order would paint the draft and then delete it —
-    // the exact flash arming exists to prevent. Arming normally PERSISTS here,
-    // because review starts with every changed file uncovered and a stop while
-    // coverage is outstanding injects again. Disarm lands later, on the read
-    // that closes the last gap (or when the retry budget escalates).
-    this.refreshIdealReviewArmed();
-    // Announce the phase before the reviewer starts, not after its bounded wait.
-    const independentMessages = await this.runIndependentReview(decision);
-    log("INFO", "ideal", "Injecting ideal review before final response", {
-      coverageExpected: coverage.expected,
-      coverageMissing: coverage.missing,
-      lspLowConfidence: lspEvidence.lowConfidence,
-      lspMissing: lspEvidence.missing,
-    });
-    return [
-      ...independentMessages,
-      this.withReviewLspEvidence(
-        withReviewCoverageRequirements(
-          buildIdealReviewMessage(decision.reasons, driftedFiles),
-          coverage.missing,
-        ),
-        lspEvidence,
-      ),
-    ];
+    return null;
   }
 
-  private reviewLspEvidence(files: readonly string[]): {
-    lowConfidence: string[];
-    missing: string[];
-  } {
-    const lowConfidence: string[] = [];
-    const missing: string[] = [];
-    for (const filePath of files) {
-      const outcome = this.lspManager?.getLatestOutcome(filePath);
-      if (outcome?.kind === "low_confidence") lowConfidence.push(filePath);
-      else if (outcome?.kind !== "clean" && outcome?.kind !== "diagnostics") missing.push(filePath);
+  /** Wraps the real run: cancels an in-flight cache prewarm and tracks run
+   *  activity / last real request time for {@link prewarm}. */
+  private async runLoop(options: PromptRunOptions = {}): Promise<void> {
+    this.prewarmController?.abort();
+    this.runLoopDepth++;
+    try {
+      await this.runLoopInner(options);
+    } finally {
+      this.runLoopDepth--;
+      this.lastRealRequestAt = Date.now();
     }
-    return { lowConfidence, missing };
-  }
-
-  private withReviewLspEvidence(
-    message: Message,
-    evidence: { lowConfidence: string[]; missing: string[] },
-  ): Message {
-    if (evidence.lowConfidence.length === 0 && evidence.missing.length === 0) return message;
-    const notes = [
-      ...(evidence.lowConfidence.length > 0
-        ? [`Diagnostics are low confidence while indexing: ${evidence.lowConfidence.join(", ")}.`]
-        : []),
-      ...(evidence.missing.length > 0
-        ? [`Diagnostics evidence is unavailable or missing: ${evidence.missing.join(", ")}.`]
-        : []),
-      "Do not describe those files as compiler-clean without other evidence.",
-    ];
-    return {
-      role: "user",
-      provenance: message.provenance,
-      content: `${String(message.content)}\n\n${notes.join(" ")}`,
-    };
   }
 
   /** Auto-compact if needed, run agent loop with auth retry, and persist messages. */
-  private async runLoop(options: PromptRunOptions = {}): Promise<void> {
+  private async runLoopInner(options: PromptRunOptions = {}): Promise<void> {
     return this.opts.unattended
       ? runUnattended(() => this.runLoopInternal(options))
       : this.runLoopInternal(options);
@@ -3468,11 +3263,7 @@ ${content}
 
   private async runLoopInternal(options: PromptRunOptions): Promise<void> {
     assertProviderExecutionAllowed(this.provider, this.opts.unattended);
-    // Languages are re-detected at each task boundary so a project scaffolded
-    // during the previous turn gets its packs; the prompt is rebuilt only when
-    // the set grows, keeping the cached prefix stable otherwise.
-    if (this.refreshActiveLanguages()) await this.rebuildSystemPromptInPlace();
-    this.refreshSystemPromptTail();
+    await this.prepareSystemPromptForRequest();
     // One-shot cache-key marker per session so turn_end cacheRead numbers
     // in the log can be traced back to a specific routing namespace —
     // particularly useful when sub-agents inherit `parentKey:subagent`.
@@ -3585,6 +3376,8 @@ ${content}
     let userAgent = this.provider === "anthropic" ? await getClaudeCliUserAgent() : undefined;
 
     const loopMessages = await this.prepareDynamicContext();
+    // Re-read every run so rule-file edits apply on the next turn; a few small files.
+    const streamRules = await loadStreamRules(this.cwd);
 
     const runAgentLoop = async (apiKey: string, accountId?: string, projectId?: string) => {
       lastResolvedAccessToken = apiKey;
@@ -3598,6 +3391,7 @@ ${content}
           ? ("fast" as const)
           : undefined;
       const generator = agentLoop(loopMessages, {
+        ...(streamRules.length > 0 ? { streamRules: { rules: streamRules } } : {}),
         provider: this.provider,
         model: resolveTransportModel(this.provider, this.model),
         tools: options.disableTools ? [] : this.tools,
@@ -3649,6 +3443,34 @@ ${content}
         // + pre-warm before the first turn. "baseline": current 5-min default.
         cacheRetention: this.isSpeedOptimized() ? "long" : "short",
         promptCacheKey: this.getPromptCacheKey(),
+        onContextPrepared: (context) => {
+          const report = this.cacheDiagnostics.prepare(context, {
+            provider: this.provider,
+            model: this.model,
+            at: Date.now(),
+            cacheRetention: this.isSpeedOptimized() ? "long" : "short",
+            route: { baseUrl: effectiveBaseUrl, accountId: this.lastAccountId ?? accountId },
+            settings: {
+              thinking:
+                this.planModeRef.current || options.capThinking
+                  ? clampThinkingForPlanMode(this.thinkingLevel)
+                  : this.thinkingLevel,
+              webSearch: !options.disableTools,
+              supportsImages: modelInfo?.supportsImages,
+              promptCacheKey: this.getPromptCacheKey(),
+            },
+          });
+          log("INFO", "cache", "Prepared context", {
+            sessionId: this.sessionId || this.transportSessionId,
+            data: JSON.stringify(report),
+          });
+          if (report.thinkingPrefixRiskBlocks > 0) {
+            log("WARN", "cache", "Possible signed-thinking prefix mismatch; not server verified", {
+              sessionId: this.sessionId || this.transportSessionId,
+              blocks: String(report.thinkingPrefixRiskBlocks),
+            });
+          }
+        },
         supportsImages: modelInfo?.supportsImages,
         supportsVideo: modelInfo?.supportsVideo,
         userAgent,
@@ -3667,9 +3489,15 @@ ${content}
           accountId,
           this.openAICodexContextProfile,
         ),
+        // Warn when web/MCP output contains instruction-like text (see injection-detect.ts).
+        transformToolResult: flagUntrustedToolResult,
         // Self-correction hooks (same as the TUI): loop-break + re-grounding are
         // polled mid-loop; the ideal review is polled when the agent would stop.
         getSteeringMessages: () => this.getHookSteeringMessages(),
+        onSteeringAvailable: (listener) => {
+          this.steeringListeners.add(listener);
+          return () => this.steeringListeners.delete(listener);
+        },
         getFollowUpMessages: () => this.getHookFollowUpMessages(),
         onTurnBudgetExhausted: (ctx) => this.shouldExtendTurnBudget(ctx),
         // Check authoritative provider usage before every model/tool step.
@@ -3696,6 +3524,7 @@ ${content}
             // retained usage afterwards since it counted the pruned content.
             const pruneResult = pruneStaleToolResults(messages);
             if (pruneResult.pruned) {
+              this.cacheDiagnostics.noteEdit("tool_prune", pruneResult.freedTokens);
               this.providerContext = null;
               log("INFO", "compaction", "Pruned stale tool outputs", {
                 prunedResults: String(pruneResult.prunedResults),
@@ -3738,6 +3567,9 @@ ${content}
               usage,
               pendingMessages,
             });
+            // An approved plan runs as ONE run, so step boundaries are only
+            // visible here, between model steps — not after the run ends.
+            const planStep = this.observePlanStepProgress(messages, contextWindow, activeTokens);
             log("INFO", "compaction", "In-flight compaction decision", {
               provider: this.provider,
               model: this.model,
@@ -3745,6 +3577,7 @@ ${content}
               contextWindow: String(contextWindow),
               activeTokens: String(activeTokens),
               triggerLimit: String(policy.targetTokens),
+              ...(planStep ? { planStep: `${planStep.compact} (${planStep.reason})` } : {}),
             });
             if (
               !shouldCompact(
@@ -3753,7 +3586,8 @@ ${content}
                 policy.threshold,
                 activeTokens,
                 policy.targetTokens,
-              )
+              ) &&
+              !planStep?.compact
             )
               return messages;
           }
@@ -4159,7 +3993,9 @@ ${content}
       this.cwd,
     );
     if (!canonicalPath || canonicalPath === this.sessionPath) return;
-    await this.adoptCompactionCheckpoint(await this.sessionManager.load(canonicalPath));
+    await this.adoptCompactionCheckpoint(
+      await this.sessionManager.load(canonicalPath, { canonical: true }),
+    );
   }
 
   private async persistCompactionCheckpoint(
@@ -4219,6 +4055,99 @@ ${content}
   }
 
   /**
+   * Advance plan-step bookkeeping over the messages added since the last
+   * observation and, when a plan step was newly completed (`[DONE:n]`), run
+   * the SoL-Pi cost rule. Called between model steps (in-flight) and once
+   * after the run; `scanIndex` and `doneSteps` make each message and each
+   * step count once across both paths. Returns undefined when no step
+   * completed since the last observation.
+   */
+  private observePlanStepProgress(
+    messages: Message[],
+    contextWindow: number,
+    activeTokens: number | undefined,
+  ): PlanStepCompactionDecision | undefined {
+    const st = this.planStepState;
+    const planPath = this.approvedPlanPath;
+    if (st.planPath !== planPath) {
+      st.planPath = planPath;
+      st.doneSteps = new Set<number>();
+      st.requestsInCompletedSteps = 0;
+      st.requestsThisStep = 0;
+    }
+    if (st.scanIndex > messages.length) st.scanIndex = 0;
+    let requests = 0;
+    const newlyDone: number[] = [];
+    for (let i = st.scanIndex; i < messages.length; i++) {
+      const msg = messages[i];
+      if (msg?.role !== "assistant") continue;
+      requests++;
+      const text =
+        typeof msg.content === "string"
+          ? msg.content
+          : msg.content.map((part) => (part.type === "text" ? part.text : "")).join("\n");
+      for (const step of findCompletedMarkers(text)) {
+        if (!st.doneSteps.has(step)) newlyDone.push(step);
+      }
+    }
+    st.scanIndex = messages.length;
+    const contextTokens = activeTokens ?? estimateConversationTokens(messages);
+    if (st.lastContextTokens > 0)
+      st.grownTokens += Math.max(0, contextTokens - st.lastContextTokens);
+    st.lastContextTokens = contextTokens;
+    st.requests += requests;
+    st.requestsThisStep += requests;
+    st.requestsSinceLastCompaction += requests;
+    if (st.writeCostBalance > 0) st.writeCostBalance -= st.savingPerRequest * requests;
+    if (!planPath || newlyDone.length === 0) return undefined;
+    for (const step of newlyDone) st.doneSteps.add(step);
+    st.requestsInCompletedSteps += st.requestsThisStep;
+    st.requestsThisStep = 0;
+    let planText: string;
+    try {
+      planText = readFileSync(planPath, "utf8");
+    } catch {
+      return undefined;
+    }
+    const totalSteps = extractPlanSteps(planText).length;
+    const decision = decidePlanStepCompaction({
+      contextTokens,
+      keptTailTokens: PLAN_STEP_KEEP_TOKENS,
+      contextWindow,
+      // The model registry carries no cache price fields; use the SoL-Pi default.
+      cacheWriteReadRatio: DEFAULT_CACHE_WRITE_READ_RATIO,
+      stepsCompleted: st.doneSteps.size,
+      stepsRemaining: Math.max(0, totalSteps - st.doneSteps.size),
+      requestsInCompletedSteps: st.requestsInCompletedSteps,
+      requests: st.requests,
+      grownTokens: st.grownTokens,
+      priorCompactions: st.compactions,
+      writeCostBalance: st.writeCostBalance,
+      requestsSinceLastCompaction: st.compactions > 0 ? st.requestsSinceLastCompaction : undefined,
+    });
+    log("INFO", "compaction", "Plan-step compaction decision", {
+      compact: String(decision.compact),
+      reason: decision.reason,
+    });
+    return decision;
+  }
+
+  /**
+   * Plan-step bookkeeping after ANY successful compaction (as in the bench:
+   * every compaction leaves a cache-write cost to be repaid by later savings).
+   */
+  private recordPlanStepCompaction(contextBefore: number): void {
+    const st = this.planStepState;
+    const after = estimateConversationTokens(this.messages);
+    st.scanIndex = this.messages.length;
+    st.lastContextTokens = after;
+    st.requestsSinceLastCompaction = 0;
+    st.compactions++;
+    st.writeCostBalance += after * (DEFAULT_CACHE_WRITE_READ_RATIO - 1);
+    st.savingPerRequest = Math.max(0, contextBefore - after);
+  }
+
+  /**
    * Post-turn compaction: once the final response has been delivered, compact
    * in the background while the user reads the answer, instead of making the
    * next prompt pay the summarizer latency up front (the pre-run path stays as
@@ -4226,7 +4155,9 @@ ${content}
    * Codex `model_post_turn_compact_threshold_percent` guards: skip when user
    * input is already queued (it would race the next turn), when the run was
    * aborted, or during the failure cooldown — and never let a compaction
-   * error surface in the completed turn.
+   * error surface in the completed turn. Besides the size trigger, a newly
+   * completed approved-plan step may compact when the cache-cost rule in
+   * compaction/plan-step-policy.ts says the shrink pays for itself.
    */
   private maybeCompactPostTurn(creds: {
     accessToken: string;
@@ -4239,14 +4170,18 @@ ${content}
     if (this.userQueue.length > 0) return;
     if (this.postTurnCompaction) return;
     if (Date.now() < this.compactionRetryAfter) return;
-    // One compaction per turn boundary: a pre-run or overflow-recovery
-    // compaction already shrank this run's history — re-probing right after
-    // the final response would only re-derive that decision.
-    if (this.compactionOccurred) return;
     const contextWindow = getContextWindow(this.model, {
       provider: this.provider,
       accountId: creds.accountId,
     });
+    // One compaction per turn boundary: a pre-run, in-flight or overflow
+    // compaction already shrank this run's history — re-probing right after
+    // the final response would only re-derive that decision. Still record the
+    // final response's `[DONE:n]` steps so plan bookkeeping stays current.
+    if (this.compactionOccurred) {
+      this.observePlanStepProgress(this.messages, contextWindow, undefined);
+      return;
+    }
     const policy = resolveCompactionPolicy({
       provider: this.provider,
       model: this.model,
@@ -4265,6 +4200,7 @@ ${content}
         });
       }
     }
+    const planStep = this.observePlanStepProgress(this.messages, contextWindow, activeTokens);
     if (
       !shouldCompact(
         this.messages,
@@ -4272,10 +4208,12 @@ ${content}
         policy.threshold,
         activeTokens,
         policy.targetTokens,
-      )
+      ) &&
+      !planStep?.compact
     )
       return;
     log("INFO", "compaction", "Post-turn compaction decision — compacting in background", {
+      trigger: planStep?.compact ? `plan-step (${planStep.reason})` : "size",
       provider: this.provider,
       model: this.model,
       transport: this.provider === "openai" && creds.accountId ? "codex_oauth" : "public_api",
@@ -4343,6 +4281,7 @@ ${content}
       approvedPlanPath: this.approvedPlanPath,
     });
     const originalCount = this.messages.length;
+    const contextTokensBefore = estimateConversationTokens(this.messages);
     this.eventBus.emit("compaction_start", { messageCount: originalCount });
 
     let contextSelection: CompactionContextSelection | undefined;
@@ -4385,7 +4324,7 @@ ${content}
           this.cwd,
         );
         if (canonicalPath && canonicalPath !== this.sessionPath) {
-          const newest = await this.sessionManager.load(canonicalPath);
+          const newest = await this.sessionManager.load(canonicalPath, { canonical: true });
           if (newest.header.sourceFingerprint === sourceFingerprint) {
             await this.adoptCompactionCheckpoint(newest);
             this.lastCompactionCompacted = true;
@@ -4466,6 +4405,10 @@ ${content}
       });
     }
 
+    if (this.lastCompactionCompacted) {
+      this.cacheDiagnostics.noteEdit("compaction");
+      this.recordPlanStepCompaction(contextTokensBefore);
+    }
     this.eventBus.emit("compaction_end", {
       compacted: this.lastCompactionCompacted,
       originalCount,
@@ -4601,6 +4544,7 @@ ${content}
     // Stay fail-closed while preparing. The caller restores source eligibility
     // on failure; a successful checkpoint never establishes fresh eligibility.
     this.contextProfileLocked = true;
+    this.cacheDiagnostics.reset();
     // Approved-plan execution is a clean checkpoint of the same conversation;
     // explicit new sessions reset the conversation identity and phase binding.
     if (!preserveConversation) {
@@ -4663,6 +4607,7 @@ ${content}
     const finish = this.beforeConversationTransition?.("restore");
     try {
       await this.loadExistingSession(sessionPath);
+      this.cacheDiagnostics.reset();
       this.verificationEvidenceLedger.clear();
       // A loaded transcript carries no in-memory corpus record.
       this.researchSources.clear();
@@ -4686,6 +4631,7 @@ ${content}
     const finish = this.beforeConversationTransition?.(retain ? "checkpoint" : "restore");
     try {
       await this.loadExistingSession(sessionPath, false, expectedConversationId);
+      this.cacheDiagnostics.reset();
       this.verificationEvidenceLedger.clear();
       // A loaded transcript carries no in-memory corpus record.
       this.researchSources.clear();
@@ -4744,6 +4690,7 @@ ${content}
     const branchMessages = this.sessionManager.getMessages(loaded.entries, this.currentLeafId);
     const systemMsg = this.messages[0];
     this.messages = [systemMsg, ...branchMessages];
+    this.cacheDiagnostics.reset();
     this.lastPersistedIndex = this.messages.length;
     this.verificationEvidenceLedger.clear();
     // Reads made in the dropped messages are no longer in the model's context.
@@ -4861,24 +4808,34 @@ ${content}
     return costUsd === undefined ? usage : { ...usage, costUsd };
   }
 
-  getPlanMode(): boolean {
-    return this.planModeRef.current;
+  /**
+   * Whether the provider's prompt cache has likely lapsed since the last
+   * successful request, and how many tokens the next message would re-read at
+   * full price. Null when the route has no known TTL or the chat is empty.
+   */
+  getCacheExpiryStatus(now = Date.now()): CacheExpiryStatus | null {
+    const status = assessCacheExpiry({
+      current: {
+        provider: this.provider,
+        model: this.model,
+        policy: resolveCacheTtl({
+          provider: this.provider,
+          model: this.model,
+          cacheRetention: this.isSpeedOptimized() ? "long" : "short",
+          baseUrl: this.baseUrl,
+          accountId: this.lastAccountId,
+        }),
+      },
+      lastTouch: this.cacheDiagnostics.lastCacheTouch(),
+      now,
+      prefixTokens: this.getContextUsage().used,
+      hasHistory: this.messages.some((m) => m.role === "user"),
+    });
+    return status && { ...status, sessionId: this.sessionId || this.transportSessionId };
   }
 
-  /**
-   * Suppress only the pre-final Ideal self-review for this live session.
-   * Autopilot uses this while Ken independently owns verification; loop-break
-   * and post-compaction re-grounding remain active.
-   */
-  setIdealReviewSuppressed(suppressed: boolean): void {
-    this.idealReviewSuppressed = suppressed;
-    if (suppressed) {
-      this.idealReviewPhase = "idle";
-      this.reviewCoverage.reset();
-    }
-    // Suppression flips mid-run (autopilot takes over verification), so a client
-    // holding a draft under a stale arming must be released.
-    this.refreshHookArming();
+  getPlanMode(): boolean {
+    return this.planModeRef.current;
   }
 
   /** Queue admission must not bypass setup/readiness/approval dispatch. */
@@ -4956,6 +4913,8 @@ ${content}
       ...(displayMeta ? { meta: displayMeta } : {}),
       ...(modelText !== undefined ? { modelText } : {}),
     });
+    // Instant interrupt: preempt running tools so the steer lands right away.
+    for (const listener of [...this.steeringListeners]) listener();
     return this.userQueue.length;
   }
 
@@ -5265,6 +5224,16 @@ ${content}
       if (predicate(toolName, tool)) this.registeredTools.delete(toolName);
     }
     this.reconcileRegisteredTools();
+  }
+
+  /**
+   * Force-stop every background process tree, synchronously. Background
+   * commands run in their own process group, so the daemon's group kill on
+   * quit never reaches them: this is the only thing that does. Callers on a
+   * shutdown deadline run it before awaiting anything that can hang.
+   */
+  stopBackgroundProcesses(): void {
+    this.processManager?.shutdownAll();
   }
 
   /** Replace a host-owned system prompt in place without resetting conversation history. */
@@ -5594,6 +5563,18 @@ ${content}
    * the standard prompt therefore needs a rebuild. Custom and sub-agent
    * prompts never render packs, so detection is skipped for them.
    */
+  /**
+   * Bring the system prompt to the exact state the next provider request will
+   * send. Shared by real runs and {@link prewarm} so both see one prefix.
+   */
+  private async prepareSystemPromptForRequest(): Promise<void> {
+    // Languages are re-detected at each task boundary so a project scaffolded
+    // during the previous turn gets its packs; the prompt is rebuilt only when
+    // the set grows, keeping the cached prefix stable otherwise.
+    if (this.refreshActiveLanguages()) await this.rebuildSystemPromptInPlace();
+    this.refreshSystemPromptTail();
+  }
+
   private refreshActiveLanguages(): boolean {
     if (this.customSystemPrompt || this.agentPrompt !== undefined) return false;
     let grew = false;
@@ -5860,6 +5841,16 @@ ${content}
   }
 
   private async persistTurnMetric(event: AgentTurnEndEvent): Promise<void> {
+    if (event.stopReason === "error") this.cacheDiagnostics.discardAttempt();
+    const cache = this.cacheDiagnostics.complete(event.usage, event.timing);
+    if (cache) {
+      log("INFO", "cache", "Context cache outcome", {
+        sessionId: this.sessionId || this.transportSessionId,
+        provider: this.provider,
+        model: this.model,
+        data: JSON.stringify(cache),
+      });
+    }
     const payload: TurnMetricPayload = {
       version: 1,
       turn: event.turn,
@@ -6233,6 +6224,134 @@ ${content}
     if (signal?.aborted) this.managerAbortHandler();
   }
 
+  private runLoopDepth = 0;
+  private lastRealRequestAt = 0;
+  private lastPrewarmAt = 0;
+  private prewarmController: AbortController | null = null;
+
+  /**
+   * Best-effort Anthropic prompt-cache prewarm before the user's next turn
+   * (desktop app calls this on the first keystroke after opening a chat or an
+   * idle pause). Sends the exact request prefix the next real turn will use —
+   * same system/tools/thinking/cache options — with `max_tokens: 1`, so the
+   * first real reply is a cache read instead of a cold write.
+   */
+  async prewarm(signal?: AbortSignal): Promise<{ ok: boolean; reason: string; usage?: Usage }> {
+    if (this.provider !== "anthropic") return { ok: false, reason: "provider" };
+    if (this.settingsManager?.get("cachePrewarm") === false) {
+      return { ok: false, reason: "disabled" };
+    }
+    if (this.runLoopDepth > 0) return { ok: false, reason: "run_active" };
+    if (this.prewarmController) return { ok: false, reason: "in_flight" };
+    const cacheRetention = this.isSpeedOptimized() ? "long" : "short";
+    const ttlMs = (cacheRetention === "long" ? 60 : 5) * 60_000;
+    const now = Date.now();
+    if (now - Math.max(this.lastPrewarmAt, this.lastRealRequestAt) < ttlMs) {
+      return { ok: false, reason: "cache_fresh" };
+    }
+    // Same preparation as the real run, BEFORE copying history: otherwise the
+    // warmed system block differs from the next request (language packs are
+    // detected at run start) and everything after it misses the cache.
+    await this.prepareSystemPromptForRequest();
+    // The await above yields: re-check that no run or other prewarm began.
+    if (this.runLoopDepth > 0) return { ok: false, reason: "run_active" };
+    if (this.prewarmController) return { ok: false, reason: "in_flight" };
+    // End at the last user/tool message: the next real turn appends a new user
+    // message after the trailing assistant reply, and its cache lookback hits
+    // the entry written at this boundary. A request must end on a user turn.
+    let end = this.messages.length;
+    while (end > 0 && this.messages[end - 1]?.role === "assistant") end--;
+    // The loop repairs tool pairing in place before every request; apply the
+    // same repair to a copy so the warmed prefix is byte-identical to it.
+    const messages = structuredClone(this.messages.slice(0, end));
+    repairToolPairingAdjacent(messages);
+    if (!messages.some((m) => m.role === "user" || m.role === "tool")) {
+      return { ok: false, reason: "no_history" };
+    }
+    const tokens = estimateConversationTokens(messages);
+    if (tokens < 4_000) return { ok: false, reason: "too_small" };
+
+    const controller = new AbortController();
+    const onAbort = (): void => controller.abort();
+    signal?.addEventListener("abort", onAbort, { once: true });
+    this.prewarmController = controller;
+    const started = Date.now();
+    try {
+      const creds = await this.authStorage.resolveCredentials(this.provider, {
+        storageKeys: this.currentAuthStorageKeys(),
+      });
+      if (controller.signal.aborted || this.runLoopDepth > 0) {
+        return { ok: false, reason: "aborted" };
+      }
+      const modelInfo = getModel(this.model);
+      const result = stream({
+        provider: this.provider,
+        model: this.model,
+        messages,
+        tools: this.tools,
+        webSearch: true,
+        maxTokens: this.maxTokens,
+        thinking: this.planModeRef.current
+          ? clampThinkingForPlanMode(this.thinkingLevel)
+          : this.thinkingLevel,
+        apiKey: creds.accessToken,
+        baseUrl: this.baseUrl ?? creds.baseUrl,
+        accountId: creds.accountId,
+        transportSessionId: this.sessionId || this.transportSessionId,
+        cacheRetention,
+        promptCacheKey: this.getPromptCacheKey(),
+        supportsImages: modelInfo?.supportsImages,
+        supportsVideo: modelInfo?.supportsVideo,
+        userAgent: await getClaudeCliUserAgent(),
+        prewarm: true,
+        signal: controller.signal,
+      });
+      const response = await result.response;
+      const usage = response.usage;
+      if (usage.inputTokens === 0 && usage.outputTokens === 0) {
+        // gg-ai sent nothing: budget thinking can't stay identical at max_tokens 1.
+        log("INFO", "prewarm", "Cache prewarm skipped: budget thinking", {
+          model: this.model,
+        });
+        return { ok: false, reason: "thinking_budget_incompatible" };
+      }
+      this.lastPrewarmAt = Date.now();
+      const warmedPolicy = resolveCacheTtl({
+        provider: this.provider,
+        model: this.model,
+        cacheRetention,
+        baseUrl: this.baseUrl ?? creds.baseUrl,
+        accountId: creds.accountId,
+      });
+      if (warmedPolicy) {
+        this.cacheDiagnostics.noteCacheTouch({
+          at: started,
+          provider: this.provider,
+          model: this.model,
+          policy: warmedPolicy,
+        });
+      }
+      log("INFO", "prewarm", "Cache prewarm complete", {
+        tokens: String(tokens),
+        cacheRead: String(usage.cacheRead ?? 0),
+        cacheWrite: String(usage.cacheWrite ?? 0),
+        ms: String(Date.now() - started),
+      });
+      return { ok: true, reason: "warmed", usage };
+    } catch (error) {
+      if (isAbortError(error) || controller.signal.aborted) return { ok: false, reason: "aborted" };
+      log(
+        "WARN",
+        "prewarm",
+        `Cache prewarm failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return { ok: false, reason: "error" };
+    } finally {
+      signal?.removeEventListener("abort", onAbort);
+      if (this.prewarmController === controller) this.prewarmController = null;
+    }
+  }
+
   /** True when speedProfile is "optimized" (1-h cache TTL + pre-warm), or the
    *  session was constructed with `forceLongCacheRetention` (Ken sessions). */
   private isSpeedOptimized(): boolean {
@@ -6343,6 +6462,9 @@ ${content}
   }
 
   async dispose(beforeSessionReset?: () => Promise<void>, awaitProcesses = false): Promise<void> {
+    // First and synchronous: nothing below may delay this, or a hung teardown
+    // step leaves background commands running after the app has quit.
+    if (!awaitProcesses) this.stopBackgroundProcesses();
     this.assessmentSequence++;
     this.commandCreation?.dispose();
     this.programmaticProfile?.dispose();
@@ -6355,12 +6477,14 @@ ${content}
     this.semanticLoop.controller?.abort();
     this.semanticLoop.verdict = null;
     await this.settlePostTurnCompaction();
+    this.cacheDiagnostics.reset();
     this.diagnosticsRecorder?.finalize();
     this.managerAbortSignal?.removeEventListener("abort", this.managerAbortHandler);
     if (awaitProcesses) this.eventBus.removeAllListeners();
     const processes = awaitProcesses
       ? [this.processManager?.shutdownAllAndWait(), this.lspManager?.shutdownAllAndWait()]
       : [this.processManager?.shutdownAll(), this.lspManager?.shutdownAll()];
+    this.debugManager?.shutdown();
     await Promise.all([
       ...processes,
       this.subAgentManager?.shutdownAll(),

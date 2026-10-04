@@ -379,9 +379,7 @@ export const MODELS: ModelInfo[] = [
     // Sent over our Code Assist (OAuth) transport ahead of gemini-cli — upstream
     // hasn't listed 3.7 yet (google-gemini/gemini-cli#28802, still open) — so
     // free/personal accounts 404 (entitlement-gated) while Code Assist
-    // Standard/Enterprise accounts get it. Kept after the working flash-lite:
-    // getFastModel picks the first low-tier entry, and flash-lite is the one
-    // that works on every account.
+    // Standard/Enterprise accounts get it.
     id: "gemini-3.7-flash",
     name: "Gemini 3.7 Flash",
     provider: "gemini",
@@ -893,41 +891,47 @@ export function getDefaultThinkingLevel(
 }
 
 /**
- * Get the model to use for compaction summarization.
- * - Anthropic: always Sonnet 5.5
- * - OpenAI: cheapest (Codex Mini)
- * - Gemini: use the current model
- * - GLM: GLM-5.3-Flash (the registered low-cost sibling)
- * - Moonshot: use the current model (no cheap alternative registered)
+ * The cost tier each provider's compaction summaries run on. Chosen by TAG,
+ * never by model id, so adding, renaming or removing models needs no change
+ * here: the first registered model of that provider carrying the tag wins.
+ * Providers not listed summarize on the active model.
+ * - Anthropic: "medium" (the Sonnet line) — Haiku's smaller window and
+ *   shallower summaries cost more in lost memory than they save.
+ * - OpenAI, GLM, DeepSeek, Hugging Face: "low" (Luna, the Flash models,
+ *   gpt-oss).
+ */
+const SUMMARY_COST_TIER: Readonly<Partial<Record<Provider, ModelInfo["costTier"]>>> = {
+  anthropic: "medium",
+  openai: "low",
+  glm: "low",
+  deepseek: "low",
+  huggingface: "low",
+};
+
+/**
+ * Get the model to use for compaction summarization — the ONLY place a
+ * cheaper model is used. Everything else (sub-agents, reviewers, judges)
+ * runs on the parent's model.
+ *
+ * Picks the provider's first model tagged with its summary tier
+ * ({@link SUMMARY_COST_TIER}). When none is registered — the tier was removed,
+ * or the provider has no cheap sibling — it summarizes on the current model.
+ * Never throws. The caller still retries on the current model when the
+ * provider rejects the chosen one at runtime (retired upstream, or not on the
+ * user's plan), since the registry cannot know that.
  */
 export function getSummaryModel(provider: Provider, currentModelId: string): ModelInfo {
   if (provider === "qwen-cloud") return getModel(QWEN_CLOUD_SUMMARY_MODEL_ID)!;
-  if (provider === "anthropic") {
-    return MODELS.find((m) => m.id === "claude-sonnet-5-5")!;
-  }
-  if (
-    provider === "openai" ||
-    provider === "glm" ||
-    provider === "deepseek" ||
-    provider === "huggingface"
-  ) {
-    const low = getModelsForProvider(provider).find((m) => m.costTier === "low");
-    if (low) return low;
-  }
-  // Moonshot or fallback: use current model
-  return getModel(currentModelId) ?? getDefaultModel(provider);
+  const tier = SUMMARY_COST_TIER[provider];
+  const tagged = tier ? getModelsForProvider(provider).find((m) => m.costTier === tier) : undefined;
+  return tagged ?? getModel(currentModelId) ?? getDefaultModel(provider);
 }
 
 /**
- * Fastest/cheapest sibling within the SAME provider, for scout-style read-only
- * sub-agents (recon, research) where a low-latency model is enough and the
- * frontier model is wasted spend + latency.
- *
- * Routes off each model's `costTier` — the single source of truth that already
- * travels with the registry entry — so a model rename/bump needs no change
- * here. Providers with no low-tier sibling (Moonshot, MiniMax, Sakana,
- * OpenRouter) gracefully keep the parent model, so there's never a
- * crash or a cross-provider jump to a login the user may not have.
+ * Fastest/cheapest sibling within the SAME provider (Local Fork). Qwen Cloud
+ * pins its token-plan flash model; other providers use their first low-tier
+ * model, falling back to the current model so there is never a cross-provider
+ * jump.
  */
 export function getFastModel(provider: Provider, currentModelId: string): ModelInfo {
   if (provider === "qwen-cloud") return getModel(QWEN_CLOUD_FAST_MODEL_ID)!;

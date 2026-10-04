@@ -88,9 +88,6 @@ export interface StylePackItem {
 
 export const UPDATE_NOTICE_TEXT = "KEN HAS PUSHED A NEW GG CODER UPDATE";
 
-/** Copy shown when the automatic pre-final ideal-review hook engages. */
-export const IDEAL_HOOK_NOTICE_TEXT = "Hook engaged — running an ideal review before finalizing.";
-
 /** Copy shown when the loop-breaker hook fires because the agent looks stuck. */
 export const LOOP_BREAK_NOTICE_TEXT =
   "Hook engaged — breaking a stuck loop and rethinking the approach.";

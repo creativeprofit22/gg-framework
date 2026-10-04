@@ -51,8 +51,8 @@ export const CORE_TOOL_NAMES: readonly string[] = [
 
 /**
  * Built-ins that live in the catalog as index lines until `tool_search` is
- * called. Each one is either rare (image generation, screenshots, package
- * source resolution) or only reachable after another tool has already run
+ * called. Each one is either rare (image generation, screenshots, the
+ * debugger, package source resolution) or only reachable after another tool has already run
  * (the child-agent control cluster follows `spawn_agent`).
  */
 export const DEFERRED_TOOL_NAMES: readonly string[] = [
@@ -66,6 +66,7 @@ export const DEFERRED_TOOL_NAMES: readonly string[] = [
   "command_information",
   "research_corpus",
   "screenshot",
+  "debug",
   "generate_image",
   "send_message",
   "followup_task",

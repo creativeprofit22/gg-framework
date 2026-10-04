@@ -2,6 +2,7 @@
 import { describe, it, expect } from "vitest";
 import { renderHook, act } from "@testing-library/react";
 import { useKenMentor } from "./useKenMentor";
+import { createLiveTextStore } from "./live-text";
 import type { Item } from "./App";
 import type { SidecarEvent } from "./agent";
 
@@ -18,9 +19,10 @@ function setup() {
     items = typeof u === "function" ? u(items) : u;
   };
   const nextId = (): number => ++id;
-  const hook = renderHook(() => useKenMentor({ setItems, nextId }));
+  const liveText = createLiveTextStore();
+  const hook = renderHook(() => useKenMentor({ setItems, nextId, liveText }));
   act(() => hook.result.current.hydrateKen({ ...identity, activeRunId: identity.runId }));
-  return { hook, getItems: () => items };
+  return { hook, getItems: () => items, liveText };
 }
 
 const identity = { conversationId: "conversation", activationEpoch: "epoch", runId: "run" };
@@ -194,7 +196,7 @@ describe("useKenMentor", () => {
     expect(b.getItems()).toMatchObject([{ text: "other pane" }]);
   });
   it("retains streaming across checkpoint extras but breaks it on history replacement", () => {
-    const { hook, getItems } = setup();
+    const { hook, getItems, liveText } = setup();
     act(() => {
       hook.result.current.handleKenEvent(ev("ken_text_delta", { text: "before" }));
       hook.result.current.handleKenEvent(
@@ -202,7 +204,11 @@ describe("useKenMentor", () => {
       );
       hook.result.current.handleKenEvent(ev("ken_text_delta", { text: " retained" }));
     });
-    expect(getItems()).toMatchObject([{ text: "before retained" }]);
+    // Still ONE bubble: the checkpoint did not break it, and the second delta
+    // grew it through the live-text store.
+    expect(getItems()).toHaveLength(1);
+    const retainedId = getItems()[0]?.id ?? -1;
+    expect(liveText.get(retainedId)).toBe("before retained");
     act(() => {
       hook.result.current.hydrateKen(
         { ...identity, activationEpoch: "replacement", activeRunId: "replacement-run" },
@@ -215,7 +221,9 @@ describe("useKenMentor", () => {
         }),
       );
     });
+    // Replacement commits the old bubble's full text and starts a new bubble.
     expect(getItems()).toMatchObject([{ text: "before retained" }, { text: "after" }]);
+    expect(liveText.get(retainedId)).toBeUndefined();
   });
   it.each([
     "ken_run_start",
@@ -236,22 +244,32 @@ describe("useKenMentor", () => {
     expect(hook.result.current.captureKenRun()).toEqual(identity);
     expect(hook.result.current.kenRunning).toBe(true);
   });
-  it("ken_text_delta appends a single kind:'ken' item via setItems", () => {
-    const { hook, getItems } = setup();
+  it("ken_text_delta streams into a single kind:'ken' item", () => {
+    const { hook, getItems, liveText } = setup();
     act(() => {
       hook.result.current.handleKenEvent(ev("ken_text_delta", { text: "hello" }));
     });
     const items = getItems();
     expect(items).toHaveLength(1);
     expect(items[0]).toMatchObject({ kind: "ken", text: "hello" });
+    const id = items[0]?.id ?? -1;
 
-    // A second delta appends to the SAME bubble, not a new item.
+    // A second delta grows the SAME bubble through the live-text store (only
+    // that row re-renders), not a new item and not a whole-transcript update.
     act(() => {
       hook.result.current.handleKenEvent(ev("ken_text_delta", { text: " world" }));
+    });
+    expect(getItems()).toHaveLength(1);
+    expect(liveText.get(id)).toBe("hello world");
+
+    // When Ken's run ends, the final text lands in the transcript once.
+    act(() => {
+      hook.result.current.handleKenEvent(ev("ken_run_end"));
     });
     const after = getItems();
     expect(after).toHaveLength(1);
     expect(after[0]).toMatchObject({ kind: "ken", text: "hello world" });
+    expect(liveText.get(id)).toBeUndefined();
   });
 
   it("ken_run_start flips kenRunning true and resets tokens", () => {

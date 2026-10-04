@@ -1,16 +1,25 @@
 import { createInterface } from "node:readline";
 import type { Provider, ThinkingLevel } from "@kenkaiiii/gg-ai";
 import { AgentSession } from "../core/agent-session.js";
+import { isModelUnavailableError } from "../core/model-unavailable.js";
 import { isUnattendedWorker } from "../core/provider-execution-policy.js";
-import { isModelUnavailableError } from "../tools/subagent.js";
 import {
   boundSubAgentOutput,
   promptSubAgent,
   SUB_AGENT_MAX_TURN_EXTENSIONS,
   SUB_AGENT_TIMEOUT_MS,
   SUB_AGENT_TIMEOUT_RECOVERY_MS,
+  subAgentThinkingLevel,
 } from "../tools/subagent-shared.js";
 import { writeTurnRecord } from "../core/subagent-turn-record.js";
+import { ReceiptRecorder } from "../core/subagent-receipt.js";
+import {
+  formatCheckResults,
+  parseAcceptanceChecks,
+  summarizeCheckResults,
+  verifyAcceptanceChecks,
+  type AcceptanceCheck,
+} from "../core/acceptance-checks.js";
 
 const TIMEOUT_RECOVERY_PROMPT = `Your execution time limit was reached and the active operation was stopped.
 You have one final 60-second recovery turn. Do not call any tools. Immediately return the best concise answer you can from the evidence already in this conversation, in the format your task asked for. Clearly state what remains incomplete or unverified.`;
@@ -126,9 +135,9 @@ export interface SubagentWorkerInitialize {
 
 type WorkerCommand =
   | { request_id: string; command: "initialize"; options: SubagentWorkerInitialize }
-  | { request_id: string; command: "start"; task: string }
+  | { request_id: string; command: "start"; task: string; checks?: unknown }
   | { request_id: string; command: "queue_message"; message: string }
-  | { request_id: string; command: "followup"; task: string }
+  | { request_id: string; command: "followup"; task: string; checks?: unknown }
   | { request_id: string; command: "interrupt" }
   | { request_id: string; command: "shutdown" };
 
@@ -178,6 +187,10 @@ export async function runSubagentWorkerMode(): Promise<void> {
   let recoveryOutput = "";
   let recoveringAfterTimeout = false;
   let producedToolCall = false;
+  // Engine-side record of this turn's tool calls → the turn's receipt.
+  const receipt = new ReceiptRecorder();
+  // The parent's acceptance checks for the current turn, decided at its end.
+  let turnChecks: AcceptanceCheck[] = [];
   // This worker's LIFETIME totals — one initialize = one agent_id = one
   // worker lifetime, so the durable turn record carries authoritative
   // cumulative numbers an adopting parent can trust.
@@ -212,7 +225,14 @@ export async function runSubagentWorkerMode(): Promise<void> {
     });
     for (const event of forwarded) {
       activeSession.eventBus.on(event, (payload) => {
-        if (event === "tool_call_start") producedToolCall = true;
+        if (event === "tool_call_start") {
+          producedToolCall = true;
+          const start = payload as { toolCallId?: unknown; name?: unknown; args?: unknown };
+          receipt.start(start.toolCallId, start.name, start.args);
+        } else if (event === "tool_call_end") {
+          const end = payload as { toolCallId?: unknown; result?: unknown; isError?: unknown };
+          receipt.end(end.toolCallId, end.result, end.isError);
+        }
         if (event === "turn_end") {
           turnCount++;
           const usage = (payload as { usage?: { inputTokens?: number; outputTokens?: number } })
@@ -248,13 +268,15 @@ export async function runSubagentWorkerMode(): Promise<void> {
     return next;
   };
 
-  const runTurn = (task: string) => {
+  const runTurn = (task: string, checks: AcceptanceCheck[]) => {
     if (!session) throw new Error("Worker is not initialized");
     if (state === "running") throw new Error("Worker already has an active turn");
     output = "";
     recoveryOutput = "";
     recoveringAfterTimeout = false;
     producedToolCall = false;
+    receipt.reset();
+    turnChecks = checks;
     abortReason = undefined;
     controller = new AbortController();
     session.setSignal(controller.signal);
@@ -287,6 +309,9 @@ export async function runSubagentWorkerMode(): Promise<void> {
             ...initializeOptions!,
             model: fallbackModel,
             fallbackModel: undefined,
+            // The lowest rung of the PARENT model — the pinned model's rung
+            // may not exist on it.
+            thinkingLevel: subAgentThinkingLevel(initializeOptions!.provider, fallbackModel),
           };
           session = await createSession(initializeOptions);
           loopError = await promptSubAgent(session, task);
@@ -354,10 +379,20 @@ export async function runSubagentWorkerMode(): Promise<void> {
    * parent must never observe a terminal frame with no record behind it.
    * Awaited inside the turn, so anything that waits for the turn (shutdown,
    * stdin closing) also waits for the record. */
-  const completeTurn = async (frame: Record<string, unknown>): Promise<void> => {
+  const completeTurn = async (turn: Record<string, unknown>): Promise<void> => {
+    const cwd = initializeOptions?.cwd ?? process.cwd();
+    const checkResults = verifyAcceptanceChecks(turnChecks, receipt.snapshot(), cwd);
+    const checksBlock = formatCheckResults(checkResults);
+    const receiptText = receipt.render(typeof turn.output === "string" ? turn.output : "", cwd);
+    const frame: Record<string, unknown> = {
+      ...turn,
+      receipt: checksBlock ? `${receiptText}\n${checksBlock}` : receiptText,
+      ...(checkResults.length > 0 && { acceptance: summarizeCheckResults(checkResults) }),
+    };
     await writeTurnRecord(initializeOptions?.childSessionPath, {
       status: (frame.status as "completed" | "interrupted" | "failed") ?? "failed",
       output: typeof frame.output === "string" ? frame.output : undefined,
+      receipt: frame.receipt as string,
       error: typeof frame.error === "string" ? frame.error : undefined,
       model: typeof frame.model === "string" ? frame.model : undefined,
       turn_count: turnCount,
@@ -394,7 +429,7 @@ export async function runSubagentWorkerMode(): Promise<void> {
           if (!session) throw new Error("Worker is not initialized");
           if (state === "running") throw new Error("Worker already has an active turn");
           acknowledge(command.request_id, { status: "running" });
-          runTurn(command.task);
+          runTurn(command.task, parseAcceptanceChecks(command.checks));
           return;
         case "queue_message": {
           if (!session || state !== "running") throw new Error("Worker is not running");

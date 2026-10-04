@@ -87,8 +87,8 @@ import { UI_SLASH_COMMANDS } from "./ui/submit-slash-commands.js";
 import { detectPromptCommand } from "./core/session-history.js";
 import { createTools } from "./tools/index.js";
 import { cleanupToolOutputs } from "./tools/overflow.js";
+import { spawnedTasks, type SpawnedTaskArgs } from "./tools/subagent-shared.js";
 import { CheckpointStore } from "./core/checkpoint-store.js";
-import { ReviewCoverageTracker } from "./core/ideal-review.js";
 import { ResearchSourceLedger } from "./core/research-sources.js";
 import { shouldCompact, compact } from "./core/compaction/compactor.js";
 import {
@@ -731,42 +731,44 @@ async function runInkTUI(opts: {
   // Holder so the (cwd-bound) tools can snapshot pre-mutation file state for
   // /rewind. The store is created once the session id is known (below).
   const checkpointRef: { current: CheckpointStore | null } = { current: null };
-  const reviewCoverageTracker = new ReviewCoverageTracker(cwd);
   // Corpus code retrieved this session; exit_plan rejects plans that omit it.
   const researchSources = new ResearchSourceLedger();
   const onPreFileMutation = (filePath: string): Promise<void> =>
     checkpointRef.current?.recordPreMutation(filePath) ?? Promise.resolve();
   let activeProvider = provider;
   let activeModel = model;
-  let activeThinking = opts.thinkingLevel;
 
-  const { tools, processManager, rebuildReadTool, clearReadTracker, lspManager, subAgentManager } =
-    await createTools(cwd, {
-      commandDiscovery: { workspaceActions: UI_SLASH_COMMANDS },
-      agents,
-      skills,
-      provider,
-      model,
-      planModeRef,
-      researchSources,
-      onPreFileMutation,
-      onFileRead: (filePath) => reviewCoverageTracker.recordRead(filePath),
-      onFileMutated: (filePath) => reviewCoverageTracker.recordChanged(filePath),
-      lspDiagnostics: opts.lspDiagnostics,
-      getWriteGuardSettings: () => ({
-        allowOutsideWorkspaceWrites: opts.allowOutsideWorkspaceWrites ?? false,
-      }),
-      authStorage,
-      onEnterPlan: (reason) => planToolCallbacks.onEnterPlan?.(reason),
-      onExitPlan: (planPath, content) =>
-        planToolCallbacks.onExitPlan?.(planPath, content) ??
-        Promise.resolve("Plan review is unavailable."),
-      getProvider: () => activeProvider,
-      getModel: () => activeModel,
-      getThinkingLevel: () => activeThinking,
-      getMaxPerModel: () => opts.subagentMaxPerModel,
-      getForegroundLimitSettings: () => foregroundLimitSettingsFrom(savedSettings),
-    });
+  const {
+    tools,
+    processManager,
+    rebuildReadTool,
+    clearReadTracker,
+    lspManager,
+    debugManager,
+    subAgentManager,
+  } = await createTools(cwd, {
+    commandDiscovery: { workspaceActions: UI_SLASH_COMMANDS },
+    agents,
+    skills,
+    provider,
+    model,
+    planModeRef,
+    researchSources,
+    onPreFileMutation,
+    lspDiagnostics: opts.lspDiagnostics,
+    getWriteGuardSettings: () => ({
+      allowOutsideWorkspaceWrites: opts.allowOutsideWorkspaceWrites ?? false,
+    }),
+    authStorage,
+    onEnterPlan: (reason) => planToolCallbacks.onEnterPlan?.(reason),
+    onExitPlan: (planPath, content) =>
+      planToolCallbacks.onExitPlan?.(planPath, content) ??
+      Promise.resolve("Plan review is unavailable."),
+    getProvider: () => activeProvider,
+    getModel: () => activeModel,
+    getMaxPerModel: () => opts.subagentMaxPerModel,
+    getForegroundLimitSettings: () => foregroundLimitSettingsFrom(savedSettings),
+  });
 
   // MCP startup can involve `npx` installing/booting servers. Do it after the
   // TUI paints so a slow network or npm cache never looks like "nothing happens".
@@ -812,6 +814,7 @@ async function runInkTUI(opts: {
     subAgentManager?.shutdownAllNow();
     processManager.shutdownAll();
     lspManager?.shutdownAll();
+    debugManager?.shutdown();
     mcpManager.dispose().catch(() => {});
   });
 
@@ -1097,8 +1100,6 @@ async function runInkTUI(opts: {
     sessionId,
     processManager,
     subAgentManager,
-    lspManager,
-    reviewCoverageTracker,
     researchSources,
     settingsFile: paths.settingsFile,
     mcpManager,
@@ -1114,7 +1115,6 @@ async function runInkTUI(opts: {
     onRuntimeStateChange: (updates) => {
       if (updates.provider) activeProvider = updates.provider;
       if (updates.model) activeModel = updates.model;
-      if ("thinking" in updates) activeThinking = updates.thinking;
     },
   });
 
@@ -1764,24 +1764,27 @@ export function messagesToHistoryItems(msgs: Message[]): CompletedItem[] {
             flushText();
             const result = toolResults.get(block.id);
             if (block.name === "subagent" || block.name === "spawn_agent") {
+              // One row per child: a batch spawn_agent call starts several.
+              const spawned: SpawnedTaskArgs[] =
+                block.name === "spawn_agent" ? spawnedTasks(block.args) : [{}];
               items.push({
                 kind: "subagent_group",
-                agents: [
-                  {
-                    toolCallId: block.id,
-                    task: String(
-                      block.name === "spawn_agent"
-                        ? (block.args.task_name ?? block.args.task ?? "Async agent")
-                        : (block.args.task ?? "Sub-agent"),
-                    ),
-                    agentName: String(block.args.agent ?? "default"),
-                    status: result?.isError ? "error" : "done",
-                    toolUseCount: 0,
-                    tokenUsage: { input: 0, output: 0 },
-                    result: result?.content ?? "",
-                    durationMs: 0,
-                  },
-                ],
+                agents: spawned.map((spawn, index) => ({
+                  toolCallId: spawned.length > 1 ? `${block.id}:${index}` : block.id,
+                  task: String(
+                    block.name === "spawn_agent"
+                      ? (spawn.task_name ?? spawn.task ?? "Async agent")
+                      : (block.args.task ?? "Sub-agent"),
+                  ),
+                  agentName: String(
+                    (block.name === "spawn_agent" ? spawn.agent : block.args.agent) ?? "default",
+                  ),
+                  status: result?.isError ? "error" : "done",
+                  toolUseCount: 0,
+                  tokenUsage: { input: 0, output: 0 },
+                  result: result?.content ?? "",
+                  durationMs: 0,
+                })),
                 id: `restore-${id++}`,
               });
             } else {

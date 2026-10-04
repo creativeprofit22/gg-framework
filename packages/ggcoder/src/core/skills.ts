@@ -226,7 +226,9 @@ export function formatSkillsForPrompt(
     `Respect explicit exclusions in the description. Matching skill instructions specialize this prompt but do not override project or file/module rules.\n\n` +
     `Match the work, not the topic: a skill's subject matter appearing in the request is not a match when the actual change falls outside its scope. ` +
     `Skip the skill when the task is routine, narrow, or already covered by existing patterns in the codebase \u2014 an unnecessary invocation costs context and slows the task. ` +
-    `Invoke at most one skill unless the task genuinely spans two, and do not re-invoke a skill whose instructions are already in this conversation.\n\n` +
+    `Invoke at most one skill unless the task genuinely spans several, and do not re-invoke a skill whose instructions are already in this conversation. ` +
+    `Launch-readiness asks span every listed skill in scope, in order durable, bulletproof, compliance-guard, lean, evidence-led-ui: ` +
+    `one report-only child per skill in a single spawn_agent call; a failed child is reported as not checked, never as clean.\n\n` +
     list +
     overflow
   );

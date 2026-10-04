@@ -15,6 +15,9 @@ overrides:
   picomatch: ^2.3.2
 
 patchedDependencies:
+  hyperframes@0.8.82:
+    hash: ca31b2633f6bdad79b427c9d0630533b7876785533eb8912705a926de8c21c1f
+    path: patches/hyperframes@0.8.82.patch
   metal-fx@2.0.10:
     hash: 28ef0aab9fd2c7161ca43f801746fc27522a95e8fa7780087dc24d3ffd8808cd
     path: patches/metal-fx@2.0.10.patch
@@ -208,6 +211,9 @@ importers:
       remark-gfm:
         specifier: ^4.0.0
         version: 4.0.1
+      remend:
+        specifier: 1.4.0
+        version: 1.4.0
       thinking-orbs:
         specifier: 0.3.1
         version: 0.3.1(react@19.2.8)
@@ -451,7 +457,7 @@ importers:
         version: 0.6.0
       hyperframes:
         specifier: 0.8.82
-        version: 0.8.82(@types/node@25.6.0)
+        version: 0.8.82(patch_hash=ca31b2633f6bdad79b427c9d0630533b7876785533eb8912705a926de8c21c1f)(@types/node@25.6.0)
       linkedom:
         specifier: ^0.18.12
         version: 0.18.13
@@ -5015,6 +5021,9 @@ packages:
 
   remark-stringify@11.0.0:
     resolution: {integrity: sha512-1OSmLd3awB/t8qdoEOMazZkNsfVTeY4fTsgzcQFdXNq8ToTN4ZGwrMnlda4K6smTFKD+GRV6O48i6Z4iKgPPpw==}
+
+  remend@1.4.0:
+    resolution: {integrity: sha512-mHiYhhwphs1IgIZmkToKLwJn0U99IjPXuutkA2acrNcG0vlEq2G4TGnd2eT0saIHwh2KjaCpvleHcsd5SAz96A==}
 
   require-directory@2.1.1:
     resolution: {integrity: sha512-fGxEI7+wsG9xrvdjsrlmL22OMTTiHRwAMroiEeMgq8gzoLC/PQr7RsRDSTLUg/bZAZtF+TVIkHc6/4RIKrui+Q==}
@@ -9757,7 +9766,7 @@ snapshots:
 
   human-id@4.2.0: {}
 
-  hyperframes@0.8.82(@types/node@25.6.0):
+  hyperframes@0.8.82(patch_hash=ca31b2633f6bdad79b427c9d0630533b7876785533eb8912705a926de8c21c1f)(@types/node@25.6.0):
     dependencies:
       '@hono/node-server': 2.1.1(hono@4.13.10)
       '@puppeteer/browsers': 3.2.3
@@ -11212,6 +11221,8 @@ snapshots:
       '@types/mdast': 4.0.4
       mdast-util-to-markdown: 2.1.2
       unified: 11.0.5
+
+  remend@1.4.0: {}
 
   require-directory@2.1.1: {}
 

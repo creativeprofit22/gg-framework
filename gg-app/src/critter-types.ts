@@ -50,7 +50,8 @@ export interface NextMove {
 export interface Tween {
   from: number;
   to: number;
-  readonly t0: number;
+  /** Start time; shifted forward by however long the floor sat paused. */
+  t0: number;
   readonly ms: number;
   readonly ease: (k: number) => number;
   readonly walking: boolean;

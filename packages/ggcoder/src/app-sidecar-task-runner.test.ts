@@ -185,7 +185,6 @@ async function taskRunnerHarness(
       getPlanMode: () => planMode,
       persistAppMarker: async () => {},
       persistAutopilotMarker: async () => {},
-      setIdealReviewSuppressed: () => {},
       getPersistedTranscriptCount: () => messages.length,
       getQueuedCount: () => (options.queued && messages.length > 0 ? 1 : 0),
     },

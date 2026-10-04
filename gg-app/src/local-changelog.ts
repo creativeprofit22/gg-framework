@@ -53,10 +53,20 @@ export const CURRENT_LOCAL_RELEASE_NOTES = requireCurrentReleaseNotes(releaseNot
 /** Newest first. Maintained only by the Local Fork release flow. */
 export const LOCAL_CHANGELOG: LocalChangelogEntry[] = [
   {
-    id: "local-2026-10-01-upstream-0750-ken-face-and-home-critters",
+    id: "local-2026-10-04-upstream-0790-campfire-and-faster-agent",
     label: CURRENT_LOCAL_RELEASE_NOTES.label,
     date: CURRENT_LOCAL_RELEASE_NOTES.date,
     items: CURRENT_LOCAL_RELEASE_NOTES.sections.flatMap(({ items }) => items),
+  },
+  {
+    id: "local-2026-10-01-upstream-0750-ken-face-and-home-critters",
+    label: "Upstream 0.75.0, with Ken's face and a lively Home",
+    date: "2026-10-01",
+    items: [
+      "Ken has a face. His replies now open with a little animated pixel portrait that blinks and talks while he types. Flip `Autopilot` on and he wakes up with a happy hop beside the big `KEN ON` banner; flip it off and he nods off with a sleepy `z`.",
+      "Your Home screen is alive. The whole critter crew beams in along the bottom on a fresh world each visit, from a sunny meadow to a beach, a desert, snow or deep space. Watch them wander, meet up and play, and click one to make it jump.",
+      "File chips under the message box now slide in when you attach or `@`-mention a file, and fold away smoothly when you remove them or send, instead of popping in and out.",
+    ],
   },
   {
     id: "local-2026-10-01-upstream-0740-critters-and-palette",

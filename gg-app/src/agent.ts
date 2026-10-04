@@ -32,7 +32,7 @@ import type {
   KenRunIdentity,
   OpenAICodexContextProfileEligibility,
   RunEndPayload,
-  PromptMeta,
+  PromptMeta as CorePromptMeta,
   PromptSegment,
 } from "@kenkaiiii/gg-core/desktop-session-ux";
 import type { OpenAICodexContextProfile } from "@kenkaiiii/gg-core/models";
@@ -622,6 +622,28 @@ export interface AgentState extends DesktopContextSnapshot, DesktopSessionUXStat
   kenModelOverride?: boolean;
   /** Live background tasks (footer indicator). */
   tasks?: BackgroundTask[];
+  /** Cold-prompt-cache status (sidecar /state + `cache_expiry` event). Null when
+   *  the route has no known cache TTL or the chat is empty; absent on older sidecars. */
+  cacheExpiry?: CacheExpiryStatus | null;
+}
+
+/** Mirrors ggcoder `core/cache-expiry.ts` CacheExpiryStatus. */
+export interface CacheExpiryStatus {
+  sessionId?: string;
+  provider: string;
+  ttlMs: number;
+  confidence: "expired" | "may_be_cold";
+  ttlSource: string;
+  lastRequestAt: number | null;
+  expiresAt: number | null;
+  expired: boolean;
+  reason: "idle" | "age_unknown" | "identity_changed" | null;
+  /** Tokens the next request re-reads at full price. */
+  prefixTokens: number;
+  minTokens: number;
+  /** expired AND prefixTokens >= minTokens. */
+  notable: boolean;
+  estimatedExtraCostUsd: number | null;
 }
 
 /** A project task from the ~/.gg-tasks store (the agent's `tasks` tool). */
@@ -780,6 +802,24 @@ export async function getProgress(): Promise<ProgressSnapshot> {
   return parseProgressSnapshot(await invoke<unknown>("agent_progress", { paneId: "primary" }));
 }
 
+/** The proxy forwards sidecar error bodies (`{ error }`) as values; surface them. */
+function keepAwakeEnabled(result: { enabled?: unknown; error?: unknown }): boolean {
+  if (typeof result.enabled === "boolean") return result.enabled;
+  throw new Error(typeof result.error === "string" ? result.error : "keep-awake request failed");
+}
+
+/** Whether the app keeps the computer from idle-sleeping while the agent works. */
+export async function getKeepAwake(): Promise<boolean> {
+  await waitForReady();
+  return keepAwakeEnabled(await invoke<{ enabled?: unknown }>("agent_keep_awake_get"));
+}
+
+/** Turn keep-awake on/off. Saved to ~/.gg/settings.json and applied live. */
+export async function setKeepAwake(enabled: boolean): Promise<boolean> {
+  await waitForReady();
+  return keepAwakeEnabled(await invoke<{ enabled?: unknown }>("agent_keep_awake_set", { enabled }));
+}
+
 export type SubscriptionUsageProvider = "anthropic" | "openai" | "moonshot";
 
 export interface SubscriptionUsageWindow {
@@ -924,6 +964,24 @@ export async function openProjectPath(
   }
 }
 
+/**
+ * Open an in-memory chat image (a `data:<type>;base64,...` URL from a paste or
+ * attachment) in the default image viewer. It has no file of its own, so the
+ * app writes a copy into its cache folder and opens that.
+ */
+export async function openImageDataUrl(src: string): Promise<void> {
+  const match = /^data:([^;,]+);base64,(.+)$/s.exec(src);
+  if (!match) {
+    await logError("open_image_data skipped: not a base64 data URL");
+    return;
+  }
+  try {
+    await invoke("open_image_data", { mediaType: match[1], data: match[2] });
+  } catch (e) {
+    await logError(`open_image_data failed: ${String(e)}`);
+  }
+}
+
 export interface DroppedPathInfo {
   path: string;
   isDir: boolean;
@@ -973,7 +1031,10 @@ export async function readDroppedFileAttachment(path: string): Promise<Attachmen
 /** Display hints for the user bubble this prompt creates — persisted by the
  *  sidecar so a resumed session re-renders the same bubble (Ken "Sent to GG
  *  Coder" label, enhancer term highlights). */
-export type { PromptMeta } from "@kenkaiiii/gg-core/desktop-session-ux";
+/** Prompt metadata sent with `agent_prompt`. `scheduled` marks a `/schedule`
+ *  timer send (not typed) so the sidecar uses the short unattended ask_user
+ *  deadline for this run. */
+export type PromptMeta = CorePromptMeta & { scheduled?: boolean };
 
 export type ContinuationHandoffResponse = ContinuationPrepareResponse;
 export type {
@@ -1963,6 +2024,17 @@ export async function importTranscript(
     return { ok: false, error: String(error) };
   }
 }
+
+/** Best-effort Anthropic prompt-cache prewarm before the user's next turn.
+ *  Fire-and-forget; the sidecar gates on provider, history size and cache TTL. */
+export async function prewarmCache(): Promise<void> {
+  try {
+    await invoke("agent_prewarm");
+  } catch (e) {
+    await logError(`agent_prewarm failed: ${String(e)}`);
+  }
+}
+
 /** Cycle the reasoning/thinking level to the next supported value (or off). */
 export async function cycleThinking(): Promise<ThinkingState | null> {
   try {

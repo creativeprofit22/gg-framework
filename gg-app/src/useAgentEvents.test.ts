@@ -30,6 +30,7 @@ import { createRunEndPayload, type RunOutcome } from "@kenkaiiii/gg-core/desktop
 import { useAutopilot } from "./useAutopilot";
 import { useKenMentor } from "./useKenMentor";
 import { useAgentEvents, type AgentEventsDeps } from "./useAgentEvents";
+import { createLiveTextStore } from "./live-text";
 import type { Item } from "./App";
 import type { AgentState, PendingPlanReview, SidecarEvent } from "./agent";
 import type { LiveToolEntry } from "./LiveToolPanel";
@@ -252,6 +253,7 @@ function setup(
     pendingPlanTotalRef: { current: null },
     stickToBottomRef: { current: true },
     onSessionReset,
+    liveText: createLiveTextStore(),
   };
 
   const hook = renderHook(() => useAgentEvents(deps));
@@ -621,7 +623,7 @@ describe("useAgentEvents", () => {
   beforeEach(() => vi.clearAllMocks());
 
   it("correlates resets before applying real mentor authority", () => {
-    const mentor = renderHook(() => useKenMentor({ setItems: vi.fn(), nextId: () => 1 }));
+    const mentor = renderHook(() => useKenMentor({ setItems: vi.fn(), nextId: () => 1, liveText: createLiveTextStore() }));
     const old = { conversationId: "old", activationEpoch: "old", activeRunId: "run" };
     act(() => mentor.result.current.hydrateKen(old));
     const { hook, deps } = setup((event) => mentor.result.current.handleKenEvent(event));
@@ -1294,6 +1296,24 @@ describe("useAgentEvents", () => {
     expect(getItems()).toEqual([]);
   });
 
+  it("drops the aborted draft and shows a notice when a stream rule fires", () => {
+    const { hook, getItems } = setup();
+
+    act(() => {
+      hook.result.current.handleEvent(ev("text_delta", { text: "TODO: later" }));
+      hook.result.current.handleEvent(
+        ev("stream_rule_triggered", { rules: ["no-todo"], source: "text" }),
+      );
+    });
+
+    expect(getItems()).toEqual([
+      expect.objectContaining({
+        kind: "info",
+        text: 'Rule "no-todo" caught the reply mid-stream — retrying',
+      }),
+    ]);
+  });
+
   it("completes the notice when messages were compacted", () => {
     const { hook, getItems } = setup();
 
@@ -1342,6 +1362,46 @@ describe("useAgentEvents", () => {
     act(() => hook.result.current.handleEvent(ev("run_end", { cancelled: true })));
     expect(getState()).toMatchObject({ running: false, runState: "idle" });
     expect(setRunning).toHaveBeenLastCalledWith(false);
+  });
+
+  describe("cold-cache notice status", () => {
+    const expired = {
+      sessionId: "old",
+      provider: "anthropic",
+      ttlMs: 300_000,
+      confidence: "documented",
+      ttlSource: "test",
+      lastRequestAt: 1,
+      expiresAt: 300_001,
+      expired: true,
+      reason: "idle",
+      prefixTokens: 358_000,
+      minTokens: 40_000,
+      notable: true,
+      estimatedExtraCostUsd: null,
+    } as unknown as NonNullable<AgentState["cacheExpiry"]>;
+
+    it("clears the previous chat's status when a fresh session starts", () => {
+      const { hook, getState } = setup(() => false, { cacheExpiry: expired });
+
+      act(() => hook.result.current.handleEvent(ev("session_reset")));
+
+      expect(getState()?.cacheExpiry).toBeNull();
+    });
+
+    it("applies live cache_expiry pushes, including null", () => {
+      const { hook, getState } = setup();
+
+      act(() =>
+        hook.result.current.handleEvent({ type: "cache_expiry", data: expired } as SidecarEvent),
+      );
+      expect(getState()?.cacheExpiry).toEqual(expired);
+
+      act(() =>
+        hook.result.current.handleEvent({ type: "cache_expiry", data: null } as SidecarEvent),
+      );
+      expect(getState()?.cacheExpiry).toBeNull();
+    });
   });
 
   it("refreshes branch and uncommitted-file count from workspace extras", () => {
@@ -1398,6 +1458,44 @@ describe("useAgentEvents", () => {
     items = getItems();
     expect(items).toHaveLength(1);
     expect(items[0]).toMatchObject({ kind: "assistant", text: "Hello world" });
+  });
+
+  it("grows a streaming reply in the live-text store, not the transcript, until it ends", () => {
+    vi.useFakeTimers();
+    try {
+      const { hook, deps, getItems } = setup();
+      act(() => hook.result.current.handleEvent(ev("text_delta", { text: "Hello" })));
+      const before = getItems();
+      const id = before[0]?.id ?? -1;
+
+      // Mid-stream flushes reach only the live-text store: the transcript
+      // array (and so the whole App) is untouched while the reply grows.
+      act(() => {
+        hook.result.current.handleEvent(ev("text_delta", { text: " there" }));
+        vi.advanceTimersByTime(100);
+        hook.result.current.handleEvent(ev("text_delta", { text: " world" }));
+        vi.advanceTimersByTime(100);
+      });
+      expect(getItems()).toBe(before);
+      expect(deps.liveText.get(id)).toBe("Hello there world");
+
+      // The end of the stream writes the final text into the transcript once
+      // and releases the store entry.
+      act(() => hook.result.current.endStreamingText());
+      expect(getItems()[0]).toMatchObject({ kind: "assistant", text: "Hello there world" });
+      expect(deps.liveText.get(id)).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("releases a streaming reply's live text when the session resets", () => {
+    const { hook, deps, getItems } = setup();
+    act(() => hook.result.current.handleEvent(ev("text_delta", { text: "Hello" })));
+    const id = getItems()[0]?.id ?? -1;
+    act(() => hook.result.current.handleEvent(ev("session_reset")));
+    expect(getItems()).toEqual([]);
+    expect(deps.liveText.get(id)).toBeUndefined();
   });
 
   it("keeps raw diagnostics out of chat without interrupting plan progress", () => {
@@ -1856,6 +1954,29 @@ describe("useAgentEvents", () => {
       mcpToolName: "tool:name",
       status: "running",
     });
+  });
+
+  it("keeps an image placeholder until its own generate_image call ends", () => {
+    const { hook, getItems } = setup();
+    act(() => {
+      hook.result.current.handleEvent(
+        ev("tool_call_start", {
+          toolCallId: "g1",
+          name: "generate_image",
+          args: { prompt: "a cat" },
+        }),
+      );
+      hook.result.current.handleEvent(
+        ev("tool_call_start", { toolCallId: "r1", name: "read", args: { file_path: "a.ts" } }),
+      );
+      hook.result.current.handleEvent(ev("tool_call_end", { toolCallId: "r1", isError: false }));
+    });
+    expect(getItems().filter((it) => it.kind === "generating_image")).toHaveLength(1);
+
+    act(() => {
+      hook.result.current.handleEvent(ev("tool_call_end", { toolCallId: "g1", isError: false }));
+    });
+    expect(getItems().filter((it) => it.kind === "generating_image")).toHaveLength(0);
   });
 
   it("turn_end accumulates output tokens across turns", () => {

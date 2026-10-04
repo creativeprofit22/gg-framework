@@ -1,7 +1,6 @@
-import { useMemo } from "react";
-import { theme } from "./theme";
 import { formatTokenCount } from "./ActivityBar";
-import { hashKey, pickCritter, renderCritterFrame, type CritterDef } from "./critter-sprites";
+import { CritterLine, type CritterTone } from "./CritterLine";
+import { hashKey, pickCritter, type CritterDef } from "./critter-sprites";
 
 /** One delegated sub-agent, mirrored from the sidecar's subagent tool stream. */
 export interface SubAgentLine {
@@ -51,7 +50,7 @@ export function formatSubAgentTokens(usage: SubAgentLine["tokenUsage"]): string 
 /** The one-line chat summary of a delegation group, and how to colour it. */
 export interface CritterSummary {
   text: string;
-  tone: "working" | "done" | "failed";
+  tone: CritterTone;
 }
 
 type CritterLines = Readonly<{ one: readonly string[]; many: readonly string[] }>;
@@ -165,7 +164,7 @@ export function summarizeCritters(
     return (list[variant % list.length] ?? "").replace("{n}", String(n));
   };
   const total = agents.length;
-  if (aborted) return { text: say(CRITTER_LINES.calledBack, total), tone: "failed" };
+  if (aborted) return { text: say(CRITTER_LINES.calledBack, total), tone: "stopped" };
   if (agents.some(isWorking)) {
     return { text: say(CRITTER_LINES.launched, total), tone: "working" };
   }
@@ -191,30 +190,13 @@ function rowCritter(agents: readonly SubAgentLine[]): CritterDef {
 /**
  * In-transcript record of the sub-agents spawned in a turn: one short, plain
  * line ("Launched 3 critters to dig in…") led by a little critter in the
- * assistant-dot gutter. It hops while the agents work, stands when they
- * succeed and tips over when they fail. The live view (who is running, their
- * tokens and current tool) is the critters on the activity bar.
+ * assistant-dot gutter (see CritterLine). It hops with shimmering pink text
+ * while the agents work, turns green when they succeed and tips over in red
+ * when they fail. The live view (who is running, their tokens and current
+ * tool) is the critters on the activity bar.
  */
 export function SubAgentFeed({ agents, aborted = false }: Props): React.ReactElement | null {
-  const critter = rowCritter(agents);
-  // The sprite only depends on which critter it is; the transcript re-renders
-  // on every streamed token, so don't rebuild the SVG each time.
-  const sprite = useMemo(() => renderCritterFrame(critter, 0), [critter]);
   if (agents.length === 0) return null;
   const summary = summarizeCritters(agents, aborted);
-  return (
-    <div className="subagents subagents-compact" data-swap-row="">
-      <span className="subagents-critter" aria-hidden="true">
-        <img
-          className={`subagents-critter-img subagents-critter-${summary.tone}`}
-          src={sprite}
-          alt=""
-          draggable={false}
-        />
-      </span>
-      <span className="subagents-compact-text" style={{ color: theme.textSecondary }}>
-        {summary.text}
-      </span>
-    </div>
-  );
+  return <CritterLine critter={rowCritter(agents)} tone={summary.tone} text={summary.text} />;
 }

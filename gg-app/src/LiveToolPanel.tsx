@@ -39,7 +39,7 @@ export function LiveToolPanel({ entries }: Props): React.ReactElement | null {
   const visible = entries.slice(-LIVE_TOOL_PANEL_ROWS);
 
   return (
-    <div className="livetoolpanel">
+    <div className="livetoolpanel dissolve-in">
       {visible.map((entry) => {
         const done = entry.status === "done";
         const parts = buildToolLineParts(entry.name, entry.args, {
@@ -64,8 +64,12 @@ export function LiveToolPanel({ entries }: Props): React.ReactElement | null {
             <span className="visually-hidden">{statusLabel}: </span>
             <span className="tool-line">
               {parts.map((p, i) => (
+                // Keyed on the wording so a status flip ("Delegating" to
+                // "Delegated") fades in rather than switching. Blur-free: this
+                // is one truncated line (see .fade-swap).
                 <span
-                  key={i}
+                  key={`${i}:${p.text}`}
+                  className="fade-swap"
                   style={{
                     color: p.dim ? theme.textDim : p.tone ? toneColor(p.tone) : theme.text,
                     fontWeight: p.bold ? 600 : 400,

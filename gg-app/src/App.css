@@ -88,6 +88,12 @@
      CSS-styled chat bubbles. Marks every Ken element. */
   --ken: #62e8d8;
 
+  /* Critters — pink, single source of truth with theme.critter in theme.ts.
+     Marks a busy critter row (sub-agents at work, compaction in progress) so
+     it reads apart from periwinkle hooks and the green "done" state.
+     ~9.5:1 on --bg. */
+  --critter: #ff8fd0;
+
   /* Agent Steroids — red sibling of the brand tint. Marks the Steroids
      button, the "Roided!" stamp and the modal status dot. */
   --steroids: #ff4d5e;
@@ -165,6 +171,9 @@
   --dur-exit: 120ms;
   /* New transcript rows (your message, the reply, notices) rising into place. */
   --dur-row: 220ms;
+  /* Things that resolve out of a blur (transcript rows, swapped labels, the
+     tool panel): long enough that the blur reads as a dissolve, not a flicker. */
+  --dur-dissolve: 340ms;
 
   /* Keyboard focus: one ring for every control, drawn with box-shadow so it
      follows the control's radius. :focus-visible means pointer clicks never
@@ -547,8 +556,12 @@
   outline-offset: 2px;
 }
 
-/* ── Toasts (bottom-right, slide up + fade) ── */
-.toaster {
+/* ── Toasts (bottom-right, slide up + fade) ──
+   `.app > .toaster` outranks the later `.app > *` rule (position: relative;
+   z-index: 1), which otherwise dropped the toaster into the flex column below
+   a full-height screen like Settings and pushed toasts off the window. */
+.toaster,
+.app > .toaster {
   position: fixed;
   right: 18px;
   bottom: 18px;
@@ -604,6 +617,35 @@
 @keyframes fade-in {
   from {
     opacity: 0;
+  }
+}
+
+/* ── Dissolve: the shared "this just appeared / just changed" entrance ──
+   Same blur-to-sharp language as the streamed words and transcript rows.
+   `.dissolve-in` is for block-level things that mount (a bar's timer, the Stop
+   button, the tool panel). `.dissolve-swap` goes on text that is re-keyed when
+   its wording changes, so a status flip ("Sent a critter off…" to "The critter
+   is back") resolves into place instead of switching. `.fade-swap` is the
+   blur-free variant for inline text inside a single truncated line, where a
+   filter would need inline-block and break the ellipsis. All `backwards`: no
+   filter is left on anything at rest. */
+@keyframes dissolve-in {
+  from {
+    opacity: 0;
+    filter: blur(6px);
+  }
+}
+.dissolve-in,
+.dissolve-swap {
+  animation: dissolve-in var(--dur-dissolve) var(--ease-out) backwards;
+}
+.fade-swap {
+  animation: fade-in var(--dur-dissolve) var(--ease-out) backwards;
+}
+@media (prefers-reduced-motion: reduce) {
+  .dissolve-in,
+  .dissolve-swap {
+    animation-name: fade-in;
   }
 }
 @keyframes fade-out {
@@ -872,6 +914,27 @@ select {
 .app:not(.window-focused) .command-shimmer,
 .app:not(.window-focused) .blink,
 .app:not(.window-focused) .wake-cursor,
+.app:not(.window-focused) .wake-critter-body,
+.app:not(.window-focused) .wake-weather i,
+.app:not(.window-focused) .wake-lane .terrain-prop-art,
+.app:not(.window-focused) .wake-lane .terrain-traveler,
+.app:not(.window-focused) .critter-lane .terrain-prop-art,
+.app:not(.window-focused) .critter-lane .terrain-traveler-art,
+.app:not(.window-focused) .critter-lane .wx,
+.app:not(.window-focused) .critter-thought span,
+.app:not(.window-focused) .critter-dizzy i,
+.app:not(.window-focused) .critter-arcs::after,
+.app:not(.window-focused) .critter-wheel,
+.app:not(.window-focused) .critter-scan,
+.app:not(.window-focused) .subagents-critter-working,
+.app:not(.window-focused) .gg-face-blink,
+.app:not(.window-focused) .ken-face-blink,
+.app:not(.window-focused) .ken-face-talk,
+.app:not(.window-focused) .ken-face-talking,
+.app:not(.window-focused) .whatsnew-critter,
+.app:not(.window-focused) .whatsnew-critter-body.bob,
+.app:not(.window-focused) .whatsnew-critter-step,
+.app:not(.window-focused) .motion-starter,
 .app:not(.window-focused) .skeleton,
 .app:not(.window-focused) .enh-diss-skeleton .skeleton::after,
 .app:not(.window-focused) .enhance-pill.enhancing,
@@ -1038,23 +1101,33 @@ select {
   height: 100%;
   mix-blend-mode: lighten;
 }
-/* Home content sits above the backdrop. Text over the waves gets a soft dark
-   halo so it stays readable across bright stretches of dots. */
+/* The campfire scenery (HomeScenery.tsx): the critters' clearing in the
+   pines. The renderer sizes the canvas to the window; it's pinned to the
+   bottom edge so the fire's glow always sits right under the critters. */
+.home-scenery {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+.home-scenery-canvas {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+}
+/* The critters' ground takes the scenery's light (set on .home by the clock). */
+.home-critters .critter-terrain {
+  filter: var(--scene-ground, none);
+}
+/* Home content sits above the backdrop. The scenery keeps the sky dark
+   behind the text, so the text goes without a halo. */
 .home > .ascii-logo,
 .home > .home-version-row,
 .home > .home-tagline,
 .home > .home-actions {
   position: relative;
   z-index: 1;
-}
-.home-version-row,
-.home-tagline,
-.home-action-note,
-.home-links,
-.home-version-corner {
-  text-shadow:
-    0 1px 2px rgb(0 0 0 / 0.9),
-    0 0 12px rgb(0 0 0 / 0.8);
 }
 /* Entry: each block fades + rises in sequence so the page assembles smoothly
    on load instead of snapping in all at once. The logo's shimmer and glitch
@@ -1097,9 +1170,9 @@ select {
     animation: none;
   }
 }
-/* Edges: Settings top-right, the critters and their terrain along the bottom,
-   and above their lane your byline (centre) and the version or update button
-   (left). The critter lane sits on the window's bottom edge with its terrain
+/* Edges: the version or update button top-centre, Settings top-right, the
+   critters and their terrain along the bottom, and your links (centre) just
+   above their lane. The critter lane sits on the window's bottom edge with its terrain
    inside (.critter-lane.with-terrain), so the ground rises out of the edge
    just like it does in chat. --home-critter-floor is the ground's depth, the
    height the critters' feet stand at; --home-above-critters clears the
@@ -1151,26 +1224,24 @@ select {
 .home > .home-links > * {
   pointer-events: auto;
 }
+/* Top centre, level with the Settings button (top 16px, 44px tall). Spans the
+   width and centres its content like the links, rather than translate(-50%),
+   since reveal-up owns transform; only the version or button takes clicks,
+   so the strip around it stays a window drag area. */
 .home > .home-version-corner {
   position: absolute;
   z-index: 1;
-  left: 20px;
-  bottom: var(--home-above-critters);
+  left: 0;
+  right: 0;
+  top: 16px;
+  height: 44px;
   display: flex;
   align-items: center;
-  /* Long update statuses wrap instead of running off the right edge. */
-  max-width: calc(100% - 40px);
+  justify-content: center;
+  pointer-events: none;
 }
-/* The update button and its statuses outgrow the gutter, so while it shows
-   the byline steps up a row instead of sharing the corner's. */
-.home:has(> .home-version-corner .home-update) > .home-links {
-  bottom: calc(var(--home-above-critters) + 36px);
-}
-/* Narrow panes wrap the longest status onto a second line; clear that too. */
-@container conversation-pane (max-width: 480px) {
-  .home:has(> .home-version-corner .home-update) > .home-links {
-    bottom: calc(var(--home-above-critters) + 54px);
-  }
+.home > .home-version-corner > * {
+  pointer-events: auto;
 }
 
 .ascii-logo {
@@ -1364,10 +1435,8 @@ select {
 .ken-power-overlay ~ .transcript {
   opacity: 0;
 }
-/* Styled as the wake screen's line (`.wake-text`), so the two things the app
-   says to you in the empty chat body look like one voice — same mono face,
-   size, tracking, ink and blue halo. Only the entrance differs: the wake line
-   types itself, this one flashes in and dissolves. */
+/* Terminal-style line in the empty chat body — mono face, blue halo. It
+   flashes in and dissolves. */
 .ken-power-banner {
   font-family: var(--mono);
   font-size: 18px;
@@ -1424,7 +1493,7 @@ select {
 }
 .home-tagline {
   margin-top: -12px;
-  font-size: 13px;
+  font-size: 15px;
   color: var(--text);
   /* A dark backing keeps the line readable where the dot field is brightest;
      the text-shadow halo alone lost to dense stretches of dots. */
@@ -1499,7 +1568,7 @@ select {
   border-radius: var(--radius-pill);
   background: var(--home-ink-backing);
   white-space: nowrap;
-  font-size: 12px;
+  font-size: 13px;
   line-height: 1.3;
   /* Full-strength ink like the tagline and byline: dimmer text got lost over
      bright stretches of the waves. Size keeps it secondary. */
@@ -3630,6 +3699,94 @@ select {
   /* Match the in-app modal's scrollbar treatment (those rules are scoped to
      `.modal`, which this window doesn't use). */
 }
+
+/* A random critter pacing beside the title (WhatsNewCritter.tsx). */
+.whatsnew-title {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-width: 0;
+}
+.whatsnew-critter-lane {
+  --lane: 96px;
+  position: relative;
+  flex: 0 0 auto;
+  width: calc(var(--lane) + 21px);
+  height: 21px;
+}
+.whatsnew-critter {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  width: 21px;
+  height: 21px;
+  animation: whatsnew-pace 9s linear infinite;
+}
+.whatsnew-critter-body {
+  position: relative;
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+.whatsnew-critter-body.bob {
+  animation: whatsnew-bob 0.72s ease-in-out infinite;
+}
+.whatsnew-critter-body img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  image-rendering: pixelated;
+  user-select: none;
+}
+/* The second walk frame blinks over the first, so the legs step. */
+.whatsnew-critter-step {
+  opacity: 0;
+  animation: whatsnew-step 0.36s steps(1, end) infinite;
+}
+/* Walk right, turn round, walk back, turn round. The scale flip runs over a
+   short beat, so the turn reads as the critter spinning on the spot. */
+@keyframes whatsnew-pace {
+  0% {
+    transform: translateX(0) scaleX(1);
+  }
+  44% {
+    transform: translateX(var(--lane)) scaleX(1);
+  }
+  50% {
+    transform: translateX(var(--lane)) scaleX(-1);
+  }
+  94% {
+    transform: translateX(0) scaleX(-1);
+  }
+  100% {
+    transform: translateX(0) scaleX(1);
+  }
+}
+@keyframes whatsnew-step {
+  0% {
+    opacity: 0;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+@keyframes whatsnew-bob {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-2px);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .whatsnew-critter,
+  .whatsnew-critter-body.bob,
+  .whatsnew-critter-step {
+    animation: none;
+  }
+}
 /* One-shot confetti overlay — covers the whole modal, never intercepts clicks,
    sits above the content while the burst plays then clears itself. */
 .confetti-canvas {
@@ -4878,36 +5035,44 @@ select {
   overflow: hidden;
 }
 
-/* ── Export-chat pill (hover-revealed) ───────────────────────────────────
-   Floats in the bottom-right of the chat viewport, anchored to
-   `.transcript-frame` — the NON-scrolling sibling. Anchoring to `.transcript`
-   would pin it to the top of the scrolled content instead of what's on screen
-   (same trap the Ken power banner comment above documents).
+/* ── Floating chat controls ─────────────────────────────────────────────
+   Export chat (top right, hover-revealed), "You have new chats" (bottom
+   centre) and scroll-to-bottom (bottom right) float over the chat viewport,
+   anchored to `.transcript-frame` — the NON-scrolling sibling. Anchoring to
+   `.transcript` would pin them to the top of the scrolled content instead of
+   what's on screen (same trap the Ken power banner comment above documents).
 
    Always in the DOM so the exit transition can play; `visibility` joins the
-   transition (delayed on the way out, instant on the way in) so the hidden
-   button is fully inert rather than an invisible click target. */
-.export-chat {
+   transition (delayed on the way out, instant on the way in) so a hidden
+   control is fully inert rather than an invisible click target. Each one
+   slides in from its own edge via `--float-x` / `--float-y`. */
+.export-chat,
+.transcript-new-pill,
+.transcript-to-bottom {
   position: absolute;
-  right: 16px;
-  bottom: 12px;
   z-index: 3;
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 5px 11px;
-  border: 1px solid var(--border);
+  /* 4 + 15 (12px × 1.25) + 4 + 2 border: 25px tall. */
+  padding: 4px 11px;
+  /* A lighter fill than the cards around it: --surface-2 sat at 1.19:1 on the
+     window background and the controls vanished into it. 30% toward --text
+     gives 3:1 against --bg with --text still 5.85:1 on top. */
+  --float-fill: color-mix(in srgb, var(--text) 30%, var(--surface-2));
+  border: 1px solid var(--border-strong);
   border-radius: var(--radius-pill);
-  background: var(--surface-2);
-  color: var(--text-secondary);
+  background: var(--float-fill);
+  color: var(--text);
+  box-shadow: var(--shadow-sm);
   font-family: var(--sans);
   font-size: 12px;
-  line-height: 1;
+  line-height: 1.25;
   cursor: pointer;
-  /* Hidden state: faded, nudged down, and untouchable. */
+  /* Hidden state: faded, nudged toward its edge, and untouchable. */
   opacity: 0;
   visibility: hidden;
-  transform: translateY(6px);
+  transform: translate(var(--float-x, 0), var(--float-y, 6px));
   pointer-events: none;
   transition:
     opacity var(--dur-enter) var(--ease-out),
@@ -4918,10 +5083,45 @@ select {
     box-shadow var(--t-fast),
     visibility 0s linear var(--dur-enter);
 }
-.export-chat.visible {
+.export-chat {
+  top: 12px;
+  right: 16px;
+  --float-y: -6px;
+}
+.transcript-new-pill {
+  bottom: 12px;
+  left: 50%;
+  --float-x: -50%;
+}
+/* "You have a new question": same pill and spot, in the amber the activity
+   bar uses for "Need your call", since the agent is waiting on it. The text
+   stays the pill's own light ink (amber text on the light fill measured under
+   3:1); the arrow and a warm rim carry the colour. */
+.transcript-ask-pill {
+  border-color: color-mix(in srgb, var(--warning) 55%, transparent);
+}
+.transcript-ask-pill svg {
+  color: var(--warning);
+}
+.transcript-to-bottom {
+  right: 16px;
+  bottom: 12px;
+  /* Round, at the pill's height. */
+  width: 25px;
+  height: 25px;
+  padding: 0;
+  justify-content: center;
+}
+/* Where "You have new chats" lands. Takes no space, so rows never shift. */
+.transcript-new-marker {
+  height: 0;
+}
+.export-chat.visible,
+.transcript-new-pill.visible,
+.transcript-to-bottom.visible {
   opacity: 1;
   visibility: visible;
-  transform: translateY(0);
+  transform: translate(var(--float-x, 0), 0);
   pointer-events: auto;
   transition:
     opacity var(--dur-enter) var(--ease-out),
@@ -4932,24 +5132,24 @@ select {
     box-shadow var(--t-fast),
     visibility 0s;
 }
-.export-chat.visible:hover {
-  background: color-mix(in srgb, var(--surface-2) 88%, var(--primary));
-  border-color: var(--border-strong);
-  color: var(--text);
+.export-chat.visible:hover,
+.transcript-new-pill.visible:hover,
+.transcript-to-bottom.visible:hover {
+  background: color-mix(in srgb, var(--float-fill) 86%, var(--primary));
 }
-.export-chat:disabled {
-  cursor: default;
-  color: var(--text-muted);
-}
+/* "Exporting…" is a status line, so it keeps full-strength text (a dimmer
+   grey fell under 4.5:1 on the lighter fill) and just stops reacting. */
+.export-chat:disabled,
 .export-chat:disabled:hover {
-  background: var(--surface-2);
-  border-color: var(--border);
-  color: var(--text-muted);
+  cursor: default;
+  background: var(--float-fill);
 }
 @media (prefers-reduced-motion: reduce) {
   /* No travel; the fade and the hover colours stay. */
-  .export-chat {
-    transform: none;
+  .export-chat,
+  .transcript-new-pill,
+  .transcript-to-bottom {
+    --float-y: 0;
     transition:
       opacity var(--dur-enter) var(--ease-out),
       background var(--t-fast),
@@ -4958,8 +5158,9 @@ select {
       box-shadow var(--t-fast),
       visibility 0s linear var(--dur-enter);
   }
-  .export-chat.visible {
-    transform: none;
+  .export-chat.visible,
+  .transcript-new-pill.visible,
+  .transcript-to-bottom.visible {
     transition:
       opacity var(--dur-enter) var(--ease-out),
       background var(--t-fast),
@@ -5001,18 +5202,22 @@ select {
 
 /* ── Live transcript rows: one entrance ──
    Only rows that arrive after the session hydrated get `.row-enter` (see
-   TranscriptRow), so restored history never replays. Your own message rises
-   from the composer below it; replies, notices and cards settle in with less
-   travel so a burst of rows reads as calm, not bouncy. `backwards` so no
-   transform lingers (it would re-parent fixed-position children). */
+   TranscriptRow), so restored history never replays. Every row dissolves in,
+   the same blur-to-sharp language as the streamed words and the plan pane: a
+   plain rise + fade was already 69% opaque on its first painted frame and read
+   as a pop next to them. Your own message rises from the composer below it;
+   replies, notices and cards settle in with less travel so a burst of rows
+   reads as calm, not bouncy. `backwards` so no filter or transform lingers
+   (either would re-parent fixed-position children). */
 @keyframes row-rise {
   from {
     opacity: 0;
+    filter: blur(8px);
     transform: translateY(var(--row-y, 6px));
   }
 }
 .row-enter {
-  animation: row-rise var(--dur-row) var(--ease-out) backwards;
+  animation: row-rise var(--dur-dissolve) var(--ease-out) backwards;
 }
 .row-enter[data-kind="user"] {
   --row-y: 14px;
@@ -5183,69 +5388,150 @@ select {
   }
 }
 
-/* ── Plan review entrance: the app's decision moment ──
-   Staged so the eye lands in reading order: the takeover fades in, the YOUR
-   PLAN banner draws left-to-right one row at a time, then the plan rises in,
-   then the decision bar. ~600ms end to end; every stage uses `backwards` so
-   nothing lingers once it has landed. Initial focus is on the plan body (see
-   PlanReviewModal), so the late-arriving buttons can't catch a stray Enter. */
-@keyframes plan-line-draw {
+/* ── Plan review motion: dissolve in, dissolve out ──
+   Arriving, the whole pane resolves out of a soft blur, then each band
+   settles in reading order (plan, activity bar, composer). Deciding plays the
+   reverse: the pane blurs and fades away, and only then does the decision run
+   (PlanReviewModal waits for `plan-dissolve-out`). The blur only exists while
+   an animation runs (`backwards` / the closing frame), so nothing keeps a
+   window-sized filter alive at rest. */
+@keyframes plan-dissolve-in {
   from {
-    clip-path: inset(0 100% 0 0);
+    opacity: 0;
+    filter: blur(10px);
+    transform: scale(1.012);
   }
+}
+@keyframes plan-dissolve-out {
   to {
-    clip-path: inset(0 0 0 0);
+    opacity: 0;
+    filter: blur(10px);
+    transform: scale(0.988);
+  }
+}
+@keyframes plan-band-in {
+  from {
+    opacity: 0;
+    filter: blur(6px);
+    transform: translateY(var(--band-y, 8px));
   }
 }
 .plan-review {
-  animation: fade-in var(--dur-enter) linear backwards;
+  animation: plan-dissolve-in 380ms var(--ease-out) backwards;
 }
-.plan-review-banner .plan-logo-line {
-  animation: plan-line-draw 260ms var(--ease-out) backwards;
-}
-.plan-review-banner .plan-logo-line:nth-child(2) {
-  animation-delay: 60ms;
-}
-.plan-review-banner .plan-logo-line:nth-child(3) {
-  animation-delay: 120ms;
-}
-.plan-review-banner .plan-logo-line:nth-child(4) {
-  animation-delay: 180ms;
+.plan-review.leaving {
+  pointer-events: none;
+  animation: plan-dissolve-out 300ms var(--ease-in) forwards;
 }
 .plan-review-body {
-  animation: row-rise var(--dur-row) var(--ease-out) 280ms backwards;
+  animation: plan-band-in 420ms var(--ease-out) 120ms backwards;
 }
-.plan-review-ken,
-.plan-review-actions {
-  --row-y: 8px;
-  animation: row-rise var(--dur-row) var(--ease-out) 380ms backwards;
+.plan-review .liveregion {
+  animation: plan-band-in 360ms var(--ease-out) 220ms backwards;
+}
+.plan-review .inputwrap,
+.plan-review-footer {
+  --band-y: 12px;
+  animation: plan-band-in 360ms var(--ease-out) 300ms backwards;
 }
 @media (prefers-reduced-motion: reduce) {
-  .plan-review-banner .plan-logo-line,
+  .plan-review,
+  .plan-review.leaving,
   .plan-review-body,
-  .plan-review-ken,
-  .plan-review-actions {
-    animation: none;
+  .plan-review .liveregion,
+  .plan-review .inputwrap,
+  .plan-review-footer {
+    animation-name: fade-in;
+    animation-duration: var(--dur-enter);
   }
 }
 
-/* ── Plan mode ASCII banner ── */
+/* Plan decision rows (accepted / feedback / rejected) dissolve into the
+   transcript rather than just rising, echoing the pane they replace. */
+.row-enter[data-kind="plan_decision"] {
+  animation: plan-band-in 460ms var(--ease-out) backwards;
+  --band-y: 4px;
+}
+/* Plan mode arriving: the banner rows resolve out of a blur top to bottom
+   (staggered by each line's --line index), then the reason line. The amber
+   shimmer keeps running underneath, so the art never flashes plain. */
+.row-enter[data-kind="plan"] .plan-logo-line {
+  --band-y: 0px;
+  animation:
+    plan-band-in 420ms var(--ease-out) calc(var(--line, 0) * 35ms) backwards,
+    ggshimmer 5s linear infinite;
+}
+.row-enter[data-kind="plan"] .plan-logo-reason {
+  --band-y: 4px;
+  animation: plan-band-in 420ms var(--ease-out) 360ms backwards;
+}
+@media (prefers-reduced-motion: reduce) {
+  .row-enter[data-kind="plan_decision"],
+  .row-enter[data-kind="plan"] .plan-logo-reason {
+    animation-name: fade-in;
+  }
+  .row-enter[data-kind="plan"] .plan-logo-line {
+    animation: fade-in var(--dur-enter) var(--ease-out) backwards;
+  }
+}
+
+/* ── Plan mode ASCII banner ──
+   "Delta Corps Priest 1", the same FIGlet font as the home GG CODER banner. */
 .plan-logo {
   margin: 10px 0;
   padding-left: 2px;
 }
-.plan-logo-line {
+.plan-logo-art {
   font-family: var(--mono);
-  font-size: 13px;
-  line-height: 1.15;
-  white-space: pre;
+  /* 101 mono columns ≈ 61em: 8px fits ~490px. Shrink with the window rather
+     than overflow the transcript (rails + scrollbar ≈ 64px). */
+  font-size: min(8px, (100vw - 64px) / 64);
+  /* Half blocks (▄ ▀) draw the curves, so rows must touch: any extra
+     leading cuts gaps through every letter. */
+  line-height: 1;
   letter-spacing: 0;
 }
-.plan-logo-reason {
-  margin-top: 6px;
+/* The amber sweep is painted per line, on the element that owns the text
+   (WebKit clips a text background only to the element's own glyphs). Every
+   line is padded to one width, so the gradient lines up down the banner. */
+.plan-logo-line {
+  width: max-content;
+  white-space: pre;
+  background: linear-gradient(
+    100deg,
+    #c98828 0%,
+    var(--warning) 25%,
+    #f6c97a 50%,
+    var(--warning) 75%,
+    #c98828 100%
+  );
+  background-size: 220% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
   color: var(--warning);
-  font-style: italic;
-  font-size: 13px;
+  animation: ggshimmer 5s linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .plan-logo-line {
+    animation: none;
+  }
+}
+/* Forced colours drop the gradient; show the art in plain system text. */
+@media (forced-colors: active) {
+  .plan-logo-line {
+    background: none;
+    -webkit-text-fill-color: currentColor;
+  }
+}
+.plan-logo-reason {
+  /* Back onto the rail (the banner's 2px optical inset), so the critter sits
+     in the assistant-dot gutter like every other critter line. */
+  margin: 8px 0 0 -2px;
+}
+/* A reason can run long: wrap it rather than ellipsize the agent's words. */
+.plan-logo-reason .subagents-compact-text {
+  white-space: normal;
 }
 
 /* ── User message chip (mirrors USER_MESSAGE_BACKGROUND in the TUI) ── */
@@ -5316,13 +5602,17 @@ select {
   border-style: dashed;
   animation: ggqueuedpromote 300ms var(--ease-out);
 }
+/* The dissolve language of the rest of the transcript: the dimmed draft comes
+   into focus as it is sent, rather than only brightening. */
 @keyframes ggqueuedpromote {
   from {
     opacity: 0.5;
+    filter: blur(3px);
     border-color: var(--border, rgba(255, 255, 255, 0.18));
   }
   to {
     opacity: 1;
+    filter: blur(0);
     border-color: transparent;
   }
 }
@@ -5475,11 +5765,13 @@ select {
 /* Streaming word reveal: each newly-arrived word mounts with a short
    blur-to-sharp fade, which hides the moment a batch of tokens landed. The
    spans exist ONLY while a row is streaming (see Markdown.tsx `animate`), so
-   finished prose keeps its plain DOM. inline-block is what makes `filter`
-   reliable here; whitespace stays outside the spans so lines break normally. */
+   finished prose keeps its plain DOM.
+   Plain inline (WebKit blurs inline boxes): the spans must not change where
+   lines break, because they come off when a block finishes. As inline-blocks
+   they did: no break inside "newest-first", a break allowed between "ms" and
+   ";", so every paragraph re-wrapped the instant it finished. That jump was
+   the flicker. */
 .markdown .md-word {
-  display: inline-block;
-  white-space: pre;
   animation: md-word-in var(--dur-row) var(--ease-out) both;
 }
 @keyframes md-word-in {
@@ -5692,6 +5984,27 @@ select {
 .ken-face-layer + .ken-face-layer {
   opacity: 0;
 }
+
+/* GG Coder's robot face (GgFace.tsx): same stacking as Ken's, with a blink
+   layer only on the Ready mood. */
+.gg-face {
+  position: relative;
+  display: inline-block;
+  flex: 0 0 auto;
+}
+.gg-face-layer {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  image-rendering: pixelated;
+  user-select: none;
+}
+.gg-face-blink {
+  opacity: 0;
+  animation: ken-face-blink 5.2s steps(1, end) infinite;
+}
 /* In the reply gutter: one cell per CSS px, centred on the first text line
    (assistant text is 15px at line-height 1.55), where the dot used to sit. */
 .ken-face-slot {
@@ -5841,7 +6154,8 @@ select {
   .ken-face,
   .ken-face.ken-face-talking,
   .ken-face .ken-face-layer,
-  .ken-face .ken-face-z {
+  .ken-face .ken-face-z,
+  .gg-face-blink {
     animation: none;
   }
   .ken-face-on .ken-face-happy,
@@ -6180,6 +6494,7 @@ select {
   margin: 0.5em 0;
   max-width: 100%;
   overflow-x: auto;
+  overscroll-behavior-x: contain;
 }
 /* Folding /steroids table: the toggle sits directly under the table (as under
    a folded code block), so the wrapper owns the bottom gap instead. */
@@ -6196,13 +6511,27 @@ select {
 .markdown th,
 .markdown td {
   border: 1px solid var(--border);
-  padding: 4px 9px;
+  padding: 7px 12px;
   text-align: left;
+  vertical-align: top;
   /* The transcript's inherited `break-word` split short words ("Complet|ed")
      in narrow panes. Keep words whole; the scroller handles tables that can't
      wrap any narrower. */
   word-break: normal;
   overflow-wrap: normal;
+  line-height: 1.45;
+}
+/* Sentence cells (Markdown.tsx TableCell) keep a readable width: never
+   narrower than a short line, and wrapping at a comfortable measure rather
+   than stretching the table into one very long line. */
+.markdown td.md-cell-prose {
+  min-width: 22ch;
+  max-width: 44ch;
+}
+/* Headers and code (paths, identifiers) never wrap mid-token. */
+.markdown th,
+.markdown td code {
+  white-space: nowrap;
 }
 .markdown th {
   background: var(--surface-1);
@@ -6407,11 +6736,11 @@ select {
 .subagents-critter-working {
   animation: subagents-critter-hop 0.9s var(--ease-in-out) infinite;
 }
-/* Failed / called back: tipped over and drained, like on the floor. */
+/* Failed / called back: tipped over, like on the floor. Kept at full colour:
+   the red text already says it failed, and a drained sprite read as disabled. */
 .subagents-critter-failed {
   transform-origin: 50% 50%;
   transform: rotate(-90deg);
-  filter: saturate(0.35) brightness(0.85);
 }
 @keyframes subagents-critter-hop {
   0%,
@@ -6423,11 +6752,16 @@ select {
     transform: translateY(-3px) scale(0.94, 1.06);
   }
 }
+/* Same size and weight as a hook line (`.assistant-text` + `.shimmer-text`),
+   in every state, so a critter row never reads smaller or dimmer than one. */
 .subagents-compact-text {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.55;
 }
 .subagents-head {
   display: flex;
@@ -8460,6 +8794,20 @@ select {
   border-radius: var(--radius-sm);
   flex: 0 0 auto;
 }
+/* Image chip thumbnail: opens the image in the default viewer. */
+.attach-thumb-open {
+  display: inline-flex;
+  flex: 0 0 auto;
+  padding: 0;
+  border: none;
+  background: none;
+  border-radius: var(--radius-sm);
+  cursor: zoom-in;
+}
+.attach-thumb-open:focus-visible {
+  outline: 2px solid var(--border-strong);
+  outline-offset: 1px;
+}
 .attach-icon {
   display: inline-flex;
   width: 28px;
@@ -8502,6 +8850,23 @@ select {
   flex-wrap: wrap;
   gap: 6px;
   margin-bottom: 6px;
+}
+/* Sent image: opens the image in the default viewer. */
+.user-img-open {
+  display: inline-flex;
+  padding: 0;
+  border: none;
+  background: none;
+  border-radius: var(--radius-button);
+  cursor: zoom-in;
+}
+.user-img-open:hover .user-img,
+.user-img-open:focus-visible .user-img {
+  border-color: var(--border-strong);
+}
+.user-img-open:focus-visible {
+  outline: 2px solid var(--border-strong);
+  outline-offset: 1px;
 }
 .user-img {
   max-width: 180px;
@@ -9363,7 +9728,7 @@ select {
   border-radius: var(--radius-pill);
   background: var(--home-ink-backing);
   font-family: var(--sans);
-  font-size: 12px;
+  font-size: 14px;
   font-weight: 500;
   color: var(--text);
   letter-spacing: 0.02em;
@@ -9381,7 +9746,7 @@ select {
   border-radius: var(--radius-pill);
   padding: 0 8px;
   font-family: var(--sans);
-  font-size: 12px;
+  font-size: 14px;
   font-weight: 600;
   color: var(--text);
   cursor: pointer;
@@ -9508,9 +9873,10 @@ select {
   -webkit-mask-image: linear-gradient(to bottom, #000 60%, rgba(0, 0, 0, 0.25) 100%);
 }
 
-/* ── Wake screen: Matrix-style empty state (the app addressing the user) ──
-   Fills the transcript area: faint brand-tinted digital rain behind a single
-   line of terminal text that types itself out and rests on the invitation. */
+/* ── Wake screen: the empty state, a critter saying hello ──
+   Fills the transcript area: the terrain's weather drifts faintly across it,
+   and in the middle a critter stands on a little patch of terrain (a real
+   terrain lane, drawn at 2x) typing a greeting into its speech bubble. */
 .wake-screen {
   position: relative;
   display: flex;
@@ -9523,42 +9889,248 @@ select {
   overflow: hidden;
   user-select: none;
 }
-.wake-rain {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  /* Sit behind the text and never bleed past readable contrast: the shared
-     ambient strength cap. Colours come from the --ambient-* family. */
-  opacity: var(--ambient-decor-opacity);
-  pointer-events: none;
-  mask-image: radial-gradient(ellipse 70% 80% at 50% 50%, #000 35%, transparent 100%);
-  -webkit-mask-image: radial-gradient(ellipse 70% 80% at 50% 50%, #000 35%, transparent 100%);
-}
-/* Match the window glow: reduced transparency removes decorative washes. */
-@media (prefers-reduced-transparency: reduce) {
-  .wake-rain {
-    display: none;
-  }
-}
-.wake-text {
+.wake-scene {
   position: relative;
   z-index: 1;
-  font-family: var(--mono);
-  font-size: 18px;
-  letter-spacing: 0.02em;
-  color: var(--text);
-  text-shadow: 0 0 12px color-mix(in srgb, var(--ambient-ink) 45%, transparent);
-  white-space: pre;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  /* Sit a little above centre, clear of the composer below. */
+  margin-bottom: 40px;
+}
+
+/* The pixel art: terrain and critter at their native size (2px a cell),
+   scaled up 2x. Its layout box is collapsed to the drawn size via margins. */
+.wake-art {
+  position: relative;
+  height: 92px;
+  transform: scale(2);
+  transform-origin: 50% 100%;
+  /* Reserve the scaled-up space: half again the width each side, and the
+     extra height above (the art grows up and out from its bottom centre). */
+  margin: 92px 0 0;
+}
+.wake-patch {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  /* Fade the patch's ends so it reads as a little island, not a cut strip. */
+  mask-image: linear-gradient(to right, transparent, #000 22%, #000 78%, transparent);
+  -webkit-mask-image: linear-gradient(to right, transparent, #000 22%, #000 78%, transparent);
+}
+.critter-lane.wake-lane {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  height: auto;
+  transition: none;
+}
+/* The screen-wide weather stands in for the lane's own. */
+.wake-lane .terrain-weather {
+  display: none;
+}
+
+/* The critter stands on the ground (8 cells), in the middle of the patch. */
+.wake-critter {
+  all: unset;
+  position: absolute;
+  left: 50%;
+  bottom: calc(var(--terrain-px, 2px) * 8);
+  width: 28px;
+  height: 28px;
+  margin-left: -14px;
+  cursor: pointer;
+  border-radius: 4px;
+  /* Pops in once the ground has risen (TERRAIN_LAND_MS). */
+  animation: wake-critter-in 420ms cubic-bezier(0.3, 1.5, 0.6, 1) 360ms backwards;
+}
+.wake-critter:focus-visible {
+  outline: 1px solid var(--critter);
+  outline-offset: 2px;
+}
+.wake-critter-body {
+  display: block;
+  width: 100%;
+  height: 100%;
+  transform-origin: 50% 100%;
+  animation: wake-breathe 2.8s ease-in-out infinite;
+}
+.wake-critter-body.wake-hop {
+  animation:
+    wake-hop 520ms cubic-bezier(0.3, 1.5, 0.6, 1),
+    wake-breathe 2.8s ease-in-out 520ms infinite;
+}
+.wake-critter-body img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  image-rendering: pixelated;
+}
+@keyframes wake-critter-in {
+  from {
+    opacity: 0;
+    transform: translateY(-10px) scale(0.6);
+  }
+}
+@keyframes wake-breathe {
+  0%,
+  100% {
+    transform: none;
+  }
+  50% {
+    transform: scale(1.04, 0.96);
+  }
+}
+@keyframes wake-hop {
+  0% {
+    transform: scale(1.1, 0.88);
+  }
+  40% {
+    transform: translateY(-9px) scale(0.94, 1.08);
+  }
+  75% {
+    transform: none;
+  }
+  88% {
+    transform: scale(1.06, 0.94);
+  }
+  100% {
+    transform: none;
+  }
+}
+
+/* The critter's speech bubble: the floor's white bubble, at reading size.
+   Sits just above the critter's head (the art's 2x critter top is 88px up). */
+.wake-bubble {
+  position: absolute;
+  left: 50%;
+  bottom: calc(88px + 12px);
+  transform: translateX(-50%);
+  z-index: 2;
+  margin: 0;
+  width: max-content;
+  max-width: min(440px, 86vw);
+  min-width: 44px;
+  min-height: 1.4em;
+  padding: 8px 14px;
+  border-radius: 14px;
+  background: #ffffff;
+  color: #0a0a0c;
+  font-family: var(--sans);
+  font-size: 19px;
+  font-weight: 600;
+  line-height: 1.4;
+  text-align: center;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.45);
+}
+.wake-bubble::after {
+  content: "";
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  margin-left: -7px;
+  border: 7px solid transparent;
+  border-top-color: #ffffff;
+}
+.wake-bubble-text {
+  white-space: pre-wrap;
 }
 .wake-cursor {
   display: inline-block;
-  margin-left: 2px;
-  color: var(--primary);
+  width: 8px;
+  height: 1.05em;
+  margin-left: 3px;
+  vertical-align: -0.17em;
+  border-radius: 2px;
+  background: #0a0a0c;
   animation: ggblink 1s step-end infinite;
 }
-.wake-cursor-rest {
-  color: var(--secondary);
+
+/* The terrain's weather across the whole screen: few particles, slow, faint,
+   fading out towards the edges. */
+.wake-weather {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  mask-image: radial-gradient(ellipse 80% 85% at 50% 50%, #000 40%, transparent 100%);
+  -webkit-mask-image: radial-gradient(ellipse 80% 85% at 50% 50%, #000 40%, transparent 100%);
+}
+.wake-weather i {
+  position: absolute;
+  opacity: 0;
+  animation-iteration-count: infinite;
+  animation-timing-function: linear;
+}
+.wake-wx-snow i {
+  top: -2% !important;
+  animation-name: wake-wx-fall;
+}
+.wake-wx-pollen i {
+  animation-name: wake-wx-float;
+  animation-timing-function: ease-in-out;
+}
+.wake-wx-dust i {
+  animation-name: wake-wx-blow;
+}
+.wake-wx-sparkle i {
+  animation-name: wake-wx-twinkle;
+  animation-timing-function: ease-in-out;
+}
+@keyframes wake-wx-fall {
+  0% {
+    opacity: 0;
+    translate: 0 0;
+  }
+  10%,
+  90% {
+    opacity: 0.55;
+  }
+  50% {
+    translate: calc(var(--drift) * 0.8) 50vh;
+  }
+  100% {
+    opacity: 0;
+    translate: var(--drift) 100vh;
+  }
+}
+@keyframes wake-wx-float {
+  0%,
+  100% {
+    opacity: 0;
+    translate: 0 0;
+  }
+  30%,
+  70% {
+    opacity: 0.85;
+  }
+  50% {
+    translate: var(--drift) -18px;
+  }
+}
+@keyframes wake-wx-blow {
+  0% {
+    opacity: 0;
+    translate: -60px 0;
+  }
+  20%,
+  80% {
+    opacity: 0.4;
+  }
+  100% {
+    opacity: 0;
+    translate: calc(var(--drift) * 2) 6px;
+  }
+}
+@keyframes wake-wx-twinkle {
+  0%,
+  100% {
+    opacity: 0;
+    scale: 0.6;
+  }
+  50% {
+    opacity: 0.8;
+    scale: 1;
+  }
 }
 /* Static one-line guidance under the typed line: readable at once, never animated. */
 .wake-hint {
@@ -9592,7 +10164,10 @@ select {
   }
 }
 @media (prefers-reduced-motion: reduce) {
-  .wake-cursor {
+  .wake-cursor,
+  .wake-critter,
+  .wake-critter-body,
+  .wake-critter-body.wake-hop {
     animation: none;
   }
 }
@@ -9802,10 +10377,11 @@ select {
 }
 
 /* ── Footer: background tasks indicator + popover ── */
+/* No outer margin: the first pill's edge sits on the footer rail, lined up
+   with the composer and transcript above; `.footer-left`'s gap spaces the rest. */
 .bgtasks {
   position: relative;
   display: inline-flex;
-  margin-left: 10px;
 }
 .bgtasks-button {
   display: inline-flex;
@@ -9911,6 +10487,9 @@ select {
    line-height differs from the inherited body line-height and the label
    visibly floats above the model name. */
 .model-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   font-family: var(--sans);
   font-size: 13px;
   line-height: 1;
@@ -11414,19 +11993,26 @@ select {
   animation: ggqueuedout 220ms var(--ease-in) forwards;
   pointer-events: none;
 }
+/* Collapsed state: no height, padding or border, and a bottom margin that also
+   soaks up the composer's 8px flex gap, so the composer moves smoothly instead
+   of snapping by the gap at the start of the enter / end of the exit. A strip
+   that pins its real size (pinSize → --pin-h; CacheExpiryNotice does) grows to
+   and folds from it; otherwise the 220px cap is the fallback. --pin-h on mount
+   is measured with padding and border already at 0, hence the +14px slack. */
 @keyframes ggqueuedin {
   from {
     opacity: 0;
     transform: translateY(6px);
     max-height: 0;
-    margin-bottom: 0;
+    margin-bottom: -8px;
     padding-top: 0;
     padding-bottom: 0;
+    border-width: 0;
   }
   to {
     opacity: 1;
     transform: translateY(0);
-    max-height: 220px;
+    max-height: calc(var(--pin-h, 206px) + 14px);
     margin-bottom: 6px;
     padding-top: 6px;
     padding-bottom: 6px;
@@ -11436,13 +12022,13 @@ select {
   from {
     opacity: 1;
     transform: translateY(0);
-    max-height: 220px;
+    max-height: var(--pin-h, 220px);
   }
   to {
     opacity: 0;
     transform: translateY(4px);
     max-height: 0;
-    margin-bottom: 0;
+    margin-bottom: -8px;
     padding-top: 0;
     padding-bottom: 0;
     border-width: 0;
@@ -11567,6 +12153,10 @@ select {
      otherwise a promoted bubble keeps its "queued" label forever. */
   .user-msg.promoted .queued-pill {
     animation: none;
+    display: none;
+  }
+  /* No exit animation to watch, so don't leave a dead strip up for EXIT_MS. */
+  .queued-bar.leaving {
     display: none;
   }
 }
@@ -15157,9 +15747,12 @@ select {
      question or option, and `max-width: 100%` stops a long one overflowing the
      transcript column. */
   width: fit-content;
-  max-width: 100%;
-  margin: 10px 0 6px;
-  padding: 12px 14px;
+  /* It belongs to the reply above it, so it starts on the reply's text column
+     (the 16px dot gutter + 6px gap of .assistant-msg), like a table or code
+     block does, instead of poking out to the dot. */
+  margin: 8px 0 6px 22px;
+  max-width: calc(100% - 22px);
+  padding: 14px 16px;
   /* A step above the transcript, plus a hairline: at --surface-1 the band was
      the same value as the canvas behind it and simply dissolved into it. */
   background: var(--surface-2);
@@ -15193,31 +15786,56 @@ select {
   display: inline-block;
   margin: 0;
 }
+/* The sweep marks the moment of answering, then rests (it looped forever on
+   every answered question in the history). Restored answers never sweep. */
+.ask-answered-bubble .shimmer-text {
+  animation: none;
+}
+.ask-answered-bubble.is-live .shimmer-text {
+  animation: ggshimmer 2.4s linear 2;
+}
 .ask-closed {
   font-size: 13px;
   /* Dim measured 3.37:1 on the bare transcript canvas this line sits on, under
      the 4.5:1 floor. Muted clears it and still reads as the quietest row. */
   color: var(--text-muted);
 }
+/* The question is the most important line in the band, so it is set at the
+   chat's own size (15px, like the reply above it); at 13px it read as a form
+   label smaller than the sentence that introduced it. */
 .ask-subq-q {
-  margin: 0 0 7px;
-  font-size: 13px;
+  margin: 0 0 8px;
+  font-size: 15px;
   font-weight: 600;
-  line-height: 1.45;
+  line-height: 1.4;
   color: var(--text);
 }
 .ask-detail {
-  margin: -3px 0 8px;
-  font-size: 13px;
+  margin: -4px 0 10px;
+  font-size: 13.5px;
   line-height: 1.5;
   /* Secondary, not muted: this sits on a raised surface, and muted grey on grey
      was genuinely hard to read. */
   color: var(--text-secondary);
 }
+/* "Agent continued with its best guess": a note about the run, not part of the
+   question, so it is smaller and ruled off from it. `width: 0; min-width: 100%`
+   keeps it out of the band's fit-content sizing — it wraps to the width the
+   question and options set instead of stretching the card. */
+.ask-deferred-note {
+  width: 0;
+  min-width: 100%;
+  margin: 0 0 10px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-secondary);
+}
 .ask-subq-num {
-  margin-right: 7px;
+  margin-right: 8px;
   font-family: var(--sans);
-  font-size: 11px;
+  font-size: 13px;
   font-weight: 500;
   /* Dim measured 2.84:1 on the band's surface. These numbers are permanent now
      that answered questions stay on screen, so they have to clear 4.5:1. */
@@ -15228,8 +15846,8 @@ select {
    band's raised surface, so this needs its own stronger value to actually read
    as a division. */
 .ask-subq + .ask-subq {
-  margin-top: 12px;
-  padding-top: 12px;
+  margin-top: 14px;
+  padding-top: 14px;
   border-top: 1px solid var(--border-strong);
 }
 
@@ -15242,7 +15860,7 @@ select {
   display: flex;
   flex-direction: column;
   align-items: stretch;
-  gap: 5px;
+  gap: 6px;
   /* Inside a fit-content band the rows still align to each other, so the band
      sizes to the LONGEST row rather than each row sizing independently. */
   min-width: 100%;
@@ -15266,7 +15884,12 @@ select {
      transcript column rather than push the whole band past its right edge. */
   white-space: normal;
   overflow-wrap: anywhere;
+  /* Chat-sized and medium weight: 12px bold read as a button caption, not as
+     an answer you would say. */
+  font-size: 14px;
+  font-weight: 500;
   line-height: 1.35;
+  gap: 10px;
   max-width: 100%;
   border-radius: var(--radius-button);
   padding: 9px 12px;
@@ -15304,12 +15927,17 @@ select {
   background: var(--primary-hi);
   border-color: transparent;
 }
-/* The index and the badge sit on the label's FIRST line, not centred against a
-   two-line block, so they align with the text they belong to. */
-.ask-options .ask-num {
-  margin-top: 1px;
-  margin-right: 2px;
+/* The lead slot (keycap or checkbox) and the badge sit on the label's FIRST
+   line, not centred against a two-line block, so they align with the text they
+   belong to. Both lead shapes are the same 18px square, so labels line up
+   across a band that mixes single and multi questions. */
+.ask-options .ask-num,
+.ask-options .ask-box {
   flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  /* Centre the 18px square on the label's 14px × 1.35 first line. */
+  margin-top: 0.5px;
 }
 /* The badge is a separate idea from the label, so it is pushed to the far edge
    rather than trailing it with the button's own 8px gap. */
@@ -15333,7 +15961,7 @@ select {
 }
 /* The plain label (no hint) has no flex container of its own: without
    `min-width: 0` a long one keeps its intrinsic width and overflows the row. */
-.ask-options .btn > span:not(.ask-num):not(.badge) {
+.ask-options .btn > span:not(.ask-num):not(.ask-box):not(.badge) {
   min-width: 0;
   flex: 1 1 auto;
 }
@@ -15351,20 +15979,65 @@ select {
 .btn-primary .ask-row-hint {
   color: color-mix(in srgb, var(--on-primary) 78%, var(--primary));
 }
-/* Accelerator index. Dim and unboxed — a hint, never competing with the label. */
+/* Accelerator index, drawn as a keycap so it reads as "press this key" rather
+   than a list number. Hairline only: a hint, never competing with the label. */
 .ask-num {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border-strong);
+  border-radius: 5px;
   font-family: var(--sans);
   font-size: 11px;
-  font-weight: 500;
+  font-weight: 600;
+  line-height: 1;
   color: var(--text-muted);
 }
 .btn-primary .ask-num {
+  border-color: color-mix(in srgb, var(--on-primary) 30%, transparent);
   color: color-mix(in srgb, var(--on-primary) 70%, var(--primary));
 }
-/* A multi-select's confirm. */
+/* Keeps the slot (10+ options, a typed answer) so labels stay aligned, with no
+   keycap drawn. After the selected rule above, which would otherwise outline
+   an empty box on a typed answer's filled row. */
+.ask-num.ask-num-empty {
+  border-color: transparent;
+}
+/* Multi-select checkbox: shown empty on every row so "pick several" is clear
+   before anything is picked (rows used to look like single-choice ones). */
+.ask-box {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1.5px solid var(--text-muted);
+  border-radius: 5px;
+}
+.btn-primary .ask-box {
+  border-color: var(--on-primary);
+  background: var(--on-primary);
+  color: var(--primary);
+}
+/* The keyboard hint under an open band: how to answer without the mouse. */
+.ask-hint {
+  width: 0;
+  min-width: 100%;
+  margin: 12px 0 0;
+  font-size: 12px;
+  line-height: 1.45;
+  /* Muted on the band's raised surface: quiet, and still above 4.5:1. */
+  color: var(--text-muted);
+}
+/* The band's only footer: a multi-select's confirm. Everything else that used
+   to live down here (a free-text link, a send button, an answered counter) is
+   gone — the options are the whole interface. */
 .ask-foot {
   display: flex;
-  margin-top: 10px;
+  margin-top: 12px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .ask-answered-bubble.is-live .shimmer-text {
+    animation: none;
+  }
 }
 /* A band of several questions can always be sent as it stands, so an optional
    question left blank never leaves the whole card with nothing to press. */

@@ -6,19 +6,19 @@ Built-in eases: `power1`, `power2`, `power3`, `power4`, `back`, `bounce`, `circ`
 
 Each has `.in`, `.out`, `.inOut` variants.
 
-| Ease                                       | Use for                                                                                                 |
-| ------------------------------------------ | ------------------------------------------------------------------------------------------------------- |
-| `power1.out`, `power2.out`                 | Gentle motion for secondary elements (a caption fade, a small shift). NOT the entrance default.         |
-| `power3.out` (house default), `power4.out` | The standard long-tail settle. Entrances, title cards, hero reveals.                                    |
-| `sine.inOut`                               | Long, slow, calm motion. Crossfades, ambient drift.                                                     |
-| `back.out(1.7)`                            | Overshoot then settle. A chosen register (playful, physical), never a default.                          |
-| `elastic.out(1, 0.3)`                      | Springy bounce. Same register rule; prefer a baked spring (see Spring Eases below).                     |
-| `expo.inOut`                               | Snappy, dramatic. Quick transitions between hero scenes.                                                |
-| `none` (linear)                            | Camera moves with timed counterpoint, mechanical motion.                                                |
+| Ease                                       | Use for                                                                                         |
+| ------------------------------------------ | ----------------------------------------------------------------------------------------------- |
+| `power1.out`, `power2.out`                 | Gentle motion for secondary elements (a caption fade, a small shift). NOT the entrance default. |
+| `power3.out` (house default), `power4.out` | The standard long-tail settle. Entrances, title cards, hero reveals.                            |
+| `sine.inOut`                               | Long, slow, calm motion. Crossfades, ambient drift.                                             |
+| `back.out(1.7)`                            | Overshoot then settle. A chosen register (playful, physical), never a default.                  |
+| `elastic.out(1, 0.3)`                      | Springy bounce. Same register rule; prefer a baked spring (see Spring Eases below).             |
+| `expo.inOut`                               | Snappy, dramatic. Quick transitions between hero scenes.                                        |
+| `none` (linear)                            | Camera moves with timed counterpoint, mechanical motion.                                        |
 
 Pick `.out` for entrances, `.in` for exits, `.inOut` for symmetric moves and continuous motion.
 
-**Smooth by default, bounce by choice** — the same rule as the Motion section of [`motion-language.md`](../motion-language.md): entrances default to `power3.out` or the baked critically-damped spring (see Spring Eases below); overshoot eases (`back` / `elastic` / `bounce`, or an underdamped spring) are a register the brief chooses for playful or physical work, never the house style.
+**Smooth by default, bounce by choice**: entrances default to `power3.out` or the baked critically-damped spring (see Spring Eases below); overshoot eases (`back` / `elastic` / `bounce`, or an underdamped spring) are a register the brief chooses for playful or physical work, never the house style.
 
 ## Easing Vocabulary (character & mood)
 
@@ -26,18 +26,18 @@ Easings are tone of voice: a video that only whispers is boring; one that varies
 
 The full palette by character (each family has `.in`, `.out`, `.inOut` variants):
 
-| Family               | Character                                                                    | Typical use                                                                                                                                  |
-| -------------------- | ---------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| `power1`–`power4`    | Gentle (1) to aggressive (4) acceleration curves                             | General purpose. **power3 is the house workhorse**; power2 for gentle secondary motion, power4 for dramatic snaps                            |
+| Family               | Character                                                                    | Typical use                                                                                                                                   |
+| -------------------- | ---------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `power1`–`power4`    | Gentle (1) to aggressive (4) acceleration curves                             | General purpose. **power3 is the house workhorse**; power2 for gentle secondary motion, power4 for dramatic snaps                             |
 | `back(N)`            | Overshoot then settle. N controls how far past the target (1=subtle, 4=wild) | Chosen register only (playful, physical), never a default. Keep N ≤ 2; prefer a baked spring at ζ 0.6–0.7 (physical settle, see Spring Eases) |
-| `elastic(amp, freq)` | Spring bounce. amp=magnitude, freq=oscillation speed                         | Same register rule; the baked spring (below) is the physical version                                                                         |
-| `bounce`             | Ball-drop bouncing                                                           | Physical-comedy register only (something literally dropping)                                                                                 |
-| `expo`               | Extreme acceleration curve (much steeper than power4)                        | Premium/luxury reveals, dramatic entrances                                                                                                   |
-| `sine`               | Smooth, organic, no hard edges                                               | Ambient float, breathing, Ken Burns, anything that loops. `.inOut` for yoyo motion                                                           |
-| `circ`               | Circular acceleration (starts very fast, ends very gentle or vice versa)     | Camera moves, scene transitions, orbital motion                                                                                              |
-| `steps(N)`           | Discrete N-step jumps, no interpolation                                      | Typing effects, cursor blink, counter ticks, retro/digital aesthetics                                                                        |
+| `elastic(amp, freq)` | Spring bounce. amp=magnitude, freq=oscillation speed                         | Same register rule; the baked spring (below) is the physical version                                                                          |
+| `bounce`             | Ball-drop bouncing                                                           | Physical-comedy register only (something literally dropping)                                                                                  |
+| `expo`               | Extreme acceleration curve (much steeper than power4)                        | Premium/luxury reveals, dramatic entrances                                                                                                    |
+| `sine`               | Smooth, organic, no hard edges                                               | Ambient float, breathing, Ken Burns, anything that loops. `.inOut` for yoyo motion                                                            |
+| `circ`               | Circular acceleration (starts very fast, ends very gentle or vice versa)     | Camera moves, scene transitions, orbital motion                                                                                               |
+| `steps(N)`           | Discrete N-step jumps, no interpolation                                      | Typing effects, cursor blink, counter ticks, retro/digital aesthetics                                                                         |
 
-**Mood mapping:** Match easing character to the beat's emotional content. Smooth/organic easings (`sine`, `power1`) feel contemplative and drifting. Aggressive deceleration (`power4.out`, `expo.out`) feels snappy and confident. Spring overshoot (`back.out`) feels bouncy and physical — but bouncy is a register, not an emphasis tool; reach for it only when the brief's register is playful or physical. The register recorded in `frame.md` should guide which character fits — not a formula.
+**Mood mapping:** Match easing character to the beat's emotional content. Smooth/organic easings (`sine`, `power1`) feel contemplative and drifting. Aggressive deceleration (`power4.out`, `expo.out`) feels snappy and confident. Spring overshoot (`back.out`) feels bouncy and physical — but bouncy is a register, not an emphasis tool; reach for it only when the brief's register is playful or physical. The video's register should guide which character fits — not a formula.
 
 ## Defaults
 
@@ -116,17 +116,17 @@ tl.fromTo(
 );
 ```
 
-| dampingFraction   | overshoot       | register                                                                                                                                           |
-| ----------------- | --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **1.0 (default)** | none (monotone) | The house settle — the exact curve `power3.out` approximates. Product / enterprise / serious tone.                                                 |
-| 0.80–0.85         | ~1–1.5%         | "Alive, not bouncy" — the iOS system default register. The overshoot is felt, not seen.                                                            |
+| dampingFraction   | overshoot       | register                                                                                                                                               |
+| ----------------- | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **1.0 (default)** | none (monotone) | The house settle — the exact curve `power3.out` approximates. Product / enterprise / serious tone.                                                     |
+| 0.80–0.85         | ~1–1.5%         | "Alive, not bouncy" — the iOS system default register. The overshoot is felt, not seen.                                                                |
 | 0.60–0.70         | ~5–10%          | Playful register, by choice (same rule as `back.out`, which this replaces — a spring's second-order settle reads physical where `back` reads cartoon). |
-| < 0.55            | > 12%           | Don't. Cartoon-wobble territory.                                                                                                                   |
+| < 0.55            | > 12%           | Don't. Cartoon-wobble territory.                                                                                                                       |
 
-| response  | duration (ζ=1) | feel                                                         |
-| --------- | -------------- | ------------------------------------------------------------ |
-| 0.25–0.35 | 0.37–0.51s     | tight snap — chips, small UI                                 |
-| 0.35–0.50 | 0.51–0.74s     | standard entrance                                            |
+| response  | duration (ζ=1) | feel                                                                                                                |
+| --------- | -------------- | ------------------------------------------------------------------------------------------------------------------- |
+| 0.25–0.35 | 0.37–0.51s     | tight snap — chips, small UI                                                                                        |
+| 0.35–0.50 | 0.51–0.74s     | standard entrance                                                                                                   |
 | 0.50–0.70 | 0.74–1.03s     | weighted hero landing — when the shot opens on it, start it early so the subject is seen within about half a second |
 
 Craft notes:

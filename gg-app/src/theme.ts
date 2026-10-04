@@ -55,6 +55,10 @@ export const theme = {
   // GG Coder blue dot and the greener `info` teal — the color IS the only
   // signal that a reply is Ken's, not GG Coder's.
   ken: "var(--ken)",
+
+  // Critters (sub-agents, compaction): pink while a critter is busy, so its
+  // rows read apart from the periwinkle hooks and the green "done" state.
+  critter: "var(--critter)",
 } as const;
 
 // User-message chip background — mirrors USER_MESSAGE_BACKGROUND in the TUI.

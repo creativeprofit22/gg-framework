@@ -181,6 +181,21 @@ export function getSupportedThinkingLevels(
   return levels.slice(0, maxIndex + 1);
 }
 
+/**
+ * The lowest effort `model` accepts — the first rung of its ladder, never
+ * "off". Used for background work (compaction summaries, `model: fast`
+ * agents) that runs on the active model but doesn't need deep reasoning.
+ * Undefined only when the model cannot reason at all, since sending it any
+ * effort would be rejected.
+ */
+export function getLowestThinkingLevel(
+  provider: Provider,
+  model: string,
+): ThinkingLevel | undefined {
+  if (getModel(model)?.supportsThinking === false) return undefined;
+  return getSupportedThinkingLevels(provider, model)[0];
+}
+
 export function isThinkingLevelSupported(
   provider: Provider,
   model: string,

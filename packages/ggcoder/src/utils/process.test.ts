@@ -9,8 +9,10 @@ import {
   DEFAULT_POSIX_TERM_GRACE_MS,
   killProcessTree,
   killProcessTreeAsync,
+  listDescendantPids,
   reapProcessWrapper,
   resolveWindowsTaskkillPath,
+  signalDescendants,
 } from "./process.js";
 
 function createKiller(): {
@@ -1112,5 +1114,45 @@ describe("killProcessTreeAsync on Windows", () => {
       "Direct PID cleanup fallback failed",
       expect.objectContaining({ pid: "555", error: "fallback blocked" }),
     );
+  });
+});
+
+describe("listDescendantPids / signalDescendants", () => {
+  // 1 ─ 10 ─ 11 ─ 12, 10 ─ 13; 20 is unrelated; 30 is its own parent.
+  const table: Array<[number, number]> = [
+    [10, 1],
+    [11, 10],
+    [12, 11],
+    [13, 10],
+    [20, 1],
+    [30, 30],
+  ];
+  const readTable = () => table;
+
+  it("returns every descendant but never the root or unrelated processes", () => {
+    expect(listDescendantPids(10, { platform: "darwin", readTable }).sort()).toEqual([11, 12, 13]);
+    expect(listDescendantPids(12, { platform: "linux", readTable })).toEqual([]);
+    expect(listDescendantPids(30, { platform: "linux", readTable })).toEqual([]);
+  });
+
+  it("is a no-op on Windows", () => {
+    expect(listDescendantPids(10, { platform: "win32", readTable })).toEqual([]);
+  });
+
+  it("signals the descendants and spares the root", () => {
+    const kill = vi.fn();
+    expect(signalDescendants(10, "SIGTERM", { platform: "darwin", readTable, kill })).toBe(3);
+    expect(kill).not.toHaveBeenCalledWith(10, expect.anything());
+    expect(kill).toHaveBeenCalledWith(12, "SIGTERM");
+  });
+
+  it.skipIf(process.platform === "win32")("finds a real child of this process", async () => {
+    const { spawn } = await import("node:child_process");
+    const child = spawn("sleep", ["5"]);
+    try {
+      expect(listDescendantPids(process.pid)).toContain(child.pid);
+    } finally {
+      child.kill("SIGKILL");
+    }
   });
 });

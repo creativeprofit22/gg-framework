@@ -36,3 +36,4 @@ overrides:
 
 patchedDependencies:
   metal-fx@2.0.10: patches/metal-fx@2.0.10.patch
+  hyperframes@0.8.82: patches/hyperframes@0.8.82.patch

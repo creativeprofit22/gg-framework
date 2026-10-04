@@ -150,7 +150,7 @@ describe("GG App session asynchronous diagnostics", () => {
     }
   }, 30_000);
 
-  it("returns the real write before diagnostics and checks errors before allowing completion", async () => {
+  it("returns the real write before diagnostics and sends real errors back before completion", async () => {
     const events: string[] = [];
     internal.eventBus.on("hook_armed", (event) =>
       events.push(`armed:${String(event.kind)}:${String(event.armed)}`),
@@ -168,7 +168,7 @@ describe("GG App session asynchronous diagnostics", () => {
     const followUp = await internal.getHookFollowUpMessages();
     expect(JSON.stringify(followUp)).toContain("Diagnostics in a.ts");
     expect(internal.lspManager.getLatestOutcome("a.ts")?.kind).toBe("diagnostics");
-    expect(events).not.toContain("hook:verification");
+    expect(events.filter((event) => event.startsWith("hook:"))).toEqual([]);
     expect(JSON.stringify(followUp)).not.toContain("Verification gate:");
     expect(diagnosticNotices).toHaveLength(1);
     expect(diagnosticNotices[0]).toContain("Diagnostics in a.ts");

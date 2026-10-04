@@ -18,9 +18,12 @@ const keyOf = (a: PendingAttachment): string => String(a.id);
 export function AttachmentBar({
   attachments,
   onRemove,
+  onOpenImage,
 }: {
   attachments: PendingAttachment[];
   onRemove: (id: number) => void;
+  /** Open an image chip's preview (a data URL) in the default image viewer. */
+  onOpenImage: (previewUrl: string) => void;
 }): React.ReactElement | null {
   const shown = usePresenceList(attachments, keyOf, EXIT_MS);
   const empty = shown.length === 0;
@@ -42,7 +45,14 @@ export function AttachmentBar({
           inert={leaving}
         >
           {a.previewUrl ? (
-            <img className="attach-thumb" src={a.previewUrl} alt={a.name} />
+            <button
+              type="button"
+              className="attach-thumb-open"
+              aria-label={`Open ${a.name}`}
+              onClick={() => a.previewUrl && onOpenImage(a.previewUrl)}
+            >
+              <img className="attach-thumb" src={a.previewUrl} alt="" />
+            </button>
           ) : (
             <span className="attach-icon" style={{ color: theme.textMuted }}>
               {a.kind === "video" ? <FilmStripIcon size={16} /> : <FileTextIcon size={16} />}

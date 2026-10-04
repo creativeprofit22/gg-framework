@@ -1,9 +1,9 @@
 import { useSyncExternalStore } from "react";
 
 /**
- * Whether the home screen shows its animated background (the dithered waves).
+ * Whether the home screen shows its animated background (the beach scenery).
  * On by default; the choice is stored per machine, like the sound setting.
- * Off leaves the plain window background and loads none of the 3D code.
+ * Off leaves the plain window background and a random critter terrain.
  *
  * Kept as a small external store so every mounted reader updates at once,
  * including other windows (via the `storage` event).

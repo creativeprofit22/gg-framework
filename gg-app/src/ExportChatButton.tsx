@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState } from "react";
-import { theme } from "./theme";
 
 interface Props {
   /**
@@ -13,11 +12,12 @@ interface Props {
 }
 
 /**
- * "Export chat" pill, floated in the bottom-right of the transcript viewport.
+ * "Export chat" pill, floated in the top-right of the transcript viewport
+ * (the bottom edge belongs to the scroll-to-bottom controls).
  *
  * Hover-revealed rather than always-on: a permanent control in the corner of
  * the reading surface competes with the conversation for attention every
- * second the user is just reading. It fades + lifts in on hover of the chat
+ * second the user is just reading. It fades + drops in on hover of the chat
  * area and back out on leave.
  *
  * The button tracks hover of its parent (the chat area) itself, so the reveal
@@ -67,7 +67,7 @@ export function ExportChatButton({ visible: pinned, busy, onExport }: Props): Re
         strokeLinecap="round"
         strokeLinejoin="round"
         aria-hidden="true"
-        style={{ display: "block", color: theme.textMuted }}
+        style={{ display: "block" }}
       >
         <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
         <polyline points="7 10 12 15 17 10" />

@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { AgentDefinition } from "../core/agents.js";
+import { getSupportedThinkingLevels } from "../core/thinking-level.js";
 import {
   renderAgentRoster,
   resolveAgentDefinition,
   selectSubAgent,
+  spawnedTasks,
   subAgentCacheKey,
 } from "./subagent-shared.js";
 
@@ -17,37 +19,89 @@ function agent(overrides: Partial<AgentDefinition> & { name: string }): AgentDef
   };
 }
 
+describe("spawnedTasks", () => {
+  it.each([
+    [
+      "a batch call",
+      {
+        tasks: [
+          { task_name: "a", task: "one" },
+          { task_name: "b", task: "two", agent: "owl" },
+        ],
+      },
+      [
+        { task_name: "a", task: "one" },
+        { task_name: "b", task: "two", agent: "owl" },
+      ],
+    ],
+    [
+      "a call saved before batch launch",
+      { task_name: "scan", task: "inspect", agent: "owl" },
+      [{ task_name: "scan", task: "inspect", agent: "owl" }],
+    ],
+    ["malformed args", null, [{}]],
+    ["an empty task list", { tasks: [] }, [{}]],
+    ["non-string fields", { tasks: [{ task_name: 7, task: "x" }, "junk"] }, [{ task: "x" }]],
+  ])("reads %s", (_label, args, expected) => {
+    expect(spawnedTasks(args)).toEqual(expected);
+  });
+});
+
 describe("selectSubAgent", () => {
-  it("keeps shell-capable agents on the parent model", () => {
-    const shellAgent = agent({ name: "worker", tools: ["read", "bash"], model: "inherit" });
-
-    expect(selectSubAgent([shellAgent], "worker", "openai", "gpt-6.1-sol").model).toBe(
+  it.each([
+    ["inherit", agent({ name: "worker", tools: ["read", "bash"], model: "inherit" })],
+    ["no model policy", agent({ name: "researcher", tools: ["read", "grep", "web_fetch"] })],
+    ["legacy fast", agent({ name: "owl", model: "fast" })],
+  ])("keeps a %s agent on the parent model", (_label, definition) => {
+    // Regression: `fast` (and, before that, inferred read-only agents) were
+    // silently routed to a weaker sibling model (Haiku, Luna, flash-lite).
+    expect(selectSubAgent([definition], definition.name, "openai", "gpt-6.1-sol").model).toBe(
       "gpt-6.1-sol",
     );
   });
 
-  it("keeps a read-only agent on the parent model unless it asks for fast", () => {
-    // Regression: read-only agents were inferred to be cheap and silently
-    // routed to the provider's low tier, with no way to override it.
-    const readOnly = agent({ name: "researcher", tools: ["read", "grep", "web_fetch"] });
+  it.each([
+    ["anthropic", "claude-opus-5-5"],
+    ["openai", "gpt-6.1-sol"],
+    ["gemini", "gemini-3.8-flash"],
+    ["glm", "glm-5.3"],
+    ["deepseek", "deepseek-v4-pro"],
+  ] as const)(
+    "runs every %s %s sub-agent at the model's lowest thinking level, never off",
+    (provider, parentModel) => {
+      const lowest = getSupportedThinkingLevels(provider, parentModel)[0];
+      const agents = [
+        agent({ name: "worker", tools: ["read", "bash"], model: "inherit" }),
+        agent({ name: "researcher" }),
+      ];
 
-    expect(selectSubAgent([readOnly], "researcher", "openai", "gpt-6.1-sol").model).toBe(
-      "gpt-6.1-sol",
-    );
+      expect(lowest).toBeDefined();
+      for (const name of ["worker", "researcher", undefined]) {
+        expect(selectSubAgent(agents, name, provider, parentModel).thinkingLevel, name).toBe(
+          lowest,
+        );
+      }
+    },
+  );
+
+  it("gives a sub-agent on a model that cannot reason no thinking level", () => {
+    expect(
+      selectSubAgent([], undefined, "huggingface", "Qwen/Qwen3-Coder-480B-A35B-Instruct")
+        .thinkingLevel,
+    ).toBeUndefined();
   });
 
-  it("downgrades only when the agent declares model: fast", () => {
-    const fast = agent({ name: "owl", model: "fast" });
-
-    expect(selectSubAgent([fast], "owl", "openai", "gpt-6.1-sol").model).not.toBe("gpt-6.1-sol");
-  });
-
-  it("honours an explicit model id", () => {
+  it("honours an explicit model id, at that model's lowest thinking level", () => {
     const pinned = agent({ name: "pinned", model: "claude-haiku-4-5" });
+    const haikuLowest = getSupportedThinkingLevels("anthropic", "claude-haiku-4-5")[0];
+    // Haiku's ladder differs from Opus's, so this proves the rung follows the
+    // model the child runs on, not the parent.
+    expect(haikuLowest).not.toBe(getSupportedThinkingLevels("anthropic", "claude-opus-5-5")[0]);
 
-    expect(selectSubAgent([pinned], "pinned", "anthropic", "claude-opus-5-5").model).toBe(
-      "claude-haiku-4-5",
-    );
+    expect(selectSubAgent([pinned], "pinned", "anthropic", "claude-opus-5-5")).toMatchObject({
+      model: "claude-haiku-4-5",
+      thinkingLevel: haikuLowest,
+    });
   });
 
   it("falls back to the parent model for an unnamed agent", () => {

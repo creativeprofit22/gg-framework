@@ -16,7 +16,6 @@ export type PhaseLifecycleSignal =
   | { type: "plan-submitted" }
   | { type: "plan-approved"; approvalSource: "user" | "agent" }
   | { type: "implementation-run-started" }
-  | { type: "ideal-review-started" }
   | { type: "autopilot-review-started" }
   | { type: "autopilot-human"; reason: string }
   | { type: "tool-failed"; toolName: string; reason?: string }
@@ -154,7 +153,6 @@ export function mapPhaseLifecycleSignal(
             kind: "attention-implementation-resolved",
           }
         : null;
-    case "ideal-review-started":
     case "autopilot-review-started":
       return null;
     case "autopilot-human":

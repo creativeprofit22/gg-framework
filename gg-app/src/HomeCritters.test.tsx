@@ -4,7 +4,14 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite
 import { HomeCritters } from "./HomeCritters";
 import { homeRoster } from "./home-roster";
 import { CRITTERS, renderCritterFrame } from "./critter-sprites";
-import { BIOMES } from "./critter-terrain";
+import { BIOMES, type Biome } from "./critter-terrain";
+
+function biome(id: string): Biome {
+  const found = BIOMES.find((b) => b.id === id);
+  if (!found) throw new Error(`no ${id} terrain`);
+  return found;
+}
+const MEADOW = biome("meadow");
 
 // jsdom has no Web Animations API; the floor only needs the calls to exist.
 beforeAll(() => {
@@ -44,12 +51,11 @@ describe("homeRoster", () => {
 });
 
 describe("HomeCritters", () => {
-  it("lays down a terrain, and a different one on the next visit", () => {
-    const first = render(<HomeCritters random={() => 0} />);
-    const firstId = terrainOf(first.container);
-    expect(BIOMES.map((b) => b.id)).toContain(firstId);
+  it.each(BIOMES.map((b) => [b.id, b] as const))("lays down the %s it's given", (id, given) => {
+    const { container, unmount } = render(<HomeCritters biome={given} />);
+    expect(terrainOf(container)).toBe(id);
     // Inside the critter lane (so it rises with it), ground and props both drawn.
-    const terrain = first.container.querySelector<HTMLElement>(".critter-lane > .critter-terrain");
+    const terrain = container.querySelector<HTMLElement>(".critter-lane > .critter-terrain");
     const ground = terrain?.querySelector<HTMLElement>(".terrain-land > .terrain-ground");
     expect(ground?.style.backgroundImage).toContain("data:image/svg+xml");
     const props = terrain?.querySelectorAll<HTMLElement>(".terrain-prop") ?? [];
@@ -57,16 +63,11 @@ describe("HomeCritters", () => {
     for (const prop of props) {
       expect(prop.style.getPropertyValue("--img")).toContain("data:image/svg+xml");
     }
-    first.unmount();
-
-    // Same roll again: still a different terrain, because the last one is excluded.
-    const second = render(<HomeCritters random={() => 0} />);
-    expect(terrainOf(second.container)).not.toBe(firstId);
-    second.unmount();
+    unmount();
   });
 
   it("brings out the whole roster, one of each critter", async () => {
-    const { container } = render(<HomeCritters />);
+    const { container } = render(<HomeCritters biome={MEADOW} />);
     expect(sprites(container)).toHaveLength(0);
 
     await act(async () => {
@@ -79,7 +80,7 @@ describe("HomeCritters", () => {
   });
 
   it("keeps everyone out playing without thinking pauses, and cleans up on unmount", async () => {
-    const { container, unmount } = render(<HomeCritters />);
+    const { container, unmount } = render(<HomeCritters biome={MEADOW} />);
     await act(async () => {
       await vi.advanceTimersByTimeAsync(40000);
     });
@@ -90,7 +91,7 @@ describe("HomeCritters", () => {
   });
 
   it("shows just the critter's name on hover", async () => {
-    const { container } = render(<HomeCritters />);
+    const { container } = render(<HomeCritters biome={MEADOW} />);
     await act(async () => {
       await vi.advanceTimersByTimeAsync(6000);
     });

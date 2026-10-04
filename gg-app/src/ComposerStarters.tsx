@@ -1,6 +1,7 @@
 import { theme } from "./theme";
 
-export type ComposerStarter = Readonly<{ label: string; prompt: string }>;
+/** `hint`, when present, is a one-line tooltip on what the starter is for. */
+export type ComposerStarter = Readonly<{ label: string; prompt: string; hint?: string }>;
 
 /**
  * A row of starting points for an empty conversation. Picking one hands its
@@ -23,6 +24,7 @@ export function ComposerStarters({
           type="button"
           className="btn btn-sm btn-ghost motion-starter"
           style={{ color: theme.text }}
+          title={starter.hint}
           onClick={() => onPick(starter.prompt)}
         >
           {starter.label}

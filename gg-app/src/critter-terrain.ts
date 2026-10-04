@@ -519,7 +519,7 @@ const SNOW: Biome = {
 export const BIOMES: readonly Biome[] = [MEADOW, BEACH, DESERT, SPACE, SNOW];
 
 /** Seeded PRNG (mulberry32), so a biome's speckles are the same every time. */
-function seeded(seed: number): () => number {
+export function seeded(seed: number): () => number {
   let a = seed >>> 0;
   return () => {
     a = (a + 0x6d2b79f5) >>> 0;

@@ -16,6 +16,7 @@ import type * as EventsModule from "./useAgentEvents";
 import type * as ProgressModule from "./useProgress";
 import type * as ToastModule from "./toast";
 import { Toaster } from "./Toaster";
+import { HOOK_LINES } from "./HookNotice";
 import { progressTransition } from "./test-fixtures/progress-transition";
 import { playSound } from "./sounds";
 import { MENTOR_HANDLE } from "./brand";
@@ -157,7 +158,6 @@ vi.mock("./useProgress", async (importOriginal) => {
 vi.mock("./useAgentEvents", async (importOriginal) => {
   const actual = await importOriginal<typeof EventsModule>();
   return {
-    HOOK_PRESENTATION: actual.HOOK_PRESENTATION,
     useAgentEvents: (deps: Parameters<typeof EventsModule.useAgentEvents>[0]) => {
       const real = actual.useAgentEvents(deps);
       const { planReviewPathRef, setPlanReview } = deps;
@@ -1074,7 +1074,14 @@ describe("pane-local opening (mocked native transport)", () => {
       expect(within(view.container).getByText("Current stored prompt")).toBeTruthy();
       end("current-transcript");
       begin("transcript-assertions");
-      expect(within(view.container).getAllByText("Current live answer")).toHaveLength(1);
+      // Still streaming, so its words sit in separate fade-in spans: match the
+      // assistant row's text rather than a single text node.
+      expect(
+        Array.from(
+          view.container.querySelectorAll(".assistant-msg .assistant-text"),
+          (node) => node.textContent,
+        ).filter((text) => text === "Current live answer"),
+      ).toHaveLength(1);
       expect(screen.queryByText("Stale stored prompt")).toBeNull();
       expect(screen.queryByText("Stale live answer")).toBeNull();
       end("transcript-assertions");
@@ -1340,7 +1347,15 @@ describe("completed verification task (mocked native transport)", () => {
       expect(screen.getAllByText(completedVerificationTask.finalAnswer)).toHaveLength(1);
       expect(screen.queryByText("Initial implementation draft.")).toBeNull();
       expect(screen.queryByText("Verification completed draft.")).toBeNull();
-      expect(screen.getAllByText(/Hook engaged/)).toHaveLength(2);
+      // Both verification hooks announce themselves as critter notices: the
+      // recheck first, then the plain verification run.
+      const hookNotices = Array.from(
+        document.querySelectorAll(".subagents-compact .subagents-compact-text"),
+        (node) => node.textContent ?? "",
+      );
+      expect(hookNotices).toHaveLength(2);
+      expect(HOOK_LINES.recheck).toContain(hookNotices[0]);
+      expect(HOOK_LINES.verification).toContain(hookNotices[1]);
 
       view.unmount();
       vi.mocked(pane.listHistory).mockResolvedValue(history);
@@ -4925,7 +4940,7 @@ describe("AgentPane lifecycle", () => {
     );
     expect(await screen.findByText(question.questions[0].question)).toBeTruthy();
     expect(pane.answerAskUser).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole("button", { name: "1Approve and start task" }));
+    fireEvent.click(screen.getByRole("button", { name: "Approve and start task" }));
     await waitFor(() =>
       expect(pane.answerAskUser).toHaveBeenCalledExactlyOnceWith("ask-1", "answer", {
         "specialist-approval": "approved-snapshot",
@@ -5837,7 +5852,13 @@ describe("AgentPane lifecycle", () => {
       emit("ready", { running: false, kenState: { ...ken, activeRunId: ken.runId } });
       emit("ken_text_delta", { ken, text: "reconnected mentor output" });
     });
-    expect(await screen.findByText("reconnected mentor output")).toBeTruthy();
+    // Ken's reply is still streaming, so its words sit in separate fade-in
+    // spans: match the mentor row's text rather than a single text node.
+    await waitFor(() =>
+      expect(document.querySelector(".ken-msg .assistant-text")?.textContent).toBe(
+        "reconnected mentor output",
+      ),
+    );
     fireEvent.click(screen.getByRole("button", { name: "esc to cancel" }));
     expect(pane.cancelKen).toHaveBeenCalledWith(ken);
   });

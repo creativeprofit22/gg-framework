@@ -3,6 +3,7 @@
 // Only moves that read at real size (28px) live here: a prop, an icon or a
 // big obvious motion. Subtle posture-only fidgets were cut.
 
+import { discard } from "./critter-fx";
 import { PRIO } from "./critter-types";
 import type { Critter, CritterApi, Ok, Variant } from "./critter-types";
 
@@ -176,13 +177,13 @@ export function makeCritterIdle(api: CritterApi): CritterIdle {
       const caught = chance(0.7);
       if (caught) {
         buzz.cancel();
-        fly.node.remove();
+        discard(fly.node);
       }
       await play(tongue, [{ transform: "scaleX(1)" }, { transform: "scaleX(0)" }], {
         duration: 160,
         fill: "forwards",
       });
-      tongue.remove();
+      discard(tongue);
       if (!ok()) return;
       if (caught) {
         fx.say(c, pick(["gulp", "*munch*", "yum"]), 800, true);
@@ -207,7 +208,7 @@ export function makeCritterIdle(api: CritterApi): CritterIdle {
       fx.say(c, "beep", 600, true);
       const beam = layer(c, `critter-scan${side(c)}`);
       await wait(1200);
-      beam.remove();
+      discard(beam);
       if (ok()) fx.say(c, pick(["boop", "boop?", "all clear"]), 700, true);
     },
     async wizard(c, ok) {
@@ -248,7 +249,7 @@ export function makeCritterIdle(api: CritterApi): CritterIdle {
           { duration: 380 },
         ),
       ]);
-      slash.remove();
+      discard(slash);
       if (chance(0.5)) fx.say(c, pick(["hah!", "en garde", "for the repo!"]), 900);
     },
     async builder(c, ok) {

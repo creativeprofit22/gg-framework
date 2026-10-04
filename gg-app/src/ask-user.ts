@@ -65,6 +65,56 @@ export function isExpiredAskError(error: unknown): boolean {
 }
 
 /**
+ * Record answers for the band `itemId`. When that completes it, the answered
+ * band leaves its spot and is re-added at the END of the conversation under a
+ * fresh id, so the answer lands below everything the agent said meanwhile, the
+ * way a sent prompt does (it rendered where the question was asked, often far
+ * above the view, so it looked as if nothing was sent). The fresh id makes it a
+ * new row: it dissolves in like any other. `answeredLive` tells the band it
+ * mounted already answered because it was answered just now (its shimmer marks
+ * that), not because it was restored. Returns the complete answers when this
+ * call completed the band, so the caller can send them.
+ */
+export function answerAskItem<
+  T extends {
+    kind: string;
+    id: number;
+    sent?: boolean;
+    answers?: AskAnswers;
+    answeredLive?: boolean;
+    prompt?: unknown;
+  },
+>(
+  items: readonly T[],
+  itemId: number,
+  delta: AskAnswers,
+  questionsOf: (item: T) => readonly AskQuestion[],
+  nextId: () => number,
+): { items: T[]; completed: AskAnswers | null } {
+  const index = items.findIndex((it) => it.kind === "ask" && it.id === itemId && !it.sent);
+  const item = items[index];
+  if (index < 0 || item === undefined) return { items: [...items], completed: null };
+  const { answers, complete } = mergeAskAnswers(item.answers, delta, questionsOf(item));
+  if (!complete) {
+    const next = [...items];
+    next[index] = { ...item, answers };
+    return { items: next, completed: null };
+  }
+  const rest = items.filter((_, i) => i !== index);
+  return {
+    items: [...rest, { ...item, id: nextId(), answers, sent: true, answeredLive: true }],
+    completed: answers,
+  };
+}
+
+/** The oldest question band still waiting on an answer, if any. */
+export function firstOpenAskId<
+  T extends { kind: string; id: number; sent?: boolean; cancelled?: boolean },
+>(items: readonly T[]): number | null {
+  return items.find((it) => it.kind === "ask" && !it.sent && !it.cancelled)?.id ?? null;
+}
+
+/**
  * Drop the question bands a freshly sent prompt supersedes.
  *
  * Sending a message of your own IS the answer: the sidecar releases the parked
@@ -132,4 +182,38 @@ export function reconcilePendingAsks(
     if (!seen.has(prompt.id)) result.push({ kind: "ask", id: nextId(), prompt });
   }
   return result;
+}
+
+type AskItemLike = {
+  kind: string;
+  prompt?: unknown;
+  sent?: boolean;
+  cancelled?: boolean;
+};
+
+/** An unresolved question band whose prompt id is in `ids`. */
+function isOpenAsk(it: AskItemLike, ids: ReadonlySet<string>): boolean {
+  if (it.kind !== "ask" || it.sent === true || it.cancelled === true) return false;
+  const prompt = it.prompt;
+  if (typeof prompt !== "object" || prompt === null) return false;
+  const id = (prompt as { id?: unknown }).id;
+  return typeof id === "string" && ids.has(id);
+}
+
+/**
+ * The question's soft deadline passed: the agent continued on its best guess,
+ * but the band stays answerable — a later answer is sent as a message.
+ */
+export function markAskDeferred<T extends AskItemLike>(items: readonly T[], promptId: string): T[] {
+  const ids = new Set([promptId]);
+  return items.map((it) => (isOpenAsk(it, ids) ? { ...it, deferred: true } : it));
+}
+
+/**
+ * The sidecar closed questions nobody is waiting on any more (a newer question
+ * or a new session superseded them). Their buttons would reach no one.
+ */
+export function closeAsks<T extends AskItemLike>(items: readonly T[], ids: readonly string[]): T[] {
+  const closed = new Set(ids);
+  return items.map((it) => (isOpenAsk(it, closed) ? { ...it, cancelled: true } : it));
 }

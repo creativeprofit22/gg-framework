@@ -95,8 +95,10 @@ const MP4: PendingAttachment = {
 
 describe("AttachmentBar exit animation", () => {
   it("collapses a removed chip before unmounting it", () => {
-    const { rerender } = render(<AttachmentBar attachments={[PNG, MP4]} onRemove={vi.fn()} />);
-    rerender(<AttachmentBar attachments={[MP4]} onRemove={vi.fn()} />);
+    const { rerender } = render(
+      <AttachmentBar attachments={[PNG, MP4]} onRemove={vi.fn()} onOpenImage={vi.fn()} />,
+    );
+    rerender(<AttachmentBar attachments={[MP4]} onRemove={vi.fn()} onOpenImage={vi.fn()} />);
 
     const leaving = screen.getByTitle("shot.png");
     expect(leaving.className).toContain("leaving");
@@ -109,8 +111,10 @@ describe("AttachmentBar exit animation", () => {
   });
 
   it("folds the whole bar shut when the last chip goes (e.g. on send)", () => {
-    const { rerender } = render(<AttachmentBar attachments={[PNG]} onRemove={vi.fn()} />);
-    rerender(<AttachmentBar attachments={[]} onRemove={vi.fn()} />);
+    const { rerender } = render(
+      <AttachmentBar attachments={[PNG]} onRemove={vi.fn()} onOpenImage={vi.fn()} />,
+    );
+    rerender(<AttachmentBar attachments={[]} onRemove={vi.fn()} onOpenImage={vi.fn()} />);
     expect(document.querySelector(".attach-bar")?.className).toContain("leaving");
 
     act(() => {
@@ -121,11 +125,23 @@ describe("AttachmentBar exit animation", () => {
 
   it("does not let a leaving chip's remove button fire again", () => {
     const onRemove = vi.fn();
-    const { rerender } = render(<AttachmentBar attachments={[PNG, MP4]} onRemove={onRemove} />);
-    rerender(<AttachmentBar attachments={[MP4]} onRemove={onRemove} />);
+    const { rerender } = render(
+      <AttachmentBar attachments={[PNG, MP4]} onRemove={onRemove} onOpenImage={vi.fn()} />,
+    );
+    rerender(<AttachmentBar attachments={[MP4]} onRemove={onRemove} onOpenImage={vi.fn()} />);
     expect(screen.getByTitle("shot.png").hasAttribute("inert")).toBe(true);
     fireEvent.click(screen.getByLabelText("Remove clip.mp4"));
     expect(onRemove).toHaveBeenCalledWith(2);
+  });
+});
+
+describe("AttachmentBar image chips", () => {
+  it("opens an image chip's preview when its thumbnail is clicked", () => {
+    const onOpenImage = vi.fn();
+    render(<AttachmentBar attachments={[PNG, MP4]} onRemove={vi.fn()} onOpenImage={onOpenImage} />);
+    fireEvent.click(screen.getByLabelText("Open shot.png"));
+    expect(onOpenImage).toHaveBeenCalledWith(PNG.previewUrl);
+    expect(screen.queryByLabelText("Open clip.mp4")).toBeNull();
   });
 });
 

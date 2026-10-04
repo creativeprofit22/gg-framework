@@ -1,5 +1,5 @@
 import type { PromptSegment } from "./agent";
-import type { HookKind } from "./useAgentEvents";
+import type { HookKind } from "./HookNotice";
 import type { SubAgentLine } from "./SubAgentFeed";
 
 export type Item =

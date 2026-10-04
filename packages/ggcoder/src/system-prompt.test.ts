@@ -382,7 +382,11 @@ describe("buildSystemPrompt", () => {
       "say what it does, not what it's called",
       "Read relevant files before changing them",
       "Re-read after formatters or other disk mutations",
-      "use editing tools, not shell writes",
+      "prefer editing tools over shell writes",
+      "Tool calls in one response run in order",
+      "send all the edits AND the check that verifies them in ONE response",
+      "asserts each target text matches exactly once before replacing",
+      "Use the edit tool for anything that needs judgment",
       "Preserve user work and existing conventions, exports, tests, and toolchains",
       "Investigate factual uncertainty yourself",
       "Ask only about unresolved requirements, permissions, material tradeoffs, or destructive actions",
@@ -587,10 +591,12 @@ describe("buildSystemPrompt", () => {
     console.info(`system prompt size measurements: ${JSON.stringify(measurements)}`);
 
     // Extreme workflow-only caps; response policy and safety floors are independently tested.
-    // Raised from 6_500 / 8_000 for the same no-card answer-first rule (~150 chars).
-    expect(measurements.normal.characters).toBeLessThan(6_650);
-    expect(measurements.planMode.characters).toBeLessThan(8_150);
-    expect(measurements.typescriptProjectContextToolsSkills.characters).toBeLessThan(10_000);
+    // Raised from 6_500 / 8_000 for the same no-card answer-first rule (~150 chars),
+    // then +400 for upstream 0.79's batched-edits rule (~360 chars) kept alongside the
+    // fork's longer response policy.
+    expect(measurements.normal.characters).toBeLessThan(7_050);
+    expect(measurements.planMode.characters).toBeLessThan(8_550);
+    expect(measurements.typescriptProjectContextToolsSkills.characters).toBeLessThan(10_400);
     expect(measurements.planMode.characters).toBeGreaterThan(measurements.normal.characters);
     expect(measurements.typescriptProjectContextToolsSkills.characters).toBeGreaterThan(
       measurements.normal.characters,
@@ -626,7 +632,8 @@ describe("buildSystemPrompt", () => {
     console.info(`system prompt audit: ${JSON.stringify(audit)}`);
 
     expect(audit.flags).toEqual([]);
-    expect(audit.size.characters).toBeLessThan(10_000);
+    // +400 for upstream 0.79's batched-edits rule; see the size measurements above.
+    expect(audit.size.characters).toBeLessThan(10_400);
     expect(prompt.match(/^## .+$/gm)).toEqual([
       "## How to Talk",
       "## How to Work",

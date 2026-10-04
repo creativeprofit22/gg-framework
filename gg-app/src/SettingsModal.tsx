@@ -17,6 +17,7 @@ import { formatBuildIdentity } from "./build-info";
 import { AzureConnectionSettings } from "./AzureConnectionSettings";
 import { AppearanceSettings } from "./AppearanceSettings";
 import { HomeBackgroundButton } from "./HomeBackgroundButton";
+import { KeepAwakeButton } from "./KeepAwakeButton";
 import { SettingsSection } from "./settings-section";
 
 // One sentence per section, shown as the card description on the Settings page
@@ -178,6 +179,14 @@ export function SettingsModal({ onClose, onSaved }: Props): React.ReactElement {
             <div className="modal-row">
               <SoundButton />
               <HomeBackgroundButton />
+            </div>
+          </SettingsSection>
+          <SettingsSection
+            title="Power"
+            description="Stop your computer sleeping mid-task. The screen can still turn off."
+          >
+            <div className="modal-row">
+              <KeepAwakeButton />
             </div>
           </SettingsSection>
           <Card embedded={embedded}>

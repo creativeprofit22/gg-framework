@@ -221,10 +221,6 @@ class FakePhaseSession implements BoundPhaseSession {
     return structuredClone(updated);
   }
 
-  setIdealReviewSuppressed(suppressed: boolean): void {
-    this.events.push(`ideal-review:${String(suppressed)}`);
-  }
-
   async prompt(text: string): Promise<void> {
     await this.assertPromptLease?.();
     this.promptCalls += 1;
@@ -282,7 +278,6 @@ function createApprovalLifecycle(
 interface FixtureOptions {
   mode?: "code" | "chat";
   busyState?: { running: boolean; autopilotActive: boolean; runLifecycleRunning: boolean };
-  autopilotEnabled?: boolean;
   failInitializeCount?: number;
   failContextCount?: number;
   failPromptCount?: number;
@@ -399,7 +394,6 @@ class ProductionPhaseFixture {
         this.events.push("events-bound");
         this.bindPaneEvents(session);
       },
-      autopilotEnabled: this.options.autopilotEnabled ?? false,
       broadcastNotesSnapshot: () => this.events.push("notes-fan-out"),
       broadcast: (type, data) => {
         this.events.push(type === "session_reset" ? "session-reset" : type);
@@ -977,7 +971,6 @@ describe("production launchBoundPhase orchestration", () => {
       "notes-fan-out",
       "session-replaced",
       "events-bound",
-      "ideal-review:false",
       "phase-state-reset",
       "session-reset",
       "plan-mode",
@@ -1658,9 +1651,7 @@ describe("production launchBoundPhase orchestration", () => {
     "keeps the launched phase linked through the %s approval checkpoint",
     async (approvalSource) => {
       const { repository, cwd } = await setup();
-      const fixture = new ProductionPhaseFixture(repository, cwd, {
-        autopilotEnabled: approvalSource === "Autopilot",
-      });
+      const fixture = new ProductionPhaseFixture(repository, cwd);
       await fixture.start();
       await fixture.promptSettled;
       const session = fixture.currentSession;

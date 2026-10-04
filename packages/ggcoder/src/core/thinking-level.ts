@@ -3,6 +3,7 @@
 export {
   clampThinkingLevel,
   getSupportedThinkingLevels,
+  getLowestThinkingLevel,
   isThinkingLevelSupported,
   getNextThinkingLevel,
   resolveInitialThinkingLevel,

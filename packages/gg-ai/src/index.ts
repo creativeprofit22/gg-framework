@@ -50,6 +50,7 @@ export type {
   StreamResponse,
   Usage,
   StreamOptions,
+  PreparedContext,
 } from "./types.js";
 
 // Classes
@@ -88,9 +89,14 @@ export { resolveToolSchema } from "./utils/zod-to-json-schema.js";
 // Provider request transforms (exposed for request-building + verification)
 export {
   clampProviderContextImages,
+  dropInvalidToolCalls,
+  isValidToolCallName,
+  toolCallNameRuleFor,
+  TOOL_CALL_NAME_RULES,
   toAnthropicMessages,
   toOpenAIMessages,
 } from "./providers/transform.js";
+export type { ToolCallNameRule } from "./providers/transform.js";
 
 // Cache pre-warming (Anthropic — fires a max_tokens:1 warm-up to prime the KV cache)
 export { prewarmAnthropicCache } from "./providers/anthropic.js";

@@ -3,6 +3,7 @@ import { z } from "zod";
 import {
   clampProviderContextImages,
   downgradeUnsupportedVideos,
+  providerImageDropCount,
   toAnthropicMessages,
   toAnthropicThinking,
   toAnthropicTools,
@@ -32,29 +33,72 @@ const MAX_TOKENS = 16_000;
 
 const image = (data: string) => ({ type: "image" as const, mediaType: "image/png", data });
 
+const sentImages = (messages: Message[]): string[] =>
+  messages.flatMap((message) => {
+    if (message.role === "user" && Array.isArray(message.content))
+      return message.content.flatMap((part) => (part.type === "image" ? [part.data] : []));
+    if (message.role === "tool")
+      return message.content.flatMap((result) =>
+        Array.isArray(result.content)
+          ? result.content.flatMap((part) => (part.type === "image" ? [part.data] : []))
+          : [],
+      );
+    return [];
+  });
+
 describe("provider image budgeting", () => {
+  // Two images over budget drop a whole batch: a third of the budget, at most 30.
   it.each([
-    ["anthropic", 90],
-    ["minimax", 90],
-    ["openai", 200],
-    ["gemini", 200],
-    ["openrouter", 90],
-    ["palsu", 5],
-  ] as const)("caps %s context at %i images", (provider, budget) => {
+    ["anthropic", 90, 62],
+    ["minimax", 90, 62],
+    ["openai", 200, 172],
+    ["gemini", 200, 172],
+    ["openrouter", 90, 62],
+    ["palsu", 5, 5],
+  ] as const)("caps %s context at %i images, keeping %i", (provider, budget, kept) => {
     const messages: Message[] = [
       {
         role: "user",
         content: Array.from({ length: budget + 2 }, (_, index) => image(String(index))),
       },
     ];
-    const result = clampProviderContextImages(messages, provider, true);
-    const user = result[0];
-    expect(user?.role).toBe("user");
-    expect(
-      user?.role === "user" && Array.isArray(user.content)
-        ? user.content.filter((part) => part.type === "image").length
-        : 0,
-    ).toBe(budget);
+    const result = sentImages(clampProviderContextImages(messages, provider, true));
+    expect(result).toHaveLength(kept);
+    expect(result.at(-1)).toBe(String(budget + 1));
+  });
+
+  it.each([
+    { name: "nothing within budget", count: 90, budget: 90, expected: 0 },
+    { name: "a whole batch for one image over", count: 91, budget: 90, expected: 30 },
+    { name: "the same batch up to its last image", count: 120, budget: 90, expected: 30 },
+    { name: "the next batch past it", count: 121, budget: 90, expected: 60 },
+    { name: "one at a time for tiny budgets", count: 7, budget: 2, expected: 5 },
+    { name: "never more than exist", count: 3, budget: 0, expected: 3 },
+  ])("drops $name", ({ count, budget, expected }) => {
+    expect(providerImageDropCount(count, budget)).toBe(expected);
+  });
+
+  it("keeps the sent conversation start identical while new images arrive", () => {
+    // A Motion session: every check adds screenshots to an already-full history.
+    const history: Message[] = Array.from({ length: 95 }, (_, index) => ({
+      role: "tool" as const,
+      content: [
+        { type: "tool_result" as const, toolCallId: `t${index}`, content: [image(`i${index}`)] },
+      ],
+    }));
+    const first = clampProviderContextImages(history, "anthropic", true);
+    for (let added = 1; added <= 25; added++) {
+      const longer: Message[] = [
+        ...history,
+        ...Array.from({ length: added }, (_, index) => ({
+          role: "user" as const,
+          content: [image(`new${index}`)],
+        })),
+      ];
+      const sent = clampProviderContextImages(longer, "anthropic", true);
+      expect(sent.slice(0, history.length)).toEqual(first);
+      expect(sentImages(sent).length).toBeLessThanOrEqual(90);
+    }
   });
 
   it("is a no-op while supported context is within budget", () => {

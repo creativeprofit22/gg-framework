@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createAskUserBridge, type AskUserPrompt } from "../core/ask-user.js";
+import { createAskUserBridge, withoutDeferral, type AskUserPrompt } from "../core/ask-user.js";
 import { createAskUserTool } from "./ask-user.js";
 
 /** The tool + bridge wired the way the sidecar wires them, minus the HTTP hop. */
@@ -318,6 +318,52 @@ describe("ask_user", () => {
       await vi.advanceTimersByTimeAsync(1001);
       await expect(result).resolves.toContain("did not answer");
       expect(onTimeout).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("stops blocking at the soft deadline rather than holding the turn forever", async () => {
+    vi.useFakeTimers();
+    try {
+      const onTimeout = vi.fn();
+      const bridge = createAskUserBridge({
+        broadcast: () => {},
+        onTimeout,
+        onLateAnswer: () => {},
+        timeoutMs: 1000,
+      });
+      const tool = createAskUserTool(bridge.park);
+      const result = tool.execute(
+        { questions: [{ id: "q", question: "Ship it?", kind: "confirm", detail: CONTEXT }] },
+        { signal: new AbortController().signal, toolCallId: "t1", onUpdate: () => {} } as never,
+      ) as Promise<string>;
+      await vi.advanceTimersByTimeAsync(1001);
+      await expect(result).resolves.toContain("No answer yet");
+      expect(onTimeout).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // Reviews that authorize side effects must never carry on past the deadline
+  // or accept a late answer: an unanswered approval is a refusal.
+  it("cancels an undeferrable question at the deadline and ignores a late answer", async () => {
+    vi.useFakeTimers();
+    try {
+      const onLateAnswer = vi.fn();
+      const broadcast = vi.fn<(prompt: AskUserPrompt) => void>();
+      const bridge = createAskUserBridge({ broadcast, onLateAnswer, timeoutMs: 1000 });
+      const result = withoutDeferral(bridge).park({
+        questions: [{ id: "q", question: "Create it?", kind: "confirm", detail: CONTEXT }],
+      });
+      await vi.advanceTimersByTimeAsync(1001);
+      await expect(result).resolves.toEqual({ action: "cancel" });
+      expect(bridge.deferredCount).toBe(0);
+      const prompt = broadcast.mock.calls[0]?.[0];
+      expect(prompt).toBeDefined();
+      if (prompt) bridge.settle(prompt.id, { action: "answer", answers: { q: "yes" } });
+      expect(onLateAnswer).not.toHaveBeenCalled();
     } finally {
       vi.useRealTimers();
     }

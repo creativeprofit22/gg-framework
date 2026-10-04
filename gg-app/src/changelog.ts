@@ -22,6 +22,58 @@ export interface ChangelogEntry {
 /** Newest first. Prepended by the `/release` flow. */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.79.0",
+    date: "2026-10-04",
+    items: [
+      "Your home screen is now a cozy campfire clearing in the pines, and it lives on your clock. Stars and an owl at `night`, mist and waking birds at dawn, sunbeams through the trees by day, then fireflies and bats at dusk. Every visit feels a little different.",
+      "Replies look finished from the very first letter. Bold, code and links render as they stream instead of flashing raw symbols, long chats stay light and snappy, and a floating pill appears to whisk you back down to `You have new chats` or straight to `You have a new question` the moment you scroll away.",
+      "Plan review got a glow up. Plans now open full window, laid out just like your chat, with a little critter crew cheering you on while you decide to accept, reject or send feedback.",
+      "Motion mode just learned sound and style. Your animations can now mark their own sound effects that stay locked to the action even when you retime it, plus real motion blur, music that cuts to your video on the beat, and `10` fresh animation pieces to build from.",
+      "Your agent got faster and cheaper. I cut the extra review passes that padded every turn, so answers land sooner and spend fewer tokens, and sign-ins and the Telegram bot no longer freeze on a flaky connection.",
+    ],
+  },
+  {
+    version: "0.78.0",
+    date: "2026-10-03",
+    items: [
+      "Your agent can now debug like a pro. The new `debug` tool pauses your Node program on a breakpoint, steps through it line by line, and peeks at live variables, so bugs get found by watching the code run instead of guessing.",
+      "Slow builds and test runs no longer get cut off. Anything still going after `2 minutes` slides into the background and keeps running while the agent carries on, and when you quit the app every background command shuts down with it, so nothing is left running behind your back.",
+      "Helper agents now have to meet the bar. The main agent can set checks up front, like a file must exist or a command must pass, and I verify each one from what the helper really did: `PASS`, `FAIL` or `UNVERIFIED`. And if a model isn't available on your plan, helpers and chat summaries quietly fall back to the one you're using instead of failing.",
+      "Fewer wasted turns. After an edit the agent now learns exactly which tests reach the file it touched, and when it fumbles a tool call it gets told the right name and fields so the very next try lands.",
+      "The cache heads-up above your chat box now glides open and folds away smoothly instead of popping in and out.",
+    ],
+  },
+  {
+    version: "0.77.0",
+    date: "2026-10-02",
+    items: [
+      "GG Coder just got a whole lot more personality. A fresh `app icon`, a little robot face that reacts to how each task went, and tiny critters that greet you on an empty chat, munch your old messages when the chat gets compacted, and narrate every safety check. Click one and it hops and says hi.",
+      "Never pay full price by surprise again. If you step away long enough for the AI's memory of your chat to go cold, a heads-up appears before you send, with a one-click `Compact first` so the next message stays cheap.",
+      "Your helper agents now come with proof. Every report carries a receipt of the files they really read and changed and the commands they really ran, so the main agent can spot claims that don't add up.",
+      "Interrupt the agent mid-command and it listens instantly. Send a new message while a tool runs and it stops right there and picks up your note, while file edits always finish cleanly so nothing is left half-written.",
+      "I tightened the safety net. Web pages and tool results that try to sneak orders to the agent now get flagged, plugin tools that report progress are no longer cut off early, and the guard against wiping your home folder now catches Windows paths like `C:\\Users` too.",
+    ],
+  },
+  {
+    version: "0.76.1",
+    date: "2026-10-02",
+    items: [
+      "Less waiting on your videos. I sped up `GG Motion` checks by letting up to `4` parts run at once, with the workload matched to your computer. You get back to creating sooner.",
+      "Long chats full of `screenshots` now make better use of what the AI already remembers. I changed how old images are tidied up, so each new picture doesn't keep forcing the AI to reread the same history. Less repeated work as you keep building.",
+    ],
+  },
+  {
+    version: "0.76.0",
+    date: "2026-10-02",
+    items: [
+      "Your laptop won't nap halfway through a big job anymore. A new `Keep computer awake` switch in Settings, under `Power`, keeps it working while the agent runs. Your screen can still turn off, and it's on by default.",
+      "A question you missed won't freeze the agent anymore. If you haven't answered after `10 minutes`, or `2 minutes` on `Autopilot`, it carries on with its best guess. The question stays on screen, and if you answer later, your answer still gets sent.",
+      "I added a safety net around risky commands. The agent now refuses to run git commands that would wipe your uncommitted work, scripts piped straight from the internet into your shell, and packages with lookalike names or known malware.",
+      "Replies start faster and long plans cost less. When you start typing, I get Claude's memory ready before you hit send, and on multi-step plans the agent tidies up its context after each finished step.",
+      "Set the agent's habits with your own `rules`. Drop a short markdown file into `.gg/rules` and the agent gets a reminder whenever its output breaks that rule, like adding a stray `console.log`.",
+    ],
+  },
+  {
     version: "0.75.0",
     date: "2026-10-02",
     items: [

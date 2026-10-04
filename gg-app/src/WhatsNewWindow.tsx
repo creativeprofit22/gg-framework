@@ -16,6 +16,7 @@ import {
   type WhatsNewStatus,
 } from "./whats-new-status";
 import { availableWhatsNewFeeds, type WhatsNewEntry } from "./whats-new";
+import { WhatsNewCritter } from "./WhatsNewCritter";
 
 /**
  * Body of the dedicated, screen-centered "What's new" window built by Rust
@@ -291,10 +292,11 @@ export function WhatsNewWindow({
     >
       <Confetti />
       <div className="modal-head">
-        <h1 className="modal-title">
+        <h1 className="modal-title whatsnew-title">
           <ShimmerText base={theme.primary} bright={theme.secondary}>
             What&apos;s new with {PRODUCT_DISPLAY_NAME}
           </ShimmerText>
+          <WhatsNewCritter />
         </h1>
         <button
           className="modal-close"

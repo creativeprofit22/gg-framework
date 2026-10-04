@@ -8,8 +8,13 @@ import { streamQwenCloud } from "./providers/qwen-cloud.js";
 import { streamOpenAICodex } from "./providers/openai-codex.js";
 import { streamGemini } from "./providers/gemini.js";
 import { providerRegistry } from "./provider-registry.js";
-import { clampProviderContextImages } from "./providers/transform.js";
+import {
+  clampProviderContextImages,
+  dropInvalidToolCalls,
+  toolCallNameRuleFor,
+} from "./providers/transform.js";
 import { sanitizeMessagesForWire } from "./utils/well-formed.js";
+import { observePreparedContext } from "./utils/context-observation.js";
 
 /** Z.AI coding API endpoint — the primary endpoint for all GLM models. */
 const GLM_CODING_BASE_URL = "https://api.z.ai/api/coding/paas/v4";
@@ -259,11 +264,34 @@ export function stream(options: StreamOptions): StreamResult {
   // shell bytes) make the JSON body unparseable for every provider — and stay in
   // history, so retries and model switches fail identically. Scrub them here,
   // the one place all providers pass through.
-  const messages = clampProviderContextImages(
-    sanitizeMessagesForWire(wireMessages),
-    options.provider,
-    options.supportsImages,
+  //
+  // Likewise a tool call whose name the target provider rejects (blank,
+  // invocation text in the name slot, over the length limit) would 400 every
+  // later request, so drop it and its results for this request only.
+  const sanitized = sanitizeMessagesForWire(wireMessages);
+  const replayable = dropInvalidToolCalls(
+    sanitized,
+    toolCallNameRuleFor(options.provider, {
+      accountId: options.accountId,
+      baseUrl: options.baseUrl,
+    }),
   );
+  const messages = clampProviderContextImages(replayable, options.provider, options.supportsImages);
+  if (options.onContextPrepared) {
+    try {
+      // Image accounting is index-aligned, so observe against the post-drop
+      // list (dropping a malformed call can remove whole messages).
+      options.onContextPrepared(
+        observePreparedContext(
+          replayable === sanitized ? wireMessages : replayable,
+          messages,
+          options.tools ?? [],
+        ),
+      );
+    } catch {
+      // Diagnostics must not change request behaviour or expose an exception containing prompts.
+    }
+  }
   return entry.stream(messages === options.messages ? options : { ...options, messages });
 }
 

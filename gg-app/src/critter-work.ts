@@ -6,6 +6,7 @@
 // while the same tool keeps firing and pulls it in when a different one
 // arrives), then mark the job `winding` and play their outro.
 
+import { discard } from "./critter-fx";
 import type { CritterApi, Critter, Job, JobKind, Ok, Variant } from "./critter-types";
 
 export interface CritterWork {
@@ -137,7 +138,7 @@ export function makeCritterWork(api: CritterApi): CritterWork {
           await wait(rand(300, 600));
           if (!ok()) return;
           flip(c);
-          book.node.remove();
+          discard(book.node);
           book = prop(c, "book", { at: "hand", flicker: 450, pop: false });
         });
         await book.put();
@@ -170,7 +171,7 @@ export function makeCritterWork(api: CritterApi): CritterWork {
         fx.say(c, "beep", 700, true);
         await loop(job, ok, () => wait(200));
         if (!ok()) return;
-        beam.remove();
+        discard(beam);
         fx.say(c, "boop", 700, true);
         await page.put();
       },
@@ -205,7 +206,7 @@ export function makeCritterWork(api: CritterApi): CritterWork {
             else await wait(rand(200, 500));
             if (ok() && chance(0.35)) {
               flip(c);
-              glass.node.remove();
+              discard(glass.node);
               glass = prop(c, "magnifier", { at, origin: "30% 30%", pop: false });
               wob();
             }
@@ -266,7 +267,7 @@ export function makeCritterWork(api: CritterApi): CritterWork {
           await wait(rand(700, 1200));
           if (!ok() || api.now() >= job.endAt) return;
           flip(c);
-          bino.node.remove();
+          discard(bino.node);
           bino = prop(c, "binoculars", { at, pop: false });
         });
         if (!ok()) return;
@@ -476,7 +477,7 @@ export function makeCritterWork(api: CritterApi): CritterWork {
         if (!ok()) return;
         for (const a of wheel.getAnimations()) a.playbackRate = 0.4;
         await wait(300);
-        wheel.remove();
+        discard(wheel);
         if (!ok()) return;
         if (chance(0.4)) fx.dizzy(c, 1000);
         await runEnding(c, ok);
@@ -520,12 +521,12 @@ export function makeCritterWork(api: CritterApi): CritterWork {
           ],
           { duration: 900, easing: "ease-out", fill: "forwards" },
         );
-        plane.node.remove();
+        discard(plane.node);
         if (!ok()) return;
         const cloud = fx.thought(c);
         await wait(400);
         await loop(job, ok, () => wait(200), 700);
-        cloud.remove();
+        discard(cloud);
         if (!ok()) return;
         const letter = prop(c, "letter", { at: "up", pop: false });
         await play(

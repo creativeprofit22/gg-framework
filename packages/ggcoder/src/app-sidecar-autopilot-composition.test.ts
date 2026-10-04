@@ -7,6 +7,7 @@ import { describe, expect, it, vi } from "vitest";
 import { AppSidecarProjectAutopilotState } from "./app-sidecar-autopilot-state.js";
 import { runUserTurn, type UserTurnDeps } from "./app-sidecar-user-turn.js";
 import { AppSidecarPlanGate } from "./app-sidecar-plan-gate.js";
+import type { CacheExpiryStatus } from "./core/cache-expiry.js";
 
 // Execute production session wiring and routes, without booting providers or native services.
 async function pane(
@@ -69,12 +70,12 @@ async function pane(
     getQueuedCount: () => 0,
     getAppMarkers: () => [],
     persistAppMarker: async () => {},
-    setIdealReviewSuppressed: vi.fn(),
     getState: () => ({ provider: "test", model: "test" }),
     getThinkingLevel: () => null,
     getMessages: () => messages,
     getPlanMode: () => false,
     getRoadmapPhaseLeaseMarker: () => null,
+    getCacheExpiryStatus: (_now?: number): CacheExpiryStatus | null => null,
     dispose: async () => {},
   };
   const events = vi.fn();
@@ -108,6 +109,8 @@ async function pane(
     reminderCoordinator: { unwatchSession: () => {} },
     opts: { id: cwd },
     phaseCandidates: { dispose: async () => {} },
+    releaseRunAwake: null,
+    releaseSubagentAwake: null,
     elicitations: { cancelAll: () => {} },
     asks: { cancelAll: () => {} },
     tasksPollStopped: false,
@@ -160,7 +163,7 @@ async function pane(
     context,
   )) as {
     userTurnDeps: UserTurnDeps;
-    stateSnapshot: () => { autopilot: boolean };
+    stateSnapshot: () => { autopilot: boolean; cacheExpiry: CacheExpiryStatus | null };
     dispose: () => Promise<void>;
     runTaskById: (id: string) => Promise<boolean>;
     request: (req: { body: string }, res: { resolve: (body: unknown) => void }) => void;
@@ -181,7 +184,7 @@ async function pane(
 }
 
 describe("live project Autopilot session composition", () => {
-  it("fans out on/off to snapshots, ordinary/task gates, queued gates and Ideal suppression", async () => {
+  it("fans out on/off to snapshots, ordinary/task gates and queued gates", async () => {
     const shared = new AppSidecarProjectAutopilotState();
     const cwd = path.resolve("work", "project");
     const equivalent =
@@ -195,10 +198,9 @@ describe("live project Autopilot session composition", () => {
     for (const enabled of [true, false]) {
       expect(await a.toggle(enabled)).toEqual({ autopilot: enabled });
       for (const current of [a, b]) {
-        expect(current.stateSnapshot().autopilot).toBe(enabled);
+        expect(current.stateSnapshot()).toMatchObject({ autopilot: enabled, cacheExpiry: null });
         expect(current.userTurnDeps.gateState().enabled).toBe(enabled);
         expect(current.queuedEnabled()).toBe(enabled);
-        expect(current.session.setIdealReviewSuppressed).toHaveBeenLastCalledWith(enabled);
         expect(await current.turn()).toBe(enabled ? "all-clear" : "no-review");
         const reviewsBeforeTask = current.review.mock.calls.length;
         expect(await current.runTaskById("task")).toBe(true);
@@ -217,7 +219,6 @@ describe("live project Autopilot session composition", () => {
     b.setActive(true);
     await a.toggle(true);
     await a.toggle(false);
-    expect(b.session.setIdealReviewSuppressed).toHaveBeenLastCalledWith(true);
     expect(b.stateSnapshot().autopilot).toBe(false);
     expect(b.programmaticChat.dispose).not.toHaveBeenCalled();
     await b.dispose();
@@ -227,11 +228,25 @@ describe("live project Autopilot session composition", () => {
     expect(b.events).toHaveBeenCalledTimes(count);
     const late = await pane(shared, cwd);
     expect(late.stateSnapshot().autopilot).toBe(true);
-    expect(late.session.setIdealReviewSuppressed).toHaveBeenLastCalledWith(true);
-    const replacement = { ...a.session, setIdealReviewSuppressed: vi.fn() };
-    a.replace(replacement);
+    // A replaced live session still receives the fan-out through its snapshot.
+    const coldCache: CacheExpiryStatus = {
+      provider: "test",
+      ttlMs: 300_000,
+      confidence: "expired",
+      ttlSource: "test",
+      lastRequestAt: 1,
+      expiresAt: 300_001,
+      expired: true,
+      reason: "idle",
+      prefixTokens: 50_000,
+      minTokens: 40_000,
+      notable: true,
+      estimatedExtraCostUsd: null,
+    };
+    a.replace({ ...a.session, getCacheExpiryStatus: () => coldCache });
+    expect(a.stateSnapshot()).toMatchObject({ autopilot: true, cacheExpiry: coldCache });
     await late.toggle(false);
-    expect(replacement.setIdealReviewSuppressed).toHaveBeenLastCalledWith(false);
+    expect(a.stateSnapshot()).toMatchObject({ autopilot: false, cacheExpiry: coldCache });
     await Promise.all([a.dispose(), other.dispose(), chat.dispose(), late.dispose()]);
     for (const current of [a, b, other, chat, late]) {
       expect(current.programmaticChat.dispose).toHaveBeenCalledExactlyOnceWith();
@@ -246,7 +261,6 @@ describe("live project Autopilot session composition", () => {
       return false;
     });
     expect(current.stateSnapshot().autopilot).toBe(true);
-    expect(current.session.setIdealReviewSuppressed).toHaveBeenLastCalledWith(true);
     await current.toggle(false);
     expect(current.stateSnapshot().autopilot).toBe(false);
     expect(current.programmaticChat.dispose).not.toHaveBeenCalled();

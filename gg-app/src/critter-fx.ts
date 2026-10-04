@@ -19,6 +19,24 @@ const MAX_PARTICLES = 90;
 
 const noop = (): void => undefined;
 
+/**
+ * Remove a node, cancelling its Web Animations (and its children's) first.
+ * WebKit keeps a finished `fill: "forwards"`/`"both"` animation, and any
+ * infinite one, on the page timeline after its element is detached, and
+ * re-checks every one of them on each frame. Once the node is gone,
+ * `getAnimations()` can no longer reach them, so they pile up for the life
+ * of the window: tens of thousands of sparks and props cost about 20% idle
+ * CPU. Every critter effect node leaves the DOM through here.
+ */
+export function discard(node: Element | null | undefined): void {
+  if (!node) return;
+  // jsdom (the test DOM) has no Web Animations.
+  if (typeof node.getAnimations === "function") {
+    for (const anim of node.getAnimations({ subtree: true })) anim.cancel();
+  }
+  node.remove();
+}
+
 export interface FxDeps {
   readonly random: () => number;
   readonly later: (ms: number, fn: () => void) => number;
@@ -259,7 +277,7 @@ export function makeCritterFx(deps: FxDeps): CritterFx {
           ],
           { duration: 160, fill: "forwards" },
         );
-        node.remove();
+        discard(node);
       },
     };
     if (opts.flicker) handle.flicker(opts.flicker);
@@ -272,14 +290,14 @@ export function makeCritterFx(deps: FxDeps): CritterFx {
     const node = el("div", opts.ms ? cls : `critter-fxl ${cls}`);
     if (opts.behind) c.react.prepend(node);
     else (opts.outside ? c.el : c.react).appendChild(node);
-    if (opts.ms) later(opts.ms, () => node.remove());
+    if (opts.ms) later(opts.ms, () => discard(node));
     return node;
   }
 
   function clearProps(c: Critter): void {
     for (const n of c.el.querySelectorAll(".critter-fxl")) {
       stoppers.get(n)?.();
-      n.remove();
+      discard(n);
     }
   }
 
@@ -306,9 +324,9 @@ export function makeCritterFx(deps: FxDeps): CritterFx {
         ],
         { duration: 1100, easing: "ease-in", fill: "forwards" },
       );
-      anim.onfinish = () => n.remove();
+      anim.onfinish = () => discard(n);
       // Belt and braces: the fake/absent animation never finishes.
-      later(1200, () => n.remove());
+      later(1200, () => discard(n));
     }
   }
 
@@ -340,7 +358,7 @@ export function makeCritterFx(deps: FxDeps): CritterFx {
       opacity: 0,
     });
     const done = (): void => {
-      p.remove();
+      discard(p);
       particles.delete(p);
     };
     const a = p.animate(frames, {
@@ -570,7 +588,7 @@ export function makeCritterFx(deps: FxDeps): CritterFx {
 
   // ── Badges and speech ──
   function setBadge(c: Critter, kind: BadgeKind | null, text = ""): void {
-    c.el.querySelector(".critter-badge")?.remove();
+    discard(c.el.querySelector(".critter-badge"));
     if (!kind) return;
     const b = el("div", `critter-badge critter-badge-${kind}`, c.el);
     b.textContent = text;
@@ -581,11 +599,11 @@ export function makeCritterFx(deps: FxDeps): CritterFx {
     setBadge(c, kind, text);
     const b = c.el.querySelector(".critter-badge");
     await wait(ms);
-    if (b?.isConnected) b.remove();
+    if (b?.isConnected) discard(b);
   }
 
   function clearBubble(c: Critter): void {
-    c.el.querySelector(".critter-bubble")?.remove();
+    discard(c.el.querySelector(".critter-bubble"));
   }
 
   let speakingUntil = 0;
@@ -602,7 +620,7 @@ export function makeCritterFx(deps: FxDeps): CritterFx {
     const bubble = el("div", "critter-bubble", c.el);
     const label = el("span", "critter-bubble-text", bubble);
     label.textContent = text;
-    later(ms, () => bubble.remove());
+    later(ms, () => discard(bubble));
   }
 
   // ── Overlay layers ──

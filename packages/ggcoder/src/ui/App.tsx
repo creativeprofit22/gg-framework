@@ -101,13 +101,6 @@ import type { TerminalHistoryPrinter } from "./terminal-history.js";
 import { buildUserContentWithAttachments } from "./prompt-routing.js";
 import { submitPromptCommand } from "./submit-prompt-command.js";
 import { handleUiSlashCommand, UI_SLASH_COMMANDS } from "./submit-slash-commands.js";
-import {
-  buildIdealReviewMessage,
-  evaluateIdealReview,
-  detectTestDrift,
-  type ReviewCoverageTracker,
-} from "../core/ideal-review.js";
-import type { LspManager } from "../core/lsp/manager.js";
 import { buildLoopBreakMessage, evaluateLoopBreak } from "../core/loop-breaker.js";
 import { buildRegroundingMessage } from "../core/regrounding.js";
 import { getNextThinkingLevel } from "./thinking-level.js";
@@ -164,7 +157,6 @@ import type {
 
 export type { CompletedItem, ToolGroupItem } from "./app-items.js";
 import {
-  IDEAL_HOOK_NOTICE_TEXT,
   LOOP_BREAK_NOTICE_TEXT,
   REGROUNDING_NOTICE_TEXT,
   TRUNCATED_CONTINUING_NOTICE_TEXT,
@@ -224,7 +216,6 @@ export interface AppProps {
   version: string;
   showTokenUsage?: boolean;
   idealReviewEnabled?: boolean;
-  /** Kill switch for the pre-stop verification gate (default on). */
   onSlashCommand?: (input: string) => Promise<string | null>;
   loggedInProviders?: Provider[];
   credentialsByProvider?: Record<
@@ -237,8 +228,6 @@ export interface AppProps {
   sessionId?: string;
   processManager?: ProcessManager;
   subAgentManager?: SubAgentManager;
-  lspManager?: LspManager;
-  reviewCoverageTracker?: ReviewCoverageTracker;
   settingsFile?: string;
   mcpManager?: MCPClientManager;
   authStorage?: AuthStorage;
@@ -1012,26 +1001,6 @@ export function App(props: AppProps) {
       projectId: activeProjectId,
       resolveCredentials,
       transformContext,
-      lspManager: props.lspManager,
-      reviewCoverageTracker: props.reviewCoverageTracker,
-      getIdealReviewMessage: (stats, touchedFiles) => {
-        if (!idealReviewEnabledRef.current) return null;
-        const decision = evaluateIdealReview(stats);
-        // Test drift fires the review even when the volume score is too low to
-        // trigger on its own \u2014 a stale sibling test is invisible to typecheck.
-        const driftedFiles = detectTestDrift(touchedFiles, process.cwd()).slice(0, 5);
-        if (!decision.shouldReview && driftedFiles.length === 0) return null;
-        log("INFO", "ideal", "Injecting ideal review before final response", {
-          score: String(decision.score),
-          reasons: decision.reasons.join(", "),
-          testDrift: driftedFiles.join(", "),
-        });
-        setLiveItems((prev) => [
-          ...prev,
-          { kind: "ideal_hook", text: IDEAL_HOOK_NOTICE_TEXT, tone: "review", id: getId() },
-        ]);
-        return buildIdealReviewMessage(decision.reasons, driftedFiles);
-      },
       getLoopBreakMessage: (stats, stage) => {
         if (!idealReviewEnabledRef.current) return null;
         const decision = evaluateLoopBreak(stats);
@@ -2004,8 +1973,8 @@ export function App(props: AppProps) {
           {
             kind: "info",
             text: next
-              ? "Ideal review enabled. Use /ideal-off to disable it."
-              : "Ideal review disabled. Use /ideal-on to enable it.",
+              ? "Loop-break and re-grounding nudges enabled. Use /ideal-off to disable them."
+              : "Loop-break and re-grounding nudges disabled. Use /ideal-on to enable them.",
             id: getId(),
           },
         ]);
@@ -2525,8 +2494,8 @@ export function App(props: AppProps) {
         name: idealReviewEnabled ? "ideal-off" : "ideal-on",
         aliases: [],
         description: idealReviewEnabled
-          ? "Disable pre-final ideal review"
-          : "Enable pre-final ideal review",
+          ? "Disable loop-break and re-grounding nudges"
+          : "Enable loop-break and re-grounding nudges",
         sectionTitle: "built-in",
       },
       {

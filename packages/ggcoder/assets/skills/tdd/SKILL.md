@@ -1,30 +1,42 @@
 ---
 name: tdd
-description: Use when the user asks for test-driven development, red-green-refactor, or "write the test first", or wants a feature built test-first. Do NOT use when tests are a verification step after the build, the project has no suite and the user has not asked for one, or the change is throwaway probe code.
+description: Use when the user asks for test-driven development, red-green-refactor, "write the test first", or wants a feature or bug fix built test-first — including mid-build when they ask to switch to test-first. Do NOT use when tests are a verification step after the build, the project has no suite and the user has not asked for one, the change is throwaway probe code, or the goal is restructuring without behaviour change (refactoring) or finding an unknown cause (root-cause).
 ---
 
 # TDD
 
-Red → green, one slice at a time. This skill is the reference that makes the loop produce tests worth keeping — most of it applies on every cycle, so consult it before and during the loop, not after.
+Red → green, one vertical slice at a time. Before the first test: agree seams (below). Then loop.
 
 ## Seams — agree before writing
 
-A **seam** is the public boundary where behavior is observable: an exported function, an HTTP route, a CLI invocation. Tests live at seams; they never reach into internals.
-
-Before the first test, write down the seams under test and confirm them with the user — which boundaries get tests and which stay untested is a decision, and settling it up front is what keeps effort on critical paths instead of every edge case. No test at an unagreed seam.
+A **seam** is a public boundary where behaviour is observable: exported function, HTTP route, CLI invocation. Tests live at seams, never in internals. List the seams under test and confirm them with the user (one `ask_user` call, recommended set marked). No test at an unagreed seam.
 
 ## The loop
 
-1. **Red.** One failing test at an agreed seam, for the next smallest real behavior. Run it; watch it fail for the right reason.
-2. **Green.** The least code that passes — nothing speculative. Run it.
-3. **Repeat.** The next test responds to what the last cycle taught. Work in vertical slices, never layers: writing all tests then all implementation verifies _imagined_ behavior and locks in structure before understanding.
-4. **Refactor outside the loop.** Cleanup happens at a checkpoint after a green cycle or in a review pass — not interleaved guesswork inside red-green.
+1. **Red.** One failing test at an agreed seam for the next smallest real behaviour. Run it; confirm it fails for the right reason (assertion, not import/syntax error).
+2. **Green.** Least code that passes. Run the test and the touched suite.
+3. **Repeat.** The next test follows from what the last cycle taught. Never write all tests first, then all code.
+4. **Refactor** only on green, as a separate step; rerun tests after.
 
-## Test quality rules
+## Test integrity (agent guard)
 
-- **Expected values from an outside source of truth** — a known literal, a worked example, the spec. Never recompute the expected value the same way the code does; that test can only agree with itself and can never catch the bug.
-- **Behavior, not structure.** Assert on what the interface does. A test that breaks under a refactor with unchanged behavior is coupled to implementation — rewrite it at the seam, never patch it with mocks of internals.
-- **Real paths over mocks.** Exercise real code; mock only external boundaries (network, clock, filesystem) and only when they are slow or stateful.
-- **Named like a spec.** "user can check out with an empty cart" — the name alone states the capability.
+- **Tests are frozen during green.** Never edit, delete, skip, loosen, or `.only` a test to make it pass. If a test is wrong, stop, say why, and get agreement before changing it.
+- Never special-case test inputs in production code (hard-coded returns for the test's literal).
+- Before claiming done, `git diff` the test files; explain any change made during a green step.
 
-The loop inherits the verification gate: never claim a cycle green that you did not run.
+## Test quality
+
+- **Expected values from an outside source of truth** — a known literal, worked example, or the spec. Never recompute the expected value the way the code does.
+- **Behaviour, not structure.** A test that breaks under a behaviour-preserving refactor is coupled to internals; rewrite it at the seam.
+- **Mock only external boundaries** (network, clock, filesystem), and only when slow or stateful.
+- **Name like a spec**: "user can check out with an empty cart".
+- **Property tests for rules over many inputs** (parsers, round-trips, invariants) when the project already has a property library (fast-check, Hypothesis, proptest); otherwise a table of examples.
+- **Optional strength check:** if a mutation tool is already installed (Stryker, mutmut, cargo-mutants), run it on the changed module; surviving mutants point to missing assertions. Do not install one unasked. Manual alternative: break one line of the new code, confirm a test goes red, revert.
+
+Never claim a cycle green that you did not run.
+
+## Scaling: one agent or several
+
+Main thread only — the loop is sequential by design. Never parallelise red/green steps or let a child edit tests.
+
+Sources (accessed 3 October 2026): https://code.claude.com/docs/en/best-practices (failing test before the fix); https://stryker-mutator.io/docs/ (killed vs surviving mutants); https://hypothesis.readthedocs.io/

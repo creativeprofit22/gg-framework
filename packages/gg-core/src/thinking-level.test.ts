@@ -6,6 +6,7 @@ import {
 } from "./model-registry.js";
 import {
   clampThinkingForPlanMode,
+  getLowestThinkingLevel,
   getNextThinkingLevel,
   getSupportedThinkingLevels,
   isThinkingLevelSupported,
@@ -13,6 +14,29 @@ import {
   resolveInitialThinkingLevel,
 } from "./thinking-level.js";
 import type { ThinkingLevel } from "@kenkaiiii/gg-ai";
+
+describe("getLowestThinkingLevel", () => {
+  it.each([
+    ["anthropic", "claude-opus-5-5"],
+    ["openai", "gpt-6.1-sol"],
+    ["gemini", "gemini-3.8-flash"],
+    ["glm", "glm-5.3"],
+    ["deepseek", "deepseek-v4-pro"],
+    ["xai", "grok-4.7"],
+    ["moonshot", "kimi-k3"],
+  ] as const)("is the first rung of %s %s's own ladder, never off", (provider, model) => {
+    const lowest = getLowestThinkingLevel(provider, model);
+
+    expect(lowest).toBeDefined();
+    expect(lowest).toBe(getSupportedThinkingLevels(provider, model)[0]);
+  });
+
+  it("is undefined only for a model that cannot reason at all", () => {
+    expect(
+      getLowestThinkingLevel("huggingface", "Qwen/Qwen3-Coder-480B-A35B-Instruct"),
+    ).toBeUndefined();
+  });
+});
 
 describe("thinking-level helpers", () => {
   it("keeps Qwen Cloud GLM 5.3 always on when restoring disabled preferences", () => {

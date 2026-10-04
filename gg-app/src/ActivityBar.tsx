@@ -4,6 +4,8 @@ import { ThinkingOrb } from "./ActivityOrb";
 import { theme } from "./theme";
 import { ShimmerText } from "./ShimmerText";
 import { outcomePhrase } from "./activity-copy";
+import { GgFace } from "./GgFace";
+import type { GgFaceMood } from "./gg-face";
 
 // Braille rotation spinner — the native language of CLI coding tools (ora,
 // npm, cargo). Smooth, monospace, and unmistakably "ours" rather than the
@@ -105,7 +107,7 @@ function ToolsToggle({
 }): React.ReactElement {
   return (
     <button
-      className="nav-toggle tools-toggle"
+      className="nav-toggle tools-toggle dissolve-in"
       title={hidden ? "Show tool panel" : "Hide tool panel"}
       aria-label={hidden ? "Show tool panel" : "Hide tool panel"}
       onClick={onToggle}
@@ -205,6 +207,21 @@ function withoutStatePrefix(label: string, state: PlainState): string {
   return rest.charAt(0).toUpperCase() + rest.slice(1);
 }
 
+/**
+ * GG Coder's face for a settled status. Picked from the same tone as the text,
+ * so the face's glow always matches the words beside it: green → happy, red →
+ * shocked, amber → sad when stopped, curious when it needs you, worried
+ * otherwise (unverified, cut short, reconnecting), and ready when idle.
+ */
+export function ggMoodFor(activity: TaskActivity | undefined, tone: string): GgFaceMood {
+  if (tone === theme.success) return "happy";
+  if (tone === theme.error) return "shocked";
+  if (tone !== theme.warning) return "ready";
+  if (activity?.phase === "stopped") return "sad";
+  if (activity?.phase === "attention") return "curious";
+  return "worried";
+}
+
 /** The existing animated row now represents a whole task, including Ken's review. */
 export function ActivityBar({
   running,
@@ -300,13 +317,7 @@ export function ActivityBar({
                 style={{ flexShrink: 0 }}
               />
             ) : (
-              <span
-                className="statusrow-icon"
-                aria-hidden="true"
-                style={{ color: bareIdle ? theme.accent : tone }}
-              >
-                {bareIdle ? "\u276f" : activity?.phase === "done" ? "\u2713" : "\u2022"}
-              </span>
+              <GgFace mood={ggMoodFor(activity, tone)} size={21} />
             )}
             <span className="statusrow-state" style={{ color: bareIdle ? theme.textMuted : tone }}>
               {state}
@@ -340,7 +351,7 @@ export function ActivityBar({
             )}
           </span>
           {(active || hasActivity) && !starting && (
-            <span className="activity-meta">
+            <span className="activity-meta dissolve-in">
               {formatElapsed(elapsed)}
               {totalTokens > 0 && (
                 <span className="activity-token-count" title="Output tokens">
@@ -351,7 +362,7 @@ export function ActivityBar({
           )}
         </div>
         {active && planTotal > 0 && planDone < planTotal && (
-          <span className="plan-steps-running">
+          <span className="plan-steps-running dissolve-in">
             <span className="plan-steps-badge">
               <span style={{ color: theme.textMuted }}>Plan</span>{" "}
               <span style={{ color: theme.textMuted }}>
@@ -366,7 +377,7 @@ export function ActivityBar({
           )}
           {canCancel && (
             <button
-              className="cancel"
+              className="cancel dissolve-in"
               style={{ color: cancelling ? theme.textMuted : theme.error }}
               onClick={onCancel}
               disabled={cancelling}

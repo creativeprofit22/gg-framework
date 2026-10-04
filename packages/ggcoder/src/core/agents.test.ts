@@ -166,9 +166,11 @@ describe("bundled agents", () => {
     for (const agent of BUNDLED_AGENTS) {
       expect(agent.model, agent.name).toBeDefined();
     }
-    // Only cheap structural recon opts out of the parent's model.
-    const fast = BUNDLED_AGENTS.filter((a) => a.model === "fast").map((a) => a.name);
-    expect(fast).toEqual(["owl"]);
+    // No bundled agent leaves the parent's model — only compaction summaries
+    // use a cheaper model.
+    for (const agent of BUNDLED_AGENTS) {
+      expect(agent.model, agent.name).toBe("inherit");
+    }
   });
 
   it("writes descriptions that route — distinct, and never 'does anything'", () => {

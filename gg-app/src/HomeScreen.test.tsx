@@ -26,7 +26,7 @@ vi.mock("@tauri-apps/api/app", () => ({ getVersion: vi.fn().mockResolvedValue("1
 vi.mock("./agent", () => agentMocks);
 vi.mock("./update", () => ({ useAppUpdate: vi.fn() }));
 vi.mock("./AsciiLogo", () => ({ AsciiLogo: () => null }));
-vi.mock("./HomeDither", () => ({ HomeDither: () => null }));
+vi.mock("./HomeScenery", () => ({ HomeScenery: () => null, withScenery: (b: unknown) => b }));
 vi.mock("./HomeCritters", () => ({ HomeCritters: () => null }));
 vi.mock("./RankBadge", () => ({ RankBadge: () => null }));
 vi.mock("./ScorecardModal", () => ({ ScorecardModal: () => null }));

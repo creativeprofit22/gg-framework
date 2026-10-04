@@ -69,6 +69,15 @@ describe("QueuedBar", () => {
     });
   });
 
+  // The enter keyframe grows max-height to --pin-h. Without it the strip runs
+  // toward a 220px guess, is fully open in a frame or two, and shoves the
+  // transcript up in one jump as a queued message lands.
+  it("pins its real height on mount so the strip grows open smoothly", () => {
+    render(<QueuedBar messages={ONE} onCancel={vi.fn()} />);
+    const bar = document.querySelector<HTMLElement>(".queued-bar");
+    expect(bar?.style.getPropertyValue("--pin-h")).toMatch(/^\d+px$/);
+  });
+
   describe("a single queued message", () => {
     it("shows its text with an inline cancel", () => {
       render(<QueuedBar messages={ONE} onCancel={vi.fn()} />);

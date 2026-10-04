@@ -1,10 +1,19 @@
 ---
 name: refactoring
-description: Use when restructuring existing code without changing behavior — "refactor", "clean up this module", "reduce tech debt/duplication", "split this god class/function", "improve code quality", "modernize" or migrate legacy code (strangler fig, framework/dependency upgrades, callback→async), or when planning a refactor before touching code. Two hats, test-guarded steps, revert-on-red. Do NOT use for new feature work, bug fixes with known symptoms (root-cause), styling or copy changes, the refactor step inside a user-requested TDD flow (tdd), or when the user asks to rewrite from scratch.
+description: Use when restructuring existing code without changing behavior — "refactor", "clean up", "reduce duplication", "split this god class", "modernize", migrating legacy code or APIs (strangler fig, parallel change, codemods across many files, callback→async), planning a refactor, or mid-build when a change needs preparatory restructuring first. Two hats, test-guarded steps, revert-on-red. Do NOT use for new features, bug fixes (stubborn ones: root-cause), performance tuning (lean), schema/data migrations (durable), styling or copy, the refactor step of a user-requested TDD flow (tdd), or a from-scratch rewrite.
 license: Behavior-preservation methodology synthesized from public sources (Fowler's Refactoring catalog, Tidy First?, and community agent skills by bienhoang, wondelai, mattpocock, jeffallan, vasilyu1983), audited 2026-09-12.
 ---
 
 # Refactoring
+
+**Route first:**
+
+| Situation                                                        | Mode                | Next                                   |
+| ---------------------------------------------------------------- | ------------------- | -------------------------------------- |
+| Tidy a module/function you are already touching, suite green     | **1. In-the-small** | Execute loop, inline                   |
+| User wants a plan, architectural change, or competing approaches | **2. Plan-first**   | Modes → 2                              |
+| No/red/unrunnable tests, or migration bigger than one session    | **3. Legacy**       | `references/legacy.md` before any edit |
+| Same mechanical change across >~10 files or >~500 lines          | **Codemod**         | `references/legacy.md` → Codemods      |
 
 Change the structure of code without changing what it does. Every observable behavior that exists before the refactoring — including the bugs — must exist after it. This skill exists because agents drift: without hard gates, "refactoring" silently becomes rewriting, and rewriting untested code is how behavior is lost.
 
@@ -36,7 +45,7 @@ Change the structure of code without changing what it does. Every observable beh
 1. **Baseline.** Run the suite on unmodified code; record green. If red or absent → mode 3. If the project has no VCS, say so and stop for direction. If the working tree is dirty with unrelated changes, see _Dirty tree_ below — a dirty baseline destroys the revert safety.
 2. **Commit checkpoint.** Refactoring is safest with per-step commits on a dedicated branch — ask the user once, up front: "I'll commit each verified step on a branch — good?" If they decline, keep steps small and separable and report the step list for review at the end. Never commit without authorization.
 3. **Pick one target.** If you were started from a `Fix /sweep:` task, that task's finding and named transformation are the target — still re-read the cited lines, since code may have moved since the sweep. Otherwise, ranked by risk-adjusted value, not by how interesting it is: security → correctness → structure → duplication → naming. Hotspots first — files where churn (recent edit frequency) meets complexity. Smell catalog and metrics thresholds: `references/smells.md`.
-4. **Apply one named transformation.** Full mechanics per transformation live in `references/smells.md`. Prefer language-aware tooling (IDE rename, AST codemods) over regex edits; at scale (>~10 files or >~500 lines), a codemod is the safe path and regex is the wrong one.
+4. **Apply one named transformation.** Full mechanics per transformation live in `references/smells.md`. Prefer language-aware tooling (`code_nav` / IDE rename, AST codemods) over regex edits; at scale (>~10 files or >~500 lines), a codemod (ast-grep, jscodeshift, OpenRewrite) is the safe path and regex is the wrong one — workflow in `references/legacy.md`.
 5. **Verify.** Smallest relevant suite → green ⇒ commit (message = transformation name) → next target. Red ⇒ rule 4 of the governing rules: revert, take a smaller step.
 6. **Close.** Full suite + typecheck + lint, on the same commands CI runs — including every package that imports the code you touched, not just the one you edited (monorepos: respect build order). Report: transformations applied (named), before/after state, smells left and why, anything deferred. Agent-specific drift modes to check before closing: `references/agent-pitfalls.md`.
 
@@ -60,6 +69,18 @@ When unsure whether behavior could change: **do not apply — ask.**
 - The code is about to be deleted or replaced. Deleting is cheaper.
 - You cannot run or construct any safety net and the risk is medium+. Report and stop.
 - The rewrite instinct hits ("this is all wrong, let me start fresh"). That is a different conversation with the user, not a refactor — and big-bang rewrites lose the one thing refactoring keeps: working software at every step.
+
+## Scaling: one agent or several
+
+| Situation                                                       | Do                                                                                                                                                                                                                                                                      |
+| --------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| In-the-small, or one package you can fully read                 | Main thread only. Never spawn.                                                                                                                                                                                                                                          |
+| Large codebase: changed symbol has many callers across packages | Impact map first: ONE `spawn_agent` call, ≤ 6 read-only `owl` children, one per package/directory. Brief: the symbol(s) and their definition file:line, the slice's paths, output = every caller/import/dynamic reference as file:line + `checked`/`not checked` lists. |
+| Dated claim needed (framework migration, deprecated API)        | One `researcher` child; label result SNAPSHOT with source URL.                                                                                                                                                                                                          |
+| Executing transformations                                       | **Serialized in the main thread**, one named step at a time, revert-on-red. Never parallel edits on a shared tree.                                                                                                                                                      |
+| Truly independent modules (no shared files, no import edges)    | Optionally one `worker` per module on its own branch; each runs the full loop and its own baseline. Merge one branch at a time, full suite after each.                                                                                                                  |
+
+Merge rule: a child that fails or omits a slice → that slice is `not checked`; treat its callers as unknown and do not change the public signature. Re-open each reported caller before relying on it.
 
 ## References
 

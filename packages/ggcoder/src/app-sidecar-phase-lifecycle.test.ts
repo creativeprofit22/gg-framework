@@ -108,12 +108,6 @@ const contract: Array<{
     },
   },
   {
-    name: "Ideal review stays outside Roadmap lifecycle",
-    signal: { type: "ideal-review-started" },
-    stage: "implementing",
-    expected: null,
-  },
-  {
     name: "Autopilot review stays outside Roadmap lifecycle",
     signal: { type: "autopilot-review-started" },
     stage: "implementing",
@@ -226,7 +220,6 @@ describe("phase lifecycle signal mapper", () => {
 
   it("requires implementation stage for run start and ignores review start signals", () => {
     expect(mapPhaseLifecycleSignal({ type: "implementation-run-started" }, "planning")).toBeNull();
-    expect(mapPhaseLifecycleSignal({ type: "ideal-review-started" }, "implementing")).toBeNull();
     expect(mapPhaseLifecycleSignal({ type: "autopilot-review-started" }, "planning")).toBeNull();
   });
 

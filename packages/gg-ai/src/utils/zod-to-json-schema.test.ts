@@ -1,6 +1,10 @@
 import { describe, it, expect } from "vitest";
 import { z } from "zod";
-import { normalizeRootForAnthropic, zodToJsonSchema } from "./zod-to-json-schema.js";
+import {
+  normalizeRootForAnthropic,
+  resolveToolSchema,
+  zodToJsonSchema,
+} from "./zod-to-json-schema.js";
 
 describe("Anthropic object compositions", () => {
   it.each(["constructor", "toString", "hasOwnProperty", "valueOf", "__proto__", "prototype"])(
@@ -408,5 +412,43 @@ describe("zodToJsonSchema", () => {
     expect(result.type).toBe("object");
     expect(result).not.toHaveProperty("oneOf");
     expect(result).not.toHaveProperty("anyOf");
+  });
+});
+
+describe("resolveToolSchema", () => {
+  const tool = (rawInputSchema: Record<string, unknown>) => ({
+    name: "t",
+    description: "",
+    parameters: z.object({}),
+    rawInputSchema,
+  });
+
+  it("gives a bare object root (an MCP no-argument tool) explicit empty properties", () => {
+    // OpenAI 400s on `{ type: "object" }`: "object schema missing properties".
+    expect(resolveToolSchema(tool({ type: "object" }))).toEqual({ type: "object", properties: {} });
+  });
+
+  it("leaves schemas that already declare properties untouched", () => {
+    const schema = { type: "object", properties: { a: { type: "string" } }, required: ["a"] };
+    expect(resolveToolSchema(tool(schema))).toBe(schema);
+  });
+
+  it.each(["oneOf", "anyOf", "allOf"])(
+    "leaves a composed %s object root untouched; its branches carry the properties",
+    (keyword) => {
+      const schema = {
+        type: "object",
+        [keyword]: [
+          { type: "object", properties: { a: { type: "string" } }, required: ["a"] },
+          { type: "object", properties: { b: { type: "number" } }, required: ["b"] },
+        ],
+      };
+      expect(resolveToolSchema(tool(schema))).toBe(schema);
+    },
+  );
+
+  it("leaves a $ref object root untouched", () => {
+    const schema = { type: "object", $ref: "#/$defs/Args", $defs: { Args: { type: "object" } } };
+    expect(resolveToolSchema(tool(schema))).toBe(schema);
   });
 });

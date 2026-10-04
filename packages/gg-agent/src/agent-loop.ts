@@ -27,16 +27,59 @@ import type {
   StructuredToolResult,
 } from "./types.js";
 import { isLocalBackendUrl } from "./local-backend.js";
+import { argumentHints, unknownToolMessage } from "./tool-call-hints.js";
 import {
   clampOutputTokens,
   outputRouteKey,
   parseOutputTokenCeiling,
   rememberOutputCeiling,
 } from "./output-ceiling.js";
+import {
+  StreamRuleMonitor,
+  buildStreamRuleReminder,
+  type StreamRuleMatch,
+} from "./stream-rules.js";
 
 const DEFAULT_MAX_TURNS = 300;
 /** Default cancellation ceiling; tools may override it or opt out with `timeoutMs: 0`. */
 const DEFAULT_TOOL_TIMEOUT_MS = 300_000;
+
+/**
+ * Instant interrupt: once a steering message preempts a tool batch, an
+ * interruptible tool that ignores its AbortSignal gets this long to settle
+ * before the loop records it as interrupted and moves on without it.
+ */
+const PREEMPT_GRACE_MS = 500;
+
+/** Result text for a tool call cut short by a mid-run steering message. */
+export const STEER_INTERRUPTED_TEXT = "Interrupted: the user sent a new message.";
+
+/**
+ * Atomic file mutators are never preempted: they finish so a write is never
+ * left half-applied. Tools can override via `interruptible`.
+ */
+const ATOMIC_TOOL_NAMES = new Set(["edit", "write", "multi_edit", "apply_patch", "notebook_edit"]);
+
+function isInterruptibleTool(tool: AgentTool | undefined, name: string): boolean {
+  if (tool?.interruptible !== undefined) return tool.interruptible;
+  return !ATOMIC_TOOL_NAMES.has(name);
+}
+
+function markSteerInterrupted(record: ToolExecutionRecord): ToolExecutionRecord {
+  const content = record.content;
+  let next: ToolResultContent;
+  if (typeof content === "string") {
+    next = content.trim()
+      ? `${STEER_INTERRUPTED_TEXT}\nPartial output:\n${content}`
+      : STEER_INTERRUPTED_TEXT;
+  } else {
+    next = [
+      { type: "text" as const, text: `${STEER_INTERRUPTED_TEXT}\nPartial output:` },
+      ...content,
+    ];
+  }
+  return { toolCallId: record.toolCallId, content: next, isError: true };
+}
 
 let _toolRedaction: RedactionOptions | undefined;
 /**
@@ -595,6 +638,12 @@ export async function* agentLoop(
   let runawayToolcallRetries = 0;
   let overflowCompactionAttempts = 0;
   let toolResultTruncationAttempted = false;
+  // Stream rules: per-run state (once-per-rule + global retry cap). Null when
+  // the host configured none, so the hot path costs one null check per delta.
+  const streamRuleMonitor =
+    options.streamRules && options.streamRules.rules.length > 0
+      ? new StreamRuleMonitor(options.streamRules)
+      : null;
   const invalidToolArgumentCounts = new Map<string, number>();
   // A recoverable tool-argument fatal (empty args -- a provider stream
   // glitch, see executeSingleToolCall) gets exactly one bounded auto-continue
@@ -746,16 +795,7 @@ export async function* agentLoop(
       // first-event watchdog with prompt size. The char-counting loop is O(n)
       // over the full message history and runs every turn — cheap (a
       // sub-millisecond scan of a few hundred KB) even uncondensed.
-      let msgChars = 0;
-      for (const m of messages) {
-        if (typeof m.content === "string") msgChars += m.content.length;
-        else if (Array.isArray(m.content)) {
-          for (const p of m.content) {
-            if ("text" in p && typeof p.text === "string") msgChars += p.text.length;
-            if ("content" in p && typeof p.content === "string") msgChars += p.content.length;
-          }
-        }
-      }
+      const msgChars = countMessageChars(messages);
       // Scale the first-event watchdog on the plain remote path: prefill time
       // grows linearly with prompt tokens (~3-5K tok/s observed), so a large
       // prompt legitimately needs longer than 45s to reach its first event.
@@ -850,6 +890,11 @@ export async function* agentLoop(
       // Text streamed this attempt — preserved across transport-failure retries
       // instead of being discarded and re-billed (see the retry branch below).
       let attemptText = "";
+      // Stream-rule hit for this attempt (set right before aborting the stream)
+      // plus thinking volume, which only feeds the aborted attempt's usage estimate.
+      let streamRuleHit: StreamRuleMatch | null = null;
+      let attemptThinkingChars = 0;
+      streamRuleMonitor?.beginAttempt();
       // Track consumer processing time — helps distinguish "API stopped sending"
       // from "our consumer was slow to pull the next event"
       let lastYieldEndTime = Date.now();
@@ -995,6 +1040,7 @@ export async function* agentLoop(
           transportSessionId: options.transportSessionId,
           projectId: liveProjectId,
           cacheRetention: options.cacheRetention,
+          onContextPrepared: options.onContextPrepared,
           promptCacheKey: options.promptCacheKey,
           serviceTier:
             options.serviceTierRequiresAccountId && !liveAccountId
@@ -1106,8 +1152,16 @@ export async function* agentLoop(
           }
           if (event.type === "text_delta") {
             attemptText += event.text;
+            // A matching delta is never yielded: abort through the per-attempt
+            // controller (not the caller's signal) and retry below.
+            streamRuleHit = streamRuleMonitor?.checkText(event.text) ?? null;
+            if (streamRuleHit) {
+              streamController.abort();
+              break;
+            }
             yield { type: "text_delta" as const, text: event.text };
           } else if (event.type === "thinking_delta") {
+            attemptThinkingChars += event.text.length;
             yield { type: "thinking_delta" as const, text: event.text };
           } else if (event.type === "server_toolcall") {
             yield {
@@ -1127,6 +1181,15 @@ export async function* agentLoop(
             const chunkChars = event.argsJson?.length ?? 0;
             toolcallDeltaChars += chunkChars;
             toolcallDeltaCount++;
+            // The tool call is still partial here — it only reaches the
+            // assistant message (and execution) via result.response, which a
+            // rule hit never awaits.
+            streamRuleHit =
+              streamRuleMonitor?.checkToolArgs(event.id, event.name, event.argsJson ?? "") ?? null;
+            if (streamRuleHit) {
+              streamController.abort();
+              break;
+            }
             if (
               !runawayDetected &&
               (toolcallDeltaChars > MAX_TOOLCALL_DELTA_CHARS ||
@@ -1153,6 +1216,71 @@ export async function* agentLoop(
           // Re-arm the idle timer only now that we're done yielding -- the
           // countdown to the next event excludes the render time above.
           resetIdleTimer();
+        }
+
+        if (streamRuleHit && streamRuleMonitor) {
+          const attempt = streamRuleMonitor.recordTrigger(streamRuleHit.rules);
+          const ruleNames = streamRuleHit.rules.map((rule) => rule.name);
+          // Providers report no usage for an aborted stream, but the prompt and
+          // the streamed output were billed. The previous request's reported
+          // prompt (system + tools + history, as the provider counted it) was
+          // re-sent as a cached prefix; only messages added since are new.
+          // Without a prior request, fall back to ~4 chars/token of history.
+          const priorPrompt = latestProviderUsage
+            ? latestProviderUsage.inputTokens +
+              (latestProviderUsage.cacheRead ?? 0) +
+              (latestProviderUsage.cacheWrite ?? 0)
+            : 0;
+          const newChars =
+            priorPrompt > 0 && usageAnchorIndex !== undefined
+              ? countMessageChars(messages.slice(usageAnchorIndex + 1))
+              : msgChars;
+          const abortedUsage: Usage = {
+            inputTokens: Math.ceil(newChars / 4),
+            outputTokens: Math.ceil(
+              (attemptText.length + attemptThinkingChars + toolcallDeltaChars) / 4,
+            ),
+            ...(priorPrompt > 0 ? { cacheRead: priorPrompt } : {}),
+          };
+          totalUsage.inputTokens += abortedUsage.inputTokens;
+          totalUsage.outputTokens += abortedUsage.outputTokens;
+          if (abortedUsage.cacheRead) {
+            totalUsage.cacheRead = (totalUsage.cacheRead ?? 0) + abortedUsage.cacheRead;
+          }
+          diag("stream_rule_triggered", {
+            rules: ruleNames.join(","),
+            source: streamRuleHit.source,
+            toolName: streamRuleHit.toolName,
+            attempt,
+            maxAttempts: streamRuleMonitor.maxRetries,
+            discardedChars: attemptText.length + toolcallDeltaChars,
+            provider: options.provider,
+            model: options.model,
+          });
+          // The partial assistant message is discarded: nothing was pushed to
+          // `messages`, so only the reminder lands before the replay.
+          messages.push(buildStreamRuleReminder(streamRuleHit.rules));
+          yield {
+            type: "stream_rule_triggered" as const,
+            rules: ruleNames,
+            source: streamRuleHit.source,
+            ...(streamRuleHit.toolName !== undefined ? { toolName: streamRuleHit.toolName } : {}),
+            attempt,
+            maxAttempts: streamRuleMonitor.maxRetries,
+            usage: abortedUsage,
+          };
+          // Silent retry: hosts roll back the streamed partial exactly as for
+          // any other replayed attempt.
+          yield {
+            type: "retry" as const,
+            reason: "stream_rule" as const,
+            attempt,
+            maxAttempts: streamRuleMonitor.maxRetries,
+            delayMs: 0,
+            silent: true,
+          };
+          turn--; // The discarded attempt does not consume a turn.
+          continue;
         }
 
         diag("stream_done", {
@@ -1804,10 +1932,16 @@ export async function* agentLoop(
         fatalToolArgumentRecoverable = recoverable;
         fatalToolArgumentToolName = toolName;
       };
+      // Instant interrupt: a steering message arriving while this batch runs
+      // preempts it. Separate from options.signal (Stop), which ends the run.
+      const preempt = new AbortController();
+      const unsubscribeSteering = options.onSteeringAvailable?.(() => preempt.abort());
       const executionOptions: ToolBatchExecutionOptions = {
         signal: options.signal,
+        preemptSignal: options.onSteeringAvailable ? preempt.signal : undefined,
         maxToolResultChars: options.maxToolResultChars,
         maxTurnToolResultChars: options.maxTurnToolResultChars,
+        transformToolResult: options.transformToolResult,
         toolMap,
         invalidToolArgumentCounts,
         markFatalToolArgumentError,
@@ -1816,9 +1950,17 @@ export async function* agentLoop(
       const hasSequentialToolCall = toolCalls.some(
         (toolCall) => toolMap.get(toolCall.name)?.executionMode === "sequential",
       );
-      const executionResult = hasSequentialToolCall
-        ? yield* executeToolCallsMixed(toolCalls, toolResults, executionOptions)
-        : yield* executeToolCallsParallel(toolCalls, toolResults, executionOptions);
+      let executionResult: ToolBatchExecutionResult;
+      try {
+        executionResult = hasSequentialToolCall
+          ? yield* executeToolCallsMixed(toolCalls, toolResults, executionOptions)
+          : yield* executeToolCallsParallel(toolCalls, toolResults, executionOptions);
+      } finally {
+        unsubscribeSteering?.();
+      }
+      if (executionResult.preempted) {
+        diag("steer_preempted_tools", { turn, provider: options.provider, model: options.model });
+      }
       messages.push({ role: "tool", content: executionResult.toolResults });
       // The step is complete and durable-able: assistant message + every tool
       // result are in `messages`, and the tools' side effects have already hit
@@ -1988,9 +2130,12 @@ interface ToolExecutionRecord {
 
 interface ToolBatchExecutionOptions {
   signal?: AbortSignal;
+  /** Fires when a steering message preempts this batch (not the Stop button). */
+  preemptSignal?: AbortSignal;
   seenToolCalls: Set<string>;
   maxToolResultChars?: number;
   maxTurnToolResultChars?: number;
+  transformToolResult?: AgentOptions["transformToolResult"];
   toolMap: Map<string, AgentTool>;
   invalidToolArgumentCounts: Map<string, number>;
   /**
@@ -2008,6 +2153,8 @@ interface ToolBatchExecutionOptions {
 interface ToolBatchExecutionResult {
   toolResults: ToolResult[];
   aborted: boolean;
+  /** A steering message cut the batch short; the turn continues. */
+  preempted: boolean;
 }
 
 interface ToolEventState {
@@ -2062,7 +2209,7 @@ async function executeSingleToolCall(
     options.seenToolCalls.add(signature);
   }
   if (!tool) {
-    resultContent = `Unknown tool: ${toolCall.name}`;
+    resultContent = unknownToolMessage(toolCall.name, [...options.toolMap.keys()]);
     isError = true;
   } else {
     try {
@@ -2090,12 +2237,20 @@ async function executeSingleToolCall(
       const callerSignal = options.signal;
       const timeoutMs = tool.timeoutMs ?? DEFAULT_TOOL_TIMEOUT_MS;
       const toolTimeout = timeoutMs === 0 ? undefined : AbortSignal.timeout(timeoutMs);
+      // Instant interrupt: a steering message aborts interruptible tools too.
+      const preemptSignal = isInterruptibleTool(tool, toolCall.name)
+        ? options.preemptSignal
+        : undefined;
+      const toolSignals = [callerSignal, toolTimeout, preemptSignal].filter(
+        (s): s is AbortSignal => s !== undefined,
+      );
       const ctx: ToolContext = {
-        signal: toolTimeout
-          ? callerSignal
-            ? AbortSignal.any([callerSignal, toolTimeout])
-            : toolTimeout
-          : (callerSignal ?? new AbortController().signal),
+        signal:
+          toolSignals.length === 0
+            ? new AbortController().signal
+            : toolSignals.length === 1
+              ? toolSignals[0]
+              : AbortSignal.any(toolSignals),
         toolCallId: toolCall.id,
         onUpdate: (update: unknown) => {
           pushEvent({
@@ -2111,6 +2266,16 @@ async function executeSingleToolCall(
       details = redactValue(normalized.details, toolRedactionOptions());
       imageResult = redactValue(normalized.imageResult, toolRedactionOptions());
       isError = normalized.isError === true;
+      if (options.transformToolResult) {
+        try {
+          resultContent = options.transformToolResult(
+            { name: toolCall.name, args: toolCall.args },
+            resultContent,
+          );
+        } catch {
+          // A faulty transform must never fail or alter the tool call.
+        }
+      }
       for (const key of options.invalidToolArgumentCounts.keys()) {
         if (key.startsWith(`${toolCall.name}:`)) options.invalidToolArgumentCounts.delete(key);
       }
@@ -2125,9 +2290,11 @@ async function executeSingleToolCall(
         const failureCount = (options.invalidToolArgumentCounts.get(failureKey) ?? 0) + 1;
         options.invalidToolArgumentCounts.set(failureKey, failureCount);
         invalidArgAttempt = failureCount;
+        const hints = argumentHints(tool, toolCall.args);
         resultContent =
           `Invalid arguments for tool \`${toolCall.name}\`:\n` +
           prettyError +
+          (hints ? `\n${hints}` : "") +
           "\nRe-issue the call with each field as the correct type.";
         if (failureCount >= 3) {
           // Empty raw args (no fields at all) is the signature of a provider
@@ -2171,6 +2338,21 @@ async function executeSingleToolCall(
   resultContent = redactValue(resultContent, toolRedactionOptions());
   details = redactValue(details, toolRedactionOptions());
 
+  // Instant interrupt: a steering message cut this tool short. Label the result
+  // before tool_call_end so the UI shows the same thing the model will read.
+  if (
+    options.preemptSignal?.aborted &&
+    isInterruptibleTool(options.toolMap.get(toolCall.name), toolCall.name)
+  ) {
+    const marked = markSteerInterrupted({
+      toolCallId: toolCall.id,
+      content: resultContent,
+      isError,
+    });
+    resultContent = marked.content;
+    isError = true;
+  }
+
   const durationMs = Date.now() - startTime;
 
   pushEvent({
@@ -2188,6 +2370,85 @@ async function executeSingleToolCall(
     content: resultContent,
     isError,
     ...(imageResult ? { imageResult } : {}),
+  };
+}
+
+/**
+ * Runs tool calls for a batch and implements instant interrupt. When the
+ * batch's preempt signal fires (a steering message arrived), interruptible
+ * tools see their AbortSignal fire; any that finish afterwards are recorded
+ * as interrupted (keeping partial output). Ones still running after a short
+ * grace are abandoned with an interrupted result. Non-interruptible tools
+ * (atomic file writes) are always awaited, so the batch never ends with a
+ * half-applied mutation.
+ */
+function createPreemptTracker(
+  options: ToolBatchExecutionOptions,
+  eventStream: EventStream<AgentEvent>,
+  state: ToolEventState,
+  resultsById: Map<string, ToolExecutionRecord>,
+  dispatchedIds: Set<string>,
+): { run: (toolCall: ToolCall) => Promise<void>; preempted: () => boolean; dispose: () => void } {
+  const running = new Map<
+    string,
+    { toolCall: ToolCall; interruptible: boolean; startedAt: number }
+  >();
+  let graceTimer: ReturnType<typeof setTimeout> | undefined;
+  const preemptSignal = options.preemptSignal;
+  const abandon = () => {
+    graceTimer = undefined;
+    for (const [id, entry] of running) {
+      if (!entry.interruptible || resultsById.has(id)) continue;
+      resultsById.set(id, { toolCallId: id, content: STEER_INTERRUPTED_TEXT, isError: true });
+      pushToolEvent(eventStream, state, {
+        type: "tool_call_end" as const,
+        toolCallId: id,
+        result: STEER_INTERRUPTED_TEXT,
+        isError: true,
+        durationMs: Date.now() - entry.startedAt,
+      });
+      running.delete(id);
+    }
+    // Only atomic tools left (or nothing): the stream closes once they settle.
+    if (running.size === 0) eventStream.close();
+  };
+  const onPreempt = () => {
+    if (graceTimer === undefined) graceTimer = setTimeout(abandon, PREEMPT_GRACE_MS);
+  };
+  preemptSignal?.addEventListener("abort", onPreempt, { once: true });
+  return {
+    async run(toolCall: ToolCall): Promise<void> {
+      if (options.preemptSignal?.aborted) return; // preempted before dispatch
+      dispatchedIds.add(toolCall.id);
+      const interruptible = isInterruptibleTool(options.toolMap.get(toolCall.name), toolCall.name);
+      running.set(toolCall.id, { toolCall, interruptible, startedAt: Date.now() });
+      const record = await executeSingleToolCall(toolCall, options, (event) =>
+        pushToolEvent(eventStream, state, event),
+      );
+      running.delete(toolCall.id);
+      if (resultsById.has(toolCall.id)) return; // abandoned after the grace period
+      // executeSingleToolCall already labels a call the steer cut short; one
+      // that finished just before the steer arrived also counts as interrupted.
+      const alreadyMarked =
+        typeof record.content === "string"
+          ? record.content.startsWith(STEER_INTERRUPTED_TEXT)
+          : record.content[0]?.type === "text" &&
+            record.content[0].text.startsWith(STEER_INTERRUPTED_TEXT);
+      resultsById.set(
+        toolCall.id,
+        interruptible && preemptSignal?.aborted && !alreadyMarked
+          ? markSteerInterrupted(record)
+          : record,
+      );
+      if (preemptSignal?.aborted && graceTimer === undefined && running.size === 0) {
+        eventStream.close();
+      }
+    },
+    preempted: () => preemptSignal?.aborted === true,
+    dispose: () => {
+      if (graceTimer !== undefined) clearTimeout(graceTimer);
+      preemptSignal?.removeEventListener("abort", onPreempt);
+    },
   };
 }
 
@@ -2217,6 +2478,7 @@ async function* executeToolCallsMixed(
   const dispatchedIds = new Set<string>();
   const abortHandler = () => eventStream.abort(new Error("aborted"));
   options.signal?.addEventListener("abort", abortHandler, { once: true });
+  const tracker = createPreemptTracker(options, eventStream, state, resultsById, dispatchedIds);
 
   // Partition tool calls into phases: each phase is either a group of
   // parallel-safe tools (run concurrently) or a single sequential tool.
@@ -2243,7 +2505,7 @@ async function* executeToolCallsMixed(
   void (async () => {
     try {
       for (const phase of phases) {
-        if (options.signal?.aborted) break;
+        if (options.signal?.aborted || options.preemptSignal?.aborted) break;
         if (phase.sequential) {
           // A different sequential call can change state (e.g. edit between
           // reads, or cd between identical bash commands). Do not deduplicate
@@ -2253,29 +2515,13 @@ async function* executeToolCallsMixed(
             canonicalToolArgs(phase.sequential.args),
           ]);
           if (!options.seenToolCalls.has(signature)) options.seenToolCalls.clear();
-          dispatchedIds.add(phase.sequential.id);
-          const record = await executeSingleToolCall(phase.sequential, options, (event) =>
-            pushToolEvent(eventStream, state, event),
-          );
-          resultsById.set(record.toolCallId, record);
+          await tracker.run(phase.sequential);
         } else if (phase.parallel.length === 1) {
           // Single parallel tool — no need for Promise.all overhead
-          dispatchedIds.add(phase.parallel[0]!.id);
-          const record = await executeSingleToolCall(phase.parallel[0]!, options, (event) =>
-            pushToolEvent(eventStream, state, event),
-          );
-          resultsById.set(record.toolCallId, record);
+          await tracker.run(phase.parallel[0]!);
         } else {
           // Multiple parallel tools — run concurrently
-          await Promise.all(
-            phase.parallel.map(async (toolCall) => {
-              dispatchedIds.add(toolCall.id);
-              const record = await executeSingleToolCall(toolCall, options, (event) =>
-                pushToolEvent(eventStream, state, event),
-              );
-              resultsById.set(record.toolCallId, record);
-            }),
-          );
+          await Promise.all(phase.parallel.map((toolCall) => tracker.run(toolCall)));
         }
       }
       if (!state.finalized) eventStream.close();
@@ -2297,6 +2543,7 @@ async function* executeToolCallsMixed(
     }
   } finally {
     options.signal?.removeEventListener("abort", abortHandler);
+    tracker.dispose();
     state.finalized = true;
   }
 
@@ -2313,7 +2560,7 @@ async function* executeToolCallsMixed(
     const call = toolCalls.find((call) => call.id === result.toolCallId);
     if (call) options.toolMap.get(call.name)?.onResultPrepared?.(result);
   }
-  return { toolResults, aborted };
+  return { toolResults, aborted, preempted: !aborted && tracker.preempted() };
 }
 
 async function* executeToolCallsParallel(
@@ -2329,16 +2576,9 @@ async function* executeToolCallsParallel(
   const dispatchedIds = new Set<string>();
   const abortHandler = () => eventStream.abort(new Error("aborted"));
   options.signal?.addEventListener("abort", abortHandler, { once: true });
+  const tracker = createPreemptTracker(options, eventStream, state, resultsById, dispatchedIds);
 
-  Promise.all(
-    toolCalls.map(async (toolCall) => {
-      dispatchedIds.add(toolCall.id);
-      const record = await executeSingleToolCall(toolCall, options, (event) =>
-        pushToolEvent(eventStream, state, event),
-      );
-      resultsById.set(record.toolCallId, record);
-    }),
-  )
+  Promise.all(toolCalls.map((toolCall) => tracker.run(toolCall)))
     .then(() => {
       if (!state.finalized) eventStream.close();
     })
@@ -2359,6 +2599,7 @@ async function* executeToolCallsParallel(
     }
   } finally {
     options.signal?.removeEventListener("abort", abortHandler);
+    tracker.dispose();
     state.finalized = true;
   }
 
@@ -2375,7 +2616,7 @@ async function* executeToolCallsParallel(
     const call = toolCalls.find((call) => call.id === result.toolCallId);
     if (call) options.toolMap.get(call.name)?.onResultPrepared?.(result);
   }
-  return { toolResults, aborted };
+  return { toolResults, aborted, preempted: !aborted && tracker.preempted() };
 }
 
 /**
@@ -2628,6 +2869,21 @@ function sanitizeOrphanedServerTools(messages: Message[]): void {
   }
 }
 
+/** Text characters across messages (string content, text parts, string results). */
+function countMessageChars(messages: readonly Message[]): number {
+  let chars = 0;
+  for (const m of messages) {
+    if (typeof m.content === "string") chars += m.content.length;
+    else if (Array.isArray(m.content)) {
+      for (const p of m.content) {
+        if ("text" in p && typeof p.text === "string") chars += p.text.length;
+        if ("content" in p && typeof p.content === "string") chars += p.content.length;
+      }
+    }
+  }
+  return chars;
+}
+
 /**
  * Ensure every assistant message with tool_call blocks is immediately followed
  * by a tool message with matching tool_result entries. This prevents Anthropic
@@ -2636,7 +2892,7 @@ function sanitizeOrphanedServerTools(messages: Message[]): void {
  *
  * Repairs in-place by inserting synthetic tool_result messages where needed.
  */
-function repairToolPairingAdjacent(
+export function repairToolPairingAdjacent(
   messages: Message[],
   toolMap?: ReadonlyMap<string, AgentTool>,
 ): void {

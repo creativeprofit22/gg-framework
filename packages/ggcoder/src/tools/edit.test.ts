@@ -268,19 +268,73 @@ describe("createEditTool", () => {
     expect(written).toBe("one two three\n");
   });
 
-  it("throws when file hasn't been read with readFiles tracking", async () => {
+  it("edits an unread file when old_text matches the live content", async () => {
     const filePath = path.join(tmpDir, "unread.txt");
     await fs.writeFile(filePath, "content\n");
 
     const readFiles: ReadTracker = new Map();
     const tool = createEditTool(tmpDir, readFiles);
 
+    await tool.execute(
+      { file_path: "unread.txt", edits: [{ old_text: "content", new_text: "new" }] },
+      { signal: new AbortController().signal, toolCallId: "test-3" },
+    );
+
+    expect(await fs.readFile(filePath, "utf-8")).toBe("new\n");
+    // The model never saw the whole file, so a later full overwrite still needs a read.
+    expect(readFiles.get(filePath)?.seen).toEqual([]);
+  });
+
+  it("still refuses an unread-file edit whose old_text is not in the file", async () => {
+    const filePath = path.join(tmpDir, "unread-miss.txt");
+    await fs.writeFile(filePath, "content\n");
+
+    const tool = createEditTool(tmpDir, new Map());
+
     await expect(
       tool.execute(
-        { file_path: "unread.txt", edits: [{ old_text: "content", new_text: "new" }] },
-        { signal: new AbortController().signal, toolCallId: "test-3" },
+        { file_path: "unread-miss.txt", edits: [{ old_text: "guessed", new_text: "new" }] },
+        { signal: new AbortController().signal, toolCallId: "test-3b" },
       ),
-    ).rejects.toThrow("File must be read first");
+    ).rejects.toThrow(/old_text not found/);
+    expect(await fs.readFile(filePath, "utf-8")).toBe("content\n");
+  });
+
+  it("edits a file changed since it was read against live content, then forgets the read", async () => {
+    const filePath = path.join(tmpDir, "stale.txt");
+    await fs.writeFile(filePath, "alpha\n");
+    const readFiles: ReadTracker = new Map();
+    await markRead(readFiles, filePath);
+    // e.g. the model's own bash script rewrote the file after the read
+    await fs.writeFile(filePath, "alpha changed elsewhere\n");
+    await fs.utimes(filePath, new Date(), new Date(Date.now() + 5000));
+
+    const tool = createEditTool(tmpDir, readFiles);
+    await tool.execute(
+      { file_path: "stale.txt", edits: [{ old_text: "changed", new_text: "edited" }] },
+      { signal: new AbortController().signal, toolCallId: "test-3c" },
+    );
+    expect(await fs.readFile(filePath, "utf-8")).toBe("alpha edited elsewhere\n");
+    // The model never saw the rewritten file whole, so a full overwrite still needs a read.
+    expect(readFiles.get(filePath)?.seen).toEqual([]);
+  });
+
+  it("still refuses a stale-file edit whose old_text is no longer there", async () => {
+    const filePath = path.join(tmpDir, "stale-miss.txt");
+    await fs.writeFile(filePath, "alpha\n");
+    const readFiles: ReadTracker = new Map();
+    await markRead(readFiles, filePath);
+    await fs.writeFile(filePath, "omega\n");
+    await fs.utimes(filePath, new Date(), new Date(Date.now() + 5000));
+
+    const tool = createEditTool(tmpDir, readFiles);
+    await expect(
+      tool.execute(
+        { file_path: "stale-miss.txt", edits: [{ old_text: "alpha", new_text: "beta" }] },
+        { signal: new AbortController().signal, toolCallId: "test-3d" },
+      ),
+    ).rejects.toThrow(/old_text not found/);
+    expect(await fs.readFile(filePath, "utf-8")).toBe("omega\n");
   });
 
   it("allows edit when file is in readFiles tracker", async () => {
@@ -304,7 +358,7 @@ describe("createEditTool", () => {
     expect(written).toBe("gamma beta\n");
   });
 
-  it("rejects edit when the file changed since it was read", async () => {
+  it("applies an edit that matches a file changed since it was read, and forgets the read", async () => {
     const filePath = path.join(tmpDir, "stale.txt");
     await fs.writeFile(filePath, "alpha\n");
 
@@ -317,13 +371,16 @@ describe("createEditTool", () => {
     const future = new Date(Date.now() + 5_000);
     await fs.utimes(filePath, future, future);
 
+    // The edit is validated against the live bytes, so text the formatter
+    // produced applies; the stale read is dropped so a later full-file write
+    // still demands a fresh read.
     const tool = createEditTool(tmpDir, readFiles);
-    await expect(
-      tool.execute(
-        { file_path: "stale.txt", edits: [{ old_text: "ALPHA", new_text: "beta" }] },
-        { signal: new AbortController().signal, toolCallId: "test-stale" },
-      ),
-    ).rejects.toThrow(/modified since/);
+    await tool.execute(
+      { file_path: "stale.txt", edits: [{ old_text: "ALPHA", new_text: "beta" }] },
+      { signal: new AbortController().signal, toolCallId: "test-stale" },
+    );
+    expect(await fs.readFile(filePath, "utf-8")).toBe("beta\n");
+    expect(readFiles.get(filePath)?.seen).toEqual([]);
   });
 
   it("allows consecutive edits without re-reading (recordWrite refreshes)", async () => {

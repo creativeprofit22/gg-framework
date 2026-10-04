@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { XIcon } from "@phosphor-icons/react";
 import { theme } from "./theme";
 import type { QueuedMessage } from "./agent";
+import { pinSize } from "./usePresenceList";
 
 /**
  * Strip above the composer showing user messages waiting to be injected into the
@@ -66,12 +67,22 @@ export function QueuedBar({ messages, onCancel }: Props): React.ReactElement | n
     return () => clearTimeout(timer);
   }, [messages]);
 
-  if (visible.length === 0) return null;
+  const barRef = useRef<HTMLDivElement>(null);
+  const empty = visible.length === 0;
+  // Measure on mount (the enter grows to this height) and again when leaving
+  // starts (the exit folds from it). Without it the max-height keyframe runs
+  // toward a 220px guess, crosses the strip's real ~28px within a frame or two,
+  // and the transcript above is shoved up in one jump instead of gliding, which
+  // made a queued send's bubble lurch upward as it landed.
+  useLayoutEffect(() => pinSize(barRef.current), [leaving, empty]);
+
+  if (empty) return null;
 
   const single = visible.length === 1 ? visible[0]! : null;
 
   return (
     <div
+      ref={barRef}
       className={`queued-bar${leaving ? " leaving" : ""}`}
       style={{ borderColor: theme.border, color: theme.textMuted }}
     >

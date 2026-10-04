@@ -1,17 +1,28 @@
 # Installer art
 
-Branded installer chrome for the macOS DMG and Windows NSIS setup, matching the
-app's dark blue→purple aesthetic (tokens mirror `src/theme.ts`).
+Branded installer chrome for the macOS DMG and Windows NSIS setup, drawn from
+the app's own art so it always matches: the "GG CODER" ASCII banner
+(`src/AsciiLogo.tsx`), the critters (`src/critter-sprites.ts`), the meadow
+terrain (`src/critter-terrain.ts`), and the theme's dark surface, white ink and
+critter pink.
 
 ## Files
 
-| Source (HTML) | Rendered PNG | Final asset (`out/`) | Used by |
-|---|---|---|---|
-| `dmg.html` | `dmg-background.png` (1320×800) | `out/dmg-background.png` | macOS DMG window background |
-| `nsis-sidebar.html` | `nsis-sidebar.png` (328×628) | `out/nsis-sidebar.bmp` (164×314, 24-bit) | NSIS Welcome/Finish page |
-| `nsis-header.html` | `nsis-header.png` (300×114) | `out/nsis-header.bmp` (150×57, 24-bit) | NSIS page header strip |
+`build-pages.mjs` draws all three pages; there are no hand-edited sources.
 
-`logo.png` is a copy of `src-tauri/icons/128x128@2x.png`.
+| Page | Rendered PNG | Final asset (`out/`) | Used by |
+|---|---|---|---|
+| DMG window | `dmg-background.png` (1320×800) | `out/dmg-background.png` | macOS DMG window background |
+| NSIS sidebar | `nsis-sidebar.png` (328×628) | `out/nsis-sidebar.bmp` (164×314, 24-bit) | NSIS Welcome/Finish page |
+| NSIS header | `nsis-header.png` (300×114) | `out/nsis-header.bmp` (150×57, 24-bit) | NSIS page header strip |
+
+`logo.png` is a copy of `src-tauri/icons/128x128@2x.png`, written by
+`scripts/build-icons.mjs`.
+
+The DMG is dark, but Finder always draws the icon labels in black (nothing can
+recolour them), so `build-pages.mjs` paints a light name plate where each label
+lands: Finder's 128pt icons sit centred at the `appPosition` /
+`applicationFolderPosition` points, with 16pt labels just below.
 
 The `out/` assets are committed and referenced from `src-tauri/tauri.conf.json`
 (`bundle.macOS.dmg` + `bundle.windows.nsis`). The build does **not** regenerate
@@ -23,11 +34,11 @@ them — edit + regenerate only when the branding changes.
 
 ## Regenerating (two steps)
 
-1. **Render the HTML → PNG** (needs headless Chromium). Edit the `*.html`, then
-   capture each at its exact viewport. With the repo's screenshot tooling that's
-   one capture per file at the sizes in the table above; or use any headless
-   Chromium that writes a full-viewport PNG next to the HTML with the matching
-   name.
+1. **Render the pages → PNG** (needs Playwright's Chromium). From the repo root:
+   ```bash
+   node_modules/.bin/tsx gg-app/installer/build-pages.mjs
+   ```
+   (`tsx` lets the script import the app's TypeScript art modules.)
 2. **Convert PNG → final assets:**
    ```bash
    pnpm --filter gg-app installer:art

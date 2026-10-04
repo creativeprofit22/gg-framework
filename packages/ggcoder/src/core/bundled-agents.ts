@@ -212,9 +212,7 @@ export const BUNDLED_AGENTS: AgentDefinition[] = [
     description:
       'Use for read-only questions about THIS repository: "where is X implemented", "what calls Y", "how does module Z fit together", tracing a data flow or mapping a directory. Never edits and never uses the web.',
     tools: ["read", "grep", "find", "ls", "code_search", "source_path"],
-    // Structural recon is mechanical pattern work; the cheap tier handles it
-    // well and keeps wide fan-out affordable.
-    model: "fast",
+    model: "inherit",
     // Conventions and style rules don't change where a symbol is defined, and
     // skipping them keeps recon fast (matching Claude Code's Explore agent).
     context: "none",

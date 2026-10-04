@@ -4,6 +4,7 @@ import { MENTOR_DISPLAY_NAME } from "./brand";
 import type { Dispatch, SetStateAction } from "react";
 import type { SidecarEvent } from "./agent";
 import type { Item } from "./App";
+import type { LiveTextStore } from "./live-text";
 
 /**
  * Ken Kai (mentor agent) client state + event handling, extracted from App.tsx.
@@ -49,8 +50,10 @@ export interface KenMentor {
 export function useKenMentor(opts: {
   setItems: Dispatch<SetStateAction<Item[]>>;
   nextId: () => number;
+  /** Where Ken's streaming reply grows until it ends (live-text.ts). */
+  liveText: LiveTextStore;
 }): KenMentor {
-  const { setItems, nextId } = opts;
+  const { setItems, nextId, liveText } = opts;
 
   const [kenRunning, setKenRunning] = useState(false);
   // Ken's own activity metrics, mirroring the build session's so Ken's activity
@@ -69,8 +72,25 @@ export function useKenMentor(opts: {
   const authorityVersion = useRef(0);
   const operationVersion = useRef(0);
   const closedRuns = useRef(new Set<string>());
-  const clearStream = useCallback(() => {
+  // Ends the CURRENT Ken streaming bubble (also called mid-turn on tool calls to
+  // break the bubble so post-tool text starts a fresh paragraph), writing its
+  // final text into `items` once.
+  const endKenStreaming = useCallback(() => {
+    const current = kenStreamingIdRef.current;
     kenStreamingIdRef.current = null;
+    if (current === null) return;
+    const final = liveText.get(current);
+    if (final !== undefined) {
+      setItems((prev) =>
+        prev.map((it) => (it.kind === "ken" && it.id === current ? { ...it, text: final } : it)),
+      );
+    }
+    liveText.release(current);
+  }, [liveText, setItems]);
+  const clearStream = useCallback(() => {
+    // Commit the open bubble's streamed text before dropping it, so a run or
+    // history boundary never truncates the bubble to its first chunk.
+    endKenStreaming();
     kenTokensRef.current = 0;
     kenThinkingStartRef.current = null;
     kenThinkingAccumRef.current = 0;
@@ -80,7 +100,7 @@ export function useKenMentor(opts: {
     setKenIsThinking(false);
     setKenThinkingStartTs(null);
     setKenThinkingAccumMs(0);
-  }, []);
+  }, [endKenStreaming]);
   const hydrateKen = useCallback(
     (value: unknown, replaceHistory = false) => {
       authorityVersion.current++;
@@ -151,32 +171,23 @@ export function useKenMentor(opts: {
       : null;
   }, []);
 
-  // Ken's streaming bubble. Ken's replies are short, so a direct setItems per
-  // delta (no rAF buffering) is fine and keeps his path independent of GG
-  // Coder's. First delta creates the magenta bubble; later deltas append to it.
+  // Ken's streaming bubble, kept independent of GG Coder's path. The first
+  // delta adds the bubble to `items`; later deltas grow it in the live-text
+  // store, which re-renders only his row instead of the whole App per token.
   const appendKen = useCallback(
     (text: string) => {
       const current = kenStreamingIdRef.current;
       if (current === null) {
         const id = nextId();
         kenStreamingIdRef.current = id;
+        liveText.begin(id, text);
         setItems((prev) => [...prev, { kind: "ken", id, text }]);
       } else {
-        setItems((prev) =>
-          prev.map((it) =>
-            it.kind === "ken" && it.id === current ? { ...it, text: it.text + text } : it,
-          ),
-        );
+        liveText.append(current, text);
       }
     },
-    [setItems, nextId],
+    [liveText, setItems, nextId],
   );
-
-  // Ends the CURRENT Ken streaming bubble (also called mid-turn on tool calls to
-  // break the bubble so post-tool text starts a fresh paragraph).
-  const endKenStreaming = useCallback(() => {
-    kenStreamingIdRef.current = null;
-  }, []);
 
   // Close Ken's open thinking span (if any), folding its duration into the
   // accumulator. Mirrors the build's finalizeThinking. Called when text or a

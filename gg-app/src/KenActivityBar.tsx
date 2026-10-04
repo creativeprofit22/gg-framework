@@ -81,7 +81,7 @@ export function KenActivityBar({
   if (thinkingLabel) meta.push({ text: thinkingLabel, thinking: true });
 
   return (
-    <div className="statusrow running ken-statusrow" style={{ color: theme.textMuted }}>
+    <div className="statusrow running ken-statusrow dissolve-in" style={{ color: theme.textMuted }}>
       <span className="statusrow-left">
         {/* Tint the canvas alpha with Ken's existing color; the package has no color prop. */}
         <svg width="0" height="0" aria-hidden="true" style={{ position: "absolute" }}>

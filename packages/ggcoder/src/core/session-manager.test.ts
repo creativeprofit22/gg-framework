@@ -4,6 +4,7 @@ import fs, {
   mkdtemp,
   readFile,
   rm,
+  stat,
   utimes,
   readdir,
   writeFile,
@@ -30,6 +31,7 @@ import {
   type TurnMetricPayload,
   type CustomEntry,
 } from "./session-manager.js";
+import { canonicalProjectKey } from "../project-notes-repository.js";
 import {
   ACTIVE_PHASE_CONTEXT_CLEAR_KIND,
   ACTIVE_PHASE_CONTEXT_KIND,
@@ -88,6 +90,21 @@ describe("SessionManager context profiles", () => {
     const legacy = (await manager.load(legacyPath, { resolveCanonical: false })).header;
     expect(legacy.openAICodexContextProfile).toBeUndefined();
     expect(legacy.openAICodexFast).toBeUndefined();
+  });
+
+  it("validates the project for pre-resolved and exact-checkpoint loads alike", async () => {
+    const manager = new SessionManager(await makeTempDir());
+    const session = await manager.create("/repo", "openai", "gpt-6-astra");
+    const projectKey = canonicalProjectKey("/repo");
+
+    for (const options of [{ canonical: true }, { resolveCanonical: false }, {}]) {
+      expect((await manager.load(session.path, { ...options, projectKey })).path).toBe(
+        session.path,
+      );
+      await expect(
+        manager.load(session.path, { ...options, projectKey: canonicalProjectKey("/other") }),
+      ).rejects.toThrow("Cannot resume a session from another project");
+    }
   });
 
   it("preserves concurrent profile, Fast, and message writes", async () => {
@@ -295,6 +312,83 @@ describe("SessionManager conversation identity", () => {
     expect(await manager.resolveCanonicalSession(original.path)).toBe(newest.path);
     expect((await manager.load(original.path)).header.id).toBe(newest.id);
     expect(await manager.getMostRecent("/repo")).toBe(newest.path);
+  });
+
+  it("serves summaries from the fingerprint index and re-reads only changed files", async () => {
+    const sessionsDir = await makeTempDir();
+    const writer = new SessionManager(sessionsDir);
+    const original = await writer.create("/repo", "anthropic", "test-model");
+    await writer.appendEntry(original.path, entry("first"));
+    const other = await writer.create("/repo", "anthropic", "test-model");
+    const directory = path.dirname(original.path);
+    const indexPath = path.join(directory, ".session-index.json");
+
+    // First scan builds the index; a fresh manager (new process) reuses it.
+    expect((await writer.listSummaries("/repo")).map((s) => s.id).sort()).toEqual(
+      [original.id, other.id].sort(),
+    );
+    expect(existsSync(indexPath)).toBe(true);
+    const reader = new SessionManager(sessionsDir);
+    expect(await reader.resolveCanonicalSession(original.id, "/repo")).toBe(original.path);
+
+    // A new checkpoint written after the index was built still wins.
+    const newest = await writer.create("/repo", "anthropic", "test-model", {
+      conversationId: original.id,
+      generation: 1,
+      parentSessionId: original.id,
+    });
+    expect(await reader.resolveCanonicalSession(original.path, "/repo")).toBe(newest.path);
+
+    // A changed file is re-read: the preview reflects the new first prompt.
+    await writer.appendEntry(other.path, entry("later"));
+    expect((await reader.listSummaries("/repo")).find((s) => s.id === other.id)?.preview).toBe(
+      "hi",
+    );
+
+    // A deleted file drops out instead of being served from the index.
+    await rm(other.path);
+    expect((await reader.listSummaries("/repo")).map((s) => s.id)).not.toContain(other.id);
+  });
+
+  it("ignores a corrupt or tampered summary index", async () => {
+    const sessionsDir = await makeTempDir();
+    const manager = new SessionManager(sessionsDir);
+    const created = await manager.create("/repo", "anthropic", "test-model");
+    const directory = path.dirname(created.path);
+    const name = path.basename(created.path);
+    const fileStat = await stat(created.path);
+
+    // Matching fingerprint but a path outside the directory: must not be trusted.
+    await writeFile(
+      path.join(directory, ".session-index.json"),
+      JSON.stringify({
+        version: 1,
+        entries: {
+          [name]: {
+            size: fileStat.size,
+            mtimeMs: fileStat.mtimeMs,
+            summary: {
+              id: created.id,
+              conversationId: created.id,
+              generation: 0,
+              path: "/etc/passwd",
+              timestamp: created.header.timestamp,
+              lastActivity: new Date().toISOString(),
+              cwd: "/repo",
+              hasMessages: false,
+            },
+          },
+        },
+      }),
+    );
+    expect(await new SessionManager(sessionsDir).resolveCanonicalSession(created.id, "/repo")).toBe(
+      created.path,
+    );
+
+    await writeFile(path.join(directory, ".session-index.json"), "{not json");
+    expect(await new SessionManager(sessionsDir).resolveCanonicalSession(created.id, "/repo")).toBe(
+      created.path,
+    );
   });
 
   it("loads ancestry oldest first and stops before corrupt or missing parents", async () => {

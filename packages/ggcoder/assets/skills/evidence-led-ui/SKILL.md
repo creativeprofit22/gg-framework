@@ -1,158 +1,100 @@
 ---
 name: evidence-led-ui
-description: Use for web/mobile UI creation, redesign, visual polish, accessibility work, and UI review, including small styling fixes and changes to focus, control states, borders, or dropdown icons. Use the small-edit path for narrow changes. Exclude behavior-only wiring unrelated to visual states, copy-only changes, database/API schemas, CLI output, standalone image/SVG generation, and description-only tasks.
+description: Use when building or changing web/mobile UI: net-new screens or pages, redesigns, design systems, visual polish, UI review, and mid-build edits touching colour, type, spacing, icons, focus/hover/selected states, borders, dropdown icons, motion, or UI copy layout. Also use when output looks generic or AI-made. Small styling fixes take the small-edit path. Do NOT use for behavior-only wiring with no visual state, copy-only text changes, database/API schemas, CLI output, or standalone image generation; speed/bundle work is lean, legal/privacy review of public pages is compliance-guard.
 license: See LICENSES.md
-compatibility: Full review requires filesystem inspection and rendered screenshots; web research and browser/device tooling are optional and unavailable checks must be reported honestly.
+compatibility: Full review requires filesystem inspection and rendered screenshots (deferred `screenshot` tool); web research and device tooling are optional and unavailable checks must be reported as unverified.
 ---
 
 # Evidence-Led UI
 
-Use this skill for web or mobile interface creation, redesign, implementation, styling, and review.
+Pick your mode, then follow only that section:
+
+| Situation | Mode | Go to |
+| --- | --- | --- |
+| One control, state, border, icon inset, focus bug, or token tweak | Small edit | § Small-edit path |
+| New screen/page/component, redesign, or "make it look less generic" | Build | § Build loop |
+| "Review this UI", audit screens or flows, pre-ship look | Review | § Review mode |
+
+Every mode obeys § Binding defaults. Preserve the project's visual language unless the user asked for a redesign.
 
 ## Small-edit path
 
-For a narrow styling or control-state fix, skip the broad design workflow, not verification:
+Skip the design workflow, not verification:
 
-1. Read the shared primitive, tokens, state rules, and affected callers. Reproduce the reported sequence before editing.
-2. For focus, borders, glass effects, or dropdown icons, read `references/craft-rulings.md` § Control icon insets and § No sticky pointer focus. Identify the rule drawing the defect before adding an override.
-3. Fix the shared owner, not each screen. Check affected variants and remove superseded local treatments within scope. Any supporting copy added or changed must pass § Copy must earn its space in `references/craft-rulings.md`; small edits must not accumulate redundant descriptions.
-4. Run the applicable interaction regression matrix in the craft rulings using the project's browser checks or manual browser verification. Screenshots alone cannot pass interaction checks. Report actual evidence and any unverified platform.
+1. Read the shared primitive, tokens, state rules, and callers. Reproduce the reported sequence before editing.
+2. Focus, borders, glass, or dropdown icons: read `references/craft-rulings.md` § Control icon insets and § No sticky pointer focus. Find the rule that paints the defect before adding an override.
+3. Fix the shared owner, not each screen. Check variants; remove superseded local treatments in scope. Added copy must pass § Copy must earn its space.
+4. Run the applicable interaction regression matrix in `references/craft-rulings.md` via browser checks. Screenshots alone cannot pass interaction checks. Report actual evidence and unverified platforms.
 
-## Governing rule
+## Build loop
 
-Inspect before inventing. Preserve the project's visual language unless the user explicitly requests a redesign. Treat corpus findings as conditional observations, not official brand truth, universal rules, or a house style.
+One design thesis, one author. Do not blend directions.
 
-Aesthetic distinction is contextual. Semantic structure, operability, responsive stability, performance, honest content, accessibility, and user trust are the non-negotiable floor.
+1. **Inspect.** Read nearest routes, components, tokens, type, icons, motion, and states. Reuse the local system; add no library just for a look. React and nothing local fits: read `references/ui-libraries.md` and use `ui_registry`/`ui_adopt` (via `tool_search`) for real Bklit/Kokonut source, never a lookalike.
+2. **Content first.** Write real headline, labels, section copy, and realistic data (longest, empty, 0/1/many) before layout. Rank it. Delete sections with nothing true to say. Never invent metrics, testimonials, logos, or ratings; label fixtures. Details: `references/direction.md` § 1.
+3. **Read the job.** Surface type, audience, single job, risk, platform, constraints. Infer from the project and state the inference; ask only for genuine taste or product decisions. Net-new or redesign: read the matching section of `references/archetypes.md`.
+4. **Write the thesis** using the template in `references/direction.md` § 2: signature, type roles, OKLCH colour tokens with intended contrast pairs, spacing/density, radius/material, imagery, motion, rejected defaults. Broad work goes in `DESIGN.md`.
+5. **Slop check the thesis** against `references/anti-defaults.md`. Every tell is replaced or justified with "This belongs because…". Run the neighbour test (§ 7 there).
+6. **Plan states:** loading, empty, error, retry, success, disabled, destructive; hover, focus-visible, press, selected, expanded, pending; keyboard order, overlays, narrow/wide, reduced motion, zoom/reflow, long and localized text. Apply the accessibility sections of `references/production-contract.md`; the full contract for forms, navigation, data/AI, native, or release work.
+7. **Implement** the complete flow with real content. Decision-critical information and the primary action stay visible or one obvious action away on desktop and mobile.
+8. **Verify rendered output** (§ Rendered verification loop).
 
-## Binding craft defaults
+## Rendered verification loop
 
-Apply these on every UI task. Read `references/craft-rulings.md` when implementing or reviewing their details.
+1. Load `screenshot` via `tool_search`. Capture desktop (~1440 px) and mobile (~390 px), plus key states.
+2. Compare each capture against the written thesis line by line, then against `references/anti-defaults.md`.
+3. Score with `references/quality-rubric.md`. Measure contrast of real rendered pairs; record pass/fail/unverified for applicable contract checks.
+4. Fix the weakest criterion and every contract failure. Remove one decorative idea that does not serve the job. Re-capture.
+5. Stop after one revision unless the gate still fails. Gate: **20/24 or higher**, no zero in accessibility, consistency and flow, responsive behaviour, state completeness, or content authenticity, and no applicable WCAG A/AA failure. Small components: 2 on every applicable floor criterion.
 
-- **No emoji UI:** Never use emoji as icons, bullets, status marks, or decoration unless explicitly requested. Reuse the project icon system; otherwise use one coherent icon package.
-- **Uniform geometry:** Align containers, columns, section edges, baselines, dividers, control heights, and repeated component anatomy. Break alignment only for a clear content reason.
-- **One shared content rail:** Default navigation, header, main content, footer, and adjacent sections to the same max-width, inline gutters, and breakpoint padding. Full-bleed backgrounds may differ, but their inner content edges must align. Any different width or offset needs an explicit user or content reason, never one-off margin or padding.
-- **No edge-hugging control icons:** Select, dropdown, and combobox chevrons and other trailing icons need a deliberate inline-end inset plus enough reserved text padding for the icon and gap. They must never touch the control edge or overlap content; use logical properties so the anatomy also works in RTL.
-- **Reuse first:** Search for existing components, variants, tokens, utilities, icon wrappers, focus rings, and motion curves before creating new ones.
-- **Purposeful feedback:** Relevant hover, focus, press, selected, expanded, loading, success, and error states need clear feedback. Avoid abrupt changes when a short transition improves continuity.
-- **No soft semantic tint-on-tint:** Do not default badges, buttons, toasts, cards, selected states, or icon medallions to a low-opacity semantic-color background with saturated same-hue text or icons, with or without a matching border. Unless the user explicitly requests that treatment or an established system must be preserved, choose a product-specific alternative rather than imposing one universal replacement style.
-- **Focus is not selection or decoration:** Diagnose the actual painted layer before changing it. Reuse one shared focus treatment, separate from glass borders/reflections and selected, expanded, or error states. Do not stack local rings on it. Prevent stale pointer-originated highlights without blurring controls, suppressing keyboard focus, or removing legitimate state cues. Prefer native `:focus-visible` behavior; custom modality handling requires a reproduced platform defect and the regression matrix in `references/craft-rulings.md`.
-- **No generic hover lift:** Do not default to `translateY`, bobbing, floating, or scale-up on hover. Prefer color, border, underline, icon fill, opacity, or restrained shadow changes.
-- **No `transition: all`:** Name transition properties, reuse duration/easing tokens, and provide a reduced-motion path.
-- **Intentional type:** Reuse the existing type system. For net-new web work, select an appropriate modern family or pairing; do not use Arial, Helvetica, or bare `system-ui` as the aesthetic direction.
-- **WCAG 2.2 Level AA is the accessibility floor:** Every web UI and complete user flow must meet every applicable Level A and Level AA success criterion, not a hand-picked subset. Native apps apply WCAG2ICT where relevant plus current platform accessibility requirements. Stricter project, contract, platform, or jurisdiction rules win; accessibility cannot be traded for aesthetics, scope, delivery speed, or a higher rubric score.
-- **No unsupported accessibility claims:** Treat ADA as an equal-access legal obligation, not a badge earned by Lighthouse, axe, or another scanner. Never label a UI `ADA compliant` or `WCAG conformant` from source review or automated checks alone; a claim requires a defined scope, per-criterion evidence, manual keyboard and assistive-technology testing, and qualified legal or product-owner review when legal compliance is asserted.
-- **Measured contrast:** Meet WCAG 2.2 contrast for text, controls, icons, focus, and meaningful graphics. Muted text must remain readable.
-- **Consistent flow:** Repeated navigation and actions keep the same order, labels, icons, placement, and behavior across sections and pages.
-- **Copy must earn its space:** Start with clear labels, controls, and relevant status, not automatic subtitles, helper paragraphs, or footer notes. Supporting text must add information needed here that the interface does not already communicate. Remove repetition, show state-specific guidance when needed, and move optional detail into contextual help. Keep essential instructions and consequences visible before action. Reduce unnecessary copy before compressing layout; verify reading effort in the rendered UI. See `references/craft-rulings.md` § Copy must earn its space.
-- **No generated em dashes:** Do not write em dashes in user-facing UI copy unless explicitly requested or exact supplied source text must remain unchanged.
+No screenshot tool or browser available: say so, mark visual checks unverified, never claim the look was verified.
+
+## Review mode
+
+Inspect code and rendered output. Return findings ordered by impact, each with screenshot or file:line evidence, label (`RUNTIME` observed, `CODE` read in source, `DEDUCED`, `SNAPSHOT` dated source), and the fix. Separate floor defects (accessibility, states, broken layout) from aesthetic opportunities (slop tells). Recommend one resolved direction.
+
+## Binding defaults
+
+Details and fixes: `references/craft-rulings.md`.
+
+- **No emoji UI.** One coherent icon family; reuse the project's.
+- **Uniform geometry and one content rail.** Shared max-width, gutters, and breakpoint padding for nav, header, main, footer. Break alignment only for a stated content reason.
+- **Control icon insets.** Chevrons and trailing icons get a deliberate inline-end inset plus reserved text padding; never touch the edge or overlap text; logical properties for RTL.
+- **Reuse first.** Existing components, variants, tokens, focus rings, motion curves before new ones.
+- **Focus is not selection or decoration.** Diagnose the painted layer; one shared focus treatment separate from borders, glass, selected, expanded, error. No stacked rings. Prefer native `:focus-visible`; custom modality handling needs a reproduced defect and the regression matrix.
+- **No soft semantic tint-on-tint** unless requested or required by an existing variant.
+- **Motion:** no generic hover lift, no `transition: all`, named properties, tokens, reduced-motion path.
+- **Intentional type and colour:** see `references/direction.md`. Not Inter/violet-gradient by default on brand surfaces.
+- **Copy must earn its space.** No automatic subtitles, helper paragraphs, or footer notes; supporting text adds information the interface lacks. Named-outcome CTAs.
+- **No em dashes in UI copy** unless requested or exact supplied copy.
+- **WCAG 2.2 Level AA is the accessibility floor** for every applicable A/AA criterion across complete flows; native apps add WCAG2ICT and platform rules. Stricter project or legal rules win. Accessibility is never traded for aesthetics or speed.
+- **No unsupported accessibility claims.** Never say `ADA compliant`, `WCAG conformant`, or "accessible" from source review or scanners; that needs a defined scope, per-criterion evidence, manual keyboard and assistive-technology testing, and owner/legal review. Dated legal context: `references/production-contract.md` § 2.
+
+## Scaling: one agent or several
+
+| Situation | Policy |
+| --- | --- |
+| Small edit, build, redesign | Main thread only. One thesis, one author; never split a design across children. |
+| Review of one or two flows you can render and read yourself | Main thread only. |
+| Review of many screens/flows, or several apps | Build a ledger: rows = flows/screens × {slop tells, states, accessibility contract, responsive}. Fan out read-only general-purpose children (they have the `skill` tool), one per disjoint flow, all in ONE `spawn_agent` call, ≤ 6 per wave. |
+| A dated legal or platform claim needs checking | One `researcher` child. |
+
+Each child brief contains: the absolute skill root path (the `Skill root directory` shown when this skill loaded), files to read (`references/anti-defaults.md`, `references/quality-rubric.md`, the accessibility sections of `references/production-contract.md`), the flow's routes and how to run the app, the ledger rows it owns, the instruction to capture desktop and mobile screenshots with the `screenshot` tool, the evidence labels, and the output schema: findings (screen, screenshot or file:line, label, severity, fix) plus explicit `checked` and `not checked` lists. Children do not edit.
+
+Merge: a failed, timed-out, or silent row is `not checked`, never clean. Re-open each reported file:line or re-capture before reporting it. Large pre-ship reviews get one fresh verifier child that tries to disprove the findings. Fixes stay on the main thread (or `bee` children on strictly disjoint files) against the single thesis; run checks once after merging.
 
 ## Reference map
 
-Resolve every path from the installed skill root. Load only what the task needs:
+Load only what the task needs; resolve paths from the skill root.
 
-- `references/craft-rulings.md`: implementation detail for the binding defaults above.
-- `references/ui-libraries.md`: real Bklit/Kokonut component discovery/adoption and Motion APIs. Read for relevant React UI creation after checking existing project UI; use deferred `ui_registry` and `ui_adopt` rather than inventing a library lookalike.
-- `references/production-contract.md`: binding pass/fail semantics, WCAG/ADA accessibility, forms, performance, resilience, platform, trust, AI, media, theme, and release checks. Read its accessibility sections for every implemented or reviewed UI; read the full contract for broad features, behavior changes, forms, navigation, data/AI interfaces, native work, performance work, or release review.
-- `references/archetypes.md`: surface-specific direction and relevant source slugs. Read for net-new UI, redesigns, or unresolved visual direction.
-- `references/observed-patterns.md`: measured corpus observations. Read only sections that answer a real design question.
-- `references/anti-defaults.md`: transferable AI-generated patterns to challenge. Read for broad visual work or generic-looking output.
-- `references/quality-rubric.md`: rendered scoring and revision gate. Read before critiquing broad output.
-- `references/methodology.md`: extraction method, denominators, and limitations. Read only to audit evidence.
-- `references/provenance.md` and `LICENSES.md`: sources, licenses, standards status, and Refero boundaries.
+- `references/direction.md`: content-first, thesis template, type, OKLCH colour, spacing, imagery, motion, verified Baseline features, INP practice.
+- `references/anti-defaults.md`: slop tells with replacement moves and the neighbour test.
+- `references/craft-rulings.md`: icons, geometry, insets, focus vs selection, regression matrix, type loading, contrast, copy rules.
+- `references/production-contract.md`: pass/fail semantics, WCAG/ADA/EAA context, forms, performance, platform, trust, AI, release evidence.
+- `references/quality-rubric.md`: rendered scoring gate.
+- `references/ui-libraries.md`: Bklit/Kokonut adoption and Motion APIs.
+- `references/archetypes.md`: surface-specific direction and corpus source slugs.
+- `references/observed-patterns.md`: measured corpus observations; read only the section that answers a question; keep numerator/denominator with any claim.
+- `references/methodology.md`, `references/provenance.md`, `LICENSES.md`: method, sources, standards status, licences, Refero boundary.
 
-Do not load `data/observations.json` or the raw corpus by default. Open a raw source only to audit one claim or inspect one selected exemplar. Never load the full corpus into context.
-
-## Workflow
-
-### 1. Inspect the project
-
-Inspect the nearest relevant routes, real content, shared components, semantic controls, tokens, theme, typography, icons, motion, screenshots, tests, responsive conventions, and existing states.
-
-Reuse the local system. Do not add a design library merely to obtain a look. For a net-new project with no neighbors, derive direction from the brief and matching archetype rather than choosing a fashionable default.
-
-### 2. Write a design read
-
-Resolve:
-
-- **Surface:** marketing, application UI, dashboard/data-dense, commerce/marketplace, editorial/content, documentation/developer tool, mobile/native, or one named hybrid with a clear leader.
-- **Audience:** user, expertise, environment, and access needs.
-- **Single job:** the one outcome this screen must make easiest.
-- **Task and risk:** frequency, decision cost, error cost, and time pressure.
-- **Content:** real hierarchy, density, variability, media, data, and longest plausible values.
-- **Platform:** viewport/window, input modes, support policy, navigation behavior, and framework conventions.
-- **Constraints:** existing tokens/assets, redesign scope, performance limits, and required tone.
-
-Infer missing facts from the project and state the inference. Ask only when code cannot resolve a genuine product or taste decision.
-
-### 3. Select evidence only when it helps
-
-For broad net-new work or a redesign, read the matching archetype and usually choose two aligned source slugs plus one contrast. Record why each applies.
-
-For a small change in an established system, local components and tokens may be sufficient. A frequency can support investigation, not automatically become a recommendation. Prefer local product evidence, then archetype evidence, then corpus-wide frequency.
-
-Refero is optional. Use it only through an authorized Refero MCP or user-provided authorized export. Do not scrape Refero, call undocumented endpoints, or access disallowed routes.
-
-### 4. Form one design thesis
-
-State one compact direction:
-
-- semantic color/type/icon/spacing/grid/motion roles and a reuse map;
-- first glance, second glance, primary action, and supporting evidence;
-- composition and uniform alignment rules;
-- reasons for borders, surfaces, shadows, blur, gradients, or imagery;
-- feedback, duration/easing, resting behavior, and reduced-motion equivalent;
-- one memorable device grounded in the subject, content, or interaction.
-
-One thesis leads. Do not combine several aesthetic directions into a mood-board compromise.
-
-### 5. Run the anti-default check
-
-For broad visual work, read `references/anti-defaults.md`. Flag emoji UI, mixed icon families, arbitrary misalignment, duplicated local styling, abrupt interaction, generic hover lift, soft semantic tint-on-tint treatments, generic type, generated em dashes, centered gradient heroes, glass cards, equal card grids, decorative eyebrows, random metric blocks, ubiquitous pills, dark-premium assumptions, fake terminals, floating screenshots, bento layouts, ambient motion, icon medallions, and invented proof.
-
-Keep a flagged pattern only after completing: **“This belongs because…”** with a product-specific reason. Replace choices that could survive unchanged in an unrelated product.
-
-### 6. Plan the complete task flow
-
-Plan only relevant states, but include the complete primary path and recovery:
-
-- loading, empty, error, retry, offline, success, disabled, and destructive outcomes;
-- hover, focus-visible, press, selected, expanded, and pending feedback;
-- keyboard order, accessible names/status, overlay focus, and drag alternatives;
-- pointer-versus-keyboard focus behavior, including native popup dismissal and clicks onto non-focusable space;
-- narrow, intermediate, desktop, wide/resizable, pointer, touch, and no-hover behavior;
-- reduced motion, forced colors, zoom/reflow, long/localized/RTL text, missing media, and realistic data extremes;
-- text alternatives and media equivalents, landmarks/headings, language, labels/instructions/errors, status announcements, timing, flashing, and sensory-independent instructions where applicable.
-
-For every UI, read and apply the accessibility sections of `references/production-contract.md`. For broad behavior, forms, navigation, native, data/AI, performance, or release work, apply the full contract. A visual score cannot compensate for a relevant contract failure.
-
-### 7. Document broad work
-
-For a broad page, multi-screen feature, or redesign, create or update `DESIGN.md` with the design read, evidence, thesis, semantic tokens, reused primitives, craft system, components/states, responsive behavior, and applicable production checks. Keep a small component plan in work notes instead.
-
-### 8. Implement the product
-
-Use real project content and data. Label fixtures honestly. Never invent testimonials, customer logos, ratings, metrics, or claims as fact.
-
-Reuse dependencies and primitives. Use one coherent icon system. Meet every applicable WCAG 2.2 Level A and AA criterion across the complete flow, including its states and responsive variants. Maintain semantic controls, visible keyboard focus, keyboard operation, assistive-technology output, measured contrast, readable line lengths, stable adaptive layout, and reduced-motion support. Pointer interaction must not leave a false focus, active, or selected-looking highlight behind. Implement the complete planned flow, not only its first screenshot.
-
-The representative initial state must keep decision-critical information and the primary action visible or one obvious action away on desktop and mobile. Preserve selected context through master-detail recomposition. Keep demo, debug, and state-switching controls subordinate and non-obscuring.
-
-### 9. Critique rendered output once
-
-Capture representative desktop and narrow/mobile output. Score broad work with `references/quality-rubric.md`, record applicable production checks as pass/fail/unverified, remove one unnecessary decorative idea, revise the weakest criterion and any contract failure, then re-capture.
-
-Default to one critique-and-revision cycle. Run another only when evidence still fails the score or production gate. If a check is unavailable, report it as unverified instead of looping or substituting more polish.
-
-Broad work is complete at **20/24 or higher**, with no zero in accessibility, consistency and flow, responsive behavior, state completeness, or content authenticity, and only after applicable production checks pass. Any applicable WCAG Level A or AA failure blocks completion regardless of score. A small component must score 2 on every applicable quality-floor criterion and pass its accessibility contract checks.
-
-## Review-only mode
-
-Inspect the project and rendered output. Return findings ordered by impact, cite screenshot/code evidence, name the matching archetype when relevant, and recommend one resolved direction. Distinguish quality-floor defects from aesthetic opportunities.
-
-## Evidence discipline
-
-- Keep a numerator/denominator or numeric sample count with every corpus claim.
-- Treat source slugs as observations of selected public surfaces, not official systems or permission to reproduce a brand.
-- Never recommend a color, font, radius, theme, or layout solely because it is frequent.
-- State corpus gaps plainly. Mobile/native has zero direct documents in this snapshot; use platform guidance and device testing.
-- If local evidence conflicts with corpus evidence, follow the product and record why.
+Never load `data/observations.json` or the raw `corpus/` into context; open one raw source only to audit one claim. Corpus frequencies are observations of public surfaces, not brand truth or a reason to pick a colour, font, or layout. Mobile/native has no corpus documents; use platform guidance. Refero only through an authorized MCP or user export.

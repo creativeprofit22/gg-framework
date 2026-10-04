@@ -1,30 +1,32 @@
 ---
 name: shared-language
-description: Use when a project's domain vocabulary is fuzzy or drifting, naming decisions keep recurring, or a hard-to-reverse architectural decision needs recording so it is not re-litigated or re-suggested later. Do NOT use for throwaway scripts or projects too small to have recurring vocabulary.
+description: Use when a project's domain vocabulary is fuzzy or drifting (two names for one thing, one name for two), naming decisions keep recurring, or a hard-to-reverse architectural decision needs recording so it is not re-litigated or re-suggested — including mid-build when a term settles or a change contradicts an ADR. Do NOT use for throwaway scripts, projects too small to have recurring vocabulary, interviewing for requirements (clarify), or renames with no vocabulary decision (refactoring).
 ---
 
 # Shared Language
 
-A repo's terms are its compression. When you and the user mean the same thing by "reservation", every prompt, name, and doc gets shorter and sharper — and the agent stops spending thinking tokens re-deriving what a single word encodes. This skill builds and maintains that vocabulary.
+Two artifacts: the glossary (`CONTEXT.md`) and decision records (`docs/adr/`). On entry, read both if they exist, then act on the trigger: term settled → glossary; hard call made → offer ADR; change contradicts an ADR → surface it.
 
 ## The glossary — CONTEXT.md
 
-At the repo root. **A glossary and nothing else**: term — a one-to-three-line definition, no implementation details, no history. If a definition names a file path, it has become documentation; move that out.
+At the repo root. **A glossary and nothing else**: `term — 1–3 line definition`, plus `Avoid: <synonyms>` where drift exists. No file paths, implementation, or history.
 
-- Challenge fuzzy terms against it: "the glossary defines _cancellation_ as pre-charge; this change reads as post-charge — which is meant?"
-- Stress-test a new term with an invented edge case before recording it ("is a no-show a cancellation?").
-- Update **inline, the moment a term settles** — never batch glossary edits for "later"; later never comes.
-- Name files, functions, variables, and tests with glossary terms verbatim. When code and glossary disagree, one of them is wrong — find out which.
-- Create the file lazily on the first settled term, never as an empty template.
-- On first creation, add one line to the repo's instruction file (AGENTS.md, or CLAUDE.md if that is what the repo uses): `Read CONTEXT.md before naming anything.` CONTEXT.md is not auto-loaded — the pointer is what makes the glossary ambient in every session.
+- Challenge fuzzy usage against it: "glossary says _cancellation_ is pre-charge; this reads post-charge — which?"
+- Test a candidate term with an invented edge case before recording it ("is a no-show a cancellation?").
+- Update the moment a term settles; create the file lazily on the first settled term, never as an empty template.
+- Code, tests, and UI use glossary terms verbatim. Code and glossary disagree → one is wrong; ask which.
+- On creation, add to the repo's instruction file (AGENTS.md, or CLAUDE.md if that is what it uses): `Read CONTEXT.md before naming anything.` CONTEXT.md is not auto-loaded — that pointer is what makes it count in later sessions.
 
 ## Decision records — docs/adr/
 
-An ADR earns its file only when a decision is **hard to reverse**, **surprising without context**, and **a real tradeoff** — all three. One file per decision: title, 1–3 sentences of context, the decision, the main rejected alternative and why. Numbered; immutable once accepted — supersede, never edit.
+Only when a decision is **hard to reverse**, **surprising without context**, and **a real tradeoff** — all three. Offer it; don't write unasked.
 
-Read the ADRs before proposing a change that contradicts one: honor it, or surface the conflict to the user. Never silently relitigate a recorded decision, and never re-suggest a rejected alternative without new facts.
+- Follow the repo's existing ADR format. None? Use the MADR 4 minimal shape: `NNNN-title-with-dashes.md` with Context and Problem Statement, Considered Options, Decision Outcome (chosen option + why), Consequences; `status: accepted` in front matter.
+- Immutable once accepted — supersede, never edit: new ADR notes `Supersedes NNNN`; the old one's status becomes `superseded by NNNN` (the only allowed change).
+- Before proposing a change that contradicts an ADR: honour it or raise the conflict. Never re-suggest a rejected option without new facts.
 
-## Integration
+## Scaling: one agent or several
 
-- During a clarify session: settled terms go to the glossary; qualifying hard calls get an ADR offer.
-- Before naming anything: read the glossary if it exists.
+Main thread only. On a large repo, one `owl` may inventory competing terms across packages (occurrences with file:line); the main thread decides and edits.
+
+Sources (accessed 3 October 2026): MADR 4.0.0, latest release (2024-09-17) — https://adr.github.io/madr/; ubiquitous language — https://martinfowler.com/bliki/UbiquitousLanguage.html

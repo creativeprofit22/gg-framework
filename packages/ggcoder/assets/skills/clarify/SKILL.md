@@ -1,30 +1,39 @@
 ---
 name: clarify
-description: Use when requirements or a design are genuinely unsettled — the user asks to interrogate, sharpen, or stress-test a plan before building, or mid-build discovery surfaces a decision that materially changes the result. Do NOT use for routine changes, clear bug reports, or work whose requirements are already settled — bias to action there.
+description: Use when requirements or a design are genuinely unsettled — the user asks to interrogate, sharpen, or stress-test a plan or spec before building, a new app or feature request leaves costly-to-reverse product decisions open, or mid-build discovery hits a decision that materially changes the result (scope, data model, UX, tradeoff). Settled terms and hard-to-reverse calls hand off to shared-language. Do NOT use for routine changes, clear bug reports (root-cause), reviewing finished work (code-review), or work whose requirements are already settled — bias to action there.
 ---
 
 # Clarify
 
-Misalignment is the most expensive failure in software: the build succeeds and the thing is still wrong. This skill is a structured interview that settles every open decision **before** implementation. It is not permission-asking — it is decision-forcing.
+Decision-forcing, not permission-asking. Pick the mode:
 
-## Two modes
+- **Quick gate** (mid-build, a blocking decision appears) → one `ask_user` call with every blocking question; keep building everything that does not depend on the answer. Never halt the whole task at one branch point.
+- **Full interview** (user asks to refine a plan/spec/design) → run the rounds below.
 
-**Quick gate** — mid-build, when you hit an unanswered decision that materially changes the result: batch every blocking question into ONE numbered list, each with your recommended answer, and keep building the parts that don't depend on it. Never stop a whole task at one branch point.
+## Rules for every question
 
-**Full interview** — the user asks to refine a plan, spec, or design. Run the rounds below.
+1. **Never ask for facts.** If reading code, running a command, or checking docs can answer it, do that instead. Only decisions reach the user: product calls, taste, tradeoffs with real stakes.
+2. **Ask only the frontier.** A question is on the frontier when every decision it depends on is settled ("needs persistence?" before "which database?"). Never re-ask a settled decision.
+3. **One `ask_user` call per round, never prose questions.** Each question: clickable options, your recommended option first and marked, a one-line reason, and the **default** you will apply if skipped ("Default if skipped: SQLite").
+4. **Show behaviour choices as examples.** When options differ in behaviour, give one concrete case per option ("Given an empty cart, When checkout is pressed, Then …"). Examples expose disagreement that abstract wording hides.
 
-## Rounds (full interview)
+## Full-interview rounds
 
-Work the decision tree from the top:
+1. Investigate first; list open decisions; keep only the frontier.
+2. Ask the round (rule 3).
+3. Record answers as one-line facts — `Settled: dark theme only`. Skipped questions settle to their stated default.
+4. Repeat until a round yields no new frontier questions.
+5. Close: print the decision list plus Given/When/Then acceptance examples for each load-bearing behaviour, then build (or hand back if the user only wanted the plan).
 
-1. **Ask only the frontier.** A question belongs on the frontier when every decision it depends on is already settled. Asking "which database?" before "does this need persistence?" wastes a round; so does re-asking anything an earlier round settled.
-2. **Batch the round.** Every frontier question in one message, numbered, each with `→ recommended: X` and a one-line reason. A recommendation is cheap for the user to confirm and expensive for them to derive.
-3. **Never ask for facts.** Facts are yours: read the code, run the command, check the docs, delegate the wide search. If investigation can answer it, it is not a question — it is homework. Only decisions — taste, product calls, tradeoffs with real stakes — reach the user.
-4. **Record what settled.** After each round, restate the settled decisions as one-line facts ("Settled: dark theme only") before asking the next round, so the record is unambiguous.
-5. **Stop at empty frontier.** When a round produces no new questions, the session is done: restate the full decision list, then start building. The goal is settled decisions, not exhaustive documentation.
+Hand-offs (shared-language skill): newly settled domain terms → glossary; a decision that is hard to reverse, surprising, and a real tradeoff → offer an ADR.
 
-## Anti-patterns
+## Do not
 
-- **Interrogation drip** — one question per reply across ten replies. Every reply costs the user a context switch; batching is the fix.
-- **Homework outsourcing** — asking what you could have read. Burns trust and returns worse answers than the source.
-- **Speculative depth** — questions about futures nobody has committed to. Ask when the decision is load-bearing for work you are about to do.
+- Drip one question per reply — batch the round.
+- Ask about futures nobody has committed to; ask only what is load-bearing for work about to start.
+
+## Scaling: one agent or several
+
+Main thread only. Fact-finding spanning several packages may go to `owl` (repo) or `researcher` (web) children in one `spawn_agent` call; the interview itself is never delegated.
+
+Sources (accessed 3 October 2026): Given-When-Then — https://martinfowler.com/bliki/GivenWhenThen.html

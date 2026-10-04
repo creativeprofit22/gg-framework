@@ -15,7 +15,7 @@
 // something more important (higher PRIO) interrupts it; `ok()` turns false
 // the moment the script loses ownership, so it stops at its next check.
 
-import { makeCritterFx, SIZE } from "./critter-fx";
+import { discard, makeCritterFx, SIZE } from "./critter-fx";
 import { makeCritterIdle } from "./critter-idle";
 import { makeCritterScare } from "./critter-scare";
 import { makeCritterSocial } from "./critter-social";
@@ -299,9 +299,14 @@ export function createCritterFloor(
     });
   }
 
-  // ── Frame loop: runs only while critters exist and the window is visible ──
+  // ── Frame loop: runs only while critters exist and the window is in use ──
+  // Like the decorative CSS loops (`.app:not(.window-focused)` in App.css),
+  // a background window doesn't animate: a 60Hz tick in every idle-but-visible
+  // window is a steady drain on battery for something nobody is watching.
+  const inUse = (): boolean => !document.hidden && document.hasFocus();
+  let pausedAt = 0;
   function startLoop(): void {
-    if (rafId || destroyed || critters.size === 0 || document.hidden) return;
+    if (rafId || destroyed || critters.size === 0 || !inUse()) return;
     lastFrameTs = now();
     rafId = requestAnimationFrame(frame);
   }
@@ -318,11 +323,26 @@ export function createCritterFloor(
     if (tooltipKey) positionTooltip();
     startLoop();
   }
-  const onVisibility = (): void => {
-    if (document.hidden) stopLoop();
-    else startLoop();
+  const onWindowState = (): void => {
+    if (!inUse()) {
+      if (!pausedAt) pausedAt = now();
+      stopLoop();
+      return;
+    }
+    if (pausedAt) {
+      // Tweens run on wall-clock time; give back the time they spent frozen
+      // so a walk resumes mid-stride instead of snapping to its end.
+      const t = now();
+      for (const c of critters.values()) {
+        if (c.tween) c.tween.t0 += t - Math.max(pausedAt, c.tween.t0);
+      }
+      pausedAt = 0;
+    }
+    startLoop();
   };
-  document.addEventListener("visibilitychange", onVisibility);
+  document.addEventListener("visibilitychange", onWindowState);
+  window.addEventListener("focus", onWindowState);
+  window.addEventListener("blur", onWindowState);
 
   // ── Script runner ──
   const canAct = (c: Critter): boolean =>
@@ -885,9 +905,9 @@ export function createCritterFloor(
       { duration: 760, delay: direction === "in" ? 160 : 0, easing: "ease-out", fill: "both" },
     );
     later(1100, () => {
-      glow.remove();
-      core.remove();
-      ring.remove();
+      discard(glow);
+      discard(core);
+      discard(ring);
     });
   }
 
@@ -1021,8 +1041,7 @@ export function createCritterFloor(
     c.token++;
     c.tween?.resolve();
     c.tween = null;
-    for (const anim of c.el.getAnimations({ subtree: true })) anim.cancel();
-    c.el.remove();
+    discard(c.el);
     critters.delete(c.key);
     if (tooltipKey === c.key) hideTooltip(c.key);
     if (critters.size === 0) stopLoop();
@@ -1187,11 +1206,13 @@ export function createCritterFloor(
     for (const id of timers) window.clearTimeout(id);
     timers.clear();
     resizeObserver?.disconnect();
-    document.removeEventListener("visibilitychange", onVisibility);
+    document.removeEventListener("visibilitychange", onWindowState);
+    window.removeEventListener("focus", onWindowState);
+    window.removeEventListener("blur", onWindowState);
     critters.clear();
     pending.clear();
-    floor.remove();
-    tooltip.remove();
+    discard(floor);
+    discard(tooltip);
     lane.classList.remove("open", "closing");
   }
 

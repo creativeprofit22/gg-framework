@@ -282,24 +282,9 @@
   background: var(--glass-clear-hover);
 }
 
-/* ── Export chat: a glass pill like the other buttons ── */
-.export-chat {
-  border-color: transparent;
-  background: var(--glass-float);
-  -webkit-backdrop-filter: var(--glass-backdrop);
-  backdrop-filter: var(--glass-backdrop);
-  box-shadow: var(--liquid-rim-small);
-}
-.export-chat.visible:hover {
-  background: var(--glass-hover);
-  border-color: transparent;
-  box-shadow: var(--liquid-rim);
-}
-.export-chat:disabled:hover {
-  background: var(--glass-float);
-  border-color: transparent;
-  box-shadow: var(--liquid-rim-small);
-}
+/* Export chat is deliberately NOT glass: it shares the solid light pill of the
+   other floating chat controls ("You have new chats", scroll-to-bottom) in
+   App.css, which reads clearly over any message behind it. */
 
 /* ── Chat: your bubbles and formatted replies ──
    Your messages are a quiet glass bead: a faint clear fill, a lit top edge and
@@ -349,17 +334,21 @@
   background: var(--glass-hover);
 }
 
-/* Tables: a rounded glass card. Grid lines become hairlines (outer edge on
-   the card), the header row a lit strip, and the zebra a whisper of white. */
+/* Tables: a rounded glass card. The card is the scroll frame (Markdown.tsx
+   MarkdownTable), so its edge and corners stay put while a wide table scrolls
+   inside it. Grid lines become hairlines, the header row a lit strip, and the
+   zebra a whisper of white. */
 /* Width is owned by App.css (`100%`, inside the `.md-table-scroll` scroller).
    Never set `max-content` here: cells then can't wrap, so every wide table
    forces a horizontal scrollbar in narrow chat panes. */
-.markdown table {
-  border-collapse: separate;
-  border-spacing: 0;
+.markdown .md-table-scroll {
   border-radius: var(--radius-card);
   background: rgb(255 255 255 / 0.03);
   box-shadow: var(--liquid-rim-soft-small);
+}
+.markdown table {
+  border-collapse: separate;
+  border-spacing: 0;
 }
 .markdown th,
 .markdown td {
@@ -376,12 +365,6 @@
 .markdown th {
   background: rgb(255 255 255 / 0.07);
   box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.1);
-}
-.markdown thead tr:first-child > th:first-child {
-  border-top-left-radius: var(--radius-card);
-}
-.markdown thead tr:first-child > th:last-child {
-  border-top-right-radius: var(--radius-card);
 }
 .markdown tbody tr:nth-child(even) td {
   background: rgb(255 255 255 / 0.025);
@@ -549,11 +532,26 @@
   transition-timing-function: ease-out;
 }
 
+/* Question band: the same raised glass card as a table in a reply (the card
+   family it belongs to), rather than a flat grey slab. */
+.ask-band:not(.is-done, .is-closed) {
+  border-color: transparent;
+  background: rgb(255 255 255 / 0.04);
+  box-shadow: var(--liquid-rim-soft-small);
+}
 /* Question options are full-width rows, not floating pills: keep their edges
-   aligned while hovering/pressing, and preserve dark ink on the selected fill. */
+   aligned while hovering/pressing, and preserve dark ink on the selected fill.
+   Unpicked rows drop the standalone button's glass rim (three heavy rims
+   stacked in a card read as boxes in a box) and keep the hairline App.css
+   gives them; the picked row keeps its lit rim, so the answer stands out. */
 .ask-options .btn {
   --glass-hover-scale: 1;
   --glass-press-scale: 1;
+}
+.ask-options .btn-ghost {
+  box-shadow: none;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
 }
 .ask-options .btn-primary:hover:not(:disabled) {
   color: var(--on-primary);

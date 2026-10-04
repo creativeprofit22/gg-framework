@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef } from "react";
 import type { Dispatch, MutableRefObject, SetStateAction } from "react";
-import { theme } from "./theme";
 import { isProgrammaticExecutionResult } from "@kenkaiiii/gg-core/programmatic-chat-contract";
+import { isHookKind, type HookKind } from "./HookNotice";
 import {
   isProgrammaticAssessmentEvent,
   type ProgrammaticAssessmentEvent,
@@ -15,6 +15,7 @@ import {
   type ToolCallStartPayload,
   type AgentState,
   type BackgroundTask,
+  type CacheExpiryStatus,
   type ModelOption,
   type PendingPlanReview,
   type ProjectTask,
@@ -26,7 +27,7 @@ import {
 } from "./agent";
 import type { RoadmapPhaseDraft } from "@kenkaiiii/gg-core/roadmap-workflow";
 import { isPhaseLaunchErrorEvent } from "./notes-types";
-import { isAskUserPrompt, reconcilePendingAsks } from "./ask-user";
+import { closeAsks, isAskUserPrompt, markAskDeferred, reconcilePendingAsks } from "./ask-user";
 import {
   extractImageWarnings,
   type AssistantTextDeltaPayload,
@@ -41,6 +42,7 @@ import { playSound } from "./sounds";
 import { findCompletedSteps, countPlanSteps } from "./plan-steps";
 import type { PendingAttachment } from "./attachments";
 import type { Item } from "./App";
+import type { LiveTextStore } from "./live-text";
 
 /**
  * Build-session SSE event handling + assistant-streaming helpers, extracted from
@@ -65,28 +67,8 @@ export interface ImagePreview {
   path?: string;
 }
 
-// Hook kind → notice copy + tone color, mirroring the TUI's app-items.ts.
-export type HookKind = "ideal" | "verification" | "loop_break" | "regrounding";
 /** Hooks that fire in place of a final answer, so their draft must be held. */
 export type PreFinalHookKind = Extract<HookKind, "ideal" | "verification">;
-export const HOOK_PRESENTATION: Record<HookKind, { text: string; color: string }> = {
-  ideal: {
-    text: "Hook engaged. Running an ideal review before finalizing.",
-    color: theme.secondary,
-  },
-  verification: {
-    text: "Hook engaged. Running the project's verification before finalizing.",
-    color: theme.secondary,
-  },
-  loop_break: {
-    text: "Hook engaged. Breaking a stuck loop and rethinking the approach.",
-    color: theme.warning,
-  },
-  regrounding: {
-    text: "Hook engaged. Re-grounding on the original request after compaction.",
-    color: theme.primary,
-  },
-};
 
 function formatElapsed(ms: number): string {
   const s = Math.round(ms / 1000);
@@ -177,6 +159,8 @@ export interface AgentEventsDeps {
   onSessionReset?: (operationId?: string) => void;
   shouldApplySessionReset?: (data: Record<string, unknown>) => boolean;
   onContinuationAccepted?: (data: unknown) => void;
+  /** Where the streaming reply's text grows until it ends (live-text.ts). */
+  liveText: LiveTextStore;
 }
 
 export interface AgentEvents {
@@ -241,6 +225,7 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
     onSessionReset,
     shouldApplySessionReset,
     onContinuationAccepted,
+    liveText,
   } = deps;
   const listCommands = client?.listCommands ?? listPrimaryCommands;
   const listModels = client?.listModels ?? listPrimaryModels;
@@ -323,6 +308,8 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
 
   /** Queued→sent morph duration. Must match `.user-msg.promoted` in App.css. */
   const PROMOTE_MS = 300;
+  // Flushed chunks go to the live-text store, which re-renders only the
+  // streaming row; `items` gets the final text once, in endStreamingText.
   const flushChunks = useCallback(() => {
     flushTimerRef.current = null;
     const chunk = pendingChunksRef.current;
@@ -330,12 +317,8 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
     pendingChunksRef.current = "";
     const current = streamingIdRef.current;
     if (current === null) return; // streaming ended while waiting
-    setItems((prev) =>
-      prev.map((it) =>
-        it.kind === "assistant" && it.id === current ? { ...it, text: it.text + chunk } : it,
-      ),
-    );
-  }, [setItems]);
+    liveText.append(current, chunk);
+  }, [liveText]);
 
   const appendAssistant = useCallback(
     (text: string) => {
@@ -351,6 +334,7 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
         // on first paint — the user should see the bubble appear right away).
         const id = nextId();
         streamingIdRef.current = id;
+        liveText.begin(id, text);
         setItems((prev) => [...prev, { kind: "assistant", id, text }]);
       } else {
         // Subsequent tokens: buffer and flush on the 100ms timer
@@ -360,7 +344,7 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
         }
       }
     },
-    [flushChunks, nextId, setItems],
+    [flushChunks, liveText, nextId, setItems],
   );
 
   // Paint text held under arming. Called the moment the turn proves it was not
@@ -373,31 +357,36 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
     if (!held) return;
     const id = nextId();
     streamingIdRef.current = id;
+    liveText.begin(id, held);
     setItems((prev) => [...prev, { kind: "assistant", id, text: held }]);
-  }, [nextId, setItems]);
+  }, [liveText, nextId, setItems]);
 
   // Flush any pending buffered text and end the current streaming section.
   // Called whenever streaming transitions to tool calls, a new prompt, etc.
   // Without this, the last few buffered tokens (waiting for the timer) would be lost.
+  // The streamed text lives in the live-text store until here: write it into
+  // `items` once, then release the store entry.
   const endStreamingText = useCallback(() => {
     if (flushTimerRef.current !== null) {
       clearTimeout(flushTimerRef.current);
       flushTimerRef.current = null;
     }
-    if (pendingChunksRef.current) {
-      const chunk = pendingChunksRef.current;
-      pendingChunksRef.current = "";
-      const current = streamingIdRef.current;
-      if (current !== null) {
-        setItems((prev) =>
-          prev.map((it) =>
-            it.kind === "assistant" && it.id === current ? { ...it, text: it.text + chunk } : it,
-          ),
-        );
-      }
-    }
+    const chunk = pendingChunksRef.current;
+    pendingChunksRef.current = "";
+    const current = streamingIdRef.current;
     streamingIdRef.current = null;
-  }, [setItems]);
+    if (current === null) return;
+    const live = liveText.get(current);
+    if (live !== undefined) {
+      const final = live + chunk;
+      setItems((prev) =>
+        prev.map((it) =>
+          it.kind === "assistant" && it.id === current ? { ...it, text: final } : it,
+        ),
+      );
+    }
+    liveText.release(current);
+  }, [liveText, setItems]);
 
   // Ideal review is a pre-final hook: the no-tool response immediately before
   // it is an internal draft, not a transcript answer. Normally the draft was
@@ -418,8 +407,9 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
       setItems((prev) =>
         prev.filter((item) => !(item.kind === "assistant" && item.id === current)),
       );
+      liveText.release(current);
     }
-  }, [setItems]);
+  }, [liveText, setItems]);
 
   const pushItem = useCallback(
     (item: Item, opts?: { skipIfSameAsLast?: boolean }) => {
@@ -880,7 +870,7 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           if (name === "generate_image") {
             const prompt = typeof args.prompt === "string" ? args.prompt : "generating image…";
             endStreamingText();
-            pushItem({ kind: "generating_image", id: nextId(), prompt });
+            pushItem({ kind: "generating_image", id: nextId(), prompt, toolCallId });
           }
           break;
         }
@@ -982,9 +972,12 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
               ),
             );
           }
-          // Remove any generating_image placeholders — the tool has finished
-          // (success or failure). If it produced images, they're pushed below.
-          setItems((prev) => prev.filter((it) => it.kind !== "generating_image"));
+          // Remove this call's generating_image placeholder — the tool has
+          // finished (success or failure). If it produced images, they're pushed
+          // below. Other tools ending must not clear a still-running generation.
+          setItems((prev) =>
+            prev.filter((it) => it.kind !== "generating_image" || it.toolCallId !== id),
+          );
           if (liveEntry?.name === "generate_image" && typeof result === "string") {
             const warnings = extractImageWarnings(result);
             if (warnings) {
@@ -1026,8 +1019,11 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
         }
         case "agent_done": {
           // The loop stopped and no review was injected, so anything held under
-          // arming was the real final answer after all — paint it.
+          // arming was the real final answer after all — paint it. The loop has
+          // stopped, so settle it as a finished bubble rather than leaving it a
+          // live stream (word fades, unfinished-tail markdown) until run_end.
           releaseHeldText();
+          endStreamingText();
           const usage = d.totalUsage as { outputTokens?: number } | undefined;
           if (usage && typeof usage.outputTokens === "number") {
             // Authoritative final total — set rather than add to avoid
@@ -1037,6 +1033,19 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
               setTokens(tokensRef.current);
             }
           }
+          break;
+        }
+        case "stream_rule_triggered": {
+          // The aborted attempt is discarded by the loop (its retry is silent, so
+          // nothing else rolls it back here): drop its partial text too.
+          discardStreamingDraft();
+          const names = Array.isArray(d.rules) ? d.rules.map(String) : [];
+          const name = names.join(", ") || "stream rule";
+          pushItem({
+            kind: "info",
+            id: nextId(),
+            text: `Rule "${name}" caught the reply mid-stream — retrying`,
+          });
           break;
         }
         case "compaction_start": {
@@ -1293,6 +1302,21 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
             );
           }
           break;
+        case "ask_user_deferred":
+          // Soft deadline passed: the agent continued on its best guess, but the
+          // band stays answerable — a later answer is sent to it as a message.
+          if (typeof d.id === "string") {
+            const promptId = d.id;
+            setItems((prev) => markAskDeferred(prev, promptId));
+          }
+          break;
+        case "ask_user_closed":
+          // A newer question or a new session superseded deferred questions.
+          if (Array.isArray(d.ids)) {
+            const ids = d.ids.filter((id): id is string => typeof id === "string");
+            setItems((prev) => closeAsks(prev, ids));
+          }
+          break;
         case "plan_progress": {
           // The sidecar reads the live approved-plan file, so this snapshot
           // stays accurate even if implementation expands or rewrites `## Steps`.
@@ -1483,8 +1507,8 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           break;
         }
         case "hook": {
-          const kind = String(d.kind ?? "ideal") as HookKind;
-          if (kind in HOOK_PRESENTATION) {
+          const kind = String(d.kind ?? "ideal");
+          if (isHookKind(kind)) {
             if (kind === "ideal" || kind === "verification") {
               // Draft dies here — held (never painted) in the normal armed path,
               // or removed from the transcript when arming came too late. Both
@@ -1530,12 +1554,17 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           acknowledgedQueueRef.current.clear();
           armedHooksRef.current.clear();
           heldTextRef.current = "";
+          // Its row is going away with the transcript; nothing left to show.
+          if (streamingIdRef.current !== null) liveText.release(streamingIdRef.current);
           stickToBottomRef.current = true;
           setItems([]);
           setLiveToolFeed([]);
           setTokens(0);
           setDoneStatus(null);
           setContextTokens(0);
+          // A fresh session has no history, so nothing to re-read: drop the
+          // previous chat's cold-cache notice instead of carrying it over.
+          setState((s) => (s ? { ...s, cacheExpiry: null } : s));
           setPlanReview(null);
           planReviewContentRef.current = null;
           {
@@ -1559,6 +1588,13 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           subagentGroupIdRef.current = null;
           subagentGroupByAgentRef.current.clear();
           onSessionReset?.(typeof d.operationId === "string" ? d.operationId : undefined);
+          break;
+        case "cache_expiry":
+          // Live cold-cache status pushed after a run, compaction or model
+          // switch settles. Null (empty chat / no known TTL) hides the notice.
+          setState((s) =>
+            s ? { ...s, cacheExpiry: (e.data as CacheExpiryStatus | null) ?? null } : s,
+          );
           break;
         case "models_change":
           // The set of usable models changed: local-model discovery landed
@@ -1696,6 +1732,7 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
       onSessionReset,
       shouldApplySessionReset,
       onContinuationAccepted,
+      liveText,
     ],
   );
 

@@ -6103,6 +6103,14 @@ select {
   max-width: 100%;
   overflow-x: auto;
 }
+/* Folding /steroids table: the toggle sits directly under the table (as under
+   a folded code block), so the wrapper owns the bottom gap instead. */
+.markdown .md-table-collapsible {
+  margin-bottom: 0.5em;
+}
+.markdown .md-table-collapsible .md-table-scroll {
+  margin-bottom: 0;
+}
 .markdown table {
   border-collapse: collapse;
   width: 100%;

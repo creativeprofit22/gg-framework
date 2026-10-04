@@ -33,20 +33,72 @@ describe("Markdown tables", () => {
     expect(table?.querySelectorAll("tbody td")).toHaveLength(2);
   });
 
-  it("collapses only the table that follows the /steroids marker, and expands on click", () => {
-    const table = "| A | B |\n| --- | --- |\n| one | two |";
+  it("folds only the /steroids table to its top 3 rows, and expands and collapses on click", () => {
+    // Arrange
+    const rows = [1, 2, 3, 4, 5].map((n) => `| ${n} | repo-${n} |`).join("\n");
+    const table = `| # | Repo |\n| --- | --- |\n${rows}`;
     const { container } = render(
       <Markdown>{`${STEROIDS_COLLAPSIBLE_TABLE_MARKER}\n\n${table}\n\nmiddle\n\n${table}`}</Markdown>,
     );
+    const [steroids, plain] = Array.from(container.querySelectorAll("table"));
+    const bodyRows = (el: Element | undefined): number =>
+      el?.querySelectorAll("tbody tr").length ?? -1;
 
-    expect(container.querySelectorAll("table")).toHaveLength(1);
-    const toggle = screen.getByRole("button", { name: "Show table" });
+    // Assert: folded by default; header stays, the unmarked table is untouched.
+    expect(bodyRows(steroids)).toBe(3);
+    expect(steroids?.querySelectorAll("thead th")).toHaveLength(2);
+    expect(steroids?.textContent).not.toContain("repo-4");
+    expect(bodyRows(plain)).toBe(5);
+    const toggle = screen.getByRole("button", { name: "Show all 5 repos" });
     expect(toggle.getAttribute("aria-expanded")).toBe("false");
 
+    // Act: expand
     fireEvent.click(toggle);
 
-    expect(container.querySelectorAll("table")).toHaveLength(2);
-    expect(screen.getByRole("button", { name: "Hide table" })).toBeTruthy();
+    // Assert
+    expect(bodyRows(container.querySelector("table") ?? undefined)).toBe(5);
+    const collapse = screen.getByRole("button", { name: "Show top 3 only" });
+    expect(collapse.getAttribute("aria-expanded")).toBe("true");
+
+    // Act: collapse back
+    fireEvent.click(collapse);
+
+    // Assert
+    expect(bodyRows(container.querySelector("table") ?? undefined)).toBe(3);
+    expect(screen.getByRole("button", { name: "Show all 5 repos" })).toBeTruthy();
+  });
+
+  it("keeps the streaming /steroids table mounted when it grows past the fold", () => {
+    // Arrange: a streaming reply whose table has not reached the fold yet.
+    const tableOf = (count: number): string => {
+      const rows = Array.from({ length: count }, (_, i) => `| ${i + 1} | repo-${i + 1} |`);
+      return `| # | Repo |\n| --- | --- |\n${rows.join("\n")}`;
+    };
+    const reply = (count: number): string =>
+      `${STEROIDS_COLLAPSIBLE_TABLE_MARKER}\n\n${tableOf(count)}`;
+    const { container, rerender } = render(<Markdown animate>{reply(3)}</Markdown>);
+    const before = container.querySelector("table");
+    expect(before).not.toBeNull();
+
+    // Act: more rows stream in, crossing the fold.
+    rerender(<Markdown animate>{reply(5)}</Markdown>);
+
+    // Assert: the same table node survives, so its word spans don't replay
+    // their fade-in and its horizontal scroll position is kept.
+    expect(container.querySelector("table")).toBe(before);
+    expect(screen.getByRole("button", { name: "Show all 5 repos" })).toBeTruthy();
+  });
+
+  it("shows a short /steroids table in full with no toggle", () => {
+    // Arrange / Act
+    const table = "| # | Repo |\n| --- | --- |\n| 1 | a |\n| 2 | b |\n| 3 | c |";
+    const { container } = render(
+      <Markdown>{`${STEROIDS_COLLAPSIBLE_TABLE_MARKER}\n\n${table}`}</Markdown>,
+    );
+
+    // Assert
+    expect(container.querySelectorAll("tbody tr")).toHaveLength(3);
+    expect(screen.queryByRole("button")).toBeNull();
   });
 
   it("carries GFM column alignment onto cells as inline text-align", () => {

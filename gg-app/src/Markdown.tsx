@@ -1,5 +1,7 @@
 import {
+  Children,
   Fragment,
+  isValidElement,
   memo,
   useCallback,
   useContext,
@@ -9,7 +11,7 @@ import {
   useState,
   createContext,
 } from "react";
-import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
+import ReactMarkdown, { defaultUrlTransform, type ExtraProps } from "react-markdown";
 import { toast } from "./toast";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
@@ -123,36 +125,83 @@ function ExternalLink({
 }
 
 const CollapsibleTableContext = createContext(false);
+/** Rows a folded /steroids table keeps visible (the top-ranked candidates). */
+const COLLAPSED_TABLE_ROWS = 3;
+/** True while the enclosing collapsible table is folded to its first rows. */
+const TableFoldedContext = createContext(false);
+
+/** Count the body rows in a hast `<table>`, without rendering them. */
+function tableBodyRowCount(node: ExtraProps["node"]): number {
+  let rows = 0;
+  for (const section of node?.children ?? []) {
+    if (section.type !== "element" || section.tagName !== "tbody") continue;
+    for (const row of section.children) {
+      if (row.type === "element" && row.tagName === "tr") rows += 1;
+    }
+  }
+  return rows;
+}
 
 /**
  * Tables live inside their own horizontal scroller so the table itself can stay
  * a real `display: table` at 100% width — it then fills and re-flows with the
  * pane as it resizes, and only scrolls when its columns can't wrap any narrower.
+ *
+ * The /steroids candidates table folds to its top rows; a toggle under it
+ * reveals the rest or folds it back.
  */
-function MarkdownTable({ children }: { children?: React.ReactNode }): React.ReactElement {
+function MarkdownTable({
+  children,
+  node,
+}: {
+  children?: React.ReactNode;
+} & ExtraProps): React.ReactElement {
   const collapsible = useContext(CollapsibleTableContext);
-  const [open, setOpen] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const captureHeight = useAnimatedHeight(rootRef, expanded);
   const panelId = useId();
+  const totalRows = tableBodyRowCount(node);
+  const foldable = collapsible && totalRows > COLLAPSED_TABLE_ROWS;
+  const folded = foldable && !expanded;
   const table = (
     <div className="md-table-scroll" id={panelId}>
-      <table>{children}</table>
+      <table>
+        <TableFoldedContext.Provider value={folded}>{children}</TableFoldedContext.Provider>
+      </table>
     </div>
   );
   if (!collapsible) return table;
+  // A collapsible table keeps one wrapper shape before and after it grows past
+  // the fold, so a streaming table isn't remounted (replaying its word fade-in
+  // and resetting its scroll) when the toggle first appears.
   return (
-    <div className="md-table-collapsible">
-      <button
-        type="button"
-        className="code-expand"
-        aria-expanded={open}
-        aria-controls={panelId}
-        onClick={() => setOpen(!open)}
-      >
-        {open ? "Hide table" : "Show table"}
-      </button>
-      {open && table}
+    <div ref={rootRef} className={`md-table-collapsible${folded ? " folded" : ""}`}>
+      {table}
+      {foldable && (
+        <button
+          type="button"
+          className="code-expand"
+          aria-expanded={expanded}
+          aria-controls={panelId}
+          onClick={() => {
+            captureHeight();
+            setExpanded(!expanded);
+          }}
+        >
+          {folded ? `Show all ${totalRows} repos` : `Show top ${COLLAPSED_TABLE_ROWS} only`}
+        </button>
+      )}
     </div>
   );
+}
+
+/** Table body that drops rows past the fold while its table is folded. */
+function MarkdownTableBody({ children }: { children?: React.ReactNode }): React.ReactElement {
+  const folded = useContext(TableFoldedContext);
+  if (!folded) return <tbody>{children}</tbody>;
+  const rows = Children.toArray(children).filter(isValidElement);
+  return <tbody>{rows.slice(0, COLLAPSED_TABLE_ROWS)}</tbody>;
 }
 
 /**
@@ -867,7 +916,12 @@ const MemoizedMarkdownBlock = memo(
           <ReactMarkdown
             remarkPlugins={[remarkGfm]}
             rehypePlugins={animate ? ANIMATED_PLUGINS : PLUGINS}
-            components={{ a: ExternalLink, pre: PreBlock, table: MarkdownTable }}
+            components={{
+              a: ExternalLink,
+              pre: PreBlock,
+              table: MarkdownTable,
+              tbody: MarkdownTableBody,
+            }}
             urlTransform={markdownUrlTransform}
           >
             {normalized}

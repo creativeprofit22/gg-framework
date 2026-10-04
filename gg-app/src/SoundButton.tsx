@@ -1,18 +1,17 @@
 import { useState } from "react";
 import { SpeakerHighIcon, SpeakerSlashIcon } from "@phosphor-icons/react";
-import { theme } from "./theme";
 import { isSoundEnabled, setSoundEnabled, playSound } from "./sounds";
 
 /**
- * Titlebar control that toggles all UI sound effects on/off. State is persisted
- * per-machine in localStorage (see sounds.ts), so the choice survives restarts.
- * Plays a confirmation click when turning sound back on.
+ * Toggles all UI sound effects on/off. State is persisted per-machine in
+ * localStorage (see sounds.ts), so the choice survives restarts. Plays a
+ * confirmation click when turning sound back on.
+ *
+ * Settings → Effects toggle: the name stays "Sound effects" and on/off is
+ * carried by `aria-pressed`, the speaker icon and the shared `.toggle-btn`
+ * styling.
  */
-export function SoundButton({
-  variant = "icon",
-}: {
-  variant?: "icon" | "settings";
-}): React.ReactElement {
+export function SoundButton(): React.ReactElement {
   const [on, setOn] = useState(isSoundEnabled());
 
   function toggle(): void {
@@ -22,25 +21,17 @@ export function SoundButton({
     if (next) playSound("click");
   }
 
-  const settingsVariant = variant === "settings";
+  const Icon = on ? SpeakerHighIcon : SpeakerSlashIcon;
   return (
     <button
-      className={
-        settingsVariant ? "modal-btn" : "btn btn-ghost btn-icon btn-nav-icon home-settings"
-      }
+      type="button"
+      className="modal-btn toggle-btn"
       title={on ? "Sound effects on — click to mute" : "Sound effects muted — click to enable"}
-      // The icon-only variant has no text: name it and expose on/off as pressed.
-      aria-label={settingsVariant ? undefined : "Sound effects"}
-      aria-pressed={settingsVariant ? undefined : on}
-      style={on ? undefined : { color: theme.textMuted }}
+      aria-pressed={on}
       onClick={toggle}
     >
-      {on ? (
-        <SpeakerHighIcon size={settingsVariant ? 16 : 20} aria-hidden="true" />
-      ) : (
-        <SpeakerSlashIcon size={settingsVariant ? 16 : 20} aria-hidden="true" />
-      )}
-      {settingsVariant ? (on ? "Sound on" : "Sound off") : null}
+      <Icon size={16} aria-hidden="true" />
+      Sound effects
     </button>
   );
 }

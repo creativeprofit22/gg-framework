@@ -1,16 +1,16 @@
 import { WavesIcon } from "@phosphor-icons/react";
-import { theme } from "./theme";
 import { setHomeBackgroundEnabled, useHomeBackgroundEnabled } from "./home-background";
 
 /**
- * Settings → Effects switch for the home screen's animated background, shaped
- * like the sound switch beside it.
+ * Settings → Effects toggle for the home screen's animated background, shaped
+ * like the sound toggle beside it. The name stays "Home background"; on/off is
+ * carried by `aria-pressed` and the shared `.toggle-btn` styling.
  */
 export function HomeBackgroundButton(): React.ReactElement {
   const on = useHomeBackgroundEnabled();
   return (
     <button
-      className="modal-btn"
+      className="modal-btn toggle-btn"
       type="button"
       aria-pressed={on}
       title={
@@ -18,11 +18,10 @@ export function HomeBackgroundButton(): React.ReactElement {
           ? "Home background on — click to turn it off"
           : "Home background off — click to turn it on"
       }
-      style={on ? undefined : { color: theme.textMuted }}
       onClick={() => setHomeBackgroundEnabled(!on)}
     >
       <WavesIcon size={16} aria-hidden="true" />
-      {on ? "Background on" : "Background off"}
+      Home background
     </button>
   );
 }

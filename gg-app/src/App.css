@@ -3414,6 +3414,33 @@ select {
   cursor: default;
   opacity: 0.4;
 }
+/* Toggle tier (style pack §5 Action tiers): a stable name plus aria-pressed.
+   On = full ink, a --primary icon and a 1px --primary ring inside the glass
+   rim; off = full ink with a muted icon on clear glass (dimmer ink measured
+   below 4.5:1 on dark glass, so only the icon dims; user decision 2026-10-03).
+   Deliberately not the violet fill, so an on switch never reads as the
+   screen's primary action. */
+.toggle-btn[aria-pressed="true"] {
+  color: var(--text);
+  box-shadow:
+    var(--liquid-rim),
+    inset 0 0 0 1px var(--primary);
+}
+.toggle-btn[aria-pressed="true"] svg {
+  color: var(--primary);
+}
+.toggle-btn[aria-pressed="false"] {
+  color: var(--text);
+}
+.toggle-btn[aria-pressed="false"] svg {
+  color: var(--text-muted);
+}
+@media (forced-colors: active) {
+  .toggle-btn[aria-pressed="true"] {
+    outline: 2px solid Highlight;
+    outline-offset: -2px;
+  }
+}
 /* Save folder sits beside the folder field on the page and in the dialog. With
    nothing to save it is an outlined, muted button: a faded accent pill read as
    a status badge. Specific enough to beat glass.css's .modal-btn.primary. */

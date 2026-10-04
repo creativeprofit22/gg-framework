@@ -176,7 +176,7 @@ export function SettingsModal({ onClose, onSaved }: Props): React.ReactElement {
             }
           >
             <div className="modal-row">
-              <SoundButton variant="settings" />
+              <SoundButton />
               <HomeBackgroundButton />
             </div>
           </SettingsSection>

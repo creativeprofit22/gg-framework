@@ -19,25 +19,28 @@ afterEach(() => {
 });
 
 describe("HomeBackgroundButton", () => {
-  it("is on by default and turns the home background off and on", () => {
+  it("is on by default and turns the home background off and on under a stable name", () => {
     render(<HomeBackgroundButton />);
-    const button = screen.getByRole("button", { name: /Background on/ });
+    const button = screen.getByRole("button", { name: "Home background" });
     expect(button.getAttribute("aria-pressed")).toBe("true");
+    expect(button.classList).toContain("toggle-btn");
 
     fireEvent.click(button);
 
     expect(isHomeBackgroundEnabled()).toBe(false);
-    expect(screen.getByRole("button", { name: /Background off/ })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Home background" })).toBe(button);
+    expect(button.getAttribute("aria-pressed")).toBe("false");
 
-    fireEvent.click(screen.getByRole("button", { name: /Background off/ }));
+    fireEvent.click(button);
 
     expect(isHomeBackgroundEnabled()).toBe(true);
+    expect(button.getAttribute("aria-pressed")).toBe("true");
   });
 
   it("remembers the choice on this machine", () => {
     render(<HomeBackgroundButton />);
 
-    fireEvent.click(screen.getByRole("button", { name: /Background on/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Home background" }));
 
     expect(localStorage.getItem("gg-home-background")).toBe("0");
   });

@@ -3530,11 +3530,6 @@ select {
 .notes-input:focus {
   border-color: var(--primary);
 }
-/* The notes modal is a workspace, not a small dialog — give it room. */
-.notes-modal {
-  width: min(900px, 94vw);
-}
-
 /* ── What's-new window (post-update release notes) ──
    Lives in its OWN borderless, screen-centered, TRANSPARENT Tauri window (see
    Rust `open_whatsnew_window`). The native window is see-through so the rounded
@@ -12018,12 +12013,15 @@ select {
 }
 
 /* ── Notes command center ── */
+/* The notes modal is a workspace, not a small dialog. One content cap is the
+   dialog width itself, so header, tabs and every panel rail share one edge
+   with no dead gutters. */
 .notes-modal {
-  --notes-content-width: 960px;
+  --notes-content-width: 1040px;
   box-sizing: border-box;
   display: flex;
   flex-direction: column;
-  width: min(1120px, calc(100vw - 32px));
+  width: min(var(--notes-content-width), calc(100vw - 32px));
   height: min(900px, calc(100vh - 32px));
   height: min(900px, calc(100dvh - 32px));
   max-height: none;
@@ -12165,9 +12163,6 @@ select {
   color: var(--text);
   font-size: 18px;
   font-weight: 650;
-}
-.notes-roadmap-rail {
-  --notes-content-width: 1040px;
 }
 .notes-roadmap-section {
   padding: 0;

@@ -235,13 +235,9 @@ ${CLAUDE_MD_RESTART_NOTICE}`,
 
 ## Step 1: Detect Project and Extract Commands
 
-Check for config files and extract the lint/typecheck commands:
-- package.json -> Extract lint, typecheck scripts
-- pyproject.toml -> Use configured mypy, pylint/ruff commands
-- go.mod -> Use configured go vet/gofmt/staticcheck commands
-- Cargo.toml -> Use configured cargo clippy/fmt commands
+Extract the project's existing lint, typecheck, format-check, and test commands from its project context files (AGENTS.md/CLAUDE.md), manifests (package.json scripts, pyproject.toml, Cargo.toml, go.mod, Makefile/justfile), or CI workflow.
 
-Prefer existing project scripts. If you must synthesize a command from tool conventions, verify the current CLI flags against official docs first.
+Prefer existing project scripts and never invent commands. If you must synthesize a command from tool conventions the project already configures, verify the current CLI flags against official docs first.
 
 ## Step 2: Generate /commit Command
 
@@ -250,32 +246,34 @@ Create the directory \`.gg/commands/\` if it doesn't exist, then write \`.gg/com
 \`\`\`markdown
 ---
 name: commit
-description: Group changes by intent, verify, commit in order, and push once
+description: Group all uncommitted work by intent, verify, commit in order, and push once
 ---
 
 Clicking \`/commit\` authorizes this entire workflow. Execute directly: never enter plan mode, create a plan, pause for confirmation, or ask how to group changes.
 
-1. Inspect status, staged/unstaged diffs, and untracked files. Review the full diff for bugs, regressions, debug leftovers, and unintended changes.
-2. Group obvious changes by purpose, splitting exact hunks only when a file spans independent purposes. Keep uncertain or coupled changes together and order foundations before dependents.
-3. Run [PROJECT-SPECIFIC QUALITY COMMANDS] once. If a required check fails, stop and report it; do not clean up unrelated failures or rerun passing checks without file changes.
-4. For each group, stage exact paths or hunks, never \`git add -A\`; inspect its staged diff before committing.
-5. Create ordered commits with concise Add/Update/Fix/Remove/Refactor messages, then push exactly once after all commits.
+Scope comes from git, not this conversation: handle every uncommitted change in the repository (staged, unstaged, and untracked), whether it came from this session, an earlier session, or a manual edit. Use conversation context only as a hint for grouping and messages; a fresh session runs the same workflow.
 
-4. Spawn ONE subagent with the full diff for a fast review of real bugs, regressions, debug leftovers, and unintended changes. Require confidence scores and report only findings at least 80; pre-existing issues and style nitpicks score low.
-5. If review is CLEAR, continue. Otherwise show the findings and use one \`ask_user\` choice with a \`detail\` of one plain sentence naming which review findings are blocking: fix first (recommended) or commit anyway. On fix-first, fix and rerun affected checks without another review. If \`ask_user\` is unavailable, ask the same choice in prose.
-6. For each group, stage exact paths or hunks, never \`git add -A\`; inspect its staged diff before committing.
-7. Create ordered commits with concise Add/Update/Fix/Remove/Refactor messages, then push exactly once after all commits. Never force-push.
+1. Inspect status, staged/unstaged diffs, untracked files, and recent commit subjects. Review the full diff for bugs, regressions, debug leftovers, and unintended changes. If nothing is uncommitted, say so and stop.
+2. Leave out and report anything that must not be committed: secrets or credentials, build output, logs, scratch files, or clearly unfinished edits. Never delete, revert, or discard them.
+3. Group obvious changes by purpose, splitting exact hunks only when a file spans independent purposes. Keep uncertain or coupled changes together and order foundations before dependents.
+4. Run [PROJECT-SPECIFIC QUALITY COMMANDS] once. If a required check fails, stop and report it; do not clean up unrelated failures or rerun passing checks without file changes.
+5. Spawn ONE subagent with the full diff for a fast review of real bugs, regressions, debug leftovers, and unintended changes. Require confidence scores and report only findings at least 80; pre-existing issues and style nitpicks score low.
+6. If review is CLEAR, continue. Otherwise show the findings and use one \`ask_user\` choice with a \`detail\` of one plain sentence naming which review findings are blocking: fix first (recommended) or commit anyway. On fix-first, fix and rerun affected checks without another review. If \`ask_user\` is unavailable, ask the same choice in prose.
+7. For each group, stage exact paths or hunks, never \`git add -A\` or interactive \`git add -p\` (stage a hunk with \`git apply --cached\`). The index must hold only that group, including anything staged before the run; inspect its staged diff before committing.
+8. Create ordered commits with concise Add/Update/Fix/Remove/Refactor messages, then push exactly once after all commits. Never force-push.
 
-Finish with the created commits, passed checks, review result, and push result.
+Finish with the created commits, anything left uncommitted and why, passed checks, review result, and push result.
 \`\`\`
 
 Replace [PROJECT-SPECIFIC QUALITY COMMANDS] with the actual commands.
+
+If the project has no quality commands, write step 4 as: \`No project quality checks are configured; say so and continue.\` Never leave the placeholder or describe missing files inside the recipe.
 
 Keep the command file under 30 lines.
 
 ## Step 3: Confirm
 
-Report that /commit now automatically groups changes into ordered commits, verifies them, and pushes once; mention which local scripts/docs verified the commands.`,
+Report that /commit now commits all uncommitted work in the repository (from this or any earlier session) as grouped, ordered commits, verifies them, and pushes once; mention which local scripts/docs verified the commands.`,
   },
   {
     name: "setup-programmatic",

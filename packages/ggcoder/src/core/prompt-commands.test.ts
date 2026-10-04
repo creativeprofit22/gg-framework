@@ -35,6 +35,41 @@ describe("prompt commands", () => {
     expect(setupCommit?.prompt).not.toContain("current index tree");
   });
 
+  it("scopes generated /commit commands to all uncommitted git work, not the session", () => {
+    const prompt = PROMPT_COMMANDS.find((command) => command.name === "setup-commit")?.prompt;
+
+    expect(prompt).toContain("Scope comes from git, not this conversation");
+    expect(prompt).toContain("(staged, unstaged, and untracked)");
+    expect(prompt).toContain("a fresh session runs the same workflow");
+    expect(prompt).toContain("If nothing is uncommitted, say so and stop.");
+    expect(prompt).toContain("Never delete, revert, or discard them.");
+    expect(prompt).toContain("The index must hold only that group");
+    expect(prompt).toContain("anything left uncommitted and why");
+  });
+
+  it("generates a /commit recipe with one numbered step per action", () => {
+    const prompt = PROMPT_COMMANDS.find((command) => command.name === "setup-commit")?.prompt ?? "";
+    const recipe = prompt.slice(prompt.indexOf("```markdown"), prompt.lastIndexOf("```"));
+    const steps = [...recipe.matchAll(/^(\d+)\. /gm)].map((match) => Number(match[1]));
+
+    expect(steps).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+    expect(recipe.split("\n").length).toBeLessThan(30);
+  });
+
+  it("generates a coherent /commit recipe when the project has no quality checks", () => {
+    const prompt = PROMPT_COMMANDS.find((command) => command.name === "setup-commit")?.prompt ?? "";
+
+    expect(prompt).toContain("lint, typecheck, format-check, and test commands");
+    expect(prompt).toContain("Makefile/justfile");
+    expect(prompt).toContain("never invent commands");
+    expect(prompt).toContain(
+      "If the project has no quality commands, write step 4 as: `No project quality checks are configured; say so and continue.`",
+    );
+    expect(prompt).toContain(
+      "Never leave the placeholder or describe missing files inside the recipe.",
+    );
+  });
+
   it("strands no audit protocol or dated threat data in a command prompt", () => {
     // /bullet-proof became the bundled `bulletproof` skill (retirement asserted
     // below). Its protocol and incident data must not survive as a copy here,

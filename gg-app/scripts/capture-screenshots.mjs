@@ -247,7 +247,14 @@ const commands = [
   ["model", "Switch the active model"],
   ["add-dir", "Add another workspace root"],
   ["memory", "Show what the agent remembers"],
-].map(([name, description]) => ({ name, aliases: [], description, source: "built-in" }));
+].map(([name, description]) => ({
+  name,
+  aliases: [],
+  description,
+  // isSlashCommandsResponse rejects commands without a valid input policy.
+  input: { text: "optional", references: "optional", attachments: "optional" },
+  source: "built-in",
+}));
 
 const progress = {
   level: 14,

@@ -7616,6 +7616,16 @@ select {
   gap: 8px;
   white-space: nowrap;
 }
+/* The plain state word never truncates; the playful label beside it ellipsizes. */
+.statusrow-state {
+  flex: 0 0 auto;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.statusrow-sep {
+  color: var(--text-muted);
+  font-weight: 400;
+}
 /* Reuse streaming text's dissolve without replaying on timer updates. */
 .activity-label-reveal {
   display: inline-block;

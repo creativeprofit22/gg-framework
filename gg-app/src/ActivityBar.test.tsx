@@ -3,7 +3,24 @@ import { render, screen, waitFor } from "@testing-library/react";
 import { theme } from "./theme";
 import { INITIAL_ACTIVITY } from "./task-activity";
 import { beforeAll, describe, expect, it, vi } from "vitest";
-import { ActivityBar } from "./ActivityBar";
+import { ActivityBar, plainState } from "./ActivityBar";
+import type { TaskPhase } from "./task-activity";
+import { reduceTaskActivity } from "./task-activity";
+import type { SidecarEvent } from "./agent";
+
+const restoredPlan = {
+  checkpointId: "checkpoint-1",
+  generation: 1,
+  planPath: ".gg/plans/plan.md",
+  content: "# Plan",
+  contentHash: "hash-1",
+  state: "pending-review",
+  reviewStatus: "ready",
+  feedback: null,
+};
+const restoredAsks = [
+  { id: "ask-1", questions: [{ id: "q1", question: "Proceed?", kind: "confirm" }] },
+];
 
 const baseProps = {
   running: true,
@@ -220,6 +237,146 @@ describe("ActivityBar task outcomes", () => {
     expect(container.querySelector("canvas")).toBeNull();
     expect(screen.getByRole("button", { name: "Cancel agent run" })).toBeTruthy();
     expect(screen.getByRole("status").textContent).toContain("Your call from here");
+  });
+});
+
+/** Text a screen reader announces: skips aria-hidden subtrees. */
+function accessibleText(node: Node): string {
+  if (node.nodeType === Node.TEXT_NODE) return node.textContent ?? "";
+  if (node instanceof Element && node.getAttribute("aria-hidden") === "true") return "";
+  return Array.from(node.childNodes).map(accessibleText).join("");
+}
+const announced = (): string =>
+  accessibleText(screen.getByRole("status")).replace(/\s+/g, " ").trim();
+
+describe("ActivityBar plain state", () => {
+  it.each([
+    ["idle", false, "Idle"],
+    ["working", true, "Working"],
+    ["reviewing", false, "Working"],
+    ["attention", true, "Waiting"],
+    ["done", false, "Done"],
+    ["unverified", false, "Done"],
+    ["failed", false, "Error"],
+    ["stopped", false, "Stopped"],
+  ] as const)("maps %s to one of six plain states", (phase: TaskPhase, running, expected) => {
+    const activity = { ...INITIAL_ACTIVITY, phase };
+    expect(plainState({ activity, running, cancelling: false, doneStatus: null })).toBe(expected);
+  });
+
+  it("covers cancelling, starting, waiting, failed stops and bare finishes", () => {
+    const base = { running: false, cancelling: false, doneStatus: null };
+    expect(plainState({ ...base, running: true, cancelling: true })).toBe("Working");
+    expect(
+      plainState({
+        ...base,
+        running: true,
+        activity: { ...INITIAL_ACTIVITY, phase: "failed", endedAt: 5 },
+      }),
+    ).toBe("Working");
+    expect(
+      plainState({
+        ...base,
+        running: true,
+        activity: { ...INITIAL_ACTIVITY, phase: "working", waitingForAnswer: true },
+      }),
+    ).toBe("Waiting");
+    expect(
+      plainState({
+        ...base,
+        running: true,
+        activity: {
+          ...INITIAL_ACTIVITY,
+          phase: "working",
+          label: "Cancellation failed · task still running",
+        },
+      }),
+    ).toBe("Error");
+    expect(
+      plainState({
+        ...base,
+        running: true,
+        activity: { ...INITIAL_ACTIVITY, phase: "working", connectionLost: true },
+      }),
+    ).toBe("Working");
+    expect(plainState({ ...base, doneStatus: "Brewed in 3s" })).toBe("Done");
+    expect(plainState(base)).toBe("Idle");
+  });
+
+  it.each([
+    ["done", "Response ready", "Done · Response ready", theme.success],
+    ["unverified", "Verification incomplete", "Done · Verification incomplete", theme.warning],
+    ["failed", "Task failed", "Error · Task failed", theme.error],
+    ["stopped", "Stopped · unfinished", "Stopped · Unfinished", theme.warning],
+    ["done", "Done · checks passed", "Done · Checks passed", theme.success],
+    ["attention", "Your decision needed", "Waiting · Your decision needed", theme.warning],
+  ] as const)("announces %s plainly in its tone", (phase, label, text, color) => {
+    const { container } = render(
+      <ActivityBar
+        {...baseProps}
+        running={false}
+        activity={{ ...INITIAL_ACTIVITY, phase, label, startedAt: 1 }}
+      />,
+    );
+    expect(announced()).toBe(text);
+    const expected = document.createElement("span");
+    expected.style.color = color;
+    const word = container.querySelector<HTMLElement>(".statusrow-state");
+    expect(word?.style.color).toBe(expected.style.color);
+  });
+
+  it.each([
+    [
+      "a plan after a disconnected run",
+      () =>
+        reduceTaskActivity(INITIAL_ACTIVITY, { type: "run_start", data: {} } as SidecarEvent, 1),
+      { cwd: "/p", running: false, pendingPlanReview: restoredPlan },
+      false,
+      "Waiting · Plan needs your decision",
+    ],
+    [
+      "a plan in a reopened pane",
+      () => INITIAL_ACTIVITY,
+      { cwd: "/p", running: false, pendingPlanReview: restoredPlan },
+      false,
+      "Waiting · Plan needs your decision",
+    ],
+    [
+      "an open question during a live run",
+      () =>
+        reduceTaskActivity(
+          reduceTaskActivity(INITIAL_ACTIVITY, { type: "run_start", data: {} } as SidecarEvent, 1),
+          { type: "connection_lost", data: {} } as SidecarEvent,
+          2,
+        ),
+      { cwd: "/p", running: true, pendingAsks: restoredAsks },
+      true,
+      "Waiting · Your decision needed",
+    ],
+  ] as const)(
+    "announces Waiting for %s restored by a ready snapshot",
+    (_, from, data, running, text) => {
+      const activity = reduceTaskActivity(from(), { type: "ready", data } as SidecarEvent, 1000);
+      expect(plainState({ activity, running, cancelling: false, doneStatus: null })).toBe(
+        "Waiting",
+      );
+      render(<ActivityBar {...baseProps} running={running} activity={activity} />);
+      expect(announced()).toBe(text);
+      expect(announced()).not.toMatch(/^(Stopped|Idle|Working)\b/);
+    },
+  );
+
+  it("announces only the state word when idle and the plain label while working", () => {
+    const { rerender } = render(<ActivityBar {...baseProps} running={false} />);
+    expect(announced()).toBe("Idle");
+    rerender(
+      <ActivityBar
+        {...baseProps}
+        activity={{ ...INITIAL_ACTIVITY, phase: "working", label: "Running verification…" }}
+      />,
+    );
+    expect(announced()).toBe("Working · Running verification…");
+    expect(screen.getByText("Verifying…")).toBeTruthy();
   });
 });
 

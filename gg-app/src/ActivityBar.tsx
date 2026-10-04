@@ -158,7 +158,6 @@ const SHORT_LABELS: Record<string, string> = {
   "Your decision needed": "Needs you",
   "Plan needs your decision": "Approve plan",
   "Plan ready for review…": "Plan ready",
-  "Plan approved · preparing implementation…": "Starting plan…",
   "Changed · verification incomplete": "Not verified",
   "Verification incomplete": "Not verified",
   "Done · checks passed": "Checks passed",
@@ -168,6 +167,43 @@ const SHORT_LABELS: Record<string, string> = {
   "Stopping the task…": "Stopping…",
   "Cancellation failed · task still running": "Stop failed",
 };
+
+/** The plain state vocabulary shared by every task phase. */
+export type PlainState = "Idle" | "Working" | "Waiting" | "Done" | "Stopped" | "Error";
+
+/**
+ * Collapse the event model's phases into six plain words. The whimsical label
+ * stays as secondary personality; this word is what the row means. Connection
+ * loss and retries stay "Working" (their warning tone carries the caution), and
+ * an unverified finish reads "Done" in the warning tone.
+ */
+export function plainState(input: {
+  activity?: TaskActivity | undefined;
+  running: boolean;
+  cancelling: boolean;
+  doneStatus: string | null;
+}): PlainState {
+  const { activity, running, cancelling, doneStatus } = input;
+  const phase = activity?.phase ?? "idle";
+  if (activity?.label === "Cancellation failed · task still running") return "Error";
+  if (cancelling || (running && typeof activity?.endedAt === "number")) return "Working";
+  if (phase === "failed") return "Error";
+  if (phase === "attention" || (phase === "working" && activity?.waitingForAnswer === true))
+    return "Waiting";
+  if (phase === "working" || phase === "reviewing") return "Working";
+  if (phase === "done" || phase === "unverified") return "Done";
+  if (phase === "stopped") return "Stopped";
+  if (running) return "Working";
+  return doneStatus ? "Done" : "Idle";
+}
+
+/** "Done · checks passed" after the word "Done" announces as "Checks passed". */
+function withoutStatePrefix(label: string, state: PlainState): string {
+  const prefix = `${state.toLowerCase()} · `;
+  if (!label.toLowerCase().startsWith(prefix)) return label;
+  const rest = label.slice(prefix.length);
+  return rest.charAt(0).toUpperCase() + rest.slice(1);
+}
 
 /** The existing animated row now represents a whole task, including Ken's review. */
 export function ActivityBar({
@@ -238,6 +274,11 @@ export function ActivityBar({
     SHORT_LABELS[fullLabel] ||
     fullLabel;
   const canCancel = running || active;
+  const state = plainState({ activity, running, cancelling, doneStatus });
+  // Idle phrases are pure decoration, so idle announces only the state word.
+  // Otherwise announce the plain event label, hiding a playful visible label.
+  const announcedDetail = bareIdle ? null : withoutStatePrefix(fullLabel, state);
+  const labelDecorative = label !== announcedDetail;
 
   return (
     <div className="task-activity" data-phase={activity?.phase ?? (running ? "working" : "idle")}>
@@ -267,9 +308,23 @@ export function ActivityBar({
                 {bareIdle ? "\u276f" : activity?.phase === "done" ? "\u2713" : "\u2022"}
               </span>
             )}
+            <span className="statusrow-state" style={{ color: bareIdle ? theme.textMuted : tone }}>
+              {state}
+              <span className="statusrow-sep" aria-hidden={announcedDetail ? undefined : "true"}>
+                {" · "}
+              </span>
+            </span>
+            {labelDecorative && announcedDetail && (
+              <span className="sr-only">{announcedDetail}</span>
+            )}
             {/* Remount only the label when its meaning changes. Timer/token
                 updates must not restart the reveal or the running orb. */}
-            <span key={`${active}:${label}`} className="activity-label-reveal" title={label}>
+            <span
+              key={`${active}:${label}`}
+              className="activity-label-reveal"
+              title={label}
+              aria-hidden={labelDecorative ? "true" : undefined}
+            >
               {active ? (
                 <ShimmerText base={tone} bright={theme.text}>
                   {label}

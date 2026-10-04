@@ -129,6 +129,34 @@ describe("narrow-window layout contracts", () => {
       /@media \(max-width:\s*560px\)[\s\S]*?\.notes-phase-detail-actions \.notes-roadmap-primary\s*\{\s*width:\s*100%;/,
     );
   });
+
+  it("gives the pane drag handle the 44px touch floor without crowding the pane actions", () => {
+    // Mouse density stays at 24px; coarse pointers get the same 44px box as the
+    // pane actions and Close.
+    expect(appCss).toMatch(/^\.pane-drag-handle\s*\{[^}]*width:\s*24px;[^}]*height:\s*24px;/m);
+    expect(appCss).toMatch(
+      /@media \(pointer: coarse\)\s*\{\s*\.pane-drag-handle\s*\{\s*width:\s*44px;\s*height:\s*44px;\s*\}\s*\}/,
+    );
+
+    // Floating chrome (Home/Settings): above the narrow-pane breakpoint, the
+    // focused pane's four 44px actions share the top line with the handle and
+    // must start right of it.
+    const handleLeft = Number(
+      appCss.match(/^\.pane-drag-handle-agent\s*\{[^}]*?left:\s*(\d+)px;/m)?.[1],
+    );
+    const coarseActions = appCss.match(
+      /@media \(pointer: coarse\)\s*\{\s*\.workspace-pane-actions\s*\{\s*right:\s*(\d+)px;[\s\S]*?@container conversation-pane \(max-width:\s*(\d+)px\)\s*\{\s*\.workspace-pane-actions\s*\{\s*top:\s*52px;/,
+    );
+    expect(coarseActions).not.toBeNull();
+    const actionsRight = Number(coarseActions?.[1]);
+    const narrowBreakpoint = Number(coarseActions?.[2]);
+    const actionsRowWidth = 4 * 44 + 3 * 3;
+
+    const firstSharedWidth = narrowBreakpoint + 1;
+    expect(firstSharedWidth - actionsRight - actionsRowWidth).toBeGreaterThanOrEqual(
+      handleLeft + 44,
+    );
+  });
 });
 
 describe("glass accessibility fallback", () => {

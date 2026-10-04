@@ -1744,6 +1744,13 @@ select {
 }
 /* Hover only lightens a tab (yaatuber's `--overlay` wash); the pill moves
    on selection, never on hover. */
+/* Touch: 44px tabs still fit the 54px dock; icon-only tabs get 44px wide. */
+@media (pointer: coarse) {
+  .settings-tab {
+    height: 44px;
+    min-width: 44px;
+  }
+}
 .settings-tab:hover:not(.is-active) {
   background: rgba(255, 255, 255, 0.06);
   color: var(--text);
@@ -2120,6 +2127,18 @@ select {
   height: 36.5px;
   padding: 0 var(--rail) 1.5px 82px;
 }
+/* Touch: the strip grows to the 44px floor so its back button, links, usage
+   meter and toggle can each fill it. The macOS rule above stays exact (there
+   are no touch Macs). */
+@media (pointer: coarse) {
+  .chat-head-strip {
+    height: 44px;
+  }
+  .chat-head-strip > .btn-icon {
+    width: 44px;
+    height: 44px;
+  }
+}
 /* The visible window title shows project context: cwd, current branch, then the
    uncommitted-file count and GitHub issue/PR chips. It grows into available
    space; on narrow windows the segments truncate in priority order (folder
@@ -2315,6 +2334,28 @@ select {
   outline: 2px solid var(--text);
   outline-offset: -2px;
 }
+/* Touch: every title link fills the 44px strip. Links can be as narrow as
+   "1 PR" or a short branch (~25px) and counts must stay whole, so each gains
+   10px of tap area per side that cancels out in layout (the separators leave
+   24px between links). The title clips overflow, so it pads its edges to keep
+   that tap area inside. */
+@media (pointer: coarse) {
+  .chat-head-title {
+    padding-inline: 10px;
+  }
+  .chat-head-link,
+  .chat-head-github {
+    min-height: 44px;
+    padding-inline: 10px;
+    margin-inline: -10px;
+  }
+  /* The dismiss button sits flush after the CI link: it takes a real 44px box
+     and starts past the link's 10px tap extension instead of overlapping it. */
+  .chat-head-ci-dismiss {
+    min-width: 44px;
+    margin-inline: 10px 0;
+  }
+}
 @container (max-width: 600px) {
   /* Use pane width, not window width: keep CI failure controls reachable in split layouts. */
   .chat-head-strip:has(.chat-head-ci) > .title-usage-meter,
@@ -2355,6 +2396,16 @@ select {
   flex-wrap: wrap;
   row-gap: 8px;
   padding: 2px var(--rail) 12px;
+}
+/* Touch: the chat nav row's buttons reach the 44px floor (same pattern as the
+   picker head); the row already wraps on narrow panes. */
+@media (pointer: coarse) {
+  .chat-head-nav :is(.btn-sm, .btn-icon) {
+    min-height: 44px;
+  }
+  .chat-head-nav :is(.btn-icon, .btn-nav-icon) {
+    min-width: 44px;
+  }
 }
 .picker-head-actions {
   margin-left: auto;
@@ -2926,6 +2977,14 @@ select {
 .modal-input:focus {
   border-color: var(--primary);
 }
+/* Touch: 44px fields; 16px text stops mobile browsers zooming on focus (same
+   as .picker-search). */
+@media (pointer: coarse) {
+  .modal-input {
+    min-height: 44px;
+    font-size: 16px;
+  }
+}
 .modal-row {
   display: flex;
   gap: 10px;
@@ -3035,6 +3094,11 @@ select {
 }
 .azure-settings .modal-btn {
   min-height: 40px;
+}
+@media (pointer: coarse) {
+  .azure-settings .modal-btn {
+    min-height: 44px;
+  }
 }
 .azure-remove-btn {
   color: var(--error);
@@ -3424,6 +3488,12 @@ select {
   transition:
     filter var(--t-fast),
     box-shadow var(--t-fast);
+}
+/* Touch: every modal action reaches the 44px floor; desktop keeps its pill. */
+@media (pointer: coarse) {
+  .modal-btn {
+    min-height: 44px;
+  }
 }
 .modal-btn:hover:not(:disabled) {
   filter: brightness(1.18);
@@ -4567,6 +4637,14 @@ select {
 .nav-toggle:hover {
   background: var(--surface-1);
   color: var(--text);
+}
+/* Touch: the 18px chevron keeps its look inside a 44px tap box. The tools
+   chevron shares this class. */
+@media (pointer: coarse) {
+  .nav-toggle {
+    min-width: 44px;
+    min-height: 44px;
+  }
 }
 /* Non-scrolling wrapper around `.transcript` — owns the flex sizing +
    `position: relative` so an absolutely positioned overlay child (the Ken
@@ -7883,6 +7961,14 @@ select {
     border-color var(--t-fast),
     opacity var(--t-fast);
 }
+/* Touch: composer actions reach the 44px floor (attach, send/stop, the Ken
+   pill and the Opportunities button). */
+@media (pointer: coarse) {
+  .ken-next-pill,
+  .inputrow .btn-sm {
+    min-height: 44px;
+  }
+}
 .ken-next-pill:hover:not(:disabled) {
   color: color-mix(in srgb, var(--ken) 84%, white);
   background: color-mix(in srgb, var(--ken) 14%, transparent);
@@ -7928,6 +8014,12 @@ select {
     color var(--t-out),
     background-color var(--t-out),
     filter var(--t-out);
+}
+@media (pointer: coarse) {
+  .icon-circle {
+    width: 44px;
+    height: 44px;
+  }
 }
 .icon-circle:hover:not(:disabled) {
   transition:
@@ -8979,6 +9071,23 @@ select {
       filter var(--t-fast);
   }
 }
+/* Touch: a 44px one-line composer (16px text + 10px padding) that also stops
+   mobile browsers zooming on focus. The @Ken overlay mirrors the metrics so
+   its glyphs stay under the caret; the autosizer reads both from CSS. The
+   enhancer overlay mirrors the same metrics so its decoded text wraps and sits
+   like the textarea it hands off to. */
+@media (pointer: coarse) {
+  .input,
+  .ken-input-highlight {
+    font-size: 16px;
+    padding-block: 10px;
+  }
+  .enh-diss {
+    font-size: 16px;
+    padding-block: 10px;
+    min-height: calc(1.5em + 20px);
+  }
+}
 .input::-webkit-scrollbar {
   width: 8px;
 }
@@ -9146,6 +9255,12 @@ select {
   /* Colour-on-hover like every other control: no lift. */
   transition: filter var(--t-fast);
 }
+/* Touch: 44px tall pill (the coarse touch floor); desktop keeps its size. */
+@media (pointer: coarse) {
+  .home-update {
+    min-height: 44px;
+  }
+}
 .home-update:hover:not(:disabled) {
   filter: brightness(1.08);
 }
@@ -9278,6 +9393,11 @@ select {
     color var(--t-fast),
     text-decoration-color var(--t-fast);
 }
+@media (pointer: coarse) {
+  .home-whatsnew {
+    min-height: 44px;
+  }
+}
 .home-whatsnew:hover {
   color: #fff;
   text-decoration-color: currentColor;
@@ -9321,6 +9441,13 @@ select {
      (and its overlays) stack above the input. */
   position: relative;
   z-index: 2;
+}
+/* Touch: the controls below take real 44px rows, so the bar trades its padding
+   for them and keeps its 48px single-row height. */
+@media (pointer: coarse) {
+  .footer {
+    padding-block: 2px;
+  }
 }
 .footer-chat {
   justify-content: flex-end;
@@ -9884,6 +10011,22 @@ select {
 .model-picker:has(> .model-select:not(:disabled)):is(:hover, :has(:focus-visible)) {
   background-color: color-mix(in srgb, currentColor 12%, transparent);
 }
+/* Touch: a real 44px row instead of the cancelled 3px bleed. A bleed-only tap
+   box would overlap the next row when the footer wraps (6px row gap), so the
+   footer grows instead. The horizontal bleed stays: 16px gaps keep it clear.
+   (The Fast toggle shares .thinking-toggle.) */
+@media (pointer: coarse) {
+  .thinking-toggle,
+  .model-button,
+  .model-picker:has(> .model-select) {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 44px;
+    min-height: 44px;
+    margin-block: 0;
+  }
+}
 .model-select-text::after,
 .model-button::after {
   content: "";
@@ -10048,6 +10191,18 @@ select {
      so the cluster stays ≤ the buttons and the row height is unchanged. */
   height: 25px;
   line-height: 1;
+}
+/* Touch: the row grows to 44px and the switch label gains an invisible 44px
+   tall tap box; the track and thumb stay where they are. */
+@media (pointer: coarse) {
+  .autopilot-toggle {
+    height: 44px;
+  }
+  .cl-switch::after {
+    content: "";
+    position: absolute;
+    inset: -10px 0;
+  }
 }
 .autopilot-label {
   font-size: 13px;
@@ -10237,6 +10392,12 @@ select {
     background-color var(--t-fast),
     box-shadow var(--t-fast),
     color var(--t-fast);
+}
+/* Touch: the pill grows to the 44px floor (Home and the chat header nav). */
+@media (pointer: coarse) {
+  .rank-badge {
+    min-height: 44px;
+  }
 }
 .rank-badge:hover {
   filter: brightness(1.18);
@@ -10766,6 +10927,11 @@ select {
     background var(--t-fast),
     border-color var(--t-fast),
     color var(--t-fast);
+}
+@media (pointer: coarse) {
+  .title-usage-meter {
+    min-height: 44px;
+  }
 }
 .title-usage-meter:hover:not([aria-disabled="true"]) {
   border-color: var(--border);
@@ -11507,6 +11673,12 @@ select {
 .workspace-pane-body {
   padding-top: 35px;
 }
+/* Touch: the 44px controls end at 49px. */
+@media (pointer: coarse) {
+  .workspace-pane-body {
+    padding-top: 54px;
+  }
+}
 .workspace-pane-slot.has-header-chrome > .workspace-pane-body {
   padding-top: 0;
 }
@@ -11605,6 +11777,13 @@ select {
   background: transparent;
   cursor: grab;
 }
+/* Touch: the 44px coarse floor, matching the pane actions and Close. */
+@media (pointer: coarse) {
+  .pane-drag-handle {
+    width: 44px;
+    height: 44px;
+  }
+}
 .pane-drag-handle:hover,
 .pane-drag-handle:focus-visible {
   color: var(--text);
@@ -11643,6 +11822,41 @@ select {
   background: var(--surface-1);
   color: var(--text-muted);
   cursor: pointer;
+}
+/* Touch: 44px pane controls (the coarse touch floor). Close stays pinned at the
+   right, so the floating action row moves left to clear it. */
+@media (pointer: coarse) {
+  .workspace-pane-actions {
+    right: 55px;
+  }
+  .workspace-pane-actions button,
+  .workspace-pane-close {
+    width: 44px;
+    height: 44px;
+  }
+  /* Narrow panes cannot fit four 44px controls between the drag handle and
+     Close, so they take their own right-aligned lines under the Close line
+     instead of spilling over the handle or past the pane edge. The body keeps
+     the same top padding whether or not the pane is focused. At 300px the
+     focused row starts just clear of the 44px drag handle. */
+  @container conversation-pane (max-width: 300px) {
+    .workspace-pane-actions {
+      top: 52px;
+      left: 8px;
+      right: 8px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+    .workspace-pane-body {
+      padding-top: 101px;
+    }
+  }
+  /* Two lines of controls. */
+  @container conversation-pane (max-width: 200px) {
+    .workspace-pane-body {
+      padding-top: 148px;
+    }
+  }
 }
 .workspace-pane-actions button:hover:not(:disabled),
 .workspace-pane-actions button:focus-visible:not(:disabled),
@@ -11768,6 +11982,54 @@ select {
     }
     .workspace-pane-actions:has([data-pane-swap-direction]) ~ .workspace-pane-body {
       padding-top: 144px;
+    }
+  }
+}
+/* Touch, narrow panes with swap targets: the 44px Close reaches 49px, so the
+   other controls start under it. Swap buttons stay on the Close line, left of
+   Close, and focusing the pane only adds controls on the line below. */
+@media (pointer: coarse) {
+  @container conversation-pane (max-width: 380px) {
+    .workspace-pane-actions:has(.pane-swap-button),
+    .workspace-pane-actions:has([data-pane-swap-direction]) {
+      top: 52px;
+      left: 8px;
+      right: 8px;
+      max-width: none;
+      min-width: 0;
+      min-height: 0;
+      padding-right: 0;
+      justify-content: flex-end;
+    }
+    .workspace-pane-actions .pane-swap-button {
+      top: -47px;
+      right: 47px;
+    }
+    .workspace-pane-actions .pane-swap-button[data-pane-swap-direction="left"] {
+      right: 94px;
+    }
+    .workspace-pane-actions:has(.pane-swap-button) ~ .workspace-pane-body {
+      padding-top: 101px;
+    }
+  }
+  /* Swap targets no longer fit between the drag handle and Close: they lead
+     their own line under Close, with the focused pane's controls below. */
+  @container conversation-pane (max-width: 200px) {
+    .workspace-pane-actions:has(.pane-swap-button),
+    .workspace-pane-actions:has([data-pane-swap-direction]) {
+      padding-top: 47px;
+    }
+    .workspace-pane-actions .pane-swap-button,
+    .workspace-pane-actions .pane-swap-button[data-pane-swap-direction] {
+      top: 0;
+      right: 0;
+    }
+    .workspace-pane-actions .pane-swap-button[data-pane-swap-direction="left"] {
+      right: 47px;
+    }
+    .workspace-pane-actions:has(.pane-swap-button) ~ .workspace-pane-body,
+    .workspace-pane-actions:has([data-pane-swap-direction]) ~ .workspace-pane-body {
+      padding-top: 195px;
     }
   }
 }
@@ -11904,6 +12166,26 @@ select {
   .chat-head-pane-chrome .workspace-pane-actions .pane-swap-button[data-pane-swap-direction] {
     width: 44px;
     height: 44px;
+  }
+}
+/* Touch, narrow panes: 44px pane controls cannot share the title row without
+   cutting the issue/PR counts, so they take their own right-aligned row under
+   it. The title stops claiming its full text width so the usage meter and
+   toggle stay on the first row. */
+@media (pointer: coarse) {
+  @container conversation-pane (max-width: 560px) {
+    .chat-head-strip:has(.chat-head-pane-chrome:not(:empty)) {
+      flex-wrap: wrap;
+      row-gap: 3px;
+      height: auto;
+    }
+    .chat-head-strip:has(.chat-head-pane-chrome:not(:empty)) .chat-head-title {
+      flex-basis: 0;
+    }
+    .chat-head-pane-chrome {
+      flex: 1 0 100%;
+      justify-content: flex-end;
+    }
   }
 }
 .workspace-divider {

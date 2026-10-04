@@ -68,6 +68,18 @@ test("audit commands declare no write or edit tools", async () => {
   }
 });
 
+test("empty scope audits the whole chat and recent narrows to the latest work", async () => {
+  const block = familyBlock(await readCommand("trace"));
+  assert.match(block, /\*\*Empty \(default\): the whole chat\.\*\*/);
+  assert.match(block, /from its first message — not only the latest turn/);
+  assert.match(block, /\*\*`recent`: the latest unit of work only\*\*/);
+  for (const name of family) {
+    const text = await readCommand(name);
+    assert.match(text, /If `\$ARGUMENTS` is empty, [^\n]*following the Scope rule above/, name);
+    assert.doesNotMatch(text, /If `\$ARGUMENTS` is empty or equals `recent`/, name);
+  }
+});
+
 test("every task prompt carries a canonical type", async () => {
   for (const name of family) {
     assert.match(await readCommand(name), /Canonical type from the Audit family rules/, name);

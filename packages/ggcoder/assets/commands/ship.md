@@ -1,12 +1,12 @@
 ---
 argument-hint: [recent, natural-language scope, path, or --all — optional]
-description: Production-readiness gate for recent work or a scoped release. Runs safe local evidence collection, checks blast radius, trace/parity risks, config/build/runtime blockers, and creates task-pane tasks.
+description: Production-readiness gate for all work from this chat (or only the latest with `recent`, or a scoped release). Runs safe local evidence collection, checks blast radius, trace/parity risks, config/build/runtime blockers, and creates task-pane tasks.
 allowed-tools: tasks, Bash, Read, Grep, Glob, LS, subagent, steroids, ask_user
 ---
 
 # Ship
 
-Run a production-readiness gate for recent work or a scoped release. Default to recent implementation changes. Accept natural-language scopes like `the onboarding release`, `billing checkout`, `calendar posting`, or exact paths. Do not edit project files.
+Run a production-readiness gate for recent work or a scoped release. Default to all implementation work in this chat, not just the latest turn; `recent` narrows to the latest unit of work. Accept natural-language scopes like `the onboarding release`, `billing checkout`, `calendar posting`, or exact paths. Do not edit project files.
 
 `/ship` is the boss gate: it combines deterministic project checks with agentic judgment about release risk. It should create one task-pane task per confirmed blocker or release-risk gap.
 
@@ -56,7 +56,12 @@ Outside `/ship`, when a confirmed finding belongs to another command, do not cre
 
 **No duplicate tasks.** Before adding tasks, call `tasks` with `action: "list"`. An open task is the same finding when its bracketed `[<CANONICAL-TYPE> <file>:<line>]` title suffix matches the new finding exactly, ignoring the `Fix /<command>:` prefix, whichever audit command created it. Do not add a second task; list it under `Already tracked` with the existing task title.
 
-**Scope.** Accept an empty argument, `recent`, a natural-language scope, or an exact path or symbol. For empty or `recent`, infer scope from `git status --short` and `git diff --name-only HEAD~1 HEAD`, then the most recently modified `.gg/plans/*.md`, then conversation context. If confidence is low or unrelated areas match, ask with `ask_user` before proceeding.
+**Scope.** Accept an empty argument, `recent`, a natural-language scope, or an exact path or symbol.
+
+- **Empty (default): the whole chat.** Audit every piece of implementation work in this conversation, from its first message — not only the latest turn. Build the scope as the union of every feature, fix, and file created or edited during the chat, including work that survives only in a compaction summary. Then add uncommitted files from `git status --short` that belong to that work. When the chat touched several unrelated areas, audit each one as its own capability; do not ask which one to pick. Arguments like `all of this chat` mean this default.
+- **`recent`: the latest unit of work only** — the most recent implementation in this chat.
+- **Fallback.** If the chat contains no implementation work, infer scope from `git status --short` and `git diff --name-only HEAD~1 HEAD`, then the most recently modified `.gg/plans/*.md`.
+- **Coverage.** List the chat work items covered in the report so the user can see nothing was dropped. Leave uncommitted changes unrelated to the chat out of scope and mention them in one line. Ask with `ask_user` only when a chat work item cannot be resolved to files, or a natural-language scope has low confidence or matches unrelated areas.
 
 **Read-only.** Do not edit project files. Installs, code generation, migrations, starting servers, or any other project-changing command need explicit approval through `ask_user` first. The `allowed-tools` frontmatter is advisory: the command runtime does not enforce it, so this no-edit rule is enforced by instruction only.
 
@@ -87,12 +92,13 @@ If a command fails, read the failure and classify it. Do not claim it passed.
 
 ## Step 1: Resolve release scope
 
-If `$ARGUMENTS` is empty or equals `recent`, infer release scope from recent changes:
+If `$ARGUMENTS` is empty, gate everything implemented in this chat, following the Scope rule above:
 
-1. `git status --short`
-2. `git diff --name-only HEAD~1 HEAD`
-3. the most recently modified `.gg/plans/*.md`
-4. current conversation context
+1. every feature, fix, and file created or edited across the whole conversation, from the first message (including compaction summaries)
+2. `git status --short` to attach uncommitted files that belong to that work
+3. any `.gg/plans/*.md` file the chat followed
+
+If `$ARGUMENTS` equals `recent`, gate only the latest unit of work in this chat. If the chat has no implementation work, fall back to `git status --short`, `git diff --name-only HEAD~1 HEAD`, then the most recently modified `.gg/plans/*.md`.
 
 If `$ARGUMENTS` is `--all`, warn that this is a broad release gate and may be slower/noisier. Continue only after confirmation.
 
@@ -347,6 +353,7 @@ Reply with:
 
 ```text
 Ship scope: <resolved scope>
+Chat work covered: <one short item per area, or n/a>
 Scope confidence: <high|medium|low>
 Mode: <recent|argument|all>
 Files scanned: <N primary, N adjacent>

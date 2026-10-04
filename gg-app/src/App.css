@@ -8074,9 +8074,9 @@ select {
   position: relative;
   flex: 1;
   min-width: 0;
-  /* At least one text line tall so the collapsed/skeleton state matches an empty
-     input's default height (14px × 1.5 = 21px). */
-  min-height: 1.5em;
+  /* At least one text line plus .input's block padding (border-box), so the
+     collapsed/skeleton state matches an empty input: 31.5px (44px on touch). */
+  min-height: calc(1.5em + 9px);
   /* Match the textarea's growth cap so a long decoded prompt scrolls inside the
      input box instead of overflowing past it (mirrors .input max-height). */
   max-height: 40vh;
@@ -8088,11 +8088,20 @@ select {
   overflow-x: hidden;
   z-index: 3;
   pointer-events: none;
-  /* Match .input exactly so the text wraps identically to the textarea. */
+  /* Match .input exactly so the text wraps identically to the textarea (the
+     touch size is mirrored in .input's coarse-pointer block). */
   font-family: var(--sans);
-  font-size: 14px;
+  font-size: 15px;
   line-height: 1.5;
-  padding: 0;
+  /* .input pins these (textarea vs div text-layout differences); inheriting the
+     page's letter-spacing here would wrap the decoded text on different words. */
+  letter-spacing: 0;
+  word-spacing: 0;
+  font-kerning: none;
+  font-variant-ligatures: none;
+  /* Same block padding as .input so the text sits on the same baseline and the
+     row keeps its height when the textarea takes over. */
+  padding: 4.5px 0;
   margin: 0;
   /* Wrap exactly like the textarea (default overflow-wrap) so the decoded text
      occupies the same lines the real input will once it's committed. */

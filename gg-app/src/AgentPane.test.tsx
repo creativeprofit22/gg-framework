@@ -3074,6 +3074,33 @@ describe("AgentPane lifecycle", () => {
     expect(picker.title).toContain("pinned");
   });
 
+  it("tells GG's and Ken's model pickers apart by role, not only by tooltip", async () => {
+    const pane = client("model-roles", 1);
+    vi.mocked(pane.getState).mockResolvedValue({
+      ...agentState("claude-prior"),
+      kenModel: "claude-prior",
+      kenModelOverride: true,
+    });
+    vi.mocked(pane.listModels).mockResolvedValue([
+      { id: "claude-prior", provider: "anthropic", name: "Prior" },
+    ]);
+    await act(async () => {
+      render(<AgentPane client={pane} target={target} workspaceOwnsSessionLifecycle />);
+    });
+
+    const ken = await screen.findByTitle(/is pinned to a separate model/);
+    const gg = screen.getByTitle("Switch Supah Coder's model");
+    const describedText = (el: HTMLElement): string =>
+      document.getElementById(el.getAttribute("aria-describedby") ?? "")?.textContent ?? "";
+    expect(describedText(gg)).toBe("Supah Coder's model — does the work");
+    expect(describedText(ken)).toBe("Ken's model — reviews Supah Coder's work and answers @Ken");
+    // The visible labels carry the same role as a tooltip.
+    expect(screen.getByTitle("Supah Coder's model — does the work").textContent).toContain("GG");
+    expect(
+      screen.getByTitle("Ken's model — reviews Supah Coder's work and answers @Ken").textContent,
+    ).toContain("Ken");
+  });
+
   it("disables the context profile selector while running", async () => {
     const pane = client("astra-running", 1);
     vi.mocked(pane.getState).mockResolvedValue({

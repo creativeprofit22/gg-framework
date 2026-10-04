@@ -176,6 +176,43 @@ describe("loadModelsInto", () => {
   });
 });
 
+describe("ModelSelect — role description", () => {
+  it.each([
+    ["native popup", true, "combobox"],
+    ["in-webview menu", false, "button"],
+  ] as const)("ties the %s to whose model it is", (_label, native, role) => {
+    supportsNativeMock.mockReturnValue(native);
+    render(
+      <>
+        <span id="ken-role">Ken's model — reviews GG's work</span>
+        <ModelSelect
+          models={MODELS}
+          currentModel="claude-sonnet-5"
+          onSelect={vi.fn()}
+          title="Switch model"
+          describedBy="ken-role"
+        />
+      </>,
+    );
+
+    expect(screen.getByRole(role).getAttribute("aria-describedby")).toBe("ken-role");
+  });
+
+  it("adds no description when none is given", () => {
+    supportsNativeMock.mockReturnValue(false);
+    render(
+      <ModelSelect
+        models={MODELS}
+        currentModel="claude-sonnet-5"
+        onSelect={vi.fn()}
+        title="Switch model"
+      />,
+    );
+
+    expect(screen.getByRole("button").hasAttribute("aria-describedby")).toBe(false);
+  });
+});
+
 describe("ModelSelect — in-webview menu", () => {
   function openMenu(current = "claude-sonnet-5", onSelect = vi.fn()) {
     supportsNativeMock.mockReturnValue(false);

@@ -506,6 +506,19 @@ const nextId = (): number => ++idSeq;
 // Vertical divider between footer segments (mirrors the TUI's ` \u2502 ` in
 // border color). Rendered between adjacent groups, never leading/trailing.
 // Pure decoration: hidden from assistive tech so it isn't read as a glyph.
+/** Footer model-picker roles, announced with each picker and shown as the
+ *  label's tooltip. Code and Motion name the work model with the same product
+ *  name as the picker's accessible name (`workspaceProductName`), so a screen
+ *  reader hears one name per model; the visible "GG" label is unchanged. Ken is
+ *  the read-only mentor: he answers @Ken and reviews the work model's output in
+ *  Autopilot (ggcoder app-sidecar mentor prompt). */
+function ggModelRole(mode: WorkspaceMode): string {
+  return mode === "chat"
+    ? "GG's model — answers your messages"
+    : `${workspaceProductName(mode)}'s model — does the work`;
+}
+const KEN_MODEL_ROLE = `${MENTOR_DISPLAY_NAME}'s model — reviews ${PRODUCT_DISPLAY_NAME}'s work and answers ${MENTOR_HANDLE}`;
+
 function FooterSep(): React.ReactElement {
   return (
     <span className="footer-sep" style={{ color: theme.border }} aria-hidden="true">
@@ -888,6 +901,9 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   const autopilotPendingRef = useRef<(() => boolean) | null>(null);
   const [running, setRunning] = useState(false);
   const [hasFinishedRun, setHasFinishedRun] = useState(false);
+  // Footer model pickers: hidden role descriptions announced with each control.
+  const ggModelRoleId = useId();
+  const kenModelRoleId = useId();
   const glowSeed = `${windowLabel}:${props.paneId}`;
   const glowStyle = useMemo(() => glowVars(glowPlacement(glowSeed)), [glowSeed]);
   const glowState = glowStateFor(running, hasFinishedRun);
@@ -5618,11 +5634,21 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
                   );
                 })()}
               <span className="model-anchor">
-                <span className="model-label" style={{ color: theme.text }}>
+                <span
+                  className="model-label"
+                  style={{ color: theme.text }}
+                  title={ggModelRole(workspaceMode)}
+                  aria-hidden="true"
+                >
                   GG
+                  {workspaceMode === "code" && <span className="model-role">{" · builds"}</span>}
+                </span>
+                <span id={ggModelRoleId} className="sr-only">
+                  {ggModelRole(workspaceMode)}
                 </span>
                 <ModelSelect
                   key={`gg-models-${modelCatalogRefreshNonce}`}
+                  describedBy={ggModelRoleId}
                   models={models}
                   currentModel={state?.model ?? ""}
                   onSelect={onSelectModel}
@@ -5639,11 +5665,21 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
                 <>
                   <FooterSep />
                   <span className="model-anchor">
-                    <span className="model-label" style={{ color: theme.ken }}>
+                    <span
+                      className="model-label"
+                      style={{ color: theme.ken }}
+                      title={KEN_MODEL_ROLE}
+                      aria-hidden="true"
+                    >
                       {MENTOR_DISPLAY_NAME}
+                      <span className="model-role">{" · reviews"}</span>
+                    </span>
+                    <span id={kenModelRoleId} className="sr-only">
+                      {KEN_MODEL_ROLE}
                     </span>
                     <ModelSelect
                       key={`ken-models-${modelCatalogRefreshNonce}`}
+                      describedBy={kenModelRoleId}
                       models={models}
                       currentModel={state?.kenModel ?? state?.model ?? ""}
                       onSelect={(id) => onSelectKenModel(id)}

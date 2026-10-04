@@ -22,6 +22,9 @@ interface Props {
   followActive?: boolean;
   /** Incremented when the backing daemon/catalog identity changes. */
   refreshNonce?: number;
+  /** Id of an element describing whose model this is (e.g. GG's or Ken's
+   *  role), so the role is announced with the control, not only in a tooltip. */
+  describedBy?: string;
 }
 
 const FOLLOW_VALUE = "__follow__";
@@ -94,6 +97,7 @@ export function ModelSelect({
   onSelectFollow,
   followActive,
   refreshNonce = 0,
+  describedBy,
 }: Props): React.ReactElement {
   const [open, setOpen] = useState(false);
   const [menuPosition, setMenuPosition] = useState<{ left: number; bottom: number } | null>(null);
@@ -257,6 +261,7 @@ export function ModelSelect({
           disabled={unavailable}
           title={triggerTitle}
           aria-label={title}
+          aria-describedby={describedBy}
           onChange={(event) => {
             const next = event.target.value;
             if (next === FOLLOW_VALUE) onSelectFollow?.();
@@ -302,6 +307,7 @@ export function ModelSelect({
         style={{ color: controlColor }}
         disabled={unavailable}
         title={triggerTitle}
+        aria-describedby={describedBy}
         aria-haspopup="menu"
         aria-expanded={open}
         aria-controls={open ? menuId : undefined}

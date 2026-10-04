@@ -9730,6 +9730,18 @@ select {
   font-size: 13px;
   line-height: 1;
 }
+/* "· builds" / "· reviews" after GG / Ken: shown only on wide conversation
+   panes, so narrow and split panes keep today's footer footprint. The full
+   role is always in the label's tooltip and the picker's description. */
+.model-role {
+  display: none;
+  color: var(--text-secondary);
+}
+@container conversation-pane (min-width: 900px) {
+  .model-role {
+    display: inline;
+  }
+}
 
 /* Text-look picker with a native dropdown: the visible label is plain mono
    text (like the old footer button); a transparent <select> stretched over it

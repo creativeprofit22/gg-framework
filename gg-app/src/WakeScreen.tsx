@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from "react";
+import { appearance } from "./appearance";
+import { readAmbientColors, rgbaCss } from "./ambient-colors";
 
 /**
  * The empty-state "wake" screen — the app addressing the user, Matrix-style.
@@ -66,6 +68,21 @@ function MatrixRain(): React.ReactElement {
       "\u30A2\u30AB\u30B5\u30BF\u30CA\u30CF\u30DE\u30E4\u30E9\u30EF\u30F30123456789<>[]{}=+*";
     const FONT_SIZE = 14;
 
+    // Shared ambient family (resolved on the canvas, so the wake screen's dark
+    // island in Light gets its own tokens). Read on mount and on appearance
+    // change only — never per frame.
+    let trail = "";
+    let ink = "";
+    let inkHi = "";
+    function readColors(): void {
+      const colors = readAmbientColors(canvas);
+      trail = rgbaCss(colors.base, 0.18);
+      ink = rgbaCss(colors.ink, 0.55);
+      inkHi = rgbaCss(colors.inkHi);
+    }
+    readColors();
+    const unsubscribeAppearance = appearance.subscribe(readColors);
+
     let columns = 0;
     let drops: number[] = [];
     let width = 0;
@@ -112,7 +129,7 @@ function MatrixRain(): React.ReactElement {
       last = now;
 
       // Trail fade — translucent wash over the prior frame.
-      ctx.fillStyle = "rgba(15, 17, 21, 0.18)";
+      ctx.fillStyle = trail;
       ctx.fillRect(0, 0, width, height);
       // Canvas 2D cannot resolve CSS var(), so spell out the mono stack (matches
       // the --mono token) instead of silently falling back to the default font.
@@ -122,8 +139,8 @@ function MatrixRain(): React.ReactElement {
         const ch = GLYPHS[Math.floor(Math.random() * GLYPHS.length)];
         const x = i * FONT_SIZE;
         const y = drops[i] * FONT_SIZE;
-        // Brand periwinkle/blue rain — bright lead glyph, dim tail.
-        ctx.fillStyle = Math.random() > 0.97 ? "#9b8cf7" : "rgba(77, 157, 255, 0.55)";
+        // Ambient ink rain — a rare bright lead glyph, dim tail.
+        ctx.fillStyle = Math.random() > 0.97 ? inkHi : ink;
         ctx.fillText(ch, x, y);
         if (y > height && Math.random() > 0.975) drops[i] = 0;
         else drops[i]++;
@@ -159,6 +176,7 @@ function MatrixRain(): React.ReactElement {
 
     return () => {
       stopLoop();
+      unsubscribeAppearance();
       ro.disconnect();
       document.removeEventListener("visibilitychange", onVisible);
       window.removeEventListener("focus", startLoop);

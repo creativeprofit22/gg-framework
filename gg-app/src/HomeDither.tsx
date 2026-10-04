@@ -1,5 +1,6 @@
-import { Component, lazy, Suspense, useState, useSyncExternalStore } from "react";
+import { Component, lazy, Suspense, useMemo, useState, useSyncExternalStore } from "react";
 import { appearance, type Appearance } from "./appearance";
+import { readAmbientColors } from "./ambient-colors";
 // Type-only: erased at build, so three.js stays in the lazily loaded chunk.
 import type { Rgb } from "./Dither";
 import { useWindowFocused } from "./useWindowFocused";
@@ -9,22 +10,18 @@ import { useWindowFocused } from "./useWindowFocused";
 const Dither = lazy(() => import("./Dither").then((module) => ({ default: module.Dither })));
 
 /**
- * Dark: React Bits' suggested grey waves on black. Light: grey dots on the
- * Light theme's near-white background (#fcfbfd), so Home ink drawn for Light
- * reads against it. The dither quantises each colour channel to `colorNum`
- * levels, so a tinted wave comes out as saturated primary dots; neutral grey
- * stays calm behind the text.
+ * Waves stay neutral grey per theme: the dither quantises each colour channel
+ * to `colorNum` levels, so a tinted wave comes out as saturated primary dots;
+ * grey stays calm behind the text (and was contrast-checked against it). The
+ * background is the shared `--ambient-base` token, so Home sits on the same
+ * surface as every other screen (Dark #0a0a0c, Light #fcfbfd). Quantising can
+ * still round it to pure black/white, so `.dither-canvas` blends over that
+ * token in CSS to land on it exactly.
  */
-const PALETTES = {
-  dark: {
-    wave: [0.34509803921568627, 0.34509803921568627, 0.34509803921568627] as const,
-    background: [0, 0, 0] as const,
-  },
-  light: {
-    wave: [0.6, 0.6, 0.6] as const,
-    background: [0.988, 0.984, 0.992] as const,
-  },
-} satisfies Record<Appearance["theme"], { wave: Rgb; background: Rgb }>;
+const WAVES = {
+  dark: [0.34509803921568627, 0.34509803921568627, 0.34509803921568627] as const,
+  light: [0.6, 0.6, 0.6] as const,
+} satisfies Record<Appearance["theme"], Rgb>;
 
 const getTheme = (): Appearance["theme"] => appearance.getSnapshot().preferences.theme;
 
@@ -73,7 +70,13 @@ class BackdropBoundary extends Component<{ children: React.ReactNode }, { failed
  */
 export function HomeDither(): React.ReactElement | null {
   const focused = useWindowFocused();
-  const palette = PALETTES[useSyncExternalStore(appearance.subscribe, getTheme)];
+  const themeName = useSyncExternalStore(appearance.subscribe, getTheme);
+  // Appearance attributes are applied before subscribers run, so the computed
+  // token is already current. Read once per theme change, never per frame.
+  const background = useMemo(() => {
+    void themeName;
+    return readAmbientColors(document.documentElement).base;
+  }, [themeName]);
   const [reduced] = useState(prefersReducedMotion);
   const [supported] = useState(webglAvailable);
   // The home screen element: pointer events are read from it, since the
@@ -92,8 +95,8 @@ export function HomeDither(): React.ReactElement | null {
         <BackdropBoundary>
           <Suspense fallback={null}>
             <Dither
-              waveColor={palette.wave}
-              backgroundColor={palette.background}
+              waveColor={WAVES[themeName]}
+              backgroundColor={background}
               colorNum={4}
               pixelSize={2}
               waveAmplitude={0.3}

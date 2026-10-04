@@ -59,8 +59,23 @@
   --info: #62e8d8;
 
   /* Ambient glow — a wide, soft wash of the accent behind the whole window.
-     Most of the richness lives here; the surfaces stay nearly colourless. */
-  --glow: #5560d8;
+     Most of the richness lives here; the surfaces stay nearly colourless.
+     `--glow-dark` is the Dark theme's glow, kept theme-independent (no theme
+     redefines it) so dark islands in other themes can reference it. Keep the
+     @property --glow-live initial-value literal above in step with it. */
+  --glow-dark: #5560d8;
+  --glow: var(--glow-dark);
+
+  /* Ambient backgrounds — Home dither, wake-screen code rain and the window
+     glow draw from this one family so every screen reads as one product.
+     Canvas/WebGL effects resolve these through ambient-colors.ts. Themed
+     islands that redefine --bg/--glow/--primary must redeclare these too,
+     because a custom property resolves var() where it is declared. */
+  --ambient-base: var(--bg);
+  --ambient-ink: var(--glow);
+  --ambient-ink-hi: var(--primary);
+  /* Shared strength cap for decorative ambient layers drawn over content. */
+  --ambient-decor-opacity: 0.32;
 
   /* Reference app (grok-bot-recon): the user's own text is the SAME ink as
      everything else, and the bubble is that ink at low opacity rather than a
@@ -797,6 +812,8 @@ select {
     --glow-live 1.6s var(--ease-glow),
     opacity 1.2s var(--ease-glow);
 }
+/* Resting tint is the shared ambient ink (--ambient-ink = --glow), the same
+   family the Home dither base and wake-screen rain draw from. */
 .app::before {
   --glow-live: var(--glow);
 }
@@ -1011,10 +1028,15 @@ select {
   inset: 0;
   z-index: 0;
   pointer-events: none;
+  background: var(--ambient-base);
 }
+/* The dither quantises its background to pure black (Dark) or white (Light).
+   Lightening over --ambient-base turns that black into the shared base while
+   the brighter grey dots pass through; Light darkens instead. */
 .dither-canvas {
   width: 100%;
   height: 100%;
+  mix-blend-mode: lighten;
 }
 /* Home content sits above the backdrop. Text over the waves gets a soft dark
    halo so it stays readable across bright stretches of dots. */
@@ -9350,11 +9372,18 @@ select {
   inset: 0;
   width: 100%;
   height: 100%;
-  /* Sit behind the text and never bleed past readable contrast. */
-  opacity: 0.32;
+  /* Sit behind the text and never bleed past readable contrast: the shared
+     ambient strength cap. Colours come from the --ambient-* family. */
+  opacity: var(--ambient-decor-opacity);
   pointer-events: none;
   mask-image: radial-gradient(ellipse 70% 80% at 50% 50%, #000 35%, transparent 100%);
   -webkit-mask-image: radial-gradient(ellipse 70% 80% at 50% 50%, #000 35%, transparent 100%);
+}
+/* Match the window glow: reduced transparency removes decorative washes. */
+@media (prefers-reduced-transparency: reduce) {
+  .wake-rain {
+    display: none;
+  }
 }
 .wake-text {
   position: relative;
@@ -9363,7 +9392,7 @@ select {
   font-size: 18px;
   letter-spacing: 0.02em;
   color: var(--text);
-  text-shadow: 0 0 12px rgba(77, 157, 255, 0.35);
+  text-shadow: 0 0 12px color-mix(in srgb, var(--ambient-ink) 45%, transparent);
   white-space: pre;
 }
 .wake-cursor {

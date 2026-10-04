@@ -154,6 +154,9 @@
 :root[data-appearance-theme="light"] {
   --workspace-pane-bg: transparent;
 }
+:root[data-appearance-theme="light"] .dither-canvas {
+  mix-blend-mode: darken;
+}
 :root[data-appearance-theme="light"] .app::before {
   opacity: 0.08;
 }
@@ -262,6 +265,11 @@
   --error: #ff6b60;
   --border: rgba(255, 255, 255, 0.12);
   --border-strong: rgba(255, 255, 255, 0.25);
+  /* Re-resolve the ambient family against the island's dark tokens; the ink
+     is the Dark theme's glow via the theme-independent --glow-dark. */
+  --ambient-base: var(--bg);
+  --ambient-ink: var(--glow-dark);
+  --ambient-ink-hi: var(--primary);
   color: var(--text);
   background-color: var(--bg);
   color-scheme: dark;
@@ -667,6 +675,11 @@
   color: var(--text);
   background: var(--surface-1);
   font: inherit;
+}
+@media (pointer: coarse) {
+  .appearance-control select {
+    min-height: 44px;
+  }
 }
 .appearance-control select:hover {
   border-color: var(--primary);

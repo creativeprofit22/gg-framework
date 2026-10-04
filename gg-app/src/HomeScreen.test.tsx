@@ -260,8 +260,17 @@ describe("HomeScreen workspace actions", () => {
     await renderHome();
 
     const motion = screen.getByRole("button", { name: "Motion" });
-    expect(screen.getByRole("button", { name: "Code" })).toBeDefined();
-    expect(screen.getByRole("button", { name: "Chat" })).toBeDefined();
+    const code = screen.getByRole("button", { name: "Code" });
+    const chat = screen.getByRole("button", { name: "Chat" });
+    // Code and Chat are the primary ways in; Motion is still in process and
+    // sits one tier below them.
+    expect(code.classList).toContain("btn-primary");
+    expect(chat.classList).toContain("btn-primary");
+    expect(motion.classList).not.toContain("btn-primary");
+    expect(motion.classList).toContain("btn-ghost");
+    // Still reached in the same keyboard order, right after Chat.
+    expect(chat.compareDocumentPosition(motion) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(motion.tabIndex).toBe(0);
     await waitFor(() => expect(motion.getAttribute("aria-disabled")).toBeNull());
 
     fireEvent.click(motion);

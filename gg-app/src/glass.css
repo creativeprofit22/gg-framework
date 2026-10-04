@@ -118,6 +118,24 @@
   background: var(--glass-clear-hover);
   color: var(--text);
 }
+/* Quiet tier (style pack §5 Action tiers): utility/chrome actions in a busy
+   bar (Notes, Tasks, Brain, Radio, Layout). Same size and hit area as a
+   ghost, but no fill or rim at rest, so the bar's one primary and its pending
+   secondaries carry the weight. Hover, focus and an open menu reveal the
+   ghost's hover glass. */
+.btn-ghost.btn-quiet {
+  background: transparent;
+  box-shadow: none;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  color: var(--text-secondary);
+}
+.btn-ghost.btn-quiet:is(:hover, :focus-visible, [aria-expanded="true"]):not(:disabled),
+.winlayout:has(.winlayout-select:not(:disabled)):is(:hover, :focus-within)
+  .btn-ghost.btn-quiet.winlayout-icon-btn {
+  background: var(--glass-clear-hover);
+  color: var(--text);
+}
 .btn-success {
   background: var(--glass-success);
   color: var(--text);

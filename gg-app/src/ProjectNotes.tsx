@@ -344,7 +344,7 @@ export const ProjectNotes = forwardRef<ProjectNotesPromptActions, Props>(functio
   return (
     <>
       <button
-        className="btn btn-sm btn-ghost"
+        className="btn btn-sm btn-ghost btn-quiet"
         title={notesStatusLabel(status)}
         aria-label={notesStatusLabel(status)}
         disabled={cwd === null}

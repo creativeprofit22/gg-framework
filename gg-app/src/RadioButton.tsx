@@ -131,7 +131,7 @@ export function RadioButton(): React.ReactElement {
   return (
     <>
       <button
-        className="btn btn-ghost btn-sm btn-nav-icon"
+        className="btn btn-ghost btn-quiet btn-sm btn-nav-icon"
         title={buttonLabel}
         aria-label={buttonLabel}
         style={playing ? { color: theme.accent } : undefined}

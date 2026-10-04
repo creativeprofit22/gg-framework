@@ -1946,6 +1946,33 @@ describe("command refresh ordering (mocked native transport)", () => {
     });
     expect(screen.queryByTitle("Run /commit")).toBeNull();
   });
+  it("keeps + New as the header's only primary, with commit secondary and utilities quiet", async () => {
+    const pane = client("header-tiers", 1);
+    vi.mocked(pane.listCommands).mockResolvedValue([
+      {
+        name: "commit",
+        aliases: [],
+        description: "Commit changes",
+        source: "built-in",
+        input: { text: "optional", references: "optional", attachments: "optional" },
+      },
+    ]);
+    const { container } = render(<AgentPane client={pane} target={target} />);
+
+    const commit = await screen.findByTitle("Run /commit");
+    const header = container.querySelector(".chat-head");
+    if (!header) throw new Error("missing chat header");
+    const primaries = header.querySelectorAll(".btn-primary");
+    expect(primaries).toHaveLength(1);
+    expect(primaries[0]?.textContent).toBe("+ New");
+    expect(header.querySelector(".btn-success")).toBeNull();
+    expect(commit.classList).toContain("btn-ghost");
+    expect(commit.classList).not.toContain("btn-quiet");
+    expect(screen.getByTitle("View and run this project's tasks").classList).toContain("btn-quiet");
+    // The layout control is a native select or a menu button by platform;
+    // either way its visible icon button is quiet.
+    expect(header.querySelector(".winlayout .btn-quiet")).not.toBeNull();
+  });
 });
 
 describe("AgentPane question acknowledgement", () => {

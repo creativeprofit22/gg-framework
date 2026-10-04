@@ -254,11 +254,12 @@ export function HomeScreen({
           <ChatCircleTextIcon size={18} weight="bold" aria-hidden="true" />
           Chat
         </button>
-        {/* Motion is still being built, so its button says so underneath. */}
+        {/* Motion is still being built, so its button says so underneath and
+            sits a tier below Code and Chat (secondary, not primary). */}
         <div className="home-action-slot">
           <button
             type="button"
-            className={`btn btn-primary home-action${ready ? "" : " is-dimmed"}`}
+            className={`btn btn-ghost home-action${ready ? "" : " is-dimmed"}`}
             aria-disabled={ready ? undefined : true}
             aria-describedby={motionNoteId}
             onClick={() => handleWorkspace(onMotion)}

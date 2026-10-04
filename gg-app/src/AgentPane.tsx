@@ -4893,7 +4893,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
             </MetalButton>
             {workspaceMode === "chat" && (
               <button
-                className="btn btn-sm btn-ghost"
+                className="btn btn-sm btn-ghost btn-quiet"
                 title="View and curate chat memories and Jiwa"
                 onClick={() => setShowMemories(true)}
               >
@@ -4959,7 +4959,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
               />
               {roadmapDraftTrigger}
               <button
-                className="btn btn-sm btn-ghost"
+                className="btn btn-sm btn-ghost btn-quiet"
                 title="View and run this project's tasks"
                 onClick={openTasks}
               >
@@ -4985,12 +4985,12 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
                   {"Initialize Git"}
                 </button>
               ) : (
+                // Secondary in both states: + New is the header's one primary
+                // (style pack §5 Action tiers); readiness lives in the title.
                 commitCommand && (
-                  <MetalButton
-                    windowFocused={
-                      windowFocused && props.windowFocused !== false && props.focused !== false
-                    }
-                    className={`btn btn-sm ${hasCommit ? "btn-success" : "btn-ghost"}`}
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-ghost"
                     disabled={running || planReview !== null}
                     title={
                       planReview !== null
@@ -5007,7 +5007,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
                     }
                   >
                     {`/${commitCommand}`}
-                  </MetalButton>
+                  </button>
                 )
               )}
             </span>

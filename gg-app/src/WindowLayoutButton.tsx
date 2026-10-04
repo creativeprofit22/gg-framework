@@ -84,7 +84,10 @@ export function WindowLayoutButton({ onArrange }: { onArrange?: () => void }): R
   if (supportsNativeSelectPopup()) {
     return (
       <span className="winlayout">
-        <span className="winlayout-icon-btn btn btn-ghost btn-sm btn-nav-icon" aria-hidden="true">
+        <span
+          className="winlayout-icon-btn btn btn-ghost btn-quiet btn-sm btn-nav-icon"
+          aria-hidden="true"
+        >
           <SquaresFourIcon size={16} />
         </span>
         <select
@@ -113,7 +116,7 @@ export function WindowLayoutButton({ onArrange }: { onArrange?: () => void }): R
     <div className="winlayout" ref={rootRef}>
       <button
         ref={triggerRef}
-        className="btn btn-ghost btn-sm btn-nav-icon"
+        className="btn btn-ghost btn-quiet btn-sm btn-nav-icon"
         disabled={busy}
         title="Arrange into multiple project windows"
         aria-label="Arrange into multiple project windows"

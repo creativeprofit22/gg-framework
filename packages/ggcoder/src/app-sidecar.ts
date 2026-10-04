@@ -4169,6 +4169,7 @@ async function createSession(
     session.setIdealReviewSuppressed(true);
     let planReviewIdentity: { checkpointId: string; generation: number } | null = null;
     let outcome: UserTurnOutcome = "review-failed";
+    let terminalEmitted = false;
     try {
       assertProviderExecutionAllowed(session.getState().provider, true);
       assertProviderExecutionAllowed(kenCurrentModel().provider, true);
@@ -4246,6 +4247,7 @@ async function createSession(
           return completed;
         },
         emit: (event) => {
+          terminalEmitted = true;
           // Persist the terminal verdict marker so a resumed session renders the
           // same Ken bubble the live run showed instead of dropping it or
           // falling back to the raw verdict text (e.g. ALL_CLEAR).
@@ -4276,11 +4278,20 @@ async function createSession(
       }));
       return outcome;
     } catch (error) {
+      terminalEmitted = true;
       broadcastError("autopilot_error", "autopilot cycle failed", error);
       return outcome;
     } finally {
       autopilotActive = false;
       session.setIdealReviewSuppressed(isAutopilotEnabled());
+      // Stale or failed reviews return without a verdict frame. Close the
+      // webview's review state; cancellation and plan accept/revise already
+      // settle it themselves.
+      if (!terminalEmitted && !autopilotCancelled) {
+        broadcast("autopilot_ignored", {
+          planPending: planGate.pending()?.state === "pending-review",
+        });
+      }
       finishOwnedGeneration(
         generation,
         true,

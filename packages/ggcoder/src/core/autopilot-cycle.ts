@@ -78,6 +78,8 @@ export interface AutopilotPlanReviewIdentity {
 /** SSE frame types the cycle can emit (matched by the webview). */
 export type AutopilotCycleEmit =
   | { type: "autopilot_done"; data: { reason?: string } }
+  // The cycle emits an empty frame; the sidecar also sends richer
+  // `autopilot_ignored` frames ({ reason } / { planPending }) outside the cycle.
   | { type: "autopilot_ignored"; data: Record<string, never> }
   | { type: "autopilot_human"; data: { reason: string } }
   | { type: "autopilot_capped"; data: { rounds: number } }

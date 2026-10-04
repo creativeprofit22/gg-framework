@@ -43,6 +43,64 @@ describe("whole-task activity", () => {
     expect(lostResult.connectionLost).toBe(false);
   });
 
+  const pendingPlanReview = {
+    checkpointId: "checkpoint-1",
+    generation: 1,
+    planPath: ".gg/plans/plan.md",
+    content: "# Plan",
+    contentHash: "hash-1",
+    state: "pending-review",
+    reviewStatus: "ready",
+    feedback: null,
+  };
+  const pendingAsks = [
+    { id: "ask-1", questions: [{ id: "q1", question: "Proceed?", kind: "confirm" }] },
+  ];
+  const lost = () => event(start(), "connection_lost");
+  it.each([
+    ["a disconnected run", lost, { cwd: "/p", running: false, pendingPlanReview }],
+    ["a rehydrated pane", () => INITIAL_ACTIVITY, { cwd: "/p", running: false, pendingPlanReview }],
+  ])("restores a pending plan decision from the ready snapshot for %s", (_, from, data) => {
+    const s = event(from(), "ready", data);
+    expect(s.phase).toBe("attention");
+    expect(s.label).toBe("Plan needs your decision");
+    expect(s.pendingPlan).toBe(true);
+    expect(s.connectionLost).toBe(false);
+    expect(s.endedAt).toBe(1000);
+  });
+  it.each([
+    ["a disconnected run", lost],
+    ["a rehydrated pane", () => INITIAL_ACTIVITY],
+    ["a settled pane", () => event(start(), "run_end", { verification: "passed" })],
+  ])("restores an open question from the ready snapshot for %s", (_, from) => {
+    const s = event(from(), "ready", { cwd: "/p", running: true, pendingAsks });
+    expect(s.phase).toBe("attention");
+    expect(s.label).toBe("Your decision needed");
+    expect(s.waitingForAnswer).toBe(true);
+    expect(s.connectionLost).toBe(false);
+    expect(s.endedAt).toBeNull();
+    expect(event(s, "thinking_delta").phase).toBe("working");
+  });
+  it.each([
+    [{ running: false }, "stopped"],
+    [{ running: false, pendingPlanReview: null }, "stopped"],
+    [{ running: false, pendingPlanReview: { checkpointId: "x" } }, "stopped"],
+    [{ running: false, pendingAsks }, "stopped"],
+    [{ running: true }, "working"],
+    [{ running: true, pendingAsks: [] }, "working"],
+    [{ running: true, pendingAsks: [{ id: "bad" }] }, "working"],
+    [{ running: true, pendingPlanReview }, "working"],
+  ])("keeps reconnect behaviour without a valid pending decision: %j", (data, phase) => {
+    const s = event(lost(), "ready", data);
+    expect(s.phase).toBe(phase);
+    expect(s.waitingForAnswer).toBe(false);
+    expect(s.pendingPlan).toBe(false);
+  });
+  it("lets Ken's pending review outrank a restored plan gate", () => {
+    const s = event(lost(), "ready", { running: false, reviewPending: true, pendingPlanReview });
+    expect(s.phase).toBe("reviewing");
+  });
+
   it("replaces the previous outcome when reconnect finds a new live run", () => {
     const done = event(start(), "run_end", { verification: "passed", verifiedChecks: 1 });
     const resumed = event(done, "ready", { running: true });
@@ -283,7 +341,72 @@ describe("whole-task activity", () => {
     const reviewing = event(s, "run_end", { reviewPending: true });
     expect(reviewing.phase).toBe("reviewing");
     expect(event(reviewing, "session_reset", { planTotal: 2 }).startedAt).toBe(100);
-    expect(event(reviewing, "autopilot_plan_accepted").label).toContain("preparing implementation");
+  });
+  it("hands a Ken-reviewed plan back to the user instead of staying busy", () => {
+    const reviewing = event(
+      event(event(start(), "plan_exit"), "run_end", { reviewPending: true }),
+      "autopilot_review_start",
+    );
+    const ready = event(
+      reviewing,
+      "autopilot_plan_ready",
+      { checkpointId: "c", generation: 1 },
+      2000,
+    );
+    expect(ready.phase).toBe("attention");
+    expect(ready.label).toBe("Plan needs your decision");
+    expect(ready.pendingPlan).toBe(true);
+    expect(ready.reviewPending).toBe(false);
+    expect(ready.endedAt).toBe(2000);
+    // A late duplicate cannot reopen or rewrite the settled state.
+    expect(event(ready, "autopilot_plan_ready", {}, 3000)).toBe(ready);
+  });
+  it("stops waiting once the user approves a plan-only plan", () => {
+    const waiting = event(event(start(), "plan_exit"), "run_end", { reviewPending: false });
+    expect(waiting.label).toBe("Plan needs your decision");
+    const approved = event(waiting, "plan_accepted", { checkpointId: "c", generation: 1 }, 3000);
+    expect(approved.phase).toBe("done");
+    expect(approved.label).toBe("Plan approved");
+    expect(approved.pendingPlan).toBe(false);
+    expect(approved.reviewPending).toBe(false);
+    expect(approved.endedAt).toBe(3000);
+    // A normal approval still resets the row, and the implementation run starts fresh.
+    expect(event(approved, "session_reset", { planTotal: 2 })).toEqual(INITIAL_ACTIVITY);
+    const implementing = event(approved, "run_start", {}, 4000);
+    expect(implementing.phase).toBe("working");
+    expect(implementing.startedAt).toBe(4000);
+  });
+  it("stops waiting once the user approves a Ken-reviewed plan", () => {
+    const ready = event(
+      event(
+        event(event(start(), "plan_exit"), "run_end", { reviewPending: true }),
+        "autopilot_review_start",
+      ),
+      "autopilot_plan_ready",
+      { checkpointId: "c", generation: 1 },
+      2000,
+    );
+    const approved = event(ready, "plan_accepted", { checkpointId: "c", generation: 1 }, 3000);
+    expect(approved.phase).toBe("done");
+    expect(approved.label).toBe("Plan approved");
+    expect(approved.pendingPlan).toBe(false);
+    expect(approved.reviewPending).toBe(false);
+    expect(approved.endedAt).toBe(3000);
+  });
+  it("ignores a plan approval when no plan is waiting", () => {
+    const done = event(start(), "run_end", {});
+    expect(event(done, "plan_accepted", { checkpointId: "c", generation: 1 }, 3000)).toBe(done);
+  });
+  it("settles a plan review that ended without a verdict", () => {
+    const reviewing = event(
+      event(event(start(), "plan_exit"), "run_end", { reviewPending: true }),
+      "autopilot_review_start",
+    );
+    const stillPending = event(reviewing, "autopilot_ignored", { planPending: true });
+    expect(stillPending.phase).toBe("attention");
+    expect(stillPending.label).toBe("Plan needs your decision");
+    expect(stillPending.reviewPending).toBe(false);
+    expect(event(reviewing, "autopilot_ignored").phase).toBe("done");
   });
   it("shows skipped reviews honestly and preserves available evidence", () => {
     const s = event(start(), "run_end", {

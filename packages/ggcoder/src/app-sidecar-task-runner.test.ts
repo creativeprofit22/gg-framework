@@ -338,6 +338,37 @@ describe("app sidecar task runner", () => {
     },
   );
 
+  it.each([
+    {
+      name: "a plan review without a verdict",
+      options: { plan: "submitted", verdict: null },
+      planPending: true,
+    },
+    { name: "a work review without a verdict", options: { verdict: null }, planPending: false },
+  ] satisfies Array<{
+    name: string;
+    options: Parameters<typeof taskRunnerHarness>[2];
+    planPending: boolean;
+  }>)("closes the review indicator after $name", async ({ options, planPending }) => {
+    const runner = await taskRunnerHarness(true, false, options);
+    await runner.runTasks("first", false);
+    expect(runner.broadcast).toHaveBeenCalledWith("autopilot_ignored", { planPending });
+  });
+
+  it.each([
+    { name: "a plan verdict", options: { plan: "submitted" } },
+    { name: "a work verdict", options: {} },
+    { name: "a cancelled review", options: { cancelAt: "review" } },
+    { name: "a failed review", options: { failure: "review" } },
+  ] satisfies Array<{ name: string; options: Parameters<typeof taskRunnerHarness>[2] }>)(
+    "adds no fallback frame after $name",
+    async ({ options }) => {
+      const runner = await taskRunnerHarness(true, false, options);
+      await runner.runTasks("first", false);
+      expect(runner.broadcast).not.toHaveBeenCalledWith("autopilot_ignored", expect.anything());
+    },
+  );
+
   it.each([true, false])(
     "keeps a drafting plan in its first session (enabled=%s)",
     async (enabled) => {

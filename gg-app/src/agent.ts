@@ -1260,10 +1260,16 @@ export async function retryCancelledRoadmapStatus(): Promise<PhaseCancellationPe
 //   autopilot_review_start {}       — Ken started an auto-review (spinner)
 //   autopilot_prompted { round }    — Ken fed GG Coder another prompt (marker)
 //   autopilot_done {}               — Ken gave the all-clear, loop stops
-//   autopilot_ignored {}            — nothing worth reviewing, loop stops SILENTLY (no marker)
+//   autopilot_ignored { reason?, planPending? } — loop stops SILENTLY (no marker).
+//                                     reason = skip reason when no review starts;
+//                                     planPending = review ended without a verdict
+//                                     while a submitted plan still awaits the user
+//                                     (row shows "Plan needs your decision"); empty
+//                                     when the user's plan accept/revise superseded
+//                                     the review.
 //   autopilot_human { reason }      — Ken needs a human decision, loop stops
 //   autopilot_capped { rounds }     — round cap hit, loop paused
-//   autopilot_plan_ready { checkpointId, generation } — Ken finished review; human
+//   autopilot_plan_ready { checkpointId, generation, reason? } — Ken finished review; human
 //                                     approval remains required. Identity prevents
 //                                     a delayed verdict from mutating a newer gate.
 //   autopilot_error { headline, … } — a review failed (structured, like error)

@@ -1,3 +1,5 @@
+import { isPendingAskSnapshot } from "@kenkaiiii/gg-core/desktop-session-ux";
+import { isPendingPlanReview } from "@kenkaiiii/gg-core/plan-review";
 import type { SidecarEvent } from "./agent";
 
 export type TaskPhase =
@@ -173,6 +175,18 @@ function finish(s: TaskActivity, now: number): TaskActivity {
   };
 }
 
+function planDecision(s: TaskActivity, now: number, note = ""): TaskActivity {
+  return {
+    ...s,
+    phase: "attention",
+    label: "Plan needs your decision",
+    detail: `${note ? `${note} ` : ""}Review the proposed plan before implementation.`,
+    pendingPlan: true,
+    reviewPending: false,
+    endedAt: now,
+  };
+}
+
 function toolPhase(name: string, args: Record<string, unknown>): string {
   if (["read", "grep", "find", "ls", "code_search", "code_nav", "source_path"].includes(name))
     return "Reading the relevant code…";
@@ -204,7 +218,7 @@ const PROGRESS_EVENTS = new Set([
   "plan_exit",
   "autopilot_review_start",
   "autopilot_prompted",
-  "autopilot_plan_accepted",
+  "autopilot_plan_ready",
   "autopilot_done",
   "autopilot_ignored",
   "autopilot_human",
@@ -278,9 +292,16 @@ export function reduceTaskActivity(s: TaskActivity, e: SidecarEvent, now: number
     }
     case "ready": {
       const project = typeof d.cwd === "string" ? d.cwd : s.project;
+      // The snapshot restores the ask and plan cards; the status row must agree.
+      const askPending =
+        d.running === true &&
+        d.runState !== "cancelling" &&
+        isPendingAskSnapshot(d.pendingAsks) &&
+        d.pendingAsks.length > 0;
+      const planPending = d.running !== true && isPendingPlanReview(d.pendingPlanReview);
       if (project !== s.project) {
         s = { ...INITIAL_ACTIVITY, project };
-        if (d.running === true)
+        if (d.running === true && !askPending)
           return {
             ...s,
             phase: "working",
@@ -297,6 +318,37 @@ export function reduceTaskActivity(s: TaskActivity, e: SidecarEvent, now: number
           reviewPending: true,
           connectionLost: false,
           endedAt: null,
+          startedAt: s.startedAt ?? now,
+        };
+      }
+      if (askPending && !s.cancelling) {
+        const base =
+          settled || s.phase === "idle" ? { ...INITIAL_ACTIVITY, project, startedAt: now } : s;
+        return {
+          ...base,
+          project,
+          phase: "attention",
+          label: "Your decision needed",
+          detail: "Answer the question in chat to continue.",
+          waitingForAnswer: true,
+          connectionLost: false,
+          endedAt: null,
+          startedAt: base.startedAt ?? now,
+        };
+      }
+      if (planPending) {
+        return {
+          ...s,
+          project,
+          phase: "attention",
+          label: "Plan needs your decision",
+          detail: "Review the proposed plan before implementation.",
+          pendingPlan: true,
+          reviewPending: false,
+          waitingForAnswer: false,
+          cancelling: false,
+          connectionLost: false,
+          endedAt: s.endedAt ?? now,
           startedAt: s.startedAt ?? now,
         };
       }
@@ -596,18 +648,15 @@ export function reduceTaskActivity(s: TaskActivity, e: SidecarEvent, now: number
         reviewPending: true,
         endedAt: null,
       };
-    case "autopilot_plan_accepted":
-      return {
-        ...s,
-        phase: "working",
-        label: "Plan approved · preparing implementation…",
-        reviewPending: true,
-        endedAt: null,
-        pendingPlan: false,
-      };
     case "autopilot_done":
       return finish({ ...s, phase: "working", reviewed: true, reviewNote: reason(d, "") }, now);
+    // Ken found no objection to the plan, but only the user can approve it.
+    case "autopilot_plan_ready":
+      return planDecision(s, now, reason(d, ""));
     case "autopilot_ignored":
+      // The sidecar marks a review that ended without a verdict while the plan
+      // still awaits the user, so the row hands back the decision instead.
+      if (s.reviewPending && d.planPending === true) return planDecision(s, now);
       return s.reviewPending
         ? finish(
             { ...s, phase: s.phase === "reviewing" ? "working" : s.phase, reviewed: false },
@@ -660,6 +709,20 @@ export function reduceTaskActivity(s: TaskActivity, e: SidecarEvent, now: number
         : s;
     case "plan_exit":
       return { ...s, pendingPlan: true, label: "Plan ready for review…" };
+    // The user's approval succeeded. Normal plans follow with session_reset and a
+    // fresh run; plan-only plans get nothing else, so settle the row here.
+    case "plan_accepted":
+      return s.pendingPlan
+        ? {
+            ...s,
+            phase: "done",
+            label: "Plan approved",
+            detail: "The approved plan is saved. Start implementation when ready.",
+            pendingPlan: false,
+            reviewPending: false,
+            endedAt: now,
+          }
+        : s;
     default:
       return s;
   }

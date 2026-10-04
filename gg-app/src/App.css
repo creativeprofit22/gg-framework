@@ -1984,6 +1984,12 @@ select {
      container query in the app. */
   container-type: inline-size;
   container-name: picker;
+  /* Wide panes centre the 760px page column instead of hugging the left edge.
+     Unregistered, so the cqi units resolve on the children against this
+     container. The offset is 0 until the header's page column (752px) plus
+     padding and window controls fit beside it (~920px), so 561-920px panes
+     keep today's layout and the locked 81px header never wraps. */
+  --picker-offset: max(0px, min((100cqi - 760px) / 2 - 12px, 100cqi - 920px));
 }
 .picker-head {
   position: relative;
@@ -2020,6 +2026,7 @@ select {
   flex: 1 1 0;
   min-width: 0;
   max-width: calc(12px + 760px - 20px);
+  margin-left: var(--picker-offset);
   gap: 14px;
   flex-wrap: wrap;
   row-gap: 8px;
@@ -4235,6 +4242,8 @@ select {
   flex: 1 1 auto;
   overflow-y: auto;
   padding: 12px;
+  /* Same offset as .picker-head-main, so rows line up under the header. */
+  padding-left: calc(12px + var(--picker-offset, 0px));
   display: flex;
   flex-direction: column;
   gap: 4px;
@@ -4395,9 +4404,13 @@ select {
      underneath it. 24px control + 8px inset + 6px breathing room. */
   padding-right: 38px;
 }
+/* Explicit line boxes keep row rhythm even: name 20px, meta one badge tall
+   whether it holds pills or plain text, snippet 18px. Rows then differ only by
+   the optional snippet line (18px + the 6px gap). */
 .picker-name {
   font-size: 14px;
   font-weight: 600;
+  line-height: 20px;
 }
 /* A project's sources (gg-coder, Claude Code, Codex, Folder) as tinted pills
    in a row; a session from another tool leads its meta line with one. */
@@ -4411,8 +4424,11 @@ select {
   display: flex;
   align-items: center;
   gap: 8px;
+  /* = .badge box: 11px × 1.5 line + 2px padding + 2px border. */
+  min-height: 20.5px;
   font-family: var(--sans);
   font-size: 12px;
+  line-height: 18px;
 }
 
 /* ── Reusable pill badge ── */
@@ -4447,6 +4463,7 @@ select {
   max-width: 100%;
   font-family: var(--sans);
   font-size: 12px;
+  line-height: 18px;
   color: var(--text-muted);
   white-space: nowrap;
   overflow: hidden;

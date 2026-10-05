@@ -5255,761 +5255,771 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       {/* React owns chat visibility rather than a stylesheet override. Activity
           keeps the draft and transcript state, and suspends hidden child effects. */}
       <Activity mode={showChecklist ? "hidden" : "visible"}>
-      {/* Non-scrolling frame the same size as the chat viewport. The banner
+        {/* Non-scrolling frame the same size as the chat viewport. The banner
           lives HERE, not inside `.transcript` — `.transcript` scrolls, and an
           absolutely positioned child of a scrolling container is pinned to the
           top of the scrolled CONTENT, not the visible viewport, so in an
           existing session scrolled down it rendered far above what's on
           screen. Anchoring to this non-scrolling sibling keeps it pinned to
           what the user is actually looking at, at any scroll position. */}
-      <div className={`conversation-stack${reviewItems.length ? " has-reviews" : ""}`}>
-        <div className="transcript-frame">
-          {workspaceMode === "code" && kenPowerBanner && (
-            <KenPowerBanner mode={kenPowerBanner} onDone={() => setKenPowerBanner(null)} />
-          )}
-          <div
-            className="transcript"
-            ref={attachTranscript}
-            onScroll={onTranscriptScroll}
-            onWheel={onTranscriptWheel}
-          >
-            {!hydrated && items.length === 0 ? (
-              <TranscriptSkeleton />
-            ) : (
-              <>
-                {items.length === 0 &&
-                  (status === "ready" ? (
-                    <WakeScreen
-                      chat={workspaceMode === "chat"}
-                      motion={workspaceMode === "motion"}
-                    />
-                  ) : (
-                    <div className="line transcript-reveal" style={{ color: theme.textDim }}>
-                      {`\u273b ${status}`}
-                    </div>
-                  ))}
-                <KenPromptActionProvider value={kenPromptDispatcher}>
-                  <LiveTextContext.Provider value={liveText}>
-                    {items.map((it) =>
-                      createElement(TranscriptRow, {
-                        key: it.id,
-                        item: it,
-                        kenTalking: it.id === talkingKenId,
-                        errorActive: it.id === currentErrorId,
-                        errorCritterId: errorCritters.get(it.id),
-                        errorModelPicker:
-                          it.kind === "error" && it.id === currentErrorId ? (
-                            <ModelSelect
-                              models={models}
-                              currentModel={
-                                it.scope === "ken_error" || it.scope === "autopilot_error"
-                                  ? (state?.kenModel ?? state?.model ?? "")
-                                  : (state?.model ?? "")
-                              }
-                              onSelect={
-                                it.scope === "ken_error" || it.scope === "autopilot_error"
-                                  ? onSelectKenModel
-                                  : onSelectModel
-                              }
-                              disabled={running || kenRunning || autopilotReviewing}
-                              title={
-                                it.scope === "ken_error" || it.scope === "autopilot_error"
-                                  ? `Switch ${MENTOR_DISPLAY_NAME}'s model`
-                                  : "Switch model"
-                              }
-                              label={it.reason === "usage_limit" ? "Switch provider" : "Choose model"}
-                              color={theme.primary}
-                            />
-                          ) : undefined,
-                        onImageLoad: maybeScrollToBottom,
-                        onAskAnswer: handleAskAnswer,
-                        onAskType: handleAskType,
-                      }),
+        <div className={`conversation-stack${reviewItems.length ? " has-reviews" : ""}`}>
+          <div className="transcript-frame">
+            {workspaceMode === "code" && kenPowerBanner && (
+              <KenPowerBanner mode={kenPowerBanner} onDone={() => setKenPowerBanner(null)} />
+            )}
+            <div
+              className="transcript"
+              ref={attachTranscript}
+              onScroll={onTranscriptScroll}
+              onWheel={onTranscriptWheel}
+            >
+              {!hydrated && items.length === 0 ? (
+                <TranscriptSkeleton />
+              ) : (
+                <>
+                  {items.length === 0 &&
+                    (status === "ready" ? (
+                      <WakeScreen
+                        chat={workspaceMode === "chat"}
+                        motion={workspaceMode === "motion"}
+                      />
+                    ) : (
+                      <div className="line transcript-reveal" style={{ color: theme.textDim }}>
+                        {`\u273b ${status}`}
+                      </div>
+                    ))}
+                  <KenPromptActionProvider value={kenPromptDispatcher}>
+                    <LiveTextContext.Provider value={liveText}>
+                      {items.map((it) =>
+                        createElement(TranscriptRow, {
+                          key: it.id,
+                          item: it,
+                          kenTalking: it.id === talkingKenId,
+                          errorActive: it.id === currentErrorId,
+                          errorCritterId: errorCritters.get(it.id),
+                          errorModelPicker:
+                            it.kind === "error" && it.id === currentErrorId ? (
+                              <ModelSelect
+                                models={models}
+                                currentModel={
+                                  it.scope === "ken_error" || it.scope === "autopilot_error"
+                                    ? (state?.kenModel ?? state?.model ?? "")
+                                    : (state?.model ?? "")
+                                }
+                                onSelect={
+                                  it.scope === "ken_error" || it.scope === "autopilot_error"
+                                    ? onSelectKenModel
+                                    : onSelectModel
+                                }
+                                disabled={running || kenRunning || autopilotReviewing}
+                                title={
+                                  it.scope === "ken_error" || it.scope === "autopilot_error"
+                                    ? `Switch ${MENTOR_DISPLAY_NAME}'s model`
+                                    : "Switch model"
+                                }
+                                label={
+                                  it.reason === "usage_limit" ? "Switch provider" : "Choose model"
+                                }
+                                color={theme.primary}
+                              />
+                            ) : undefined,
+                          onImageLoad: maybeScrollToBottom,
+                          onAskAnswer: handleAskAnswer,
+                          onAskType: handleAskType,
+                        }),
+                      )}
+                    </LiveTextContext.Provider>
+                  </KenPromptActionProvider>
+                  {workspaceMode === "code" &&
+                    programmaticOpen &&
+                    programmatic.generation === programmaticGeneration && (
+                      <ProgrammaticChat
+                        state={programmatic}
+                        busy={programmaticBusy}
+                        planMode={state?.planMode ?? false}
+                        onAction={(request) => void performProgrammatic(request)}
+                        onSelect={(id) => {
+                          dispatchProgrammatic({ type: "select", id });
+                          void performProgrammatic({ version: 1, action: "detail", id });
+                        }}
+                        onSelectCandidate={(source, id) => {
+                          if (source === "history" && programmaticBusy) return;
+                          dispatchProgrammatic({ type: "select-candidate", source, id });
+                          if (source === "history")
+                            void performProgrammatic({
+                              version: 1,
+                              action: "history-detail",
+                              candidateId: id,
+                              offset: 0,
+                            });
+                        }}
+                        onRun={() => void runSelectedProgrammatic()}
+                      />
                     )}
-                  </LiveTextContext.Provider>
-                </KenPromptActionProvider>
-                {workspaceMode === "code" &&
-                  programmaticOpen &&
-                  programmatic.generation === programmaticGeneration && (
-                    <ProgrammaticChat
-                      state={programmatic}
-                      busy={programmaticBusy}
-                      planMode={state?.planMode ?? false}
-                      onAction={(request) => void performProgrammatic(request)}
-                      onSelect={(id) => {
-                        dispatchProgrammatic({ type: "select", id });
-                        void performProgrammatic({ version: 1, action: "detail", id });
-                      }}
-                      onSelectCandidate={(source, id) => {
-                        if (source === "history" && programmaticBusy) return;
-                        dispatchProgrammatic({ type: "select-candidate", source, id });
-                        if (source === "history")
-                          void performProgrammatic({
-                            version: 1,
-                            action: "history-detail",
-                            candidateId: id,
-                            offset: 0,
-                          });
-                      }}
-                      onRun={() => void runSelectedProgrammatic()}
-                    />
-                  )}
-              </>
+                </>
+              )}
+            </div>
+            {items.length > 0 && (
+              <ExportChatButton
+                visible={exporting}
+                busy={exporting}
+                onExport={() => void exportTranscript()}
+              />
             )}
           </div>
-          {items.length > 0 && (
-            <ExportChatButton
-              visible={exporting}
-              busy={exporting}
-              onExport={() => void exportTranscript()}
+
+          <ReviewDock
+            items={reviewItems}
+            expanded={expandedReview}
+            onExpandedChange={setExpandedReview}
+            onLayoutChange={maybeScrollToBottom}
+            fallbackFocus={() => inputRef.current?.focus()}
+          />
+        </div>
+
+        {/* Sub-agents walk on top of the pinned region as critters; the lane
+          opens (pushing the chat up) only while one is out. */}
+        <CritterFloor groups={critterGroups} />
+        <div className="liveregion">
+          {/* Starting points sit just above the activity bar, only for an empty,
+            loaded, ready conversation. They fill the composer (never send) and
+            hide as soon as the user types or attaches something. */}
+          {showStarters &&
+            (workspaceMode === "motion" ? (
+              <MotionStarters onPick={fillComposer} />
+            ) : (
+              <ComposerStarters
+                starters={workspaceMode === "chat" ? CHAT_STARTERS : CODE_STARTERS}
+                label="Ways to start"
+                onPick={fillComposer}
+              />
+            ))}
+          {workspaceMode === "code" && kenRunning && (
+            <KenActivityBar
+              runStartTs={kenRunStartTs}
+              tokens={kenTokens}
+              isThinking={kenIsThinking}
+              thinkingStartTs={kenThinkingStartTs}
+              thinkingAccumMs={kenThinkingAccumMs}
+              onCancel={() => cancelCurrentKen()}
+            />
+          )}
+          {!toolsHidden && <LiveToolPanel entries={liveToolFeed} />}
+          {/* Automatic review stays in this pane's task row; manual @Ken keeps its own bar. */}
+          {(workspaceMode !== "code" || running || autopilotReviewing || !kenRunning) && (
+            <ActivityBar
+              running={running}
+              activity={activity}
+              cancelling={cancelling}
+              tokens={tokens}
+              doneStatus={doneStatus}
+              isThinking={isThinking}
+              thinkingStartTs={thinkingStartTs}
+              thinkingAccumMs={thinkingAccumMs}
+              planTotal={workspaceMode !== "code" ? 0 : planTotal}
+              planDone={workspaceMode !== "code" ? 0 : Math.min(planDone.size, planTotal)}
+              onCancel={requestCancel}
+              toolsHidden={toolsHidden}
+              hasToolFeed={liveToolFeed.length > 0}
+              onToggleTools={toggleTools}
             />
           )}
         </div>
 
-        <ReviewDock
-          items={reviewItems}
-          expanded={expandedReview}
-          onExpandedChange={setExpandedReview}
-          onLayoutChange={maybeScrollToBottom}
-          fallbackFocus={() => inputRef.current?.focus()}
-        />
-      </div>
-
-      {/* Sub-agents walk on top of the pinned region as critters; the lane
-          opens (pushing the chat up) only while one is out. */}
-      <CritterFloor groups={critterGroups} />
-      <div className="liveregion">
-        {/* Starting points sit just above the activity bar, only for an empty,
-            loaded, ready conversation. They fill the composer (never send) and
-            hide as soon as the user types or attaches something. */}
-        {showStarters &&
-          (workspaceMode === "motion" ? (
-            <MotionStarters onPick={fillComposer} />
+        <div
+          className={`inputwrap${isFileDragOver ? " dragover" : ""}${
+            scheduleInvalid ? " schedule-invalid" : ""
+          }`}
+        >
+          <WorkingBeam active={running || kenRunning || autopilotReviewing} />
+          {scheduleDraft ? (
+            <ScheduleHint input={input} caret={caret} onPickInterval={fillScheduleInterval} />
           ) : (
-            <ComposerStarters
-              starters={workspaceMode === "chat" ? CHAT_STARTERS : CODE_STARTERS}
-              label="Ways to start"
-              onPick={fillComposer}
-            />
-          ))}
-        {workspaceMode === "code" && kenRunning && (
-          <KenActivityBar
-            runStartTs={kenRunStartTs}
-            tokens={kenTokens}
-            isThinking={kenIsThinking}
-            thinkingStartTs={kenThinkingStartTs}
-            thinkingAccumMs={kenThinkingAccumMs}
-            onCancel={() => cancelCurrentKen()}
-          />
-        )}
-        {!toolsHidden && <LiveToolPanel entries={liveToolFeed} />}
-        {/* Automatic review stays in this pane's task row; manual @Ken keeps its own bar. */}
-        {(workspaceMode !== "code" || running || autopilotReviewing || !kenRunning) && (
-          <ActivityBar
-            running={running}
-            activity={activity}
-            cancelling={cancelling}
-            tokens={tokens}
-            doneStatus={doneStatus}
-            isThinking={isThinking}
-            thinkingStartTs={thinkingStartTs}
-            thinkingAccumMs={thinkingAccumMs}
-            planTotal={workspaceMode !== "code" ? 0 : planTotal}
-            planDone={workspaceMode !== "code" ? 0 : Math.min(planDone.size, planTotal)}
-            onCancel={requestCancel}
-            toolsHidden={toolsHidden}
-            hasToolFeed={liveToolFeed.length > 0}
-            onToggleTools={toggleTools}
-          />
-        )}
-      </div>
-
-      <div
-        className={`inputwrap${isFileDragOver ? " dragover" : ""}${
-          scheduleInvalid ? " schedule-invalid" : ""
-        }`}
-      >
-        <WorkingBeam active={running || kenRunning || autopilotReviewing} />
-        {scheduleDraft ? (
-          <ScheduleHint input={input} caret={caret} onPickInterval={fillScheduleInterval} />
-        ) : (
-          slashOpen && (
-            <SlashMenu
-              commands={slashMatches}
-              activeIndex={clampedSlashIndex}
-              onSelect={pickSlashCommand}
-              onHover={setSlashIndex}
-            />
-          )
-        )}
-        {paletteOpen && (
-          <CommandPalette
-            commands={collectionCommands}
-            problems={paletteProblems}
-            onClose={() => setPaletteOpen(false)}
-            onInsert={(cmd) => {
-              setPaletteOpen(false);
-              pickSlashCommand(cmd);
-            }}
-            onSend={(cmd) => {
-              setPaletteOpen(false);
-              submitText(`/${cmd.name}`);
-            }}
-          />
-        )}
-        {mentionOpen && !noReferenceSlashCommand && (
-          <FileMentionMenu
-            files={fileMatches}
-            activeIndex={clampedFileIndex}
-            isRecent={mention?.query === ""}
-            onSelect={pickMentionFile}
-            onHover={setFileIndex}
-          />
-        )}
-        <AttachmentBar
-          attachments={attachments}
-          onRemove={removeAttachment}
-          onOpenImage={(src) => void openImageDataUrl(src)}
-        />
-        <ReferencedFiles paths={mentionedPaths} onRemove={removeMentionChip} />
-        <QueuedBar messages={visibleQueuedMessages} onCancel={handleCancelQueued} />
-        <div className="inputrow">
-          <input
-            ref={fileInputRef}
-            type="file"
-            multiple
-            accept="image/*,video/*"
-            disabled={planReview !== null || noAttachmentSlashCommand !== null}
-            style={{ display: "none" }}
-            onChange={(event) => {
-              if (event.target.files) void addFiles(event.target.files);
-              event.target.value = "";
-            }}
-          />
-          <button
-            className="icon-circle"
-            aria-label="Attach files"
-            title={
-              noAttachmentSlashCommand
-                ? `/${noAttachmentSlashCommand.name} does not accept attachments`
-                : planReview !== null
-                  ? "Resolve the pending plan first"
-                  : "Attach files"
-            }
-            disabled={planReview !== null || noAttachmentSlashCommand !== null}
-            onClick={() => fileInputRef.current?.click()}
-          >
-            <PaperclipIcon size={15} />
-          </button>
-          <div className="input-stack">
-            {enhanceAnim && (
-              <EnhanceDissolve
-                oldText={enhanceAnim.oldText}
-                newText={enhanceAnim.newText}
-                onDone={onEnhanceAnimDone}
+            slashOpen && (
+              <SlashMenu
+                commands={slashMatches}
+                activeIndex={clampedSlashIndex}
+                onSelect={pickSlashCommand}
+                onHover={setSlashIndex}
               />
-            )}
-            {/* `@Ken` active: a textarea can't color just one token, so we mirror
+            )
+          )}
+          {paletteOpen && (
+            <CommandPalette
+              commands={collectionCommands}
+              problems={paletteProblems}
+              onClose={() => setPaletteOpen(false)}
+              onInsert={(cmd) => {
+                setPaletteOpen(false);
+                pickSlashCommand(cmd);
+              }}
+              onSend={(cmd) => {
+                setPaletteOpen(false);
+                submitText(`/${cmd.name}`);
+              }}
+            />
+          )}
+          {mentionOpen && !noReferenceSlashCommand && (
+            <FileMentionMenu
+              files={fileMatches}
+              activeIndex={clampedFileIndex}
+              isRecent={mention?.query === ""}
+              onSelect={pickMentionFile}
+              onHover={setFileIndex}
+            />
+          )}
+          <AttachmentBar
+            attachments={attachments}
+            onRemove={removeAttachment}
+            onOpenImage={(src) => void openImageDataUrl(src)}
+          />
+          <ReferencedFiles paths={mentionedPaths} onRemove={removeMentionChip} />
+          <QueuedBar messages={visibleQueuedMessages} onCancel={handleCancelQueued} />
+          <div className="inputrow">
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              accept="image/*,video/*"
+              disabled={planReview !== null || noAttachmentSlashCommand !== null}
+              style={{ display: "none" }}
+              onChange={(event) => {
+                if (event.target.files) void addFiles(event.target.files);
+                event.target.value = "";
+              }}
+            />
+            <button
+              className="icon-circle"
+              aria-label="Attach files"
+              title={
+                noAttachmentSlashCommand
+                  ? `/${noAttachmentSlashCommand.name} does not accept attachments`
+                  : planReview !== null
+                    ? "Resolve the pending plan first"
+                    : "Attach files"
+              }
+              disabled={planReview !== null || noAttachmentSlashCommand !== null}
+              onClick={() => fileInputRef.current?.click()}
+            >
+              <PaperclipIcon size={15} />
+            </button>
+            <div className="input-stack">
+              {enhanceAnim && (
+                <EnhanceDissolve
+                  oldText={enhanceAnim.oldText}
+                  newText={enhanceAnim.newText}
+                  onDone={onEnhanceAnimDone}
+                />
+              )}
+              {/* `@Ken` active: a textarea can't color just one token, so we mirror
                 the input in an aligned overlay where the leading `@Ken` shimmers
                 in Ken's color. The textarea text below is made transparent (caret
                 stays visible) so only this styled copy shows. Metrics match
                 `.input` 1:1 so wrapping/caret line up. */}
-            {kenActive && kenInputParts && (
-              <div className="ken-input-highlight" aria-hidden="true">
-                {kenInputParts.lead}
-                <ShimmerText base={theme.ken} bright="#ffffff">
-                  {kenInputParts.token}
-                </ShimmerText>
-                {kenInputParts.rest}
-              </div>
-            )}
-            <textarea
-              ref={attachInput}
-              className={`input${enhanceAnim ? " input-anim" : ""}${kenActive ? " input-ken" : ""}`}
-              rows={1}
-              // No-input commands stay keyboard-submittable while preventing edits.
-              readOnly={enhanceAnim !== null || noInputSlashCommand !== null}
-              disabled={planReview !== null}
-              title={
-                noInputSlashCommand
-                  ? `Send /${noInputSlashCommand.name} as-is; it accepts no added input`
-                  : undefined
-              }
-              value={input}
-              placeholder={
-                planReview !== null
-                  ? "Approve or dismiss the pending plan to continue…"
-                  : workspaceMode === "chat"
-                    ? "Ask anything…"
-                    : workspaceMode === "motion"
-                      ? "Describe a video, paste a link, or drop a PDF…"
-                      : displayPlaceholder
-              }
-              onPaste={(event) => {
-                if (noInputSlashCommandRef.current) {
+              {kenActive && kenInputParts && (
+                <div className="ken-input-highlight" aria-hidden="true">
+                  {kenInputParts.lead}
+                  <ShimmerText base={theme.ken} bright="#ffffff">
+                    {kenInputParts.token}
+                  </ShimmerText>
+                  {kenInputParts.rest}
+                </div>
+              )}
+              <textarea
+                ref={attachInput}
+                className={`input${enhanceAnim ? " input-anim" : ""}${kenActive ? " input-ken" : ""}`}
+                rows={1}
+                // No-input commands stay keyboard-submittable while preventing edits.
+                readOnly={enhanceAnim !== null || noInputSlashCommand !== null}
+                disabled={planReview !== null}
+                title={
+                  noInputSlashCommand
+                    ? `Send /${noInputSlashCommand.name} as-is; it accepts no added input`
+                    : undefined
+                }
+                value={input}
+                placeholder={
+                  planReview !== null
+                    ? "Approve or dismiss the pending plan to continue…"
+                    : workspaceMode === "chat"
+                      ? "Ask anything…"
+                      : workspaceMode === "motion"
+                        ? "Describe a video, paste a link, or drop a PDF…"
+                        : displayPlaceholder
+                }
+                onPaste={(event) => {
+                  if (noInputSlashCommandRef.current) {
+                    event.preventDefault();
+                    return;
+                  }
+                  const files = Array.from(event.clipboardData.files);
+                  if (files.length === 0) return;
                   event.preventDefault();
-                  return;
-                }
-                const files = Array.from(event.clipboardData.files);
-                if (files.length === 0) return;
-                event.preventDefault();
-                if (!noAttachmentSlashCommandRef.current) void addFiles(files);
-              }}
-              onChange={(event) => {
-                if (noInputSlashCommandRef.current) return;
-                const now = Date.now();
-                if (!running && now - lastKeystrokeAtRef.current > 4 * 60_000) {
-                  void client.prewarmCache();
-                }
-                lastKeystrokeAtRef.current = now;
-                setInput(event.target.value);
-                setSlashIndex(0);
-                setCaret(event.target.selectionStart ?? event.target.value.length);
-                // Typing exits history-recall mode so ↑/↓ start fresh next time.
-                if (historyIndex !== null) setHistoryIndex(null);
-                // Drop the enhancement the instant the text diverges from it, so
-                // the highlighted preview/bubble never misalign with edited text.
-                if (enhancement && event.target.value !== enhancement.plain) setEnhancement(null);
-                updateMention(
-                  event.target.value,
-                  event.target.selectionStart ?? event.target.value.length,
-                );
-              }}
-              onClick={(e) => {
-                const el = e.currentTarget;
-                setCaret(el.selectionStart ?? el.value.length);
-                updateMention(el.value, el.selectionStart ?? el.value.length);
-              }}
-              onKeyUp={(e) => {
-                const el = e.currentTarget;
-                setCaret(el.selectionStart ?? el.value.length);
-                if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
-                  updateMention(el.value, el.selectionStart ?? el.value.length);
-                }
-              }}
-              onKeyDown={(e) => {
-                // While the dissolve→decode animation plays the input is locked;
-                // swallow keys so Enter can't submit the un-enhanced draft.
-                if (enhanceAnim) {
-                  e.preventDefault();
-                  return;
-                }
-                if (mentionOpen && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
-                  e.preventDefault();
-                  const delta = e.key === "ArrowDown" ? 1 : -1;
-                  setFileIndex((i) => (i + delta + fileMatches.length) % fileMatches.length);
-                } else if (mentionOpen && (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey))) {
-                  e.preventDefault();
-                  const file = fileMatches[clampedFileIndex];
-                  if (file) pickMentionFile(file);
-                } else if (mentionOpen && e.key === "Escape") {
-                  e.preventDefault();
-                  setMention(null);
-                } else if (slashOpen && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
-                  e.preventDefault();
-                  const delta = e.key === "ArrowDown" ? 1 : -1;
-                  setSlashIndex((i) => (i + delta + slashMatches.length) % slashMatches.length);
-                } else if (slashOpen && (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey))) {
-                  e.preventDefault();
-                  const cmd = slashMatches[clampedSlashIndex];
-                  if (cmd) pickSlashCommand(cmd);
-                } else if (e.key === "ArrowUp" || e.key === "ArrowDown") {
-                  // Menus are closed here (handled above), so arrows recall sent
-                  // prompts shell-style — unless the caret is mid-text in a
-                  // multi-line draft, where navigateHistory declines and the
-                  // cursor moves normally.
-                  if (navigateHistory(e.key === "ArrowUp" ? -1 : 1, e.currentTarget)) {
-                    e.preventDefault();
+                  if (!noAttachmentSlashCommandRef.current) void addFiles(files);
+                }}
+                onChange={(event) => {
+                  if (noInputSlashCommandRef.current) return;
+                  const now = Date.now();
+                  if (!running && now - lastKeystrokeAtRef.current > 4 * 60_000) {
+                    void client.prewarmCache();
                   }
-                } else if (e.key === "Enter" && !e.shiftKey) {
-                  // Enter sends; Shift+Enter inserts a newline (textarea default).
-                  e.preventDefault();
-                  submit();
-                } else if (e.key === "Escape") {
-                  // Cancel the build if it's running; otherwise cancel Ken so the
-                  // "esc to cancel" on his bar actually works.
-                  if (slashOpen) setInput("");
-                  else if (running && !cancelling) requestCancel();
-                  else if (kenRunning) cancelCurrentKen();
-                }
-              }}
-              autoFocus
-            />
-          </div>
-          {workspaceMode === "code" && (
-            <button
-              type="button"
-              className="btn btn-ghost btn-sm"
-              aria-expanded={programmaticOpen}
-              disabled={!hydrated || programmatic.generation !== programmaticGeneration}
-              onClick={() => setProgrammaticOpen((value) => !value)}
-            >
-              Opportunities
-            </button>
-          )}
-          {workspaceMode === "code" && (
-            <button
-              type="button"
-              className="ken-next-pill"
-              title={
-                planReview !== null
-                  ? "Resolve the pending plan first"
-                  : kenRunning
-                    ? "Ken is already running"
-                    : "Ask Ken what to do next"
-              }
-              disabled={kenRunning || planReview !== null}
-              onClick={() => sendToKen("next?", `${MENTOR_HANDLE} next?`, true)}
-            >
-              Ken, next?
-            </button>
-          )}
-          <div className="inputactions-trailing">
-            <WorkingBeam active={running} size="sm" />
-            <ActionMetal
-              active={
-                !running &&
-                !cancelling &&
-                readyRef.current &&
-                planReview === null &&
-                (!!input.trim() || attachments.length > 0 || mentionedPaths.length > 0)
-              }
-              windowFocused={
-                windowFocused && props.windowFocused !== false && props.focused !== false
-              }
-            />
-            <button
-              type="button"
-              className={`icon-circle icon-circle-primary composer-send-icon${running ? " is-stop" : ""}`}
-              aria-label={running ? "Stop response" : "Send message"}
-              title={
-                running
-                  ? cancelling
-                    ? "Stopping…"
-                    : "Stop response"
-                  : attachmentsLoading
-                    ? "Loading attachments…"
-                    : "Send message"
-              }
-              disabled={
-                running
-                  ? cancelling
-                  : !readyRef.current ||
-                    planReview !== null ||
-                    attachmentsLoading ||
-                    (!input.trim() && attachments.length === 0 && mentionedPaths.length === 0)
-              }
-              onClick={running ? requestCancel : submit}
-            >
-              {running ? <SquareIcon size={12} weight="fill" /> : <ArrowUpIcon size={16} />}
-            </button>
-          </div>
-        </div>
-        {!enhanceAnim && (
-          // Pill pinned to the center of the input box (.inputwrap) top border,
-          // overlapping it. Decoupled from text flow, so it never overlaps text,
-          // drifts, or shifts the caret/height; centered (not in a corner) to
-          // stay clear of the status row's "esc to cancel". Always mounted (so it
-          // can transition both ways); the `visible` class fades/slides it in
-          // when there's text and out when there isn't.
-          <div className={`enhance-pill-host${enhanceHintVisible ? " visible" : ""}`}>
-            <ActionMetal
-              active={enhanceHintVisible && !enhancing && !enhanceOverLimit && planReview === null}
-              windowFocused={
-                windowFocused && props.windowFocused !== false && props.focused !== false
-              }
-              variant="button"
-            />
-            <button
-              className={`enhance-pill${enhancing ? " enhancing" : ""}`}
-              title={
-                enhanceOverLimit
-                  ? enhanceLimitReason
-                  : "Enhance prompt — clearer wording + correct terms"
-              }
-              aria-describedby={
-                enhanceOverLimit && enhanceHintVisible ? enhanceLimitReasonId : undefined
-              }
-              disabled={planReview !== null || enhancing || !enhanceHintVisible || enhanceOverLimit}
-              aria-hidden={!enhanceHintVisible}
-              onClick={() => void runEnhance()}
-            >
-              {enhancing ? "Enhancing…" : "Enhance?"}
-            </button>
-          </div>
-        )}
-      </div>
-
-      {enhanceOverLimit && enhanceHintVisible && (
-        <p id={enhanceLimitReasonId} role="status" style={{ color: theme.textDim }}>
-          {enhanceLimitReason}
-        </p>
-      )}
-
-      <div
-        className={`footer${workspaceMode !== "code" ? " footer-chat" : ""}`}
-        style={{ color: theme.footerText }}
-      >
-        {!readyRef.current ? (
-          <span role="status" style={{ color: theme.textDim }}>
-            {status}
-          </span>
-        ) : (
-          <>
-            {workspaceMode === "motion" ? (
-              <span className="footer-left footer-reveal" style={{ color: theme.textDim }}>
-                Motion Agent
-              </span>
-            ) : workspaceMode === "chat" ? (
-              <span className="footer-left footer-reveal" style={{ color: theme.textDim }}>
-                {state?.chatAgent === "therapist"
-                  ? "Therapist Agent"
-                  : state?.chatAgent === "research"
-                    ? "Research Agent"
-                    : "Brainstorm"}
-              </span>
-            ) : (
-              <span className="footer-left footer-reveal">
-                {BUILD_IDENTITY && (
-                  <span className="footer-custom-build">{`◆ ${BUILD_IDENTITY}`}</span>
-                )}
-                {runningTaskCount > 0 && (
-                  <>
-                    {BUILD_IDENTITY && <FooterSep />}
-                    <BackgroundTasksButton tasks={tasks} />
-                  </>
-                )}
-                {schedules.length > 0 && (
-                  <>
-                    {(BUILD_IDENTITY || runningTaskCount > 0) && <FooterSep />}
-                    <RunningSchedulesButton schedules={schedules} onStop={stopSchedule} />
-                  </>
-                )}
-                {state?.planMode && (
-                  <>
-                    {(BUILD_IDENTITY || runningTaskCount > 0 || schedules.length > 0) && (
-                      <FooterSep />
-                    )}
-                    <span className="footer-plan">
-                      <ShimmerText base={theme.secondary} bright="#ddd6fe">
-                        {"\u25C6 plan mode"}
-                      </ShimmerText>
-                    </span>
-                  </>
-                )}
-              </span>
-            )}
-            <span className="footer-right footer-reveal">
-              {showContextProfileSelector && (
-                <>
-                  <span className="astra-control-group" aria-busy={astraControlsBusy}>
-                    <label
-                      className="model-picker"
-                      style={{ color: theme.secondary }}
-                      title={
-                        contextProfileLockReason ??
-                        "OpenAI Codex context window: stable 272K or experimental 872K"
-                      }
-                    >
-                      <span className="model-select-text">
-                        Context {state.openAICodexContextProfile}
-                      </span>
-                      <select
-                        aria-label="OpenAI Codex context profile"
-                        className="model-select"
-                        value={state.openAICodexContextProfile}
-                        title={contextProfileLockReason}
-                        aria-describedby={
-                          contextProfileLockReason ? contextProfileDescriptionId : undefined
-                        }
-                        disabled={
-                          running ||
-                          autopilotReviewing ||
-                          astraControlsBusy ||
-                          !contextProfileEligibility.canChange
-                        }
-                        onChange={(event) =>
-                          onSelectContextProfile(event.target.value, event.currentTarget)
-                        }
-                      >
-                        <option value="stable">Stable · 272K</option>
-                        <option value="experimental">Experimental · 872K</option>
-                      </select>
-                    </label>
-                    {contextProfileLockReason && (
-                      <span id={contextProfileDescriptionId} hidden>
-                        {contextProfileLockReason}
-                      </span>
-                    )}
-                    <button
-                      aria-label={`Fast ${state.openAICodexFast ? "on" : "off"} · 2.5× credits`}
-                      title={
-                        state.openAICodexFast
-                          ? "Fast mode is on. Uses 2.5× credits. Click to turn off."
-                          : "Fast mode is off. Turn on to use Fast mode at 2.5× credits."
-                      }
-                      aria-checked={state.openAICodexFast}
-                      className={`thinking-toggle astra-fast-toggle${state.openAICodexFast ? " active" : ""}`}
-                      disabled={running || autopilotReviewing || astraControlsBusy}
-                      onClick={onToggleOpenAICodexFast}
-                      role="switch"
-                      type="button"
-                    >
-                      Fast {state.openAICodexFast ? "on" : "off"} · 2.5× credits
-                    </button>
-                  </span>
-                  <FooterSep />
-                </>
-              )}
-              {state && state.contextWindow > 0 && (
-                <>
-                  <ContextMeter used={contextTokens} window={state.contextWindow} />
-                  <FooterSep />
-                </>
-              )}
-              {(state?.supportedThinkingLevels?.length ?? 0) > 0 &&
-                (() => {
-                  const level = state?.thinkingLevel ?? null;
-                  const label =
-                    state?.provider === "qwen-cloud"
-                      ? getQwenCloudThinkingLabel(
-                          state.model,
-                          level as Parameters<typeof getQwenCloudThinkingLabel>[1],
-                        )
-                      : level
-                        ? `Thinking ${level}`
-                        : "Thinking off";
-                  const maxPower = level === "xhigh" || level === "max";
-                  return (
-                    <>
-                      <button
-                        className="thinking-toggle"
-                        style={{
-                          color: thinkingColor(level),
-                          fontWeight: level === "high" ? 600 : 400,
-                        }}
-                        title="Cycle reasoning level"
-                        onClick={() => void cycleThinking()}
-                      >
-                        {maxPower ? (
-                          <ShimmerText base={MAX_POWER_COLOR} bright={MAX_POWER_SHIMMER}>
-                            {label}
-                          </ShimmerText>
-                        ) : (
-                          label
-                        )}
-                      </button>
-                      <FooterSep />
-                    </>
+                  lastKeystrokeAtRef.current = now;
+                  setInput(event.target.value);
+                  setSlashIndex(0);
+                  setCaret(event.target.selectionStart ?? event.target.value.length);
+                  // Typing exits history-recall mode so ↑/↓ start fresh next time.
+                  if (historyIndex !== null) setHistoryIndex(null);
+                  // Drop the enhancement the instant the text diverges from it, so
+                  // the highlighted preview/bubble never misalign with edited text.
+                  if (enhancement && event.target.value !== enhancement.plain) setEnhancement(null);
+                  updateMention(
+                    event.target.value,
+                    event.target.selectionStart ?? event.target.value.length,
                   );
-                })()}
-              <span className="model-anchor">
-                <span
-                  className="model-label"
-                  style={{ color: theme.text }}
-                  title={ggModelRole(workspaceMode)}
-                  aria-hidden="true"
-                >
-                  GG
-                  {workspaceMode === "code" && <span className="model-role">{" · builds"}</span>}
-                </span>
-                <span id={ggModelRoleId} className="sr-only">
-                  {ggModelRole(workspaceMode)}
-                </span>
-                <ModelSelect
-                  key={`gg-models-${modelCatalogRefreshNonce}`}
-                  describedBy={ggModelRoleId}
-                  models={models}
-                  currentModel={state?.model ?? ""}
-                  onSelect={onSelectModel}
-                  disabled={running}
-                  refreshNonce={modelCatalogRefreshNonce}
-                  title={
-                    workspaceMode === "chat"
-                      ? "Switch GG's model"
-                      : `Switch ${workspaceProductName(workspaceMode)}'s model`
+                }}
+                onClick={(e) => {
+                  const el = e.currentTarget;
+                  setCaret(el.selectionStart ?? el.value.length);
+                  updateMention(el.value, el.selectionStart ?? el.value.length);
+                }}
+                onKeyUp={(e) => {
+                  const el = e.currentTarget;
+                  setCaret(el.selectionStart ?? el.value.length);
+                  if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+                    updateMention(el.value, el.selectionStart ?? el.value.length);
                   }
-                />
-              </span>
-              {workspaceMode === "code" && (
-                <>
-                  <FooterSep />
-                  <span className="model-anchor">
-                    <span
-                      className="model-label"
-                      style={{ color: theme.ken }}
-                      title={KEN_MODEL_ROLE}
-                      aria-hidden="true"
-                    >
-                      {MENTOR_DISPLAY_NAME}
-                      <span className="model-role">{" · reviews"}</span>
-                    </span>
-                    <span id={kenModelRoleId} className="sr-only">
-                      {KEN_MODEL_ROLE}
-                    </span>
-                    <ModelSelect
-                      key={`ken-models-${modelCatalogRefreshNonce}`}
-                      describedBy={kenModelRoleId}
-                      models={models}
-                      currentModel={state?.kenModel ?? state?.model ?? ""}
-                      onSelect={(id) => onSelectKenModel(id)}
-                      color={theme.ken}
-                      refreshNonce={modelCatalogRefreshNonce}
-                      title={
-                        state?.kenModelOverride
-                          ? `${MENTOR_DISPLAY_NAME} is pinned to a separate model — click to change`
-                          : `${MENTOR_DISPLAY_NAME} follows ${PRODUCT_DISPLAY_NAME}'s model — click to pin one`
-                      }
-                      onSelectFollow={() => onSelectKenModel(null)}
-                      followActive={!state?.kenModelOverride}
-                    />
-                  </span>
-                </>
-              )}
-            </span>
-          </>
-        )}
-      </div>
+                }}
+                onKeyDown={(e) => {
+                  // While the dissolve→decode animation plays the input is locked;
+                  // swallow keys so Enter can't submit the un-enhanced draft.
+                  if (enhanceAnim) {
+                    e.preventDefault();
+                    return;
+                  }
+                  if (mentionOpen && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
+                    e.preventDefault();
+                    const delta = e.key === "ArrowDown" ? 1 : -1;
+                    setFileIndex((i) => (i + delta + fileMatches.length) % fileMatches.length);
+                  } else if (
+                    mentionOpen &&
+                    (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey))
+                  ) {
+                    e.preventDefault();
+                    const file = fileMatches[clampedFileIndex];
+                    if (file) pickMentionFile(file);
+                  } else if (mentionOpen && e.key === "Escape") {
+                    e.preventDefault();
+                    setMention(null);
+                  } else if (slashOpen && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
+                    e.preventDefault();
+                    const delta = e.key === "ArrowDown" ? 1 : -1;
+                    setSlashIndex((i) => (i + delta + slashMatches.length) % slashMatches.length);
+                  } else if (slashOpen && (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey))) {
+                    e.preventDefault();
+                    const cmd = slashMatches[clampedSlashIndex];
+                    if (cmd) pickSlashCommand(cmd);
+                  } else if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+                    // Menus are closed here (handled above), so arrows recall sent
+                    // prompts shell-style — unless the caret is mid-text in a
+                    // multi-line draft, where navigateHistory declines and the
+                    // cursor moves normally.
+                    if (navigateHistory(e.key === "ArrowUp" ? -1 : 1, e.currentTarget)) {
+                      e.preventDefault();
+                    }
+                  } else if (e.key === "Enter" && !e.shiftKey) {
+                    // Enter sends; Shift+Enter inserts a newline (textarea default).
+                    e.preventDefault();
+                    submit();
+                  } else if (e.key === "Escape") {
+                    // Cancel the build if it's running; otherwise cancel Ken so the
+                    // "esc to cancel" on his bar actually works.
+                    if (slashOpen) setInput("");
+                    else if (running && !cancelling) requestCancel();
+                    else if (kenRunning) cancelCurrentKen();
+                  }
+                }}
+                autoFocus
+              />
+            </div>
+            {workspaceMode === "code" && (
+              <button
+                type="button"
+                className="btn btn-ghost btn-sm"
+                aria-expanded={programmaticOpen}
+                disabled={!hydrated || programmatic.generation !== programmaticGeneration}
+                onClick={() => setProgrammaticOpen((value) => !value)}
+              >
+                Opportunities
+              </button>
+            )}
+            {workspaceMode === "code" && (
+              <button
+                type="button"
+                className="ken-next-pill"
+                title={
+                  planReview !== null
+                    ? "Resolve the pending plan first"
+                    : kenRunning
+                      ? "Ken is already running"
+                      : "Ask Ken what to do next"
+                }
+                disabled={kenRunning || planReview !== null}
+                onClick={() => sendToKen("next?", `${MENTOR_HANDLE} next?`, true)}
+              >
+                Ken, next?
+              </button>
+            )}
+            <div className="inputactions-trailing">
+              <WorkingBeam active={running} size="sm" />
+              <ActionMetal
+                active={
+                  !running &&
+                  !cancelling &&
+                  readyRef.current &&
+                  planReview === null &&
+                  (!!input.trim() || attachments.length > 0 || mentionedPaths.length > 0)
+                }
+                windowFocused={
+                  windowFocused && props.windowFocused !== false && props.focused !== false
+                }
+              />
+              <button
+                type="button"
+                className={`icon-circle icon-circle-primary composer-send-icon${running ? " is-stop" : ""}`}
+                aria-label={running ? "Stop response" : "Send message"}
+                title={
+                  running
+                    ? cancelling
+                      ? "Stopping…"
+                      : "Stop response"
+                    : attachmentsLoading
+                      ? "Loading attachments…"
+                      : "Send message"
+                }
+                disabled={
+                  running
+                    ? cancelling
+                    : !readyRef.current ||
+                      planReview !== null ||
+                      attachmentsLoading ||
+                      (!input.trim() && attachments.length === 0 && mentionedPaths.length === 0)
+                }
+                onClick={running ? requestCancel : submit}
+              >
+                {running ? <SquareIcon size={12} weight="fill" /> : <ArrowUpIcon size={16} />}
+              </button>
+            </div>
+          </div>
+          {!enhanceAnim && (
+            // Pill pinned to the center of the input box (.inputwrap) top border,
+            // overlapping it. Decoupled from text flow, so it never overlaps text,
+            // drifts, or shifts the caret/height; centered (not in a corner) to
+            // stay clear of the status row's "esc to cancel". Always mounted (so it
+            // can transition both ways); the `visible` class fades/slides it in
+            // when there's text and out when there isn't.
+            <div className={`enhance-pill-host${enhanceHintVisible ? " visible" : ""}`}>
+              <ActionMetal
+                active={
+                  enhanceHintVisible && !enhancing && !enhanceOverLimit && planReview === null
+                }
+                windowFocused={
+                  windowFocused && props.windowFocused !== false && props.focused !== false
+                }
+                variant="button"
+              />
+              <button
+                className={`enhance-pill${enhancing ? " enhancing" : ""}`}
+                title={
+                  enhanceOverLimit
+                    ? enhanceLimitReason
+                    : "Enhance prompt — clearer wording + correct terms"
+                }
+                aria-describedby={
+                  enhanceOverLimit && enhanceHintVisible ? enhanceLimitReasonId : undefined
+                }
+                disabled={
+                  planReview !== null || enhancing || !enhanceHintVisible || enhanceOverLimit
+                }
+                aria-hidden={!enhanceHintVisible}
+                onClick={() => void runEnhance()}
+              >
+                {enhancing ? "Enhancing…" : "Enhance?"}
+              </button>
+            </div>
+          )}
+        </div>
 
-      {appUpdate.phase === "available" && !appUpdate.localPatched && (
-        <button
-          className="update-banner"
-          title={appUpdate.installTitle}
-          onClick={() => {
-            if (shouldConfirmLocalUpdate(appUpdate.localPatched, appUpdate.phase)) {
-              setSummarizeDecisions(false);
-              setShowLocalUpdateConfirm(true);
-            } else {
-              void appUpdate.install();
-            }
-          }}
-        >
-          <span className="update-banner-dot" />
-          {appUpdate.localPatched
-            ? `${appUpdate.installLabel} — click to review the protected source update`
-            : `${MENTOR_DISPLAY_NAME} just updated ${PRODUCT_DISPLAY_NAME}!`}
-          {!appUpdate.localPatched && <Badge>Install</Badge>}
-        </button>
-      )}
-      {appUpdate.phase === "installing" && !appUpdate.localPatched && (
+        {enhanceOverLimit && enhanceHintVisible && (
+          <p id={enhanceLimitReasonId} role="status" style={{ color: theme.textDim }}>
+            {enhanceLimitReason}
+          </p>
+        )}
+
         <div
-          className="update-banner update-banner-busy update-banner-progress"
-          role="progressbar"
-          aria-valuenow={appUpdate.progress ?? 0}
-          aria-valuemin={0}
-          aria-valuemax={100}
-          aria-label="Downloading update"
+          className={`footer${workspaceMode !== "code" ? " footer-chat" : ""}`}
+          style={{ color: theme.footerText }}
         >
-          <span className="update-banner-fill" style={{ width: `${appUpdate.progress ?? 0}%` }} />
-          <span className="update-banner-pct">{`${appUpdate.progress ?? 0}%`}</span>
+          {!readyRef.current ? (
+            <span role="status" style={{ color: theme.textDim }}>
+              {status}
+            </span>
+          ) : (
+            <>
+              {workspaceMode === "motion" ? (
+                <span className="footer-left footer-reveal" style={{ color: theme.textDim }}>
+                  Motion Agent
+                </span>
+              ) : workspaceMode === "chat" ? (
+                <span className="footer-left footer-reveal" style={{ color: theme.textDim }}>
+                  {state?.chatAgent === "therapist"
+                    ? "Therapist Agent"
+                    : state?.chatAgent === "research"
+                      ? "Research Agent"
+                      : "Brainstorm"}
+                </span>
+              ) : (
+                <span className="footer-left footer-reveal">
+                  {BUILD_IDENTITY && (
+                    <span className="footer-custom-build">{`◆ ${BUILD_IDENTITY}`}</span>
+                  )}
+                  {runningTaskCount > 0 && (
+                    <>
+                      {BUILD_IDENTITY && <FooterSep />}
+                      <BackgroundTasksButton tasks={tasks} />
+                    </>
+                  )}
+                  {schedules.length > 0 && (
+                    <>
+                      {(BUILD_IDENTITY || runningTaskCount > 0) && <FooterSep />}
+                      <RunningSchedulesButton schedules={schedules} onStop={stopSchedule} />
+                    </>
+                  )}
+                  {state?.planMode && (
+                    <>
+                      {(BUILD_IDENTITY || runningTaskCount > 0 || schedules.length > 0) && (
+                        <FooterSep />
+                      )}
+                      <span className="footer-plan">
+                        <ShimmerText base={theme.secondary} bright="#ddd6fe">
+                          {"\u25C6 plan mode"}
+                        </ShimmerText>
+                      </span>
+                    </>
+                  )}
+                </span>
+              )}
+              <span className="footer-right footer-reveal">
+                {showContextProfileSelector && (
+                  <>
+                    <span className="astra-control-group" aria-busy={astraControlsBusy}>
+                      <label
+                        className="model-picker"
+                        style={{ color: theme.secondary }}
+                        title={
+                          contextProfileLockReason ??
+                          "OpenAI Codex context window: stable 272K or experimental 872K"
+                        }
+                      >
+                        <span className="model-select-text">
+                          Context {state.openAICodexContextProfile}
+                        </span>
+                        <select
+                          aria-label="OpenAI Codex context profile"
+                          className="model-select"
+                          value={state.openAICodexContextProfile}
+                          title={contextProfileLockReason}
+                          aria-describedby={
+                            contextProfileLockReason ? contextProfileDescriptionId : undefined
+                          }
+                          disabled={
+                            running ||
+                            autopilotReviewing ||
+                            astraControlsBusy ||
+                            !contextProfileEligibility.canChange
+                          }
+                          onChange={(event) =>
+                            onSelectContextProfile(event.target.value, event.currentTarget)
+                          }
+                        >
+                          <option value="stable">Stable · 272K</option>
+                          <option value="experimental">Experimental · 872K</option>
+                        </select>
+                      </label>
+                      {contextProfileLockReason && (
+                        <span id={contextProfileDescriptionId} hidden>
+                          {contextProfileLockReason}
+                        </span>
+                      )}
+                      <button
+                        aria-label={`Fast ${state.openAICodexFast ? "on" : "off"} · 2.5× credits`}
+                        title={
+                          state.openAICodexFast
+                            ? "Fast mode is on. Uses 2.5× credits. Click to turn off."
+                            : "Fast mode is off. Turn on to use Fast mode at 2.5× credits."
+                        }
+                        aria-checked={state.openAICodexFast}
+                        className={`thinking-toggle astra-fast-toggle${state.openAICodexFast ? " active" : ""}`}
+                        disabled={running || autopilotReviewing || astraControlsBusy}
+                        onClick={onToggleOpenAICodexFast}
+                        role="switch"
+                        type="button"
+                      >
+                        Fast {state.openAICodexFast ? "on" : "off"} · 2.5× credits
+                      </button>
+                    </span>
+                    <FooterSep />
+                  </>
+                )}
+                {state && state.contextWindow > 0 && (
+                  <>
+                    <ContextMeter used={contextTokens} window={state.contextWindow} />
+                    <FooterSep />
+                  </>
+                )}
+                {(state?.supportedThinkingLevels?.length ?? 0) > 0 &&
+                  (() => {
+                    const level = state?.thinkingLevel ?? null;
+                    const label =
+                      state?.provider === "qwen-cloud"
+                        ? getQwenCloudThinkingLabel(
+                            state.model,
+                            level as Parameters<typeof getQwenCloudThinkingLabel>[1],
+                          )
+                        : level
+                          ? `Thinking ${level}`
+                          : "Thinking off";
+                    const maxPower = level === "xhigh" || level === "max";
+                    return (
+                      <>
+                        <button
+                          className="thinking-toggle"
+                          style={{
+                            color: thinkingColor(level),
+                            fontWeight: level === "high" ? 600 : 400,
+                          }}
+                          title="Cycle reasoning level"
+                          onClick={() => void cycleThinking()}
+                        >
+                          {maxPower ? (
+                            <ShimmerText base={MAX_POWER_COLOR} bright={MAX_POWER_SHIMMER}>
+                              {label}
+                            </ShimmerText>
+                          ) : (
+                            label
+                          )}
+                        </button>
+                        <FooterSep />
+                      </>
+                    );
+                  })()}
+                <span className="model-anchor">
+                  <span
+                    className="model-label"
+                    style={{ color: theme.text }}
+                    title={ggModelRole(workspaceMode)}
+                    aria-hidden="true"
+                  >
+                    GG
+                    {workspaceMode === "code" && <span className="model-role">{" · builds"}</span>}
+                  </span>
+                  <span id={ggModelRoleId} className="sr-only">
+                    {ggModelRole(workspaceMode)}
+                  </span>
+                  <ModelSelect
+                    key={`gg-models-${modelCatalogRefreshNonce}`}
+                    describedBy={ggModelRoleId}
+                    models={models}
+                    currentModel={state?.model ?? ""}
+                    onSelect={onSelectModel}
+                    disabled={running}
+                    refreshNonce={modelCatalogRefreshNonce}
+                    title={
+                      workspaceMode === "chat"
+                        ? "Switch GG's model"
+                        : `Switch ${workspaceProductName(workspaceMode)}'s model`
+                    }
+                  />
+                </span>
+                {workspaceMode === "code" && (
+                  <>
+                    <FooterSep />
+                    <span className="model-anchor">
+                      <span
+                        className="model-label"
+                        style={{ color: theme.ken }}
+                        title={KEN_MODEL_ROLE}
+                        aria-hidden="true"
+                      >
+                        {MENTOR_DISPLAY_NAME}
+                        <span className="model-role">{" · reviews"}</span>
+                      </span>
+                      <span id={kenModelRoleId} className="sr-only">
+                        {KEN_MODEL_ROLE}
+                      </span>
+                      <ModelSelect
+                        key={`ken-models-${modelCatalogRefreshNonce}`}
+                        describedBy={kenModelRoleId}
+                        models={models}
+                        currentModel={state?.kenModel ?? state?.model ?? ""}
+                        onSelect={(id) => onSelectKenModel(id)}
+                        color={theme.ken}
+                        refreshNonce={modelCatalogRefreshNonce}
+                        title={
+                          state?.kenModelOverride
+                            ? `${MENTOR_DISPLAY_NAME} is pinned to a separate model — click to change`
+                            : `${MENTOR_DISPLAY_NAME} follows ${PRODUCT_DISPLAY_NAME}'s model — click to pin one`
+                        }
+                        onSelectFollow={() => onSelectKenModel(null)}
+                        followActive={!state?.kenModelOverride}
+                      />
+                    </span>
+                  </>
+                )}
+              </span>
+            </>
+          )}
         </div>
-      )}
-      {appUpdate.localPatched && ["installing", "completed", "error"].includes(appUpdate.phase) && (
-        <div className="update-banner update-banner-busy" title={appUpdate.installTitle}>
-          <span className="update-banner-dot" />
-          {appUpdate.statusMessage ?? appUpdate.installLabel}
-        </div>
-      )}
+
+        {appUpdate.phase === "available" && !appUpdate.localPatched && (
+          <button
+            className="update-banner"
+            title={appUpdate.installTitle}
+            onClick={() => {
+              if (shouldConfirmLocalUpdate(appUpdate.localPatched, appUpdate.phase)) {
+                setSummarizeDecisions(false);
+                setShowLocalUpdateConfirm(true);
+              } else {
+                void appUpdate.install();
+              }
+            }}
+          >
+            <span className="update-banner-dot" />
+            {appUpdate.localPatched
+              ? `${appUpdate.installLabel} — click to review the protected source update`
+              : `${MENTOR_DISPLAY_NAME} just updated ${PRODUCT_DISPLAY_NAME}!`}
+            {!appUpdate.localPatched && <Badge>Install</Badge>}
+          </button>
+        )}
+        {appUpdate.phase === "installing" && !appUpdate.localPatched && (
+          <div
+            className="update-banner update-banner-busy update-banner-progress"
+            role="progressbar"
+            aria-valuenow={appUpdate.progress ?? 0}
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-label="Downloading update"
+          >
+            <span className="update-banner-fill" style={{ width: `${appUpdate.progress ?? 0}%` }} />
+            <span className="update-banner-pct">{`${appUpdate.progress ?? 0}%`}</span>
+          </div>
+        )}
+        {appUpdate.localPatched &&
+          ["installing", "completed", "error"].includes(appUpdate.phase) && (
+            <div className="update-banner update-banner-busy" title={appUpdate.installTitle}>
+              <span className="update-banner-dot" />
+              {appUpdate.statusMessage ?? appUpdate.installLabel}
+            </div>
+          )}
       </Activity>
 
       {workspaceMode === "code" && showInitGit && (

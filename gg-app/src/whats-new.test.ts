@@ -156,7 +156,7 @@ describe("What's New feeds", () => {
 
   it("keeps the latest Local Fork release notes identical to the source contract", () => {
     expect(LOCAL_CHANGELOG[0]).toEqual({
-      id: "local-2026-10-04-upstream-0790-campfire-and-faster-agent",
+      id: "local-2026-10-04-upstream-0810-faster-openai-and-multi-file-edits",
       label: localReleaseNotes.label,
       date: localReleaseNotes.date,
       items: localReleaseNotes.sections.flatMap(({ items }) => items),
@@ -164,64 +164,69 @@ describe("What's New feeds", () => {
   });
 
   it("preserves the prior shipped Local Fork identities and dates", () => {
-    expect(LOCAL_CHANGELOG[1].id).toBe("local-2026-10-01-upstream-0750-ken-face-and-home-critters");
-    expect(LOCAL_CHANGELOG[1].date).toBe("2026-10-01");
+    expect(LOCAL_CHANGELOG[1].id).toBe("local-2026-10-04-upstream-0790-campfire-and-faster-agent");
+    expect(LOCAL_CHANGELOG[1].date).toBe("2026-10-04");
     expect(createHash("sha256").update(JSON.stringify(LOCAL_CHANGELOG[1])).digest("hex")).toBe(
-      "d2d3e7205ec0f4129a8f1e712e88e4f9d784a7f81420e77acea45048db98bf3a",
+      "0b4ce4b86718420e901bd1cdeea209654aa394b9b2efbd6c93df8542ae7d3eb1",
     );
-    expect(LOCAL_CHANGELOG[2].id).toBe("local-2026-10-01-upstream-0740-critters-and-palette");
+    expect(LOCAL_CHANGELOG[2].id).toBe("local-2026-10-01-upstream-0750-ken-face-and-home-critters");
     expect(LOCAL_CHANGELOG[2].date).toBe("2026-10-01");
     expect(createHash("sha256").update(JSON.stringify(LOCAL_CHANGELOG[2])).digest("hex")).toBe(
+      "d2d3e7205ec0f4129a8f1e712e88e4f9d784a7f81420e77acea45048db98bf3a",
+    );
+    expect(LOCAL_CHANGELOG[3].id).toBe("local-2026-10-01-upstream-0740-critters-and-palette");
+    expect(LOCAL_CHANGELOG[3].date).toBe("2026-10-01");
+    expect(createHash("sha256").update(JSON.stringify(LOCAL_CHANGELOG[3])).digest("hex")).toBe(
       "a25b34c1b1ce4c8a207980303a5e530d4feed594e32eaf7e215e1aae65af5681",
     );
-    expect(LOCAL_CHANGELOG[3].id).toBe("local-2026-09-28-readable-tables-and-slash-menu");
-    expect(LOCAL_CHANGELOG[3].date).toBe("2026-09-28");
-    expect(createHash("sha256").update(JSON.stringify(LOCAL_CHANGELOG[3])).digest("hex")).toBe(
-      "45bd234d869fedf83f9e1536d8bbcb7846eab4fe8dcf14bc34eeeb72ac1226ae",
-    );
-    expect(LOCAL_CHANGELOG[4].id).toBe("local-2026-09-28-upstream-0721-motion-and-sonnet-55");
+    expect(LOCAL_CHANGELOG[4].id).toBe("local-2026-09-28-readable-tables-and-slash-menu");
     expect(LOCAL_CHANGELOG[4].date).toBe("2026-09-28");
     expect(createHash("sha256").update(JSON.stringify(LOCAL_CHANGELOG[4])).digest("hex")).toBe(
-      "5ca36b6b9c7477cbb56d63de0e1eac6a96be84889c2e53461ae2d5cbcac049a6",
+      "45bd234d869fedf83f9e1536d8bbcb7846eab4fe8dcf14bc34eeeb72ac1226ae",
     );
-    expect(LOCAL_CHANGELOG[5].id).toBe(
-      "local-2026-09-28-upstream-0720-settings-and-clearer-questions",
-    );
+    expect(LOCAL_CHANGELOG[5].id).toBe("local-2026-09-28-upstream-0721-motion-and-sonnet-55");
     expect(LOCAL_CHANGELOG[5].date).toBe("2026-09-28");
     expect(createHash("sha256").update(JSON.stringify(LOCAL_CHANGELOG[5])).digest("hex")).toBe(
+      "5ca36b6b9c7477cbb56d63de0e1eac6a96be84889c2e53461ae2d5cbcac049a6",
+    );
+    expect(LOCAL_CHANGELOG[6].id).toBe(
+      "local-2026-09-28-upstream-0720-settings-and-clearer-questions",
+    );
+    expect(LOCAL_CHANGELOG[6].date).toBe("2026-09-28");
+    expect(createHash("sha256").update(JSON.stringify(LOCAL_CHANGELOG[6])).digest("hex")).toBe(
       "7ee71544b1d581396b70ad90db7e7ac6261baf5c2714f660fddd6cd28d466e1f",
     );
-    expect(LOCAL_CHANGELOG[6].id).toBe("local-2026-09-27-upstream-0705-steadier-replies");
-    expect(LOCAL_CHANGELOG[6].date).toBe("2026-09-27");
-    expect(createHash("sha256").update(JSON.stringify(LOCAL_CHANGELOG[6])).digest("hex")).toBe(
+    expect(LOCAL_CHANGELOG[7].id).toBe("local-2026-09-27-upstream-0705-steadier-replies");
+    expect(LOCAL_CHANGELOG[7].date).toBe("2026-09-27");
+    expect(createHash("sha256").update(JSON.stringify(LOCAL_CHANGELOG[7])).digest("hex")).toBe(
       "238aba2c5b98202036c7aa6a5ba0954e4ae9125018e28b0780cb7014e46c81fd",
     );
-    expect(LOCAL_CHANGELOG[7].id).toBe("local-2026-09-26-steadier-commands-and-questions");
-    expect(LOCAL_CHANGELOG[7].date).toBe("2026-09-26");
-    expect(createHash("sha256").update(JSON.stringify(LOCAL_CHANGELOG[7])).digest("hex")).toBe(
+    expect(LOCAL_CHANGELOG[8].id).toBe("local-2026-09-26-steadier-commands-and-questions");
+    expect(LOCAL_CHANGELOG[8].date).toBe("2026-09-26");
+    expect(createHash("sha256").update(JSON.stringify(LOCAL_CHANGELOG[8])).digest("hex")).toBe(
       "d9fa7bde02123104caddacd162343f9420cbe35392beb0c6b9065c9298ee9ce8",
     );
-    expect(LOCAL_CHANGELOG[8].id).toBe("local-2026-09-23-upstream-0702-gpt6-and-calmer-app");
-    expect(LOCAL_CHANGELOG[8].date).toBe("2026-09-23");
-    expect(createHash("sha256").update(JSON.stringify(LOCAL_CHANGELOG[8])).digest("hex")).toBe(
+    expect(LOCAL_CHANGELOG[9].id).toBe("local-2026-09-23-upstream-0702-gpt6-and-calmer-app");
+    expect(LOCAL_CHANGELOG[9].date).toBe("2026-09-23");
+    expect(createHash("sha256").update(JSON.stringify(LOCAL_CHANGELOG[9])).digest("hex")).toBe(
       "6a93d2ca268a384da298dec92393c2ca642ea9d005098defd0ec5b22d363caa7",
     );
-    expect(LOCAL_CHANGELOG[9].id).toBe("local-2026-09-22-upstream-0664-status-and-reading");
-    expect(LOCAL_CHANGELOG[9].date).toBe("2026-09-22");
-    expect(createHash("sha256").update(JSON.stringify(LOCAL_CHANGELOG[9])).digest("hex")).toBe(
+    expect(LOCAL_CHANGELOG[10].id).toBe("local-2026-09-22-upstream-0664-status-and-reading");
+    expect(LOCAL_CHANGELOG[10].date).toBe("2026-09-22");
+    expect(createHash("sha256").update(JSON.stringify(LOCAL_CHANGELOG[10])).digest("hex")).toBe(
       "f7b1b26a8d2c01c01cbd61ea7ca1347cb695fd396494b11d35ed8687b4e0ef50",
     );
-    expect(LOCAL_CHANGELOG[10].id).toBe("local-2026-09-18-upstream-0651-queues-and-discovery");
-    expect(LOCAL_CHANGELOG[10].date).toBe("2026-09-18");
-    expect(createHash("sha256").update(JSON.stringify(LOCAL_CHANGELOG[10])).digest("hex")).toBe(
+    expect(LOCAL_CHANGELOG[11].id).toBe("local-2026-09-18-upstream-0651-queues-and-discovery");
+    expect(LOCAL_CHANGELOG[11].date).toBe("2026-09-18");
+    expect(createHash("sha256").update(JSON.stringify(LOCAL_CHANGELOG[11])).digest("hex")).toBe(
       "00a675339954de960923e087f2bd968e9f6eaeccc018cf617802a42cbb1123ed",
     );
-    expect(LOCAL_CHANGELOG[11].id).toBe("local-2026-09-15-upstream-0650-reviewed-commands");
-    expect(LOCAL_CHANGELOG[11].date).toBe("2026-09-15");
-    expect(createHash("sha256").update(JSON.stringify(LOCAL_CHANGELOG[11])).digest("hex")).toBe(
+    expect(LOCAL_CHANGELOG[12].id).toBe("local-2026-09-15-upstream-0650-reviewed-commands");
+    expect(LOCAL_CHANGELOG[12].date).toBe("2026-09-15");
+    expect(createHash("sha256").update(JSON.stringify(LOCAL_CHANGELOG[12])).digest("hex")).toBe(
       "a953bb81124c0be2a98786440c2ca3aedf241ae9bdf56d0f9455c54d3f8b3a0a",
     );
-    expect(LOCAL_CHANGELOG[12]).toEqual({
+    expect(LOCAL_CHANGELOG[13]).toEqual({
       id: "local-2026-09-12-upstream-0634-reviews-and-replies",
       label: "Upstream 0.63.4, with reviews that stay in reach",
       date: "2026-09-12",
@@ -237,20 +242,20 @@ describe("What's New feeds", () => {
         "Know an image limit before chasing another retry. `Flare` and `Sunburst` explain that `transparent backgrounds` are unavailable through your ChatGPT connection, rather than switching models or silently substituting an opaque image.",
       ],
     });
-    expect(LOCAL_CHANGELOG[13].id).toBe("local-2026-09-09-upstream-0630-images-and-prompts");
-    expect(LOCAL_CHANGELOG[13].label).toBe(
+    expect(LOCAL_CHANGELOG[14].id).toBe("local-2026-09-09-upstream-0630-images-and-prompts");
+    expect(LOCAL_CHANGELOG[14].label).toBe(
       "Upstream 0.63.0, with clearer prompts and image results",
     );
-    expect(LOCAL_CHANGELOG[13].date).toBe("2026-09-09");
-    expect(LOCAL_CHANGELOG[13].items).toHaveLength(8);
-    expect(LOCAL_CHANGELOG[14].id).toBe("local-2026-09-07-upstream-0621-and-roadmap-recovery");
-    expect(LOCAL_CHANGELOG[14].label).toBe("Upstream 0.62.1, with steadier Roadmap updates");
-    expect(LOCAL_CHANGELOG[14].date).toBe("2026-09-07");
-    expect(LOCAL_CHANGELOG[14].items).toHaveLength(5);
-    expect(LOCAL_CHANGELOG[15].id).toBe("local-2026-08-29-roadmap-completion-fails-closed");
-    expect(LOCAL_CHANGELOG[15].label).toBe("Upstream 0.62.0, still your Local Fork");
-    expect(LOCAL_CHANGELOG[15].date).toBe("2026-09-06");
-    expect(LOCAL_CHANGELOG[15].items).toHaveLength(14);
+    expect(LOCAL_CHANGELOG[14].date).toBe("2026-09-09");
+    expect(LOCAL_CHANGELOG[14].items).toHaveLength(8);
+    expect(LOCAL_CHANGELOG[15].id).toBe("local-2026-09-07-upstream-0621-and-roadmap-recovery");
+    expect(LOCAL_CHANGELOG[15].label).toBe("Upstream 0.62.1, with steadier Roadmap updates");
+    expect(LOCAL_CHANGELOG[15].date).toBe("2026-09-07");
+    expect(LOCAL_CHANGELOG[15].items).toHaveLength(5);
+    expect(LOCAL_CHANGELOG[16].id).toBe("local-2026-08-29-roadmap-completion-fails-closed");
+    expect(LOCAL_CHANGELOG[16].label).toBe("Upstream 0.62.0, still your Local Fork");
+    expect(LOCAL_CHANGELOG[16].date).toBe("2026-09-06");
+    expect(LOCAL_CHANGELOG[16].items).toHaveLength(14);
   });
 
   it.each([

@@ -53,10 +53,30 @@ export const CURRENT_LOCAL_RELEASE_NOTES = requireCurrentReleaseNotes(releaseNot
 /** Newest first. Maintained only by the Local Fork release flow. */
 export const LOCAL_CHANGELOG: LocalChangelogEntry[] = [
   {
-    id: "local-2026-10-04-upstream-0790-campfire-and-faster-agent",
+    id: "local-2026-10-04-upstream-0810-faster-openai-and-multi-file-edits",
     label: CURRENT_LOCAL_RELEASE_NOTES.label,
     date: CURRENT_LOCAL_RELEASE_NOTES.date,
     items: CURRENT_LOCAL_RELEASE_NOTES.sections.flatMap(({ items }) => items),
+  },
+  {
+    id: "local-2026-10-04-upstream-0790-campfire-and-faster-agent",
+    label: "Upstream 0.79.0, with a campfire Home and a faster agent",
+    date: "2026-10-04",
+    items: [
+      "Your Home screen is now a cozy campfire clearing in the pines, and it follows your clock. Stars and an owl at night, mist and waking birds at dawn, sunbeams by day, then fireflies and bats at dusk.",
+      "Replies look finished from the very first letter. Bold, code and links render as they stream instead of flashing raw symbols, and a floating pill takes you back down to `You have new chats` or `You have a new question` when you scroll away.",
+      "Plan review opens full window, laid out just like your chat, with a little critter crew keeping you company while you accept, reject or send feedback.",
+      "Your laptop won't nap halfway through a big job. The new `Keep computer awake` switch in Settings, under `Power`, keeps it working while the agent runs; your screen can still turn off.",
+      "No more paying full price by surprise. If you step away long enough for the AI's memory of your chat to go cold, a heads-up appears before you send, with a one-click `Compact first` to keep the next message cheap.",
+      "Motion mode learned sound and style: sound effects that stay locked to the action when you retime it, real motion blur, music that cuts on the beat, and `10` fresh animation pieces. `GG Motion` checks also run up to `4` parts at once.",
+      "Your agent answers sooner and spends fewer tokens. The extra self-review pass that padded every turn is gone; `Autopilot` reviews and your project's checks still run as before.",
+      "Helper agents have to meet the bar. The main agent can set checks up front, like a file must exist or a command must pass, and each one is judged from what the helper really did: `PASS`, `FAIL` or `UNVERIFIED`. Every helper report also lists the files it really read and changed.",
+      "The agent can now debug like a pro. The new `debug` tool pauses a Node program on a breakpoint, steps through it line by line and reads live variables, so bugs get found by watching the code run.",
+      "A question you missed no longer freezes the agent. After `10 minutes`, or `2 minutes` on `Autopilot`, it carries on with its best guess, and if you answer later your answer still gets sent.",
+      "Send a new message while a command is running and the agent stops right there to read it, while file edits always finish cleanly so nothing is left half-written.",
+      "A sturdier safety net. The agent refuses git commands that would wipe uncommitted work, scripts piped straight from the internet into your shell, and packages with lookalike names. Web pages that try to sneak orders to the agent get flagged.",
+      "Give the agent house rules. A short markdown note in your project's rules folder sets its habits, and it gets a reminder whenever its output breaks one, like leaving a stray `console.log`.",
+    ],
   },
   {
     id: "local-2026-10-01-upstream-0750-ken-face-and-home-critters",

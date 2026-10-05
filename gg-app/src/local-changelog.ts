@@ -53,10 +53,23 @@ export const CURRENT_LOCAL_RELEASE_NOTES = requireCurrentReleaseNotes(releaseNot
 /** Newest first. Maintained only by the Local Fork release flow. */
 export const LOCAL_CHANGELOG: LocalChangelogEntry[] = [
   {
-    id: "local-2026-10-04-upstream-0810-faster-openai-and-multi-file-edits",
+    id: "local-2026-10-05-upstream-0821-checklist-and-clearer-errors",
     label: CURRENT_LOCAL_RELEASE_NOTES.label,
     date: CURRENT_LOCAL_RELEASE_NOTES.date,
     items: CURRENT_LOCAL_RELEASE_NOTES.sections.flatMap(({ items }) => items),
+  },
+  {
+    id: "local-2026-10-04-upstream-0810-faster-openai-and-multi-file-edits",
+    label: "Upstream 0.81.0, with faster OpenAI runs and multi-file edits",
+    date: "2026-10-04",
+    items: [
+      "Your `ChatGPT` and OpenAI API key chats move faster. The agent can now send several tool calls in one go instead of one per reply, and it stops spelling out every blank option on each call, so work lands sooner and costs fewer tokens. Prefer the old one-at-a-time style? Set `codexResponsesLite` and `codexStrictTools` to `on` in your settings file.",
+      "Changes that span files land in one step. The agent can edit several files in a single call instead of crawling through them one turn at a time, so renames and refactors across your project finish sooner. If one file fails, the rest still save and the agent retries only the one that failed.",
+      "Bug fixes stick. When the cause is clear, the agent sends the fix together with a small test that catches the bug and runs your tests once, so the same problem can't quietly come back.",
+      "Less busywork before the real work. The agent no longer hunts for instruction files it has already read, and it skips loading specialist skills for everyday fixes and renames.",
+      "`Gemini` works with your whole toolbox again. A hidden snag made it refuse requests whenever certain tools were loaded, like `web_fetch`; that's fixed.",
+      "Helper agents start reliably in the desktop app again. A crash that stopped the `subagent` tool before it even began is fixed, so handing off work just works.",
+    ],
   },
   {
     id: "local-2026-10-04-upstream-0790-campfire-and-faster-agent",

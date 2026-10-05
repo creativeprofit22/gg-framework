@@ -1,17 +1,25 @@
 {
   "schemaVersion": 1,
-  "date": "2026-10-04",
-  "label": "Upstream 0.81.0, with faster OpenAI runs and multi-file edits",
+  "date": "2026-10-05",
+  "label": "Upstream 0.82.1, with a project Checklist and clearer error notices",
   "sections": [
     {
-      "title": "Upstream 0.80.0 to 0.81.0: in your agent",
+      "title": "Upstream 0.82.0 to 0.82.1: in your app",
       "items": [
-        "Your `ChatGPT` and OpenAI API key chats move faster. The agent can now send several tool calls in one go instead of one per reply, and it stops spelling out every blank option on each call, so work lands sooner and costs fewer tokens. Prefer the old one-at-a-time style? Set `codexResponsesLite` and `codexStrictTools` to `on` in your settings file.",
-        "Changes that span files land in one step. The agent can edit several files in a single call instead of crawling through them one turn at a time, so renames and refactors across your project finish sooner. If one file fails, the rest still save and the agent retries only the one that failed.",
-        "Bug fixes stick. When the cause is clear, the agent sends the fix together with a small test that catches the bug and runs your tests once, so the same problem can't quietly come back.",
-        "Less busywork before the real work. The agent no longer hunts for instruction files it has already read, and it skips loading specialist skills for everyday fixes and renames.",
-        "`Gemini` works with your whole toolbox again. A hidden snag made it refuse requests whenever certain tools were loaded, like `web_fetch`; that's fixed.",
-        "Helper agents start reliably in the desktop app again. A crash that stopped the `subagent` tool before it even began is fixed, so handing off work just works."
+        "Every project gets a health hub. Open `Checklist` from the top of a chat pane to work through setup, tests, security and shipping one check at a time. Results are saved, each pane checks its own project, and you get a nudge when a check is due again.",
+        "When a chat hits a snag, the notice tells you what to do next. Usage limits, sign-in trouble and unavailable models each get their own notice with expandable details and a `Choose model` or `Switch provider` button when switching helps. Rate limits show the time the provider says you can retry, and a rotating crew of critters keeps you company.",
+        "Attachments land every time. `Send` waits until your files finish loading, so nothing gets left behind, and a file that fails to load tells you instead of quietly vanishing.",
+        "Fresh starts feel fresh. A new session opens straight to the welcome screen instead of showing the last run's `cancelled` status."
+      ]
+    },
+    {
+      "title": "Upstream 0.82.0 to 0.82.1: in your agent",
+      "items": [
+        "Your plans wait for you. When the agent hands over a plan for review, it stops cleanly instead of burning extra turns while you decide.",
+        "`Ultra` on OpenAI thinks the way Codex does, and helper agents now inherit the effort level you picked instead of quietly dropping to the lowest one.",
+        "`Checks passed` means what it says. Mixed shell commands no longer count as fresh verification, and the agent has a clear way to run its checks and look over its changes without hiding a failure.",
+        "Every turn is a little lighter. The agent loads its task list tool only when it needs it and follows shorter house rules, so each request sends about `1,400` fewer characters.",
+        "`Find references` reaches further in JavaScript projects without a config file. It includes callers in files you haven't opened and tells the agent when coverage is incomplete."
       ]
     }
   ]

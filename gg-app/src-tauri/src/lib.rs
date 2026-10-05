@@ -566,6 +566,33 @@ fn trusted_event_envelope(
     }))
 }
 
+/// Log-safe event type: daemon types are short identifiers, so anything else is
+/// reported as "unknown" rather than echoing arbitrary payload text into logs.
+fn loggable_event_type(value: &serde_json::Value) -> &str {
+    value
+        .get("type")
+        .and_then(|kind| kind.as_str())
+        .filter(|kind| {
+            !kind.is_empty()
+                && kind.len() <= 64
+                && kind
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+        })
+        .unwrap_or("unknown")
+}
+
+/// Why `trusted_event_envelope` rejected a frame, for drop diagnostics only.
+fn envelope_rejection_reason(session_id: &str, value: &serde_json::Value) -> &'static str {
+    match value.get("sessionId").and_then(|v| v.as_str()) {
+        None => "missing-session",
+        Some(id) if id != session_id => "session-mismatch",
+        Some(_) if value.get("type").and_then(|v| v.as_str()).is_none() => "missing-type",
+        Some(_) if value.get("data").is_none() => "missing-data",
+        Some(_) => "unknown",
+    }
+}
+
 /// The bridge's own notice that a pane's event stream dropped, scoped like a
 /// daemon event so the webview can show a reconnecting state.
 fn connection_lost_envelope(pane_id: &str, session_id: &str) -> Option<serde_json::Value> {
@@ -8808,6 +8835,7 @@ fn start_event_bridge(
                     retry_delay = SSE_RETRY_MIN;
                     let mut stream = res.bytes_stream();
                     let mut buf: Vec<u8> = Vec::new();
+                    let mut stream_error: Option<String> = None;
                     while let Some(chunk) = stream.next().await {
                         let identity_is_current = {
                             let state: State<Windows> = app.state();
@@ -8823,31 +8851,67 @@ fn start_event_bridge(
                             );
                             return;
                         }
-                        let Ok(bytes) = chunk else { break };
+                        let bytes = match chunk {
+                            Ok(bytes) => bytes,
+                            Err(error) => {
+                                // without_url: the URL carries the session id query.
+                                stream_error = Some(error.without_url().to_string());
+                                break;
+                            }
+                        };
                         buf.extend_from_slice(&bytes);
                         for frame in drain_sse_frames(&mut buf) {
                             for line in frame.lines() {
                                 let Some(payload) = line.strip_prefix("data: ") else {
                                     continue;
                                 };
-                                let Ok(value) = serde_json::from_str::<serde_json::Value>(payload)
-                                else {
-                                    continue;
+                                let value = match serde_json::from_str::<serde_json::Value>(payload)
+                                {
+                                    Ok(value) => value,
+                                    Err(error) => {
+                                        log::warn!(
+                                            "agent event dropped for {label}/{pane_id}: reason=invalid-json type=unknown bytes={} error={error}",
+                                            payload.len()
+                                        );
+                                        continue;
+                                    }
                                 };
                                 let Some(trusted) =
                                     trusted_event_envelope(&pane_id, &session_id, &value)
                                 else {
+                                    log::warn!(
+                                        "agent event dropped for {label}/{pane_id}: reason={} type={} bytes={}",
+                                        envelope_rejection_reason(&session_id, &value),
+                                        loggable_event_type(&value),
+                                        payload.len()
+                                    );
                                     continue;
                                 };
-                                let _ = app.emit_to(
+                                let event_type = loggable_event_type(&trusted).to_owned();
+                                if let Err(error) = app.emit_to(
                                     EventTarget::webview_window(label.clone()),
                                     "agent-event",
                                     trusted,
-                                );
+                                ) {
+                                    log::warn!(
+                                        "agent event delivery failed for {label}/{pane_id}: type={event_type} bytes={} error={error}",
+                                        payload.len()
+                                    );
+                                }
                             }
                         }
                     }
-                    log::warn!("agent event stream ended for {label}/{pane_id}, reconnecting");
+                    // Unterminated buffered bytes are a partial frame lost with the stream.
+                    match stream_error {
+                        Some(error) => log::warn!(
+                            "agent event stream failed for {label}/{pane_id}: error={error} unterminated_bytes={}, reconnecting",
+                            buf.len()
+                        ),
+                        None => log::warn!(
+                            "agent event stream closed by daemon for {label}/{pane_id}: unterminated_bytes={}, reconnecting",
+                            buf.len()
+                        ),
+                    }
                 }
                 Err(e) => {
                     log::error!("failed to connect to event stream for {label}/{pane_id}: {e}");
@@ -10883,6 +10947,7 @@ pub fn run() {
             agent_state,
             agent_notes_get,
             notes_phase_deletion::agent_notes_phase_deletion,
+            notes_phase_deletion::agent_notes_phase_status,
             agent_notes_diagnostics,
             agent_notes_phase_binding,
             agent_phase_start,
@@ -15644,6 +15709,30 @@ mod tests {
             trusted_event_envelope("chat", "sid", &serde_json::json!({"sessionId": "sid"}))
                 .is_none()
         );
+
+        // Drop diagnostics name the reason and never echo non-identifier text.
+        assert_eq!(envelope_rejection_reason("other", &event), "session-mismatch");
+        assert_eq!(
+            envelope_rejection_reason("sid", &serde_json::json!({"type": "delta"})),
+            "missing-session"
+        );
+        assert_eq!(
+            envelope_rejection_reason("sid", &serde_json::json!({"sessionId": "sid"})),
+            "missing-type"
+        );
+        assert_eq!(
+            envelope_rejection_reason(
+                "sid",
+                &serde_json::json!({"sessionId": "sid", "type": "delta"})
+            ),
+            "missing-data"
+        );
+        assert_eq!(loggable_event_type(&event), "delta");
+        assert_eq!(
+            loggable_event_type(&serde_json::json!({"type": "token=abc secret"})),
+            "unknown"
+        );
+        assert_eq!(loggable_event_type(&serde_json::json!({})), "unknown");
 
         // The bridge's own disconnect notice must survive its session filter.
         let lost = connection_lost_envelope("chat", "sid").expect("connection_lost is delivered");

@@ -72,6 +72,10 @@ interface Props {
   onEditPhase(id: string, input: NotesPhaseInput): void;
   onMovePhase(id: string, direction: "up" | "down"): void;
   onChangePhaseStatus(id: string, status: NotesPhaseStatus): void;
+  onSetPhaseStatusOverride(
+    id: string,
+    status: NotesPhaseStatus,
+  ): Promise<NotesRoadmapMutationResult>;
   onArchivePhase(id: string): void;
   onRestorePhase(id: string): void;
   onCreateReference(
@@ -184,6 +188,7 @@ export function NotesModalContent({
   onEditPhase,
   onMovePhase,
   onChangePhaseStatus,
+  onSetPhaseStatusOverride,
   onArchivePhase,
   onRestorePhase,
   onCreateReference,
@@ -425,6 +430,7 @@ export function NotesModalContent({
                 onEditPhase={onEditPhase}
                 onMovePhase={onMovePhase}
                 onChangePhaseStatus={onChangePhaseStatus}
+                onSetPhaseStatusOverride={onSetPhaseStatusOverride}
                 onArchivePhase={onArchivePhase}
                 onDeletePhase={deletePhase}
                 onLinkReferenceToPhase={onLinkReferenceToPhase}

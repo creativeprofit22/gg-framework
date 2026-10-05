@@ -294,6 +294,11 @@ export function NotesPhaseMoreControls(): ReactElement {
     resumedLifecycle,
     canPauseAutomation,
     canCancelRun,
+    canMarkDone,
+    canReopen,
+    reopenStatus,
+    markPhaseDone,
+    reopenPhase,
     onChangePhaseStatus,
     onMovePhase,
     onArchivePhase,
@@ -352,6 +357,11 @@ export function NotesPhaseMoreControls(): ReactElement {
                 {resumedLifecycle.stage.toLocaleLowerCase()}.
               </p>
             )}
+            {canMarkDone && canCancelRun && (
+              <p className="notes-phase-status-help" id={`notes-phase-mark-done-help-${phase.id}`}>
+                Cancel the run before marking this phase done.
+              </p>
+            )}
           </div>
           <div className="notes-phase-lifecycle-actions">
             {canPauseAutomation && (
@@ -386,6 +396,62 @@ export function NotesPhaseMoreControls(): ReactElement {
                 onClick={resumeAutomaticStatus}
               >
                 {pendingRoadmapAction === "resume-status" ? "Resuming…" : "Resume automation"}
+              </button>
+            )}
+            {canMarkDone && (
+              <button
+                type="button"
+                disabled={
+                  controlsDisabled ||
+                  canCancelRun ||
+                  isTopologyMutationBlocked({
+                    type: "set-status",
+                    phaseId: phase.id,
+                    status: "done",
+                  })
+                }
+                aria-describedby={
+                  canCancelRun ? `notes-phase-mark-done-help-${phase.id}` : undefined
+                }
+                title={
+                  canCancelRun
+                    ? "Cancel the run before marking this phase done."
+                    : isTopologyMutationBlocked({
+                          type: "set-status",
+                          phaseId: phase.id,
+                          status: "done",
+                        })
+                      ? "Confirm or recover the pending Roadmap advancement before marking this phase done."
+                      : undefined
+                }
+                onClick={markPhaseDone}
+              >
+                {pendingRoadmapAction === "mark-done" ? "Marking…" : "Mark done"}
+              </button>
+            )}
+            {canReopen && (
+              <button
+                type="button"
+                disabled={
+                  controlsDisabled ||
+                  isTopologyMutationBlocked({
+                    type: "set-status",
+                    phaseId: phase.id,
+                    status: reopenStatus,
+                  })
+                }
+                title={
+                  isTopologyMutationBlocked({
+                    type: "set-status",
+                    phaseId: phase.id,
+                    status: reopenStatus,
+                  })
+                    ? "Reopening this phase would replace the target protected by a pending phase advancement."
+                    : undefined
+                }
+                onClick={reopenPhase}
+              >
+                {pendingRoadmapAction === "reopen" ? "Reopening…" : "Reopen"}
               </button>
             )}
             {canCancelRun && (

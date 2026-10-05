@@ -43,6 +43,10 @@ import type {
   ReminderClaimOutcome,
   ReminderReserveOutcome,
 } from "./notes-types";
+import type {
+  UserPhaseStatusOverrideOutcome,
+  UserPhaseStatusOverrideRequest,
+} from "@kenkaiiii/gg-core/project-notes";
 
 const tauriMocks = vi.hoisted(() => ({
   invoke: vi.fn(),
@@ -507,10 +511,75 @@ class FakeProjectNotesClient implements NotesClient {
     if (current.revision !== expectedRevision) {
       return { status: "conflict", snapshot: current };
     }
+    // Mirrors the daemon: generic saves never move a phase into or out of Done.
+    for (const [index, next] of document.phases.entries()) {
+      const previous = current.document.phases.find((candidate) => candidate.id === next.id);
+      if (previous && (previous.status === "done") !== (next.status === "done")) {
+        return {
+          status: "invalid",
+          error: {
+            path: `phases[${index}].status`,
+            message: "phase completion requires the dedicated completion authority path",
+          },
+        };
+      }
+    }
     const snapshot = { projectKey, revision: expectedRevision + 1, document };
     this.snapshots.set(projectKey, snapshot);
     this.emit(snapshot);
     return { status: "ok", snapshot };
+  }
+
+  readonly phaseStatusCalls: UserPhaseStatusOverrideRequest[] = [];
+  phaseStatusOutcome: UserPhaseStatusOverrideOutcome | null = null;
+
+  /** Mirrors the daemon's manual Done / Reopen rules. */
+  async changePhaseStatusOverride(
+    request: UserPhaseStatusOverrideRequest,
+  ): Promise<UserPhaseStatusOverrideOutcome> {
+    this.phaseStatusCalls.push(request);
+    if (this.phaseStatusOutcome) return this.phaseStatusOutcome;
+    const projectKey = canonicalProjectKey(this.cwd);
+    const current = this.snapshots.get(projectKey);
+    if (!current) return { status: "missing" };
+    const document = structuredClone(current.document);
+    const target = document.phases.find((candidate) => candidate.id === request.phaseId);
+    if (!target) return { status: "phase-not-found" };
+    if (target.archivedAt !== null) return { status: "phase-archived" };
+    const manuallyDone = target.status === "done" && target.overrides.status?.value === "done";
+    if (request.status === "done" && target.session !== null) {
+      return {
+        status: "refused",
+        reason: "active-execution",
+        message: "Cancel the run before marking this phase done.",
+      };
+    }
+    if (request.status !== "done" && !manuallyDone) {
+      return {
+        status: "refused",
+        reason: "not-manually-done",
+        message: "Only a phase you marked Done by hand can be reopened.",
+      };
+    }
+    target.lifecycleEvents.push({
+      id: `manual-${this.phaseStatusCalls.length}`,
+      fromStatus: target.status,
+      toStatus: request.status,
+      source: "user",
+      timestamp: request.timestamp,
+      reason: "manual",
+      kind: "other",
+    });
+    target.status = request.status;
+    target.completedAt = request.status === "done" ? request.timestamp : null;
+    target.overrides.status = {
+      value: request.status,
+      source: "user",
+      updatedAt: request.timestamp,
+    };
+    const snapshot = { projectKey, revision: current.revision + 1, document };
+    this.snapshots.set(projectKey, snapshot);
+    return { status: "committed", phaseId: target.id, resultingStatus: request.status, snapshot };
   }
 
   /** Commits the shared pure transition so deletion journeys exercise real metadata. */
@@ -3603,6 +3672,128 @@ describe("ProjectNotes", () => {
 
     await waitFor(() => expect(phaseDetail("Only phase refreshed")).not.toBeNull());
     expect(screen.getByText("Selected phase")).toBeTruthy();
+  });
+
+  it("marks a phase Done by hand, keeps the next phase startable, and reopens it", async () => {
+    const cwd = "/work/roadmap-manual-done";
+    const client = new FakeProjectNotesClient(cwd);
+    const populated = notes("reference");
+    populated.phases = [
+      { ...phase("alpha", "review"), title: "Alpha", order: 0 },
+      { ...phase("beta", "not-started"), title: "Beta", order: 1 },
+    ];
+    client.seed(cwd, populated);
+    render(<ProjectNotes cwd={cwd} client={client} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
+    await selectNotesTab("Roadmap");
+    fireEvent.click(screen.getByRole("button", { name: "Inspect phase: Alpha" }));
+    selectPhaseView("More");
+    fireEvent.click(screen.getByRole("button", { name: "Mark done" }));
+
+    await waitFor(() => {
+      const stored = client.snapshots.get(canonicalProjectKey(cwd))!.document.phases[0]!;
+      expect(stored.status).toBe("done");
+      expect(stored.completedAt).not.toBeNull();
+      expect(stored.overrides.status).toMatchObject({ value: "done", source: "user" });
+      expect(stored.lifecycleEvents).toMatchObject([
+        { fromStatus: "review", toStatus: "done", source: "user" },
+      ]);
+    });
+    expect(client.phaseStatusCalls).toMatchObject([
+      { version: 1, phaseId: "alpha", status: "done", expectedRevision: null },
+    ]);
+    expect(screen.getByText("Marked Alpha as Done.")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Mark done" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Start next phase" })).toBeNull();
+    const startBeta = screen.getByRole("button", {
+      name: "Start phase: Beta",
+    }) as HTMLButtonElement;
+    expect(startBeta.disabled).toBe(false);
+
+    fireEvent.click(screen.getByRole("button", { name: "Reopen" }));
+    await waitFor(() => {
+      const stored = client.snapshots.get(canonicalProjectKey(cwd))!.document.phases[0]!;
+      expect(stored.status).toBe("review");
+      expect(stored.completedAt).toBeNull();
+      expect(stored.lifecycleEvents.at(-1)).toMatchObject({
+        fromStatus: "done",
+        toStatus: "review",
+        source: "user",
+      });
+    });
+    expect(client.phaseStatusCalls.at(-1)).toMatchObject({ phaseId: "alpha", status: "review" });
+    expect(screen.getByText("Reopened Alpha as Review.")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Reopen" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Mark done" })).toBeTruthy();
+
+    // A later ordinary edit still saves: nothing rejected is left replaying in the queue.
+    const revisionBefore = client.snapshots.get(canonicalProjectKey(cwd))!.revision;
+    fireEvent.click(screen.getByRole("button", { name: "Move down" }));
+    await waitFor(() =>
+      expect(client.snapshots.get(canonicalProjectKey(cwd))!.revision).toBe(revisionBefore + 1),
+    );
+  });
+
+  it("reports a rejected Mark done save instead of claiming success", async () => {
+    const cwd = "/work/roadmap-manual-done-rejected";
+    const client = new FakeProjectNotesClient(cwd);
+    const populated = notes("reference");
+    populated.phases = [{ ...phase("alpha", "review"), title: "Alpha", order: 0 }];
+    client.seed(cwd, populated);
+    render(<ProjectNotes cwd={cwd} client={client} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
+    await selectNotesTab("Roadmap");
+    fireEvent.click(screen.getByRole("button", { name: "Inspect phase: Alpha" }));
+    selectPhaseView("More");
+    client.phaseStatusOutcome = {
+      status: "refused",
+      reason: "protected-advancement",
+      message: "A pending phase advancement depends on this phase. Finish or resolve it first.",
+    };
+    fireEvent.click(screen.getByRole("button", { name: "Mark done" }));
+
+    const detail = phaseDetail("Alpha");
+    await waitFor(() =>
+      expect(detail?.querySelector('[role="alert"]')?.textContent).toContain(
+        "A pending phase advancement depends on this phase.",
+      ),
+    );
+    expect(client.phaseStatusCalls).toHaveLength(1);
+    expect(screen.queryByText("Marked Alpha as Done.")).toBeNull();
+    expect(client.snapshots.get(canonicalProjectKey(cwd))!.document.phases[0]!.status).toBe(
+      "review",
+    );
+  });
+
+  it("disables Mark done while a run is active on the phase", async () => {
+    const cwd = "/work/roadmap-manual-done-running";
+    const client = new FakeProjectNotesClient(cwd);
+    const populated = notes("reference");
+    populated.phases = [
+      {
+        ...phase("alpha", "in-progress"),
+        title: "Alpha",
+        session: { sessionId: "alpha-session", sessionPath: "/alpha-session.jsonl" },
+      },
+    ];
+    client.seed(cwd, populated);
+    render(<ProjectNotes cwd={cwd} client={client} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
+    await selectNotesTab("Roadmap");
+    fireEvent.click(screen.getByRole("button", { name: "Inspect phase: Alpha" }));
+    selectPhaseView("More");
+
+    const markDone = screen.getByRole("button", { name: "Mark done" }) as HTMLButtonElement;
+    expect(markDone.disabled).toBe(true);
+    expect(markDone.title).toBe("Cancel the run before marking this phase done.");
+    expect(screen.getByText("Cancel the run before marking this phase done.")).toBeTruthy();
+    fireEvent.click(markDone);
+    expect(client.snapshots.get(canonicalProjectKey(cwd))!.document.phases[0]!.status).toBe(
+      "in-progress",
+    );
   });
 
   it("creates, edits, reorders, pauses automation, cancels runs, archives, and restores phases", async () => {

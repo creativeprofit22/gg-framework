@@ -69,7 +69,27 @@ export interface RoadmapAdvancement {
 
 export type RoadmapTopologyMutation =
   | { type: "move"; phaseId: string; direction: "up" | "down" }
-  | { type: "archive" | "restore" | "pause-status" | "resume-status"; phaseId: string };
+  | { type: "archive" | "restore" | "pause-status" | "resume-status"; phaseId: string }
+  | { type: "set-status"; phaseId: string; status: NotesPhaseStatus };
+
+/** A Done the user chose by hand, not one an agent reported with evidence. */
+export function isManuallyDone(phase: Pick<NotesPhase, "status" | "overrides">): boolean {
+  return phase.status === "done" && phase.overrides.status?.value === "done";
+}
+
+/** The status a manually-Done phase held before its latest move to Done. */
+export function statusBeforeManualDone(
+  phase: Pick<NotesPhase, "lifecycleEvents">,
+): NotesPhaseStatus {
+  for (let index = phase.lifecycleEvents.length - 1; index >= 0; index -= 1) {
+    const event = phase.lifecycleEvents[index];
+    if (event?.toStatus !== "done") continue;
+    return event.fromStatus !== null && event.fromStatus !== "done"
+      ? event.fromStatus
+      : "not-started";
+  }
+  return "not-started";
+}
 
 export function selectRoadmapAdvancement(phases: readonly NotesPhase[]): RoadmapAdvancement | null {
   const orderedPhases = phases
@@ -176,6 +196,13 @@ function applyRoadmapTopologyMutation(
   }
   if (mutation.type === "resume-status") {
     phase.overrides = { ...phase.overrides, status: null };
+  }
+  if (mutation.type === "set-status") {
+    phase.status = mutation.status;
+    phase.overrides = {
+      ...phase.overrides,
+      status: { value: mutation.status, source: "user", updatedAt: new Date(0).toISOString() },
+    };
   }
   if (mutation.type === "move") {
     const visible = next.filter((candidate) => candidate.archivedAt === null);
@@ -379,6 +406,7 @@ export function roadmapMutationMessage(result: NotesRoadmapMutationResult): stri
   if (result.status === "missing-phase" || result.status === "archived-phase") {
     return "The phase is no longer available. Return to the Roadmap and choose an active phase.";
   }
+  if (result.message !== undefined) return result.message;
   return "The Roadmap change could not be saved. Check Notes storage and try again.";
 }
 

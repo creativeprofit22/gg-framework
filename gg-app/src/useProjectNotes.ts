@@ -43,6 +43,7 @@ import {
   type NotesDocumentV3,
   type NotesLoadResult,
   type NotesOperationFailureReason,
+  type NotesPhase,
   type NotesPhaseStatus,
   type NotesPromptSaveInput,
   type NotesPromptSaveResult,
@@ -94,6 +95,7 @@ export interface UseProjectNotesResult {
   editPhase(id: string, input: NotesPhaseInput): void;
   movePhase(id: string, direction: "up" | "down"): void;
   changePhaseStatus(id: string, status: NotesPhaseStatus): void;
+  setPhaseStatusOverride(id: string, status: NotesPhaseStatus): Promise<NotesRoadmapMutationResult>;
   archivePhase(id: string): void;
   restorePhase(id: string): void;
   savePrompt(input: NotesPromptSaveInput): Promise<NotesPromptSaveResult>;
@@ -1127,50 +1129,81 @@ export function useProjectNotes(
       const eventId = idFactory();
       enqueueMutation({
         evaluate: documentMutation((current) =>
-          updatePhase(current, id, now, (phase) => {
-            const statusChanged = phase.status !== status;
-            if (phase.archivedAt !== null || (!statusChanged && phase.overrides.status !== null)) {
-              return null;
-            }
-            const timestamp = chronologicalTimestamp(now, phase);
-            return {
-              ...phase,
-              status,
-              attentionReason:
-                statusChanged && status !== "needs-attention" ? null : phase.attentionReason,
-              updatedAt: timestamp,
-              completedAt: statusChanged
-                ? status === "done" || status === "cancelled"
-                  ? timestamp
-                  : null
-                : phase.completedAt,
-              overrides: {
-                ...phase.overrides,
-                status: { value: status, source: "user", updatedAt: timestamp },
-              },
-              lifecycleEvents: statusChanged
-                ? [
-                    ...phase.lifecycleEvents,
-                    {
-                      id: eventId,
-                      fromStatus: phase.status,
-                      toStatus: status,
-                      source: "user" as const,
-                      timestamp,
-                      reason:
-                        status === "cancelled"
-                          ? "Phase cancelled by user"
-                          : "Status changed by user",
-                      kind: "other" as const,
-                    },
-                  ]
-                : phase.lifecycleEvents,
-            };
-          }),
+          updatePhase(current, id, now, (phase) =>
+            applyUserStatusOverride(phase, status, now, eventId),
+          ),
         ),
       });
     },
     [clock, enqueueMutation, idFactory],
+  );
+
+  // Manual Done / Reopen. The daemon refuses completion changes through generic saves, so
+  // sidecar mode uses its dedicated route; local fallback keeps the document transform.
+  const setPhaseStatusOverride = useCallback(
+    async (id: string, status: NotesPhaseStatus): Promise<NotesRoadmapMutationResult> => {
+      const now = clock();
+      if (modeRef.current === "sidecar") {
+        const projectKey = activeCwdRef.current ? canonicalProjectKey(activeCwdRef.current) : null;
+        const epoch = epochRef.current;
+        if (!client?.changePhaseStatusOverride || !projectKey) {
+          return { status: "failed", reason: "unavailable" };
+        }
+        try {
+          const outcome = await client.changePhaseStatusOverride({
+            version: 1,
+            phaseId: id,
+            status,
+            // The daemon re-checks every precondition under its lock; queued edits rebase.
+            expectedRevision: null,
+            timestamp: now,
+          });
+          if (
+            epoch !== epochRef.current ||
+            projectKey !== canonicalProjectKey(activeCwdRef.current ?? "")
+          ) {
+            return { status: "failed", reason: "unavailable" };
+          }
+          switch (outcome.status) {
+            case "committed":
+              adoptSnapshot(outcome.snapshot, projectKey, epoch);
+              return { status: "committed", phaseId: id, resultingStatus: outcome.resultingStatus };
+            case "refused":
+              return { status: "failed", reason: "invalid", message: outcome.message };
+            case "phase-not-found":
+              return { status: "missing-phase", phaseId: id };
+            case "phase-archived":
+              return { status: "archived-phase", phaseId: id };
+            case "stale-revision":
+              adoptSnapshot(outcome.snapshot, projectKey, epoch);
+              return { status: "failed", reason: "unavailable" };
+            case "missing":
+              return { status: "failed", reason: "missing" };
+            case "corrupt":
+              return { status: "failed", reason: "corrupt" };
+            case "unavailable":
+              return { status: "failed", reason: "unavailable", message: outcome.message };
+          }
+        } catch {
+          return { status: "failed", reason: "unavailable" };
+        }
+      }
+      const eventId = idFactory();
+      return enqueueRoadmapMutation((current) => {
+        const phase = current.phases.find((candidate) => candidate.id === id);
+        if (!phase) return { document: null, result: { status: "missing-phase", phaseId: id } };
+        if (phase.archivedAt !== null) {
+          return { document: null, result: { status: "archived-phase", phaseId: id } };
+        }
+        return {
+          document: updatePhase(current, id, now, (candidate) =>
+            applyUserStatusOverride(candidate, status, now, eventId),
+          ),
+          result: { status: "committed", phaseId: id, resultingStatus: status },
+        };
+      });
+    },
+    [adoptSnapshot, client, clock, enqueueRoadmapMutation, idFactory],
   );
 
   const archivePhase = useCallback(
@@ -1631,6 +1664,7 @@ export function useProjectNotes(
     editPhase,
     movePhase,
     changePhaseStatus,
+    setPhaseStatusOverride,
     archivePhase,
     restorePhase,
     savePrompt,
@@ -1673,6 +1707,48 @@ function evaluateMutation(mutation: NotesMutation, base: NotesDocumentV3): Notes
   const value = mutation.evaluate(base);
   mutation.cachedEvaluation = { base, value };
   return value;
+}
+
+function applyUserStatusOverride(
+  phase: NotesPhase,
+  status: NotesPhaseStatus,
+  now: string,
+  eventId: string,
+): NotesPhase | null {
+  const statusChanged = phase.status !== status;
+  if (phase.archivedAt !== null || (!statusChanged && phase.overrides.status !== null)) {
+    return null;
+  }
+  const timestamp = chronologicalTimestamp(now, phase);
+  return {
+    ...phase,
+    status,
+    attentionReason: statusChanged && status !== "needs-attention" ? null : phase.attentionReason,
+    updatedAt: timestamp,
+    completedAt: statusChanged
+      ? status === "done" || status === "cancelled"
+        ? timestamp
+        : null
+      : phase.completedAt,
+    overrides: {
+      ...phase.overrides,
+      status: { value: status, source: "user", updatedAt: timestamp },
+    },
+    lifecycleEvents: statusChanged
+      ? [
+          ...phase.lifecycleEvents,
+          {
+            id: eventId,
+            fromStatus: phase.status,
+            toStatus: status,
+            source: "user" as const,
+            timestamp,
+            reason: status === "cancelled" ? "Phase cancelled by user" : "Status changed by user",
+            kind: "other" as const,
+          },
+        ]
+      : phase.lifecycleEvents,
+  };
 }
 
 function documentMutation(

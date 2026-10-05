@@ -61,6 +61,10 @@ import {
   type RoadmapPhaseDraftApprovalResult,
   type RoadmapPhaseDraftRejectionResult,
 } from "@kenkaiiii/gg-core/roadmap-workflow";
+import {
+  isUserPhaseStatusOverrideOutcome,
+  isUserPhaseStatusOverrideRequest,
+} from "@kenkaiiii/gg-core/project-notes";
 import { createSafeTauriUnlisten, type SafeTauriUnlisten } from "./tauri-listener";
 import { normalizeRoadmapPhaseDraft } from "./roadmap-phase-draft-state";
 import {
@@ -3366,6 +3370,16 @@ export function createPaneAgentClient(paneId: string): PaneAgentClient {
       if (!isPhaseDeletionRequest(request)) throw new Error("Invalid phase deletion request");
       const outcome = await call<unknown>("agent_notes_phase_deletion", { request });
       if (!isPhaseDeletionOutcome(outcome)) throw new Error("Invalid phase deletion response");
+      return outcome;
+    },
+    async changePhaseStatusOverride(request) {
+      if (!isUserPhaseStatusOverrideRequest(request)) {
+        throw new Error("Invalid phase status request");
+      }
+      const outcome = await call<unknown>("agent_notes_phase_status", { request });
+      if (!isUserPhaseStatusOverrideOutcome(outcome)) {
+        throw new Error("Invalid phase status response");
+      }
       return outcome;
     },
     async getNotes() {

@@ -41,12 +41,15 @@ import type {
 import type { NotesLifecyclePresentation } from "../notes-lifecycle-presentation";
 import type { PhaseView } from "./NotesPhaseViewNavigation";
 import {
+  isManuallyDone,
   latestRoadmapReport,
   lines,
   phaseActionLabel,
   primaryAction,
   roadmapMutationMessage,
   sessionAction,
+  statusBeforeManualDone,
+  statusLabel,
   unresolvedRoadmapProposals,
   type PhasePrimaryAction,
   type RoadmapTopologyMutation,
@@ -66,6 +69,7 @@ export interface NotesPhaseDetailProps {
   onEditPhase(id: string, input: NotesPhaseInput): void;
   onMovePhase(id: string, direction: "up" | "down"): void;
   onChangePhaseStatus(status: NotesPhaseStatus): void;
+  onSetPhaseStatusOverride(status: NotesPhaseStatus): Promise<NotesRoadmapMutationResult>;
   onArchivePhase(): void;
   onDeletePhase?(): void;
   isTopologyMutationBlocked(mutation: RoadmapTopologyMutation): boolean;
@@ -164,6 +168,9 @@ interface NotesPhaseDetailContextValue extends NotesPhaseDetailProps {
   resumedLifecycle: NotesLifecyclePresentation;
   canPauseAutomation: boolean;
   canCancelRun: boolean;
+  canMarkDone: boolean;
+  canReopen: boolean;
+  reopenStatus: NotesPhaseStatus;
   primaryActionRef: RefObject<HTMLButtonElement | null>;
   runPhaseAction(): Promise<void>;
   beginEdit(): void;
@@ -182,12 +189,15 @@ interface NotesPhaseDetailContextValue extends NotesPhaseDetailProps {
   runRoadmapMutation(
     actionKey: string,
     operation: () => Promise<NotesRoadmapMutationResult>,
+    committedMessage?: string,
   ): Promise<void>;
   acceptReferenceProposal(proposalId: string): void;
   rejectReferenceProposal(proposalId: string): void;
   resumeAutomaticStatus(): void;
   resumeAutomaticReferences(): void;
   runCancellation(): Promise<void>;
+  markPhaseDone(): void;
+  reopenPhase(): void;
 }
 
 const NotesPhaseDetailContext = createContext<NotesPhaseDetailContextValue | null>(null);
@@ -206,6 +216,7 @@ export function NotesPhaseDetailProvider({
     onRejectReferenceProposal,
     onResumeAutomaticStatus,
     onResumeAutomaticReferences,
+    onSetPhaseStatusOverride,
     onScheduleReminder,
     onSnoozeReminder,
     onDismissReminder,
@@ -264,6 +275,9 @@ export function NotesPhaseDetailProvider({
       phase.status === "waiting-for-approval" ||
       phase.status === "in-progress" ||
       phase.status === "review");
+  const canMarkDone = phase.status !== "done" && phase.status !== "cancelled";
+  const canReopen = isManuallyDone(phase);
+  const reopenStatus = statusBeforeManualDone(phase);
   const phaseStartDisabled =
     (effectiveAction === "Start" || effectiveAction === "Recover") &&
     startUnavailableReason !== null;
@@ -375,6 +389,7 @@ export function NotesPhaseDetailProvider({
   const runRoadmapMutation = async (
     actionKey: string,
     operation: () => Promise<NotesRoadmapMutationResult>,
+    committedMessage?: string,
   ): Promise<void> => {
     if (controlsDisabled) return;
     setPendingRoadmapAction(actionKey);
@@ -383,7 +398,10 @@ export function NotesPhaseDetailProvider({
     setActionStatus("Saving Roadmap change…");
     try {
       const result = await operation();
-      const message = roadmapMutationMessage(result);
+      const message =
+        result.status === "committed" && committedMessage !== undefined
+          ? committedMessage
+          : roadmapMutationMessage(result);
       if (result.status === "failed" || result.status === "decision-conflict") {
         setActionError(message);
         setActionStatus("");
@@ -526,6 +544,9 @@ export function NotesPhaseDetailProvider({
     resumedLifecycle,
     canPauseAutomation,
     canCancelRun,
+    canMarkDone,
+    canReopen,
+    reopenStatus,
     primaryActionRef,
     runPhaseAction,
     beginEdit,
@@ -576,6 +597,23 @@ export function NotesPhaseDetailProvider({
       void runRoadmapMutation("resume-references", () => onResumeAutomaticReferences(phase.id));
     },
     runCancellation,
+    markPhaseDone: () => {
+      // A live run would keep working on a phase already recorded as finished.
+      if (controlsDisabled || !canMarkDone || canCancelRun) return;
+      void runRoadmapMutation(
+        "mark-done",
+        () => onSetPhaseStatusOverride("done"),
+        `Marked ${phase.title} as Done.`,
+      );
+    },
+    reopenPhase: () => {
+      if (controlsDisabled || !canReopen) return;
+      void runRoadmapMutation(
+        "reopen",
+        () => onSetPhaseStatusOverride(reopenStatus),
+        `Reopened ${phase.title} as ${statusLabel(reopenStatus)}.`,
+      );
+    },
   };
 
   return (

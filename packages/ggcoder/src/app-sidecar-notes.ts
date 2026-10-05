@@ -1,7 +1,9 @@
 import type http from "node:http";
 import {
   isPhaseDeletionRequest,
+  isUserPhaseStatusOverrideRequest,
   type PhaseDeletionOutcome,
+  type UserPhaseStatusOverrideOutcome,
 } from "@kenkaiiii/gg-core/project-notes";
 import {
   AppSidecarJsonBodyError,
@@ -25,7 +27,10 @@ import {
 export const NOTES_REQUEST_BODY_MAX_BYTES = 4 * 1024 * 1024;
 
 export interface AppSidecarNotesHandlerOptions {
-  repository: Pick<ProjectNotesRepository, "load" | "migrate" | "save" | "resolveRoadmapBlocker">;
+  repository: Pick<
+    ProjectNotesRepository,
+    "load" | "migrate" | "save" | "resolveRoadmapBlocker" | "recordUserPhaseStatusOverride"
+  >;
   phaseDeletion?: {
     execute(
       input: unknown,
@@ -64,6 +69,7 @@ export function createAppSidecarNotesHandler(
         pathname === "/notes" ||
         pathname === "/notes/diagnostics" ||
         pathname === "/notes/phase-deletion" ||
+        pathname === "/notes/phase-status" ||
         pathname === "/notes/migrate" ||
         pathname === "/notes/roadmap/blocker-resolution";
       if (!isNotesRoute) return false;
@@ -82,6 +88,21 @@ export function createAppSidecarNotesHandler(
                   message: "Phase deletion is unavailable in this session.",
                 };
             sendJson(res, 200, outcome);
+          })
+          .catch((error) => sendBodyReadError(res, error, onError));
+        return true;
+      }
+
+      if (method === "POST" && pathname === "/notes/phase-status") {
+        void readJsonBody(req, 16 * 1024)
+          .then(async (body) => {
+            if (!isUserPhaseStatusOverrideRequest(body)) {
+              sendJson(res, 400, invalidBody());
+              return;
+            }
+            const outcome = await repository.recordUserPhaseStatusOverride(context.cwd, body);
+            if (outcome.status === "committed") onCommittedSnapshot(outcome.snapshot);
+            sendPhaseStatusOverrideOutcome(res, outcome);
           })
           .catch((error) => sendBodyReadError(res, error, onError));
         return true;
@@ -198,6 +219,14 @@ function sendBlockerResolutionOutcome(
         ? 409
         : 200;
   sendJson(res, status, outcome);
+}
+
+/** Every typed outcome, including refusals, is a successful exchange (like phase deletion). */
+function sendPhaseStatusOverrideOutcome(
+  res: http.ServerResponse,
+  outcome: UserPhaseStatusOverrideOutcome,
+): void {
+  sendJson(res, 200, outcome);
 }
 
 function sendSaveOutcome(res: http.ServerResponse, outcome: ProjectNotesSaveOutcome): void {

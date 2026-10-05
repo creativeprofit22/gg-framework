@@ -17,6 +17,8 @@ import {
   phaseDeletionFingerprint,
   type PhaseDeletionRequest,
   type PhaseDeletionOutcome,
+  type UserPhaseStatusOverrideOutcome,
+  type UserPhaseStatusOverrideRequest,
   canonicalProjectKey,
   canonicalReferenceIdentity,
   classifyLegacyNotesLifecycleEvent,
@@ -865,6 +867,26 @@ function validateGenericSaveReminderAuthority(
     }
   }
   return null;
+}
+
+/** Mirrors the desktop rule: a bound session in an active status must be cancelled first. */
+function hasLiveUserCancellableRun(phase: NotesPhase): boolean {
+  const session = phase.execution?.lastSession ?? phase.session;
+  return (
+    session !== null &&
+    (phase.status === "planning" ||
+      phase.status === "waiting-for-approval" ||
+      phase.status === "in-progress" ||
+      phase.status === "review")
+  );
+}
+
+function committedStatusOverride(
+  stored: StoredProjectNotes,
+  phaseId: string,
+  resultingStatus: NotesPhaseStatus,
+): UserPhaseStatusOverrideOutcome {
+  return { status: "committed", phaseId, resultingStatus, snapshot: toSnapshot(stored) };
 }
 
 function chronologicalLifecycleTimestamp(phase: NotesPhase, requested: string): string {
@@ -2905,6 +2927,106 @@ export class ProjectNotesRepository {
         phase: structuredClone(phase),
       };
     });
+  }
+
+  /**
+   * The only path for a user to mark a phase Done by hand (`status: "done"`) or to
+   * reopen a phase they previously marked Done (any other status). Generic saves
+   * cannot change completion state; agent/system completion is never reopened here.
+   */
+  async recordUserPhaseStatusOverride(
+    cwd: string,
+    request: UserPhaseStatusOverrideRequest,
+  ): Promise<UserPhaseStatusOverrideOutcome> {
+    if (!Number.isFinite(Date.parse(request.timestamp))) {
+      throw new Error("Cannot change a phase status with an invalid timestamp.");
+    }
+    if (!isNotesPhaseStatus(request.status)) {
+      throw new Error("Cannot change a phase to an unknown status.");
+    }
+    const outcome = await this.withLockedCurrent(
+      cwd,
+      async (paths, current): Promise<UserPhaseStatusOverrideOutcome> => {
+        if (request.expectedRevision !== null && request.expectedRevision !== current.revision) {
+          return { status: "stale-revision", snapshot: toSnapshot(current) };
+        }
+        const phaseIndex = current.document.phases.findIndex(
+          (phase) => phase.id === request.phaseId,
+        );
+        if (phaseIndex < 0) return { status: "phase-not-found" };
+        const currentPhase = current.document.phases[phaseIndex]!;
+        if (isNotesPhaseDeleted(currentPhase)) return { status: "phase-not-found" };
+        if (currentPhase.archivedAt !== null) return { status: "phase-archived" };
+        const manuallyDone =
+          currentPhase.status === "done" && currentPhase.overrides.status?.value === "done";
+
+        if (request.status === "done") {
+          if (manuallyDone) {
+            return committedStatusOverride(current, request.phaseId, "done");
+          }
+          if (currentPhase.status === "done" || currentPhase.status === "cancelled") {
+            return {
+              status: "refused",
+              reason: "terminal-status",
+              message: "This phase has already finished.",
+            };
+          }
+          if (hasLiveUserCancellableRun(currentPhase)) {
+            return {
+              status: "refused",
+              reason: "active-execution",
+              message: "Cancel the run before marking this phase done.",
+            };
+          }
+        } else if (!manuallyDone) {
+          return {
+            status: "refused",
+            reason: "not-manually-done",
+            message: "Only a phase you marked Done by hand can be reopened.",
+          };
+        }
+
+        const document = structuredClone(current.document);
+        const phase = document.phases[phaseIndex]!;
+        const timestamp = chronologicalLifecycleTimestamp(phase, request.timestamp);
+        const fromStatus = phase.status;
+        phase.status = request.status;
+        phase.attentionReason = null;
+        phase.completedAt = request.status === "done" ? timestamp : null;
+        phase.updatedAt = timestamp;
+        phase.pendingAutomaticLifecycleTransition = null;
+        phase.overrides.status = { value: request.status, source: "user", updatedAt: timestamp };
+        phase.lifecycleEvents.push({
+          id: this.createId(),
+          fromStatus,
+          toStatus: request.status,
+          source: "user",
+          timestamp,
+          reason:
+            request.status === "done" ? "Phase marked Done by user" : "Phase reopened by user",
+          kind: "other",
+        });
+        document.updatedAt = timestamp;
+        if (validateGenericSaveAdvancementAuthority(current.document, document) !== null) {
+          return {
+            status: "refused",
+            reason: "protected-advancement",
+            message:
+              "A pending phase advancement depends on this phase. Finish or resolve it first.",
+          };
+        }
+        const next = await this.commitDocument(paths, current, document, {
+          validationMode: "validated",
+          context: "User phase status override commit",
+        });
+        return committedStatusOverride(next, request.phaseId, request.status);
+      },
+    );
+    if (outcome.status === "unsupported") {
+      return { status: "unavailable", message: "Notes were saved by a newer app version." };
+    }
+    if (outcome.status === "corrupt") return { status: "corrupt" };
+    return outcome;
   }
 
   async recordPhaseLifecycleTransition(

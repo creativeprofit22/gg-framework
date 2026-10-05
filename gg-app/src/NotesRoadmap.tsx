@@ -55,6 +55,10 @@ interface RoadmapProps {
   onEditPhase(id: string, input: NotesPhaseInput): void;
   onMovePhase(id: string, direction: "up" | "down"): void;
   onChangePhaseStatus(id: string, status: NotesPhaseStatus): void;
+  onSetPhaseStatusOverride(
+    id: string,
+    status: NotesPhaseStatus,
+  ): Promise<NotesRoadmapMutationResult>;
   onArchivePhase(id: string): void;
   /** `onDeleted` runs when that deletion commits, so the caller can retire a selection. */
   onDeletePhase?(id: string, onDeleted?: () => void): void;
@@ -133,6 +137,7 @@ export function NotesRoadmap({
   onEditPhase,
   onMovePhase,
   onChangePhaseStatus,
+  onSetPhaseStatusOverride,
   onArchivePhase,
   onDeletePhase,
   onLinkReferenceToPhase,
@@ -338,6 +343,14 @@ export function NotesRoadmap({
               ? `Paused automation for ${selectedPhase.title}`
               : `Changed ${selectedPhase.title} to ${statusLabel(status)}`,
           );
+        },
+        onSetPhaseStatusOverride: async (status) => {
+          const title = selectedPhase.title;
+          const result = await onSetPhaseStatusOverride(selectedPhase.id, status);
+          if (result.status === "committed") {
+            setAnnouncement(`Changed ${title} to ${statusLabel(status)}`);
+          }
+          return result;
         },
         isTopologyMutationBlocked: (mutation) => isRoadmapTopologyMutationBlocked(phases, mutation),
         // A deliberate delete leaves the list the way Archive does: selection is cleared

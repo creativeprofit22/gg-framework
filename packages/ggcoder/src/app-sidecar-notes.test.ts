@@ -630,6 +630,63 @@ describe("app sidecar Notes routes", () => {
     expect(sessions.get("other")!.events).toHaveLength(0);
   });
 
+  it("records manual Done and Reopen through the dedicated phase-status route", async () => {
+    const document = notes("phase status route");
+    document.phases[0]!.status = "review";
+    document.phases[0]!.session = null;
+    await request("a", "/notes/migrate", { method: "POST", body: JSON.stringify({ document }) });
+    const body = (status: string, timestamp: string) =>
+      JSON.stringify({ version: 1, phaseId: "phase-1", status, expectedRevision: null, timestamp });
+
+    const done = await request("a", "/notes/phase-status", {
+      method: "POST",
+      body: body("done", "2026-07-25T13:00:00.000Z"),
+    });
+    expect(done.response.status).toBe(200);
+    expect(done.body).toMatchObject({
+      status: "committed",
+      resultingStatus: "done",
+      snapshot: {
+        revision: 2,
+        document: {
+          phases: [
+            {
+              status: "done",
+              completedAt: "2026-07-25T13:00:00.000Z",
+              overrides: { status: { value: "done", source: "user" } },
+            },
+          ],
+        },
+      },
+    });
+    expect(committedSnapshots.at(-1)).toMatchObject({ revision: 2 });
+    expect(sessions.get("alias")!.events).toHaveLength(2);
+
+    const reopened = await request("a", "/notes/phase-status", {
+      method: "POST",
+      body: body("review", "2026-07-25T13:05:00.000Z"),
+    });
+    expect(reopened.body).toMatchObject({
+      status: "committed",
+      resultingStatus: "review",
+      snapshot: { revision: 3, document: { phases: [{ status: "review", completedAt: null }] } },
+    });
+
+    const refused = await request("a", "/notes/phase-status", {
+      method: "POST",
+      body: body("planning", "2026-07-25T13:10:00.000Z"),
+    });
+    expect(refused.response.status).toBe(200);
+    expect(refused.body).toMatchObject({ status: "refused", reason: "not-manually-done" });
+    expect(committedSnapshots.at(-1)).toMatchObject({ revision: 3 });
+
+    const invalid = await request("a", "/notes/phase-status", {
+      method: "POST",
+      body: JSON.stringify({ phaseId: "phase-1", status: "done" }),
+    });
+    expect(invalid.response.status).toBe(400);
+  });
+
   it("rejects duplicate occurrence keys at the migration route without persisting or broadcasting", async () => {
     const document = notes("duplicate occurrence route");
     document.phases[0]!.reminder = {

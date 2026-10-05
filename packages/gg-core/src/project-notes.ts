@@ -4,6 +4,7 @@ import {
   type NotesPhaseDeletion,
 } from "./roadmap-phase-deletion.js";
 export * from "./roadmap-phase-deletion.js";
+export * from "./roadmap-phase-status-override.js";
 
 export type NotesTaskStatus = "todo" | "done";
 

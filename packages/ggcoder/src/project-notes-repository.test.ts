@@ -796,6 +796,233 @@ describe("ProjectNotesRepository phase launch transaction", () => {
     },
   );
 
+  it("starts the next phase after the previous one was manually marked Done", async () => {
+    const agentDir = await tempAgentDir();
+    const cwd = path.join(agentDir, "manual-done-successor");
+    const document = notes();
+    const previous = document.phases[0]!;
+    previous.status = "done";
+    previous.session = null;
+    previous.completedAt = NOW;
+    previous.overrides.status = { value: "done", source: "user", updatedAt: NOW };
+    previous.lifecycleEvents = [
+      {
+        id: "manual-done",
+        fromStatus: "in-progress",
+        toStatus: "done",
+        source: "user",
+        timestamp: NOW,
+        reason: null,
+        kind: "other",
+      },
+    ];
+    previous.roadmapEvents = [];
+    document.phases.push({
+      ...structuredClone(previous),
+      id: "phase-2",
+      title: "Next phase",
+      order: 1,
+      status: "not-started",
+      reminder: null,
+      completedAt: null,
+      overrides: { status: null, referenceIds: null },
+      lifecycleEvents: [],
+    });
+    const repository = new ProjectNotesRepository(agentDir);
+    await expect(repository.migrate(cwd, document)).resolves.toMatchObject({ status: "ok" });
+
+    const launched = await repository.launchPhase(cwd, "phase-2", async () => ({
+      sessionId: "next-session",
+      sessionPath: "/sessions/next.jsonl",
+    }));
+
+    expect(launched).toMatchObject({
+      status: "accepted",
+      phase: { id: "phase-2", status: "planning", session: { sessionId: "next-session" } },
+    });
+  });
+
+  describe("user phase status override (manual Done / Reopen)", () => {
+    const LATER = "2026-07-25T13:00:00.000Z";
+
+    function reviewWithSuccessor(): NotesDocumentV3 {
+      const document = notes();
+      const first = document.phases[0]!;
+      first.status = "review";
+      first.session = null;
+      first.overrides.status = null;
+      first.roadmapEvents = [];
+      first.lifecycleEvents = [
+        {
+          id: "to-review",
+          fromStatus: "in-progress",
+          toStatus: "review",
+          source: "session",
+          timestamp: NOW,
+          reason: null,
+          kind: "other",
+        },
+      ];
+      document.phases.push({
+        ...structuredClone(first),
+        id: "phase-2",
+        title: "Next phase",
+        order: 1,
+        status: "not-started",
+        reminder: null,
+        lifecycleEvents: [],
+      });
+      return document;
+    }
+
+    async function seeded(name: string, document: NotesDocumentV3) {
+      const agentDir = await tempAgentDir();
+      const cwd = path.join(agentDir, name);
+      const repository = new ProjectNotesRepository(agentDir);
+      await expect(repository.migrate(cwd, document)).resolves.toMatchObject({ status: "ok" });
+      return { cwd, repository };
+    }
+
+    it("marks a phase Done by hand, records a user event, and lets the next phase launch", async () => {
+      const { cwd, repository } = await seeded("manual-done-route", reviewWithSuccessor());
+
+      const outcome = await repository.recordUserPhaseStatusOverride(cwd, {
+        version: 1,
+        phaseId: "phase-1",
+        status: "done",
+        expectedRevision: null,
+        timestamp: LATER,
+      });
+
+      expect(outcome).toMatchObject({ status: "committed", resultingStatus: "done" });
+      const loaded = await repository.load(cwd);
+      if (loaded.status !== "ok") throw new Error("expected stored notes");
+      const stored = loaded.snapshot.document.phases[0]!;
+      expect(stored).toMatchObject({
+        status: "done",
+        completedAt: LATER,
+        attentionReason: null,
+        pendingAutomaticLifecycleTransition: null,
+        overrides: { status: { value: "done", source: "user" } },
+      });
+      expect(stored.lifecycleEvents.at(-1)).toMatchObject({
+        fromStatus: "review",
+        toStatus: "done",
+        source: "user",
+        timestamp: LATER,
+      });
+
+      await expect(
+        repository.launchPhase(cwd, "phase-2", async () => ({
+          sessionId: "next-session",
+          sessionPath: "/sessions/next.jsonl",
+        })),
+      ).resolves.toMatchObject({
+        status: "accepted",
+        phase: { id: "phase-2", status: "planning" },
+      });
+    });
+
+    it("refuses manual Done while a run is bound to the phase", async () => {
+      const document = reviewWithSuccessor();
+      document.phases[0]!.session = { sessionId: "live", sessionPath: "/sessions/live.jsonl" };
+      const { cwd, repository } = await seeded("manual-done-live", document);
+      const before = await repository.load(cwd);
+
+      await expect(
+        repository.recordUserPhaseStatusOverride(cwd, {
+          version: 1,
+          phaseId: "phase-1",
+          status: "done",
+          expectedRevision: null,
+          timestamp: LATER,
+        }),
+      ).resolves.toMatchObject({ status: "refused", reason: "active-execution" });
+      await expect(repository.load(cwd)).resolves.toEqual(before);
+    });
+
+    it("reopens a manual Done to the requested status and clears completion", async () => {
+      const { cwd, repository } = await seeded("manual-reopen", reviewWithSuccessor());
+      await repository.recordUserPhaseStatusOverride(cwd, {
+        version: 1,
+        phaseId: "phase-1",
+        status: "done",
+        expectedRevision: null,
+        timestamp: LATER,
+      });
+
+      const outcome = await repository.recordUserPhaseStatusOverride(cwd, {
+        version: 1,
+        phaseId: "phase-1",
+        status: "review",
+        expectedRevision: null,
+        timestamp: "2026-07-25T13:05:00.000Z",
+      });
+
+      expect(outcome).toMatchObject({ status: "committed", resultingStatus: "review" });
+      if (outcome.status !== "committed") throw new Error("expected commit");
+      const stored = outcome.snapshot.document.phases[0]!;
+      expect(stored).toMatchObject({
+        status: "review",
+        completedAt: null,
+        overrides: { status: { value: "review", source: "user" } },
+      });
+      expect(stored.lifecycleEvents.at(-1)).toMatchObject({
+        fromStatus: "done",
+        toStatus: "review",
+        source: "user",
+      });
+    });
+
+    it("refuses to reopen an agent or system Done", async () => {
+      const document = reviewWithSuccessor();
+      document.phases[0]!.status = "done";
+      document.phases[0]!.completedAt = NOW;
+      document.phases[0]!.overrides.status = null;
+      document.phases[0]!.lifecycleEvents[0]!.toStatus = "done";
+      document.phases[0]!.lifecycleEvents[0]!.source = "agent";
+      const { cwd, repository } = await seeded("agent-done-reopen", document);
+      const before = await repository.load(cwd);
+
+      await expect(
+        repository.recordUserPhaseStatusOverride(cwd, {
+          version: 1,
+          phaseId: "phase-1",
+          status: "review",
+          expectedRevision: null,
+          timestamp: LATER,
+        }),
+      ).resolves.toMatchObject({ status: "refused", reason: "not-manually-done" });
+      await expect(repository.load(cwd)).resolves.toEqual(before);
+    });
+
+    it("reports stale revisions, missing and archived phases without writing", async () => {
+      const document = reviewWithSuccessor();
+      document.phases[1]!.archivedAt = NOW;
+      const { cwd, repository } = await seeded("manual-done-guards", document);
+      const request = {
+        version: 1 as const,
+        status: "done" as const,
+        expectedRevision: null,
+        timestamp: LATER,
+      };
+
+      await expect(
+        repository.recordUserPhaseStatusOverride(cwd, {
+          ...request,
+          phaseId: "phase-1",
+          expectedRevision: 99,
+        }),
+      ).resolves.toMatchObject({ status: "stale-revision" });
+      await expect(
+        repository.recordUserPhaseStatusOverride(cwd, { ...request, phaseId: "ghost" }),
+      ).resolves.toEqual({ status: "phase-not-found" });
+      await expect(
+        repository.recordUserPhaseStatusOverride(cwd, { ...request, phaseId: "phase-2" }),
+      ).resolves.toEqual({ status: "phase-archived" });
+    });
+  });
+
   it("rejects a terminal Done phase before candidate creation and leaves its binding untouched", async () => {
     const agentDir = await tempAgentDir();
     const cwd = path.join(agentDir, "done-launch");

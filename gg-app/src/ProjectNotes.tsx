@@ -66,6 +66,8 @@ interface NotesPersistenceStatus {
 export interface ProjectNotesPromptActions {
   listDestinations(): KenPromptSaveDestination[];
   savePrompt(input: NotesPromptSaveInput): Promise<NotesPromptSaveResult>;
+  /** Re-read authoritative Notes, e.g. after a commit whose push event may be lost. */
+  refresh(): void;
 }
 
 export const ProjectNotes = forwardRef<ProjectNotesPromptActions, Props>(function ProjectNotes(
@@ -123,6 +125,7 @@ export const ProjectNotes = forwardRef<ProjectNotesPromptActions, Props>(functio
     editPhase,
     movePhase,
     changePhaseStatus,
+    setPhaseStatusOverride,
     archivePhase,
     restorePhase,
     preparePhaseDeletion,
@@ -269,8 +272,9 @@ export const ProjectNotes = forwardRef<ProjectNotesPromptActions, Props>(functio
             sourcePrompt: phase.sourcePrompt,
           })),
       savePrompt,
+      refresh,
     }),
-    [notesDocument.phases, savePrompt],
+    [notesDocument.phases, savePrompt, refresh],
   );
 
   const activeReminder = reminderQueue[0] ?? null;
@@ -433,6 +437,7 @@ export const ProjectNotes = forwardRef<ProjectNotesPromptActions, Props>(functio
             onEditPhase={editPhase}
             onMovePhase={movePhase}
             onChangePhaseStatus={changePhaseStatus}
+            onSetPhaseStatusOverride={setPhaseStatusOverride}
             onArchivePhase={archivePhase}
             phaseDeletionBridge={{ prepare: preparePhaseDeletion, mutate: mutatePhaseDeletion }}
             onRestorePhase={restorePhase}

@@ -2,6 +2,8 @@ import {
   isNotesDocumentV3,
   type PhaseDeletionRequest,
   type PhaseDeletionOutcome,
+  type UserPhaseStatusOverrideOutcome,
+  type UserPhaseStatusOverrideRequest,
   isNullableNotesSessionLink,
   NOTES_REMINDER_NOTE_MAX_LENGTH,
   type NotesDocumentV3,
@@ -274,7 +276,7 @@ export type NotesRoadmapMutationResult =
   | { status: "missing-phase"; phaseId: string }
   | { status: "archived-phase"; phaseId: string }
   | { status: "missing-proposal"; phaseId: string; proposalId: string }
-  | { status: "failed"; reason: NotesOperationFailureReason };
+  | { status: "failed"; reason: NotesOperationFailureReason; message?: string };
 
 export type NotesPromptSaveInput =
   | { kind: "new-draft"; title: string; prompt: string }
@@ -378,6 +380,10 @@ export type { PhaseDeletionRequest, PhaseDeletionOutcome } from "@kenkaiiii/gg-c
 
 export interface NotesClient {
   mutatePhaseDeletion?(request: PhaseDeletionRequest): Promise<PhaseDeletionOutcome>;
+  /** Dedicated daemon path for a user's manual Done/Reopen; generic saves refuse both. */
+  changePhaseStatusOverride?(
+    request: UserPhaseStatusOverrideRequest,
+  ): Promise<UserPhaseStatusOverrideOutcome>;
   getNotes(): Promise<ProjectNotesReadOutcome>;
   getNotesDiagnostics(): Promise<ProjectNotesStorageDiagnostics>;
   bindRoadmapPhase(request: PhaseBindingRequest): Promise<PhaseBindingOutcome>;

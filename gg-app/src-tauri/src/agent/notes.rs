@@ -11,8 +11,40 @@ pub async fn agent_notes_phase_deletion(
     let port = crate::port_for(&webview).ok_or("daemon not ready")?;
     let session = crate::pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
     let response = deletion_request(&client, port, &session, request)
-        .send().await.map_err(|error| error.to_string())?;
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
     crate::notes_response(response).await
+}
+
+/// Native-only pane/session routing for a user's manual Done/Reopen. The daemon owns
+/// eligibility (live runs, protected advancement, agent completion) and persistence.
+#[tauri::command]
+pub async fn agent_notes_phase_status(
+    webview: WebviewWindow,
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
+    request: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let port = crate::port_for(&webview).ok_or("daemon not ready")?;
+    let session = crate::pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
+    let response = phase_status_request(&client, port, &session, request)
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    crate::notes_response(response).await
+}
+
+fn phase_status_request(
+    client: &reqwest::Client,
+    port: u16,
+    session: &str,
+    request: serde_json::Value,
+) -> reqwest::RequestBuilder {
+    client
+        .post(format!("{}/notes/phase-status", crate::sidecar_base(port)))
+        .header("x-gg-session", session)
+        .json(&request)
 }
 
 fn deletion_request(
@@ -21,7 +53,11 @@ fn deletion_request(
     session: &str,
     request: serde_json::Value,
 ) -> reqwest::RequestBuilder {
-    client.post(format!("{}/notes/phase-deletion", crate::sidecar_base(port)))
+    client
+        .post(format!(
+            "{}/notes/phase-deletion",
+            crate::sidecar_base(port)
+        ))
         .header("x-gg-session", session)
         .json(&request)
 }
@@ -37,10 +73,39 @@ mod tests {
             "expectedGeneration": 1});
         let _ = rustls::crypto::ring::default_provider().install_default();
         let client = reqwest::Client::builder().build().unwrap();
-        let request = deletion_request(&client, 1421, "native-session", payload.clone()).build().unwrap();
+        let request = deletion_request(&client, 1421, "native-session", payload.clone())
+            .build()
+            .unwrap();
         assert_eq!(request.method(), reqwest::Method::POST);
         assert_eq!(request.url().path(), "/notes/phase-deletion");
         assert_eq!(request.headers()["x-gg-session"], "native-session");
-        assert_eq!(serde_json::from_slice::<serde_json::Value>(request.body().unwrap().as_bytes().unwrap()).unwrap(), payload);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(
+                request.body().unwrap().as_bytes().unwrap()
+            )
+            .unwrap(),
+            payload
+        );
+    }
+
+    #[test]
+    fn notes_phase_status_proxy_preserves_request_and_native_session() {
+        let payload = serde_json::json!({"version": 1, "phaseId": "phase-1", "status": "done",
+            "expectedRevision": 4, "timestamp": "2026-10-05T00:00:00.000Z"});
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let client = reqwest::Client::builder().build().unwrap();
+        let request = phase_status_request(&client, 1421, "native-session", payload.clone())
+            .build()
+            .unwrap();
+        assert_eq!(request.method(), reqwest::Method::POST);
+        assert_eq!(request.url().path(), "/notes/phase-status");
+        assert_eq!(request.headers()["x-gg-session"], "native-session");
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(
+                request.body().unwrap().as_bytes().unwrap()
+            )
+            .unwrap(),
+            payload
+        );
     }
 }

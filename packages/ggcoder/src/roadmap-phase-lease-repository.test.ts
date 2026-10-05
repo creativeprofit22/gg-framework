@@ -431,3 +431,148 @@ describe("roadmap phase lease repository", () => {
     ).toMatchObject({ status: "phase-lease-held" });
   });
 });
+
+describe("compaction session rotation (regression: orphaned phase leases)", () => {
+  // Compaction checkpoints give the SAME live session a new session id/path.
+  const rotatedA: RoadmapPhaseLeaseHolderV1 = {
+    ...holderA,
+    sessionId: "session-a-compacted",
+    sessionPath: "/sessions/a-compacted.jsonl",
+  };
+
+  async function acquireRunning(leases: RoadmapPhaseLeaseRepository) {
+    const acquired = await leases.execute({
+      cwd,
+      request: request("acquire", "acquire"),
+      holder: holderA,
+      context,
+    });
+    if (acquired.status !== "acquired" || !acquired.lease) throw new Error("expected lease");
+    const token = { leaseId: acquired.lease.leaseId, fence: acquired.lease.fence };
+    await leases.execute({
+      cwd,
+      request: request("renew", "running", token),
+      holder: holderA,
+      context,
+      runState: "running",
+    });
+    return token;
+  }
+
+  it("hands the lease to the compacted session without changing its fence", async () => {
+    const leases = repository();
+    const token = await acquireRunning(leases);
+
+    const rotated = await leases.rotateHolderSession({
+      cwd,
+      phaseId: context.phaseId,
+      holder: rotatedA,
+      predecessorSessionIds: [holderA.sessionId],
+      token,
+    });
+
+    expect(rotated).toMatchObject({
+      status: "rotated",
+      lease: { ...token, runState: "running", holder: publicHolder(rotatedA) },
+    });
+    await expect(
+      leases.withFence({ cwd, phaseId: context.phaseId, token, holder: rotatedA }, async () => 1),
+    ).resolves.toEqual({ status: "executed", value: 1 });
+    await expect(
+      leases.withFence({ cwd, phaseId: context.phaseId, token, holder: holderA }, async () => 1),
+    ).resolves.toMatchObject({ status: "phase-lease-lost" });
+    await expect(
+      leases.execute({
+        cwd,
+        request: request("renew", "renew-rotated", token),
+        holder: rotatedA,
+        context,
+      }),
+    ).resolves.toMatchObject({ status: "renewed" });
+  });
+
+  it("is idempotent once the lease already names the current session", async () => {
+    const leases = repository();
+    const token = await acquireRunning(leases);
+    const input = {
+      cwd,
+      phaseId: context.phaseId,
+      holder: rotatedA,
+      predecessorSessionIds: [holderA.sessionId],
+      token,
+    };
+    expect((await leases.rotateHolderSession(input)).status).toBe("rotated");
+    expect((await leases.rotateHolderSession(input)).status).toBe("unchanged");
+  });
+
+  it.each([
+    ["another process", { ...rotatedA, processId: 999 }, [holderA.sessionId], null],
+    ["another daemon", { ...rotatedA, daemonInstanceId: "daemon-z" }, [holderA.sessionId], null],
+    ["a session outside the compaction lineage", rotatedA, ["unrelated-session"], null],
+    ["a stale fence", rotatedA, [holderA.sessionId], { fence: 99 }],
+  ] as const)("refuses to hand the lease to %s", async (_label, holder, lineage, tokenPatch) => {
+    const leases = repository();
+    const token = { ...(await acquireRunning(leases)), ...(tokenPatch ?? {}) };
+
+    await expect(
+      leases.rotateHolderSession({
+        cwd,
+        phaseId: context.phaseId,
+        holder,
+        predecessorSessionIds: lineage,
+        token,
+      }),
+    ).resolves.toMatchObject({
+      status: "phase-lease-lost",
+      currentLease: { holder: publicHolder(holderA) },
+    });
+  });
+
+  describe("orphan recovery inside a live process", () => {
+    const sibling = { ...holderA, sessionId: "session-a2", sessionPath: "/sessions/a2.jsonl" };
+
+    function processWith(liveSessionIds: readonly string[]) {
+      return new RoadmapPhaseLeaseRepository(agentDir, {
+        now: () => new Date(now),
+        createId: () => `lease-${++id}`,
+        processLiveness: async () => "alive",
+        hasLiveLocalSession: (holder) => liveSessionIds.includes(holder.sessionId),
+      });
+    }
+
+    it("reclaims an expired running lease whose session is no longer live", async () => {
+      const leases = processWith([sibling.sessionId]);
+      await acquireRunning(leases);
+
+      await expect(
+        leases.execute({ cwd, request: request("acquire", "too-early"), holder: sibling, context }),
+      ).resolves.toMatchObject({ status: "phase-lease-held" });
+
+      now += PHASE_LEASE_TTL_MS + 1;
+      await expect(
+        leases.execute({ cwd, request: request("acquire", "reclaim"), holder: sibling, context }),
+      ).resolves.toMatchObject({
+        status: "acquired",
+        lease: { fence: 2, holder: publicHolder(sibling) },
+      });
+    });
+
+    it("keeps protecting an expired lease whose session is still live", async () => {
+      const leases = processWith([holderA.sessionId, sibling.sessionId]);
+      await acquireRunning(leases);
+      now += PHASE_LEASE_TTL_MS + 1;
+      await expect(
+        leases.execute({ cwd, request: request("acquire", "steal"), holder: sibling, context }),
+      ).resolves.toMatchObject({ status: "phase-lease-held" });
+    });
+
+    it("never applies to a lease recorded by another live process", async () => {
+      const leases = processWith([holderB.sessionId]);
+      await acquireRunning(leases);
+      now += PHASE_LEASE_TTL_MS + 1;
+      await expect(
+        leases.execute({ cwd, request: request("acquire", "foreign"), holder: holderB, context }),
+      ).resolves.toMatchObject({ status: "phase-lease-held" });
+    });
+  });
+});

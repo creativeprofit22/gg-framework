@@ -178,6 +178,82 @@ export function committedReleaseNotes(root, runGit = (args) => gitBytes(root, ar
   return releaseNotesEnvelope(sourceRevision, parsed);
 }
 
+/**
+ * Local Fork rebuild gate: agents must be able to keep a claimed Roadmap phase
+ * and record its status after the conversation compacts. Each file must still
+ * contain its regression marker (so the guard cannot be silently deleted) and
+ * must pass before this script bundles the sidecar or packages an installer
+ * (build:local-patched, build:local-hotfix, and the local-update workflow all
+ * run through here). Running bundle:sidecar directly, and upstream CI/release
+ * builds, do not run this gate; they rely on the regular test suite instead.
+ * Paths are relative to packages/ggcoder.
+ */
+export const PHASE_LEASE_REGRESSION_GATE = Object.freeze([
+  Object.freeze({
+    file: "src/roadmap-phase-lease-repository.test.ts",
+    marker: "compaction session rotation (regression: orphaned phase leases)",
+  }),
+  Object.freeze({
+    file: "src/app-sidecar-phase-binding.test.ts",
+    marker: "compaction keeps phase ownership (regression: orphaned leases)",
+  }),
+  Object.freeze({
+    file: "src/core/agent-session-compaction.test.ts",
+    marker: "carries the Roadmap phase lease marker into the compaction checkpoint (regression)",
+  }),
+  // Exercises the daemon's own wiring (orphan-recovery predicate and the
+  // compaction_end hand-off) compiled from app-sidecar.ts, which the unit
+  // tests above cannot see because they construct their own options.
+  Object.freeze({
+    file: "src/app-sidecar-phase-lease-wiring.test.ts",
+    marker: "daemon phase-lease wiring (regression: orphaned leases after compaction)",
+  }),
+]);
+
+/** Returns the gate entries whose file or regression marker is missing. */
+export function missingPhaseLeaseRegressionGuards(
+  ggcoderRoot,
+  readText = (path) => readFileSync(path, "utf8"),
+) {
+  return PHASE_LEASE_REGRESSION_GATE.filter(({ file, marker }) => {
+    try {
+      return !readText(join(ggcoderRoot, file)).includes(marker);
+    } catch {
+      return true;
+    }
+  });
+}
+
+export function phaseLeaseRegressionGateArgs() {
+  return [
+    "--filter",
+    "@kenkaiiii/ggcoder",
+    "exec",
+    "vitest",
+    "run",
+    ...PHASE_LEASE_REGRESSION_GATE.map(({ file }) => file),
+  ];
+}
+
+function runPhaseLeaseRegressionGate() {
+  const missing = missingPhaseLeaseRegressionGuards(join(repoRoot, "packages", "ggcoder"));
+  if (missing.length > 0) {
+    console.error(
+      "Build gate failed: Roadmap phase-lease regression tests are missing:\n" +
+        missing.map(({ file, marker }) => `  ${file}: "${marker}"`).join("\n"),
+    );
+    process.exit(1);
+  }
+  const status = run(pnpm, phaseLeaseRegressionGateArgs());
+  if (status !== 0) {
+    console.error(
+      "Build gate failed: agents could lose their Roadmap phase after compaction. " +
+        "Fix the phase-lease regression tests before rebuilding.",
+    );
+    process.exit(status);
+  }
+}
+
 function run(command, args) {
   console.log(`> ${command} ${args.join(" ")}`);
   const result = spawnSync(command, args, {
@@ -502,6 +578,8 @@ async function main() {
   ]) {
     requireSuccess(run(pnpm, ["--filter", packageName, "build"]));
   }
+  // Runs against the freshly built packages, before anything is bundled.
+  runPhaseLeaseRegressionGate();
   requireSuccess(run(pnpm, ["--filter", "gg-app", "bundle:sidecar"]));
   const bundleBuildStartedAt = Date.now();
   const buildStatus = runWithCargoTomlRestored(cargoTomlPath, () =>

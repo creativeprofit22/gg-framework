@@ -23,6 +23,7 @@ import {
 import type { ActivePhaseContextV1 } from "./phase-context.js";
 import { ProjectNotesRepository } from "./project-notes-repository.js";
 import {
+  PHASE_LEASE_RENEW_INTERVAL_MS,
   PHASE_LEASE_TTL_MS,
   RoadmapPhaseLeaseRepository,
 } from "./roadmap-phase-lease-repository.js";
@@ -389,6 +390,7 @@ describe("transparent status leases", () => {
               resolve();
             },
           },
+          catchUpCompactedPhaseLink: async () => observed.push("phase-link-catch-up"),
           settleDeferredPhaseLeaseRelease: async () => false,
           planGate: { pending: () => false },
           approvedPlanPath: null,
@@ -410,6 +412,7 @@ describe("transparent status leases", () => {
           "outcome:completed",
           "cleanup",
           "journal-settled",
+          "phase-link-catch-up",
           "run_end",
           "tasks_list",
           "queued",
@@ -525,6 +528,247 @@ function request(cwd: string, overrides: Partial<PhaseBindingRequest> = {}): Pha
     ...overrides,
   };
 }
+
+/** A live session whose id/path rotate the way a compaction checkpoint rotates them. */
+class CompactingSession extends FakeSession {
+  private current: { sessionId: string; sessionPath: string | null };
+  private readonly predecessors: Array<{ sessionId: string; sessionPath: string | null }> = [];
+
+  constructor(cwd: string, initial: { sessionId: string; sessionPath: string | null }) {
+    super(cwd, initial);
+    this.current = { ...initial };
+  }
+
+  override getState() {
+    return { cwd: this.cwd, ...this.current };
+  }
+
+  compact(next: { sessionId: string; sessionPath: string | null }) {
+    this.predecessors.push({ ...this.current });
+    this.current = { ...next };
+    // Like AgentSession, compaction re-persists the active context under the new id.
+    if (this.active) this.active = { ...this.active, session: { ...next } };
+  }
+
+  getCompactionPredecessorSessions() {
+    return this.predecessors.map((link) => ({ ...link }));
+  }
+}
+
+describe("compaction keeps phase ownership (regression: orphaned leases)", () => {
+  async function claimedPhase(name: string, liveSessionIds?: readonly string[]) {
+    const { cwd, repository, agentDir } = await setup(name);
+    let clock = new Date("2026-10-05T08:00:00.000Z");
+    const leases = new RoadmapPhaseLeaseRepository(agentDir, {
+      now: () => clock,
+      processLiveness: async () => "alive",
+      ...(liveSessionIds
+        ? { hasLiveLocalSession: (holder) => liveSessionIds.includes(holder.sessionId) }
+        : {}),
+    });
+    const service = createAppSidecarPhaseBindingService({
+      repository,
+      leaseRepository: leases,
+      daemonInstanceId: "compaction-daemon",
+      processId: process.pid,
+      processStartToken: "compaction-start",
+    });
+    const session = new CompactingSession(cwd, sessionA);
+    const acquired = await service.lease(leaseRequest(cwd, "claim"), session);
+    if (acquired.status !== "acquired") throw new Error(`Expected lease: ${acquired.status}`);
+    return {
+      cwd,
+      repository,
+      leases,
+      service,
+      session,
+      advance: (ms: number) => {
+        clock = new Date(clock.getTime() + ms);
+      },
+      now: () => clock,
+    };
+  }
+
+  async function renew(
+    service: ReturnType<typeof createAppSidecarPhaseBindingService>,
+    repository: ProjectNotesRepository,
+    session: CompactingSession,
+  ) {
+    const marker = session.leaseMarker!;
+    const loaded = await repository.load(session.cwd);
+    if (loaded.status !== "ok") throw new Error("Expected Notes");
+    return service.lease(
+      {
+        ...leaseRequest(session.cwd, `renew-${Math.random()}`),
+        action: "renew",
+        expectedRevision: loaded.snapshot.revision,
+        planId: marker.planId,
+        lease: { leaseId: marker.leaseId, fence: marker.fence },
+      },
+      session,
+    );
+  }
+
+  async function markDone(
+    service: ReturnType<typeof createAppSidecarPhaseBindingService>,
+    repository: ProjectNotesRepository,
+    session: CompactingSession,
+    at: Date,
+    heldRevision?: number,
+  ) {
+    const before = await repository.load(session.cwd);
+    if (before.status !== "ok") throw new Error("Expected Notes");
+    return service.withStatusLease(session, "phase-1", () =>
+      repository.recordRoadmapStatusUpdate(session.cwd, {
+        updateId: `done-${at.getTime()}`,
+        phaseId: "phase-1",
+        expectedRevision: heldRevision ?? before.snapshot.revision,
+        actor: "gg-coder",
+        transition: "done",
+        progress: "Finished after compaction",
+        verification: "passed",
+        evidence: ["regression suite passed"],
+        blocker: null,
+        requiredExternalAction: null,
+        verificationReason: null,
+        proposedReferences: [],
+        timestamp: at.toISOString(),
+        autopilotEnabled: false,
+      }),
+    );
+  }
+
+  it("keeps renewing the lease after compaction rotates the session id", async () => {
+    const { repository, service, session } = await claimedPhase("compaction-renew");
+    const marker = structuredClone(session.leaseMarker!);
+
+    session.compact(sessionC);
+
+    await expect(renew(service, repository, session)).resolves.toMatchObject({
+      status: "renewed",
+      lease: { leaseId: marker.leaseId, fence: marker.fence },
+    });
+    expect(session.clearReasons).toEqual([]);
+    expect(session.leaseMarker).toMatchObject({ leaseId: marker.leaseId, fence: marker.fence });
+  });
+
+  it("lets the compacted session mark its phase Done without a stale revision", async () => {
+    const { repository, service, session, now } = await claimedPhase("compaction-done");
+
+    session.compact(sessionC);
+    const result = await markDone(service, repository, session, now());
+
+    expect(result).toMatchObject({ status: "executed", value: { status: "committed" } });
+    const after = await repository.load(session.cwd);
+    if (after.status !== "ok") throw new Error("Expected Notes");
+    expect(after.snapshot.document.phases[0]?.status).toBe("done");
+  });
+
+  it("keeps the agent's held Notes revision valid when the compaction event hands off the lease", async () => {
+    const { repository, service, session, now } = await claimedPhase("compaction-held-revision");
+    const held = await repository.load(session.cwd);
+    if (held.status !== "ok") throw new Error("Expected Notes");
+
+    session.compact(sessionC);
+    expect(await service.handOffCompactedSession(session, { moveNotesLink: false })).toBe(
+      "handed-off",
+    );
+
+    const after = await repository.load(session.cwd);
+    if (after.status !== "ok") throw new Error("Expected Notes");
+    expect(after.snapshot.revision).toBe(held.snapshot.revision);
+    await expect(
+      markDone(service, repository, session, now(), held.snapshot.revision),
+    ).resolves.toMatchObject({ status: "executed", value: { status: "committed" } });
+  });
+
+  it("moves the Notes session link at reconciliation after the compaction event hands off the lease", async () => {
+    const { repository, service, session } = await claimedPhase("compaction-event");
+
+    session.compact(sessionC);
+    expect(await service.handOffCompactedSession(session, { moveNotesLink: false })).toBe(
+      "handed-off",
+    );
+    const beforeReconcile = await repository.load(session.cwd);
+    if (beforeReconcile.status !== "ok") throw new Error("Expected Notes");
+    expect(beforeReconcile.snapshot.document.phases[0]?.session).toEqual(sessionA);
+
+    expect(await service.reconcile(session)).toBe("consistent");
+
+    const after = await repository.load(session.cwd);
+    if (after.status !== "ok") throw new Error("Expected Notes");
+    expect(after.snapshot.document.phases[0]?.session).toEqual(sessionC);
+    await expect(markDone(service, repository, session, new Date())).resolves.toMatchObject({
+      status: "executed",
+      value: { status: "committed" },
+    });
+  });
+
+  it("survives repeated compactions and moves the Notes session link with the lease", async () => {
+    const { repository, service, session, advance } = await claimedPhase("compaction-repeat");
+    const sessionD = { sessionId: "session-d", sessionPath: "/sessions/d.jsonl" };
+
+    session.compact(sessionC);
+    advance(PHASE_LEASE_RENEW_INTERVAL_MS);
+    session.compact(sessionD);
+    expect(await service.handOffCompactedSession(session)).toBe("handed-off");
+    expect(await service.handOffCompactedSession(session)).toBe("unchanged");
+
+    advance(PHASE_LEASE_RENEW_INTERVAL_MS);
+    await expect(renew(service, repository, session)).resolves.toMatchObject({
+      status: "renewed",
+    });
+    const after = await repository.load(session.cwd);
+    if (after.status !== "ok") throw new Error("Expected Notes");
+    expect(after.snapshot.document.phases[0]?.session).toEqual(sessionD);
+    expect(await service.reconcile(session)).toBe("consistent");
+  });
+
+  it("releases the lease at run end after compaction rotates the session id", async () => {
+    const { cwd, repository, service, session } = await claimedPhase("compaction-release");
+
+    session.compact(sessionC);
+    await expect(
+      service.releaseCurrent("release-after-compaction", session),
+    ).resolves.toMatchObject({ status: "released" });
+
+    const loaded = await repository.load(cwd);
+    if (loaded.status !== "ok") throw new Error("Expected Notes");
+    const next = new CompactingSession(cwd, sessionB);
+    await expect(
+      service.lease(
+        {
+          ...leaseRequest(cwd, "claim-after-release"),
+          expectedRevision: loaded.snapshot.revision,
+        },
+        next,
+      ),
+    ).resolves.toMatchObject({ status: "acquired" });
+  });
+
+  it("does not let an unrelated session in the same process take the lease", async () => {
+    const { cwd, repository, service } = await claimedPhase("compaction-foreign");
+    const stranger = new CompactingSession(cwd, sessionB);
+
+    expect(await service.handOffCompactedSession(stranger)).toBe("none");
+    const result = await markDone(service, repository, stranger, new Date("2026-10-05T08:00:01Z"));
+
+    expect(result).toMatchObject({ status: "phase-lease-lost" });
+  });
+
+  it("recovers a phase whose owning session is gone once its stale lease expires", async () => {
+    // The orphan's session (A) is no longer live in this process; B is.
+    const { cwd, repository, service, advance, now } = await claimedPhase("compaction-orphan", [
+      sessionB.sessionId,
+    ]);
+    advance(PHASE_LEASE_TTL_MS + 1);
+    const nextAgent = new CompactingSession(cwd, sessionB);
+
+    const result = await markDone(service, repository, nextAgent, now());
+
+    expect(result).toMatchObject({ status: "executed", value: { status: "committed" } });
+  });
+});
 
 function leaseRequest(cwd: string, operationId: string): PhaseLeaseRequestV2 {
   return {

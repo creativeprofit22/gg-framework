@@ -11,6 +11,7 @@ import { estimateConversationTokens } from "./compaction/token-estimator.js";
 import type * as McpModule from "./mcp/index.js";
 import { approvedPlanContentHash } from "./session-manager.js";
 import { useFakeHome } from "../test-support/fake-home.js";
+import { canonicalProjectKey } from "@kenkaiiii/gg-core/project-notes";
 
 const shouldCompactMock = vi.hoisted(() => vi.fn());
 const compactMock = vi.hoisted(() => vi.fn());
@@ -430,6 +431,103 @@ describe("AgentSession compaction persistence", () => {
     expect(texts.some((t) => t.includes("[session compacted] Summary of earlier work"))).toBe(true);
     expect(texts.some((t) => t.includes("Do the task."))).toBe(false);
   }, 15_000);
+
+  it("carries the Roadmap phase lease marker into the compaction checkpoint (regression)", async () => {
+    // A compaction checkpoint used to drop the phase lease marker, orphaning the
+    // lease: the agent could no longer renew it or record phase status.
+    shouldCompactMock.mockReturnValue(false);
+    compactMock.mockResolvedValue(
+      compactionResult([
+        { role: "system", content: "worker system prompt" },
+        { role: "user", content: "[session compacted] Summary of earlier work." },
+      ]),
+    );
+    agentLoopMock.mockImplementation(async function* (messages: Message[]) {
+      messages.push({ role: "assistant", content: "working on it" });
+      yield { type: "agent_done" };
+    });
+    const marker = {
+      version: 1 as const,
+      projectKey: canonicalProjectKey(tmpProject),
+      phaseId: "phase-1",
+      planId: null,
+      planHash: null,
+      leaseId: "lease-1",
+      fence: 3,
+      daemonInstanceId: "daemon-1",
+    };
+
+    const { AgentSession } = await import("./agent-session.js");
+    const session = new AgentSession({
+      provider: "anthropic",
+      model: "claude-test",
+      cwd: tmpProject,
+      systemPrompt: "worker system prompt",
+    });
+    await session.initialize();
+    await session.prompt("Do the task.");
+    await session.setRoadmapPhaseLeaseMarker(marker);
+    const before = session.getState();
+
+    await session.compact();
+    const after = session.getState();
+    expect(after.sessionId).not.toBe(before.sessionId);
+    expect(session.getRoadmapPhaseLeaseMarker()).toEqual(marker);
+    expect(session.getCompactionPredecessorSessions()).toEqual([
+      { sessionId: before.sessionId, sessionPath: before.sessionPath },
+    ]);
+    await session.dispose();
+
+    // Durable: a reopened checkpoint still knows which lease it owns.
+    const reopened = new AgentSession({
+      provider: "anthropic",
+      model: "claude-test",
+      cwd: tmpProject,
+      systemPrompt: "worker system prompt",
+    });
+    await reopened.initialize();
+    await reopened.loadSession(after.sessionPath!);
+    expect(reopened.getRoadmapPhaseLeaseMarker()).toEqual(marker);
+    await reopened.dispose();
+  }, 60_000);
+
+  it("drops compaction lineage when the session switches to a new conversation", async () => {
+    // Stale lineage made an abandoned conversation's sessions look live, so
+    // their expired phase leases could never be reclaimed.
+    shouldCompactMock.mockReturnValue(false);
+    compactMock.mockResolvedValue(
+      compactionResult([
+        { role: "system", content: "worker system prompt" },
+        { role: "user", content: "[session compacted] Summary of earlier work." },
+      ]),
+    );
+    agentLoopMock.mockImplementation(async function* (messages: Message[]) {
+      messages.push({ role: "assistant", content: "working on it" });
+      yield { type: "agent_done" };
+    });
+
+    const { AgentSession } = await import("./agent-session.js");
+    const session = new AgentSession({
+      provider: "anthropic",
+      model: "claude-test",
+      cwd: tmpProject,
+      systemPrompt: "worker system prompt",
+    });
+    await session.initialize();
+    await session.prompt("Do the task.");
+    await session.compact();
+    const lineage = session.getCompactionPredecessorSessions();
+    expect(lineage).toHaveLength(1);
+
+    // A preserving checkpoint continues the same conversation.
+    await session.newSession(true);
+    expect(session.getCompactionPredecessorSessions()).toEqual(lineage);
+
+    // An explicit new session starts an unrelated conversation.
+    await session.newSession(false);
+    expect(session.getCompactionPredecessorSessions()).toEqual([]);
+    await session.dispose();
+  }, 60_000);
 });
 
 describe("AgentSession stale tool-output pruning", () => {

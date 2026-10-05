@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   committedReleaseNotes,
@@ -11,6 +12,9 @@ import {
   INSTALLED_SMOKE_IDENTITY,
   LOCAL_FORK_IDENTITY,
   localBuildConfigPaths,
+  missingPhaseLeaseRegressionGuards,
+  PHASE_LEASE_REGRESSION_GATE,
+  phaseLeaseRegressionGateArgs,
   releaseNotesEnvelope,
   runWithCargoTomlRestored,
   tauriBuildArgs,
@@ -18,6 +22,7 @@ import {
   windowsNsisPayloadMetadata,
 } from "./build-local-hotfix.mjs";
 
+const here = dirname(fileURLToPath(import.meta.url));
 const temporaryDirectories: string[] = [];
 const sourceRevision = "a".repeat(40);
 const validReleaseNotes = {
@@ -345,6 +350,69 @@ describe("Tauri build arguments", () => {
       "requires Windows",
     );
     expect(() => installedSmokeBuildRequested(["--unknown"], "win32")).toThrow("Usage");
+  });
+});
+
+describe("Roadmap phase-lease regression build gate", () => {
+  const ggcoderRoot = join(here, "..", "..", "packages", "ggcoder");
+
+  it("finds every regression guard in the real ggcoder test files", () => {
+    expect(PHASE_LEASE_REGRESSION_GATE.length).toBeGreaterThan(0);
+    expect(missingPhaseLeaseRegressionGuards(ggcoderRoot)).toEqual([]);
+  });
+
+  it("blocks the build when a guard file or its regression marker disappears", () => {
+    const [first, ...rest] = PHASE_LEASE_REGRESSION_GATE;
+    const contents = new Map(
+      rest.map(({ file, marker }) => [join(ggcoderRoot, file), `describe("${marker}")`]),
+    );
+    contents.set(join(ggcoderRoot, first!.file), "describe('renamed')");
+    const read = (path: string) => {
+      const text = contents.get(path);
+      if (text === undefined) throw new Error("ENOENT");
+      return text;
+    };
+
+    expect(missingPhaseLeaseRegressionGuards(ggcoderRoot, read)).toEqual([first]);
+    contents.delete(join(ggcoderRoot, rest[0]!.file));
+    expect(missingPhaseLeaseRegressionGuards(ggcoderRoot, read)).toEqual([first, rest[0]]);
+  });
+
+  it("runs exactly the guarded files through ggcoder's vitest", () => {
+    expect(phaseLeaseRegressionGateArgs()).toEqual([
+      "--filter",
+      "@kenkaiiii/ggcoder",
+      "exec",
+      "vitest",
+      "run",
+      ...PHASE_LEASE_REGRESSION_GATE.map(({ file }) => file),
+    ]);
+  });
+
+  it("runs the gate after the framework builds and before the sidecar is bundled", () => {
+    const source = readFileSync(join(here, "build-local-hotfix.mjs"), "utf8");
+    const main = source.slice(source.indexOf("async function main()"));
+    const lastPackageBuild = main.indexOf('"@kenkaiiii/ggcoder"');
+    const gate = main.indexOf("runPhaseLeaseRegressionGate();");
+    const bundle = main.indexOf('"bundle:sidecar"');
+    expect(lastPackageBuild).toBeGreaterThan(-1);
+    expect(gate).toBeGreaterThan(lastPackageBuild);
+    expect(bundle).toBeGreaterThan(gate);
+  });
+
+  it("guards the daemon's own phase-lease wiring, not only the unit-level contracts", () => {
+    expect(PHASE_LEASE_REGRESSION_GATE.map(({ file }) => file)).toContain(
+      "src/app-sidecar-phase-lease-wiring.test.ts",
+    );
+    const sidecar = readFileSync(join(ggcoderRoot, "src", "app-sidecar.ts"), "utf8");
+    const construction = sidecar.slice(sidecar.indexOf("new RoadmapPhaseLeaseRepository("));
+    expect(construction.slice(0, construction.indexOf("});"))).toMatch(
+      /hasLiveLocalSession:[\s\S]*hasLivePhaseLeaseSession\(/,
+    );
+    const compactionEnd = sidecar.slice(sidecar.indexOf('target.eventBus.on("compaction_end"'));
+    expect(compactionEnd.slice(0, compactionEnd.indexOf("\n    });"))).toContain(
+      "phaseBinding\n          .handOffCompactedSession(target",
+    );
   });
 });
 

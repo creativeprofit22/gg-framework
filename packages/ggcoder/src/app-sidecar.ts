@@ -297,6 +297,7 @@ import {
 } from "./app-sidecar-storage-diagnostics.js";
 import {
   createAppSidecarPhaseBindingService,
+  hasLivePhaseLeaseSession,
   type AppSidecarPhaseBindingService,
 } from "./app-sidecar-phase-binding.js";
 import {
@@ -1157,7 +1158,15 @@ async function main(): Promise<void> {
   const notesRepository = new ProjectNotesRepository(paths.agentDir);
   // Mutation fencing is standard, independent of historical completion rollout settings.
   const durableRoadmapExecution = true;
-  const phaseLeaseRepository = new RoadmapPhaseLeaseRepository(paths.agentDir);
+  const phaseLeaseRepository = new RoadmapPhaseLeaseRepository(paths.agentDir, {
+    // Only consulted for expired leases recorded by this process: a lease whose
+    // session is not live here (directly or via compaction lineage) is orphaned.
+    hasLiveLocalSession: (holder) =>
+      hasLivePhaseLeaseSession(
+        Array.from(sessions.values(), (context) => context.session),
+        holder,
+      ),
+  });
   const daemonInstanceId = process.env.GG_DAEMON_INSTANCE_ID?.trim() || randomUUID();
   const processStartToken =
     process.env.GG_PROCESS_START_TOKEN?.trim() || `${process.pid}:${Date.now()}`;
@@ -2383,6 +2392,18 @@ async function createSession(
     }
     await releaseCurrentPhaseLease(operationId);
   }
+  /**
+   * Run boundary: move the Notes phase link onto the current session after a
+   * mid-run compaction (the compaction event moved only the lease, so the
+   * agent's held Notes revision stayed valid). No-op without a compaction.
+   */
+  async function catchUpCompactedPhaseLink(): Promise<void> {
+    try {
+      await phaseBinding.handOffCompactedSession(session);
+    } catch (error) {
+      captureSidecarError(error, "app-sidecar.phase-link-catch-up");
+    }
+  }
   async function settleDeferredPhaseLeaseRelease(): Promise<boolean> {
     const operationId = deferredPhaseLeaseReleaseOperationId;
     if (!operationId) return false;
@@ -3201,6 +3222,23 @@ async function createSession(
     target.eventBus.on("compaction_end", (data) => {
       broadcast("compaction_end", data);
       broadcast("extras", footerExtras());
+      // A compaction checkpoint gives the session a new id. Hand the phase lease
+      // over now so renewals and status writes keep their owner. Mid-run, leave
+      // the Notes link on the predecessor: moving it commits a Notes revision and
+      // would stale the agent's held expected_revision. The run-end hand-off
+      // moves it; an idle (post-turn) compaction can move it immediately.
+      if (data.compacted && target.getRoadmapPhaseLeaseMarker()) {
+        void phaseBinding
+          .handOffCompactedSession(target, {
+            moveNotesLink: target.getPhaseLeaseRunState() !== "running",
+          })
+          .then((outcome) => {
+            if (outcome !== "none" && outcome !== "unchanged") {
+              log("INFO", "roadmap-durability", "compaction phase lease hand-off", { outcome });
+            }
+          })
+          .catch((error) => captureSidecarError(error, "app-sidecar.phase-lease-handoff"));
+      }
     });
     // Cold-prompt-cache notice: push the fresh TTL anchor + context size whenever
     // a run or compaction settles. Expiry itself is time-based, so the webview
@@ -3807,6 +3845,7 @@ async function createSession(
       if (ownsGeneration) {
         finishOwnedGeneration(generation, false, outcome);
         await runJournalPersistence;
+        await catchUpCompactedPhaseLink();
         if (!(await settleDeferredPhaseLeaseRelease())) {
           if (
             (outcome === "aborted" || outcome === "failed") &&

@@ -51,7 +51,12 @@ export interface PhaseBindingSession {
   getRoadmapPhaseLeaseMarker?(): RoadmapPhaseLeaseMarkerV1 | undefined;
   setRoadmapPhaseLeaseMarker?(marker: RoadmapPhaseLeaseMarkerV1): Promise<void>;
   getPhaseLeaseRunState?(): "idle" | "running";
+  /** Sessions this live session continued from through compaction checkpoints. */
+  getCompactionPredecessorSessions?(): NotesSessionLink[];
 }
+
+export type CompactedSessionHandOffOutcome =
+  "none" | "unchanged" | "handed-off" | "phase-lease-lost" | "corrupt";
 
 export type PhaseStatusLeaseFailure =
   "phase-lease-lost" | "corrupt" | "notes-missing" | "phase-not-found" | "phase-archived";
@@ -79,18 +84,34 @@ export interface AppSidecarPhaseBindingService {
     operation: () => Promise<T>,
   ): Promise<{ status: "executed"; value: T } | { status: PhaseStatusLeaseFailure }>;
   reconcile(session: PhaseBindingSession): Promise<"none" | "consistent" | "cleared">;
+  /**
+   * After a compaction checkpoint rotates the session id, move this session's
+   * phase lease (and, unless `moveNotesLink` is false, the Notes phase session
+   * link) to the new id. Ownership does not change; without this the lease
+   * looks held by another session.
+   *
+   * Pass `moveNotesLink: false` while a run is in flight: moving the link
+   * commits a Notes revision, which would make the agent's held
+   * `expected_revision` stale. The link catches up at the run boundary.
+   */
+  handOffCompactedSession(
+    session: PhaseBindingSession,
+    options?: { moveNotesLink: boolean },
+  ): Promise<CompactedSessionHandOffOutcome>;
 }
 
 export interface AppSidecarPhaseBindingOptions {
   repository: Pick<
     ProjectNotesRepository,
     "load" | "bindPhaseToCurrentSession" | "reconcilePhaseExecution"
-  >;
+  > &
+    Partial<Pick<ProjectNotesRepository, "updatePhaseSessionLink">>;
   onCommittedSnapshot?: (snapshot: ProjectNotesSnapshot) => void;
   leaseRepository?: Pick<
     RoadmapPhaseLeaseRepository,
     "execute" | "reconcileTakeover" | "withFence"
-  >;
+  > &
+    Partial<Pick<RoadmapPhaseLeaseRepository, "rotateHolderSession">>;
   daemonInstanceId?: string;
   processId?: number;
   processStartToken?: string;
@@ -162,7 +183,11 @@ export function createAppSidecarPhaseBindingService(
     },
 
     async lease(request, session) {
-      return executePhaseLease(options, request, session);
+      return executePhaseLeaseWithCompactionHandOff(options, request, session);
+    },
+
+    async handOffCompactedSession(session, handOffOptions) {
+      return handOffCompactedSession(options, session, handOffOptions);
     },
 
     async acquireForLaunch(session, snapshot, phaseId) {
@@ -255,7 +280,7 @@ export function createAppSidecarPhaseBindingService(
       if (!marker) return { status: "missing" };
       const loaded = await options.repository.load(session.getState().cwd);
       if (loaded.status !== "ok") return loaded;
-      return executePhaseLease(
+      return executePhaseLeaseWithCompactionHandOff(
         options,
         {
           version: 2,
@@ -278,20 +303,7 @@ export function createAppSidecarPhaseBindingService(
       return executePhaseExecutionReconciliation(options, request, session, now);
     },
     async withLeaseFence(session, operation) {
-      if (!options.leaseRepository) return { status: "executed", value: await operation() };
-      const state = session.getState();
-      const marker = session.getRoadmapPhaseLeaseMarker?.();
-      if (!marker) return { status: "phase-lease-lost" };
-      const outcome = await options.leaseRepository.withFence(
-        {
-          cwd: state.cwd,
-          phaseId: marker.phaseId,
-          token: { leaseId: marker.leaseId, fence: marker.fence },
-          holder: phaseLeaseHolder(options, state),
-        },
-        operation,
-      );
-      return outcome.status === "executed" ? outcome : { status: outcome.status };
+      return executeLeaseFence(options, session, operation);
     },
 
     async withStatusLease(session, phaseId, operation) {
@@ -299,19 +311,11 @@ export function createAppSidecarPhaseBindingService(
       if (!leases) return { status: "executed", value: await operation() };
       const state = session.getState();
       const holder = phaseLeaseHolder(options, state);
-      const marker = session.getRoadmapPhaseLeaseMarker?.();
-      if (marker?.phaseId === phaseId) {
-        const result = await leases.withFence(
-          {
-            cwd: state.cwd,
-            phaseId,
-            holder,
-            token: { leaseId: marker.leaseId, fence: marker.fence },
-          },
-          operation,
-        );
+      if (session.getRoadmapPhaseLeaseMarker?.()?.phaseId === phaseId) {
+        const result = await executeLeaseFence(options, session, operation);
         if (result.status !== "phase-lease-lost") return result;
       }
+      const marker = session.getRoadmapPhaseLeaseMarker?.();
       const loaded = await options.repository.load(state.cwd);
       if (loaded.status !== "ok")
         return { status: loaded.status === "missing" ? "notes-missing" : "corrupt" };
@@ -384,6 +388,9 @@ export function createAppSidecarPhaseBindingService(
     },
 
     async reconcile(session) {
+      // A compaction rotation is the same owner under a new session id; move the
+      // lease first so reconciliation does not mistake it for a foreign holder.
+      await handOffCompactedSession(options, session);
       const state = session.getState();
       const context = session.getActivePhaseContext();
       const marker = session.getRoadmapPhaseLeaseMarker?.();
@@ -650,6 +657,116 @@ async function executeLeaseFence<T>(
   session: PhaseBindingSession,
   operation: () => Promise<T>,
 ): Promise<{ status: "executed"; value: T } | { status: "phase-lease-lost" | "corrupt" }> {
+  const outcome = await executeLeaseFenceOnce(options, session, operation);
+  if (
+    outcome.status !== "phase-lease-lost" ||
+    (await handOffCompactedSession(options, session, { moveNotesLink: false })) !== "handed-off"
+  ) {
+    return outcome;
+  }
+  return executeLeaseFenceOnce(options, session, operation);
+}
+
+/**
+ * Moves this session's lease and Notes phase link from a compaction
+ * predecessor to the current session id. The repository authenticates the
+ * token, the process identity, and the predecessor lineage under its lock.
+ *
+ * In-request retries and mid-run compaction events pass `moveNotesLink: false`:
+ * a Notes commit would bump the revision the caller's request (or the agent's
+ * held `expected_revision`) was validated against. The link is moved at run
+ * boundaries and by reconciliation instead.
+ */
+async function handOffCompactedSession(
+  options: AppSidecarPhaseBindingOptions,
+  session: PhaseBindingSession,
+  { moveNotesLink }: { moveNotesLink: boolean } = { moveNotesLink: true },
+): Promise<CompactedSessionHandOffOutcome> {
+  const leases = options.leaseRepository;
+  const marker = session.getRoadmapPhaseLeaseMarker?.();
+  const predecessors = session.getCompactionPredecessorSessions?.() ?? [];
+  if (!leases?.rotateHolderSession || !marker || predecessors.length === 0) return "none";
+  const state = session.getState();
+  if (!state.sessionPath) return "none";
+  const rotated = await leases.rotateHolderSession({
+    cwd: state.cwd,
+    phaseId: marker.phaseId,
+    holder: phaseLeaseHolder(options, state),
+    predecessorSessionIds: predecessors.map((link) => link.sessionId),
+    token: { leaseId: marker.leaseId, fence: marker.fence },
+  });
+  if (rotated.status === "corrupt" || rotated.status === "phase-lease-lost") {
+    return rotated.status;
+  }
+  if (moveNotesLink) {
+    await moveNotesLinkFromPredecessor(options, session, marker.phaseId, predecessors);
+  }
+  return rotated.status === "rotated" ? "handed-off" : "unchanged";
+}
+
+/**
+ * True when a lease holder's session is one of these live sessions, directly or
+ * as a compaction predecessor (the session rotated its id but is still live).
+ * The daemon passes this to its lease repository so an expired lease whose
+ * session is gone from this process counts as an orphan and can be reclaimed.
+ */
+export function hasLivePhaseLeaseSession(
+  liveSessions: Iterable<
+    Pick<PhaseBindingSession, "getState" | "getCompactionPredecessorSessions">
+  >,
+  holder: Pick<RoadmapPhaseLeaseHolderV1, "sessionId">,
+): boolean {
+  for (const live of liveSessions) {
+    if (live.getState().sessionId === holder.sessionId) return true;
+    const predecessors = live.getCompactionPredecessorSessions?.() ?? [];
+    if (predecessors.some((predecessor) => predecessor.sessionId === holder.sessionId)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * True when Notes links the phase to this session or to a session this live
+ * session continued from through compaction (the link catches up separately).
+ */
+function linksToThisConversation(
+  link: NotesSessionLink | null,
+  session: PhaseBindingSession,
+): boolean {
+  const state = session.getState();
+  if (notesSessionLinksEqual(link, state)) return true;
+  if (!link) return false;
+  return (session.getCompactionPredecessorSessions?.() ?? []).some((predecessor) =>
+    notesSessionLinksEqual(predecessor, link),
+  );
+}
+
+async function moveNotesLinkFromPredecessor(
+  options: AppSidecarPhaseBindingOptions,
+  session: PhaseBindingSession,
+  phaseId: string,
+  predecessors: readonly NotesSessionLink[],
+): Promise<void> {
+  const update = options.repository.updatePhaseSessionLink;
+  if (!update) return;
+  const state = session.getState();
+  const loaded = await options.repository.load(state.cwd);
+  if (loaded.status !== "ok") return;
+  const phase = loaded.snapshot.document.phases.find((candidate) => candidate.id === phaseId);
+  const linked = phase?.session;
+  if (!linked || !predecessors.some((link) => notesSessionLinksEqual(link, linked))) return;
+  const current: NotesSessionLink = { sessionId: state.sessionId, sessionPath: state.sessionPath };
+  // Compare-and-swap on the predecessor link: a concurrent rebind wins.
+  const outcome = await update.call(options.repository, state.cwd, phaseId, current, linked);
+  if (outcome.status === "ok") options.onCommittedSnapshot?.(outcome.snapshot);
+}
+
+async function executeLeaseFenceOnce<T>(
+  options: AppSidecarPhaseBindingOptions,
+  session: PhaseBindingSession,
+  operation: () => Promise<T>,
+): Promise<{ status: "executed"; value: T } | { status: "phase-lease-lost" | "corrupt" }> {
   if (!options.leaseRepository) return { status: "executed", value: await operation() };
   const state = session.getState();
   const marker = session.getRoadmapPhaseLeaseMarker?.();
@@ -722,7 +839,7 @@ async function persistLeaseContextFromLatestNotes(
     isNotesPhaseDeleted(phase) ||
     phase.archivedAt !== null ||
     lease.projectKey !== latest.snapshot.projectKey ||
-    !notesSessionLinksEqual(phase.session, state) ||
+    !linksToThisConversation(phase.session, session) ||
     lease.planId !== (phase.execution?.plan?.planId ?? null)
   ) {
     return false;
@@ -774,6 +891,32 @@ async function loadCurrentLeaseContext(
     planId: phase.execution?.plan?.planId ?? null,
     lastDeletionRevision: (phase.deletion?.events.at(-1)?.request.expectedRevision ?? -1) + 1,
   };
+}
+
+/**
+ * Runs a token-bearing lease action, retrying once when the lease is still
+ * recorded under a compaction predecessor of this live session. Acquire and
+ * takeover carry no held token, so there is nothing to hand off for them.
+ */
+async function executePhaseLeaseWithCompactionHandOff(
+  options: AppSidecarPhaseBindingOptions,
+  request: PhaseLeaseRequestV2,
+  session: PhaseBindingSession,
+): Promise<PhaseLeaseOutcome> {
+  const outcome = await executePhaseLease(options, request, session);
+  if (
+    outcome.status !== "phase-lease-lost" ||
+    request.action === "acquire" ||
+    request.action === "takeover" ||
+    (await handOffCompactedSession(options, session, { moveNotesLink: false })) !== "handed-off"
+  ) {
+    return outcome;
+  }
+  return executePhaseLease(
+    options,
+    { ...request, operationId: `${request.operationId}:session-handoff` },
+    session,
+  );
 }
 
 async function executePhaseLease(

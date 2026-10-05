@@ -287,6 +287,8 @@ import { ResearchSourceLedger } from "./research-sources.js";
  * progressing — refuse to extend its turn budget.
  */
 const TURN_EXTENSION_MAX_FAILURE_RATIO = 0.5;
+/** Compaction rotations remembered for phase-lease hand-off between renewals. */
+const COMPACTION_PREDECESSOR_LIMIT = 32;
 
 // ── Options ────────────────────────────────────────────────
 
@@ -845,6 +847,12 @@ export class AgentSession {
   private roadmapPhaseLeaseMarker?: RoadmapPhaseLeaseMarkerV1;
   private runJournal: RunJournalEntry[] = [];
   private phaseLeaseRunState: "idle" | "running" = "idle";
+  /**
+   * Session ids this live session rotated away from through compaction
+   * checkpoints. A phase lease recorded under one of these ids still belongs to
+   * this conversation and is handed to the current session id, not lost.
+   */
+  private compactionPredecessorSessions: { sessionId: string; sessionPath: string | null }[] = [];
 
   private sessionId = "";
   private checkpointGeneration = 0;
@@ -3989,6 +3997,7 @@ ${content}
     const systemMessage = this.messages[0];
     const loadedMessages = this.sessionManager.getMessages(loaded.entries, loaded.header.leafId);
     this.messages = [systemMessage, ...loadedMessages];
+    this.recordCompactionPredecessor();
     this.sessionId = loaded.header.id;
     this.conversationId = loaded.header.conversationId ?? loaded.header.id;
     this.checkpointGeneration = loaded.header.generation ?? 0;
@@ -4006,6 +4015,10 @@ ${content}
     this.lastPersistedIndex = this.messages.length;
     this.providerContext = null;
     await this.subAgentManager?.rebindParentSession(this.sessionId);
+    // The adopted checkpoint continues this conversation, so the selected phase
+    // and its lease marker continue with it.
+    await this.rePersistActivePhaseContext();
+    await this.rePersistRoadmapPhaseLeaseMarker();
   }
 
   /** Canonicalize a deferred restore before a new prompt can fork stale history. */
@@ -4043,6 +4056,7 @@ ${content}
       openAICodexContextProfile: this.openAICodexContextProfile,
       openAICodexFast: this.openAICodexFast,
     });
+    this.recordCompactionPredecessor();
     this.sessionId = session.id;
     this.checkpointGeneration = session.header.generation ?? 0;
     this.conversationId = session.header.conversationId ?? session.id;
@@ -4060,10 +4074,31 @@ ${content}
     await this.rePersistApprovedPlanConsumption();
     await this.rePersistAppMarkers();
     await this.persistCompletionReviewState();
+    // A compaction checkpoint continues the same conversation: carry the
+    // selected phase and its lease marker into the new session file, exactly as
+    // a preserved fresh session does. Dropping them orphaned the phase lease.
+    await this.rePersistActivePhaseContext();
+    await this.rePersistRoadmapPhaseLeaseMarker();
     await this.persistAppMarker("compaction", {
       originalCount: result.originalCount,
       newCount: result.newCount,
     });
+  }
+
+  /** Call before the session identity rotates to a compaction checkpoint. */
+  private recordCompactionPredecessor(): void {
+    const sessionId = this.sessionId;
+    if (!sessionId) return;
+    const retained = this.compactionPredecessorSessions.filter(
+      (link) => link.sessionId !== sessionId,
+    );
+    retained.push({ sessionId, sessionPath: this.sessionPath || null });
+    this.compactionPredecessorSessions = retained.slice(-COMPACTION_PREDECESSOR_LIMIT);
+  }
+
+  /** Sessions this live session continued from through compaction checkpoints, oldest first. */
+  getCompactionPredecessorSessions(): { sessionId: string; sessionPath: string | null }[] {
+    return this.compactionPredecessorSessions.map((link) => ({ ...link }));
   }
 
   /**
@@ -4496,6 +4531,7 @@ ${content}
       baseSystemPrompt: this.baseSystemPrompt,
       renderedEnvironment: this.renderedEnvironment,
       lastPersistedIndex: this.lastPersistedIndex,
+      compactionPredecessorSessions: this.compactionPredecessorSessions,
     };
     let parentResetAttempted = false;
     try {
@@ -4576,6 +4612,9 @@ ${content}
       this.checkpointGeneration = 0;
       this.sessionPreview = "";
       this.activePhaseContext = undefined;
+      // Compaction lineage belongs to the abandoned conversation; keeping it
+      // would mark that conversation's sessions live and block lease reclaim.
+      this.compactionPredecessorSessions = [];
     }
     // A fresh explicit session drops plan state. A preserved phase checkpoint
     // reconstructs it from durable execution metadata below.
@@ -6614,6 +6653,8 @@ ${content}
     if (this.conversationId !== restoredConversationId) {
       this.advisoryTurn?.close();
       this.advisoryEvidence.clear();
+      // Compaction lineage is per conversation, not per AgentSession object.
+      this.compactionPredecessorSessions = [];
     }
     this.conversationId = restoredConversationId;
     this.openAICodexContextProfile = loaded.header.openAICodexContextProfile ?? "stable";

@@ -90,11 +90,32 @@ export type PhaseLeaseFenceInput = {
   holder: RoadmapPhaseLeaseHolderV1;
 } & { [key in "token"]: PhaseLeaseTokenV1 };
 
+export type PhaseLeaseSessionRotationInput = {
+  cwd: string;
+  phaseId: string;
+  /** The same process continuing under its new session identity. */
+  holder: RoadmapPhaseLeaseHolderV1;
+  /** Session ids this live session object rotated away from (compaction lineage). */
+  predecessorSessionIds: readonly string[];
+} & { [key in "token"]: PhaseLeaseTokenV1 };
+
+export type PhaseLeaseSessionRotationOutcome =
+  | { status: "rotated" | "unchanged"; lease: PhaseLeaseV1 }
+  | { status: "phase-lease-lost"; currentLease: PhaseLeaseV1 | null }
+  | { status: "corrupt" };
+
 export interface PhaseLeaseRepositoryOptions {
   now?: () => Date;
   createId?: () => string;
   processLiveness?: (holder: RoadmapPhaseLeaseHolderV1) => Promise<PhaseLeaseLiveness>;
   lock?: <T>(filePath: string, operation: () => Promise<T>) => Promise<T>;
+  /**
+   * Answers, for a holder recorded by THIS process, whether one of this
+   * process's live sessions still owns that holder's session. Lets the process
+   * recover an expired lease that no live session of its own can renew. Absent:
+   * expired leases of a live process stay protected.
+   */
+  hasLiveLocalSession?: (holder: RoadmapPhaseLeaseHolderV1) => boolean;
 }
 
 export class RoadmapPhaseLeaseRepository {
@@ -113,7 +134,11 @@ export class RoadmapPhaseLeaseRepository {
     this.createId = options.createId ?? randomUUID;
     this.processLiveness = options.processLiveness ?? defaultProcessLiveness;
     this.lock = options.lock ?? withFileLock;
+    this.hasLiveLocalSession = options.hasLiveLocalSession;
   }
+
+  private readonly hasLiveLocalSession:
+    ((holder: RoadmapPhaseLeaseHolderV1) => boolean) | undefined;
 
   paths(cwd: string): PhaseLeasePaths {
     const directory = path.join(this.agentDir, "project-notes");
@@ -182,6 +207,55 @@ export class RoadmapPhaseLeaseRepository {
         return { status: "phase-lease-lost", currentLease: toPublicLease(current) };
       }
       return { status: "executed", value: await operation() };
+    });
+  }
+
+  /**
+   * Moves a lease to the new session identity of the SAME process after its
+   * session file rotated (compaction checkpoint). The lease keeps its id, fence
+   * and run state: ownership does not change, only the session it is recorded
+   * under. Requires the current token, the same process, and that the recorded
+   * session is one this session object rotated away from, so it cannot take a
+   * lease from another session or process.
+   */
+  async rotateHolderSession(
+    input: PhaseLeaseSessionRotationInput,
+  ): Promise<PhaseLeaseSessionRotationOutcome> {
+    const paths = this.paths(input.cwd);
+    await ensureDirectory(paths.directory);
+    return this.lock(paths.primary, async () => {
+      const loaded = await readStoredState(paths, canonicalProjectKey(input.cwd));
+      if (loaded.status === "corrupt") return { status: "corrupt" };
+      const state = loaded.state;
+      const current = state.leases[input.phaseId] ?? null;
+      if (
+        !current ||
+        current.leaseId !== input.token.leaseId ||
+        current.fence !== input.token.fence ||
+        !sameProcess(current.holder, input.holder)
+      ) {
+        return { status: "phase-lease-lost", currentLease: toPublicLease(current) };
+      }
+      if (sameHolder(current.holder, input.holder)) {
+        return {
+          status: "unchanged",
+          lease: { ...current, holder: toPublicHolder(current.holder) },
+        };
+      }
+      if (!input.predecessorSessionIds.includes(current.holder.sessionId)) {
+        return { status: "phase-lease-lost", currentLease: toPublicLease(current) };
+      }
+      const now = this.now();
+      const rotated: StoredPhaseLeaseV1 = {
+        ...current,
+        holder: { ...input.holder },
+        renewedAt: now.toISOString(),
+        expiresAt: new Date(now.getTime() + PHASE_LEASE_TTL_MS).toISOString(),
+      };
+      state.leases[input.phaseId] = rotated;
+      state.leaseRevision += 1;
+      await writeStoredState(paths, state, loaded.persistedState);
+      return { status: "rotated", lease: { ...rotated, holder: toPublicHolder(rotated.holder) } };
     });
   }
 
@@ -331,7 +405,7 @@ export class RoadmapPhaseLeaseRepository {
 
     if (request.action === "acquire") {
       if (current) {
-        const replace = await this.canReplaceExpired(current);
+        const replace = await this.canReplaceExpired(current, holder);
         if (replace !== "replace") return leaseFailure(replace, context, state, current);
       }
       return this.acquire(state, input);
@@ -370,10 +444,22 @@ export class RoadmapPhaseLeaseRepository {
 
   private async canReplaceExpired(
     current: StoredPhaseLeaseV1,
+    requester: RoadmapPhaseLeaseHolderV1,
   ): Promise<"replace" | "phase-lease-held" | "lease-owner-unreachable"> {
+    const expired = Date.parse(current.expiresAt) <= this.now().getTime();
+    // An expired lease recorded by the requester's own process whose session is
+    // no longer live in that process is an orphan: nothing can renew it, and
+    // without this it blocks the phase until the whole process exits.
+    if (
+      expired &&
+      sameProcess(current.holder, requester) &&
+      this.hasLiveLocalSession?.(current.holder) === false
+    ) {
+      return "replace";
+    }
     const liveness = await this.processLiveness(current.holder);
     if (liveness === "dead") return "replace";
-    if (Date.parse(current.expiresAt) > this.now().getTime()) return "phase-lease-held";
+    if (!expired) return "phase-lease-held";
     return liveness === "unknown" ? "lease-owner-unreachable" : "phase-lease-held";
   }
 
@@ -386,7 +472,7 @@ export class RoadmapPhaseLeaseRepository {
     if (current.holder.daemonInstanceId === destination.daemonInstanceId) {
       return current.runState === "idle" ? "replace" : "phase-lease-held";
     }
-    return this.canReplaceExpired(current);
+    return this.canReplaceExpired(current, destination);
   }
 }
 
@@ -502,6 +588,14 @@ function isCommittedOutcome(outcome: PhaseLeaseOutcome): boolean {
 
 function tokenMatches(request: PhaseLeaseRequestV2, lease: StoredPhaseLeaseV1): boolean {
   return request.lease?.leaseId === lease.leaseId && request.lease.fence === lease.fence;
+}
+
+function sameProcess(left: RoadmapPhaseLeaseHolderV1, right: RoadmapPhaseLeaseHolderV1): boolean {
+  return (
+    left.daemonInstanceId === right.daemonInstanceId &&
+    left.processId === right.processId &&
+    left.processStartToken === right.processStartToken
+  );
 }
 
 function sameHolder(left: RoadmapPhaseLeaseHolderV1, right: RoadmapPhaseLeaseHolderV1): boolean {

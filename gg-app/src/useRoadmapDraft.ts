@@ -9,8 +9,19 @@ import {
 } from "./roadmap-phase-draft-state";
 
 /** One reducer and one coalesced IPC reader per pane/session/project generation. */
-export function useRoadmapDraft(client: PaneAgentClient, scope: string, hydrated: boolean) {
+export function useRoadmapDraft(
+  client: PaneAgentClient,
+  scope: string,
+  hydrated: boolean,
+  onApproved?: () => void,
+) {
   const [state, send] = useReducer(reduceRoadmapPhaseDraftState, initialRoadmapPhaseDraftState);
+  // The pushed notes_change carries the whole Notes document and can be lost on
+  // large projects; approval callers re-read Notes instead of relying on it.
+  const onApprovedRef = useRef(onApproved);
+  useLayoutEffect(() => {
+    onApprovedRef.current = onApproved;
+  }, [onApproved]);
   const currentState = useRef(state);
   const dispatch = useCallback((action: RoadmapPhaseDraftAction) => {
     currentState.current = reduceRoadmapPhaseDraftState(currentState.current, action);
@@ -97,6 +108,7 @@ export function useRoadmapDraft(client: PaneAgentClient, scope: string, hydrated
           if (decision === "approving") {
             const result = await client.approveRoadmapPhaseDraft(draftId);
             if (isCurrent()) dispatch({ type: "approval-result", result });
+            if (generation.active && result.status === "created") onApprovedRef.current?.();
           } else {
             const result = await client.rejectRoadmapPhaseDraft(draftId);
             if (isCurrent()) dispatch({ type: "rejection-result", result });

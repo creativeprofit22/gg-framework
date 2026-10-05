@@ -55,6 +55,21 @@ describe("useRoadmapDraft", () => {
     expect(c.approveRoadmapPhaseDraft).toHaveBeenCalledOnce();
   });
 
+  it("notifies the caller only when approval creates phases", async () => {
+    const onApproved = vi.fn();
+    const c = client();
+    vi.mocked(c.approveRoadmapPhaseDraft).mockResolvedValueOnce({ status: "proposal-not-found" });
+    const hook = renderHook(() => useRoadmapDraft(c, "one", true, onApproved));
+    await waitFor(() => expect(hook.result.current.state.draft).toEqual(draft));
+    act(() => hook.result.current.approve());
+    await waitFor(() => expect(hook.result.current.state.decision).toBe("idle"));
+    expect(onApproved).not.toHaveBeenCalled();
+
+    act(() => hook.result.current.onChange(draft));
+    act(() => hook.result.current.approve());
+    await waitFor(() => expect(onApproved).toHaveBeenCalledOnce());
+  });
+
   it("ignores an old decision after a different draft arrives", async () => {
     const decision = deferred<unknown>();
     const c = client();

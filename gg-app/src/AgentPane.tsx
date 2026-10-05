@@ -2105,6 +2105,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     client,
     JSON.stringify([state?.sessionId, state?.cwd, hydrateNonce]),
     hydrated,
+    () => projectNotesActionsRef.current?.refresh(),
   );
   const onAstraStateChange = useCallback(() => {
     astraAuthoritativeRevisionRef.current += 1;

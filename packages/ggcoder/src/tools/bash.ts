@@ -31,6 +31,7 @@ import { isCatastrophicCommand } from "../core/workspace-guard.js";
 import { checkDestructiveGit } from "../core/destructive-git-guard.js";
 import { shellThreatBlockMessage } from "../core/shell-threats.js";
 import { checkPackageInstall } from "../core/package-threats.js";
+import { classifyVerificationCommand } from "../core/verification-evidence.js";
 import { checkCommandPolicy, type GetNetworkPolicy } from "../core/network-guard.js";
 import {
   BOUNDED_OUTPUT_MAX_BYTES,
@@ -47,6 +48,7 @@ import {
 } from "../core/sandbox.js";
 import type { WakeRules } from "../core/process-manager.js";
 import { annotateSandboxDenial } from "../core/sandbox-feedback.js";
+import { collectVerificationReview } from "./verification-review.js";
 
 /** Tool env, plus the tweaks that only make sense inside the OS sandbox. */
 function sandboxAwareEnv(sandboxed: boolean): Record<string, string> {
@@ -65,6 +67,10 @@ const FOREGROUND_LIMITS_DESCRIPTION =
   "long time (default 10 min, configurable) or past the hard limit (default 60 min, configurable) is stopped automatically, " +
   "including after hand-off. Omit timeout unless you need a hard bound. Long output is truncated (tail kept). ";
 const MAX_OUTPUT_BYTES = BOUNDED_OUTPUT_MAX_BYTES;
+
+/** Host-authored rejection: no process started, so this is not a failed check. */
+export const REVIEW_REJECTED_BEFORE_START =
+  "Error: review requires a local, non-persistent foreground verification check. Pass only the check in command; do not combine it with edits or diff inspection. Nothing was run.";
 
 /**
  * Result for a call whose Stop arrived while the launch was still being
@@ -102,9 +108,16 @@ const GUESSED_WAIT_SECONDS = 10;
  * re-running the command. The offload is best-effort — a full disk or
  * permission error never fails the tool result.
  */
-export async function renderBashOutput(rawOutput: string): Promise<string> {
+export async function renderBashOutput(rawOutput: string, command?: string): Promise<string> {
+  const check = command ? classifyVerificationCommand(command) : undefined;
+  const feedback =
+    check?.candidate && !check.accepted && check.snapshotPreserveOnly
+      ? "\n\n[This mixed check/inspection chain cannot establish fresh verification; it can only preserve earlier successful checks. If the current changes are not already verified, run the check standalone or chain only checks with &&. Do not claim fresh verification from this shell exit status.]"
+      : check?.candidate && !check.accepted && !check.snapshotEligible
+        ? `\n\n[Verification evidence rejected: ${check.reason}. Run the check as a standalone command, or chain only checks with &&. A failed baseline need not be rerun just to record evidence: fix the bug, then verify with a supported command. Run edits and diff inspection separately; do not claim verification from this shell exit status.]`
+        : "";
   const result = truncateTail(rawOutput);
-  if (!result.truncated) return result.content;
+  if (!result.truncated) return result.content + feedback;
   const overflowPath =
     Buffer.byteLength(rawOutput, "utf-8") > MAX_BYTES
       ? await writeOverflow(rawOutput, "bash").catch(() => null)
@@ -114,7 +127,7 @@ export async function renderBashOutput(rawOutput: string): Promise<string> {
     : "";
   const c = compressToolOutput(rawOutput);
   const what = describeCompressed(rawOutput, c.content);
-  return `[${c.notice}${what ? ` ${what}` : ""}${overflowNotice}]\n${c.content}`;
+  return `[${c.notice}${what ? ` ${what}` : ""}${overflowNotice}]\n${c.content}${feedback}`;
 }
 
 export interface ForegroundCommandExecution {
@@ -692,6 +705,7 @@ async function executePersistentCommand({
 async function renderStructuredForegroundResult(
   execution: ForegroundCommandExecution,
   persistent: boolean,
+  command?: string,
 ): Promise<{ content: string; details: BashToolResultDetails; isError?: boolean }> {
   const { outcome } = execution;
   const diagnostics = formatForegroundDiagnostics(outcome, execution.rawOutput);
@@ -710,7 +724,7 @@ async function renderStructuredForegroundResult(
     };
   }
 
-  let output = await renderBashOutput(execution.rawOutput);
+  let output = await renderBashOutput(execution.rawOutput, command);
   if (execution.outputCapped) {
     output =
       `[Foreground output tail capped at ${BOUNDED_OUTPUT_MAX_LINES} lines / ` +
@@ -788,6 +802,12 @@ function formatDuration(ms: number): string {
 
 const BashParams = z.object({
   command: z.string().describe("The bash command to execute"),
+  review: z
+    .boolean()
+    .optional()
+    .describe(
+      "For a local foreground check, append read-only Git status/worktree diff after success. Keeps the check exit status separate; no shell chaining needed. Staged/untracked contents are not included.",
+    ),
   timeout: z
     .number()
     .int()
@@ -918,7 +938,19 @@ export function createBashTool(
     // Bash owns its limits (yield hand-off, inactivity, hard backstop); the
     // loop must not preempt them.
     timeoutMs: 0,
-    async execute({ command, timeout: timeoutMs, run_in_background, persist, wake }, context) {
+    async execute(
+      { command, timeout: timeoutMs, run_in_background, persist, wake, review },
+      context,
+    ) {
+      if (
+        review &&
+        (persist ||
+          run_in_background ||
+          ops !== localOperations ||
+          !classifyVerificationCommand(command).accepted)
+      ) {
+        return REVIEW_REJECTED_BEFORE_START;
+      }
       const commandMode = run_in_background === true ? "background" : "foreground";
       if (wake && !run_in_background) {
         return "Error: wake conditions require run_in_background=true — there is nothing to watch on a foreground call.";
@@ -1072,7 +1104,7 @@ export function createBashTool(
                 context.onUpdate?.({ type: "bash_progress", output, totalBytes })
             : undefined,
         });
-        const rendered = await renderStructuredForegroundResult(execution, true);
+        const rendered = await renderStructuredForegroundResult(execution, true, command);
         return {
           ...rendered,
           content: annotateSandboxDenial(rendered.content, sessionSandboxed),
@@ -1141,10 +1173,27 @@ export function createBashTool(
               context.onUpdate?.({ type: "bash_progress", output, totalBytes })
           : undefined,
       });
-      const rendered = await renderStructuredForegroundResult(execution, false);
-      return {
+      const rendered = await renderStructuredForegroundResult(execution, false, command);
+      const result = {
         ...rendered,
         content: annotateSandboxDenial(rendered.content, launch.sandboxed),
+      };
+      const diagnostics = rendered.details.bashDiagnostics;
+      if (
+        !review ||
+        context.signal.aborted ||
+        diagnostics?.reason !== "completed" ||
+        diagnostics.exitCode !== 0
+      ) {
+        return result;
+      }
+      const inspection = await collectVerificationReview(cwd, context.signal);
+      return {
+        ...result,
+        content: `${result.content}
+
+--- Independent read-only review ---
+${await renderBashOutput(inspection)}`,
       };
     },
   };

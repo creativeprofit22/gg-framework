@@ -1,10 +1,12 @@
 ---
 name: refactoring
-description: Use when restructuring existing code without changing behavior — "refactor", "clean up", "reduce duplication", "split this god class", "modernize", migrating legacy code or APIs (strangler fig, parallel change, codemods across many files, callback→async), planning a refactor, or mid-build when a change needs preparatory restructuring first. Two hats, test-guarded steps, revert-on-red. Do NOT use for new features, bug fixes (stubborn ones: root-cause), performance tuning (lean), schema/data migrations (durable), styling or copy, the refactor step of a user-requested TDD flow (tdd), or a from-scratch rewrite.
+description: Use for behavior-preserving restructuring: extract, move, split, deduplicate, plan a refactor, or migrate an implementation behind an unchanged contract. Baseline tests, small steps, revert-on-red. Do NOT use for requested behavior or API-contract changes (including new return/error semantics), even when called a "refactor"; use the normal implementation workflow with regression tests and update affected callers together. Also exclude bug fixes (root-cause when stubborn), performance work (lean), data migrations (durable), styling/copy, TDD's refactor step (tdd), and rewrites.
 license: Behavior-preservation methodology synthesized from public sources (Fowler's Refactoring catalog, Tidy First?, and community agent skills by bienhoang, wondelai, mattpocock, jeffallan, vasilyu1983), audited 2026-09-12.
 ---
 
 # Refactoring
+
+**Scope gate:** Decide from the requested behavior, not the word "refactor". A requested change to return values, error handling, or an API contract is implementation work, not a behavior-preserving cleanup. Use the normal implementation workflow: inspect the affected callers, make the requested contract and caller changes together, add regression coverage, and run the checks. Do not manufacture a separate pure-rename stage merely to enter this skill. Existing authorization and safety controls still apply. For a genuine behavior-preserving refactor, use the gated loop below unchanged.
 
 **Route first:**
 

@@ -11,6 +11,10 @@
             "type": "string",
             "description": "The bash command to execute"
           },
+          "review": {
+            "description": "For a local foreground check, append read-only Git status/worktree diff after success. Keeps the check exit status separate; no shell chaining needed. Staged/untracked contents are not included.",
+            "type": "boolean"
+          },
           "timeout": {
             "description": "Optional hard limit in milliseconds. Usually omit it: long commands are handed off to a background task automatically instead of being killed. Setting it keeps the command in the foreground (no hand-off) until it exits, hits this limit, or produces no output for the inactivity limit.",
             "type": "integer",
@@ -50,11 +54,97 @@
         ],
         "additionalProperties": false
       },
-      "hash": "6c161dcdc5c61cd6d308b7f3dd07d59e9b891a775774aeccde422b6caf2aa821"
+      "hash": "f78a444f8dd066268f197b6b21bd14c371b77e984659afb31b0ca71c35fbca00"
+    },
+    {
+      "name": "checklist",
+      "description": "Read or record the project health checklist (stored in .gg-checklist.json). `status` lists every item with its status and last check; items older than 30 days are due. `record` saves the result of checking one item: the date and Git commit are filled in automatically. `issues` needs at least one finding; `pass` takes none; `evidence` lists what you actually ran or read, including scope and exclusions. Record completed checklist reviews or checks requested in normal chat; never start extra audits unasked.",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "enum": [
+              "status",
+              "record"
+            ]
+          },
+          "id": {
+            "type": "string",
+            "enum": [
+              "agent-setup",
+              "docs",
+              "naming",
+              "git-github",
+              "secrets",
+              "quality-tools",
+              "tests",
+              "ci",
+              "commit-gate",
+              "code-health",
+              "errors-logging",
+              "dependencies",
+              "design-system",
+              "styling-consistency",
+              "motion-consistency",
+              "accessibility",
+              "ui-states",
+              "security",
+              "data-safety",
+              "compliance",
+              "performance",
+              "build-release",
+              "monitoring"
+            ],
+            "description": "record: the checklist item id"
+          },
+          "result": {
+            "type": "string",
+            "enum": [
+              "pass",
+              "issues",
+              "not-applicable"
+            ],
+            "description": "record: pass, issues (needs findings) or not-applicable"
+          },
+          "summary": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 300,
+            "description": "record: one-line verdict in plain words"
+          },
+          "findings": {
+            "default": [],
+            "description": "record: each problem with file:line, severity and suggested fix",
+            "maxItems": 10,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 300
+            }
+          },
+          "evidence": {
+            "minItems": 1,
+            "maxItems": 10,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "description": "record: what was actually run or read, e.g. 'pnpm lint — 0 errors'"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "additionalProperties": false
+      },
+      "hash": "bc90e84bc9ba981376efe55c0fa3a4fd4c617d380d79dd9ad2a51dc6d7c61e6e"
     },
     {
       "name": "code_nav",
-      "description": "Resolve a symbol with the language server: `definition` (where it is declared), `references` (every use), `symbols` (outline of a file), `hover` (type/signature). Exact and cross-file — prefer it over grep for 'who calls this' and 'where is this defined'. Reports explicitly when no language server can answer.",
+      "description": "Resolve a symbol with the language server: `definition` (where it is declared), `references` (every use), `symbols` (outline of a file), `hover` (type/signature). Exact and cross-file — prefer it over grep for 'who calls this' and 'where is this defined'. Reports when no language server can answer or reference coverage is partial.",
       "schema": {
         "type": "object",
         "properties": {
@@ -101,7 +191,7 @@
         ],
         "additionalProperties": false
       },
-      "hash": "a6c85e9cf7bf53e155bb95ba35721ed32e1d7a5b0e0c79a4bee0ab4d9f65f5ef"
+      "hash": "19be2435203360a9562679155619326592973380613f4502355f5849c857867b"
     },
     {
       "name": "code_search",

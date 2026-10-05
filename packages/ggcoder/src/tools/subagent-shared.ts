@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 import type { Provider, ThinkingLevel } from "@kenkaiiii/gg-ai";
 import type { AgentDefinition } from "../core/agents.js";
 import type { AgentSession } from "../core/agent-session.js";
-import { getLowestThinkingLevel } from "../core/thinking-level.js";
+import { getLowestThinkingLevel, getSupportedThinkingLevels } from "../core/thinking-level.js";
 import { truncateTail } from "./truncate.js";
 import { getTrustedAgentEnv } from "./safe-env.js";
 import { isUnattendedExecution, UNATTENDED_AGENT_ENV } from "../core/provider-execution-policy.js";
@@ -58,6 +58,7 @@ export function selectSubAgent(
   requestedName: string | undefined,
   provider: Provider,
   parentModel: string,
+  parentThinkingLevel?: ThinkingLevel,
 ): SubAgentSelection {
   const agentDef = resolveAgentDefinition(agents, requestedName);
   const model = resolveAgentModel(agentDef, parentModel);
@@ -66,7 +67,7 @@ export function selectSubAgent(
     provider,
     parentModel,
     model,
-    thinkingLevel: subAgentThinkingLevel(provider, model),
+    thinkingLevel: subAgentThinkingLevel(provider, model, parentThinkingLevel),
   };
 }
 
@@ -88,18 +89,22 @@ export function resolveAgentModel(
 }
 
 /**
- * The thinking level EVERY sub-agent runs at: the lowest rung of the model it
- * actually runs on — never off, and never the parent's level. Delegated work
- * is scoped and briefed, so it reasons briefly on the full-strength model.
- * Resolved per model (not copied from the parent) because ladders differ: a
- * model-unavailable retry on the parent model must use the PARENT's lowest
- * rung, not one the pinned model happened to accept.
+ * OpenAI children inherit the parent's selection, including Ultra (resolved
+ * by the transport), as in Codex. A pinned model with a lower ceiling is
+ * capped to its supported ladder. Other providers keep their lowest-rung
+ * policy. Resolve again from the original parent selection on fallback.
  */
 export function subAgentThinkingLevel(
   provider: Provider,
   model: string,
+  parentThinkingLevel?: ThinkingLevel,
 ): ThinkingLevel | undefined {
-  return getLowestThinkingLevel(provider, model);
+  if (provider !== "openai") return getLowestThinkingLevel(provider, model);
+  if (!parentThinkingLevel) return undefined;
+  const levels = getSupportedThinkingLevels(provider, model);
+  if (levels.includes(parentThinkingLevel)) return parentThinkingLevel;
+  // Older OpenAI models start at medium; never turn inherited low into xhigh.
+  return parentThinkingLevel === "low" ? levels[0] : levels.at(-1);
 }
 
 /**

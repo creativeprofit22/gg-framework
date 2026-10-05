@@ -119,6 +119,8 @@ export interface SubagentWorkerInitialize {
   /** Whether the composed prompt includes project instruction files. */
   agentContext?: "project" | "none";
   thinkingLevel?: ThinkingLevel;
+  /** Original selection before a pinned child model's ceiling was applied. */
+  parentThinkingLevel?: ThinkingLevel;
   allowedTools?: string[];
   /** MCP servers this agent may connect, derived from its `tools:` frontmatter. */
   allowedMcpServers?: string[];
@@ -309,9 +311,11 @@ export async function runSubagentWorkerMode(): Promise<void> {
             ...initializeOptions!,
             model: fallbackModel,
             fallbackModel: undefined,
-            // The lowest rung of the PARENT model — the pinned model's rung
-            // may not exist on it.
-            thinkingLevel: subAgentThinkingLevel(initializeOptions!.provider, fallbackModel),
+            thinkingLevel: subAgentThinkingLevel(
+              initializeOptions!.provider,
+              fallbackModel,
+              initializeOptions!.parentThinkingLevel,
+            ),
           };
           session = await createSession(initializeOptions);
           loopError = await promptSubAgent(session, task);

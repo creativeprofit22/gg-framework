@@ -99,14 +99,20 @@ function prohibitedResearchTools(policy: { allTools: string[] }): string[] {
 
 function policySnapshot(session: AgentSession): {
   allTools: string[];
+  deferredTools: string[];
   roadmapTools: string[];
   systemPrompt: string;
   conversation: unknown[];
 } {
-  const internals = session as unknown as { tools: AgentTool[]; opts: AgentSessionOptions };
+  const internals = session as unknown as {
+    tools: AgentTool[];
+    opts: AgentSessionOptions;
+    deferredBuiltinTools: Map<string, AgentTool>;
+  };
   const allTools = internals.tools.map((tool) => tool.name).sort();
   return {
     allTools,
+    deferredTools: [...internals.deferredBuiltinTools.keys()].sort(),
     roadmapTools: allTools.filter((name) => name.startsWith("roadmap_")).sort(),
     systemPrompt: String(session.getMessages()[0]?.content),
     conversation: session.getMessages().slice(1),
@@ -190,7 +196,9 @@ describe("chat Research restart restoration", () => {
       await switchChatAgent(restarted, "general", false);
       const brainstormPolicy = policySnapshot(restarted);
       expect(brainstormPolicy.roadmapTools).toEqual([]);
-      expect(brainstormPolicy.allTools).toEqual(expect.arrayContaining(["edit", "write", "tasks"]));
+      expect(brainstormPolicy.allTools).toEqual(expect.arrayContaining(["edit", "write"]));
+      // `tasks` is deferred (loaded on demand) to keep its schema out of every request.
+      expect(brainstormPolicy.deferredTools).toContain("tasks");
       expect(brainstormPolicy.systemPrompt).not.toContain(APP_SIDECAR_ROADMAP_DRAFT_SYSTEM_PROMPT);
       expect(brainstormPolicy.conversation).toEqual(persistedConversation);
 

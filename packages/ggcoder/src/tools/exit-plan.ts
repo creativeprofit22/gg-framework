@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
-import type { AgentTool } from "@kenkaiiii/gg-agent";
+import type { AgentTool, ToolExecuteResult } from "@kenkaiiii/gg-agent";
 import { resolvePath } from "./path-utils.js";
 import { extractPlanSteps } from "../utils/plan-steps.js";
 import { checkPlanCitations, type ResearchSourceLedger } from "../core/research-sources.js";
@@ -12,7 +12,7 @@ const ExitPlanParams = z.object({
 
 export function createExitPlanTool(
   cwd: string,
-  onExitPlan: (planPath: string, content: string) => Promise<string>,
+  onExitPlan: (planPath: string, content: string) => Promise<ToolExecuteResult>,
   researchSources?: ResearchSourceLedger,
 ): AgentTool<typeof ExitPlanParams> {
   return {
@@ -65,9 +65,14 @@ export function createExitPlanTool(
 
       // Carry the exact validated snapshot across the callback boundary; the path
       // may be edited or removed before a review checkpoint is persisted.
-      const submitted = await onExitPlan(resolved, content);
+      const review = await onExitPlan(resolved, content);
       researchSources?.clear();
-      return submitted;
+      // Desktop/TUI callbacks open review UI and return immediately. End this
+      // run instead of asking the model to respond to "wait for approval".
+      // Hosts that approve inline (ACP) explicitly opt into continuation.
+      return typeof review === "string"
+        ? { content: review, endRun: true }
+        : { endRun: true, ...review };
     },
   };
 }

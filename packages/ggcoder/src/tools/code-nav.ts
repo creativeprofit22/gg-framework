@@ -99,7 +99,7 @@ export function createCodeNavTool(
       "Resolve a symbol with the language server: `definition` (where it is declared), " +
       "`references` (every use), `symbols` (outline of a file), `hover` (type/signature). " +
       "Exact and cross-file — prefer it over grep for 'who calls this' and 'where is this " +
-      "defined'. Reports explicitly when no language server can answer.",
+      "defined'. Reports when no language server can answer or reference coverage is partial.",
     parameters: CodeNavParams,
     async execute({ op, file, line, column, symbol, max_results }) {
       if (!lspManager) {
@@ -142,7 +142,16 @@ export function createCodeNavTool(
           ? await lspManager.definition(absolute, content, position)
           : await lspManager.references(absolute, content, position);
       if (outcome.kind !== "ok") return describeFailure(outcome, cwd, op);
-      return formatLocations(outcome.value, cwd, ops, maxResults, op, absolute, position);
+      const locations = await formatLocations(
+        outcome.value,
+        cwd,
+        ops,
+        maxResults,
+        op,
+        absolute,
+        position,
+      );
+      return outcome.warning ? `${outcome.warning}\n\n${locations}` : locations;
     },
   };
 }

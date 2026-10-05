@@ -1,4 +1,10 @@
-import { environmentSecrets, formatError, redactText } from "@kenkaiiii/gg-ai";
+import {
+  environmentSecrets,
+  formatChatError,
+  redactText,
+  type ChatErrorReason,
+  type ErrorSource,
+} from "@kenkaiiii/gg-ai";
 
 const SAFE_REQUEST_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const MALFORMED_STREAM_STAGES = new Set([
@@ -16,6 +22,8 @@ export interface SidecarErrorDetails {
     headline: string;
     message?: string;
     guidance: string;
+    reason?: ChatErrorReason;
+    source?: ErrorSource;
     provider?: string;
     statusCode?: number;
     resetsAt?: number;
@@ -42,7 +50,7 @@ export function formatSidecarError(
   transform: (value: string) => string = (value) => value,
   sensitiveValues: Iterable<string> = [],
 ): SidecarErrorDetails {
-  const formatted = formatError(err);
+  const formatted = formatChatError(err);
   const clean = (value: string): string =>
     redactText(transform(value), { secrets: sensitiveValues, maxStringLength: 2_000 });
   const headline = clean(formatted.headline);
@@ -67,8 +75,11 @@ export function formatSidecarError(
       headline,
       ...(message ? { message } : {}),
       guidance,
+      reason: formatted.reason,
+      source: formatted.source,
       ...(formatted.provider ? { provider: formatted.provider } : {}),
       ...(formatted.statusCode != null ? { statusCode: formatted.statusCode } : {}),
+      // Local Fork: request IDs stay in logs only, never in UI events/history.
       ...(formatted.resetsAt != null ? { resetsAt: formatted.resetsAt } : {}),
     },
   };

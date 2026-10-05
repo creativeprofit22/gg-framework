@@ -357,6 +357,41 @@ describe("spawn_agent worker", () => {
     expect(thinkingByCall).toEqual(["max", "medium"]);
   });
 
+  it("restores inherited OpenAI Ultra when a pinned model falls back to the parent", async () => {
+    await writeJson(path.join(tmpHome, ".gg", "auth.json"), {
+      openai: {
+        accessToken: "test-access",
+        refreshToken: "test-refresh",
+        expiresAt: Date.now() + 3_600_000,
+      },
+    });
+    agentLoopMock
+      .mockImplementationOnce(async function* rejectsPinnedModel(messages: Message[]) {
+        if (messages.length > 0) throw new Error("model not found: gpt-6-luna");
+        yield { type: "agent_done", totalTurns: 0, totalUsage: usage };
+      })
+      .mockImplementationOnce(answersCleanly);
+
+    const { done } = await runWorkerTurn({
+      provider: "openai",
+      model: "gpt-6-luna",
+      fallbackModel: "gpt-6.1-sol",
+      thinkingLevel: "max",
+      parentThinkingLevel: "ultra",
+    });
+
+    expect(done).toMatchObject({ status: "completed", output: "Final report." });
+    expect(
+      agentLoopMock.mock.calls.map(([, options]) => {
+        const { model, thinking } = options as { model: string; thinking: string };
+        return { model, thinking };
+      }),
+    ).toEqual([
+      { model: "gpt-6-luna", thinking: "max" },
+      { model: "gpt-6.1-sol", thinking: "ultra" },
+    ]);
+  });
+
   it("retries an unavailable pinned model on the parent model at the parent's lowest thinking level", async () => {
     // Haiku's ladder bottoms out at "high", Opus's at "low". The retry used
     // to keep the pinned model's rung, so it would run Opus at "high".

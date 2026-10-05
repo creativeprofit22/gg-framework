@@ -512,6 +512,7 @@ export function App(props: AppProps) {
     props.thinking,
   );
   const thinkingLevelRef = useRef<ThinkingLevel | undefined>(thinkingLevel);
+  currentProviderRef.current = currentProvider;
   currentModelRef.current = currentModel;
   thinkingLevelRef.current = thinkingLevel;
   const [renderMarkdown, setRenderMarkdown] = useState(true);

@@ -56,6 +56,25 @@ describe("skill routing prompts", () => {
     expect(tool.description).toContain("do not re-invoke a skill already loaded");
   });
 
+  it("routes requested API behavior changes away from the pure-refactor workflow", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "bundled-skill-contract-"));
+    try {
+      const skills = await discoverSkills({ globalSkillsDir: path.join(root, "global") });
+      const refactoring = skills.find((candidate) => candidate.name === "refactoring");
+      expect(refactoring?.description).toContain("requested behavior or API-contract changes");
+      expect(refactoring?.description).toContain("regression tests");
+      expect(refactoring?.content).toContain('not the word "refactor"');
+      expect(refactoring?.content).toContain("Do not manufacture a separate pure-rename stage");
+      expect(refactoring?.content).toContain(
+        "Existing authorization and safety controls still apply",
+      );
+      expect(refactoring?.content).toContain("The baseline is a gate");
+      expect(refactoring?.content).toContain("Red means revert");
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("gives every bundled skill an explicit exclusion clause", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "bundled-skills-"));
     try {

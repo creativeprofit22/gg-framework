@@ -374,13 +374,17 @@ describe("streamOpenAICodex", () => {
   });
 
   it.each([
-    ["medium", "medium"],
-    ["high", "high"],
-    ["xhigh", "xhigh"],
-    ["ultra", "max"],
+    ["gpt-5.5", "medium", "medium"],
+    ["gpt-5.5", "high", "high"],
+    ["gpt-5.5", "xhigh", "xhigh"],
+    ["gpt-6-sol", "ultra", "max"],
+    ["gpt-6-astra", "ultra", "xhigh"],
+    ["gpt-6.1-sol", "ultra", "xhigh"],
+    ["gpt-6-astra", "max", "max"],
+    ["gpt-6.1-sol", "max", "max"],
   ] as const)(
-    "maps %s to %s reasoning effort through Codex transport",
-    async (thinking, effort) => {
+    "maps %s %s to %s reasoning effort through Codex transport",
+    async (model, thinking, effort) => {
       vi.stubGlobal(
         "fetch",
         vi.fn(async () =>
@@ -396,7 +400,7 @@ describe("streamOpenAICodex", () => {
       const fetchMock = vi.mocked(fetch);
       const result = streamOpenAICodex({
         provider: "openai",
-        model: "gpt-5.5",
+        model,
         messages: [{ role: "user", content: "hi" }],
         apiKey: "token",
         accountId: "acct",
@@ -929,7 +933,7 @@ describe("streamOpenAICodex", () => {
     [
       "The 'gpt-6-astra' model is not supported when using Codex with a ChatGPT account.",
       "This model is not available through your ChatGPT account. " +
-        "Switch to a model listed for OpenAI via the model selector, or check your ChatGPT usage limits.",
+        "Choose another available model using the model selector.",
     ],
   ])(
     "only gives account-access guidance for an actual entitlement error: %s",
@@ -1016,7 +1020,7 @@ describe("streamOpenAICodex", () => {
     await expect(missingModel.response).rejects.toMatchObject({
       hint:
         "This model is not in OpenAI's current catalog for your ChatGPT account. " +
-        "Switch to GPT-6 Astra, GPT-6.1 Sol, or GPT-6 Luna via the model selector.",
+        "Choose another available model using the model selector.",
     });
   });
 

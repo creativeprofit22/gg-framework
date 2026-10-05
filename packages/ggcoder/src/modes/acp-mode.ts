@@ -25,7 +25,7 @@ import path from "node:path";
 import { readFileSync, statSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import type { Message, Provider, ThinkingLevel } from "@kenkaiiii/gg-ai";
-import { isAbortError } from "@kenkaiiii/gg-agent";
+import { isAbortError, type ToolExecuteResult } from "@kenkaiiii/gg-agent";
 import { getAllModels, getMaxThinkingLevel, getModel } from "@kenkaiiii/gg-core";
 import { AgentSession } from "../core/agent-session.js";
 import type { EventBus } from "../core/event-bus.js";
@@ -139,7 +139,7 @@ export interface AcpAgentSession {
 export interface AcpPlanHooks {
   onEnterPlan: () => Promise<void>;
   /** Returns the instruction handed back to the model after approval. */
-  onExitPlan: (planPath: string, content: string) => Promise<string>;
+  onExitPlan: (planPath: string, content: string) => Promise<ToolExecuteResult>;
 }
 
 export interface AcpModeOptions {
@@ -1060,7 +1060,11 @@ export async function runAcpMode(options: AcpModeOptions): Promise<void> {
       // The exact validated snapshot becomes the client's initial to-do list.
       // Later progress refreshes may still incorporate deliberate implementation edits.
       adoptPlan(approvedPath, content);
-      return "Plan approved. Proceed with implementation, marking each completed step with [DONE:n].";
+      return {
+        content:
+          "Plan approved. Proceed with implementation, marking each completed step with [DONE:n].",
+        endRun: false,
+      };
     },
   };
 

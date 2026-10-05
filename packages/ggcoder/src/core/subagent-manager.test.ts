@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { Provider } from "@kenkaiiii/gg-ai";
+import type { Provider, ThinkingLevel } from "@kenkaiiii/gg-ai";
 import type { AgentDefinition } from "./agents.js";
 import { buildSubAgentCompletionFollowUp, SubAgentManager } from "./subagent-manager.js";
 import { SubAgentStore, type PersistedSubAgentRecord } from "./subagent-store.js";
@@ -46,6 +46,7 @@ function manager(
     adoptionPollMs?: number;
     provider?: Provider;
     model?: string;
+    getThinkingLevel?: () => ThinkingLevel | undefined;
   } = {},
 ) {
   const instance = new SubAgentManager({
@@ -54,6 +55,7 @@ function manager(
     agents: options.agentDefs ?? agents,
     getProvider: () => options.provider ?? "openai",
     getModel: () => options.model ?? "gpt-6.1-sol",
+    getThinkingLevel: options.getThinkingLevel,
     getCacheKey: () => "parent-cache",
     getMaxPerModel: () => options.maxPerModel,
     workerEntry,
@@ -133,36 +135,59 @@ describe("SubAgentManager", () => {
     ["legacy fast", "fake"],
     ["inheriting", "inheritor"],
     ["unnamed", undefined],
-  ])(
-    "runs the %s child on the parent model at its lowest thinking level",
-    async (_label, agentName) => {
-      // Regressions: `fast` swapped in a weaker model (gpt-6-luna), and other
-      // children copied the parent's level ("ultra" here, capped to "max").
-      const inheriting: AgentDefinition = {
-        name: "inheritor",
-        description: "Inherits everything",
-        tools: ["read"],
-        systemPrompt: "fake",
-        source: "bundled",
-      };
-      const instance = manager({ agentDefs: [...agents, inheriting] });
-      const requestSpy = vi.spyOn(
-        instance as unknown as {
-          request: (...args: unknown[]) => Promise<unknown>;
-        },
-        "request",
-      );
+  ])("runs the %s child on the parent model with inherited Ultra", async (_label, agentName) => {
+    // Neither legacy fast nor an unnamed child may silently downgrade
+    // the parent's model or reasoning selection.
+    const inheriting: AgentDefinition = {
+      name: "inheritor",
+      description: "Inherits everything",
+      tools: ["read"],
+      systemPrompt: "fake",
+      source: "bundled",
+    };
+    const instance = manager({
+      agentDefs: [...agents, inheriting],
+      getThinkingLevel: () => "ultra",
+    });
+    const requestSpy = vi.spyOn(
+      instance as unknown as {
+        request: (...args: unknown[]) => Promise<unknown>;
+      },
+      "request",
+    );
 
-      await instance.spawn("lowest-child", "fast", agentName);
+    await instance.spawn("ultra-child", "fast", agentName);
 
-      const lowest = getSupportedThinkingLevels("openai", "gpt-6.1-sol")[0];
-      const initializeCall = requestSpy.mock.calls.find(([, command]) => command === "initialize");
-      expect(lowest).toBeDefined();
-      expect(initializeCall?.[2]).toMatchObject({
-        options: { model: "gpt-6.1-sol", fallbackModel: undefined, thinkingLevel: lowest },
-      });
-    },
-  );
+    const initializeCall = requestSpy.mock.calls.find(([, command]) => command === "initialize");
+    expect(initializeCall?.[2]).toMatchObject({
+      options: { model: "gpt-6.1-sol", fallbackModel: undefined, thinkingLevel: "ultra" },
+    });
+  });
+
+  it("reads current parent reasoning on each spawn and retains it for fallback", async () => {
+    let thinking: ThinkingLevel | undefined = "ultra";
+    const instance = manager({ getThinkingLevel: () => thinking });
+    const requestSpy = vi.spyOn(
+      instance as unknown as { request: (...args: unknown[]) => Promise<unknown> },
+      "request",
+    );
+    await instance.spawn("pinned", "fast", undefined, { model: "gpt-6-luna" });
+    thinking = "high";
+    await instance.spawn("high", "fast");
+    thinking = undefined;
+    await instance.spawn("off", "fast");
+    const initializeCalls = requestSpy.mock.calls.filter(([, command]) => command === "initialize");
+    expect(initializeCalls[0]?.[2]).toMatchObject({
+      options: { thinkingLevel: "max", parentThinkingLevel: "ultra", fallbackModel: "gpt-6.1-sol" },
+    });
+    expect(initializeCalls[1]?.[2]).toMatchObject({
+      options: { thinkingLevel: "high", parentThinkingLevel: "high" },
+    });
+    // JSON omits undefined fields; neither the child nor fallback should enable thinking.
+    expect(initializeCalls[2]?.[2]).toMatchObject({
+      options: { thinkingLevel: undefined, parentThinkingLevel: undefined },
+    });
+  });
 
   it("uses the lowest thinking level of an overridden model, not the agent's own", async () => {
     // The reviewer forces a model at spawn time; its rung must come from THAT
@@ -423,6 +448,7 @@ describe("SubAgentManager", () => {
     await fs.mkdir(cwd, { recursive: true });
     const instance = manager({
       idleTimeoutMs: 5,
+      getThinkingLevel: () => "ultra",
       cwd,
       sessionRootDir,
       store: new SubAgentStore(path.join(root, "state")),
@@ -446,7 +472,7 @@ describe("SubAgentManager", () => {
     await instance.followup(child.agent_id, "late");
     const initialize = requestSpy.mock.calls.find(([, command]) => command === "initialize");
     expect(initialize?.[2]).toMatchObject({
-      options: { childSessionPath },
+      options: { childSessionPath, thinkingLevel: "ultra", parentThinkingLevel: "ultra" },
     });
     const resumed = await instance.wait([child.agent_id], "all", 500);
     expect(resumed.agents[0]).toMatchObject({ state: "completed", collected: true });

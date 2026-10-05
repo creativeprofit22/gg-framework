@@ -39,6 +39,7 @@ export const TOOL_PROMPT_HINTS: Record<string, string> = {
   wait_agent: "Wait for child agents; for processes use task_output.",
   list_agents: "List child IDs, states, turns and tokens.",
   interrupt_agent: "Interrupt a child's turn; preserve follow-up context.",
+  checklist: "Read/record completed project checks; no unasked audits.",
   tasks:
     "Manage the project task list. Never proactively — only on explicit request, or at a slash-command's task-handoff step.",
   enter_plan:
@@ -112,6 +113,7 @@ export function buildToolSteering(activeTools: readonly string[]): string {
 export const BUILTIN_TOOL_NAMES: readonly string[] = [
   "ask_user",
   "bash",
+  "checklist",
   "code_nav",
   "code_search",
   "debug",

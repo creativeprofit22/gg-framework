@@ -254,11 +254,11 @@ async function* runStream(
     ) {
       hint =
         "This model is not available through your ChatGPT account. " +
-        "Switch to a model listed for OpenAI via the model selector, or check your ChatGPT usage limits.";
+        "Choose another available model using the model selector.";
     } else if (response.status === 404 && text.includes("does not exist")) {
       hint =
         "This model is not in OpenAI's current catalog for your ChatGPT account. " +
-        "Switch to GPT-6 Astra, GPT-6.1 Sol, or GPT-6 Luna via the model selector.";
+        "Choose another available model using the model selector.";
     }
 
     throw new ProviderError("openai", message, {
@@ -820,6 +820,7 @@ function codexUsageLimitError(
   if (!isHardUsage && !(isRateOr429 && resetsAt != null)) return null;
 
   return new ProviderError("openai", "ChatGPT usage limit reached", {
+    cause: errorObj,
     statusCode: statusCode ?? 429,
     ...(requestId ? { requestId } : {}),
     ...(resetsAt ? { resetsAt } : {}),

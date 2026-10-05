@@ -4,6 +4,7 @@
 //   - invoke("agent_state" | "agent_prompt" | "agent_cancel")
 //   - listen("agent-event")  ← forwarded SSE frames
 import { invoke } from "@tauri-apps/api/core";
+import type { ChatErrorData } from "./chat-error";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { error as logError, info as logInfo } from "@tauri-apps/plugin-log";
 import { toast } from "./toast";
@@ -661,6 +662,117 @@ export async function runTask(id: string): Promise<void> {
 /** Run every pending task sequentially (a fresh session each), in order. */
 export async function runAllTasks(): Promise<void> {
   await invoke("agent_run_tasks", { paneId: "primary", id: null, all: true });
+}
+
+/** Mirrors ggcoder `core/checklist-store.ts` ChecklistStatus. */
+export type ChecklistStatus = "not-run" | "not-applicable" | "due" | "passed" | "needs-work";
+
+/** One project health-checklist item joined with its recorded result (ChecklistRow). */
+export interface ChecklistEntry {
+  id: string;
+  group: string;
+  title: string;
+  description: string;
+  check: string;
+  skill: string | null;
+  setupCommand: string | null;
+  status: ChecklistStatus;
+  checkedAt: string | null;
+  commit: string | null;
+  uncommittedChanges: boolean;
+  result: "pass" | "issues" | "not-applicable" | null;
+  summary: string | null;
+  findings: string[];
+  evidence: string[];
+  /** Read-only setup observations, not an audit result. */
+  detection?: { summary: string; facts: string[] } | null;
+  /** The instructions Check sends to the agent (built by the sidecar from the item). */
+  runPrompt: string | null;
+}
+
+export interface ChecklistSnapshot {
+  staleAfterDays: number;
+  items: ChecklistEntry[];
+  detectionWarnings?: string[];
+}
+
+function checklistObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function checklistStrings(value: unknown, maxLength: number): value is string[] {
+  return (
+    Array.isArray(value) &&
+    value.length <= 10 &&
+    value.every((line) => typeof line === "string" && line.length <= maxLength)
+  );
+}
+function checklistEntry(value: unknown): value is ChecklistEntry {
+  if (!checklistObject(value)) return false;
+  const text = (key: string, max: number): boolean =>
+    typeof value[key] === "string" && value[key].length <= max;
+  const nullable = (key: string, max: number): boolean => value[key] === null || text(key, max);
+  const detection = value.detection;
+  return (
+    text("id", 80) &&
+    /^[a-z0-9-]+$/.test(String(value.id)) &&
+    text("group", 100) &&
+    text("title", 200) &&
+    text("description", 2000) &&
+    text("check", 5000) &&
+    nullable("skill", 100) &&
+    nullable("setupCommand", 100) &&
+    nullable("runPrompt", 16000) &&
+    ["not-run", "not-applicable", "due", "passed", "needs-work"].includes(String(value.status)) &&
+    [null, "pass", "issues", "not-applicable"].includes(value.result as string | null) &&
+    (value.checkedAt === null ||
+      (text("checkedAt", 40) && Number.isFinite(Date.parse(String(value.checkedAt))))) &&
+    (value.commit === null ||
+      (text("commit", 64) && /^[0-9a-f]{4,64}$/i.test(String(value.commit)))) &&
+    typeof value.uncommittedChanges === "boolean" &&
+    nullable("summary", 300) &&
+    checklistStrings(value.findings, 300) &&
+    checklistStrings(value.evidence, 200) &&
+    (detection === undefined ||
+      detection === null ||
+      (checklistObject(detection) &&
+        typeof detection.summary === "string" &&
+        detection.summary.length <= 300 &&
+        checklistStrings(detection.facts, 300)))
+  );
+}
+
+/**
+ * Read the project health checklist for one pane's session (Rust resolves the
+ * session from `paneId`). `null` when it can't be read.
+ */
+export async function getChecklist(paneId: string = "primary"): Promise<ChecklistSnapshot | null> {
+  try {
+    await waitForPaneReady(paneId);
+    const res: unknown = await invoke("agent_checklist", { paneId });
+    if (
+      !checklistObject(res) ||
+      typeof res.staleAfterDays !== "number" ||
+      !Number.isFinite(res.staleAfterDays) ||
+      res.staleAfterDays < 1 ||
+      !Array.isArray(res.items) ||
+      res.items.length === 0 ||
+      res.items.length > 64 ||
+      !res.items.every(checklistEntry) ||
+      new Set(res.items.map((item) => item.id)).size !== res.items.length ||
+      (res.detectionWarnings !== undefined && !checklistStrings(res.detectionWarnings, 300))
+    ) {
+      await logError("agent_checklist returned an invalid snapshot");
+      return null;
+    }
+    return {
+      staleAfterDays: res.staleAfterDays,
+      items: res.items,
+      detectionWarnings: res.detectionWarnings ?? [],
+    };
+  } catch (e) {
+    await logError(`agent_checklist failed: ${String(e)}`);
+    return null;
+  }
 }
 
 export async function listMemories(): Promise<MemorySnapshot> {
@@ -1482,7 +1594,7 @@ export interface HistoryEntry {
   task?: { title: string };
   /** Error row persisted by the sidecar's broadcastError. `scope` selects the
    *  live headline prefix (ken_error → "Ken: ", autopilot_error → "Autopilot: "). */
-  error?: { scope: string; headline: string; message?: string; guidance?: string };
+  error?: ChatErrorData & { scope: string; headline: string };
   /** Webview-copy info row marker (e.g. the video-capability warning). */
   infoKind?: "video_warning";
   /** Tool-produced images rendered inline (same as live `images` items),
@@ -3180,6 +3292,7 @@ export interface PaneAgentClient extends NotesClient {
   setRadio(station: string): Promise<string | null>;
   setRadioVolume(volume: number): Promise<number>;
   listTasks(): Promise<ProjectTask[]>;
+  getChecklist(): Promise<ChecklistSnapshot | null>;
   runTask(id: string): Promise<void>;
   runAllTasks(): Promise<void>;
   deleteTask(id: string): Promise<ProjectTask[]>;
@@ -3695,6 +3808,7 @@ export function createPaneAgentClient(paneId: string): PaneAgentClient {
       return Number.isFinite(r.volume) ? r.volume : volume;
     },
     listTasks: async () => (await call<{ tasks: ProjectTask[] }>("agent_tasks")).tasks ?? [],
+    getChecklist: () => getChecklist(paneId),
     runTask: (id) => call("agent_run_tasks", { id, all: false }),
     runAllTasks: () => call("agent_run_tasks", { id: null, all: true }),
     deleteTask: async (id) =>

@@ -1,5 +1,6 @@
 import os from "node:os";
 import type { ThinkingLevel } from "../types.js";
+import { toCodexReasoningEffort } from "./transform.js";
 
 // Advertised Codex client version. The ChatGPT backend gates models on it, and
 // the live gate can be stricter than the bundled catalog's
@@ -52,7 +53,7 @@ export function codexRequestProfile(
     reasoning: {
       // GPT-5.6/6 require at least low; older models still support thinking off.
       // `ultra` is a client orchestration preset, not a Codex API effort.
-      effort: thinking === "ultra" ? "max" : (thinking ?? (responsesLite ? "low" : "none")),
+      effort: thinking ? toCodexReasoningEffort(thinking, model) : responsesLite ? "low" : "none",
       summary: "auto",
       ...(liteShape ? { context: "all_turns" } : {}),
     },

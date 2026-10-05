@@ -1,5 +1,7 @@
 # Shared language
 
+**Ultra (OpenAI)** — A local delegation preset, not an API reasoning level. Following `openai/codex` commit `4c9f42f4`, Astra/Sol send `xhigh` and proactively delegate; explicit Max still sends `max` through Codex. OpenAI children inherit the current parent's reasoning selection in both blocking and persistent paths, capped to a pinned model's supported levels and restored on fallback. Other providers retain their lowest-rung child policy. Thinking/model changes refresh the live delegation instructions as well as the request setting.
+
 **Build-render-once** — GG Motion's working loop: ask the few things only the user knows, build the page in one go, look at a few stills, render once, deliver. No planning file, draft renders or checking pass; re-render only for something visibly broken. See ADR 0003.
 
 **Motion study** — A short example demonstrating transferable motion decisions. It informs a build; it is not choreography to copy.
@@ -29,3 +31,5 @@
 **Move kit** — GG's own seek-safe motion helpers (`library/kit/moves.js`): springs, arrivals, handoffs, contact, an operated camera and a cursor. Pure functions of time, not a look. Optional; plain GSAP is fine.
 
 **Review-ready** — A legacy independent-review status, not a requirement or claim made by the normal Motion workflow.
+
+**Checklist item** — One of GG Coder's built-in project health checks (tests, CI, security, design system and so on), defined once in `packages/ggcoder/src/core/checklist-items.ts`. The app's full-page Checklist shows automatically detected setup separately from recorded reviews; detected configuration is not a pass. The Agent setup button runs `/init` to create or update project instructions; it is setup, not an audit. All other checks are report-only: the agent changes no project file, and the `checklist` tool records the verdict, date, commit and evidence in `.gg-checklist.json` at the project root, which is shared through Git. Reviews state their scope and exclusions, and can also be recorded after checks requested in normal chat. A result is due again after 30 days. Not the same as a project task, which is work to do.

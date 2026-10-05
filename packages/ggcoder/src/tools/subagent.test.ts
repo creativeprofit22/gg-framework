@@ -105,6 +105,8 @@ function owlTool() {
     () => "openai",
     () => "gpt-6.1-sol",
     () => "parent-cache",
+    undefined,
+    () => "ultra",
   );
 }
 
@@ -124,20 +126,16 @@ beforeEach(() => {
 });
 
 describe("createSubAgentTool model and thinking routing", () => {
-  const parentLowest = getSupportedThinkingLevels("openai", "gpt-6.1-sol")[0];
-
   it.each(["owl", undefined])(
-    "runs the %s child on the parent model at its lowest thinking level",
+    "runs the %s child on the parent model with inherited Ultra",
     async (agent) => {
-      // Regressions: `fast` swapped in a weaker model (gpt-6-luna), and the
-      // blocking tool sent no --thinking at all, so children ran with it OFF.
+      // Blocking and persistent children must use the same inherited effort.
       spawnMock.mockImplementationOnce(() => mockExit("", 0, "done"));
 
       await runAgent(agent);
 
-      expect(parentLowest).toBeDefined();
       expect(spawnedModels()).toEqual(["gpt-6.1-sol"]);
-      expect(spawnedFlag("--thinking")).toEqual([parentLowest]);
+      expect(spawnedFlag("--thinking")).toEqual(["ultra"]);
     },
   );
 
@@ -152,11 +150,36 @@ describe("createSubAgentTool model and thinking routing", () => {
       content: "fallback succeeded\n\nReceipt (0 calls): no tool calls",
     });
     expect(spawnedModels()).toEqual(["gpt-6-luna", "gpt-6.1-sol"]);
-    // Each attempt runs at the lowest rung of ITS OWN model.
+    // The pinned model caps Ultra, but fallback restores the parent selection.
+    expect(spawnedFlag("--thinking")).toEqual(["max", "ultra"]);
     expect(spawnedCacheKeys()).toEqual([
       "parent-cache:subagent:gpt-6-luna:pinned",
       "parent-cache:subagent:gpt-6-luna:pinned",
     ]);
+  });
+
+  it("reads the current OpenAI selection on every blocking call, including off", async () => {
+    let thinking: "high" | undefined = "high";
+    const tool = createSubAgentTool(
+      process.cwd(),
+      [],
+      () => "openai",
+      () => "gpt-6.1-sol",
+      undefined,
+      undefined,
+      () => thinking,
+    );
+    spawnMock.mockImplementation(() => mockExit("", 0, "done"));
+    await tool.execute(
+      { task: "first" },
+      { signal: new AbortController().signal, toolCallId: "first" },
+    );
+    thinking = undefined;
+    await tool.execute(
+      { task: "second" },
+      { signal: new AbortController().signal, toolCallId: "second" },
+    );
+    expect(spawnedFlag("--thinking")).toEqual(["high", undefined]);
   });
 
   it("re-resolves the lowest thinking level for the parent model on a retry", async () => {

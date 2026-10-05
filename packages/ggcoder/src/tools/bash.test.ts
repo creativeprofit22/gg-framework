@@ -1,5 +1,5 @@
 import fs from "node:fs/promises";
-import { spawn } from "node:child_process";
+import { spawn, execFileSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -16,6 +16,7 @@ import { localOperations } from "./operations.js";
 import { existsSync } from "node:fs";
 import { useFakeHome } from "../test-support/fake-home.js";
 import { keepAliveWhileOwnerLives } from "../test-support/keep-alive.js";
+import { collectVerificationReview } from "./verification-review.js";
 
 let restoreHome: (() => void) | undefined;
 let tmpHome: string;
@@ -106,7 +107,133 @@ async function listSavedOutputs(): Promise<string[]> {
   }
 }
 
+describe("foreground verification review", () => {
+  async function fixture(fail = false): Promise<ReturnType<typeof createBashTool>> {
+    await fs.writeFile(
+      path.join(tmpHome, "package.json"),
+      JSON.stringify({ type: "module", scripts: { test: "node --test check.test.js" } }),
+    );
+    await fs.writeFile(path.join(tmpHome, "value.js"), "export const value = false;\n");
+    await fs.writeFile(
+      path.join(tmpHome, "check.test.js"),
+      `import { test } from 'node:test'; import assert from 'node:assert/strict'; import { value } from './value.js'; test('value', () => assert.equal(value, ${!fail}));\n`,
+    );
+    execFileSync("git", ["init", "-q"], { cwd: tmpHome });
+    execFileSync("git", ["add", "package.json", "value.js", "check.test.js"], { cwd: tmpHome });
+    await fs.writeFile(path.join(tmpHome, "value.js"), "export const value = true;\n");
+    return createBashTool(tmpHome, new ProcessManager());
+  }
+  const context = (): { signal: AbortSignal; toolCallId: string } => ({
+    signal: new AbortController().signal,
+    toolCallId: "review-test",
+  });
+
+  it("keeps check evidence first and appends a real hardened worktree diff", async () => {
+    const tool = await fixture();
+    const result = outputText(await tool.execute({ command: "npm test", review: true }, context()));
+    expect(result).toMatch(/^Exit code: 0\b/);
+    expect(result).toContain("Independent read-only review");
+    expect(result).toContain("-export const value = false;");
+    expect(result).toContain("+export const value = true;");
+    expect(result).toContain("staged/untracked contents are not shown");
+    expect(result).not.toContain("Verification evidence rejected");
+    expect(await fs.readFile(path.join(tmpHome, "value.js"), "utf8")).toBe(
+      "export const value = true;\n",
+    );
+  });
+
+  it("keeps both status and diff inside a nested working directory", async () => {
+    await fixture();
+    const nested = path.join(tmpHome, "nested");
+    await fs.mkdir(nested);
+    await fs.writeFile(path.join(nested, "note.js"), "export const note = true;\n");
+    const result = await collectVerificationReview(nested, new AbortController().signal);
+    expect(result).toContain("Status:");
+    expect(result).not.toContain("value.js");
+    expect(result).not.toContain("Review unavailable");
+  });
+
+  it("cannot turn a failing check into a success and skips the review", async () => {
+    const tool = await fixture(true);
+    const result = outputText(await tool.execute({ command: "npm test", review: true }, context()));
+    expect(result).toMatch(/^Exit code: 1\b/);
+    expect(result).not.toContain("Independent read-only review");
+  });
+
+  it("does not claim review completeness when Git is unavailable", async () => {
+    const tool = await fixture();
+    await fs.rm(path.join(tmpHome, ".git"), { recursive: true, force: true });
+    const result = outputText(await tool.execute({ command: "npm test", review: true }, context()));
+    expect(result).toMatch(/^Exit code: 0\b/);
+    expect(result).toContain("Review unavailable or incomplete");
+    expect(result).toContain("do not claim the diff was reviewed");
+  });
+
+  it.each([
+    { command: "npm test; git diff" },
+    { command: "npm test && git diff --check" },
+    { command: "echo not-a-check" },
+    { command: "npm test", persist: true },
+    { command: "npm test", run_in_background: true },
+  ])("rejects unsupported review execution before spawning: %j", async (args) => {
+    const spawnSpy = vi.spyOn(localOperations.process, "spawn");
+    try {
+      const tool = createBashTool(tmpHome, new ProcessManager());
+      const result = await tool.execute({ ...args, review: true }, context());
+      expect(result).toContain("Nothing was run");
+      expect(spawnSpy).not.toHaveBeenCalled();
+    } finally {
+      spawnSpy.mockRestore();
+    }
+  });
+
+  it("does not review a cancelled check", async () => {
+    const tool = await fixture();
+    const result = outputText(
+      await tool.execute(
+        { command: "npm test", review: true },
+        { signal: AbortSignal.abort(), toolCallId: "cancelled-review" },
+      ),
+    );
+    expect(result).toContain("Exit code: CANCELLED");
+    expect(result).not.toContain("Independent read-only review");
+  });
+});
+
 describe("renderBashOutput", () => {
+  it("explains why a semicolon check cannot prove verification", async () => {
+    const output = await renderBashOutput("diff succeeded", "npm test; git diff --stat");
+    expect(output).toContain("Verification evidence rejected");
+    expect(output).toContain("standalone command");
+    expect(output).toContain("chain only checks with &&");
+  });
+
+  it("does not demand another failed baseline solely to record evidence", async () => {
+    const output = await renderBashOutput("tests failed", "cat src/example.js; npm test");
+    expect(output).toContain("Verification evidence rejected");
+    expect(output).toContain("A failed baseline need not be rerun just to record evidence");
+    expect(output).toContain("fix the bug, then verify with a supported command");
+    expect(output).toContain("do not claim verification from this shell exit status");
+  });
+
+  it("explains that mixed checks cannot establish fresh evidence without discarding prior verification", async () => {
+    const output = await renderBashOutput(
+      "tests and whitespace passed",
+      "npm test && git diff --check",
+    );
+    expect(output).toContain("cannot establish fresh verification");
+    expect(output).toContain("can only preserve earlier successful checks");
+    expect(output).toContain("If the current changes are not already verified");
+    expect(output).toContain("run the check standalone");
+  });
+
+  it.each(["npm test", "npm test && npm run check", "git diff --stat", "npm run build"])(
+    "does not add rejection feedback to accepted or snapshot-eligible commands: %s",
+    async (command) => {
+      expect(await renderBashOutput("output", command)).toBe("output");
+    },
+  );
+
   it("saves full output and returns a recovery pointer when output exceeds 50KB", async () => {
     const raw = Array.from(
       { length: 6_000 },

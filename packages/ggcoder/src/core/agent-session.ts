@@ -12,6 +12,7 @@ import {
   type AgentEvent,
   type AgentTool,
   type AgentTurnEndEvent,
+  type ToolExecuteResult,
 } from "@kenkaiiii/gg-agent";
 import {
   ProviderError,
@@ -167,6 +168,7 @@ import { ProgrammaticSetupInspection } from "./programmatic/setup-inspection.js"
 import type { DirectCommandExecutor } from "./programmatic/execution.js";
 import type { BackgroundProcess } from "./process-manager.js";
 import type { DebugManager } from "../tools/debug.js";
+import { REVIEW_REJECTED_BEFORE_START } from "../tools/bash.js";
 import { buildProcessCompletionFollowUp } from "./process-gate.js";
 import { canonicalProjectKey } from "../project-notes-repository.js";
 import { buildSubAgentCompletionFollowUp, type SubAgentManager } from "./subagent-manager.js";
@@ -413,7 +415,7 @@ export interface AgentSessionOptions {
    * UI. Omitted by callers that don't want plan mode (CLI wires its own).
    */
   onEnterPlan?: (reason?: string) => void | Promise<void>;
-  onExitPlan?: (planPath: string, content: string) => Promise<string>;
+  onExitPlan?: (planPath: string, content: string) => Promise<ToolExecuteResult>;
   /** Captures exact Git state when a bounded verification command settles. */
   captureVerificationWorkspace?: () => Promise<NotesWorkspaceSnapshotV1>;
   /**
@@ -1087,6 +1089,7 @@ export class AgentSession {
       // sub-agent spawns read the current parent state at execution time.
       getProvider: () => this.provider,
       getModel: () => this.model,
+      getThinkingLevel: () => this.thinkingLevel,
       getBaseUrl: () => this.baseUrl,
       getCacheKey: () => this.getPromptCacheKey(),
       getMaxPerModel: () => this.settingsManager.get("subagentMaxPerModel"),
@@ -1109,8 +1112,7 @@ export class AgentSession {
     // Both delegation tools carry the agent roster; when both survive the
     // allow-list, `subagent` points at `spawn_agent`'s copy instead.
     const builtInTools =
-      createdBuiltInTools.some((t) => t.name === "spawn_agent") &&
-      this.isToolAllowed("spawn_agent")
+      createdBuiltInTools.some((t) => t.name === "spawn_agent") && this.isToolAllowed("spawn_agent")
         ? createdBuiltInTools.map((t) =>
             t.name === "subagent" ? { ...t, description: subAgentDescription(agents, true) } : t,
           )
@@ -2643,19 +2645,28 @@ ${content}
         const args = call?.args;
         if (call) {
           const command = typeof call.args.command === "string" ? call.args.command : "";
+          // A review the bash tool rejected before spawning ran nothing: it is
+          // neither a pass nor a failure, so it must not count as a check.
+          const rejectedBeforeStart =
+            call.name === "bash" &&
+            call.args.review === true &&
+            event.result === REVIEW_REJECTED_BEFORE_START;
           const verificationCandidate =
-            call.name === "bash" && classifyVerificationCommand(command).candidate;
+            call.name === "bash" &&
+            !rejectedBeforeStart &&
+            classifyVerificationCommand(command).candidate;
           const workspace =
             verificationCandidate && this.opts.captureVerificationWorkspace
               ? await this.opts.captureVerificationWorkspace().catch(() => undefined)
               : undefined;
           if (this.hookToolCalls.get(event.toolCallId) !== call) break;
-          this.verificationEvidenceLedger.recordToolResult({
-            ...call,
-            isError: event.isError,
-            details: event.details,
-            workspace,
-          });
+          if (!rejectedBeforeStart)
+            this.verificationEvidenceLedger.recordToolResult({
+              ...call,
+              isError: event.isError,
+              details: event.details,
+              workspace,
+            });
           // Upstream saves completion-review state whenever verification state
           // changes; the evidence ledger replaced that save point here.
           if (verificationCandidate) await this.persistCompletionReviewState();

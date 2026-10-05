@@ -6,6 +6,7 @@ import {
 } from "@kenkaiiii/gg-core/desktop-session-ux";
 import { getQwenCloudThinkingLabel } from "@kenkaiiii/gg-core/qwen-cloud-token-plan";
 import {
+  Activity,
   createElement,
   memo,
   useCallback,
@@ -23,6 +24,10 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { theme } from "./theme";
 import { WorkingBeam } from "./WorkingBeam";
+import { ChatErrorNotice } from "./ChatErrorNotice";
+import { withViewTransition } from "./view-transition";
+import { assignErrorCritters } from "./ErrorCritter";
+import { activeChatErrorId, readChatError, type ChatErrorItem } from "./chat-error";
 import { usePaneSwapViewState, type RegisterPaneSwapViewState } from "./usePaneSwapViewState";
 import { ActionMetal } from "./ActionMetal";
 import { MetalButton } from "./MetalButton";
@@ -91,7 +96,7 @@ import {
   type FileHit,
   type QueuedMessage,
   type TrayIntent,
-  type Attachment,
+  type ChecklistEntry,
   type PromptSegment,
   type AskUserPrompt,
   type PaneAgentClient,
@@ -133,6 +138,7 @@ import { ContextMeter } from "./ContextMeter";
 import { BackgroundTasksButton } from "./BackgroundTasksButton";
 import { isBackgroundTaskRunning } from "./background-task-status";
 import { TasksModal, type TasksLoadState } from "./TasksModal";
+import { ChecklistScreen, type ChecklistLoad, type ChecklistNotice } from "./ChecklistScreen";
 import { ProjectNotes, type ProjectNotesPromptActions } from "./ProjectNotes";
 import type {
   NotesPromptSaveResult,
@@ -444,14 +450,7 @@ export type Item =
   // me or them", message is the raw detail (omitted when redundant with the
   // headline), guidance is the action line (retry / switch model / log in /
   // wait until a reset time). `text` is a legacy fallback for older items.
-  | {
-      kind: "error";
-      id: number;
-      text?: string;
-      headline?: string;
-      message?: string;
-      guidance?: string;
-    }
+  | ChatErrorItem
   // Agent self-correction hook notice (ideal review / loop-break / re-grounding),
   // rendered as a working critter row with critter-themed wording.
   | { kind: "hook"; id: number; hook: HookKind; verificationReason?: VerificationReason }
@@ -742,6 +741,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     exportTranscriptName,
     saveTranscript,
     listTasks,
+    getChecklist,
     runTask,
     runAllTasks,
     deleteTask,
@@ -852,6 +852,8 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   } = useKenMentor({ setItems, nextId, liveText });
   // Ken's face talks on the reply he is streaming right now: the last row,
   // while his run is live. Only that row's props change, so memo holds.
+  const currentErrorId = useMemo(() => activeChatErrorId(items), [items]);
+  const errorCritters = useMemo(() => assignErrorCritters(items), [items]);
   const lastItem = items[items.length - 1];
   const talkingKenId = kenRunning && lastItem?.kind === "ken" ? lastItem.id : null;
   // Autopilot Ken (auto-reviewer): consumes the `autopilot_*` event family into
@@ -877,6 +879,50 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   const historyDraftRef = useRef("");
   // Staged attachments (paste / attach button / whole-window drag-drop) shown above the input.
   const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
+  const [attachmentsLoading, setAttachmentsLoading] = useState(false);
+  const attachmentReadsRef = useRef(0);
+  const attachmentGenerationRef = useRef(0);
+  const clearAttachments = useCallback((): void => {
+    // A read started in an old session must not attach to a new one.
+    attachmentGenerationRef.current++;
+    attachmentReadsRef.current = 0;
+    setAttachmentsLoading(false);
+    setAttachments([]);
+  }, []);
+  useEffect(
+    () => () => {
+      attachmentGenerationRef.current++;
+    },
+    [],
+  );
+  const stageAttachments = useCallback(
+    async (read: () => Promise<(PendingAttachment | null)[]>): Promise<void> => {
+      // A slash command that takes no attachments owns the composer: drop new
+      // reads instead of staging them behind it (Local Fork guard).
+      if (noAttachmentSlashCommandRef.current) return;
+      const generation = attachmentGenerationRef.current;
+      attachmentReadsRef.current++;
+      setAttachmentsLoading(true);
+      try {
+        const loaded = await read();
+        if (generation !== attachmentGenerationRef.current) return;
+        const ok = loaded.filter((item): item is PendingAttachment => item !== null);
+        if (ok.length > 0 && !noAttachmentSlashCommandRef.current)
+          setAttachments((previous) => [...previous, ...ok]);
+        if (ok.length !== loaded.length)
+          toast("Some attachments could not be loaded. Try again.", "error");
+      } catch {
+        if (generation === attachmentGenerationRef.current)
+          toast("Attachments could not be loaded. Try again.", "error");
+      } finally {
+        if (generation === attachmentGenerationRef.current) {
+          attachmentReadsRef.current--;
+          setAttachmentsLoading(attachmentReadsRef.current > 0);
+        }
+      }
+    },
+    [],
+  );
   const [isFileDragOver, setIsFileDragOver] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   // The most recent prompt-enhancement result. `plain` is the text now in the
@@ -1104,6 +1150,18 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     setTasksLoad("idle");
   }, []);
   const [showTasks, setShowTasks] = useState(false);
+  // Checklist is a workspace view; the mounted chat keeps its draft and history.
+  const [showChecklist, setShowChecklist] = useState(false);
+  const [checklistLoad, setChecklistLoad] = useState<ChecklistLoad>({ kind: "loading" });
+  const [checklistRunId, setChecklistRunId] = useState<string | null>(null);
+  const [checklistNotice, setChecklistNotice] = useState<ChecklistNotice | null>(null);
+  const checklistRunRef = useRef<{
+    id: string;
+    checkedAt: string | null;
+    expectsRecord: boolean;
+  } | null>(null);
+  const checklistFetchRef = useRef(0);
+  const checklistWasOpen = useRef(false);
   const [showMemories, setShowMemories] = useState(false);
   // Every window chooses a code or chat workspace before connecting. Mode stays
   // separate from picker visibility so restore and reopened pickers are explicit.
@@ -1585,6 +1643,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     props.focused !== false &&
     !needsProject &&
     !showPicker &&
+    !showChecklist &&
     workspaceMode === "code" &&
     input.length === 0;
   // The empty composer is one line tall, so a hint wider than the field is cut
@@ -1677,11 +1736,18 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
         }
         setIsFileDragOver(false);
         if (!canHandleWindowFileDrop() || payload.paths.length === 0) return;
-        void getDroppedPathInfo(payload.paths).then((infos) => {
-          if (disposed) return;
+        const generation = attachmentGenerationRef.current;
+        void stageAttachments(async () => {
+          const infos = await getDroppedPathInfo(payload.paths);
+          if (disposed || generation !== attachmentGenerationRef.current) return [];
           insertDroppedFolderPaths(infos.filter((info) => info.isDir).map((info) => info.path));
           const filePaths = infos.filter((info) => !info.isDir).map((info) => info.path);
-          if (filePaths.length > 0) void addNativeDroppedFiles(filePaths);
+          return Promise.all(
+            filePaths.map(async (path): Promise<PendingAttachment | null> => {
+              const attachment = await readDroppedFileAttachment(path);
+              return attachment ? attachmentToPending(attachment) : null;
+            }),
+          );
         });
       })
       .then((off) => {
@@ -1693,7 +1759,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       disposed = true;
       void unlisten?.();
     };
-  }, [insertDroppedFolderPaths, ownsWindowGlobals]);
+  }, [insertDroppedFolderPaths, ownsWindowGlobals, stageAttachments]);
 
   // Keep the native window title aligned with the visible title-bar context.
   useEffect(() => {
@@ -1861,7 +1927,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       // A modal/overlay owns keyboard focus while open — stealing it back to the
       // chat input means the user can't type in the modal's fields. Bail when one
       // is present (every modal renders inside `.modal-backdrop`).
-      if (document.querySelector(".modal-backdrop")) return;
+      if (document.querySelector(".modal-backdrop, .checklist-screen")) return;
       // Don't yank focus out of another editable field (a different input,
       // textarea, or contenteditable) the user is intentionally typing in.
       if (
@@ -2192,8 +2258,8 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       setPlanReview,
       setQueuedCount,
       setQueuedMessages,
-      setAttachments: (next) => {
-        if (!unresolvedSessionResetRef.current) setAttachments(next);
+      setAttachments: () => {
+        if (!unresolvedSessionResetRef.current) clearAttachments();
       },
       setCommands,
       refreshCommands,
@@ -2545,18 +2611,10 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
             if (h.plan) return { kind: "plan", id: nextId(), reason: h.plan.reason };
             if (h.task) return { kind: "task", id: nextId(), title: h.task.title };
             if (h.error) {
-              const prefix =
-                h.error.scope === "ken_error"
-                  ? `${MENTOR_DISPLAY_NAME}: `
-                  : h.error.scope === "autopilot_error"
-                    ? "Autopilot: "
-                    : "";
               return {
                 kind: "error",
                 id: nextId(),
-                headline: `${prefix}${h.error.headline}`,
-                message: h.error.message,
-                guidance: h.error.guidance,
+                ...readChatError({ ...h.error }, h.error.scope, true),
               };
             }
             if (h.infoKind === "video_warning")
@@ -2734,6 +2792,67 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
         toast(taskErrorMessage(error), "error");
       });
   }, [listTasks, setProjectTasks]);
+
+  const refreshChecklist = useCallback(
+    async (completed?: {
+      id: string;
+      checkedAt: string | null;
+      expectsRecord: boolean;
+    }): Promise<void> => {
+      const fetchId = ++checklistFetchRef.current;
+      // Pane-scoped: Rust resolves this pane's session from its paneId.
+      const snapshot = await getChecklist();
+      if (fetchId !== checklistFetchRef.current) return;
+      setChecklistLoad(snapshot ? { kind: "ready", snapshot } : { kind: "error" });
+      if (snapshot) {
+        setChecklistNotice((previous) => {
+          const notice = completed?.expectsRecord
+            ? {
+                id: completed.id,
+                checkedAt: completed.checkedAt,
+                message: "No result recorded. View the conversation for details.",
+              }
+            : previous;
+          if (!notice) return null;
+          const checkedAt = snapshot.items.find((item) => item.id === notice.id)?.checkedAt;
+          return checkedAt && checkedAt !== notice.checkedAt ? null : notice;
+        });
+      }
+    },
+    [getChecklist],
+  );
+  const openChecklist = useCallback(() => {
+    withViewTransition(() => {
+      setShowChecklist(true);
+      setChecklistLoad({ kind: "loading" });
+      void refreshChecklist();
+    });
+  }, [refreshChecklist]);
+  useEffect(() => {
+    if (!showChecklist && checklistWasOpen.current)
+      inputRef.current?.focus({ preventScroll: true });
+    checklistWasOpen.current = showChecklist;
+  }, [showChecklist]);
+  // Refresh from the record, not from an assistant's claim of success. This also
+  // picks up checks recorded during ordinary chat while this view is open.
+  useEffect(
+    () =>
+      subscribe((event) => {
+        if (event.type !== "run_end") return;
+        const completed = checklistRunRef.current;
+        checklistRunRef.current = null;
+        setChecklistRunId(null);
+        if (showChecklist || completed) void refreshChecklist(completed ?? undefined);
+      }),
+    [subscribe, showChecklist, refreshChecklist],
+  );
+  useEffect(
+    () => () => {
+      checklistFetchRef.current++;
+      checklistRunRef.current = null;
+    },
+    [],
+  );
 
   // Run a single task: the sidecar opens a fresh session and streams progress
   // back (session_reset → task_start → run_start/…/run_end). Close the modal so
@@ -3043,7 +3162,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       setInput("");
       setMention(null);
       setMentionedPaths([]);
-      setAttachments([]);
+      clearAttachments();
       setIsFileDragOver(false);
       setSlashIndex(0);
       void pickWorkspaceDirectory(cmd.name);
@@ -3059,7 +3178,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       setMentionedPaths([]);
     }
     if (cmd.input.attachments === "none") {
-      setAttachments([]);
+      clearAttachments();
       setIsFileDragOver(false);
     }
     if (cmd.input.text === "none") setEnhancement(null);
@@ -3215,7 +3334,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       setInput("");
       setSlashIndex(0);
       if (clearMedia) {
-        setAttachments([]);
+        clearAttachments();
         setMention(null);
         setMentionedPaths([]);
         setEnhancement(null);
@@ -3244,18 +3363,24 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   // `keepInput` is for sends the user did not initiate right now — a scheduled
   // prompt firing on its interval. Those must NOT clear the composer, or a
   // schedule that comes due mid-sentence deletes what the user was typing.
-  function submitText(text: string, label?: string, opts?: { keepInput?: boolean }): void {
-    if (blockUnconfirmedSession() || sessionMutationLockRef.current) return;
+  // Returns whether the prompt was dispatched; `onError` replaces the default
+  // failure report for callers (the checklist) that surface it themselves.
+  function submitText(
+    text: string,
+    label?: string,
+    opts?: { keepInput?: boolean; onError?: (error: unknown) => void },
+  ): boolean {
+    if (blockUnconfirmedSession() || sessionMutationLockRef.current) return false;
     // A pending plan is the only operation that can move this session forward.
     // Do not let toolbar commands or scheduled prompts silently clear its gate.
-    if (planReview !== null) return;
+    if (planReview !== null) return false;
     const trimmed = text.trim();
     // Mid-run this QUEUES as steering, exactly like a typed message (see
     // submit()): the sidecar injects it into the running loop. Dropping it
     // instead would be silent — the folder picker especially, which gives no
     // hint that the directory you just chose went nowhere.
     const disposition = submitDisposition(trimmed, readyRef.current, running);
-    if (disposition === "ignore") return;
+    if (disposition === "ignore") return false;
     const queued = disposition === "queue";
     const supersedesQuestion = hasOpenAsk();
     // Keep approval controls and queue state unchanged until the host accepts.
@@ -3282,8 +3407,11 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
         if (!submission.queued) planResumePromptRef.current = trimmed;
       })
       .catch((error) => {
-        if (isCurrent()) reportPromptFailure(error);
+        if (!isCurrent()) return;
+        if (opts?.onError) opts.onError(error);
+        else reportPromptFailure(error);
       });
+    return true;
   }
 
   // Scheduled prompts fire from a ticker that is set up once, so it can't close
@@ -3291,6 +3419,40 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   // current one without re-creating the interval on every render.
   const submitTextRef = useRef(submitText);
   submitTextRef.current = submitText;
+
+  // Return to chat without consuming the draft. Agent setup runs the existing
+  // /init workflow; audits require a recorded result, never an inferred pass.
+  function handleRunChecklistItem(item: ChecklistEntry): void {
+    const setup = item.id === "agent-setup";
+    const prompt = setup ? "/init" : item.runPrompt;
+    if (prompt === null || running || checklistRunRef.current || !readyRef.current) return;
+    const run = { id: item.id, checkedAt: item.checkedAt, expectsRecord: !setup };
+    checklistRunRef.current = run;
+    setChecklistRunId(item.id);
+    setChecklistNotice(null);
+    const failed = (): void => {
+      if (checklistRunRef.current !== run) return;
+      checklistRunRef.current = null;
+      setChecklistRunId(null);
+      setChecklistNotice({
+        id: item.id,
+        checkedAt: item.checkedAt,
+        message: setup
+          ? "Couldn't start /init. Try again."
+          : "Couldn't start this check. Try again.",
+      });
+    };
+    if (
+      submitText(prompt, setup ? "/init" : `Checking ${item.title}`, {
+        keepInput: true,
+        onError: failed,
+      })
+    ) {
+      withViewTransition(() => setShowChecklist(false));
+    } else {
+      failed();
+    }
+  }
 
   const typingAskRef = useRef<{ itemId: number; promptId: string; questionId: string } | null>(
     null,
@@ -4097,6 +4259,10 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     if (blockUnconfirmedSession() || sessionMutationLockRef.current) return;
     if (promptSubmissionPendingRef.current?.()) return;
     if (!readyRef.current) return;
+    if (attachmentReadsRef.current > 0) {
+      toast("Attachments are still loading. Please wait.");
+      return;
+    }
     const trimmed = input.trim();
     const typedAsk = typingAskRef.current;
     if (typedAsk && trimmed) {
@@ -4123,7 +4289,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
         setMention(null);
         setMentionedPaths([]);
       }
-      if (match?.command.input.attachments === "none") setAttachments([]);
+      if (match?.command.input.attachments === "none") clearAttachments();
       pushItem({
         kind: "error",
         id: nextId(),
@@ -4168,6 +4334,13 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     // build run; his reply streams into a magenta bubble via ken_* events.
     const kenMatch = workspaceMode === "code" ? MENTOR_HANDLE_SUBMIT_RE.exec(trimmed) : null;
     if (kenMatch) {
+      if (attachments.length > 0) {
+        toast(
+          `${MENTOR_DISPLAY_NAME} cannot receive attachments. Remove ${MENTOR_HANDLE} to send them to ${PRODUCT_DISPLAY_NAME}.`,
+          "warning",
+        );
+        return;
+      }
       const question = trimmed.slice(kenMatch[0].length).trim();
       sendToKen(question, trimmed);
       return;
@@ -4282,26 +4455,9 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   async function addFiles(files: FileList | File[]): Promise<void> {
     if (noAttachmentSlashCommandRef.current) return;
     const list = Array.from(files);
-    const pendings = await Promise.all(list.map((file) => fileToPending(file).catch(() => null)));
-    const ok = pendings.filter((pending): pending is PendingAttachment => pending !== null);
-    if (ok.length > 0 && !noAttachmentSlashCommandRef.current) {
-      setAttachments((previous) => [...previous, ...ok]);
-    }
-  }
-
-  // Native Tauri drop events hand us absolute paths, not browser File objects
-  // (macOS/Linux keep the native drag-drop handler enabled so folder drops can
-  // report a path at all — see build_app_window). Non-directory paths are read
-  // here and staged exactly like a picked/pasted file.
-  async function addNativeDroppedFiles(paths: string[]): Promise<void> {
-    if (paths.length === 0 || noAttachmentSlashCommandRef.current) return;
-    const results = await Promise.all(paths.map((path) => readDroppedFileAttachment(path)));
-    const ok = results
-      .filter((attachment): attachment is Attachment => attachment !== null)
-      .map((attachment) => attachmentToPending(attachment));
-    if (ok.length > 0 && !noAttachmentSlashCommandRef.current) {
-      setAttachments((previous) => [...previous, ...ok]);
-    }
+    await stageAttachments(() =>
+      Promise.all(list.map((file) => fileToPending(file).catch(() => null))),
+    );
   }
 
   function handleWindowDragEnter(e: React.DragEvent<HTMLDivElement>): void {
@@ -4468,6 +4624,12 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   // the hydrate effect even when needsProject is already false (switching
   // sessions from the reopened picker), which flipping the boolean alone won't.
   function onProjectChosen(): void {
+    checklistFetchRef.current++;
+    checklistRunRef.current = null;
+    setShowChecklist(false);
+    setChecklistRunId(null);
+    setChecklistNotice(null);
+    setChecklistLoad({ kind: "loading" });
     stickToBottomRef.current = true;
     setItems([]);
     setLiveToolFeed([]);
@@ -4481,7 +4643,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     planDoneRef.current = new Set();
     setPlanTotal(0);
     setPlanDone(new Set());
-    if (!unresolvedSessionResetRef.current) setAttachments([]);
+    if (!unresolvedSessionResetRef.current) clearAttachments();
     setQueuedCount(0);
     setQueuedMessages([]);
     setHydrated(false);
@@ -4632,15 +4794,23 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       handleNativeDrop: (paths) => {
         if (!canHandleWindowFileDrop() || paths.length === 0) return;
         setIsFileDragOver(false);
-        void getDroppedPathInfo(paths).then((infos) => {
+        const generation = attachmentGenerationRef.current;
+        void stageAttachments(async () => {
+          const infos = await getDroppedPathInfo(paths);
+          if (generation !== attachmentGenerationRef.current) return [];
           insertDroppedFolderPaths(infos.filter((info) => info.isDir).map((info) => info.path));
           const filePaths = infos.filter((info) => !info.isDir).map((info) => info.path);
-          if (filePaths.length > 0) void addNativeDroppedFiles(filePaths);
+          return Promise.all(
+            filePaths.map(async (path): Promise<PendingAttachment | null> => {
+              const attachment = await readDroppedFileAttachment(path);
+              return attachment ? attachmentToPending(attachment) : null;
+            }),
+          );
         });
       },
     });
     return () => registerInput?.(paneId, null);
-  }, [insertDroppedFolderPaths, paneId, registerInput]);
+  }, [insertDroppedFolderPaths, paneId, registerInput, stageAttachments]);
 
   // Show explicit recovery feedback while Rust resolves this window's durable
   // target. This branch used to paint only the dark background, which looked
@@ -4851,7 +5021,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
 
   const content = (
     <div
-      className={`app agent-pane${props.focused !== false ? " pane-focused" : ""}${isFileDragOver ? " app-file-dragover" : ""}${windowFocused && props.windowFocused !== false ? " window-focused" : ""}`}
+      className={`app agent-pane${props.focused !== false ? " pane-focused" : ""}${isFileDragOver ? " app-file-dragover" : ""}${windowFocused && props.windowFocused !== false ? " window-focused" : ""}${workspaceMode === "code" && showChecklist ? " checklist-open" : ""}`}
       data-glow={glowState}
       style={{ background: "var(--workspace-pane-bg, var(--bg))", ...glowStyle }}
       onPointerDown={() => props.onFocus?.(paneId)}
@@ -4878,13 +5048,19 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
         leading={
           <BackButton
             label={
-              workspaceMode === "chat"
-                ? "Back to chats"
-                : workspaceMode === "motion"
-                  ? "Back to motion sessions"
-                  : "Back to this project's sessions"
+              showChecklist
+                ? "Back to chat"
+                : workspaceMode === "chat"
+                  ? "Back to chats"
+                  : workspaceMode === "motion"
+                    ? "Back to motion sessions"
+                    : "Back to this project's sessions"
             }
-            onClick={() => setShowPicker(true)}
+            onClick={() =>
+              showChecklist
+                ? withViewTransition(() => setShowChecklist(false))
+                : setShowPicker(true)
+            }
           />
         }
         stripExtras={
@@ -5006,6 +5182,14 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
                   ? `Tasks (${projectTasks.filter((t) => t.status !== "done").length})`
                   : "Tasks"}
               </button>
+              <button
+                className="btn btn-sm btn-ghost"
+                title="Check this project's health: tests, CI, security, design and more"
+                onClick={openChecklist}
+                aria-pressed={showChecklist}
+              >
+                Checklist
+              </button>
               <RadioButton />
               {/* <GazeButton /> */}
               <WindowLayoutButton
@@ -5054,6 +5238,23 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
         )}
       </WorkspaceHeader>
 
+      {workspaceMode === "code" && showChecklist && (
+        <ChecklistScreen
+          load={checklistLoad}
+          running={running || checklistRunId !== null}
+          activeId={checklistRunId}
+          notice={checklistNotice}
+          onRun={handleRunChecklistItem}
+          onRetry={() => {
+            setChecklistLoad({ kind: "loading" });
+            void refreshChecklist();
+          }}
+        />
+      )}
+
+      {/* React owns chat visibility rather than a stylesheet override. Activity
+          keeps the draft and transcript state, and suspends hidden child effects. */}
+      <Activity mode={showChecklist ? "hidden" : "visible"}>
       {/* Non-scrolling frame the same size as the chat viewport. The banner
           lives HERE, not inside `.transcript` — `.transcript` scrolls, and an
           absolutely positioned child of a scrolling container is pinned to the
@@ -5094,6 +5295,32 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
                         key: it.id,
                         item: it,
                         kenTalking: it.id === talkingKenId,
+                        errorActive: it.id === currentErrorId,
+                        errorCritterId: errorCritters.get(it.id),
+                        errorModelPicker:
+                          it.kind === "error" && it.id === currentErrorId ? (
+                            <ModelSelect
+                              models={models}
+                              currentModel={
+                                it.scope === "ken_error" || it.scope === "autopilot_error"
+                                  ? (state?.kenModel ?? state?.model ?? "")
+                                  : (state?.model ?? "")
+                              }
+                              onSelect={
+                                it.scope === "ken_error" || it.scope === "autopilot_error"
+                                  ? onSelectKenModel
+                                  : onSelectModel
+                              }
+                              disabled={running || kenRunning || autopilotReviewing}
+                              title={
+                                it.scope === "ken_error" || it.scope === "autopilot_error"
+                                  ? `Switch ${MENTOR_DISPLAY_NAME}'s model`
+                                  : "Switch model"
+                              }
+                              label={it.reason === "usage_limit" ? "Switch provider" : "Choose model"}
+                              color={theme.primary}
+                            />
+                          ) : undefined,
                         onImageLoad: maybeScrollToBottom,
                         onAskAnswer: handleAskAnswer,
                         onAskType: handleAskType,
@@ -5455,12 +5682,21 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
               type="button"
               className={`icon-circle icon-circle-primary composer-send-icon${running ? " is-stop" : ""}`}
               aria-label={running ? "Stop response" : "Send message"}
-              title={running ? (cancelling ? "Stopping…" : "Stop response") : "Send message"}
+              title={
+                running
+                  ? cancelling
+                    ? "Stopping…"
+                    : "Stop response"
+                  : attachmentsLoading
+                    ? "Loading attachments…"
+                    : "Send message"
+              }
               disabled={
                 running
                   ? cancelling
                   : !readyRef.current ||
                     planReview !== null ||
+                    attachmentsLoading ||
                     (!input.trim() && attachments.length === 0 && mentionedPaths.length === 0)
               }
               onClick={running ? requestCancel : submit}
@@ -5774,6 +6010,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
           {appUpdate.statusMessage ?? appUpdate.installLabel}
         </div>
       )}
+      </Activity>
 
       {workspaceMode === "code" && showInitGit && (
         <InitGitModal
@@ -6050,6 +6287,9 @@ function KenReply({
 const TranscriptRow = memo(function TranscriptRow({
   item,
   kenTalking = false,
+  errorActive = false,
+  errorCritterId,
+  errorModelPicker,
   onImageLoad,
   onAskAnswer,
   onAskType,
@@ -6057,6 +6297,9 @@ const TranscriptRow = memo(function TranscriptRow({
   item: Item;
   /** This is the Ken reply currently streaming in, so his face talks. */
   kenTalking?: boolean;
+  errorActive?: boolean;
+  errorCritterId?: string | undefined;
+  errorModelPicker?: React.ReactNode;
   onImageLoad?: () => void;
   onAskAnswer?: (
     itemId: number,
@@ -6205,21 +6448,18 @@ const TranscriptRow = memo(function TranscriptRow({
         </div>
       );
     }
-    case "error": {
-      // Structured errors (see gg-ai's formatError) always answer "is this me or
-      // them" and, for usage-limit stops, when it resets — mirrors the CLI's
-      // ErrorRow instead of dumping the raw provider string. `text` is the
-      // legacy fallback for items that only ever carried a flat string.
-      const headline = item.headline ?? item.text ?? "";
-      const showMessage = item.message && item.message !== headline;
+    case "error":
       return (
-        <div className="line error" data-swap-row={item.id}>
-          <div style={{ color: theme.error, fontWeight: 600 }}>{headline}</div>
-          {showMessage && <div style={{ color: theme.textDim }}>{item.message}</div>}
-          {item.guidance && <div style={{ color: theme.textDim }}>{item.guidance}</div>}
+        <div data-swap-row={item.id}>
+          <ChatErrorNotice
+            error={item}
+            critterId={errorCritterId ?? "cat"}
+            active={errorActive}
+            modelPicker={errorModelPicker}
+            onContentGrow={onImageLoad}
+          />
         </div>
       );
-    }
     case "hook":
       return (
         <HookNotice

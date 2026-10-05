@@ -42,6 +42,7 @@ import { playSound } from "./sounds";
 import { findCompletedSteps, countPlanSteps } from "./plan-steps";
 import type { PendingAttachment } from "./attachments";
 import type { Item } from "./App";
+import { readChatError } from "./chat-error";
 import type { LiveTextStore } from "./live-text";
 
 /**
@@ -1107,21 +1108,7 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
             pendingPhasePromptFailureRef.current = null;
             break;
           }
-          // Structured payload from the sidecar's broadcastError (headline always
-          // present; message/guidance may be omitted for terse capability errors).
-          // Fall back to a flat string for any older-shaped frame.
-          const headline = typeof d.headline === "string" ? d.headline : undefined;
-          pushItem(
-            headline
-              ? {
-                  kind: "error",
-                  id: nextId(),
-                  headline,
-                  message: typeof d.message === "string" ? d.message : undefined,
-                  guidance: typeof d.guidance === "string" ? d.guidance : undefined,
-                }
-              : { kind: "error", id: nextId(), text: `error: ${String(d.message ?? "unknown")}` },
-          );
+          pushItem({ kind: "error", id: nextId(), ...readChatError(d) });
           break;
         }
         case "run_end": {
@@ -1558,6 +1545,9 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           if (streamingIdRef.current !== null) liveText.release(streamingIdRef.current);
           stickToBottomRef.current = true;
           setItems([]);
+          // The empty transcript must show the welcome screen, not the previous
+          // run's status (for example "cancelled").
+          setStatus("ready");
           setLiveToolFeed([]);
           setTokens(0);
           setDoneStatus(null);

@@ -269,7 +269,9 @@ describe("specialist chat agents", () => {
       expect(staleFutureMutator).toBeDefined();
       for (const tool of staleRemovedTools.values()) expect(tool).toBeDefined();
       expect(scopedNames()).toEqual([]);
-      expect(allNames()).toEqual(expect.arrayContaining(["bash", "edit", "write", "tasks"]));
+      expect(allNames()).toEqual(expect.arrayContaining(["bash", "edit", "write"]));
+      // `tasks` is deferred (loaded on demand) to keep its schema out of every request.
+      expect(internals.deferredBuiltinTools.has("tasks")).toBe(true);
       expect(systemPrompt()).toContain("shared memory sentinel");
       expect(systemPrompt()).not.toContain(APP_SIDECAR_ROADMAP_DRAFT_SYSTEM_PROMPT);
 
@@ -327,7 +329,9 @@ describe("specialist chat agents", () => {
         (tool) => tool.name === "mcp__unknown-mutator__write",
       );
       expect(agent.getMessages().slice(1)).toEqual(conversation);
-      expect(allNames()).toEqual(expect.arrayContaining(["bash", "edit", "write", "tasks"]));
+      expect(allNames()).toEqual(expect.arrayContaining(["bash", "edit", "write"]));
+      // `tasks` is deferred (loaded on demand) to keep its schema out of every request.
+      expect(internals.deferredBuiltinTools.has("tasks")).toBe(true);
       expect(systemPrompt()).not.toContain(APP_SIDECAR_ROADMAP_DRAFT_SYSTEM_PROMPT);
       await expect(
         staleInspectTool?.execute(

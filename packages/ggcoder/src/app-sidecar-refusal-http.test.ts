@@ -20,6 +20,8 @@ it("shows and persists a refusal instead of silently forwarding an unhandled eve
         message:
           "The model stopped with a refusal. This is not an empty-response or connection error.",
         guidance: "Review your request and the conversation context before trying again.",
+        scope: "error",
+        occurredAt: expect.any(Number),
       });
       expect(JSON.stringify(refusal?.data)).not.toContain("GG Coder bug");
       // Error-marker persistence is asynchronous; query the real history route until it appears.

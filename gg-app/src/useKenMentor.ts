@@ -1,9 +1,9 @@
 import { useCallback, useRef, useState } from "react";
 import type { KenRunIdentity, KenState, KenTarget } from "@kenkaiiii/gg-core/desktop-session-ux";
-import { MENTOR_DISPLAY_NAME } from "./brand";
 import type { Dispatch, SetStateAction } from "react";
 import type { SidecarEvent } from "./agent";
 import type { Item } from "./App";
+import { readChatError } from "./chat-error";
 import type { LiveTextStore } from "./live-text";
 
 /**
@@ -295,24 +295,9 @@ export function useKenMentor(opts: {
           endKenStreaming();
           setKenIsThinking(false);
           setKenRunStartTs(null);
-          // Structured payload from the sidecar's broadcastError; "Ken: " prefix on
-          // the headline keeps it distinguishable from a GG Coder build error.
-          const headline = typeof d.headline === "string" ? d.headline : undefined;
           setItems((prev) => [
             ...prev,
-            headline
-              ? {
-                  kind: "error",
-                  id: nextId(),
-                  headline: `${MENTOR_DISPLAY_NAME}: ${headline}`,
-                  message: typeof d.message === "string" ? d.message : undefined,
-                  guidance: typeof d.guidance === "string" ? d.guidance : undefined,
-                }
-              : {
-                  kind: "error",
-                  id: nextId(),
-                  text: `${MENTOR_DISPLAY_NAME}: ${String(d.message ?? "unknown")}`,
-                },
+            { kind: "error", id: nextId(), ...readChatError(d, "ken_error") },
           ]);
           return true;
         }

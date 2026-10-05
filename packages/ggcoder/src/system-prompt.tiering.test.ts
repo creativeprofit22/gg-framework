@@ -180,7 +180,10 @@ describe("tool tiering in the system prompt", () => {
     // constant — this block stays ~1.2KB against a schema per tool, so tiering
     // still pays for itself. Raised again (1,260 → 1,310) for upstream's
     // deferred `debug` line (~66 chars), mirroring upstream's own +50 raise.
-    expect(indexBlock.length).toBeLessThan(1_500);
+    // Raised again (1,500 → 1,660) for upstream 0.82's deferred `checklist`
+    // and `tasks` lines (~150 chars); deferring `tasks` keeps its ~1.2k-char
+    // schema out of every request, a net saving of ~1.1k chars.
+    expect(indexBlock.length).toBeLessThan(1_660);
     // Raised with the "How to Talk" reply-shape rules, then again for the
     // always-on security defaults in Code Quality, then again for the Code
     // Quality minimization ladder (benchmarked: same correctness, 50–76% less

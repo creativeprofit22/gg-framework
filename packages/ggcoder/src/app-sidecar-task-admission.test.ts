@@ -299,6 +299,8 @@ describe("task route admission", () => {
             message: "Task setup or execution could not finish.",
             guidance:
               "Open Tasks and retry the unfinished task. If it fails again, report the problem.",
+            scope: "error",
+            occurredAt: expect.any(Number),
           },
         ],
       ]);
@@ -502,6 +504,8 @@ describe("task route admission", () => {
           headline: "Run All did not start",
           message: "Cannot run tasks while plan mode is active. Leave plan mode first.",
           guidance: "Clear the blocking state, then open Tasks and run it again.",
+          scope: "error",
+          occurredAt: expect.any(Number),
         },
       ],
     ]);

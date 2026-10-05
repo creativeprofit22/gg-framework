@@ -62,7 +62,6 @@ describe("selectSubAgent", () => {
 
   it.each([
     ["anthropic", "claude-opus-5-5"],
-    ["openai", "gpt-6.1-sol"],
     ["gemini", "gemini-3.8-flash"],
     ["glm", "glm-5.3"],
     ["deepseek", "deepseek-v4-pro"],
@@ -83,6 +82,44 @@ describe("selectSubAgent", () => {
       }
     },
   );
+
+  it.each(["low", "medium", "high", "xhigh", "max", "ultra", undefined] as const)(
+    "inherits OpenAI reasoning %s for named and unnamed agents",
+    (thinkingLevel) => {
+      const agents = [
+        agent({ name: "worker", model: "inherit" }),
+        agent({ name: "owl", model: "fast" }),
+      ];
+      for (const model of ["gpt-6-astra", "gpt-6.1-sol"]) {
+        for (const name of ["worker", "owl", undefined]) {
+          expect(selectSubAgent(agents, name, "openai", model, thinkingLevel).thinkingLevel).toBe(
+            thinkingLevel,
+          );
+        }
+      }
+    },
+  );
+
+  it("caps inherited Ultra for a pinned OpenAI model without Ultra", () => {
+    const pinned = agent({ name: "pinned", model: "gpt-6-luna" });
+    expect(selectSubAgent([pinned], "pinned", "openai", "gpt-6.1-sol", "ultra")).toMatchObject({
+      model: "gpt-6-luna",
+      thinkingLevel: "max",
+    });
+  });
+
+  it("uses the floor rather than the ceiling when a pinned model does not support low", () => {
+    const pinned = agent({ name: "pinned", model: "gpt-5.5" });
+    expect(selectSubAgent([pinned], "pinned", "openai", "gpt-6.1-sol", "low").thinkingLevel).toBe(
+      "medium",
+    );
+  });
+
+  it("does not change other providers' child reasoning when the parent uses max", () => {
+    expect(selectSubAgent([], undefined, "anthropic", "claude-opus-5-5", "max").thinkingLevel).toBe(
+      "low",
+    );
+  });
 
   it("gives a sub-agent on a model that cannot reason no thinking level", () => {
     expect(

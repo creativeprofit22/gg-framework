@@ -1,5 +1,5 @@
-import type { AgentTool } from "@kenkaiiii/gg-agent";
-import type { Provider, ToolCall, ToolResult } from "@kenkaiiii/gg-ai";
+import type { AgentTool, ToolExecuteResult } from "@kenkaiiii/gg-agent";
+import type { Provider, ThinkingLevel, ToolCall, ToolResult } from "@kenkaiiii/gg-ai";
 import type { ContextLimits } from "../core/context-limits.js";
 import { SubAgentManager, type SubAgentSnapshot } from "../core/subagent-manager.js";
 import { ProcessManager } from "../core/process-manager.js";
@@ -40,6 +40,7 @@ import { createTaskOutputTool } from "./task-output.js";
 import { createTaskStopTool } from "./task-stop.js";
 import { createTaskSendTool } from "./task-send.js";
 import { createTasksTool } from "./tasks.js";
+import { createChecklistTool } from "./checklist.js";
 
 import { createSkillTool } from "./skill.js";
 import { createScreenshotTool } from "./screenshot.js";
@@ -90,7 +91,7 @@ export interface CreateToolsOptions {
   /** Callback when the LLM enters plan mode. */
   onEnterPlan?: (reason?: string) => void | Promise<void>;
   /** Callback when the LLM submits a plan for review. */
-  onExitPlan?: (planPath: string, content: string) => Promise<string>;
+  onExitPlan?: (planPath: string, content: string) => Promise<ToolExecuteResult>;
   /** Callback after read tool successfully reads a text file. */
   onFileRead?: (filePath: string) => void | Promise<void>;
   /** Callback after write/edit tools successfully mutate a file. */
@@ -113,6 +114,7 @@ export interface CreateToolsOptions {
   /** Current parent provider/model, evaluated lazily when spawning a sub-agent. */
   getProvider?: () => Provider;
   getModel?: () => string;
+  getThinkingLevel?: () => ThinkingLevel | undefined;
   getBaseUrl?: () => string | undefined;
   /** Optional per-model subagent concurrency cap (subagentMaxPerModel). */
   getMaxPerModel?: () => number | undefined;
@@ -349,6 +351,7 @@ export async function createTools(
     createTaskSendTool(processManager, cwd),
     createTaskStopTool(processManager),
     createTasksTool(cwd, opts?.onTasksChanged),
+    createChecklistTool(cwd),
     createScreenshotTool(cwd),
     // The debugger connects to a loopback inspector port, so the program must
     // run on this machine: local operations only, like LSP.
@@ -396,6 +399,7 @@ export async function createTools(
           () => opts.getModel?.() ?? opts.model!,
           opts.getCacheKey,
           planModeRef,
+          opts.getThinkingLevel,
         ),
       ),
     );
@@ -404,6 +408,7 @@ export async function createTools(
       agents: opts.agents,
       getProvider: () => opts.getProvider?.() ?? opts.provider!,
       getModel: () => opts.getModel?.() ?? opts.model!,
+      getThinkingLevel: opts.getThinkingLevel,
       getCacheKey: opts.getCacheKey,
       getBaseUrl: opts.getBaseUrl,
       getMaxPerModel: () => opts.getMaxPerModel?.(),
@@ -527,6 +532,7 @@ export { createTaskOutputTool } from "./task-output.js";
 export { createTaskSendTool } from "./task-send.js";
 export { createTaskStopTool } from "./task-stop.js";
 export { createTasksTool } from "./tasks.js";
+export { createChecklistTool } from "./checklist.js";
 export { createSkillTool } from "./skill.js";
 export { createScreenshotTool } from "./screenshot.js";
 export { createGenerateImageTool, type GenerateImageAuth } from "./generate-image.js";

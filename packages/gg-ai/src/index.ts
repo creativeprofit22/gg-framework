@@ -64,6 +64,8 @@ export {
   isHardBillingMessage,
 } from "./errors.js";
 export type { ErrorSource, FormattedError } from "./errors.js";
+export { formatChatError } from "./chat-error.js";
+export type { ChatErrorReason, FormattedChatError } from "./chat-error.js";
 export { classifyProviderError } from "./error-classification.js";
 export { REDACTION_MARKER, environmentSecrets, redactText, redactValue } from "./redaction.js";
 export type { RedactionOptions } from "./redaction.js";

@@ -3,6 +3,7 @@ import type { Dispatch, SetStateAction } from "react";
 import type { SidecarEvent } from "./agent";
 import { resolveRunEndOutcome } from "@kenkaiiii/gg-core/desktop-session-ux";
 import type { Item } from "./App";
+import { readChatError } from "./chat-error";
 
 /**
  * Autopilot Ken (auto-reviewer) event handling, extracted from App.tsx and
@@ -111,24 +112,9 @@ export function useAutopilot(opts: {
           return false;
         case "autopilot_error": {
           setAutopilotReviewing(false);
-          // Structured payload from the sidecar's broadcastError; "Autopilot: "
-          // prefix on the headline distinguishes it from a build/Ken error.
-          const headline = typeof d.headline === "string" ? d.headline : undefined;
           setItems((prev) => [
             ...prev,
-            headline
-              ? {
-                  kind: "error",
-                  id: nextId(),
-                  headline: `Autopilot: ${headline}`,
-                  message: typeof d.message === "string" ? d.message : undefined,
-                  guidance: typeof d.guidance === "string" ? d.guidance : undefined,
-                }
-              : {
-                  kind: "error",
-                  id: nextId(),
-                  text: `Autopilot: ${String(d.message ?? "unknown")}`,
-                },
+            { kind: "error", id: nextId(), ...readChatError(d, "autopilot_error") },
           ]);
           return true;
         }

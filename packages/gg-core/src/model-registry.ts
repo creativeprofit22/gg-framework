@@ -229,7 +229,7 @@ export const MODELS: ModelInfo[] = [
     // but the ChatGPT backend only serves it from 0.159.0 (see
     // CODEX_CLIENT_VERSION). $2/$10 MTok, cached input $0.10. Ladder low →
     // medium → high → xhigh → max → ultra; ultra is the Codex orchestration
-    // preset (max effort on the wire + proactive local subagent delegation).
+    // preset (xhigh effort on the wire + proactive local subagent delegation).
     id: "gpt-6.1-sol",
     name: "GPT-6.1 Sol",
     provider: "openai",

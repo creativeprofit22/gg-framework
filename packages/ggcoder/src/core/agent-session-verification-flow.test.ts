@@ -8,6 +8,7 @@ import type { AgentEvent } from "@kenkaiiii/gg-agent";
 import { useFakeHome } from "../test-support/fake-home.js";
 import type { AgentSession } from "./agent-session.js";
 import type { ProcessManager } from "./process-manager.js";
+import { createBashTool, REVIEW_REJECTED_BEFORE_START } from "../tools/bash.js";
 
 interface FlowInternals {
   processManager: ProcessManager;
@@ -146,6 +147,38 @@ describe("honest reports without stop gates", () => {
     expect(session!.getVerificationEvidenceLedgerSnapshot().currentEvidence).toEqual([]);
     expect(await internal.getHookFollowUpMessages()).toBeNull();
     expect(events).not.toContain("verification");
+  });
+
+  // Upstream regression: a review the bash tool rejects before spawning ran
+  // nothing, so it is neither a pass nor a failure.
+  it("records nothing for a review rejected before start, but keeps real failures", async () => {
+    const { internal } = await makeSession();
+    await tool(internal, "edit", { file_path: "subject.mjs" });
+    const bash = createBashTool(cwd, internal.processManager);
+    const args = { command: "node --test a.test.mjs && git diff --check", review: true };
+    const toolCallId = randomUUID();
+    await internal.trackHookEvent({
+      type: "tool_call_start",
+      toolCallId,
+      name: "bash",
+      args,
+    } as AgentEvent);
+    const result = await bash.execute(args, { signal: new AbortController().signal, toolCallId });
+    expect(result).toBe(REVIEW_REJECTED_BEFORE_START);
+    await internal.trackHookEvent({
+      type: "tool_call_end",
+      toolCallId,
+      result,
+      isError: false,
+      durationMs: 1,
+    } as AgentEvent);
+    expect(session!.getVerificationEvidenceLedgerSnapshot().currentEvidence).toEqual([]);
+
+    // Matching text from a check that actually ran must still count.
+    await tool(internal, "bash", { command: "node --test a.test.mjs", review: true }, 1);
+    expect(
+      session!.getVerificationEvidenceLedgerSnapshot().currentEvidence.map((entry) => entry.status),
+    ).toEqual(["failed"]);
   });
 
   it("accepts format-check evidence without restoring automatic reminders", async () => {

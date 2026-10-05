@@ -34,9 +34,9 @@ describe("tool tiers", () => {
     for (const name of BUILTIN_TOOL_NAMES) expect(tiered.has(name)).toBe(true);
   });
 
-  it("keeps the local task handoff tool eager", () => {
-    expect(CORE_TOOL_NAMES).toContain("tasks");
-    expect(DEFERRED_TOOL_NAMES).not.toContain("tasks");
+  it("defers the task handoff tool like upstream to keep it out of every request", () => {
+    expect(DEFERRED_TOOL_NAMES).toContain("tasks");
+    expect(CORE_TOOL_NAMES).not.toContain("tasks");
   });
 
   it("gives every deferred tool a prompt hint (its only discoverability)", () => {

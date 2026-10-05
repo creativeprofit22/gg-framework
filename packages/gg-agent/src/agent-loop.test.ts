@@ -1841,6 +1841,99 @@ describe("agentLoop", () => {
     expect(calls).toEqual(["mutate:start", "mutate:end", "read_after"]);
   });
 
+  it("ends a handoff before later batch tools, steering, or budget extensions can run", async () => {
+    const later = vi.fn(() => "should not run");
+    const getSteeringMessages = vi
+      .fn<() => Message[] | null>()
+      .mockReturnValueOnce(null)
+      .mockReturnValue([{ role: "user", content: "Queued while submitting" }]);
+    const getFollowUpMessages = vi.fn(() => null);
+    const onTurnBudgetExhausted = vi.fn(() => true);
+    mockStream.mockReturnValueOnce({
+      [Symbol.asyncIterator]: async function* () {
+        yield* [];
+      },
+      response: Promise.resolve({
+        message: {
+          role: "assistant" as const,
+          content: [
+            { type: "tool_call" as const, id: "submit", name: "handoff", args: {} },
+            { type: "tool_call" as const, id: "later", name: "mutate", args: {} },
+          ],
+        },
+        stopReason: "tool_use",
+        usage: { inputTokens: 10, outputTokens: 5 },
+      }),
+    } as unknown as ReturnType<typeof stream>);
+    const messages: Message[] = [{ role: "user", content: "Submit a plan for review." }];
+
+    const { events } = await collectLoop(messages, {
+      provider: "openai",
+      model: "test",
+      maxTurns: 1,
+      getSteeringMessages,
+      getFollowUpMessages,
+      onTurnBudgetExhausted,
+      tools: [
+        {
+          name: "handoff",
+          description: "Wait for approval",
+          parameters: emptyParams,
+          executionMode: "sequential",
+          execute: () => ({ content: "Awaiting review", endRun: true }),
+        },
+        { name: "mutate", description: "Later mutation", parameters: emptyParams, execute: later },
+      ],
+    });
+
+    expect(later).not.toHaveBeenCalled();
+    // The initial pre-provider poll is allowed; the queued message must stay
+    // queued instead of bypassing the review handoff after the tool finishes.
+    expect(getSteeringMessages).toHaveBeenCalledOnce();
+    expect(messages).not.toContainEqual({ role: "user", content: "Queued while submitting" });
+    expect(getFollowUpMessages).not.toHaveBeenCalled();
+    expect(onTurnBudgetExhausted).not.toHaveBeenCalled();
+    expect(mockStream).toHaveBeenCalledOnce();
+    expect(events.slice(-2)).toEqual([
+      { type: "checkpoint", turn: 1 },
+      { type: "agent_done", totalTurns: 1, totalUsage: { inputTokens: 10, outputTokens: 5 } },
+    ]);
+    expect(messages.at(-1)).toMatchObject({
+      role: "tool",
+      content: [
+        { toolCallId: "submit", content: "Awaiting review" },
+        {
+          toolCallId: "later",
+          content: expect.stringContaining("cancelled before it started"),
+          isError: true,
+        },
+      ],
+    });
+    expect(JSON.stringify(messages)).not.toContain("endRun");
+  });
+
+  it("honors a handoff from a parallel tool after the batch finishes", async () => {
+    mockStream.mockReturnValueOnce(
+      mockToolCallResult("handoff", { inputTokens: 10, outputTokens: 5 }) as unknown as ReturnType<
+        typeof stream
+      >,
+    );
+    const { events } = await collectLoop([{ role: "user", content: "Hand off" }], {
+      provider: "openai",
+      model: "test",
+      tools: [
+        {
+          name: "handoff",
+          description: "Hand off",
+          parameters: emptyParams,
+          execute: () => ({ content: "Review pending", endRun: true }),
+        },
+      ],
+    });
+    expect(mockStream).toHaveBeenCalledOnce();
+    expect(events.at(-1)).toMatchObject({ type: "agent_done", totalTurns: 1 });
+  });
+
   it("tells a dispatched-then-aborted call apart from one that never started", async () => {
     const controller = new AbortController();
     mockStream.mockReturnValueOnce({

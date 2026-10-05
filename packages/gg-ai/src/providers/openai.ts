@@ -865,8 +865,8 @@ function toError(err: unknown, provider: string = "openai"): ProviderError {
     let hint: string | undefined;
     if (modelName === "codex-mini-latest" || cleanMessage.includes("codex-mini-latest")) {
       hint =
-        "codex-mini-latest requires an OpenAI Pro or Max subscription. " +
-        "Your account currently has access to GPT-5.4 and GPT-5.4 Mini.";
+        "This request could not use codex-mini-latest. " +
+        "Check your account access or choose another available model.";
     }
 
     const requestId =

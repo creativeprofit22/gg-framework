@@ -203,7 +203,7 @@ export function isHardBillingMessage(message: string): boolean {
 }
 
 /** Format a unix-seconds reset timestamp for display, e.g. "3:45 PM". */
-function formatResetTime(resetsAt: number): string {
+export function formatResetTime(resetsAt: number): string {
   const when = new Date(resetsAt * 1000);
   const sameDay = when.toDateString() === new Date().toDateString();
   return sameDay

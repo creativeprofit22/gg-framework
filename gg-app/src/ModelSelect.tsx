@@ -14,6 +14,8 @@ interface Props {
   disabled?: boolean;
   /** Tooltip + accessible name (e.g. "Switch GG Coder's model"). */
   title: string;
+  /** Optional compact action copy; the menu still selects the current model. */
+  label?: string;
   /** Accent color for the closed control (GG = text, Ken = ken). */
   color?: string;
   /** When set, adds a "Follow GG Coder" choice (Ken's picker) — selecting it
@@ -93,6 +95,7 @@ export function ModelSelect({
   onSelect,
   disabled,
   title,
+  label,
   color,
   onSelectFollow,
   followActive,
@@ -253,7 +256,7 @@ export function ModelSelect({
     return (
       <span className="model-picker model-picker-native" style={{ color: controlColor }}>
         <span className="model-select-text" aria-hidden="true">
-          {modelDisplayName(models, currentModel)}
+          {label ?? modelDisplayName(models, currentModel)}
         </span>
         <select
           className="model-select"
@@ -313,7 +316,7 @@ export function ModelSelect({
         aria-controls={open ? menuId : undefined}
         onClick={() => setOpen((current) => !current)}
       >
-        {modelDisplayName(models, currentModel)}
+        {label ?? modelDisplayName(models, currentModel)}
       </button>
       {open &&
         createPortal(

@@ -1682,14 +1682,23 @@ select {
 .settings-card .login-grid {
   padding: 0;
 }
-/* Page arrival. The first page rises in like the other screens' rows
-   (reveal-up); switching tabs crossfades the new page in, as yaatuber's
-   settings do (Glance's page crossfade, 280ms ease-in-out). */
+/* Shared Settings/Checklist page arrival. A light defocus, no movement, and
+   a partially visible first frame avoid the full-page blank/reload flash. */
+@keyframes settings-page-dissolve {
+  from {
+    opacity: 0.35;
+    filter: blur(2px);
+  }
+  to {
+    opacity: 1;
+    filter: none;
+  }
+}
 .settings-page.is-entering {
   animation: reveal-up var(--dur-row) var(--ease-out) both;
 }
 .settings-page.is-switching {
-  animation: fade-in 280ms ease-in-out both;
+  animation: settings-page-dissolve var(--dur-dissolve) var(--ease-out) both;
 }
 @media (prefers-reduced-motion: reduce) {
   .settings-page.is-entering,

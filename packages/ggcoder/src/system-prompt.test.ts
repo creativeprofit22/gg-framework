@@ -87,6 +87,17 @@ afterEach(async () => {
 });
 
 describe("buildSystemPrompt", () => {
+  it("steers verification into fail-fast checks", async () => {
+    const prompt = await buildSystemPrompt(await makeProject());
+    expect(prompt).toContain("Run checks standalone or chain only checks with `&&`");
+    expect(prompt).toContain("If verification evidence is rejected, correct the command");
+    expect(prompt).toContain("use bash's review:true for final checks");
+    // The rule sits inside a template literal; unescaped backticks once ended it
+    // early and silently dropped the whole How to Work section.
+    expect(prompt).toContain("## How to Work");
+    expect(prompt).toContain("After three failed fixes, re-diagnose instead of retrying.");
+  });
+
   it("tells the model instruction files are preloaded, whether or not any exist", async () => {
     const empty = await buildSystemPrompt(await makeProject());
     const withFile = await buildSystemPrompt(await makeProject({ "AGENTS.md": "Use tabs." }));

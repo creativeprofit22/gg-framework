@@ -22,6 +22,17 @@ export interface ChangelogEntry {
 /** Newest first. Prepended by the `/release` flow. */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.82.0",
+    date: "2026-10-06",
+    items: [
+      "I built you a project health hub. Open `Checklist` to work through setup, tests, security and shipping one check at a time, with saved results and a nudge when a check is due again.",
+      "When a chat hits a snag, I make the next step clearer. Usage limits, sign-in trouble and unavailable models now get their own helpful notices, with `reset times`, expandable details and a `model picker` when switching can help.",
+      "Your plans now wait for you, not the other way around. I fixed `plan review` so the agent stops cleanly when it hands over a plan, instead of burning extra turns while you decide.",
+      "I tightened the rules behind `checks passed`. Mixed shell commands no longer get mistaken for fresh verification, and the agent gets a clear way to run its checks and inspect the diff without hiding a failure.",
+      "I made `Find references` reach further in JavaScript projects without a config file. It now includes callers in unopened files and tells the agent when coverage is incomplete, so it knows when to look further.",
+    ],
+  },
+  {
     version: "0.81.0",
     date: "2026-10-05",
     items: [

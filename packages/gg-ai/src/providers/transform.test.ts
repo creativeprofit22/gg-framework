@@ -12,6 +12,7 @@ import {
   toGlmReasoningEffort,
   toLocalReasoningEffort,
   toOpenAIReasoningEffort,
+  toCodexReasoningEffort,
 } from "./transform.js";
 import { supportsStrictToolSampling } from "../utils/strict-tool-schema.js";
 import type { Message, Tool } from "../types.js";
@@ -892,6 +893,19 @@ describe("toAnthropicThinking", () => {
       // Visible output floor always reserved.
       expect(result.maxTokens - budget).toBeGreaterThanOrEqual(1024);
     }
+  });
+});
+
+describe("toCodexReasoningEffort", () => {
+  it.each(["gpt-6-astra", "gpt-6.1-sol"])("resolves %s Ultra without changing Max", (model) => {
+    expect(toCodexReasoningEffort("ultra", model)).toBe("xhigh");
+    expect(toCodexReasoningEffort("max", model)).toBe("max");
+    expect(toCodexReasoningEffort("low", model)).toBe("low");
+  });
+
+  it("keeps the max fallback for catalogs without a multi-agent effort override", () => {
+    expect(toCodexReasoningEffort("ultra", "gpt-6-sol")).toBe("max");
+    expect(toCodexReasoningEffort("ultra", "gpt-5.6-sol")).toBe("max");
   });
 });
 

@@ -10,6 +10,7 @@ import {
   serverForFile,
   type LspServerSpec,
 } from "./servers.js";
+import { findServerProjectRoot } from "./project-root.js";
 
 export interface LspManagerOptions {
   /** Server catalog override — tests inject a fake-server spec here. */
@@ -74,7 +75,7 @@ export type LspDiagnosticOutcome =
  * the same, legible way.
  */
 export type LspNavigationOutcome<T> =
-  | { kind: "ok"; filePath: string; serverId: string; value: T }
+  | { kind: "ok"; filePath: string; serverId: string; value: T; warning?: string }
   | {
       kind: "timeout" | "unsupported" | "unavailable" | "server_failed";
       filePath: string;
@@ -141,6 +142,12 @@ export class LspManager {
   /** Missing-server keys whose install hint has been delivered this session. */
   private readonly reportedMissing = new Set<string>();
   /**
+   * Server root resolved for each nearest root. Resolution is async (a TypeScript
+   * solution may enclose the nearest project), but the edit-time missing-server
+   * skip is synchronous; this lets it use the same key the resolution produced.
+   */
+  private readonly resolvedRoots = new Map<string, string>();
+  /**
    * Keys that have completed a diagnostics pass, mapped to the pool generation
    * that served it.
    *
@@ -180,7 +187,9 @@ export class LspManager {
     // A known-missing server cannot produce diagnostics; queuing again would
     // only repeat "not verified" on every edit. Its install hint is delivered
     // once by drainDiagnostics, independent of this skip.
-    const serverKey = `${spec.id}\u0000${findProjectRoot(file, spec.rootMarkers, this.cwd)}`;
+    const nearestKey = `${spec.id}\u0000${findProjectRoot(file, spec.rootMarkers, this.cwd)}`;
+    const resolvedRoot = this.resolvedRoots.get(nearestKey);
+    const serverKey = resolvedRoot === undefined ? nearestKey : `${spec.id}\u0000${resolvedRoot}`;
     if (this.missingServers.has(serverKey)) return "";
     const before = this.errorBaseline(file);
     this.latestOutcomes.delete(file);
@@ -443,7 +452,8 @@ export class LspManager {
     try {
       const spec = serverForFile(normalizedFilePath, this.catalog);
       if (!spec) return record(this.outcome("unsupported", normalizedFilePath));
-      const root = findProjectRoot(normalizedFilePath, spec.rootMarkers, this.cwd);
+      const root = await this.resolveServerRoot(normalizedFilePath, spec);
+      if (this.shutDown) return this.outcome("unavailable", normalizedFilePath);
       const key = `${spec.id}\u0000${root}`;
       const budgetMs = this.isWarm(key, spec, root) ? this.warmBudgetMs : this.firstBudgetMs;
       const work = this.collect(
@@ -542,6 +552,13 @@ export class LspManager {
       this.latestOutcomes.delete(oldest);
     }
     return outcome;
+  }
+
+  private async resolveServerRoot(filePath: string, spec: LspServerSpec): Promise<string> {
+    const root = await findServerProjectRoot(filePath, spec, this.cwd);
+    const nearest = findProjectRoot(filePath, spec.rootMarkers, this.cwd);
+    this.resolvedRoots.set(`${spec.id}\u0000${nearest}`, root);
+    return root;
   }
 
   private async collect(
@@ -739,7 +756,8 @@ export class LspManager {
     try {
       const spec = serverForFile(normalizedFilePath, this.catalog);
       if (!spec) return { kind: "unsupported", filePath: normalizedFilePath };
-      const root = findProjectRoot(normalizedFilePath, spec.rootMarkers, this.cwd);
+      const root = await this.resolveServerRoot(normalizedFilePath, spec);
+      if (this.shutDown) return { kind: "unavailable", filePath: normalizedFilePath };
       const key = `${spec.id}\u0000${root}`;
       const budgetMs = this.isWarm(key, spec, root) ? this.warmBudgetMs : this.firstBudgetMs;
 
@@ -778,6 +796,7 @@ export class LspManager {
             filePath: normalizedFilePath,
             serverId: spec.id,
             value: outcome.value,
+            ...(outcome.warning ? { warning: outcome.warning } : {}),
           };
         }
         if (outcome.status === "unsupported") {

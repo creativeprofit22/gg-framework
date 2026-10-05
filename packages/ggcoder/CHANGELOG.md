@@ -1,5 +1,17 @@
 # @kenkaiiii/ggcoder
 
+## 5.74.0
+
+### Minor Changes
+
+- Add a persistent project health checklist, clearer chat errors and recovery guidance, reliable plan-review handoffs, fail-fast verification feedback, and reference lookup for configless JavaScript projects.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.74.0
+- @kenkaiiii/gg-agent@5.74.0
+- @kenkaiiii/gg-core@5.74.0
+
 ## 5.73.0
 
 ### Minor Changes

@@ -22,8 +22,14 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { parseArgs } from "node:util";
 import { spawn, type ChildProcess } from "node:child_process";
-import { GGAIError, environmentSecrets, redactValue, type ToolResultContent } from "@kenkaiiii/gg-ai";
+import {
+  GGAIError,
+  environmentSecrets,
+  redactValue,
+  type ToolResultContent,
+} from "@kenkaiiii/gg-ai";
 import type { AddressInfo } from "node:net";
+import { restoreAppErrorPayload, type AppErrorPayload } from "./app-error.js";
 import { runJsonMode } from "./modes/json-mode.js";
 import { appSettingsFile } from "./app-sidecar-paths.js";
 import {
@@ -236,6 +242,7 @@ import {
   markTaskInProgress,
   finalizeTaskRun,
 } from "./core/tasks-store.js";
+import { readChecklistSnapshot } from "./core/checklist-snapshot.js";
 import { initLogger, log } from "./core/logger.js";
 import { installTerminationHandlers } from "./core/shutdown.js";
 import { KeepAwake } from "./core/keep-awake.js";
@@ -667,7 +674,7 @@ interface HistoryEntryForWire {
   /** Error row (headline/message/guidance), persisted by broadcastError.
    *  `scope` selects the live prefix (ken_error → "Ken: ", autopilot_error →
    *  "Autopilot: "). */
-  error?: { scope: string; headline: string; message?: string; guidance?: string };
+  error?: AppErrorPayload;
   /** Webview-copy info row marker (e.g. the video-capability warning). */
   infoKind?: "video_warning";
   /** Image previews; `text` carries verbatim warnings rendered once before them. */
@@ -2238,18 +2245,11 @@ async function createSession(
     captureSidecarError(err, `app-sidecar.${logLabel.replaceAll(" ", "-")}`, {
       scope: type,
     });
+    const payload = { scope: type, ...formatted.event, occurredAt: Date.now() };
     log("ERROR", "app-sidecar", logLabel, formatted.logFields);
-    broadcast(type, formatted.event);
-    // Persist the error row (display-only marker) so a resumed session shows
-    // the same headline/message/guidance the live run did. Best-effort.
-    void session
-      .persistAppMarker("error", {
-        scope: type,
-        headline: formatted.event.headline,
-        ...(formatted.event.message ? { message: formatted.event.message } : {}),
-        guidance: formatted.event.guidance,
-      })
-      .catch(() => {});
+    broadcast(type, payload);
+    // Same sanitized snapshot for live and restored rows, including reset metadata.
+    void session.persistAppMarker("error", payload).catch(() => {});
   }
 
   // ── MCP elicitation bridge ─────────────────────────────────
@@ -5606,16 +5606,8 @@ async function createSession(
                 task: { title: typeof d.title === "string" ? d.title : "" },
               });
             } else if (marker.kind === "error" && typeof d.headline === "string") {
-              history.push({
-                role: "assistant",
-                text: "",
-                error: {
-                  scope: typeof d.scope === "string" ? d.scope : "error",
-                  headline: d.headline,
-                  ...(typeof d.message === "string" ? { message: d.message } : {}),
-                  ...(typeof d.guidance === "string" ? { guidance: d.guidance } : {}),
-                },
-              });
+              const error = restoreAppErrorPayload(d);
+              if (error) history.push({ role: "assistant", text: "", error });
             } else if (marker.kind === "interrupted_run") {
               // Rendered as an error row: the run's tools already changed the
               // repo, so the user needs to see it and decide what to do. We
@@ -6420,6 +6412,27 @@ async function createSession(
 
     if (method === "GET" && url === "/tasks") {
       json(res, 200, { tasks: pruneDoneTasksSync(cwd) });
+      return;
+    }
+
+    if (method === "GET" && url === "/checklist") {
+      const controller = new AbortController();
+      res.once("close", () => controller.abort());
+      void (async () => {
+        try {
+          const result = await readChecklistSnapshot(cwd, new Date(), controller.signal);
+          if (res.destroyed) return;
+          if (!result.ok) {
+            log("WARN", "app-sidecar", "checklist read failed", { error: result.error });
+            json(res, 500, { error: result.error });
+            return;
+          }
+          json(res, 200, result.value);
+        } catch (error) {
+          log("WARN", "app-sidecar", "checklist snapshot failed", { error: String(error) });
+          if (!res.destroyed) json(res, 500, { error: "Could not read the project checklist" });
+        }
+      })();
       return;
     }
 

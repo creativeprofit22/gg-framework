@@ -34,8 +34,8 @@ export const CORE_TOOL_NAMES: readonly string[] = [
   "code_search",
   "code_nav",
   "web_fetch",
-  // Task handoff and the local code corpus are frequent app/orchestrator paths.
-  "tasks",
+  // The local code corpus is a frequent app/orchestrator path. `tasks` follows
+  // upstream into the deferred tier: its schema leaves every request.
   "steroids",
   "task_output",
   "task_send",
@@ -74,6 +74,8 @@ export const DEFERRED_TOOL_NAMES: readonly string[] = [
   "screenshot",
   "debug",
   "generate_image",
+  "tasks",
+  "checklist",
   "send_message",
   "followup_task",
   "wait_agent",

@@ -221,7 +221,7 @@ function setup(
     setState,
     setTasks: noop as unknown as AgentEventsDeps["setTasks"],
     setProjectTasks: noop as unknown as AgentEventsDeps["setProjectTasks"],
-    setStatus: noop as unknown as AgentEventsDeps["setStatus"],
+    setStatus: vi.fn<AgentEventsDeps["setStatus"]>(),
     setRunning,
     setLiveToolFeed,
     setTokens,
@@ -623,7 +623,9 @@ describe("useAgentEvents", () => {
   beforeEach(() => vi.clearAllMocks());
 
   it("correlates resets before applying real mentor authority", () => {
-    const mentor = renderHook(() => useKenMentor({ setItems: vi.fn(), nextId: () => 1, liveText: createLiveTextStore() }));
+    const mentor = renderHook(() =>
+      useKenMentor({ setItems: vi.fn(), nextId: () => 1, liveText: createLiveTextStore() }),
+    );
     const old = { conversationId: "old", activationEpoch: "old", activeRunId: "run" };
     act(() => mentor.result.current.hydrateKen(old));
     const { hook, deps } = setup((event) => mentor.result.current.handleKenEvent(event));
@@ -1364,6 +1366,24 @@ describe("useAgentEvents", () => {
     expect(setRunning).toHaveBeenLastCalledWith(false);
   });
 
+  it("restores the empty-session welcome state after cancelling then starting a new session", () => {
+    const { hook, deps, getItems, pushUserItem } = setup();
+    pushUserItem("Stop this run", false);
+    act(() => {
+      hook.result.current.handleEvent(ev("run_start"));
+      hook.result.current.handleEvent(ev("run_cancelling"));
+      hook.result.current.handleEvent(ev("run_end", { cancelled: true }));
+    });
+    expect(deps.setStatus).toHaveBeenLastCalledWith("cancelled");
+    expect(getItems()).toHaveLength(1);
+
+    act(() => hook.result.current.handleEvent(ev("session_reset")));
+
+    expect(getItems()).toEqual([]);
+    expect(deps.setStatus).toHaveBeenLastCalledWith("ready");
+    expect(deps.setDoneStatus).toHaveBeenLastCalledWith(null);
+  });
+
   describe("cold-cache notice status", () => {
     const expired = {
       sessionId: "old",
@@ -1848,6 +1868,10 @@ describe("useAgentEvents", () => {
           headline: "Anthropic usage limit reached.",
           message: "Your Anthropic usage is finished. It resets at 12:50 PM.",
           guidance: "Try again once it's back. Your conversation is preserved.",
+          reason: "usage_limit",
+          resetsAt: 1_800_000_000,
+          occurredAt: 1_799_000_000_000,
+          provider: "anthropic",
         }),
       );
     });
@@ -1858,6 +1882,10 @@ describe("useAgentEvents", () => {
       headline: "Anthropic usage limit reached.",
       message: "Your Anthropic usage is finished. It resets at 12:50 PM.",
       guidance: "Try again once it's back. Your conversation is preserved.",
+      reason: "usage_limit",
+      resetsAt: 1_800_000_000,
+      occurredAt: 1_799_000_000_000,
+      provider: "anthropic",
     });
   });
 

@@ -215,6 +215,31 @@ describe("LspManager", () => {
     expect(manager.drainDiagnostics(false)).toBe("");
   });
 
+  it("stops queuing a missing server when a TypeScript solution encloses the nearest root", async () => {
+    // The resolved root (the solution) differs from the nearest tsconfig; the
+    // edit-time skip must use the resolved key or it re-queues every edit.
+    const pkg = path.join(tmpDir, "pkg");
+    await fs.mkdir(pkg);
+    await fs.writeFile(path.join(tmpDir, "tsconfig.json"), '{"references":[{"path":"./pkg"}]}');
+    await fs.writeFile(path.join(pkg, "tsconfig.json"), "{}");
+    const manager = makeManager(
+      fakeSpec([], {
+        id: "typescript",
+        extensions: [".ts"],
+        rootMarkers: ["tsconfig.json"],
+        resolveCommand: () => null,
+      }),
+    );
+    const filePath = path.join(pkg, "a.ts");
+
+    manager.queueDiagnosticsAfterWrite(filePath, "x");
+    await manager.flushDiagnostics();
+    expect(manager.drainDiagnostics(true, { deferUnverified: true })).toContain("not installed");
+
+    expect(manager.queueDiagnosticsAfterWrite(filePath, "y")).toBe("");
+    expect(manager.hasQueuedDiagnostics()).toBe(false);
+  });
+
   it("records initialization failure separately", async () => {
     const manager = makeManager(fakeSpec(["--init-error"]));
     const outcome = await manager.diagnosticsAfterWriteDetailed(

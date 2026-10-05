@@ -333,6 +333,15 @@ export interface StreamOptions {
   promptCacheKey?: string;
   /** OpenAI service tier for latency-sensitive requests. */
   serviceTier?: "auto" | "default" | "flex" | "priority" | "fast";
+  /** Codex endpoint only: send the Responses-Lite request shape (lite header,
+   *  `parallel_tool_calls: false`, all-turns reasoning context). Unset follows
+   *  the model family (on for gpt-5.6/gpt-6 models). Lite allows only one tool
+   *  call per response, so turning it off lets the model batch calls. */
+  responsesLite?: boolean;
+  /** OpenAI only (Codex and API-key routes): send tools with strict
+   *  (grammar-constrained) schemas. Default true. Strict calls carry every
+   *  optional field as null, which costs output tokens and latency per call. */
+  strictTools?: boolean;
   /** OpenAI ChatGPT account ID (from OAuth JWT) for codex endpoint */
   accountId?: string;
   /** Stable conversation identity for Codex transport headers. This is distinct from

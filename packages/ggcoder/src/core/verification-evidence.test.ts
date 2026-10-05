@@ -781,6 +781,23 @@ describe("SessionVerificationEvidenceLedger", () => {
     });
   });
 
+  it("stales evidence after a multi-file edit with no top-level file_path", () => {
+    const ledger = new SessionVerificationEvidenceLedger();
+    record(ledger, "accepted", "pnpm check");
+    ledger.recordToolResult({
+      name: "edit",
+      args: {
+        files: [
+          { file_path: "src/a.ts", edits: [] },
+          { file_path: "src/b.ts", edits: [] },
+        ],
+      },
+      isError: false,
+    });
+
+    expect(ledger.snapshot().currentEvidence).toEqual([]);
+  });
+
   it("moves accepted evidence to stale after a workspace mutation", () => {
     const ledger = new SessionVerificationEvidenceLedger();
     record(ledger, "accepted", "pnpm check");

@@ -130,9 +130,20 @@ function plural(n: number, one: string, many = `${one}s`): string {
 
 function toolDetail(name: string, args: Record<string, unknown>): { text: string; quote: boolean } {
   switch (name) {
+    case "edit": {
+      // A multi-file edit carries `files: [{ file_path, edits }]` instead of `file_path`.
+      const paths = [
+        args.file_path,
+        ...(Array.isArray(args.files)
+          ? args.files.map((f) => (f as { file_path?: unknown } | null)?.file_path)
+          : []),
+      ].filter((p): p is string => typeof p === "string" && p.length > 0);
+      const first = paths[0] ?? "";
+      const more = paths.length > 1 ? ` +${paths.length - 1} more` : "";
+      return { text: `${basename(first)}${more}`, quote: false };
+    }
     case "read":
     case "write":
-    case "edit":
       return { text: basename(String(args.file_path ?? "")), quote: false };
     case "ls":
       return { text: shorten(String(args.path ?? ".")), quote: false };

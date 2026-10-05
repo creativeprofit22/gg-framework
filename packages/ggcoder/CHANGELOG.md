@@ -1,5 +1,29 @@
 # @kenkaiiii/ggcoder
 
+## 5.73.0
+
+### Minor Changes
+
+- Add a multi-file `files` form to the `edit` tool and tighten agent prompts (edit batching, bug fixes with a small regression test, preloaded instruction files, leaner skill loading) to cut model round trips; GG now edges out Codex on gpt-6-astra.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.73.0
+- @kenkaiiii/gg-agent@5.73.0
+- @kenkaiiii/gg-core@5.73.0
+
+## 5.72.0
+
+### Minor Changes
+
+- OpenAI requests (ChatGPT login and API key) now default to the faster request shape: gpt-5.6/gpt-6 models on the Codex route drop the Responses-Lite shape, so a response can carry several tool calls instead of one, and tools are sent without strict schemas, so calls no longer spell out every optional argument as null. Two new settings, `codexResponsesLite` and `codexStrictTools` (`auto`/`on`/`off`), restore the previous behaviour. Gemini no longer rejects every request whose tools use exclusive numeric bounds (zod `.positive()`/`.lt()`); they are rewritten to inclusive ones. In the desktop app, the `subagent` tool no longer crashes with "Unknown option '--thinking'": the sidecar's JSON mode now accepts the flag, and the flag-parity test covers it. `web_search` moves to the on-demand tool catalog, the `subagent` description points at `spawn_agent`'s agent roster instead of repeating it, and the system prompt, tool hints, Motion prompt and Motion skills are tightened.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.72.0
+- @kenkaiiii/gg-agent@5.72.0
+- @kenkaiiii/gg-core@5.72.0
+
 ## 5.71.0
 
 ### Minor Changes

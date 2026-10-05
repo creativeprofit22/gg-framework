@@ -207,6 +207,7 @@ import {
   isThinkingLevelSupported,
   resolveInitialThinkingLevel,
 } from "./core/thinking-level.js";
+import { parseThinkingLevel } from "./cli/thinking-arg.js";
 import { PROMPT_COMMANDS } from "./core/prompt-commands.js";
 import { AppSidecarProgrammaticChat, bindProgrammaticAssessmentEvents, programmaticChatIdentity } from "./app-sidecar-programmatic-chat.js";
 import { loadCustomCommands } from "./core/custom-commands.js";
@@ -931,6 +932,7 @@ async function runJsonModeIfRequested(): Promise<boolean> {
       tools: { type: "string" },
       "mcp-servers": { type: "string" },
       "prompt-cache-key": { type: "string" },
+      thinking: { type: "string" },
     },
     allowPositionals: true,
     strict: true,
@@ -967,6 +969,7 @@ async function runJsonModeIfRequested(): Promise<boolean> {
     allowedTools,
     allowedMcpServers,
     promptCacheKey: values["prompt-cache-key"],
+    thinkingLevel: parseThinkingLevel(values.thinking),
   }).catch(async (err: unknown) => {
     process.stderr.write((err instanceof Error ? err.message : String(err)) + "\n");
     process.exit(1);

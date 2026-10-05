@@ -11,6 +11,10 @@ skill describes; this page adds the study step.
 
 ## Ask (on the motion skill's single card)
 
+Use the shared visual-approach question from `motion` when unsettled, ahead of
+an optional idea pitch. Adapt its choices to this job; keep the card to four
+questions total and skip choices the brief or requested reference already settles.
+
 - "What should the new video be about?" when the prompt doesn't say.
 - "What do you like most about the example?" The pace · The look · How one
   scene flows into the next · All of it (recommended).

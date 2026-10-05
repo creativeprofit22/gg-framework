@@ -8,7 +8,7 @@ vi.mock("node:child_process", () => ({ spawn: spawnMock }));
 
 import type { AgentDefinition } from "../core/agents.js";
 import { getSupportedThinkingLevels } from "../core/thinking-level.js";
-import { createSubAgentTool } from "./subagent.js";
+import { createSubAgentTool, subAgentDescription } from "./subagent.js";
 import {
   MAX_BLOCKING_SUBAGENT_DEPTH,
   SUB_AGENT_DEPTH_ENV,
@@ -351,5 +351,22 @@ describe("createSubAgentTool receipt", () => {
     expect(result.content).toBe(
       "Sub-agent failed (exit 1): unknown error\n\nReceipt (1 call): write out.ts ✗",
     );
+  });
+});
+
+describe("subAgentDescription", () => {
+  const owl = {
+    name: "owl",
+    description: "Traces call chains",
+  } as AgentDefinition;
+
+  it("carries the roster when it is the only delegation tool", () => {
+    expect(subAgentDescription([owl], false)).toContain("- owl: Traces call chains");
+  });
+
+  it("points at spawn_agent's roster instead of repeating it", () => {
+    const text = subAgentDescription([owl], true);
+    expect(text).not.toContain("Traces call chains");
+    expect(text).toContain("`spawn_agent`");
   });
 });

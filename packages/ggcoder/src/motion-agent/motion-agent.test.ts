@@ -109,6 +109,10 @@ describe("Motion agent", () => {
       expect(job.content).not.toMatch(/continuous-take|frame\.md|source-ingest/);
       expect(job.content).toMatch(/## Ask \(on the motion skill's single card\)/);
       expect(job.content).toContain("## Pitfalls");
+      expect(job.content).toContain(
+        "Use the shared visual-approach question from `motion` when unsettled",
+      );
+      expect(job.content).toContain("keep the card to four");
     }
     // The idea pitch joins the one upfront card; it is not a second stop.
     expect(motion).toContain('"Which idea should we\ngo with?"');
@@ -172,6 +176,49 @@ describe("Motion agent", () => {
     expect(prompt).not.toContain("references/index.json");
   });
 
+  it("keeps new video research separate from prior projects, while allowing selected edits", async () => {
+    const bundle = await motionBundle();
+    const prompt = buildMotionAgentPrompt(bundle);
+    const skills = await loadMotionSkills(bundle);
+    const motion = skills.find((skill) => skill.name === "motion")?.content ?? "";
+    const website = skills.find((skill) => skill.name === "website-video")?.content ?? "";
+
+    expect(prompt).toContain("create a fresh workspace subfolder before gathering assets");
+    expect(prompt).toContain("use plain mkdir, not mkdir -p");
+    expect(prompt).toContain("If it exists, choose a new name without opening it");
+    expect(prompt).toContain("Never browse, read or imitate prior video compositions");
+    expect(prompt).toContain("unless the user explicitly selects one for editing or reference");
+    expect(prompt).toContain("no workspace-wide searches");
+    expect(prompt).toContain("For edits or continuations, reuse only the video the user means");
+    expect(prompt).not.toContain("On follow-ups, reuse the existing project and assets");
+    expect(motion).toContain("The same subject does not make an\nold video relevant");
+    expect(motion).toContain("do not move assets out of older projects");
+    expect(motion).toContain("If the target is unclear, ask rather than browse");
+    expect(website).toContain("Work inside the fresh video folder");
+    expect(website).toContain("video about the same URL is not a source or design reference");
+  });
+
+  it("uses a website as source material for a brand film, not a default screenshot walkthrough", async () => {
+    const skills = await loadMotionSkills(await motionBundle());
+    const website = skills.find((skill) => skill.name === "website-video");
+    expect(website?.description).toContain("original animated brand film");
+    expect(website?.content).toContain("The website is source material, not the video");
+    expect(website?.content).toContain(
+      "Page screenshots are research, not default scene backgrounds",
+    );
+    expect(website?.content).toContain("original HTML/SVG/CSS illustrations");
+    expect(website?.content).toContain("Ask which visual approach the");
+    expect(website?.content).toContain("Follow the chosen");
+    expect(website?.content).toContain("user's photos with illustrations");
+    expect(website?.content).toContain("## If a website walkthrough is requested");
+    expect(website?.content).toContain("illustration must not invent product");
+    expect(website?.content).toContain(
+      "Website screenshots with animated text over them: not a brand film",
+    );
+    expect(website?.content).not.toContain("One scroll, operated");
+    expect(website?.content).not.toContain("A still hold on the site's best frame");
+  });
+
   it("holds every video to a showcase bar", async () => {
     const prompt = buildMotionAgentPrompt(await motionBundle());
     expect(prompt).toContain("Make every video a showcase piece");
@@ -180,12 +227,21 @@ describe("Motion agent", () => {
       (await loadMotionSkills(await motionBundle())).find((s) => s.name === "motion")?.content ??
       "";
     expect(motion).toContain("**Go big.** Fill the frame");
+    // A short build left one model making slideshows: 80% near-still frames, 22 px labels.
+    expect(prompt).toContain("Never a slideshow: something always moving");
+    expect(motion).toContain("## Make it move");
+    expect(motion).toContain("A slow zoom on a photo is not motion on its own");
+    expect(motion).toContain("nothing under 32 px");
+    expect(motion).toContain("instead of sliding a new card over the old one");
   });
 
   it("asks non-designers about their world in plain words and reports results the same way", async () => {
     const bundle = await motionBundle();
     const prompt = buildMotionAgentPrompt(bundle);
     expect(prompt).toContain("Users are not motion designers");
+    expect(prompt).toContain("For every new-video job, ask what the visuals should use");
+    expect(prompt).toContain("a URL alone is not a choice");
+    expect(prompt).toContain("Follow their answer throughout the build");
     expect(prompt).toContain('not "9:16 or 16:9?"');
     expect(prompt).toContain("Keep craft terms (register, easing, LUFS, safe zone, fps) out");
     // The written delivery is the final message. Live runs that also offered a card at delivery
@@ -204,9 +260,14 @@ describe("Motion agent", () => {
     expect(motion).toContain("## Deliver");
     expect(motion).toContain('<node> "<motion bin>/reveal.mjs" renders/<file>.mp4');
     expect(motion).toContain("as your final message");
-    expect(motion).toContain("A detailed brief, a shot list or an edit gets no\n  questions.");
+    expect(motion).toContain("An edit gets no intake questions");
+    expect(motion).toContain("list skips questions only for choices it actually settles");
     expect(motion).toContain("at most four questions, each with a recommended");
     expect(motion).toContain("it is not an approval step");
+    expect(motion).toContain('"What should we build the visuals from?"');
+    expect(motion).toContain("never silently choose an approach");
+    expect(motion).toContain("Never drop the unsettled visual-approach question");
+    expect(motion).toContain("already settles it. Tailor the options to the source");
     expect(motion).toContain('1. "Where will people mostly watch this?"');
     // The music answer can't promise a library that only fits upbeat subjects.
     expect(motion).toContain("GG's built-in tracks are all upbeat and cheerful.");
@@ -231,9 +292,17 @@ describe("Motion agent", () => {
     ]
       .map((label) => label.trim())
       .filter(Boolean);
-    expect(labels).toHaveLength(25);
+    expect(labels).toHaveLength(29);
     expect(labels).toEqual(
-      expect.arrayContaining(["My logo or colours", "My photos or videos", "Nothing, start fresh"]),
+      expect.arrayContaining([
+        "My logo or colours",
+        "My photos or videos",
+        "Nothing, start fresh",
+        "Use my images",
+        "Use website photos",
+        "Animate illustrations",
+        "Mix photos and animation",
+      ]),
     );
     const shown: string[] = [];
     const ask = createAskUserTool(async (request) => {

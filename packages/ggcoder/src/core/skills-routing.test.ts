@@ -28,9 +28,8 @@ describe("skill routing prompts", () => {
   it("places the same routing rule in the skill tool description", () => {
     const tool = createSkillTool([skill]);
 
-    expect(tool.description).toContain("Before acting");
-    expect(tool.description).toContain("matches its scope");
-    expect(tool.description).toContain("respect explicit exclusions");
+    expect(tool.description).toContain("only for work that clearly needs its specialised method");
+    expect(tool.description).toContain("Respect explicit exclusions");
   });
 
   it("counterbalances invocation pressure in both routing surfaces", () => {
@@ -50,7 +49,10 @@ describe("skill routing prompts", () => {
 
     const tool = createSkillTool([skill]);
     expect(tool.description).toContain("Match the work rather than the topic");
-    expect(tool.description).toContain("skip it for routine or narrow changes");
+    // Not "Before acting, invoke…": that opener cost a skill-only turn on a
+    // plain rename 6/6 times in replay (Codex head-to-head).
+    expect(tool.description).toContain("most bug fixes, renames and refactors need none");
+    expect(tool.description).not.toContain("Before acting");
     expect(tool.description).toContain("do not re-invoke a skill already loaded");
   });
 

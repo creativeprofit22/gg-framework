@@ -321,13 +321,13 @@
     },
     {
       "name": "edit",
-      "description": "Replace text in a file. Two edit forms:\n1. TEXT form { old_text, new_text }: copy old_text verbatim from the latest read/diff with enough context to match one location; set replace_all: true only for deliberate global renames. The matcher tolerates safe whitespace/quote/dash drift, but do not paraphrase. For long blocks, a line containing only `...` in BOTH old_text and new_text elides a middle preserved verbatim.\n2. SPAN form { span, lines } (preferred after a read with anchors:true): pin the line range by its line+hash endpoints and supply the full replacement lines — no old_text to retype, and the edit is rejected if the file changed since the read. Span edits apply against the file as read; text edits then run on the result.\nPartial-apply by default: failed edits are listed for retry, successful ones are still written — re-issue ONLY the listed failures, not the whole batch. Returns a unified diff.",
+      "description": "Replace text in a file. Two edit forms:\n1. TEXT form { old_text, new_text }: copy old_text verbatim from the latest read/diff with enough context to match one location; set replace_all: true only for deliberate global renames. The matcher tolerates safe whitespace/quote/dash drift, but do not paraphrase. For long blocks, a line containing only `...` in BOTH old_text and new_text elides a middle preserved verbatim.\n2. SPAN form { span, lines } (preferred after a read with anchors:true): pin the line range by its line+hash endpoints and supply the full replacement lines — no old_text to retype, and the edit is rejected if the file changed since the read. Span edits apply against the file as read; text edits then run on the result.\nPartial-apply by default: failed edits are listed for retry, successful ones are still written — re-issue ONLY the listed failures, not the whole batch. Returns a unified diff.\nMulti-file: pass `files` (one {file_path, edits} entry per file) to change several files in a single call.",
       "schema": {
         "type": "object",
         "properties": {
           "file_path": {
-            "type": "string",
-            "description": "The file path to edit"
+            "description": "The file path to edit (single-file form)",
+            "type": "string"
           },
           "edits": {
             "description": "One or more edits applied in order. Each edit operates on the result of the previous one.",
@@ -425,18 +425,56 @@
               "additionalProperties": false
             }
           },
+          "files": {
+            "description": "Several files in ONE call: one entry per file, each with text-form edits (old_text/new_text). Use instead of file_path/edits when a change spans files.",
+            "minItems": 1,
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "file_path": {
+                  "type": "string",
+                  "description": "The file path to edit"
+                },
+                "edits": {
+                  "description": "Text-form edits for this file, applied in order.",
+                  "minItems": 1,
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "old_text": {
+                        "description": "The exact text to find and replace (text form)",
+                        "type": "string"
+                      },
+                      "new_text": {
+                        "description": "The replacement text (text form)",
+                        "type": "string"
+                      },
+                      "replace_all": {
+                        "description": "Replace every occurrence of old_text instead of requiring a unique match. Use for renames or repeated tokens. Defaults to false.",
+                        "type": "boolean"
+                      }
+                    },
+                    "additionalProperties": false
+                  }
+                }
+              },
+              "required": [
+                "file_path",
+                "edits"
+              ],
+              "additionalProperties": false
+            }
+          },
           "atomic": {
-            "description": "If true, fail the whole batch when any edit fails — no changes written. Default false: partial-apply, keep every successful edit and report failures for retry. Use atomic only when later edits depend on earlier ones in a way where a half-applied state would be worse than nothing.",
+            "description": "If true, fail a file's whole batch when any of its edits fails — that file is left unchanged. Default false: partial-apply, keep every successful edit and report failures for retry. Use atomic only when later edits depend on earlier ones in a way where a half-applied state would be worse than nothing.",
             "type": "boolean"
           }
         },
-        "required": [
-          "file_path",
-          "edits"
-        ],
         "additionalProperties": false
       },
-      "hash": "1f89f8a9025b764d150fd4b50d0afb01bcf0076fee42a88ff9ffafb02ee9ce9a"
+      "hash": "b3f36b1de1bbe4a9590748f847b3931bdb13d6fae51aeea38d4c60c10f692108"
     },
     {
       "name": "find",

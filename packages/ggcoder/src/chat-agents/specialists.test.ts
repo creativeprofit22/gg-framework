@@ -225,6 +225,7 @@ describe("specialist chat agents", () => {
       tools: AgentTool[];
       messages: Array<{ role: "system" | "user"; content: string }>;
       opts: AgentSessionOptions;
+      deferredBuiltinTools: Map<string, AgentTool>;
     };
     const scopedNames = () =>
       internals.tools
@@ -260,7 +261,9 @@ describe("specialist chat agents", () => {
       const expectedResearchTools = RESEARCH_CHAT_ALLOWED_TOOL_NAMES.filter(
         (name) =>
           brainstormTools.includes(name) ||
-          DEFERRED_TOOL_NAMES.includes(name) ||
+          // Only deferred tools this provider actually has: Anthropic serves
+          // web_search server-side, so the client tool is never registered.
+          (DEFERRED_TOOL_NAMES.includes(name) && internals.deferredBuiltinTools.has(name)) ||
           name.startsWith("roadmap_"),
       ).sort();
       expect(staleFutureMutator).toBeDefined();

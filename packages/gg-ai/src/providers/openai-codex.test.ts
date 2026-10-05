@@ -830,6 +830,97 @@ describe("streamOpenAICodex", () => {
     expect(maxBody.reasoning.effort).toBe("max");
   });
 
+  it("sends the plain request shape for a lite model when responsesLite is false", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        createSseResponse([
+          {
+            type: "response.completed",
+            response: { usage: { input_tokens: 1, output_tokens: 1 } },
+          },
+        ]),
+      ),
+    );
+
+    const fetchMock = vi.mocked(fetch);
+    const result = streamOpenAICodex({
+      provider: "openai",
+      model: "gpt-6-astra",
+      messages: [{ role: "user", content: "hi" }],
+      apiKey: "test-" + "key",
+      accountId: "acct",
+      thinking: "low",
+      responsesLite: false,
+    });
+
+    for await (const _event of result) {
+      /* consume */
+    }
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const headers = init.headers as Record<string, string>;
+    const body = JSON.parse(init.body as string) as {
+      parallel_tool_calls: boolean;
+      reasoning: Record<string, unknown>;
+      text: unknown;
+    };
+    // The server rejects parallel_tool_calls under lite, so the header and the
+    // flag must flip together; the Codex identity and verbosity stay.
+    expect(headers).not.toHaveProperty("X-OpenAI-Internal-Codex-Responses-Lite");
+    expect(headers).toMatchObject({ originator: "codex_cli_rs", version: "0.159.1" });
+    expect(body.parallel_tool_calls).toBe(true);
+    expect(body.reasoning).not.toHaveProperty("context");
+    expect(body.text).toEqual({ verbosity: "low" });
+  });
+
+  it("sends tools without strict schemas when strictTools is false", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        createSseResponse([
+          {
+            type: "response.completed",
+            response: { usage: { input_tokens: 1, output_tokens: 1 } },
+          },
+        ]),
+      ),
+    );
+    const tools = [
+      {
+        name: "read",
+        description: "Read a file",
+        parameters: z.object({ file_path: z.string(), limit: z.number().optional() }),
+      },
+    ];
+    const send = async (strictTools: boolean | undefined): Promise<Record<string, unknown>> => {
+      const result = streamOpenAICodex({
+        provider: "openai",
+        model: "gpt-6-astra",
+        messages: [{ role: "user", content: "hi" }],
+        apiKey: "test-" + "key",
+        accountId: "acct",
+        tools,
+        ...(strictTools === undefined ? {} : { strictTools }),
+      });
+      for await (const _event of result) {
+        /* consume */
+      }
+      const [, init] = vi.mocked(fetch).mock.calls.at(-1) as [string, RequestInit];
+      return (JSON.parse(init.body as string) as { tools: Record<string, unknown>[] }).tools[0]!;
+    };
+
+    const strict = await send(undefined);
+    const loose = await send(false);
+
+    expect(strict.strict).toBe(true);
+    expect((strict.parameters as { required: string[] }).required).toEqual(["file_path", "limit"]);
+    // Non-strict keeps optional fields optional, so calls omit them instead of
+    // spelling each one out as null.
+    expect(loose.strict).toBeNull();
+    expect((loose.parameters as { required: string[] }).required).toEqual(["file_path"]);
+  });
+
   it.each([
     [
       "Unsupported value: 'none' is not supported with the 'gpt-6-astra' model. Supported values are: 'low', 'medium', 'high', 'xhigh', and 'max'.",

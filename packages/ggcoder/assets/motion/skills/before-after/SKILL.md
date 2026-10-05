@@ -10,6 +10,10 @@ skill describes; this page adds what is specific to comparisons.
 
 ## Ask (on the motion skill's single card)
 
+Use the shared visual-approach question from `motion` when unsettled, ahead of
+an optional idea pitch. Adapt its choices to this job; keep the card to four
+questions total and skip choices the brief or requested reference already settles.
+
 - "What's the annoying part of life without it?" Offer two or three guesses
   from the prompt, plus "Let GG Motion choose".
 - "Where will people mostly watch this?" (from the `motion` skill).

@@ -22,10 +22,12 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   readdirSync,
   realpathSync,
   rmSync,
   statSync,
+  writeSync,
 } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
@@ -52,6 +54,64 @@ const PACKAGED_BUILD_ARGS = [
 
 function fail(message) {
   throw new Error(message);
+}
+
+// The step the smoke is on, printed with every failure. A CI run once died
+// seven seconds after extraction with nothing but "exit code 1" in the log;
+// the stage alone says whether launch, the window wait, or cleanup broke.
+let stage = "starting";
+let failureReported = false;
+
+function enterStage(next) {
+  stage = next;
+  console.log(`STAGE: ${next}`);
+}
+
+/**
+ * Print the failure synchronously to stderr. `console.error` can be lost if
+ * the process is torn down right after; `writeSync` cannot.
+ */
+function reportFailure(error) {
+  failureReported = true;
+  const detail =
+    error instanceof Error ? (error.stack ?? error.message) : `non-Error thrown: ${String(error)}`;
+  writeSync(2, `SMOKE FAIL (stage: ${stage}): ${detail}\n`);
+}
+
+/** The last `count` lines of `text`, for log excerpts. */
+export function tailLines(text, count) {
+  const lines = text.replace(/\r\n/g, "\n").replace(/\n+$/, "").split("\n");
+  return lines.slice(-count).join("\n");
+}
+
+/**
+ * Log files the packaged app and its sidecar wrote inside the throwaway
+ * profile (Tauri's log plugin under LOCALAPPDATA, the sidecar log under
+ * ~/.gg). These hold the real reason an app fails to start.
+ */
+export function findDiagnosticLogs(profileRoot) {
+  return walkFiles(profileRoot)
+    .filter((path) => extname(path).toLowerCase() === ".log")
+    .sort();
+}
+
+function printDiagnostics(profileRoot, msiLog) {
+  const logs = findDiagnosticLogs(profileRoot);
+  writeSync(2, `DIAGNOSTICS: ${logs.length} app log file(s) under ${profileRoot}\n`);
+  for (const path of logs) {
+    try {
+      writeSync(
+        2,
+        `--- ${path} (last 60 lines) ---\n${tailLines(readFileSync(path, "utf8"), 60)}\n`,
+      );
+    } catch (error) {
+      writeSync(2, `--- ${path}: unreadable (${error.message}) ---\n`);
+    }
+  }
+  if (existsSync(msiLog)) {
+    const tail = tailLines(readFileSync(msiLog, "utf16le").replaceAll("\0", ""), 15);
+    writeSync(2, `--- ${msiLog} (last 15 lines) ---\n${tail}\n`);
+  }
 }
 
 /** Thrown by a probe to abort `waitFor` immediately instead of retrying. */
@@ -361,6 +421,7 @@ export async function smokePackagedLayout(layout, options) {
   const snapshot = options.snapshot ?? processSnapshot;
   const visiblePids = options.visiblePids ?? visibleWindowPids;
   const exists = options.exists ?? processExists;
+  enterStage("launching packaged app");
   const child = spawnApp(layout.executable, [], {
     cwd: options.projectDir,
     env: isolatedEnvironment(options.smokeRoot, options.projectDir),
@@ -370,14 +431,26 @@ export async function smokePackagedLayout(layout, options) {
     windowsHide: false,
   });
   const appPid = child.pid;
+  // stdio is ignored (see above), so the exit code is the only crash evidence
+  // this runner can report. Without it a flaky launch and a real startup
+  // crash produce the same one-line failure.
   let exited = null;
+  let spawnError = null;
   child.on?.("exit", (code, signal) => {
     exited = { code, signal };
   });
+  // Without a listener a spawn failure is an uncaught 'error' event.
+  child.on?.("error", (error) => {
+    spawnError = error;
+  });
+  console.log(`LAUNCHED: pid=${appPid}`);
   try {
+    enterStage("waiting for packaged app window and bundled sidecar");
     await waitFor(
       "packaged app window and bundled sidecar",
       () => {
+        if (spawnError)
+          throw new StopWaitingError(`packaged app failed to spawn: ${spawnError.message}`);
         if (!exists(appPid)) {
           const how = exited
             ? `code ${exited.code === null ? "null" : `0x${(exited.code >>> 0).toString(16)}`}, signal ${exited.signal}`
@@ -403,6 +476,7 @@ export async function smokePackagedLayout(layout, options) {
       options.waitOptions,
     );
   } finally {
+    enterStage("cleaning up packaged processes");
     await cleanupOwnedProcesses({
       ...(options.cleanupOptions ?? {}),
       rootPid: appPid,
@@ -442,6 +516,7 @@ async function main() {
       }
     } else {
       const before = snapshotMsiArtifacts(bundleDir);
+      enterStage("building MSI");
       console.log(`BUILD: ${process.execPath} ${PACKAGED_BUILD_ARGS.join(" ")}`);
       execFileSync(process.execPath, PACKAGED_BUILD_ARGS, {
         cwd: appDir,
@@ -452,14 +527,19 @@ async function main() {
       msi = discoverChangedMsi(before, snapshotMsiArtifacts(bundleDir));
     }
 
+    enterStage("extracting MSI");
     extractMsi(msi, extractRoot, msiLog);
     const layout = discoverPackagedLayout(extractRoot);
     console.log(`PACKAGE: ${relative(appDir, msi)} -> ${layout.installDir}`);
     result = await smokePackagedLayout(layout, { smokeRoot, projectDir });
   } catch (error) {
     smokeError = error;
+    // Report and dump the app's own logs BEFORE cleanup deletes the profile.
+    reportFailure(error);
+    printDiagnostics(join(smokeRoot, "home"), msiLog);
   }
 
+  enterStage("cleaning up");
   let cleanupError;
   try {
     await removeTemporaryDirectory(smokeRoot);
@@ -480,8 +560,23 @@ async function main() {
 
 const invokedPath = process.argv[1] ? pathToFileURL(resolve(process.argv[1])).href : "";
 if (invokedPath === import.meta.url) {
+  // Every way out of this process says why: thrown errors, stray async
+  // errors, and any non-zero exit that skipped the normal report.
+  process.on("uncaughtException", (error) => {
+    reportFailure(error);
+    process.exitCode = 1;
+  });
+  process.on("unhandledRejection", (reason) => {
+    reportFailure(reason);
+    process.exitCode = 1;
+  });
+  process.on("exit", (code) => {
+    if (code !== 0 && !failureReported) {
+      writeSync(2, `SMOKE FAIL (stage: ${stage}): exited with code ${code} and no error report\n`);
+    }
+  });
   main().catch((error) => {
-    console.error(`SMOKE FAIL: ${error.message}`);
+    if (!failureReported) reportFailure(error);
     process.exitCode = 1;
   });
 }

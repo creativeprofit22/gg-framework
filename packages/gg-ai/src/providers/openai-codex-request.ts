@@ -11,27 +11,36 @@ import type { ThinkingLevel } from "../types.js";
 const CODEX_CLIENT_VERSION = "0.159.1";
 
 // GPT-6 point releases (gpt-6.1-sol) keep the dotted version in the id, so a
-// bare `gpt-6-` prefix would miss them.
-function usesResponsesLite(model: string): boolean {
+// bare `gpt-6-` prefix would miss them. This is the model family Codex CLI
+// serves with Responses-Lite; it also owns the effort floor, verbosity and
+// client identity, which stay on even when the lite request shape is turned off.
+export function usesResponsesLite(model: string): boolean {
   return model.startsWith("gpt-5.6-") || model.startsWith("gpt-6-") || model.startsWith("gpt-6.");
 }
 
 /** Shared wire profile; image-result handling remains separate from text streaming. */
-export function codexRequestProfile(model: string, thinking?: ThinkingLevel) {
+export function codexRequestProfile(
+  model: string,
+  thinking?: ThinkingLevel,
+  responsesLiteOverride?: boolean,
+) {
   const responsesLite = usesResponsesLite(model);
+  // The lite request shape (header, single tool call per response, all-turns
+  // reasoning context) is separately switchable: the server rejects
+  // parallel_tool_calls under lite, so every tool call costs a model turn.
+  const liteShape = responsesLiteOverride ?? responsesLite;
   const headers: Record<string, string> = {
     "OpenAI-Beta": "responses=experimental",
     originator: responsesLite ? "codex_cli_rs" : "ggcoder",
     "User-Agent": responsesLite
       ? `codex_cli_rs/${CODEX_CLIENT_VERSION}`
       : `ggcoder (${os.platform()} ${os.release()}; ${os.arch()})`,
-    ...(responsesLite
-      ? { version: CODEX_CLIENT_VERSION, "X-OpenAI-Internal-Codex-Responses-Lite": "true" }
-      : {}),
+    ...(responsesLite ? { version: CODEX_CLIENT_VERSION } : {}),
+    ...(liteShape ? { "X-OpenAI-Internal-Codex-Responses-Lite": "true" } : {}),
   };
   return {
     headers,
-    parallelToolCalls: !responsesLite,
+    parallelToolCalls: !liteShape,
     // Catalog parity: every responses-lite model (gpt-6-astra, gpt-6.1-sol,
     // gpt-6-luna and the older gpt-6-sol and gpt-5.6-sol/terra/luna) declares
     // `support_verbosity: true` with `default_verbosity: "low"` in openai/codex
@@ -45,7 +54,7 @@ export function codexRequestProfile(model: string, thinking?: ThinkingLevel) {
       // `ultra` is a client orchestration preset, not a Codex API effort.
       effort: thinking === "ultra" ? "max" : (thinking ?? (responsesLite ? "low" : "none")),
       summary: "auto",
-      ...(responsesLite ? { context: "all_turns" } : {}),
+      ...(liteShape ? { context: "all_turns" } : {}),
     },
   };
 }

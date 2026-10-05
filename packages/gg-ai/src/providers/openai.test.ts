@@ -613,6 +613,33 @@ describe("streamOpenAI request shaping", () => {
       }
     }
   });
+
+  it("keeps optional fields optional for openai when strictTools is false", async () => {
+    createMock.mockReset();
+    createMock.mockResolvedValueOnce(createStreamingResult(""));
+    const result = streamOpenAI({
+      provider: "openai",
+      model: "test-model",
+      messages: [{ role: "user", content: "hi" }],
+      apiKey: "k",
+      strictTools: false,
+      tools: [
+        {
+          name: "read",
+          description: "read",
+          parameters: z.object({ path: z.string(), offset: z.number().optional() }),
+        },
+      ],
+    });
+    for await (const _event of result) {
+      /* consume */
+    }
+    const request = createMock.mock.calls[0]?.[0] as OpenAI.ChatCompletionCreateParamsStreaming;
+    const tool = request.tools?.[0];
+    if (tool?.type !== "function") throw new Error("Expected a function tool");
+    expect(tool.function.strict).toBeUndefined();
+    expect(tool.function.parameters).toHaveProperty("required", ["path"]);
+  });
 });
 
 describe("streamOpenAI tool argument parsing", () => {

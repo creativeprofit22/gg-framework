@@ -7,7 +7,7 @@
 // GG Coder, or an unrelated process that inherited a recycled PID.
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
@@ -15,9 +15,11 @@ import {
   collectOwnedProcessIds,
   discoverChangedMsi,
   discoverPackagedLayout,
+  findDiagnosticLogs,
   removeTemporaryDirectory,
   smokePackagedLayout,
   snapshotMsiArtifacts,
+  tailLines,
   waitFor,
 } from "./smoke-packaged-windows.mjs";
 
@@ -128,8 +130,8 @@ describe("packaged Windows smoke artifact discovery", () => {
         spawnApp: () => ({
           pid: 10,
           on: (event, listener) => {
-            expect(event).toBe("exit");
-            handleExit = listener;
+            expect(["exit", "error"]).toContain(event);
+            if (event === "exit") handleExit = listener;
           },
         }),
         exists: () => {
@@ -276,5 +278,28 @@ describe("packaged Windows smoke cleanup", () => {
         timeoutMs: 0,
       }),
     ).rejects.toThrow("packaged smoke processes survived cleanup: 10");
+  });
+});
+
+describe("packaged Windows smoke failure diagnostics", () => {
+  it("keeps the last lines of a log, ignoring CRLF and trailing blank lines", () => {
+    expect(tailLines("one\r\ntwo\r\nthree\r\n\n", 2)).toBe("two\nthree");
+    expect(tailLines("only", 5)).toBe("only");
+  });
+
+  it("finds every app and sidecar log inside the throwaway profile", () => {
+    const home = temporaryDirectory();
+    const tauriLogs = join(home, "AppData", "Local", "com.ggcoder.local-fork", "logs");
+    const ggDir = join(home, ".gg");
+    mkdirSync(tauriLogs, { recursive: true });
+    mkdirSync(ggDir, { recursive: true });
+    writeFileSync(join(tauriLogs, "GG Coder Local Fork.log"), "panic");
+    writeFileSync(join(ggDir, "gg-app-sidecar.log"), "boot");
+    writeFileSync(join(ggDir, "settings.json"), "{}");
+
+    expect(findDiagnosticLogs(home).map((path) => relative(home, path))).toEqual([
+      join(".gg", "gg-app-sidecar.log"),
+      join("AppData", "Local", "com.ggcoder.local-fork", "logs", "GG Coder Local Fork.log"),
+    ]);
   });
 });

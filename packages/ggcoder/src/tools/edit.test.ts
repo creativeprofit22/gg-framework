@@ -57,6 +57,79 @@ describe("createEditTool", () => {
     expect(written).toBe("goodbye world\n");
   });
 
+  describe("multi-file `files` form", () => {
+    const ctx = { signal: new AbortController().signal, toolCallId: "multi" };
+    const content = (result: unknown): string =>
+      typeof result === "string" ? result : (result as { content: string }).content;
+
+    it("edits every listed file in one call and returns each diff", async () => {
+      await fs.writeFile(path.join(tmpDir, "a.js"), "const a = 1;\n");
+      await fs.writeFile(path.join(tmpDir, "b.js"), "const b = 1;\n");
+      const tool = createEditTool(tmpDir);
+
+      const result = await tool.execute(
+        {
+          files: [
+            { file_path: "a.js", edits: [{ old_text: "a = 1", new_text: "a = 2" }] },
+            { file_path: "b.js", edits: [{ old_text: "b = 1", new_text: "b = 2" }] },
+          ],
+        },
+        ctx,
+      );
+
+      expect(await fs.readFile(path.join(tmpDir, "a.js"), "utf-8")).toBe("const a = 2;\n");
+      expect(await fs.readFile(path.join(tmpDir, "b.js"), "utf-8")).toBe("const b = 2;\n");
+      expect(content(result)).toContain("Edited 2 files.");
+      expect(resultToString(result)).toContain("+const a = 2;");
+      expect(resultToString(result)).toContain("+const b = 2;");
+    });
+
+    it("keeps the files that succeeded and names only the failed one", async () => {
+      await fs.writeFile(path.join(tmpDir, "a.js"), "const a = 1;\n");
+      await fs.writeFile(path.join(tmpDir, "b.js"), "const b = 1;\n");
+      const tool = createEditTool(tmpDir);
+
+      const result = await tool.execute(
+        {
+          files: [
+            { file_path: "a.js", edits: [{ old_text: "a = 1", new_text: "a = 2" }] },
+            { file_path: "b.js", edits: [{ old_text: "missing", new_text: "x" }] },
+          ],
+        },
+        ctx,
+      );
+
+      expect(await fs.readFile(path.join(tmpDir, "a.js"), "utf-8")).toBe("const a = 2;\n");
+      expect(await fs.readFile(path.join(tmpDir, "b.js"), "utf-8")).toBe("const b = 1;\n");
+      expect(content(result)).toContain("Edited 1 of 2 files. 1 failed");
+      expect(content(result)).toMatch(/### b\.js\nFAILED — .*old_text not found/);
+    });
+
+    it("throws when every file fails, leaving all files unchanged", async () => {
+      await fs.writeFile(path.join(tmpDir, "a.js"), "const a = 1;\n");
+      const tool = createEditTool(tmpDir);
+
+      await expect(
+        tool.execute(
+          { files: [{ file_path: "a.js", edits: [{ old_text: "missing", new_text: "x" }] }] },
+          ctx,
+        ),
+      ).rejects.toThrow(/old_text not found/);
+      expect(await fs.readFile(path.join(tmpDir, "a.js"), "utf-8")).toBe("const a = 1;\n");
+    });
+
+    it.each([
+      ["both forms", { file_path: "a.js", edits: [{ old_text: "a", new_text: "b" }], files: [] }],
+      ["neither form", {}],
+      ["file_path without edits", { file_path: "a.js" }],
+    ])("rejects %s", async (_label, args) => {
+      const tool = createEditTool(tmpDir);
+      await expect(tool.execute(args as never, ctx)).rejects.toThrow(
+        /file_path and edits|not both/,
+      );
+    });
+  });
+
   it.each([
     {
       label: "retention fields without duplicating the first object",

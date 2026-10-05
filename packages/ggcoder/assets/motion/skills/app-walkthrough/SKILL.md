@@ -11,6 +11,10 @@ specific to walkthroughs.
 
 ## Ask (on the motion skill's single card)
 
+Use the shared visual-approach question from `motion` when unsettled, ahead of
+an optional idea pitch. Adapt its choices to this job; keep the card to four
+questions total and skip choices the brief or requested reference already settles.
+
 - "Which task should the video walk through?" Offer the two or three tasks the
   prompt or screenshots suggest, plus "Let GG Motion choose".
 - "Where will people mostly watch this?" (from the `motion` skill).

@@ -132,8 +132,8 @@ import {
   resolveRpcModel,
   resolveSavedCliModel,
 } from "./core/cli-model-resolution.js";
+import { parseThinkingLevel } from "./cli/thinking-arg.js";
 
-const THINKING_LEVELS = new Set<ThinkingLevel>(["low", "medium", "high", "xhigh", "max", "ultra"]);
 const PROVIDERS = new Set<Provider>([
   "anthropic",
   "xiaomi",
@@ -152,14 +152,6 @@ const PROVIDERS = new Set<Provider>([
   "huggingface",
   "local",
 ]);
-
-export function parseThinkingLevel(value: string | undefined): ThinkingLevel | undefined {
-  if (value === undefined) return undefined;
-  if (THINKING_LEVELS.has(value as ThinkingLevel)) return value as ThinkingLevel;
-  throw new Error(
-    `Invalid --thinking value "${value}". Expected low, medium, high, xhigh, max, or ultra.`,
-  );
-}
 
 function parseProvider(value: string | undefined): Provider | undefined {
   if (value === undefined) return undefined;

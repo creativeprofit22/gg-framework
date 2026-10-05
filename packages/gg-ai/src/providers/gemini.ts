@@ -395,6 +395,21 @@ function stripUnsupportedSchemaFields(value: unknown): void {
 
   delete value.$schema;
   delete value.additionalProperties;
+  // Gemini's schema subset has inclusive minimum/maximum only; an exclusive
+  // bound (zod .positive()/.lt()) 400s the whole request. Integers keep the
+  // exact bound (n+1 / n-1); numbers widen to inclusive, and the tool's own
+  // zod schema still rejects the boundary value at execution.
+  for (const [key, target, step] of [
+    ["exclusiveMinimum", "minimum", 1],
+    ["exclusiveMaximum", "maximum", -1],
+  ] as const) {
+    const bound = value[key];
+    if (bound === undefined) continue;
+    delete value[key];
+    if (typeof bound === "number" && value[target] === undefined) {
+      value[target] = value.type === "integer" ? bound + step : bound;
+    }
+  }
 
   for (const item of Object.values(value)) {
     if (isJsonObject(item) || Array.isArray(item)) {

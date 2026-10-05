@@ -1046,6 +1046,8 @@ export async function* agentLoop(
             options.serviceTierRequiresAccountId && !liveAccountId
               ? undefined
               : options.serviceTier,
+          responsesLite: options.responsesLite,
+          strictTools: options.strictTools,
           supportsImages: options.supportsImages,
           supportsVideo: options.supportsVideo,
           compaction: options.compaction,

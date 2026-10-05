@@ -11,6 +11,7 @@ import { getSummaryModel, getContextWindow, getModel } from "../model-registry.j
 import { isModelUnavailableFailure } from "../model-unavailable.js";
 import { kimiCodingHeaders, isKimiCodingEndpoint } from "../oauth/kimi.js";
 import { log } from "../logger.js";
+import { editTargetPaths } from "../../tools/edit-targets.js";
 
 /**
  * Per-message-part char caps when preparing messages for the summarizer.
@@ -437,6 +438,10 @@ export function extractFileOperations(messages: Message[]): {
         name: string;
         args: Record<string, unknown>;
       };
+      if (tc.name === "edit") {
+        for (const target of editTargetPaths(tc.args)) modified.add(target);
+        continue;
+      }
       const filePath = tc.args.file_path ?? tc.args.path ?? tc.args.file;
       if (typeof filePath !== "string") continue;
 

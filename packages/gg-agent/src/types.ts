@@ -381,6 +381,10 @@ export interface AgentOptions {
   serviceTier?: StreamOptions["serviceTier"];
   /** Suppress `serviceTier` whenever live per-turn OAuth identity is absent. */
   serviceTierRequiresAccountId?: boolean;
+  /** Codex Responses-Lite request shape override (see StreamOptions). */
+  responsesLite?: StreamOptions["responsesLite"];
+  /** Codex strict tool schema override (see StreamOptions). */
+  strictTools?: StreamOptions["strictTools"];
   /** Whether the target model supports image input. When false, image blocks
    *  in messages/tool_results are downgraded to text placeholders. Default: true. */
   supportsImages?: boolean;

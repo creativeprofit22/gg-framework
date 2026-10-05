@@ -1,5 +1,6 @@
 import { basename, plural, shortenValue, steroidsQuery } from "./tool-group-summary.js";
 import { getToolTone, type ToolTone } from "./transcript/tool-presentation.js";
+import { editTargetLabel } from "../tools/edit-targets.js";
 
 const MAX_DETAIL = 44;
 
@@ -65,9 +66,10 @@ function firstLine(text: string): string {
 /** The detail fragment (file, pattern, command, …). `quote` wraps it in quotes. */
 function toolDetail(name: string, args: Record<string, unknown>): { text: string; quote: boolean } {
   switch (name) {
+    case "edit":
+      return { text: editTargetLabel(args, basename), quote: false };
     case "read":
     case "write":
-    case "edit":
       return { text: basename(String(args.file_path ?? "")), quote: false };
     case "ls":
       return { text: shortenValue(String(args.path ?? "."), MAX_DETAIL), quote: false };

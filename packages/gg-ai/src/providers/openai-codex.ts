@@ -124,7 +124,7 @@ async function* runStream(
     createCodexInputAdapter(options.supportsImages),
   );
 
-  const profile = codexRequestProfile(options.model, options.thinking);
+  const profile = codexRequestProfile(options.model, options.thinking, options.responsesLite);
   const body: Record<string, unknown> = {
     model: options.model,
     store: false,
@@ -144,7 +144,9 @@ async function* runStream(
   }
 
   if (options.tools?.length) {
-    body.tools = serializeResponsesTools(options.tools, { strict: true });
+    body.tools = serializeResponsesTools(options.tools, {
+      strict: (options.strictTools ?? true) ? true : null,
+    });
   }
   // Always set a prompt_cache_key. OpenAI uses this key to route requests
   // with the same prefix to the same cache shard — without it, the codex

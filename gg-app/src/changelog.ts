@@ -22,6 +22,16 @@ export interface ChangelogEntry {
 /** Newest first. Prepended by the `/release` flow. */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.82.1",
+    date: "2026-10-06",
+    items: [
+      "`Ultra` on OpenAI now thinks the way Codex does. I matched its reasoning on `GPT-6.1 Sol` and `GPT-6 Astra`, and your helper agents now inherit the effort level you picked instead of quietly dropping to the lowest one. Deeper thinking, all the way down.",
+      "Attachments land every time. `Send` now waits until your files finish loading, so nothing gets left behind, and anything that fails to load tells you instead of quietly vanishing.",
+      "Error notices got friendlier. All `15` critters now take turns showing up, each one stays put when you reopen a chat, and the details toggle opens and closes smoothly.",
+      "Fresh starts feel fresh. A new session now opens straight to the welcome screen instead of showing the last run's `cancelled` status.",
+    ],
+  },
+  {
     version: "0.82.0",
     date: "2026-10-06",
     items: [

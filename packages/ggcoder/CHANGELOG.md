@@ -1,5 +1,14 @@
 # @kenkaiiii/ggcoder
 
+## 5.74.1
+
+### Patch Changes
+
+- Align OpenAI Ultra with Codex: Astra/Sol send `xhigh` effort for Ultra, OpenAI sub-agents inherit the parent's thinking level (capped to the child model's ladder), and the live system prompt's delegation policy refreshes when effort or model changes.
+  - @kenkaiiii/gg-ai@5.74.1
+  - @kenkaiiii/gg-agent@5.74.1
+  - @kenkaiiii/gg-core@5.74.1
+
 ## 5.74.0
 
 ### Minor Changes

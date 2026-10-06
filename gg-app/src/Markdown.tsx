@@ -1,6 +1,7 @@
 import {
   Children,
   Fragment,
+  cloneElement,
   isValidElement,
   memo,
   useCallback,
@@ -211,11 +212,41 @@ function MarkdownTableBody({ children }: { children?: React.ReactNode }): React.
 /** Cells with at least this much text are sentences, not labels. */
 const PROSE_CELL_CHARS = 24;
 
+/** Insert `<wbr />` after each slash that has more path after it; text is unchanged. */
+function breakAfterSlashes(text: string): React.ReactNode {
+  if (!/[/\\]\S/.test(text)) return text;
+  const parts = text.split(/(?<=[/\\])(?=\S)/);
+  return parts.map((part, i) => (
+    <Fragment key={i}>
+      {part}
+      {i < parts.length - 1 && <wbr />}
+    </Fragment>
+  ));
+}
+
+/**
+ * File paths in a table cell may break after a slash, so a long path wraps
+ * onto a second line instead of pushing the table wider than a narrow pane. It
+ * still never breaks mid-name. Reaches paths inside links, emphasis and the
+ * streaming word spans as well as bare ones; code blocks are left alone.
+ * Only `<wbr />` is inserted, so text, copy/paste and link targets are unchanged.
+ */
+function withPathBreaks(children: React.ReactNode): React.ReactNode {
+  return Children.map(children, (child) => {
+    if (typeof child === "string") return breakAfterSlashes(child);
+    if (!isValidElement<{ children?: React.ReactNode }>(child)) return child;
+    if (child.type === "pre" || child.type === PreBlock) return child;
+    const inner = child.props.children;
+    if (inner === undefined || inner === null) return child;
+    return cloneElement(child, undefined, withPathBreaks(inner));
+  });
+}
+
 /**
  * A body cell. Sentence-length cells get a readable minimum width
- * (`.md-cell-prose`), so a wide table scrolls instead of squeezing them into a
- * word per line; short labels ("Low", "Done") keep their natural width. Only
- * `style` (GFM column alignment) is carried over from the parser.
+ * (`.md-cell-prose`) that relaxes in narrow panes, so tables fit instead of
+ * scrolling sideways; short labels ("Low", "Done") keep their natural width.
+ * Only `style` (GFM column alignment) is carried over from the parser.
  */
 function TableCell({
   children,
@@ -227,7 +258,7 @@ function TableCell({
   const prose = codeNodeText(children).length >= PROSE_CELL_CHARS;
   return (
     <td className={prose ? "md-cell-prose" : undefined} style={style}>
-      {children}
+      {withPathBreaks(children)}
     </td>
   );
 }

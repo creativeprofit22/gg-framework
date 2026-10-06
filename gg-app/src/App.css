@@ -6530,15 +6530,18 @@ select {
   overflow-wrap: normal;
   line-height: 1.45;
 }
-/* Sentence cells (Markdown.tsx TableCell) keep a readable width: never
-   narrower than a short line, and wrapping at a comfortable measure rather
+/* Sentence cells (Markdown.tsx TableCell) keep a readable width: a short line
+   in roomy panes, relaxing in narrow ones (20% of the pane) so the table fits
+   instead of scrolling sideways, and wrapping at a comfortable measure rather
    than stretching the table into one very long line. */
 .markdown td.md-cell-prose {
-  min-width: 22ch;
+  min-width: min(22ch, 20cqi);
   max-width: 44ch;
 }
-/* Headers and code (paths, identifiers) never wrap mid-token. */
-.markdown th,
+/* Code (paths, identifiers) never wraps mid-token; TableCell inserts break
+   points after slashes so long paths wrap at folder boundaries. Headers wrap
+   only between words: unbreakable multi-word headers forced narrow-pane tables
+   wider than the pane, hiding their right columns. */
 .markdown td code {
   white-space: nowrap;
 }

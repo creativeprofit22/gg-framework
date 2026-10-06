@@ -593,8 +593,13 @@
 :root[data-appearance-paragraphs="roomy"] .assistant-text p {
   margin-block: 0.7em;
 }
+/* The reading cap is for prose. Tables are exempt: capped, a wide table in a
+   wide pane was clipped to the prose measure and hid its right columns. */
 @container (min-width: 900px) {
-  :root[data-appearance-cap="on"] .assistant-text {
+  :root[data-appearance-cap="on"]
+    .assistant-text
+    .markdown
+    > :not(.md-table-scroll, .md-table-collapsible) {
     max-inline-size: 74ch;
   }
 }

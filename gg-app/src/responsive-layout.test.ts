@@ -43,6 +43,17 @@ describe("narrow-window layout contracts", () => {
     expect(declared).not.toContain("max-content");
   });
 
+  it("exempts Markdown tables from the prose reading cap and lets headers wrap between words", () => {
+    const cap = appearanceCss.match(
+      /:root\[data-appearance-cap="on"\]([^{]*)\{\s*max-inline-size:\s*74ch;/,
+    );
+    expect(cap?.[1]?.replace(/\s+/g, " ").trim()).toBe(
+      ".assistant-text .markdown > :not(.md-table-scroll, .md-table-collapsible)",
+    );
+    expect(appCss).not.toMatch(/\.markdown th,\s*\.markdown td code\s*\{\s*white-space:\s*nowrap;/);
+    expect(appCss).toMatch(/\.markdown td code\s*\{\s*white-space:\s*nowrap;/);
+  });
+
   it("keeps the portaled model menu fixed above responsive footer clipping", () => {
     expect(appCss).toMatch(
       /\.model-menu\s*\{[\s\S]*?responsive footer overflow cannot clip[\s\S]*?position:\s*fixed;/,

@@ -356,6 +356,13 @@
   border-bottom: 1px solid rgb(255 255 255 / 0.07);
   padding: 7px 12px;
 }
+/* Narrow panes: tighter cell padding gives the columns' text the room, so
+   tables fit instead of scrolling sideways. */
+@container (max-width: 640px) {
+  .markdown :is(th, td) {
+    padding-inline: 8px;
+  }
+}
 .markdown :is(th, td) + :is(th, td) {
   border-left: 1px solid rgb(255 255 255 / 0.05);
 }

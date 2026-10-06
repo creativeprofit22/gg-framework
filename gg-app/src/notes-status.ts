@@ -25,11 +25,18 @@ function isActivePhase(status: NotesDocumentV3["phases"][number]["status"]): boo
   return status !== "done" && status !== "cancelled";
 }
 
+/** Present, not archived, and not settled (done or cancelled). */
+export function isActiveNotesPhase(phase: NotesDocumentV3["phases"][number]): boolean {
+  return isNotesPhasePresent(phase) && phase.archivedAt === null && isActivePhase(phase.status);
+}
+
 export function getActiveNotesPhaseCount(document: NotesDocumentV3): number {
-  return document.phases.filter(
-    (phase) =>
-      isNotesPhasePresent(phase) && phase.archivedAt === null && isActivePhase(phase.status),
-  ).length;
+  return document.phases.filter(isActiveNotesPhase).length;
+}
+
+export function activePhaseCountLabel(count: number): string {
+  if (count === 0) return "No active phases";
+  return `${count} active phase${count === 1 ? "" : "s"}`;
 }
 
 export function getActiveNotesReminderCount(document: NotesDocumentV3): number {

@@ -1,38 +1,48 @@
 import type { NotesPhase, NotesPhaseStatus } from "./notes-types";
-import { activeRoadmapBlocker } from "./notes-roadmap/roadmap-presentation";
 
-export type NotesLifecycleState = "Ready" | "Working" | "Needs you" | "Blocked" | "Done";
+export type NotesPhaseStatusTone = "neutral" | "active" | "positive" | "warning";
 export type NotesLifecycleStage = "Planning" | "Implementation" | "Review" | "Verification";
 
+/** The only user-facing word and tone for each stored phase status. */
+export const NOTES_PHASE_STATUS_PRESENTATION = {
+  "not-started": { label: "Not started", tone: "neutral" },
+  planning: { label: "Planning", tone: "neutral" },
+  "waiting-for-approval": { label: "Needs approval", tone: "neutral" },
+  "in-progress": { label: "In progress", tone: "active" },
+  review: { label: "In review", tone: "active" },
+  done: { label: "Done", tone: "positive" },
+  "needs-attention": { label: "Needs attention", tone: "warning" },
+  cancelled: { label: "Cancelled", tone: "neutral" },
+} as const satisfies Record<
+  NotesPhaseStatus,
+  { readonly label: string; readonly tone: NotesPhaseStatusTone }
+>;
+
+export type NotesPhaseStatusLabel =
+  (typeof NOTES_PHASE_STATUS_PRESENTATION)[NotesPhaseStatus]["label"];
+
+export function notesPhaseStatusLabel(status: NotesPhaseStatus): NotesPhaseStatusLabel {
+  return NOTES_PHASE_STATUS_PRESENTATION[status].label;
+}
+
+export function notesPhaseStatusTone(status: NotesPhaseStatus): NotesPhaseStatusTone {
+  return NOTES_PHASE_STATUS_PRESENTATION[status].tone;
+}
+
 export interface NotesLifecyclePresentation {
-  state: NotesLifecycleState;
+  state: NotesPhaseStatusLabel;
+  tone: NotesPhaseStatusTone;
   stage: NotesLifecycleStage;
 }
 
-type PresentablePhase = Pick<
-  NotesPhase,
-  "status" | "attentionReason" | "lifecycleEvents" | "roadmapEvents"
->;
+type PresentablePhase = Pick<NotesPhase, "status" | "lifecycleEvents" | "roadmapEvents">;
 
 export function notesLifecyclePresentation(phase: PresentablePhase): NotesLifecyclePresentation {
   return {
-    state: lifecycleState(phase),
+    state: notesPhaseStatusLabel(phase.status),
+    tone: notesPhaseStatusTone(phase.status),
     stage: lifecycleStage(phase),
   };
-}
-
-function lifecycleState(phase: PresentablePhase): NotesLifecycleState {
-  if (phase.status === "not-started") return "Ready";
-  if (activeRoadmapBlocker(phase)) return "Blocked";
-  if (
-    phase.status === "waiting-for-approval" ||
-    phase.status === "needs-attention" ||
-    phase.status === "cancelled"
-  ) {
-    return "Needs you";
-  }
-  if (phase.status === "done") return "Done";
-  return "Working";
 }
 
 function lifecycleStage(phase: PresentablePhase): NotesLifecycleStage {

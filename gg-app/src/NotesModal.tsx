@@ -10,6 +10,7 @@ import type { SlashCommand } from "./agent";
 import { NotesRoadmap, NotesRoadmapArchive } from "./NotesRoadmap";
 import { NotesTaskList } from "./NotesTaskList";
 import type { NotesReferenceInput } from "./notes-reference";
+import { activePhaseCountLabel } from "./notes-status";
 import type { OpenReferenceUrl } from "./notes-open-source";
 import type { NotesPhaseInput } from "./useProjectNotes";
 import type {
@@ -340,7 +341,11 @@ export function NotesModalContent({
               >
                 <span>{tab.label}</span>
                 {tab.id === "roadmap" && activePhaseCount > 0 && (
-                  <span className="notes-tab-count" aria-hidden="true">
+                  <span
+                    className="notes-tab-count"
+                    aria-hidden="true"
+                    title={activePhaseCountLabel(activePhaseCount)}
+                  >
                     {activePhaseCount}
                   </span>
                 )}
@@ -362,7 +367,7 @@ export function NotesModalContent({
             {hasRoadmapSummary && (
               <aside className="notes-roadmap-summary" aria-label="Roadmap summary">
                 <strong>Roadmap</strong>
-                {activePhaseCount > 0 && <span>{countLabel(activePhaseCount, "phase")}</span>}
+                {activePhaseCount > 0 && <span>{activePhaseCountLabel(activePhaseCount)}</span>}
                 {activeReminderCount > 0 && (
                   <span>{countLabel(activeReminderCount, "reminder")}</span>
                 )}

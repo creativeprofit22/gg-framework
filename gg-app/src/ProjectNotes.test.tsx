@@ -1643,7 +1643,7 @@ describe("ProjectNotes", () => {
     // The card stays concise: goal and criteria belong to the detail presentation.
     expect(card?.querySelector(".notes-roadmap-goal")).toBeNull();
     expect(card?.querySelector(".notes-roadmap-criteria")).toBeNull();
-    expect(card?.querySelector(".notes-phase-status")?.textContent).toBe("Working");
+    expect(card?.querySelector(".notes-phase-status")?.textContent).toBe("In progress");
     expect(card?.querySelector(".notes-roadmap-card-footer .notes-roadmap-primary")).not.toBeNull();
 
     fireEvent.click(inspect);
@@ -1992,6 +1992,16 @@ describe("ProjectNotes", () => {
     expect(summary.textContent).toContain("2 active phases");
     expect(summary.textContent).toContain("1 active reminder");
     expect(screen.getByRole("tab", { name: "Roadmap" }).textContent).toBe("Roadmap2");
+    expect(
+      screen
+        .getByRole("tab", { name: "Roadmap" })
+        .querySelector(".notes-tab-count")
+        ?.getAttribute("title"),
+    ).toBe("2 active phases");
+    await selectNotesTab("Roadmap");
+    expect(
+      globalThis.document.getElementById("notes-roadmap-heading")?.nextElementSibling?.textContent,
+    ).toBe("2 active phases");
 
     await selectNotesTab("Roadmap");
     expect(screen.getByRole("list", { name: "Roadmap phases" }).children).toHaveLength(4);
@@ -2273,7 +2283,7 @@ describe("ProjectNotes", () => {
         .getByRole("heading", { name: "Status and last report" })
         .closest("section");
       expect(completion?.querySelector("p")?.textContent).toBe(
-        status === "done" ? "Done" : "in progress",
+        status === "done" ? "Done" : "In progress",
       );
     },
   );
@@ -2563,7 +2573,8 @@ describe("ProjectNotes", () => {
       .getByRole("heading", { name: "Status and last report" })
       .closest("section");
     expect(gates?.textContent).toContain("No progress report yet.");
-    expect(gates?.textContent).toContain("in progress");
+    expect(gates?.textContent).toContain("In progress");
+    expect(gates?.textContent).not.toContain("Explicit status");
     expect(gates?.textContent).not.toContain("Final review");
   });
 
@@ -2591,7 +2602,7 @@ describe("ProjectNotes", () => {
       .getByRole("heading", { name: "Status and last report" })
       .closest("section");
     expect(gates?.textContent).toContain("Reported passed");
-    expect(gates?.textContent).toContain("in progress");
+    expect(gates?.textContent).toContain("In progress");
     expect(gates?.textContent).toContain("not rechecked on opening");
     expect(gates?.textContent).not.toContain("owning implementation run");
   });
@@ -2707,7 +2718,7 @@ describe("ProjectNotes", () => {
     const gates = screen
       .getByRole("heading", { name: "Status and last report" })
       .closest("section");
-    expect(gates?.textContent).toContain("in progress");
+    expect(gates?.textContent).toContain("In progress");
     expect(gates?.textContent).not.toContain("settle");
     selectPhaseView("Activity");
     expect(screen.getByText(/1 of 2 plan steps, run was interrupted/)).toBeTruthy();
@@ -2844,7 +2855,7 @@ describe("ProjectNotes", () => {
     await openRoadmapPhase(selected.title);
 
     const overview = document.querySelector(".notes-phase-overview");
-    expect(overview?.textContent).toContain("Needs you");
+    expect(overview?.textContent).toContain("Needs attention");
     expect(overview?.textContent).toContain("Retry this phase");
     expect(overview?.textContent).toContain(
       "Implementation is ready for another verification run.",
@@ -3434,17 +3445,17 @@ describe("ProjectNotes", () => {
       name: "Inspect phase: Blocked deployment",
     });
     expect(inspectButton.closest("li")?.classList.contains("is-blocked")).toBe(true);
-    expect(inspectButton.closest("li")?.textContent).toContain("Blocked");
+    expect(inspectButton.closest("li")?.textContent).toContain("Needs attention");
     fireEvent.click(inspectButton);
 
-    const alert = screen.getByRole("alert", { name: "Blocked" });
+    const alert = screen.getByRole("alert", { name: "Blocker" });
     expect(alert.textContent).toContain("Reason:");
     expect(alert.textContent).toContain(blocker);
     expect(alert.textContent).toContain("Required action:");
     expect(alert.textContent).toContain(requiredExternalAction);
     fireEvent.click(screen.getByRole("button", { name: "Mark resolved" }));
 
-    await waitFor(() => expect(screen.queryByRole("alert", { name: "Blocked" })).toBeNull());
+    await waitFor(() => expect(screen.queryByRole("alert", { name: "Blocker" })).toBeNull());
     const snapshot = client.snapshots.get(canonicalProjectKey(cwd))!;
     expect(snapshot.document.phases[0]).toMatchObject({
       status: "needs-attention",
@@ -3468,7 +3479,7 @@ describe("ProjectNotes", () => {
     expect(
       screen.getByRole("button", { name: "Inspect phase: Blocked deployment" }).closest("li")
         ?.textContent,
-    ).toContain("Needs you");
+    ).toContain("Needs attention");
   });
 
   it("explains lifecycle attention on the phase card without a blocked report", async () => {
@@ -3492,7 +3503,7 @@ describe("ProjectNotes", () => {
     expect(row.classList.contains("notes-roadmap-row")).toBe(true);
     expect(row.classList.contains("is-blocked")).toBe(true);
     expect(row.querySelector(".notes-roadmap-attention")?.textContent).toContain(reason);
-    expect(row.textContent).toContain("Needs you");
+    expect(row.textContent).toContain("Needs attention");
   });
 
   it("renders authoritative lifecycle labels and recovery actions without losing selection", async () => {
@@ -3558,16 +3569,16 @@ describe("ProjectNotes", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
     await selectNotesTab("Roadmap");
     const expectedRows = [
-      ["Not started phase", "Ready", "Planning", "Start"],
-      ["Planning phase", "Working", "Planning", "Start"],
-      ["Waiting phase", "Needs you", "Planning", "Resume"],
-      ["Progress phase", "Working", "Implementation", "Resume"],
-      ["Review phase", "Working", "Review", "Review"],
+      ["Not started phase", "Not started", "Planning", "Start"],
+      ["Planning phase", "Planning", "Planning", "Start"],
+      ["Waiting phase", "Needs approval", "Planning", "Resume"],
+      ["Progress phase", "In progress", "Implementation", "Resume"],
+      ["Review phase", "In review", "Review", "Review"],
       ["Done phase", "Done", "Verification", "Review"],
-      ["Attention phase", "Needs you", "Implementation", "Retry"],
-      ["Bound attention phase", "Needs you", "Implementation", "Retry"],
-      ["Cancelled phase", "Needs you", "Implementation", "Retry"],
-      ["Manual cancellation", "Needs you", "Implementation", "Review"],
+      ["Attention phase", "Needs attention", "Implementation", "Retry"],
+      ["Bound attention phase", "Needs attention", "Implementation", "Retry"],
+      ["Cancelled phase", "Cancelled", "Implementation", "Retry"],
+      ["Manual cancellation", "Cancelled", "Implementation", "Review"],
     ] as const;
     for (const [title, state, stage, action] of expectedRows) {
       const button = screen.getByRole("button", { name: `${action} phase: ${title}` });
@@ -3598,7 +3609,7 @@ describe("ProjectNotes", () => {
     fireEvent.click(screen.getByRole("button", { name: "Back to roadmap" }));
     fireEvent.click(screen.getByRole("button", { name: "Review phase: Manual cancellation" }));
     selectPhaseView("More");
-    expect(screen.getByText("Paused. Resume returns to Working, review.")).toBeTruthy();
+    expect(screen.getByText("Paused. Resume returns to In review.")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Resume automation" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Retry phase: Manual cancellation" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Resume phase" })).toBeNull();
@@ -3723,7 +3734,7 @@ describe("ProjectNotes", () => {
       });
     });
     expect(client.phaseStatusCalls.at(-1)).toMatchObject({ phaseId: "alpha", status: "review" });
-    expect(screen.getByText("Reopened Alpha as Review.")).toBeTruthy();
+    expect(screen.getByText("Reopened Alpha as In review.")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Reopen" })).toBeNull();
     expect(screen.getByRole("button", { name: "Mark done" })).toBeTruthy();
 
@@ -4109,7 +4120,10 @@ describe("ProjectNotes", () => {
       name: "Inspect reference: Pull request #44 in Owner/Repo",
     });
     expect(openSource).not.toHaveBeenCalled();
+    expect(inspect.querySelector(".notes-reference-row-source")?.textContent).toBe("GitHub");
+    expect(inspect.textContent).not.toContain("github-search");
     fireEvent.click(inspect);
+    expect(screen.getByText("github-search")).toBeTruthy();
     expect(screen.getByText("https://github.com/Owner/Repo/pull/44")).toBeTruthy();
     expect(screen.getAllByText("Reviews the structured reference boundary")).toHaveLength(2);
     expect(screen.getByText("10 to 20")).toBeTruthy();

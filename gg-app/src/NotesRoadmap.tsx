@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { isNotesPhasePresent } from "@kenkaiiii/gg-core/project-notes";
-import { notesLifecyclePresentation } from "./notes-lifecycle-presentation";
+import { notesLifecyclePresentation, notesPhaseStatusLabel } from "./notes-lifecycle-presentation";
 import { openReferenceUrl, type OpenReferenceUrl } from "./notes-open-source";
 import { referenceSourceLabel } from "./notes-reference";
+import { activePhaseCountLabel, isActiveNotesPhase } from "./notes-status";
 import type { SlashCommand } from "./agent";
 import { NotesPhaseDetail } from "./notes-roadmap/NotesPhaseDetail";
 import { useRoadmapPhaseNavigation } from "./notes-roadmap/useRoadmapPhaseNavigation";
@@ -18,7 +19,6 @@ import {
   selectRoadmapAdvancement,
   isRoadmapPhaseStartProtected,
   isRoadmapTopologyMutationBlocked,
-  statusLabel,
   visibleRoadmapAttentionReason,
 } from "./notes-roadmap/roadmap-presentation";
 import type { NotesPhaseInput } from "./useProjectNotes";
@@ -341,14 +341,14 @@ export function NotesRoadmap({
           setAnnouncement(
             pausingAutomation
               ? `Paused automation for ${selectedPhase.title}`
-              : `Changed ${selectedPhase.title} to ${statusLabel(status)}`,
+              : `Changed ${selectedPhase.title} to ${notesPhaseStatusLabel(status)}`,
           );
         },
         onSetPhaseStatusOverride: async (status) => {
           const title = selectedPhase.title;
           const result = await onSetPhaseStatusOverride(selectedPhase.id, status);
           if (result.status === "committed") {
-            setAnnouncement(`Changed ${title} to ${statusLabel(status)}`);
+            setAnnouncement(`Changed ${title} to ${notesPhaseStatusLabel(status)}`);
           }
           return result;
         },
@@ -434,7 +434,7 @@ export function NotesRoadmap({
           <h2 id="notes-roadmap-heading" tabIndex={-1} data-roadmap-focus-last-resort>
             Roadmap
           </h2>
-          <p>{visiblePhases.length === 1 ? "1 phase" : `${visiblePhases.length} phases`}</p>
+          <p>{activePhaseCountLabel(visiblePhases.filter(isActiveNotesPhase).length)}</p>
         </div>
         <button
           ref={newPhaseButtonRef}
@@ -600,7 +600,7 @@ export function NotesRoadmap({
                           )}
                         </button>
                       </h3>
-                      <span className={`notes-phase-status is-${phase.status}`}>
+                      <span className={`notes-phase-status is-tone-${lifecycle.tone}`}>
                         {lifecycle.state}
                       </span>
                     </div>

@@ -331,7 +331,12 @@ export function referenceSourceLabel(reference: NotesReference): string {
     return reference.path;
   }
   if (reference.revision) return `Revision ${reference.revision}`;
-  return reference.tool ?? reference.provider;
+  return referenceProviderLabel(reference.provider);
+}
+
+/** User-facing source name; the research tool stays in reference metadata only. */
+export function referenceProviderLabel(provider: string): string {
+  return provider.trim().toLowerCase() === "github" ? "GitHub" : provider;
 }
 
 function validateGithubCoordinates(

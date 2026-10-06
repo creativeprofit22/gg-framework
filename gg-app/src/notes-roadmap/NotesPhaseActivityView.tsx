@@ -9,10 +9,10 @@ import {
   implementationOutcomeLabel,
   roadmapActorLabel,
   roadmapReviewerLabel,
-  statusLabel,
   statusOutcomeLabel,
   verificationLabel,
 } from "./roadmap-presentation";
+import { notesPhaseStatusLabel } from "../notes-lifecycle-presentation";
 
 export function NotesPhaseActivityView(): ReactElement {
   const { phase, latestReport, latestReportHasPendingManualReview } = useNotesPhaseDetail();
@@ -119,8 +119,8 @@ function renderActivityItem(item: ActivityItem): ReactNode {
       <>
         <strong>{item.event.source === "user" ? "User" : item.event.source}</strong> {timestamp}
         <p>
-          {statusLabel(item.event.fromStatus ?? "not-started")} to{" "}
-          {statusLabel(item.event.toStatus)}
+          {notesPhaseStatusLabel(item.event.fromStatus ?? "not-started")} to{" "}
+          {notesPhaseStatusLabel(item.event.toStatus)}
           {item.event.reason ? `: ${item.event.reason}` : ""}
         </p>
       </>

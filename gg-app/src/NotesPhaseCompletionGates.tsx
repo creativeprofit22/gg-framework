@@ -1,4 +1,5 @@
 import type { ReactElement } from "react";
+import { notesPhaseStatusLabel, notesPhaseStatusTone } from "./notes-lifecycle-presentation";
 import type {
   NotesCompletionUnmetGateCode,
   NotesPhase,
@@ -24,8 +25,9 @@ function latestReport(phase: NotesPhase): NotesRoadmapStatusUpdate | undefined {
 
 export function notesCompletionGateOverview(phase: NotesPhase): NotesCompletionGateOverview {
   const report = latestReport(phase);
-  const tone: NotesCompletionGateTone = phase.status === "done" ? "positive" : "neutral";
-  const status = phase.status === "done" ? "Done" : phase.status.replace(/-/g, " ");
+  const tone: NotesCompletionGateTone =
+    notesPhaseStatusTone(phase.status) === "positive" ? "positive" : "neutral";
+  const status = notesPhaseStatusLabel(phase.status);
   const blocker =
     phase.status === "needs-attention" || phase.status === "waiting-for-approval"
       ? phase.attentionReason
@@ -45,7 +47,7 @@ export function notesCompletionGateOverview(phase: NotesPhase): NotesCompletionG
     },
     settlement: {
       label: status,
-      detail: "Explicit status; historical evidence was not rechecked.",
+      detail: null,
       tone,
     },
     outcome: status,

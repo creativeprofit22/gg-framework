@@ -353,8 +353,7 @@ export function NotesPhaseMoreControls(): ReactElement {
             </p>
             {phase.overrides.status && (
               <p className="notes-phase-status-help">
-                Paused. Resume returns to {resumedLifecycle.state},{" "}
-                {resumedLifecycle.stage.toLocaleLowerCase()}.
+                Paused. Resume returns to {resumedLifecycle.state}.
               </p>
             )}
             {canMarkDone && canCancelRun && (

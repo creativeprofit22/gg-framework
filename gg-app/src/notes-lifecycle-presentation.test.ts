@@ -1,33 +1,46 @@
 import { describe, expect, it } from "vitest";
 import type { NotesPhase, NotesPhaseStatus } from "./notes-types";
-import { notesLifecyclePresentation } from "./notes-lifecycle-presentation";
+import {
+  NOTES_PHASE_STATUS_PRESENTATION,
+  notesLifecyclePresentation,
+  notesPhaseStatusLabel,
+} from "./notes-lifecycle-presentation";
 
-type PresentablePhase = Pick<
-  NotesPhase,
-  "status" | "attentionReason" | "lifecycleEvents" | "roadmapEvents"
->;
+type PresentablePhase = Pick<NotesPhase, "status" | "lifecycleEvents" | "roadmapEvents">;
 
 function phase(status: NotesPhaseStatus): PresentablePhase {
-  return { status, attentionReason: null, lifecycleEvents: [], roadmapEvents: [] };
+  return { status, lifecycleEvents: [], roadmapEvents: [] };
 }
 
 describe("notesLifecyclePresentation", () => {
   it.each([
-    ["not-started", "Ready", "Planning"],
-    ["planning", "Working", "Planning"],
-    ["waiting-for-approval", "Needs you", "Planning"],
-    ["in-progress", "Working", "Implementation"],
-    ["review", "Working", "Review"],
-    ["done", "Done", "Verification"],
-    ["needs-attention", "Needs you", "Implementation"],
-    ["cancelled", "Needs you", "Implementation"],
-  ] as const)("projects %s into %s with %s as its stage", (status, state, stage) => {
-    expect(notesLifecyclePresentation(phase(status))).toEqual({ state, stage });
+    ["not-started", "Not started", "neutral", "Planning"],
+    ["planning", "Planning", "neutral", "Planning"],
+    ["waiting-for-approval", "Needs approval", "neutral", "Planning"],
+    ["in-progress", "In progress", "active", "Implementation"],
+    ["review", "In review", "active", "Review"],
+    ["done", "Done", "positive", "Verification"],
+    ["needs-attention", "Needs attention", "warning", "Implementation"],
+    ["cancelled", "Cancelled", "neutral", "Implementation"],
+  ] as const)(
+    "projects %s into %s (%s tone) with %s as its stage",
+    (status, state, tone, stage) => {
+      expect(notesLifecyclePresentation(phase(status))).toEqual({ state, tone, stage });
+    },
+  );
+
+  it("gives every stored status its own non-empty word from the one table", () => {
+    const statuses = Object.keys(NOTES_PHASE_STATUS_PRESENTATION) as NotesPhaseStatus[];
+    const labels = statuses.map((status) => notesPhaseStatusLabel(status));
+
+    expect(statuses).toHaveLength(8);
+    expect(labels.every((label) => label.trim().length > 0)).toBe(true);
+    expect(new Set(labels).size).toBe(statuses.length);
   });
 
-  it("labels only a matching latest blocked report as Blocked", () => {
+  it("shows a reported blocker as Needs attention rather than a second status word", () => {
     const blocked = phase("needs-attention");
-    blocked.attentionReason =
+    const blocker =
       "The release account is missing; the release owner must provide account access.";
     blocked.roadmapEvents.push({
       type: "status-update",
@@ -35,7 +48,7 @@ describe("notesLifecyclePresentation", () => {
       actor: "gg-coder",
       transition: "blocked",
       progress: "Release is blocked by missing account access",
-      blocker: blocked.attentionReason,
+      blocker,
       requiredExternalAction: "Provide release account access",
       evidence: [],
       verification: null,
@@ -47,26 +60,10 @@ describe("notesLifecyclePresentation", () => {
     });
 
     expect(notesLifecyclePresentation(blocked)).toEqual({
-      state: "Blocked",
+      state: "Needs attention",
+      tone: "warning",
       stage: "Implementation",
     });
-
-    blocked.attentionReason = "An unrelated runtime error needs attention.";
-    expect(notesLifecyclePresentation(blocked).state).toBe("Needs you");
-
-    const blockedReport = blocked.roadmapEvents[0]!;
-    if (blockedReport.type !== "status-update") throw new Error("Expected blocked report");
-    blocked.attentionReason = blockedReport.blocker;
-    blocked.roadmapEvents.push({
-      ...blockedReport,
-      id: "resumed-report",
-      transition: "in-progress",
-      blocker: null,
-      requiredExternalAction: null,
-      progress: "Release work resumed",
-      timestamp: "2026-08-03T08:01:00.000Z",
-    });
-    expect(notesLifecyclePresentation(blocked).state).toBe("Needs you");
   });
 
   it("shows verification from typed roadmap evidence", () => {
@@ -89,7 +86,8 @@ describe("notesLifecyclePresentation", () => {
     });
 
     expect(notesLifecyclePresentation(reviewing)).toEqual({
-      state: "Working",
+      state: "In review",
+      tone: "active",
       stage: "Verification",
     });
   });

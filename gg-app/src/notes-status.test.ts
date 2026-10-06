@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  activePhaseCountLabel,
   getActiveNotesPhaseCount,
   getActiveNotesReminderCount,
   getDueNotesReminderCount,
@@ -156,6 +157,14 @@ describe("Notes status selectors", () => {
     expect(getActiveNotesPhaseCount(document([archived]))).toBe(0);
     expect(getActiveNotesReminderCount(document([archived]))).toBe(0);
     expect(getDueNotesReminderCount(document([archived]))).toBe(0);
+  });
+
+  it.each([
+    [0, "No active phases"],
+    [1, "1 active phase"],
+    [2, "2 active phases"],
+  ] as const)("labels %i active phases as %s", (count, label) => {
+    expect(activePhaseCountLabel(count)).toBe(label);
   });
 
   it("returns zero counts for an empty roadmap", () => {

@@ -19,6 +19,7 @@ import {
   notesReferenceToDraft,
   referencePhaseDependencies,
   referenceRepositoryKey,
+  referenceProviderLabel,
   referenceRepositoryLabel,
   referenceSourceLabel,
 } from "./notes-reference";
@@ -255,6 +256,10 @@ describe("structured reference helpers", () => {
     expect(referenceSourceLabel({ ...REFERENCE, path: null, range: null, pullRequest: 7 })).toBe(
       "Pull request #7",
     );
+    expect(referenceSourceLabel({ ...REFERENCE, path: null, range: null, revision: null })).toBe(
+      "GitHub",
+    );
+    expect(referenceProviderLabel("docs")).toBe("docs");
   });
 
   describe("phase eligibility", () => {

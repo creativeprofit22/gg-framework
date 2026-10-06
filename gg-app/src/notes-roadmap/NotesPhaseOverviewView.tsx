@@ -131,7 +131,7 @@ export function NotesPhaseOverviewView(): ReactElement {
           aria-labelledby={`notes-phase-blocker-title-${phase.id}`}
         >
           <div className="notes-phase-blocker-copy">
-            <strong id={`notes-phase-blocker-title-${phase.id}`}>Blocked</strong>
+            <strong id={`notes-phase-blocker-title-${phase.id}`}>Blocker</strong>
             <p>Reason: {activeBlocker.blocker}</p>
             <p>Required action: {activeBlocker.requiredExternalAction}</p>
           </div>
@@ -192,7 +192,7 @@ export function NotesPhaseOverviewView(): ReactElement {
 
       <dl className="notes-phase-metadata">
         <div>
-          <dt>State</dt>
+          <dt>Status</dt>
           <dd>{lifecycle.state}</dd>
         </div>
         <div>

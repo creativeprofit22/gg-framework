@@ -3,6 +3,7 @@ import {
   isNotesPhaseAdvancementSourceCurrent,
 } from "@kenkaiiii/gg-core/project-notes";
 import { MENTOR_DISPLAY_NAME, PRODUCT_DISPLAY_NAME } from "../brand";
+import { notesPhaseStatusLabel } from "../notes-lifecycle-presentation";
 import type {
   NotesCompletionGateOutcome,
   NotesCompletionUnmetGateCode,
@@ -19,17 +20,6 @@ import type {
   NotesSessionLink,
   NotesVerificationStatus,
 } from "../notes-types";
-
-const STATUS_LABELS = {
-  "not-started": "Not started",
-  planning: "Planning",
-  "waiting-for-approval": "Waiting for approval",
-  "in-progress": "In progress",
-  review: "Review",
-  done: "Done",
-  "needs-attention": "Needs attention",
-  cancelled: "Cancelled",
-} as const satisfies Record<NotesPhaseStatus, string>;
 
 const STATUS_OUTCOME_LABELS = {
   applied: "Status updated",
@@ -227,10 +217,10 @@ const IMPLEMENTATION_OUTCOME_LABELS = {
 } as const satisfies Record<NotesImplementationRunOutcome, string>;
 
 const COMPLETION_OUTCOME_LABELS = {
-  done: "Done",
-  review: "Review",
-  "needs-attention": "Needs attention",
-  "waiting-for-approval": "Waiting for approval",
+  done: notesPhaseStatusLabel("done"),
+  review: notesPhaseStatusLabel("review"),
+  "needs-attention": notesPhaseStatusLabel("needs-attention"),
+  "waiting-for-approval": notesPhaseStatusLabel("waiting-for-approval"),
   "manual-override": "Manual override protected",
   "done-terminal": "Already Done",
 } as const satisfies Record<NotesCompletionGateOutcome, string>;
@@ -263,10 +253,6 @@ const dateTimeFormatter = new Intl.DateTimeFormat(undefined, {
 const timeFormatter = new Intl.DateTimeFormat(undefined, { timeStyle: "short" });
 
 export type PhasePrimaryAction = "Start" | "Resume" | "Recover" | "Review";
-
-export function statusLabel(status: NotesPhaseStatus): string {
-  return STATUS_LABELS[status];
-}
 
 export function statusOutcomeLabel(outcome: NotesRoadmapStatusUpdate["statusOutcome"]): string {
   return STATUS_OUTCOME_LABELS[outcome];

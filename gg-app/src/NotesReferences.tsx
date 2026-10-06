@@ -8,6 +8,7 @@ import {
   notesReferenceFieldMaxLength,
   notesReferenceToDraft,
   referencePhaseDependencies,
+  referenceProviderLabel,
   referenceRepositoryLabel,
   referenceSourceLabel,
   type NotesReferenceDraft,
@@ -15,6 +16,7 @@ import {
   type NotesReferenceInput,
 } from "./notes-reference";
 import { openReferenceUrl, type OpenReferenceUrl } from "./notes-open-source";
+import { notesPhaseStatusLabel } from "./notes-lifecycle-presentation";
 import type { NotesPhase, NotesReference, NotesReferenceOperationResult } from "./notes-types";
 
 interface NotesReferencesProps {
@@ -350,7 +352,7 @@ export function NotesReferences({
                           onClick={() => selectReference(reference.id)}
                         >
                           <span className="notes-reference-row-source">
-                            {reference.tool ?? reference.provider}
+                            {referenceProviderLabel(reference.provider)}
                           </span>
                           <strong>{referenceSourceLabel(reference)}</strong>
                           <span className="notes-reference-row-relevance">
@@ -782,5 +784,5 @@ function referenceOperationFailure(
 }
 
 function phaseStatusLabel(phase: NotesPhase): string {
-  return phase.status.replace(/-/g, " ");
+  return notesPhaseStatusLabel(phase.status);
 }

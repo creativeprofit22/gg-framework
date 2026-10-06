@@ -49,11 +49,11 @@ import {
   roadmapMutationMessage,
   sessionAction,
   statusBeforeManualDone,
-  statusLabel,
   unresolvedRoadmapProposals,
   type PhasePrimaryAction,
   type RoadmapTopologyMutation,
 } from "./roadmap-presentation";
+import { notesPhaseStatusLabel } from "../notes-lifecycle-presentation";
 
 export interface NotesPhaseDetailProps {
   phase: NotesPhase;
@@ -611,7 +611,7 @@ export function NotesPhaseDetailProvider({
       void runRoadmapMutation(
         "reopen",
         () => onSetPhaseStatusOverride(reopenStatus),
-        `Reopened ${phase.title} as ${statusLabel(reopenStatus)}.`,
+        `Reopened ${phase.title} as ${notesPhaseStatusLabel(reopenStatus)}.`,
       );
     },
   };

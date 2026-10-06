@@ -283,6 +283,8 @@ export type OpenAICodexContextProfileEligibility =
 export interface DesktopSessionUXState {
   /** Authoritative live-only asks. Legacy absence preserves cards; [] retires open cards. */
   pendingAsks?: AskUserPrompt[];
+  /** Asks no turn is blocked on that still accept a late answer (deadline passed, run stopped). */
+  deferredAsks?: AskUserPrompt[];
   openAICodexContextProfileEligibility: OpenAICodexContextProfileEligibility;
   /** Last completed explicit reset; recovery must match both operation and current identity. */
   lastNewSessionReset?: {

@@ -564,10 +564,19 @@ interface QueuedPrompt {
   attachments: SessionAttachment[];
   meta?: PromptMeta;
   /**
-   * Set when `text` is a prompt-template command: the expanded body the model
-   * receives as steering, matching what an idle send would run.
+   * Steering entries only: set when `text` is a prompt-template command, holding
+   * the expanded body the model receives as steering, matching what an idle send
+   * would run. Always unset on deferred entries, which the host runs later from
+   * the raw `text` as a normal send that expands the command itself.
    */
   modelText?: string;
+  /**
+   * Wait for the current run to finish and run as its own turn instead of
+   * steering the run in flight. Deferred entries never interrupt tools and are
+   * skipped by the mid-run steering drain, so they stay cancellable until the
+   * host takes them with {@link AgentSession.takeNextQueuedMessage}.
+   */
+  deferred?: boolean;
 }
 
 /** Display hints persisted with a consumed user message; `command` restores the `/name` chip. */
@@ -2873,8 +2882,9 @@ ${content}
 
     // User steering wins: drain any messages queued during this run first so the
     // agent sees them mid-loop instead of after it stops.
-    if (this.userQueue.length > 0) {
-      const queued = this.userQueue.splice(0);
+    if (this.userQueue.some((m) => !m.deferred)) {
+      const queued = this.userQueue.filter((m) => !m.deferred);
+      this.userQueue = this.userQueue.filter((m) => m.deferred);
       // The agent has now consumed these. Announce the new depth immediately so
       // clients can drop the "queued" affordance at the turn boundary rather
       // than holding it until the whole run ends — the message is already in
@@ -4237,7 +4247,7 @@ ${content}
   }): void {
     if (!this.settingsManager.get("autoCompact")) return;
     if (this.opts.signal?.aborted) return;
-    if (this.userQueue.length > 0) return;
+    if (this.userQueue.some((m) => !m.deferred)) return;
     if (this.postTurnCompaction) return;
     if (Date.now() < this.compactionRetryAfter) return;
     const contextWindow = getContextWindow(this.model, {
@@ -4926,10 +4936,17 @@ ${content}
   }
 
   /**
-   * Queue like {@link queueMessage}, but a prompt-template command (`/name args`)
-   * is expanded now, so the model receives its instructions as steering rather
-   * than the bare name. The queue still shows and restores what was typed.
-   * Action commands and plain text queue unchanged.
+   * Queue a prompt in one of two modes. The queue always shows and restores what
+   * was typed.
+   *
+   * - Steering (default): like {@link queueMessage}, drained into the run in
+   *   flight. A prompt-template command (`/name args`) is expanded now, so the
+   *   model receives its instructions as steering rather than the bare name.
+   *   Action commands and plain text queue unchanged.
+   * - Deferred (`options.deferred`): waits for the current run to end and stays
+   *   cancellable until the host takes it with {@link takeNextQueuedMessage}.
+   *   The host then runs the raw text as its own normal send, which expands any
+   *   command at that point, so nothing is expanded here.
    *
    * Calls are serialized: each entry is pushed in arrival order, and only once
    * fully prepared, so a mid-run drain never sees a half-prepared item and a
@@ -4940,6 +4957,7 @@ ${content}
     text: string,
     attachments: SessionAttachment[] = [],
     meta?: PromptMeta,
+    options: { deferred?: boolean } = {},
   ): Promise<{ count: number; id: string }> {
     // Policy errors reject this call immediately (as a rejection, not a
     // synchronous throw) and never hold up the chain.
@@ -4949,13 +4967,17 @@ ${content}
       return Promise.reject(error);
     }
     const queued = this.queuePromptChain.then(async () => {
-      // Attachment prompts skip slash expansion when idle too.
-      const resolved = attachments.length === 0 ? await this.resolveSlashInput(text, false) : null;
+      // Attachment prompts skip slash expansion when idle too. Deferred entries
+      // are expanded by the later send that runs them, so skip it here.
+      const resolved =
+        attachments.length === 0 && options.deferred !== true
+          ? await this.resolveSlashInput(text, false)
+          : null;
       const modelText =
         resolved?.kind === "template" && !resolved.setupInspection
           ? resolved.fullPrompt
           : undefined;
-      const count = this.enqueue(text, attachments, meta, modelText);
+      const count = this.enqueue(text, attachments, meta, modelText, options.deferred === true);
       return { count, id: `q${this.queueSeq}` };
     });
     // A failed expansion rejects only its own call; later calls still run.
@@ -4976,6 +4998,7 @@ ${content}
     attachments: SessionAttachment[],
     meta: PromptMeta | undefined,
     modelText?: string,
+    deferred = false,
   ): number {
     if (text.trim() || attachments.length > 0) this.contextProfileLocked = true;
     this.queueSeq += 1;
@@ -4986,9 +5009,11 @@ ${content}
       attachments,
       ...(displayMeta ? { meta: displayMeta } : {}),
       ...(modelText !== undefined ? { modelText } : {}),
+      ...(deferred ? { deferred } : {}),
     });
     // Instant interrupt: preempt running tools so the steer lands right away.
-    for (const listener of [...this.steeringListeners]) listener();
+    // A deferred entry waits for the run to end, so it must not cut tools short.
+    if (!deferred) for (const listener of [...this.steeringListeners]) listener();
     return this.userQueue.length;
   }
 
@@ -4998,9 +5023,11 @@ ${content}
   }
 
   /** Cancel one pending message by id. Returns true if it was still queued.
-   *  A false return is the normal race rather than an error: the message drained
-   *  into the run between the client rendering the cancel affordance and the
-   *  click arriving. */
+   *  Deferred entries stay cancellable until their own run starts; steering
+   *  entries until they drain into the run in flight. A false return is the
+   *  normal race rather than an error: the message was taken (its run started,
+   *  or it drained as steering) between the client rendering the cancel
+   *  affordance and the click arriving. */
   cancelQueuedMessage(id: string): boolean {
     const index = this.userQueue.findIndex((m) => m.id === id);
     if (index === -1) return false;
@@ -5013,9 +5040,16 @@ ${content}
     return this.userQueue.length;
   }
 
+  /** Number of queued messages meant to steer the current run. Deferred entries
+   *  wait for the run to end and run as their own turns, so they are excluded. */
+  getSteeringQueuedCount(): number {
+    return this.userQueue.filter((m) => !m.deferred).length;
+  }
+
   /** Remove and return the oldest queued message (text + attachments), or null.
-   *  Used by the sidecar to run a message that queued while autopilot was
-   *  reviewing (no run in flight to steer it into) — unlike {@link drainQueue},
+   *  The sidecar's queue drain uses this to run queued prompts one at a time as
+   *  their own turns once the session is idle (deferred user prompts, plus any
+   *  leftovers queued while autopilot was reviewing) — unlike {@link drainQueue},
    *  attachments survive so queued media isn't silently dropped. */
   takeNextQueuedMessage(): QueuedPrompt | null {
     return this.userQueue.shift() ?? null;

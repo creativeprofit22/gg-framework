@@ -135,6 +135,57 @@ describe("ask_user soft deadline", () => {
     await expect(second).resolves.toContain("Second?\n→ Yes");
   });
 
+  it("a stopped run defers its question instead of cancelling it", async () => {
+    const onDeferred = vi.fn<(prompt: AskUserPrompt) => void>();
+    const onLateAnswer = vi.fn<(late: LateAskAnswer) => void>();
+    const onSettled = vi.fn();
+    const bridge = createAskUserBridge({
+      broadcast: () => {},
+      timeoutMs: 600_000,
+      onDeferred,
+      onLateAnswer,
+      onSettled,
+    });
+    const parked = bridge.park({ questions: [{ id: "q", question: "Ship it?", kind: "confirm" }] });
+    const [prompt] = bridge.pendingRequests;
+    // What abortOwnedWork does when the run is stopped.
+    bridge.deferAll();
+    await expect(parked).resolves.toEqual({ action: "deferred" });
+    expect(onDeferred).toHaveBeenCalledExactlyOnceWith(prompt);
+    expect(onSettled).not.toHaveBeenCalled();
+    expect(bridge.pendingRequests).toEqual([]);
+    expect(bridge.deferredRequests).toEqual([prompt]);
+    expect(bridge.settle(prompt!.id, { action: "answer", answers: { q: "Yes" } })).toBe(true);
+    expect(onLateAnswer).toHaveBeenCalledExactlyOnceWith({ prompt, answers: { q: "Yes" } });
+    expect(bridge.deferredCount).toBe(0);
+  });
+
+  it("a stopped run still cancels a question that may not be answered late", async () => {
+    const onLateAnswer = vi.fn<(late: LateAskAnswer) => void>();
+    const bridge = createAskUserBridge({ broadcast: () => {}, timeoutMs: 600_000, onLateAnswer });
+    const approval = bridge.park(
+      { questions: [{ id: "q", question: "Approve?", kind: "confirm" }] },
+      { defer: false },
+    );
+    bridge.deferAll();
+    await expect(approval).resolves.toEqual({ action: "cancel" });
+    expect(bridge.deferredCount).toBe(0);
+  });
+
+  it("a typed prompt still closes a question deferred by a stopped run", async () => {
+    const { bridge, call, lastPrompt, onLateAnswer } = harness(600_000);
+    const result = call();
+    bridge.deferAll();
+    await result;
+    const { id } = lastPrompt();
+    // What POST /prompt does: settle every captured pending and deferred id.
+    for (const prompt of [...bridge.pendingRequests, ...bridge.deferredRequests]) {
+      bridge.settle(prompt.id, { action: "cancel", superseded: true });
+    }
+    expect(bridge.settle(id, { action: "answer", answers: { q: "Yes" } })).toBe(false);
+    expect(onLateAnswer).not.toHaveBeenCalled();
+  });
+
   it("reads the deadline per question, so unattended runs get the short one", async () => {
     let unattended = true;
     const { bridge, call } = harness(() => askSoftDeadlineMs(unattended));

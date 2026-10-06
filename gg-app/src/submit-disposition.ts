@@ -6,14 +6,17 @@
  * This exists because the three states are easy to conflate and one of them was
  * wrong: a folder chosen from the native picker *while a run was in flight* was
  * silently dropped, so the dialog opened, the user picked a directory, and
- * nothing happened. Typed input never had that problem — it queues as steering.
+ * nothing happened. Typed input never had that problem — it queues to run next.
  */
 export type SubmitDisposition =
   /** Nothing to send, or the sidecar isn't ready yet. */
   | "ignore"
   /** Send immediately as a new run. */
   | "send"
-  /** A run is in flight: queue as steering for the sidecar to inject mid-loop. */
+  /**
+   * A run is in flight: queue it as a waiting prompt. The sidecar runs queued
+   * prompts one at a time after the current run finishes.
+   */
   | "queue";
 
 export function submitDisposition(

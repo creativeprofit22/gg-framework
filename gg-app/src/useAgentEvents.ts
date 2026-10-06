@@ -238,6 +238,10 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
   // Retain acknowledged IDs through receipt delivery, even when enqueue and
   // drain both precede the HTTP response. Unknown IDs still await their SSE ack.
   const acknowledgedQueueRef = useRef<Map<string, boolean | "cancelled">>(new Map());
+  // Accepted prompts that wait for a later run of their own (non-steering).
+  // They show only in the queue strip until the sidecar takes them, then land
+  // at the transcript's end — right before their run — matching history.
+  const deferredQueueRef = useRef<Map<string, Extract<Item, { kind: "user" }>>>(new Map());
   // Transcript id of the active sub-agent group for this run (null until the
   // first subagent spawns). The per-agent map keeps late async lifecycle events
   // attached to their original transcript group after a newer run starts.
@@ -441,6 +445,27 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
         // Retain cancellation only until its in-flight submission receipt arrives.
         acknowledgedQueueRef.current.delete(receipt.queueId);
       }
+      if (receipt.queued && !receipt.steers && !hideQueued) {
+        // A deferred prompt runs as its own later turn. Showing it now would put
+        // it amid the current run's output; the queue strip shows it instead.
+        const withoutRow = (previous: Item[]): Item[] =>
+          previous.some((row) => row.id === item.id)
+            ? previous.filter((row) => row.id !== item.id)
+            : previous;
+        if (queueState === false) {
+          // Already taken before this receipt arrived: its run has begun.
+          setItems((previous) => [
+            ...withoutRow(previous),
+            { ...item, queueId: receipt.queueId, queued: false },
+          ]);
+          return;
+        }
+        if (queueState !== "cancelled") {
+          deferredQueueRef.current.set(receipt.queueId, { ...item, queueId: receipt.queueId });
+        }
+        setItems(withoutRow);
+        return;
+      }
       setItems((previous) => {
         if (queueState === "cancelled") return previous.filter((row) => row.id !== item.id);
         const accepted = {
@@ -481,9 +506,11 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
 
   useEffect(() => {
     const acknowledgedQueue = acknowledgedQueueRef.current;
+    const deferredQueue = deferredQueueRef.current;
     return () => {
       if (promoteTimerRef.current !== null) clearTimeout(promoteTimerRef.current);
       acknowledgedQueue.clear();
+      deferredQueue.clear();
     };
   }, []);
 
@@ -697,7 +724,10 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           // as a whole rather than turning a partial list into settlement evidence.
           if (isPendingAskSnapshot(d.pendingAsks)) {
             const pendingAsks = d.pendingAsks;
-            setItems((previous) => reconcilePendingAsks(previous, pendingAsks, nextId));
+            const deferredAsks = isPendingAskSnapshot(d.deferredAsks) ? d.deferredAsks : undefined;
+            setItems((previous) =>
+              reconcilePendingAsks(previous, pendingAsks, nextId, deferredAsks),
+            );
           }
           setRunning(readyState.running);
           setContextTokens(readyState.contextTokens);
@@ -1153,8 +1183,10 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           const runFailed = outcome === "failed";
           setItems((prev) =>
             prev.map((it) => {
+              // A stopped run releases its question but keeps it answerable
+              // (the sidecar defers it); a later answer is sent as a message.
               if (runCancelled && it.kind === "ask" && !it.sent && !it.cancelled) {
-                return { ...it, cancelled: true };
+                return it.deferred ? it : { ...it, deferred: true };
               }
               return it;
             }),
@@ -1278,9 +1310,11 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
 
         case "ask_user":
           // The agent's turn is parked on this question until App POSTs the
-          // answers back (or the run ends and `run_end` closes the band). A
-          // malformed frame is dropped rather than rendered as an empty band
-          // the user could never answer.
+          // answers back. Stopping the run defers the band instead of closing
+          // it: it stays answerable and a late answer goes out as a message.
+          // The band closes only on answer, supersession (`ask_user_settled` /
+          // `ask_user_closed`), or session reset. A malformed frame is dropped
+          // rather than rendered as an empty band the user could never answer.
           if (isAskUserPrompt(d)) {
             setItems((previous) =>
               previous.some((item) => item.kind === "ask" && item.prompt.id === d.id)
@@ -1290,8 +1324,9 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           }
           break;
         case "ask_user_deferred":
-          // Soft deadline passed: the agent continued on its best guess, but the
-          // band stays answerable — a later answer is sent to it as a message.
+          // The soft deadline passed (the agent continued on its best guess) or
+          // the run was stopped. Either way the band stays answerable — a later
+          // answer is sent to the agent as a message.
           if (typeof d.id === "string") {
             const promptId = d.id;
             setItems((prev) => markAskDeferred(prev, promptId));
@@ -1443,6 +1478,18 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           if (cancelledId && acknowledgedQueueRef.current.has(cancelledId)) {
             acknowledgedQueueRef.current.set(cancelledId, "cancelled");
           }
+          if (cancelledId && deferredQueueRef.current.delete(cancelledId)) {
+            // The receipt already arrived; no cancellation tombstone is needed.
+            acknowledgedQueueRef.current.delete(cancelledId);
+          }
+          // Deferred prompts that left the list uncancelled were just taken for
+          // their own run, which starts next: land them at the transcript's end.
+          const released: Extract<Item, { kind: "user" }>[] = [];
+          for (const [queueId, pending] of deferredQueueRef.current) {
+            if (acknowledgedQueueRef.current.get(queueId) !== false) continue;
+            deferredQueueRef.current.delete(queueId);
+            released.push({ ...pending, queued: false, promoted: true });
+          }
           setItems((previous) => {
             if (
               cancelledId &&
@@ -1467,7 +1514,8 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
                 acknowledgedQueueRef.current.get(item.queueId) === false
                   ? { ...item, queued: false, promoted: true }
                   : item,
-              );
+              )
+              .concat(released);
           });
           schedulePromotionEnd();
           break;
@@ -1539,6 +1587,7 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           // The transcript is going away, so acknowledged queue IDs from the old
           // session must not gate clears in the new one.
           acknowledgedQueueRef.current.clear();
+          deferredQueueRef.current.clear();
           armedHooksRef.current.clear();
           heldTextRef.current = "";
           // Its row is going away with the transcript; nothing left to show.

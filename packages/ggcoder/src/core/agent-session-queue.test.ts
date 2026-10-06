@@ -175,6 +175,85 @@ describe("AgentSession queue — takeNextQueuedMessage", () => {
   });
 });
 
+describe("AgentSession queue — deferred prompts", () => {
+  it("wait out the run: no interrupt, no steering drain, then FIFO and cancellable", async () => {
+    const session = await makeSession();
+    try {
+      const interrupts = vi.fn();
+      (session as unknown as { steeringListeners: Set<() => void> }).steeringListeners.add(
+        interrupts,
+      );
+      await session.queuePrompt("first", [], undefined, { deferred: true });
+      await session.queuePrompt("second", [], undefined, { deferred: true });
+      await session.queuePrompt("third", [], undefined, { deferred: true });
+      session.queueMessage("steer now");
+      expect(interrupts).toHaveBeenCalledTimes(1);
+
+      const steering = (
+        session as unknown as { getHookSteeringMessages(): Array<{ content: unknown }> | null }
+      ).getHookSteeringMessages();
+      expect(JSON.stringify(steering)).toContain("steer now");
+      expect(JSON.stringify(steering)).not.toContain("first");
+      expect(session.listQueuedMessages().map((m) => m.text)).toEqual(["first", "second", "third"]);
+
+      expect(session.cancelQueuedMessage(session.listQueuedMessages()[1]!.id)).toBe(true);
+      expect(session.takeNextQueuedMessage()?.text).toBe("first");
+      expect(session.takeNextQueuedMessage()?.text).toBe("third");
+      expect(session.takeNextQueuedMessage()).toBeNull();
+    } finally {
+      await session.dispose();
+    }
+  });
+
+  it("leave template commands unexpanded for the later send, unlike steering entries", async () => {
+    const commands = path.join(tmpProject, ".gg", "commands");
+    await fs.mkdir(commands, { recursive: true });
+    await fs.writeFile(path.join(commands, "shipit.md"), "Ship the release now.", "utf-8");
+    const session = await makeSession();
+    try {
+      await session.queuePrompt("/shipit later", [], undefined, { deferred: true });
+      await session.queuePrompt("/shipit now");
+
+      const deferred = session.takeNextQueuedMessage();
+      expect(deferred?.text).toBe("/shipit later");
+      expect(deferred?.deferred).toBe(true);
+      expect(deferred?.modelText).toBeUndefined();
+
+      const steering = session.takeNextQueuedMessage();
+      expect(steering?.text).toBe("/shipit now");
+      expect(steering?.modelText).toContain("Ship the release now.");
+    } finally {
+      await session.dispose();
+    }
+  }, 20_000);
+
+  it("do not block post-turn compaction, while steering entries still do", async () => {
+    const session = await makeSession();
+    try {
+      const internal = session as unknown as {
+        compactionOccurred: boolean;
+        observePlanStepProgress: (...args: unknown[]) => void;
+        maybeCompactPostTurn(creds: { accessToken: string }): void;
+      };
+      // compactionOccurred short-circuits right after the guards; reaching
+      // observePlanStepProgress proves the queue guard let the attempt through.
+      internal.compactionOccurred = true;
+      const passedGuards = vi.fn();
+      internal.observePlanStepProgress = passedGuards;
+
+      await session.queuePrompt("later", [], undefined, { deferred: true });
+      internal.maybeCompactPostTurn({ accessToken: "t" });
+      expect(passedGuards).toHaveBeenCalledTimes(1);
+
+      session.queueMessage("steer now");
+      internal.maybeCompactPostTurn({ accessToken: "t" });
+      expect(passedGuards).toHaveBeenCalledTimes(1);
+    } finally {
+      await session.dispose();
+    }
+  });
+});
+
 describe("AgentSession queue — per-message cancellation", () => {
   it("lists pending messages with stable ids", async () => {
     const session = await makeSession();

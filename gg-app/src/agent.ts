@@ -1284,10 +1284,15 @@ export class PromptSubmissionError extends Error {
   }
 }
 
-/** Authoritative outcome of submitting one prompt to the sidecar. */
+/**
+ * Authoritative outcome of submitting one prompt to the sidecar. For a queued
+ * prompt, `steers` says whether the sidecar hands it to the run in flight (a
+ * reply to a live question, or a Ken-sent correction) or holds it in the
+ * visible, cancellable queue until the run ends.
+ */
 export type PromptSubmissionResult =
-  | { queued: true; count: number; queueId: string }
-  | { queued: false; count: number; queueId?: never };
+  | { queued: true; count: number; queueId: string; steers: boolean }
+  | { queued: false; count: number; queueId?: never; steers?: never };
 
 export function requirePromptSubmissionResult(value: unknown): PromptSubmissionResult {
   if (typeof value !== "object" || value === null) {
@@ -1302,13 +1307,19 @@ export function requirePromptSubmissionResult(value: unknown): PromptSubmissionR
     (result.queued
       ? result.count < 1 ||
         typeof result.queueId !== "string" ||
-        !/^q[1-9][0-9]*$/.test(result.queueId)
-      : result.count !== 0 || result.queueId !== undefined)
+        !/^q[1-9][0-9]*$/.test(result.queueId) ||
+        typeof result.steers !== "boolean"
+      : result.count !== 0 || result.queueId !== undefined || result.steers !== undefined)
   ) {
     throw new Error("invalid prompt submission response");
   }
   return result.queued
-    ? { queued: true, count: result.count, queueId: result.queueId as string }
+    ? {
+        queued: true,
+        count: result.count,
+        queueId: result.queueId as string,
+        steers: result.steers as boolean,
+      }
     : { queued: false, count: result.count };
 }
 
@@ -2076,14 +2087,16 @@ export async function setRadioVolume(volume: number): Promise<number> {
   return Number.isFinite(res.volume) ? res.volume : volume;
 }
 
-/** One user message waiting to be injected into the running turn. */
+/** One user prompt waiting for its own run to start after the current one. */
 export interface QueuedMessage {
   id: string;
   text: string;
 }
 
 /**
- * Cancel one pending queued message by id.
+ * Cancel one pending queued message by id. A queued prompt waits until its own
+ * run starts and can be cancelled until then; `false` means that run already
+ * started between render and click.
  *
  * Returns the explicit cancellation verdict, or null on transport failure.
  * Queue state is owned exclusively by ordered sidecar events: the HTTP response

@@ -5,7 +5,7 @@ import { createProgrammaticProfileTool } from "./tools/programmatic-profile.js";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 
-import { createAskUserBridge, type AskUserPrompt } from "./core/ask-user.js";
+import { createAskUserBridge, promptSteersRun, type AskUserPrompt } from "./core/ask-user.js";
 import { withRealSidecar } from "./test-support/real-sidecar.js";
 import { createAskUserTool } from "./tools/ask-user.js";
 import { commandCreationReviewer } from "./core/programmatic/command-creation.js";
@@ -77,6 +77,45 @@ describe("reviewed command questions use the existing desktop bridge", () => {
         const expired = await request(`/ask/${question.id}`, sessionId, { action: "cancel" });
         expect(expired.status).toBe(409);
         expect(await expired.json()).toEqual({ error: "no question is awaiting an answer" });
+      },
+      { parkQuestion: true },
+    );
+  }, 60_000);
+  it("keeps a question answerable after Stop over real source-daemon HTTP/SSE", async () => {
+    await withRealSidecar(
+      async ({ project, manager, open, request, subscribe, generation }) => {
+        const saved = await manager.create(project, "openai", "gpt-5", {
+          openAICodexContextProfile: "stable",
+        });
+        const sessionId = await open(saved.path, "chat");
+        const observer = await subscribe(sessionId);
+        await observer.waitFor("ready");
+        expect((await request("/prompt", sessionId, { text: "Ask for approval" })).status).toBe(
+          202,
+        );
+        const question = (await observer.waitFor("ask_user")).data;
+        // The fixture's model step ignores abort; let it finish so Stop can drain.
+        const stop = request("/cancel", sessionId, {});
+        generation.release();
+        expect((await stop).status).toBe(200);
+        expect((await observer.waitFor("ask_user_deferred")).data).toEqual({ id: question.id });
+        expect(observer.events.filter((event) => event.type === "ask_user_settled")).toEqual([]);
+        // A pane that reconnects after the stop still gets the card back.
+        const late = await subscribe(sessionId);
+        const ready = (await late.waitFor("ready")).data;
+        expect(ready.pendingAsks).toEqual([]);
+        expect(ready.deferredAsks).toEqual([question]);
+        const receipt = await request(`/ask/${question.id}`, sessionId, {
+          action: "answer",
+          answers: { approval: "allow" },
+        });
+        expect(receipt.status).toBe(200);
+        expect((await observer.waitFor("ask_user_settled")).data).toEqual({
+          id: question.id,
+          action: "answer",
+        });
+        const again = await request(`/ask/${question.id}`, sessionId, { action: "cancel" });
+        expect(again.status).toBe(409);
       },
       { parkQuestion: true },
     );
@@ -259,6 +298,41 @@ describe("a typed prompt supersedes a parked question", () => {
     const text = await parked;
     expect(text).toContain("sent their own message instead");
     expect(text).not.toContain("stop and wait");
+  });
+
+  it("keeps a question answerable when the run stops, but a typed prompt still closes it", async () => {
+    const source = await fs.readFile(APP_SIDECAR, "utf8");
+    const abortBlock = source.slice(
+      source.indexOf("function abortOwnedWork(): void {"),
+      source.indexOf("taskRunAll = false;", source.indexOf("function abortOwnedWork(): void {")),
+    );
+    expect(abortBlock).toContain("asks.deferAll();");
+    expect(abortBlock).not.toContain("asks.cancelAll()");
+    const prompt = routeBlock(source, 'if (method === "POST" && url === "/prompt") {');
+    expect(prompt).toContain("[...asks.pendingRequests, ...asks.deferredRequests]");
+    expect(source).toContain("deferredAsks: asks.deferredRequests");
+  });
+
+  it("reports steers=true for a pending question and false for a deferred-only one", async () => {
+    const asks = createAskUserBridge({ broadcast: () => {}, onLateAnswer: () => {} });
+    const parked = asks.park({
+      questions: [{ id: "store", kind: "confirm", question: "Which store?" }],
+    });
+    expect(promptSteersRun(asks, false)).toBe(true);
+    asks.deferAll();
+    expect(await parked).toEqual({ action: "deferred" });
+    expect(asks.deferredCount).toBe(1);
+    expect(promptSteersRun(asks, false)).toBe(false);
+    expect(promptSteersRun(asks, true)).toBe(true);
+    const block = routeBlock(
+      await fs.readFile(APP_SIDECAR, "utf8"),
+      'if (method === "POST" && url === "/prompt") {',
+    );
+    // Evaluated before superseding empties the pending list, and reported as-is.
+    expect(block.indexOf("promptSteersRun(asks")).toBeLessThan(block.indexOf("superseded: true"));
+    expect(block).toContain("deferred: !steers");
+    expect(block).toContain("json(res, 202, { queued: true, count, queueId, steers })");
+    asks.cancelAll();
   });
 
   it("releases it before the prompt can queue as steering", async () => {

@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import ts from "typescript";
 import { expect, it, vi } from "vitest";
-import { createAskUserBridge } from "./core/ask-user.js";
+import { createAskUserBridge, promptSteersRun } from "./core/ask-user.js";
 import { resolveChatResearchCommandRoute } from "./app-sidecar-chat-research-handoff.js";
 import { handleAppSidecarChatResearchPrompt } from "./app-sidecar-chat-research-route.js";
 import { withRealSidecar } from "./test-support/real-sidecar.js";
@@ -36,7 +36,12 @@ it.each(["research", "attachment", "accepted"] as const)(
           scenario === "research" ? 409 : scenario === "attachment" ? 500 : 202,
         );
         if (scenario === "accepted") {
-          expect(await response.json()).toEqual({ queued: true, count: 1, queueId: "q1" });
+          expect(await response.json()).toEqual({
+            queued: true,
+            count: 1,
+            queueId: "q1",
+            steers: true,
+          });
           await stream.waitFor("ask_user_settled");
         } else {
           if (scenario === "research")
@@ -136,6 +141,7 @@ it.each(["cancelling", "cancel_failed", "new-question"] as const)(
     try {
       await promptController({
         asks,
+        promptSteersRun,
         programmaticExecutionActive: false,
         text: "Change direction",
         attachments: [{}],
@@ -176,7 +182,12 @@ it.each(["cancelling", "cancel_failed", "new-question"] as const)(
       });
       expect(asks.pendingCount).toBe(1);
       if (state === "new-question") {
-        expect(json).toHaveBeenCalledWith({}, 202, { queued: true, count: 1, queueId: "q1" });
+        expect(json).toHaveBeenCalledWith({}, 202, {
+          queued: true,
+          count: 1,
+          queueId: "q1",
+          steers: true,
+        });
         expect(settled).toHaveBeenCalledExactlyOnceWith({ id: originalId, action: "answer" });
         const replacementId = asks.pendingRequests[0]!.id;
         expect(replacementId).not.toBe(originalId);

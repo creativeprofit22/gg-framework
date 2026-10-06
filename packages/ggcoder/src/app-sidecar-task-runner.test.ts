@@ -65,6 +65,7 @@ async function taskRunnerHarness(
     mechanical?: boolean;
     workflow?: boolean;
     queued?: boolean;
+    deferredQueued?: boolean;
     provider?: "anthropic" | "qwen-cloud";
     reviewerProvider?: "anthropic" | "qwen-cloud";
   } = {},
@@ -103,9 +104,12 @@ async function taskRunnerHarness(
   let messages: Message[] = [];
   let cancelled = true; // A previous cancellation must not disable a new task.
   let planMode = false;
+  let deferredQueue = 0; // Prompts the user sent while the task was busy.
+  const events: string[] = [];
   const broadcast = vi.fn();
   const newSession = vi.fn(async () => {
     if (options.failure === "session") throw new Error("session failed");
+    events.push("newSession");
     messages = [];
     planMode = false;
   });
@@ -131,6 +135,7 @@ async function taskRunnerHarness(
       ],
     });
     cancelled = cancelledDuringRun;
+    if (options.deferredQueued && prompt.mock.calls.length === 1) deferredQueue = 1;
     const current = tasks.find((candidate) => candidate.status === "in-progress");
     if (current) current.status = "done";
     if (options.plan === "submitted") await context.planGate.submit("plan.md", "Draft plan");
@@ -186,7 +191,8 @@ async function taskRunnerHarness(
       persistAppMarker: async () => {},
       persistAutopilotMarker: async () => {},
       getPersistedTranscriptCount: () => messages.length,
-      getQueuedCount: () => (options.queued && messages.length > 0 ? 1 : 0),
+      getSteeringQueuedCount: () => (options.queued && messages.length > 0 ? 1 : 0),
+      getQueuedCount: () => (options.queued && messages.length > 0 ? 1 : 0) + deferredQueue,
     },
     isAutopilotEnabled: () => enabled,
     get autopilotCancelled() {
@@ -203,7 +209,12 @@ async function taskRunnerHarness(
     kenAutoSession: null,
     finishOwnedGeneration: vi.fn(),
     queueMicrotask: () => {},
-    runStrandedQueue: vi.fn(async () => {}),
+    // Mirrors the production barrier: nothing drains while a task turn owns the session.
+    runStrandedQueue: vi.fn(async () => {
+      if (context.taskTurnActive || deferredQueue === 0) return;
+      deferredQueue = 0;
+      events.push("queued-prompt");
+    }),
     runAutopilotReview: verdict,
     runAutopilotPlanReview: verdict,
     driveAutopilotCycle,
@@ -253,6 +264,7 @@ async function taskRunnerHarness(
     verdict,
     getTasks: () => tasks,
     getMessages: () => messages,
+    events,
   };
 }
 
@@ -492,6 +504,13 @@ describe("app sidecar task runner", () => {
     expect(runner.newSession).toHaveBeenCalledOnce();
     expect(runner.getTasks()).toMatchObject([{ status: "blocked" }, { status: "pending" }]);
     expect(runner.context.runStrandedQueue).toHaveBeenCalledOnce();
+  });
+
+  it("completes a task when the user queued a prompt mid-run, then runs it before the next task", async () => {
+    const runner = await taskRunnerHarness(true, false, { deferredQueued: true });
+    await runner.runTasks("first", true);
+    expect(runner.getTasks()).toEqual([]); // Neither task blocked with queued-messages.
+    expect(runner.events).toEqual(["newSession", "queued-prompt", "newSession"]);
   });
 
   it("settles an unexpected user-turn rejection without pruning provisional work", async () => {

@@ -68,6 +68,7 @@ async function pane(
       messages.length = 0;
     },
     getQueuedCount: () => 0,
+    getSteeringQueuedCount: () => 0,
     getAppMarkers: () => [],
     persistAppMarker: async () => {},
     getState: () => ({ provider: "test", model: "test" }),

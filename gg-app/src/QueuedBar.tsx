@@ -93,7 +93,7 @@ export function QueuedBar({ messages, onCancel }: Props): React.ReactElement | n
             <span className="queued-bar-text" title={single.text}>
               {preview(single.text)}
             </span>
-            <span className="queued-bar-when">queued for the next turn</span>
+            <span className="queued-bar-when">runs after the current task</span>
             <button
               className="queued-cancel"
               style={{ color: theme.textDim }}
@@ -107,7 +107,7 @@ export function QueuedBar({ messages, onCancel }: Props): React.ReactElement | n
         ) : (
           <>
             <span className="queued-bar-text">
-              {visible.length} messages queued for the next turn
+              {visible.length} messages waiting to run in order
             </span>
             <button
               className="queued-toggle"

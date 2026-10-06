@@ -40,7 +40,6 @@ import { getClaudeCliUserAgent } from "../../core/claude-code-version.js";
 import { resolveSessionTurnToolResultCharLimit } from "../../core/agent-session.js";
 import { kimiCodingHeaders, isKimiCodingEndpoint } from "../../core/oauth/kimi.js";
 import { log } from "../../core/logger.js";
-import { wrapSteeringContent } from "../../core/steering.js";
 
 /** Extract plain text from this run's user input — the verbatim request that
  *  the re-grounding hook re-pins after a compaction. Captured at run start so
@@ -69,32 +68,6 @@ function estimateTokens(msgs: Message[]): number {
     }
   }
   return Math.round(chars / 4);
-}
-
-/**
- * Merge multiple UserContent items into a single one.
- * Text-only items are joined with newlines. Mixed content (text + images)
- * is flattened into a content array preserving all parts.
- */
-function mergeUserContent(items: UserContent[]): UserContent {
-  if (items.length === 1) return items[0];
-
-  const hasArrayContent = items.some((c) => Array.isArray(c));
-  if (!hasArrayContent) {
-    // All items are strings — join with newlines
-    return (items as string[]).join("\n");
-  }
-
-  // Flatten into a single content array
-  const parts: (TextContent | ImageContent | VideoContent)[] = [];
-  for (const item of items) {
-    if (typeof item === "string") {
-      parts.push({ type: "text", text: item });
-    } else {
-      parts.push(...item);
-    }
-  }
-  return parts;
 }
 
 /** Extract the plain-text portion of a UserContent value (drops images). */
@@ -709,23 +682,11 @@ export function useAgentLoop(
                   return result;
                 }
               : undefined,
-            // Drain queued messages as steering — injected between tool calls
-            // and before the agent would stop, so the LLM sees user guidance
-            // within the same run instead of waiting for a new one. User
-            // steering wins; then the loop-breaker; then post-compaction
-            // re-grounding — all polled at the same mid-loop boundary.
+            // Host-generated mid-run guidance only: the loop-breaker, then
+            // post-compaction re-grounding. User messages queued while busy are
+            // NOT injected here — like the desktop app, each one runs after the
+            // current task finishes, as its own run (see the drain below).
             getSteeringMessages: () => {
-              if (queueRef.current.length > 0) {
-                const batch = queueRef.current.splice(0);
-                setQueuedCount(0);
-                const merged = mergeUserContent(batch.map((q) => q.content));
-                // Show the user their verbatim message; send the framed version
-                // so the model treats it as concurrent steering, not a fresh
-                // request that supersedes the original task.
-                onQueuedStart?.(merged);
-                return [{ role: "user" as const, content: wrapSteeringContent(merged) }];
-              }
-
               // Loop-breaker: two-stage. Stage 1 nudges the agent to break the
               // pattern; a FRESH detection after that injects the harsher final
               // stop-and-report prompt. All loop signals reset after each
@@ -998,8 +959,8 @@ export function useAgentLoop(
                 break;
 
               case "steering_message":
-                // Steering message was injected — UI already notified via
-                // onQueuedStart inside getSteeringMessages callback.
+                // Host guidance (loop-breaker / re-grounding) was injected;
+                // user-queued prompts never take this path.
                 break;
 
               case "error":
@@ -1292,10 +1253,10 @@ export function useAgentLoop(
           }
         }
 
-        // Drain the queue: process follow-up messages that arrived after agent_done.
-        // Most queued messages are consumed mid-run via getSteeringMessages, but
-        // messages that arrive after the agent finishes (no more tool calls to
-        // trigger steering) land here. Batch all remaining into a single run.
+        // Drain the queue: messages sent while the agent was busy run after the
+        // current task, one at a time, oldest first, each as its own run —
+        // matching the desktop app's deferred prompt queue. Entries queued
+        // during a drained run are picked up by this same loop.
         //
         // This drains even when the run was aborted. After an interrupt, the
         // teardown (process kills, stream finish, finally block, React commit of
@@ -1306,15 +1267,15 @@ export function useAgentLoop(
         // left here arrived *after* the abort and is a fresh user intent. Without
         // this it would be orphaned in the queue forever with no loop to pick it
         // up.
-        if (!disposedRef.current && queueRef.current.length > 0) {
-          const batch = queueRef.current.splice(0);
-          setQueuedCount(0);
-          const merged = mergeUserContent(batch.map((q) => q.content));
+        while (!disposedRef.current && queueRef.current.length > 0) {
+          const entry = queueRef.current.shift();
+          if (!entry) break;
+          setQueuedCount(queueRef.current.length);
           // Let React process the onDone state updates before starting next run
           await new Promise((r) => setTimeout(r, 100));
           if (disposedRef.current) return;
-          onQueuedStart?.(merged);
-          await runSingle(merged);
+          onQueuedStart?.(entry.content);
+          await runSingle(entry.content);
         }
       } finally {
         assessmentActiveRef.current = false;

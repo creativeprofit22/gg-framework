@@ -842,6 +842,57 @@ describe("useAgentEvents", () => {
   });
 
   describe("queued pill lifecycle", () => {
+    it("lands a deferred prompt after the earlier run's output, right before its own run", () => {
+      const { hook, getItems } = setup();
+      act(() => {
+        hook.result.current.handleEvent(ev("run_start"));
+        hook.result.current.handleEvent(ev("text_delta", { text: "Earlier step." }));
+        hook.result.current.acceptSubmission(
+          { kind: "user", id: 500, text: "Next task" },
+          { queued: true, count: 1, queueId: "q1", steers: false },
+        );
+        hook.result.current.handleEvent(
+          ev("queued", { count: 1, messages: [{ id: "q1", text: "Next task" }] }),
+        );
+      });
+      // Waiting prompts live in the queue strip, not mid-run in the transcript.
+      expect(getItems().some((item) => item.kind === "user")).toBe(false);
+      act(() => {
+        hook.result.current.handleEvent(
+          ev("tool_call_start", { toolCallId: "t1", name: "read", args: {} }),
+        );
+        hook.result.current.handleEvent(ev("tool_call_end", { toolCallId: "t1", result: "ok" }));
+        hook.result.current.handleEvent(ev("text_delta", { text: "Earlier wrap-up." }));
+        hook.result.current.handleEvent(ev("run_end"));
+        // The drain takes the entry, then starts that prompt's own run.
+        hook.result.current.handleEvent(ev("queued", { count: 0, messages: [] }));
+        hook.result.current.handleEvent(ev("run_start"));
+        hook.result.current.handleEvent(ev("text_delta", { text: "New answer." }));
+      });
+      const transcript = getItems()
+        .filter((item) => item.kind === "user" || item.kind === "assistant")
+        .map((item) => (item.kind === "user" || item.kind === "assistant" ? item.text : ""));
+      expect(transcript).toEqual(["Earlier step.", "Earlier wrap-up.", "Next task", "New answer."]);
+      expect(getItems().find((item) => item.kind === "user")).toMatchObject({
+        queueId: "q1",
+        queued: false,
+        promoted: true,
+      });
+    });
+
+    it("keeps steering prompts inline with their queued pill", () => {
+      const { hook, getItems } = setup();
+      act(() => {
+        hook.result.current.acceptSubmission(
+          { kind: "user", id: 501, text: "Correction", kenSent: true },
+          { queued: true, count: 1, queueId: "q1", steers: true },
+        );
+      });
+      expect(getItems()).toEqual([
+        expect.objectContaining({ id: 501, queueId: "q1", queued: true }),
+      ]);
+    });
+
     it.each(["q1", "q2"])(
       "keeps exact metadata with reversed late receipts when cancelling %s",
       (cancelledId) => {
@@ -868,6 +919,7 @@ describe("useAgentEvents", () => {
               queued: true,
               count: 2,
               queueId: messages[index]!.id,
+              steers: false,
             });
           hook.result.current.handleEvent(
             ev("queued", {
@@ -878,8 +930,11 @@ describe("useAgentEvents", () => {
           );
         });
         const survivor = cancelledId === "q1" ? 1 : 0;
+        // Both wait in the queue strip; only the survivor lands when taken.
+        expect(getItems()).toEqual([]);
+        act(() => hook.result.current.handleEvent(ev("queued", { count: 0, messages: [] })));
         expect(getItems()).toEqual([
-          { ...rows[survivor], queueId: messages[survivor]!.id, queued: true },
+          { ...rows[survivor], queueId: messages[survivor]!.id, queued: false, promoted: true },
         ]);
       },
     );
@@ -891,7 +946,7 @@ describe("useAgentEvents", () => {
         for (const pane of [a, b]) {
           pane.hook.result.current.acceptSubmission(
             { kind: "user", id: 101, text: "same" },
-            { queued: true, count: 1, queueId: "q1" },
+            { queued: true, count: 1, queueId: "q1", steers: false },
           );
           pane.hook.result.current.handleEvent(
             ev("queued", { count: 1, messages: [{ id: "q1", text: "same" }] }),
@@ -901,17 +956,25 @@ describe("useAgentEvents", () => {
           ev("queued", { count: 0, messages: [], cancelledId: "q1" }),
         );
       });
+      act(() => {
+        for (const pane of [a, b])
+          pane.hook.result.current.handleEvent(ev("queued", { count: 0, messages: [] }));
+      });
       expect(a.getItems()).toEqual([]);
-      expect(b.getItems()).toEqual([expect.objectContaining({ queueId: "q1", queued: true })]);
+      expect(b.getItems()).toEqual([expect.objectContaining({ queueId: "q1", queued: false })]);
       act(() => {
         a.hook.result.current.handleEvent(ev("session_reset"));
         a.hook.result.current.acceptSubmission(
           { kind: "user", id: 102, text: "replacement" },
-          { queued: true, count: 1, queueId: "q1" },
+          { queued: true, count: 1, queueId: "q1", steers: false },
         );
+        a.hook.result.current.handleEvent(
+          ev("queued", { count: 1, messages: [{ id: "q1", text: "replacement" }] }),
+        );
+        a.hook.result.current.handleEvent(ev("queued", { count: 0, messages: [] }));
       });
       expect(a.getItems()).toEqual([
-        expect.objectContaining({ text: "replacement", queueId: "q1", queued: true }),
+        expect.objectContaining({ text: "replacement", queueId: "q1", promoted: true }),
       ]);
     });
 
@@ -939,30 +1002,39 @@ describe("useAgentEvents", () => {
           // Receipts may complete in reverse order. Only q1 was consumed.
           hook.result.current.acceptSubmission(
             { kind: "user", id: 2, text: "same", files: ["src/a.ts"] },
-            { queued: true, count: 2, queueId: "q2" },
+            { queued: true, count: 2, queueId: "q2", steers: false },
           );
           hook.result.current.acceptSubmission(
             { kind: "user", id: 1, text: "same", files: ["src/a.ts"] },
-            { queued: true, count: 1, queueId: "q1" },
+            { queued: true, count: 1, queueId: "q1", steers: false },
           );
         });
+        // q1 already started its run, so it lands now; q2 still waits.
         expect(getItems()).toEqual([
-          expect.objectContaining({ id: 2, queueId: "q2", queued: true, files: ["src/a.ts"] }),
           expect.objectContaining({ id: 1, queueId: "q1", queued: false, files: ["src/a.ts"] }),
+        ]);
+        act(() => hook.result.current.handleEvent(ev("queued", { count: 0, messages: [] })));
+        expect(getItems()).toEqual([
+          expect.objectContaining({ id: 1, queueId: "q1", queued: false, files: ["src/a.ts"] }),
+          expect.objectContaining({ id: 2, queueId: "q2", promoted: true, files: ["src/a.ts"] }),
         ]);
       },
     );
 
-    it("updates an existing idle bubble without duplicates and settles a referenced queue ID", () => {
+    it("moves an optimistic idle bubble to the queue strip and lands it once when taken", () => {
       const { hook, getItems } = setup();
       const item = { kind: "user" as const, id: 1, text: "read", files: ["src/a.ts"] };
       act(() => {
         hook.result.current.pushItem(item);
-        hook.result.current.acceptSubmission(item, { queued: true, count: 1, queueId: "q1" });
+        hook.result.current.acceptSubmission(item, {
+          queued: true,
+          count: 1,
+          queueId: "q1",
+          steers: false,
+        });
         hook.result.current.handleEvent(ev("queued", { count: 0, messages: [] }));
       });
-      expect(getItems()).toHaveLength(1);
-      expect(getItems()[0]).toMatchObject({ queued: true });
+      expect(getItems()).toEqual([]);
       act(() => {
         hook.result.current.handleEvent(
           ev("queued", {
@@ -2882,15 +2954,55 @@ describe("models_change", () => {
       expect(getItems()).toEqual([]);
     });
 
-    // The sidecar releases parked questions only on a real abort, so only a
-    // cancelled run may close a band.
-    it("closes an unanswered band when the run is cancelled", () => {
+    // A stopped run defers its parked question in the sidecar: the band stays
+    // answerable and a later answer is delivered as an ordinary message.
+    it("keeps an unanswered band answerable when the run is cancelled", () => {
       const { hook, getItems } = setup();
       act(() => {
         hook.result.current.handleEvent(ev("ask_user", { id: "ask-1", questions: [question] }));
         hook.result.current.handleEvent(ev("run_end", { cancelled: true }));
       });
-      expect(getItems()).toEqual([expect.objectContaining({ kind: "ask", cancelled: true })]);
+      expect(getItems()).toEqual([expect.objectContaining({ kind: "ask", deferred: true })]);
+      expect(getItems()[0]).not.toHaveProperty("cancelled");
+    });
+
+    it("keeps a deferred band across reconnect snapshots until it is superseded", () => {
+      const { hook, getItems } = setup();
+      const prompt = { id: "ask-1", questions: [question] };
+      act(() => {
+        hook.result.current.handleEvent(ev("ask_user", prompt));
+        hook.result.current.handleEvent(ev("ask_user_deferred", { id: "ask-1" }));
+        hook.result.current.handleEvent(ev("ready", { pendingAsks: [], deferredAsks: [prompt] }));
+        hook.result.current.handleEvent(ev("ready", { pendingAsks: [] }));
+      });
+      expect(getItems()).toEqual([
+        expect.objectContaining({ kind: "ask", id: 1, prompt, deferred: true }),
+      ]);
+      expect(getItems()[0]).not.toHaveProperty("cancelled");
+      // The user typed a new prompt: the sidecar settles the deferred id.
+      act(() => {
+        hook.result.current.handleEvent(ev("ask_user_settled", { id: "ask-1", action: "cancel" }));
+      });
+      expect(getItems()[0]).toMatchObject({ cancelled: true });
+    });
+
+    it("restores a deferred band missed while the pane was away", () => {
+      const { hook, getItems } = setup();
+      const prompt = { id: "ask-away", questions: [question] };
+      act(() => {
+        hook.result.current.handleEvent(ev("ready", { pendingAsks: [], deferredAsks: [prompt] }));
+      });
+      expect(getItems()).toEqual([{ kind: "ask", id: 1, prompt, deferred: true }]);
+    });
+
+    it("retires a deferred band the sidecar no longer holds", () => {
+      const { hook, getItems } = setup();
+      act(() => {
+        hook.result.current.handleEvent(ev("ask_user", { id: "ask-1", questions: [question] }));
+        hook.result.current.handleEvent(ev("ask_user_deferred", { id: "ask-1" }));
+        hook.result.current.handleEvent(ev("ready", { pendingAsks: [], deferredAsks: [] }));
+      });
+      expect(getItems()[0]).toMatchObject({ cancelled: true });
     });
 
     // Autopilot emits a run_end per injected round while the tool call is still

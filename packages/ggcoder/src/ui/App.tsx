@@ -2118,6 +2118,8 @@ export function App(props: AppProps) {
       );
 
       // ── Queue message if agent is already running ──
+      // It runs after the current task finishes, as its own run (oldest
+      // first) — never injected into the in-flight run.
       if (agentLoop.isBusy()) {
         log(
           "INFO",

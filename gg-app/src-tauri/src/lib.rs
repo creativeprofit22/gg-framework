@@ -3808,6 +3808,10 @@ struct PromptSubmissionResult {
     count: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     queue_id: Option<String>,
+    /// Queued prompts only: whether the sidecar hands it to the run in flight
+    /// (true) or holds it in the visible, cancellable queue (false).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    steers: Option<bool>,
 }
 
 // Only allowlisted pre-execution failures carry a definite rejection receipt.
@@ -3862,16 +3866,17 @@ fn parse_prompt_submission_response(
     }
     let result: PromptSubmissionResult =
         serde_json::from_str(body).map_err(|_| "invalid prompt submission response".to_string())?;
-    let has_queue_id = serde_json::from_str::<serde_json::Value>(body)
-        .map_err(|_| "invalid prompt submission response".to_string())?
-        .get("queueId").is_some();
+    let raw = serde_json::from_str::<serde_json::Value>(body)
+        .map_err(|_| "invalid prompt submission response".to_string())?;
+    let has_queue_id = raw.get("queueId").is_some();
+    let has_steers = raw.get("steers").is_some();
     let valid_queue_id = result.queue_id.as_deref().is_some_and(|id| {
         let bytes = id.as_bytes();
         bytes.len() >= 2 && bytes[0] == b'q' && (b'1'..=b'9').contains(&bytes[1])
             && bytes[2..].iter().all(u8::is_ascii_digit)
     });
-    if (result.queued && (result.count == 0 || !valid_queue_id))
-        || (!result.queued && (result.count != 0 || has_queue_id))
+    if (result.queued && (result.count == 0 || !valid_queue_id || result.steers.is_none()))
+        || (!result.queued && (result.count != 0 || has_queue_id || has_steers))
     {
         return Err("invalid prompt submission response".into());
     }
@@ -4436,8 +4441,9 @@ async fn agent_auth_logout(
 }
 
 /// Proxy: cancel one pending queued message by id. Returns
-/// `{ cancelled, queued }`. `cancelled: false` means it already drained into
-/// the run between render and click, which is a normal race, not an error.
+/// `{ cancelled, queued }`. A queued prompt waits until its own run starts and
+/// can be cancelled until then; `cancelled: false` means that run already
+/// started between render and click, which is a normal race, not an error.
 #[tauri::command]
 async fn agent_cancel_queued(
     webview: WebviewWindow,
@@ -12675,19 +12681,28 @@ mod tests {
                 queued: false,
                 count: 0,
                 queue_id: None,
+                steers: None,
             })
         );
-        assert_eq!(
-            prompt_proxy_result(
+        for steers in [false, true] {
+            let result = prompt_proxy_result(
                 reqwest::StatusCode::ACCEPTED,
-                r#"{"queued":true,"count":2,"queueId":"q19"}"#,
-            ),
-            Ok(PromptSubmissionResult {
-                queued: true,
-                count: 2,
-                queue_id: Some("q19".to_string()),
-            })
-        );
+                &format!(r#"{{"queued":true,"count":2,"queueId":"q19","steers":{steers}}}"#),
+            );
+            assert_eq!(
+                result,
+                Ok(PromptSubmissionResult {
+                    queued: true,
+                    count: 2,
+                    queue_id: Some("q19".to_string()),
+                    steers: Some(steers),
+                })
+            );
+            assert_eq!(
+                serde_json::to_value(result.unwrap()).unwrap(),
+                serde_json::json!({ "queued": true, "count": 2, "queueId": "q19", "steers": steers })
+            );
+        }
     }
 
     #[test]
@@ -12798,6 +12813,9 @@ mod tests {
             r#"{"queued":true,"count":1.5,"queueId":"q1"}"#,
             r#"{"queued":false,"count":0,"queueId":"q1"}"#,
             r#"{"queued":false,"count":0,"queueId":null}"#,
+            r#"{"queued":true,"count":1,"queueId":"q1","steers":"yes"}"#,
+            r#"{"queued":true,"count":1,"queueId":"q1","steers":null}"#,
+            r#"{"queued":false,"count":0,"steers":false}"#,
         ] {
             assert_eq!(
                 prompt_proxy_result(reqwest::StatusCode::ACCEPTED, body),

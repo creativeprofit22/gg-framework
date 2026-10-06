@@ -281,6 +281,7 @@ import {
   askSoftDeadlineMs,
   createAskUserBridge,
   deliverLateAnswer,
+  promptSteersRun,
   withoutDeferral,
   type AskUserResult,
   type AskUserPrompt,
@@ -2290,8 +2291,9 @@ async function createSession(
         return;
       }
       log("WARN", "app-sidecar", "ask_user deadline passed; agent proceeding", { id: prompt.id });
-      broadcast("ask_user_deferred", { id: prompt.id });
     },
+    // Soft deadline or a stopped run: the card stays answerable for a late answer.
+    onDeferred: (prompt) => broadcast("ask_user_deferred", { id: prompt.id }),
     onClosed: (ids) => broadcast("ask_user_closed", { ids }),
     onLateAnswer: (late) => {
       log("INFO", "app-sidecar", "ask_user late answer queued", { id: late.prompt.id });
@@ -3715,9 +3717,10 @@ async function createSession(
     abort.abort();
     // An MCP tool call parked on user input is not cancelled by the signal —
     // the promise lives in the bridge. Release it, or the aborted turn's tool
-    // call never returns. Same for a question parked on the user.
+    // call never returns. A question parked on the user is released too, but
+    // stays answerable: a later answer arrives as an ordinary message.
     elicitations.cancelAll();
-    asks.cancelAll();
+    asks.deferAll();
     // Stop a run-all sweep and every async child through AgentSession's signal.
     taskRunAll = false;
     autopilotCancelled = true;
@@ -3911,6 +3914,11 @@ async function createSession(
         messages: session.listQueuedMessages(),
       });
       broadcast("extras", footerExtras());
+      // Deferred user prompts wait for the run to end and never steer into it.
+      // Direct runs (plan implementation, phase launch, plan revision) have no
+      // user-turn drain, so hand the queue on here. Cancel already returned the
+      // queue to the composer.
+      if (ownsGeneration && !cancelled) scheduleIdleQueueDrain();
     }
   }
 
@@ -4083,6 +4091,7 @@ async function createSession(
           }
         } finally {
           runClaim.release();
+          scheduleIdleQueueDrain();
         }
       }
     },
@@ -4479,15 +4488,14 @@ async function createSession(
     }
   }
 
-  // ── Stranded-queue drain ───────────────────────────────
-  // A prompt POSTed while an autopilot cycle is between injected runs (build
-  // idle, Ken reviewing) queues — but the queue only drains INTO a running
-  // turn as steering. If the cycle ends without another run (ALL_CLEAR /
-  // IGNORE / HUMAN / error), that message would sit stranded until the next
-  // unrelated prompt, then land mislabeled as "concurrent steering" of an
-  // unrelated run. Drain it here as a fresh turn of its own (with its own
-  // gated review). Also covers the non-autopilot tail window: a message queued
-  // after the run's last steering drain but before run_end.
+  // ── Queued-prompt drain ────────────────────────────────
+  // The main path that runs queued user prompts. A user prompt sent while the
+  // session is busy (a run in flight, or an autopilot cycle between injected
+  // runs) is queued as deferred; once the session goes idle, this drain runs
+  // each entry as a fresh turn of its own (with its own gated review), one at a
+  // time, oldest first. Only live-question replies and Ken-sent prompts steer a
+  // run in flight; any of those left over after the run's last steering drain
+  // are picked up here too, rather than stranding until an unrelated prompt.
   const runStrandedQueue = createStrandedQueueDrain(
     () => taskTurnActive || planGate.pending() !== null,
     async () => {
@@ -4545,6 +4553,18 @@ async function createSession(
       }
     },
   );
+  // Start queued prompts once the session is fully idle. Deferred to a microtask
+  // so the ending run's owner can finish its own bookkeeping first; anything
+  // still holding the session (user-turn review, run claim, autopilot) keeps
+  // ownership and drains through its own path.
+  function scheduleIdleQueueDrain(): void {
+    queueMicrotask(() => {
+      if (isAppSidecarSessionBusy(sessionBusyState())) return;
+      void runStrandedQueue().catch((error) => {
+        broadcastError("error", "queued prompt failed after the run ended", error);
+      });
+    });
+  }
 
   // ── Task runner (project task list → sessions) ──────────────
   // Mirrors the CLI's task flow: each task runs in its OWN fresh session, with a
@@ -4604,7 +4624,12 @@ async function createSession(
                 ? "run-failed"
                 : outcome !== "all-clear" && outcome !== "ignored" && outcome !== "no-review"
                   ? "review-failed"
-                  : session.getQueuedCount() !== 0
+                  : // Only steering entries the run never consumed mean the task
+                    // missed user input. Deferred prompts (sent while busy) are
+                    // promised to run afterward in FIFO order, so they must not
+                    // turn a successful task into a block; runTasks drains them
+                    // between tasks instead.
+                    session.getSteeringQueuedCount() !== 0
                     ? "queued-messages"
                     : null;
       succeeded = reason === null;
@@ -4644,6 +4669,9 @@ async function createSession(
           ? runUnattended(() => runTaskById(taskId))
           : runTaskById(taskId));
         if (!ran || !taskRunAll) break;
+        // Run prompts the user queued during this task before the next task
+        // starts; runTaskById refuses to start while anything is still queued.
+        await runStrandedQueue();
         const next = getNextRunnableTask(cwd);
         currentId = next ? next.id : null;
         // Cancellation during the cadence must not start a fresh task/clear its flag.
@@ -5005,6 +5033,7 @@ async function createSession(
       ...footerExtras(),
       pendingPlanReview: planGate.pending(),
       pendingAsks: asks.pendingRequests,
+      deferredAsks: asks.deferredRequests,
     };
   }
 
@@ -6032,7 +6061,14 @@ async function createSession(
             conflict: (body) => json(res, 409, body),
             perform: async (onAccepted) => {
               // Capture before any await: acceptance must not dismiss a newer question.
-              const supersededAskIds = asks.pendingRequests.map(({ id }) => id);
+              // Deferred questions are superseded too: the user moved on.
+              const supersededAskIds = [...asks.pendingRequests, ...asks.deferredRequests].map(
+                ({ id }) => id,
+              );
+              // A prompt sent while the live run is parked on a question is its
+              // reply, so it must reach that run. Every other busy prompt waits.
+              // The 202 reports this so the app never guesses steer vs. wait.
+              const steers = promptSteersRun(asks, meta?.kenSent === true);
               const supersedeCapturedAsks = () => {
                 for (const id of supersededAskIds) {
                   asks.settle(id, { action: "cancel", superseded: true });
@@ -6162,23 +6198,28 @@ async function createSession(
                   json(res, 409, { error: "workflow_busy", message: queuePolicyError });
                   return;
                 }
-                // Queue prompts as mid-run steering (mirrors the CLI). Also queue while
-                // an autopilot cycle is active but between injected runs (build idle,
-                // Ken reviewing) so the message never starts a run that collides with
-                // an injected one on the same session. Attachments are persisted to
+                // User prompts wait for the current run and then run one at a time,
+                // oldest first, staying cancellable until they start. Only a reply to
+                // a live question or a Ken-sent correction steers the run in flight.
+                // Also queue while an autopilot cycle is active but between injected
+                // runs (build idle, Ken reviewing) so the message never starts a run
+                // that collides with an injected one on the same session. Attachments are persisted to
                 // .gg/uploads first so the queued media rides the same native-block
                 // path as a non-queued attachment prompt when it drains.
                 const prepared =
                   attachments.length > 0 ? await prepareAttachments(cwd, attachments) : [];
                 // A prompt-template command is expanded before queueing so the model
-                // gets its instructions as steering, matching an idle send; the queue
+                // receives its instructions (as the queued run's prompt, or as a
+                // steer), matching an idle send; the queue
                 // still shows the typed `/name`.
-                const { count, id: queueId } = await session.queuePrompt(text, prepared, meta);
+                const { count, id: queueId } = await session.queuePrompt(text, prepared, meta, {
+                  deferred: !steers,
+                });
                 // Queue before releasing the blocked ask; awaiting the run would deadlock.
                 supersedeCapturedAsks();
                 const messages = session.listQueuedMessages();
                 broadcast("queued", { count: messages.length, messages });
-                json(res, 202, { queued: true, count, queueId });
+                json(res, 202, { queued: true, count, queueId, steers });
                 // Preparing the entry awaited; if the run ended meanwhile, its
                 // final drain already passed, so hand the entry to the stranded drain.
                 if (!isAppSidecarSessionBusy(sessionBusyState())) {
@@ -6290,6 +6331,9 @@ async function createSession(
           if (claimedStart) {
             scheduledRunActive = false;
             runClaim.release();
+            // Research and programmatic runs start runAgent directly while holding
+            // the claim, so their run-end drain was skipped as busy.
+            scheduleIdleQueueDrain();
           }
         });
       return;
@@ -6833,7 +6877,7 @@ async function createSession(
       return;
     }
 
-    // Pending queued steering, for the composer's cancel affordance.
+    // Prompts waiting for their own run, for the composer's cancel affordance.
     if (method === "GET" && url === "/queued") {
       json(res, 200, { queued: session.listQueuedMessages() });
       return;
@@ -6854,8 +6898,8 @@ async function createSession(
           json(res, 400, { error: "missing queued message id" });
           return;
         }
-        // `false` means it already drained into the run between render and
-        // click. That is a race, not an error, so report it as a normal result
+        // `false` means its own run already started between render and click
+        // (queued prompts are cancellable only until then). That is a race, not an error, so report it as a normal result
         // and let the client reconcile through the ordered event stream.
         const cancelled = session.cancelQueuedMessage(id);
         const queued = session.listQueuedMessages();

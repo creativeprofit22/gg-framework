@@ -92,19 +92,18 @@ describe("QueuedBar", () => {
       expect(onCancel).toHaveBeenCalledWith("q1");
     });
 
-    it("says the message lands next turn, not after the run", () => {
-      // Queued steering drains at the agent's mid-loop steering hook. "after
-      // this run" would imply waiting for the final response, which is wrong.
+    it("says the message waits for the current task", () => {
+      // Queued user prompts run as their own turn once the current run ends.
       render(<QueuedBar messages={ONE} onCancel={vi.fn()} />);
-      expect(screen.getByText(/next turn/)).toBeTruthy();
-      expect(screen.queryByText(/after this run/)).toBeNull();
+      expect(screen.getByText(/runs after the current task/)).toBeTruthy();
+      expect(screen.queryByText(/next turn/)).toBeNull();
     });
   });
 
   describe("several queued messages", () => {
     it("shows the count and hides the list until asked", () => {
       render(<QueuedBar messages={THREE} onCancel={vi.fn()} />);
-      expect(screen.getByText("3 messages queued for the next turn")).toBeTruthy();
+      expect(screen.getByText("3 messages waiting to run in order")).toBeTruthy();
       expect(document.querySelector(".queued-list")).toBeNull();
     });
 

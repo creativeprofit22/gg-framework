@@ -324,8 +324,10 @@ it.each([
     loop.queueMessage("ordinary second");
     release();
     await running;
-    expect(onQueuedStart).toHaveBeenCalledOnce();
-    expect(String(onQueuedStart.mock.calls[0]![0])).toMatch(/ordinary first[\s\S]*ordinary second/);
+    expect(onQueuedStart.mock.calls.map(([content]) => content)).toEqual([
+      "ordinary first",
+      "ordinary second",
+    ]);
     expect(loop.isBusy()).toBe(false);
     expect(loop.drainQueuedText()).toBe("");
     // Ownership is released after draining, allowing a later fresh submission.
@@ -337,6 +339,122 @@ it.each([
     mounted.unmount();
     restore();
     await fs.rm(cwd, { recursive: true, force: true });
+  }
+});
+
+it("runs prompts queued while busy after the current run, one at a time, oldest first", async () => {
+  let release!: () => void;
+  let started!: () => void;
+  let held: Promise<void> | undefined;
+  let ready: Promise<void> = Promise.resolve();
+  const hold = () => {
+    held = new Promise<void>((resolve) => (release = resolve));
+    ready = new Promise<void>((resolve) => (started = resolve));
+  };
+  const requests: Message[][] = [];
+  const noop: AgentTool = {
+    name: "noop",
+    description: "Fixture",
+    parameters: z.object({}),
+    execute: async () => "ok",
+  };
+  vi.mocked(stream).mockReset();
+  vi.mocked(stream).mockImplementation(
+    (params) =>
+      new StreamResult(
+        (async function* () {
+          requests.push([...params.messages]);
+          const gate = held;
+          held = undefined;
+          if (gate) {
+            started();
+            await gate;
+          }
+          // The held run's first turn calls a tool, so the loop polls steering
+          // between turns — the boundary where queued prompts used to be injected.
+          if (requests.length === 1) {
+            const call: ToolCall = { type: "tool_call", id: "t1", name: "noop", args: {} };
+            yield { type: "toolcall_done", id: call.id, name: call.name, args: call.args };
+            return {
+              message: { role: "assistant", content: [call] },
+              stopReason: "tool_use",
+              usage: { inputTokens: 1, outputTokens: 1 },
+            };
+          }
+          return {
+            message: { role: "assistant", content: "done" },
+            stopReason: "end_turn",
+            usage: { inputTokens: 1, outputTokens: 1 },
+          };
+        })(),
+      ),
+  );
+  const messages = { current: [] as Message[] };
+  let loop!: UseAgentLoopReturn;
+  const onQueuedStart = vi.fn();
+  function Harness() {
+    loop = useAgentLoop(
+      messages,
+      { provider: "openai", model: "gpt-5", tools: [noop], maxTokens: 100 },
+      { onQueuedStart },
+    );
+    return null;
+  }
+  const mounted = render(<Harness />, {
+    stdout: makeRecordingStdout(new ScreenRecorder({ columns: 80, rows: 24 })),
+    patchConsole: false,
+  });
+  let running: Promise<void> | undefined;
+  try {
+    await vi.waitFor(() => expect(loop).toBeDefined());
+    hold();
+    running = loop.run("initial");
+    await ready;
+    loop.queueMessage("queued first");
+    loop.queueMessage("queued second");
+    release();
+    await running;
+
+    const lastUser = (msgs: Message[]) => msgs.filter((m) => m.role === "user").at(-1)?.content;
+    // Request 2 continues the held run after its tool call: nothing injected mid-run.
+    expect(requests).toHaveLength(4);
+    expect(JSON.stringify(requests[1])).not.toContain("queued");
+    expect(lastUser(requests[1]!)).toBe("initial");
+    // Then two separate runs, oldest first, each message its own plain user turn.
+    expect(lastUser(requests[2]!)).toBe("queued first");
+    expect(JSON.stringify(requests[2])).not.toContain("queued second");
+    expect(lastUser(requests[3]!)).toBe("queued second");
+    expect(messages.current.filter((m) => m.role === "user").map((m) => m.content)).toEqual([
+      "initial",
+      "queued first",
+      "queued second",
+    ]);
+    expect(onQueuedStart.mock.calls.map(([content]) => content)).toEqual([
+      "queued first",
+      "queued second",
+    ]);
+
+    // Interrupt: pre-abort queued text is restored (as App's abort handler
+    // does via drainQueuedText) and never runs; a post-abort arrival still runs.
+    onQueuedStart.mockClear();
+    requests.length = 0;
+    hold();
+    running = loop.run("interrupted");
+    await ready;
+    loop.queueMessage("pre-abort one");
+    loop.queueMessage("pre-abort two");
+    expect(loop.drainQueuedText()).toBe("pre-abort one\n\npre-abort two");
+    loop.abort();
+    loop.queueMessage("post-abort");
+    release();
+    await running;
+    expect(onQueuedStart.mock.calls.map(([content]) => content)).toEqual(["post-abort"]);
+    expect(JSON.stringify(requests)).not.toContain("pre-abort");
+    expect(loop.isBusy()).toBe(false);
+  } finally {
+    release?.();
+    await running?.catch(() => {});
+    mounted.unmount();
   }
 });
 

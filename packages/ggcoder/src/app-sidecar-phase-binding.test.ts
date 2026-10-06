@@ -395,6 +395,7 @@ describe("transparent status leases", () => {
           planGate: { pending: () => false },
           approvedPlanPath: null,
           createRunEndPayload: (outcome: string) => ({ outcome }),
+          scheduleIdleQueueDrain: () => {},
           pruneDoneTasksSync: () => [],
           footerExtras: () => ({}),
         };

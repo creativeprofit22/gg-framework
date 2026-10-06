@@ -67,11 +67,16 @@ it.each(["text", "attachment", "template"])(
       const text = "Queue while generating\n\nReferenced files:\n- src/context.ts";
       const queued = await request("/prompt", pane, { text, attachments: [attachment] });
       expect(queued.status).toBe(202);
-      expect(await queued.json()).toEqual({ queued: true, count: 1, queueId: "q1" });
+      expect(await queued.json()).toEqual({ queued: true, count: 1, queueId: "q1", steers: false });
       const snapshot = await stream.waitFor("queued");
       expect(snapshot.data).toEqual({ count: 1, messages: [{ id: "q1", text }] });
       const duplicate = await request("/prompt", pane, { text });
-      expect(await duplicate.json()).toEqual({ queued: true, count: 2, queueId: "q2" });
+      expect(await duplicate.json()).toEqual({
+        queued: true,
+        count: 2,
+        queueId: "q2",
+        steers: false,
+      });
       const secondSnapshot = await stream.waitFor("queued", 2);
       expect(secondSnapshot.data).toEqual({
         count: 2,

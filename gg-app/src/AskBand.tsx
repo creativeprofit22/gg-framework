@@ -430,7 +430,7 @@ export function AskBand({
       {/* A status note about the run, set apart from the question below it. */}
       {deferred && (
         <p className="ask-deferred-note" role="status">
-          Agent continued with its best guess — your answer will still be sent
+          The agent stopped waiting — your answer will still be sent
         </p>
       )}
       {questions.map((q, i) => (

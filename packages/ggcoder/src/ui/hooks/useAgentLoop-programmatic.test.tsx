@@ -487,7 +487,7 @@ it.each([
   },
 );
 
-it("rejects stale references and late tools while retaining restricted steering and normal post-turn queue draining", async () => {
+it("rejects stale references and late tools while deferring queued prompts to normal post-run draining", async () => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "terminal-advisory-refs-"));
   const restore = useFakeHome(path.join(cwd, "home"));
   // Passive call observer: the original agentLoop always executes.
@@ -563,7 +563,7 @@ it("rejects stale references and late tools while retaining restricted steering 
               );
               tools.push({ ...write, name: "late_mutation" });
               expect(params.tools!.some((tool) => tool.name === "late_mutation")).toBe(false);
-              loop.queueMessage("ordinary steering stays restricted");
+              loop.queueMessage("queued during advisory");
               const calls: ToolCall[] = [
                 { type: "tool_call", id: "late", name: "late_mutation", args: {} },
               ];
@@ -575,14 +575,18 @@ it("rejects stale references and late tools while retaining restricted steering 
                 usage: { inputTokens: 1, outputTokens: 1 },
               };
             } else if (providerCall === 3) {
-              expect(JSON.stringify(params.messages)).toContain(
-                "ordinary steering stays restricted",
-              );
+              // Queued prompts are never injected into the advisory run.
+              expect(JSON.stringify(params.messages)).not.toContain("queued during advisory");
               expect(params.tools!.some((tool) => tool.name === "write")).toBe(false);
               // Queue from agent_done, after the last steering boundary.
               queueAfterDone = true;
             } else {
-              expect(providerCall).toBe(4);
+              expect(providerCall).toBeLessThanOrEqual(5);
+              // Each queued prompt runs afterwards as its own run, oldest first.
+              const users = params.messages.filter((message) => message.role === "user");
+              expect(users.at(-1)?.content).toBe(
+                providerCall === 4 ? "queued during advisory" : "fresh request after advisory",
+              );
               expect(params.tools!.some((tool) => tool.name === "write")).toBe(true);
               expect(params.tools!.some((tool) => tool.name === "read")).toBe(false);
               expect(
@@ -617,8 +621,11 @@ it("rejects stale references and late tools while retaining restricted steering 
       getId: () => "refs",
       reloadCustomCommands: vi.fn(),
     });
-    expect(providerCall).toBe(4);
-    expect(onQueuedStart).toHaveBeenCalledTimes(2);
+    expect(providerCall).toBe(5);
+    expect(onQueuedStart.mock.calls.map(([content]) => content)).toEqual([
+      "queued during advisory",
+      "fresh request after advisory",
+    ]);
     expect(mutation).not.toHaveBeenCalled();
     const results = messages.current.flatMap((message) =>
       message.role === "tool" ? message.content : [],

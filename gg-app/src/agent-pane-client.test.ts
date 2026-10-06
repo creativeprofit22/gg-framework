@@ -704,7 +704,7 @@ describe("pane agent client", () => {
   it.each(["primary", "right"])(
     "preserves queue correlation through %s prompt IPC",
     async (paneId) => {
-      const receipt = { queued: true, count: 2, queueId: "q19" };
+      const receipt = { queued: true, count: 2, queueId: "q19", steers: false };
       invoke.mockResolvedValueOnce(receipt);
       const submit = paneId === "primary" ? sendPrompt : createPaneAgentClient(paneId).sendPrompt;
       await expect(submit("read\n\nReferenced files:\n- src/a.ts")).resolves.toEqual(receipt);
@@ -715,12 +715,15 @@ describe("pane agent client", () => {
     null,
     {},
     { queued: true, count: 1 },
-    { queued: true, count: 1, queueId: "" },
-    { queued: true, count: 1, queueId: "q0" },
-    { queued: true, count: 1, queueId: "q1\n" },
+    { queued: true, count: 1, queueId: "", steers: false },
+    { queued: true, count: 1, queueId: "q0", steers: false },
+    { queued: true, count: 1, queueId: "q1\n", steers: false },
     { queued: true, count: 1, queueId: 1 },
-    { queued: true, count: 0, queueId: "q1" },
+    { queued: true, count: 0, queueId: "q1", steers: false },
     { queued: true, count: 1.5, queueId: "q1" },
+    { queued: true, count: 1, queueId: "q1" },
+    { queued: true, count: 1, queueId: "q1", steers: "yes" },
+    { queued: false, count: 0, steers: false },
     { queued: false, count: 1 },
     { queued: false, count: 0, queueId: "q1" },
     { queued: false, count: 0, queueId: null },

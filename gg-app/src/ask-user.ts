@@ -160,26 +160,46 @@ function sameAskPrompt(a: AskUserPrompt, b: AskUserPrompt): boolean {
   );
 }
 
-/** Reconcile display state only. Never send, infer, or replay an answer. */
+/**
+ * Reconcile display state only. Never send, infer, or replay an answer.
+ *
+ * `deferredPrompts` are questions no turn is blocked on that still accept a
+ * late answer. `undefined` (a daemon that does not report them) preserves
+ * deferred cards as they are; an array is authoritative for them too.
+ */
 export function reconcilePendingAsks(
   items: Item[],
   prompts: readonly AskUserPrompt[],
   nextId: () => number,
+  deferredPrompts?: readonly AskUserPrompt[],
 ): Item[] {
-  const pending = new Map(prompts.map((prompt) => [prompt.id, prompt]));
+  const pending = new Map<string, { prompt: AskUserPrompt; deferred: boolean }>();
+  for (const prompt of deferredPrompts ?? []) pending.set(prompt.id, { prompt, deferred: true });
+  for (const prompt of prompts) pending.set(prompt.id, { prompt, deferred: false });
   const seen = new Set<string>();
+  const card = (prompt: AskUserPrompt, deferred: boolean): Item =>
+    deferred
+      ? { kind: "ask", id: nextId(), prompt, deferred }
+      : { kind: "ask", id: nextId(), prompt };
   const result = items.flatMap((item): Item[] => {
     if (item.kind !== "ask") return [item];
-    const prompt = pending.get(item.prompt.id);
-    if (!prompt) return [item.sent || item.cancelled ? item : { ...item, cancelled: true }];
+    const entry = pending.get(item.prompt.id);
+    if (!entry) {
+      if (item.sent || item.cancelled) return [item];
+      if (item.deferred && deferredPrompts === undefined) return [item];
+      return [{ ...item, cancelled: true }];
+    }
+    const { prompt, deferred } = entry;
     if (seen.has(prompt.id)) return [];
     seen.add(prompt.id);
     // Preserve row identity (including component-local drafts) only for the exact live prompt.
-    if (!item.sent && !item.cancelled && sameAskPrompt(item.prompt, prompt)) return [item];
-    return [{ kind: "ask", id: nextId(), prompt }];
+    if (!item.sent && !item.cancelled && sameAskPrompt(item.prompt, prompt)) {
+      return [deferred && !item.deferred ? { ...item, deferred } : item];
+    }
+    return [card(prompt, deferred)];
   });
-  for (const prompt of prompts) {
-    if (!seen.has(prompt.id)) result.push({ kind: "ask", id: nextId(), prompt });
+  for (const [id, { prompt, deferred }] of pending) {
+    if (!seen.has(id)) result.push(card(prompt, deferred));
   }
   return result;
 }

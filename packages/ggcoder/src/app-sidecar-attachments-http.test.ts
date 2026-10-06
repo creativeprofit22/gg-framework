@@ -70,7 +70,9 @@ it.each([false, true].flatMap((busy) => ["", "Read this file"].map((text) => ({ 
       const retry = await request("/prompt", pane, { text, attachments: [file] });
       expect(retry.status).toBe(202);
       expect(await retry.json()).toEqual(
-        busy ? { queued: true, count: 1, queueId: "q1" } : { queued: false, count: 0 },
+        busy
+          ? { queued: true, count: 1, queueId: "q1", steers: false }
+          : { queued: false, count: 0 },
       );
     });
   },

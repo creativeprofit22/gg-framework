@@ -62,7 +62,8 @@ export async function queuedPromptMetadataRoundTrip(
         (entry) => entry.data?.kind === "user_hint",
       );
       generation.release();
-      await stream.waitFor("run_end", mode === "steering" ? 1 : 3);
+      // Steering: Ken's prompt steers the held run; the user's waits and runs after.
+      await stream.waitFor("run_end", mode === "steering" ? 2 : 3);
       const reopened = await open(saved.path);
       const response = await request("/history", reopened);
       if (!response.ok) throw new Error("Reopened history failed");

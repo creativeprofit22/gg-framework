@@ -993,10 +993,10 @@ describe("AskBand", () => {
       />
     );
     const { rerender } = render(band(false));
-    expect(screen.queryByText(/best guess/)).toBeNull();
+    expect(screen.queryByText(/stopped waiting/)).toBeNull();
     rerender(band(true));
     expect(screen.getByRole("status").textContent).toBe(
-      "Agent continued with its best guess — your answer will still be sent",
+      "The agent stopped waiting — your answer will still be sent",
     );
     fireEvent.click(screen.getByRole("button", { name: /Yes/ }));
     expect(onAnswer).toHaveBeenCalledWith({ flag: "Yes" });

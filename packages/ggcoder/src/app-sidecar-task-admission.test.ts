@@ -111,6 +111,7 @@ async function harness(provider = "anthropic") {
       newSession,
       getState: () => ({ provider }),
       getQueuedCount: () => context.queuedCount as number,
+      getSteeringQueuedCount: () => 0,
       getPlanMode: () => context.planMode as boolean,
       getAppMarkers: () => [],
       persistAppMarker: async () => {},
@@ -155,6 +156,8 @@ async function harness(provider = "anthropic") {
       void cadence.promise.then(callback);
     },
     runStrandedQueue: async () => {
+      // Run All drains between tasks too; only the final drain owns the queue window.
+      if (context.taskRunAll) return;
       draining.resolve();
       await queue.promise;
     },

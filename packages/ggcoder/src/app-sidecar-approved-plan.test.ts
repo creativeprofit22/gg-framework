@@ -126,6 +126,7 @@ describe("approved phase implementation message", () => {
         runLifecycle: { generation: 7 },
         commitActivePhaseImplementationStart: async () => {},
         runAgent: async (_prompt: string, run: () => Promise<void>) => run(),
+        scheduleIdleQueueDrain: () => {},
       });
       const scheduled: Array<() => void> = [];
       const onLaunchFailure = vi.fn();

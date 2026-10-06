@@ -42,10 +42,16 @@ export function askSoftDeadlineMs(unattended: boolean): number {
   return unattended ? ASK_USER_UNATTENDED_DEADLINE_MS : ASK_USER_INTERACTIVE_DEADLINE_MS;
 }
 
-/** The tool result when the run is stopped while the question is still open. */
+/**
+ * The tool result when the run is stopped while the question is still open.
+ * A stop defers the ask rather than cancelling it, so the card stays
+ * answerable and a reply comes back via `formatLateAnswer`. Worded "may" because
+ * the same text also repairs restored transcripts, where the card is gone.
+ */
 export const ASK_USER_INTERRUPTED_TEXT =
-  "The question was not answered: the run was stopped while it was still waiting on the " +
-  "user, so no answer was received. Do not assume one — ask again only if you still need it.";
+  "No answer yet: the run was stopped while it was still waiting on the user, so no answer " +
+  "was received. Do not assume one. The question may still be open; a later reply arrives " +
+  'as a message starting "Late answer to:", so do not ask the same question again.';
 
 export type AskUserResult =
   | { action: "answer"; answers: Record<string, string | string[]> }
@@ -55,8 +61,9 @@ export type AskUserResult =
    */
   | { action: "cancel"; superseded?: boolean }
   /**
-   * The soft deadline passed with no answer. The question stays open; a later
-   * answer is delivered to the agent as a message (see `onLateAnswer`).
+   * No answer yet: the soft deadline passed or the run was stopped
+   * (`deferAll`). The question stays open; a later answer is delivered to the
+   * agent as a message (see `onLateAnswer`).
    */
   | { action: "deferred" };
 
@@ -68,8 +75,8 @@ export interface LateAskAnswer {
 
 /**
  * Questions parked on the user. A question is either *pending* (the tool call
- * is blocked on it) or *deferred* (its soft deadline passed, the agent moved
- * on, but the user can still answer it).
+ * is blocked on it) or *deferred* (its soft deadline passed or the run that
+ * asked it was stopped, the agent moved on, but the user can still answer it).
  */
 export interface AskUserBridge {
   /**
@@ -85,9 +92,18 @@ export interface AskUserBridge {
   settle: (id: string, result: AskUserResult) => boolean;
   /**
    * Release every pending question with `result` (default: cancel) and close
-   * every deferred one — for run abort, a superseding user message, teardown.
+   * every deferred one — for a superseding user message, teardown. Run abort
+   * uses `deferAll` instead, so its questions stay answerable.
    */
   cancelAll: (result?: AskUserResult) => void;
+  /**
+   * The run stopped (abort, error) while questions were blocking it: release
+   * every pending question but keep it answerable, as if its soft deadline had
+   * passed. A later answer is delivered through `onLateAnswer`. Questions that
+   * cannot be deferred (no `onLateAnswer`, or parked with `defer: false`) are
+   * cancelled instead.
+   */
+  deferAll: () => void;
   /** Close deferred questions without touching a pending one (session reset). */
   closeDeferred: () => void;
   /** Questions the turn is currently blocked on. */
@@ -96,6 +112,8 @@ export interface AskUserBridge {
   readonly deferredCount: number;
   /** Detached snapshots of blocking prompts; settled/deferred ones are never included. */
   readonly pendingRequests: AskUserPrompt[];
+  /** Detached snapshots of deferred prompts that still accept a late answer. */
+  readonly deferredRequests: AskUserPrompt[];
 }
 
 export interface AskParkOptions {
@@ -112,6 +130,8 @@ export interface AskUserBridgeOptions {
    * for a late answer, false when deferral is off and it was cancelled.
    */
   onTimeout?: (prompt: AskUserPrompt, deferred: boolean) => void;
+  /** A pending question became deferred (soft deadline or `deferAll`). */
+  onDeferred?: (prompt: AskUserPrompt) => void;
   /**
    * A deferred question was answered. Called at most once per question.
    * Without it there is nowhere to deliver a late answer, so the deadline
@@ -131,6 +151,7 @@ export function createAskUserBridge(opts: AskUserBridgeOptions): AskUserBridge {
       prompt: AskUserPrompt;
       resolve: (result: AskUserResult) => void;
       timer: ReturnType<typeof setTimeout>;
+      defer: boolean;
     }
   >();
   const deferred = new Map<string, AskUserPrompt>();
@@ -158,6 +179,12 @@ export function createAskUserBridge(opts: AskUserBridgeOptions): AskUserBridge {
     return true;
   };
 
+  const defer = (prompt: AskUserPrompt): void => {
+    deferred.set(prompt.id, prompt);
+    release(prompt.id, { action: "deferred" });
+    opts.onDeferred?.(prompt);
+  };
+
   const closeDeferred = (): void => {
     if (deferred.size === 0) return;
     const ids = [...deferred.keys()];
@@ -176,7 +203,7 @@ export function createAskUserBridge(opts: AskUserBridgeOptions): AskUserBridge {
           "Question cannot be parked: invalid content or live-question limit exceeded.",
         );
       }
-      const defer = (options?.defer ?? true) && opts.onLateAnswer !== undefined;
+      const deferrable = (options?.defer ?? true) && opts.onLateAnswer !== undefined;
       return new Promise<AskUserResult>((resolve) => {
         // A newer question supersedes any older one still waiting past its
         // deadline: the agent has moved on to a new decision point.
@@ -184,16 +211,15 @@ export function createAskUserBridge(opts: AskUserBridgeOptions): AskUserBridge {
         const prompt: AskUserPrompt = { ...detached, id: `${idPrefix}-${++seq}` };
         const timer = setTimeout(() => {
           if (!pending.has(prompt.id)) return;
-          opts.onTimeout?.(prompt, defer);
-          if (!defer) {
+          opts.onTimeout?.(prompt, deferrable);
+          if (!deferrable) {
             release(prompt.id, { action: "cancel" });
             return;
           }
-          deferred.set(prompt.id, prompt);
-          release(prompt.id, { action: "deferred" });
+          defer(prompt);
         }, deadline());
         timer.unref?.();
-        pending.set(prompt.id, { prompt, resolve, timer });
+        pending.set(prompt.id, { prompt, resolve, timer, defer: deferrable });
         opts.broadcast(prompt);
       });
     },
@@ -210,6 +236,12 @@ export function createAskUserBridge(opts: AskUserBridgeOptions): AskUserBridge {
       for (const id of [...pending.keys()]) release(id, result ?? { action: "cancel" });
       closeDeferred();
     },
+    deferAll: () => {
+      for (const [id, entry] of [...pending.entries()]) {
+        if (entry.defer) defer(entry.prompt);
+        else release(id, { action: "cancel" });
+      }
+    },
     closeDeferred,
     get pendingCount() {
       return pending.size;
@@ -220,6 +252,9 @@ export function createAskUserBridge(opts: AskUserBridgeOptions): AskUserBridge {
     get pendingRequests() {
       return structuredClone([...pending.values()].map(({ prompt }) => prompt));
     },
+    get deferredRequests() {
+      return structuredClone([...deferred.values()]);
+    },
   };
 }
 
@@ -228,11 +263,25 @@ export function createAskUserBridge(opts: AskUserBridgeOptions): AskUserBridge {
  * questions whose late answer must not arrive as a free-form user message —
  * e.g. host reviews that authorize side effects.
  */
+/**
+ * Whether a prompt sent to a busy session steers the run in flight. Only a
+ * reply to a question the run is still blocked on (pending, not deferred) or a
+ * Ken-sent correction steers; every other prompt waits in the visible queue.
+ * Read it before superseding the questions: superseding empties `pending`.
+ */
+export function promptSteersRun(
+  bridge: Pick<AskUserBridge, "pendingCount">,
+  kenSent: boolean,
+): boolean {
+  return bridge.pendingCount > 0 || kenSent;
+}
+
 export function withoutDeferral(bridge: AskUserBridge): AskUserBridge {
   return {
     park: (request, options) => bridge.park(request, { ...options, defer: false }),
     settle: (id, result) => bridge.settle(id, result),
     cancelAll: (result) => bridge.cancelAll(result),
+    deferAll: () => bridge.deferAll(),
     closeDeferred: () => bridge.closeDeferred(),
     get pendingCount() {
       return bridge.pendingCount;
@@ -242,6 +291,9 @@ export function withoutDeferral(bridge: AskUserBridge): AskUserBridge {
     },
     get pendingRequests() {
       return bridge.pendingRequests;
+    },
+    get deferredRequests() {
+      return bridge.deferredRequests;
     },
   };
 }

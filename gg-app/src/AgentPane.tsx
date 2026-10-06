@@ -2675,7 +2675,8 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       // writes. Never replace a transcript after opening the submission gate.
       if (isPendingAskSnapshot(st?.pendingAsks)) {
         const pendingAsks = st.pendingAsks;
-        setItems((previous) => reconcilePendingAsks(previous, pendingAsks, nextId));
+        const deferredAsks = isPendingAskSnapshot(st.deferredAsks) ? st.deferredAsks : undefined;
+        setItems((previous) => reconcilePendingAsks(previous, pendingAsks, nextId, deferredAsks));
       }
       replayEvents();
       readyRef.current = true;
@@ -3398,12 +3399,13 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       .then((submission) => {
         if (!isCurrent()) return;
         acceptComposer();
-        if (supersedesQuestion) {
-          dismissOpenAsks();
-          if (submission.queued) noteSupersedingSend(trimmed);
-        }
+        if (supersedesQuestion) dismissOpenAsks();
+        // Only the sidecar knows whether this reply reaches the run now or waits
+        // (a deferred question does not steer); a waiting prompt stays visible.
+        const steers = submission.queued && submission.steers;
+        if (steers) noteSupersedingSend(trimmed);
         stickToBottomRef.current = true;
-        acceptSubmission(userItem, submission, supersedesQuestion);
+        acceptSubmission(userItem, submission, steers);
         if (!submission.queued) planResumePromptRef.current = trimmed;
       })
       .catch((error) => {
@@ -3845,7 +3847,10 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
           const submission = await sendPrompt(prompt, [], { kenSent: true });
           if (!isCurrent()) return { status: "cancelled" };
           if (supersedesQuestion) dismissOpenAsks();
-          if (supersedesQuestion && submission.queued) noteSupersedingSend(prompt);
+          // Ken corrections always steer; without a question to replace they
+          // still wear the queued look until the run picks them up.
+          const hideQueued = supersedesQuestion && submission.queued && submission.steers;
+          if (hideQueued) noteSupersedingSend(prompt);
           if (!submission.queued) planResumePromptRef.current = prompt;
           stickToBottomRef.current = true;
           acceptSubmission(
@@ -3856,7 +3861,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
               kenSent: true,
             },
             submission,
-            supersedesQuestion,
+            hideQueued,
           );
           if (!submission.queued) endStreamingText();
           return { status: "sent", session: "current" };
@@ -4389,11 +4394,11 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
         .then((submission) => {
           if (!isCurrent()) return;
           acceptComposer();
-          if (supersedesQuestion) {
-            dismissOpenAsks();
-            if (submission.queued) noteSupersedingSend(prompt);
-          }
-          acceptSubmission(userItem, submission, supersedesQuestion);
+          if (supersedesQuestion) dismissOpenAsks();
+          // Server-decided: a deferred question does not make this prompt steer.
+          const steers = submission.queued && submission.steers;
+          if (steers) noteSupersedingSend(prompt);
+          acceptSubmission(userItem, submission, steers);
           if (!submission.queued) planResumePromptRef.current = prompt;
         })
         .catch((error) => {

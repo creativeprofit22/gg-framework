@@ -85,11 +85,20 @@ it.each([
           kenSent,
           enhancements,
         })),
-    ).toEqual([
-      { text: "Idle control", kenSent: true, enhancements: undefined },
-      { text: "Use TypeScript", kenSent: undefined, enhancements: queuedSegments },
-      { text: "Ken queued prompt", kenSent: true, enhancements: undefined },
-    ]);
+    ).toEqual(
+      mode === "steering"
+        ? [
+            // Ken's correction steers the live run; the user's prompt waits for it.
+            { text: "Idle control", kenSent: true, enhancements: undefined },
+            { text: "Ken queued prompt", kenSent: true, enhancements: undefined },
+            { text: "Use TypeScript", kenSent: undefined, enhancements: queuedSegments },
+          ]
+        : [
+            { text: "Idle control", kenSent: true, enhancements: undefined },
+            { text: "Use TypeScript", kenSent: undefined, enhancements: queuedSegments },
+            { text: "Ken queued prompt", kenSent: true, enhancements: undefined },
+          ],
+    );
   },
   60_000,
 );
@@ -121,7 +130,8 @@ async function queuedCommandRoundTrip() {
       const queuedPlain = await plainResponse.json();
       const queuedEvent = await stream.waitFor("queued", 2);
       generation.release();
-      await stream.waitFor("run_end");
+      // User prompts wait for the held run, then each runs as its own turn in order.
+      await stream.waitFor("run_end", 3);
       const reopened = await open(saved.path);
       const { history } = (await (await request("/history", reopened)).json()) as {
         history: Array<{ role: string; text: string; command?: boolean }>;
@@ -141,8 +151,8 @@ async function queuedCommandRoundTrip() {
 
 it("queues a busy /command and a plain message in arrival order with their own ids, expanded for the model", async () => {
   const { queuedCommand, queuedPlain, queuedEvent, modelMessages } = await queuedCommandRoundTrip();
-  expect(queuedCommand).toEqual({ queued: true, count: 1, queueId: "q1" });
-  expect(queuedPlain).toEqual({ queued: true, count: 2, queueId: "q2" });
+  expect(queuedCommand).toEqual({ queued: true, count: 1, queueId: "q1", steers: false });
+  expect(queuedPlain).toEqual({ queued: true, count: 2, queueId: "q2", steers: false });
   expect(queuedEvent.data).toMatchObject({
     count: 2,
     messages: [
@@ -167,6 +177,33 @@ it("reopens a session showing a queued /command as its /name chip, not the templ
     { text: "plain follow-up", command: false },
   ]);
   expect(JSON.stringify(history)).not.toContain("Ship the release now.");
+}, 60_000);
+
+it("runs a prompt queued during a direct (non user-turn) run once that run ends", async () => {
+  await withRealSidecar(
+    async ({ project, manager, open, request, subscribe, generation }) => {
+      const saved = await manager.create(project, "openai", "gpt-5", {
+        openAICodexContextProfile: "stable",
+      });
+      // Chat /research starts its provider run directly, bypassing runUserTurn's drain.
+      const pane = await open(saved.path, "chat");
+      const stream = await subscribe(pane);
+      expect((await request("/prompt", pane, { text: "/research queue drains" })).status).toBe(202);
+      await generation.started;
+      const queued = await request("/prompt", pane, { text: "after research" });
+      expect(await queued.json()).toMatchObject({ queued: true, count: 1 });
+      generation.release();
+      await stream.waitFor("run_end", 2);
+      const starts = stream.events.filter((event) => event.type === "run_start");
+      expect(starts.map((event) => event.data.text)).toEqual([
+        "/research queue drains",
+        "after research",
+      ]);
+      const state = await (await request("/state", pane)).json();
+      expect(state.running).toBe(false);
+    },
+    { queueDrain: "stranded" },
+  );
 }, 60_000);
 
 it.each([false, true])(

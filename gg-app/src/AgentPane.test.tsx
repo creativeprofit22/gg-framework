@@ -1401,6 +1401,48 @@ describe("queued cancellation ordering (mocked native transport)", () => {
       expect(screen.queryByTitle("older")).toBeNull();
     },
   );
+
+  // Regression: a deferred question does not make a typed prompt steer; the
+  // sidecar holds it until the run ends, so it must stay visibly queued.
+  it("keeps a queued prompt visible and cancellable when only a deferred ask is open", async () => {
+    nativeMocks.realMentor = true;
+    const pane = client("queue-deferred-ask", 1);
+    const emit = liveEvents(pane);
+    pane.cancelQueued = vi.fn(async () => true);
+    const question = {
+      id: "approval",
+      kind: "choice",
+      question: "Allow this action?",
+      options: [{ label: "Allow action", value: "allow" }],
+    };
+    vi.mocked(pane.sendPrompt).mockResolvedValueOnce({
+      queued: true,
+      count: 1,
+      queueId: "q1",
+      steers: false,
+    });
+    vi.mocked(pane.getState).mockResolvedValue({
+      ...agentState("azure:gpt-test"),
+      running: true,
+      runState: "running",
+    });
+    const { container } = render(<AgentPane client={pane} target={target} />);
+    await waitFor(() => expect(pane.subscribe).toHaveBeenCalled());
+    act(() => {
+      emit("ask_user", { id: "ask-1", questions: [question] });
+      emit("ask_user_deferred", { id: "ask-1" });
+    });
+    await screen.findByRole("button", { name: /Allow action/ });
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "Wait for me" } });
+    fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter" });
+    await waitFor(() => expect(pane.sendPrompt).toHaveBeenCalledOnce());
+    act(() => emit("queued", { count: 1, messages: [{ id: "q1", text: "Wait for me" }] }));
+    // It waits in the queue strip; the transcript gets it when its own run starts.
+    expect(await screen.findByTitle("Wait for me")).toBeTruthy();
+    expect(container.querySelector(".user-msg.queued")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel queued message" }));
+    expect(pane.cancelQueued).toHaveBeenCalledWith("q1");
+  });
 });
 
 describe("enhancement composer outcomes (mocked native transport)", () => {
@@ -1652,15 +1694,20 @@ describe("enhancement composer outcomes (mocked native transport)", () => {
       fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
       await waitFor(() => expect(document.querySelectorAll(".user-msg")).toHaveLength(3));
       const bubbles = Array.from(document.querySelectorAll(".user-msg"));
+      // Steering: Ken's correction lands in the held run, so the user's
+      // prompt (which waits for that run) comes last.
+      const [userIndex, kenIndex] = mode === "steering" ? [2, 1] : [1, 2];
+      const user = bubbles[userIndex];
+      const ken = bubbles[kenIndex];
       expect(bubbles[0].classList.contains("user-ken-sent")).toBe(true);
-      expect(bubbles[1].classList.contains("user-ken-sent")).toBe(false);
-      expect(bubbles[1].querySelector(".enh-term")?.firstChild?.textContent).toBe("TypeScript");
-      expect(bubbles[1].querySelector(".enh-term")?.getAttribute("title")).toBe(
+      expect(user?.classList.contains("user-ken-sent")).toBe(false);
+      expect(user?.querySelector(".enh-term")?.firstChild?.textContent).toBe("TypeScript");
+      expect(user?.querySelector(".enh-term")?.getAttribute("title")).toBe(
         "you said: “type script”\nLanguage name",
       );
-      expect(bubbles[2].classList.contains("user-ken-sent")).toBe(true);
-      expect(bubbles[2].textContent).toBe(bubbles[0].textContent);
-      expect(bubbles[2].textContent).toContain("Sent to");
+      expect(ken?.classList.contains("user-ken-sent")).toBe(true);
+      expect(ken?.textContent).toBe(bubbles[0].textContent);
+      expect(ken?.textContent).toContain("Sent to");
       expect(screen.queryByText("Cancelled prompt")).toBeNull();
       expect(screen.queryByText("Ken queued prompt")).toBeNull();
       expect(document.querySelector(".queued-pill")).toBeNull();
@@ -2320,6 +2367,50 @@ describe("AgentPane question acknowledgement", () => {
     expect(pane.answerAskUser).toHaveBeenCalledTimes(1);
   });
 
+  // Regression: a question open when the run stopped vanished, so the user had
+  // to ask the agent to repeat it. The sidecar now defers it instead.
+  it("keeps a question answerable after the run is stopped and sends the late answer", async () => {
+    nativeMocks.realMentor = true;
+    const pane = client("ask-after-abort", 1);
+    const emit = liveEvents(pane);
+    vi.mocked(pane.getState).mockResolvedValue(agentState("azure:gpt-test"));
+    const { container } = render(<AgentPane client={pane} target={target} />);
+    await waitFor(() => expect(pane.subscribe).toHaveBeenCalled());
+    act(() => {
+      emit("ask_user", { id: "ask-1", questions: [question] });
+      emit("ask_user_deferred", { id: "ask-1" });
+      emit("run_end", { cancelled: true });
+      // A reconnect while the user was in another pane re-announces it.
+      emit("ready", {
+        ...agentState("azure:gpt-test"),
+        pendingAsks: [],
+        deferredAsks: [{ id: "ask-1", questions: [question] }],
+      });
+    });
+    expect(container.querySelector(".ask-band.is-closed")).toBeNull();
+    expect(container.querySelector(".ask-deferred-note")?.textContent).toContain("stopped waiting");
+    fireEvent.click(await screen.findByRole("button", { name: /Allow action/ }));
+    await waitFor(() => expect(pane.answerAskUser).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(pane.answerAskUser).mock.calls[0]?.slice(0, 2)).toEqual(["ask-1", "answer"]);
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it("closes a question deferred by a stopped run once the sidecar supersedes it", async () => {
+    nativeMocks.realMentor = true;
+    const pane = client("ask-after-abort-supersede", 1);
+    const emit = liveEvents(pane);
+    vi.mocked(pane.getState).mockResolvedValue(agentState("azure:gpt-test"));
+    render(<AgentPane client={pane} target={target} />);
+    await waitFor(() => expect(pane.subscribe).toHaveBeenCalled());
+    act(() => {
+      emit("ask_user", { id: "ask-1", questions: [question] });
+      emit("run_end", { cancelled: true });
+    });
+    await screen.findByRole("button", { name: /Allow action/ });
+    act(() => emit("ask_user_settled", { id: "ask-1", action: "cancel" }));
+    expect(screen.queryByRole("button", { name: /Allow action/ })).toBeNull();
+  });
+
   // Regression: 2026-09-25 uimaxxxing session. A card with an optional text
   // question (or a multi-select ticked but not confirmed) could never complete,
   // had no send control, and the user could only stop the run — which the agent
@@ -2414,7 +2505,9 @@ describe("AgentPane question acknowledgement", () => {
             questions: [{ ...question, options: [{ label: "Allow next action" }] }],
           }),
         );
-        await act(async () => submission.resolve({ queued: true, count: 1, queueId: "q1" }));
+        await act(async () =>
+          submission.resolve({ queued: true, count: 1, queueId: "q1", steers: true }),
+        );
         expect(screen.getByRole("button", { name: /Allow next action/ })).toBeTruthy();
         expect(screen.queryByRole("button", { name: /Allow action/ })).toBeNull();
         expect(container.querySelectorAll(".user-msg")).toHaveLength(1);
@@ -4017,7 +4110,9 @@ describe("AgentPane lifecycle", () => {
       expect(screen.getByRole("button", { name: "Remove file.txt" })).toBeTruthy();
       expect(screen.getByRole("button", { name: "Remove src/context.ts" })).toBeTruthy();
       vi.mocked(pane.sendPrompt).mockResolvedValueOnce(
-        running ? { queued: true, count: 1, queueId: "q1" } : { queued: false, count: 0 },
+        running
+          ? { queued: true, count: 1, queueId: "q1", steers: false }
+          : { queued: false, count: 0 },
       );
       fireEvent.keyDown(input, { key: "Enter" });
       await waitFor(() => expect(pane.sendPrompt).toHaveBeenCalledTimes(2));
@@ -5687,7 +5782,7 @@ describe("AgentPane lifecycle", () => {
     ] as Awaited<ReturnType<PaneAgentClient["listHistory"]>>);
     vi.mocked(pane.sendPrompt)
       .mockResolvedValueOnce({ queued: false, count: 0 })
-      .mockResolvedValueOnce({ queued: true, count: 1, queueId: "q1" });
+      .mockResolvedValueOnce({ queued: true, count: 1, queueId: "q1", steers: false });
     vi.mocked(pane.acceptPlan).mockResolvedValue({
       ok: true,
       planTotal: 2,
@@ -6247,7 +6342,7 @@ describe("AgentPane lifecycle", () => {
         else
           old.resolve(
             outcome === "queued"
-              ? { queued: true, count: 9, queueId: "old-queue" }
+              ? { queued: true, count: 9, queueId: "old-queue", steers: false }
               : { queued: false, count: 0 },
           );
       });
@@ -6367,7 +6462,9 @@ describe("AgentPane lifecycle", () => {
         emit("queued", { count: 0, messages: [] });
         emit("run_end", {});
       });
-      await act(async () => submission.resolve({ queued: true, count: 1, queueId: "q1" }));
+      await act(async () =>
+        submission.resolve({ queued: true, count: 1, queueId: "q1", steers: false }),
+      );
       expect(container.querySelectorAll(".user-msg")).toHaveLength(1);
       expect(container.querySelector(".user-msg.queued")).toBeNull();
       expect(container.querySelector(".user-msg")?.textContent).toContain("Queued follow-up");
@@ -6387,7 +6484,9 @@ describe("AgentPane lifecycle", () => {
       runState: running ? "running" : "idle",
     });
     vi.mocked(pane.sendPrompt).mockResolvedValueOnce(
-      running ? { queued: false, count: 0 } : { queued: true, count: 1, queueId: "q1" },
+      running
+        ? { queued: false, count: 0 }
+        : { queued: true, count: 1, queueId: "q1", steers: false },
     );
     const { container } = render(<AgentPane client={pane} target={target} />);
     const input = await screen.findByRole("textbox");
@@ -6395,15 +6494,17 @@ describe("AgentPane lifecycle", () => {
     fireEvent.change(input, { target: { value: "Server decides" } });
     fireEvent.keyDown(input, { key: "Enter" });
     await waitFor(() => expect((input as HTMLTextAreaElement).value).toBe(""));
-    expect(container.querySelectorAll(".user-msg")).toHaveLength(1);
-    expect(container.querySelector(".user-msg")?.classList.contains("queued")).toBe(!running);
+    // A deferred receipt moves the optimistic bubble to the queue strip until
+    // its own run takes it; an accepted receipt keeps it in the transcript.
+    expect(container.querySelectorAll(".user-msg")).toHaveLength(running ? 1 : 0);
     if (!running) {
       act(() => {
         emit("queued", { count: 1, messages: [{ id: "q1", text: "Server decides" }] });
         emit("queued", { count: 0, messages: [] });
       });
-      expect(container.querySelector(".user-msg.queued")).toBeNull();
+      expect(container.querySelectorAll(".user-msg")).toHaveLength(1);
     }
+    expect(container.querySelector(".user-msg.queued")).toBeNull();
   });
 
   it.each([false, true])(
@@ -6412,7 +6513,9 @@ describe("AgentPane lifecycle", () => {
       nativeMocks.realMentor = true;
       const pane = client("ken-stale-running", 1);
       vi.mocked(pane.sendPrompt).mockResolvedValueOnce(
-        running ? { queued: false, count: 0 } : { queued: true, count: 1, queueId: "q1" },
+        running
+          ? { queued: false, count: 0 }
+          : { queued: true, count: 1, queueId: "q1", steers: true },
       );
       const send = await renderKenPromptPane(pane, running);
       fireEvent.click(send);
@@ -6438,7 +6541,9 @@ describe("AgentPane lifecycle", () => {
         emit("queued", { count: 0, messages: [] });
         emit("run_end", {});
       });
-      await act(async () => submission.resolve({ queued: true, count: 1, queueId: "q1" }));
+      await act(async () =>
+        submission.resolve({ queued: true, count: 1, queueId: "q1", steers: true }),
+      );
       expect(document.querySelectorAll(".user-ken-sent")).toHaveLength(1);
       expect(document.querySelector(".user-ken-sent.queued")).toBeNull();
       expect(document.querySelector(".queued-pill")).toBeNull();
@@ -6468,7 +6573,9 @@ describe("AgentPane lifecycle", () => {
       emit("queued", { count: 0, messages: [] });
       emit("run_end", {});
     });
-    await act(async () => submission.resolve({ queued: true, count: 1, queueId: "q1" }));
+    await act(async () =>
+      submission.resolve({ queued: true, count: 1, queueId: "q1", steers: false }),
+    );
     expect(container.querySelectorAll(".user-msg")).toHaveLength(1);
     expect(container.querySelector(".user-msg.queued")).toBeNull();
     expect(container.querySelector(".queued-pill")).toBeNull();
@@ -6476,7 +6583,12 @@ describe("AgentPane lifecycle", () => {
 
   it("queues a Ken current-send during an active run with authoritative queue metadata", async () => {
     const pane = client("pane-ken-queued", 1);
-    vi.mocked(pane.sendPrompt).mockResolvedValueOnce({ queued: true, count: 2, queueId: "q2" });
+    vi.mocked(pane.sendPrompt).mockResolvedValueOnce({
+      queued: true,
+      count: 2,
+      queueId: "q2",
+      steers: true,
+    });
     const send = await renderKenPromptPane(pane, true);
 
     fireEvent.click(send);
@@ -7595,7 +7707,12 @@ describe("command palette (Ctrl/Cmd+K)", () => {
         running: true,
         runState: "running",
       });
-      vi.mocked(p.sendPrompt).mockResolvedValue({ queued: true, count: 1, queueId: "q-palette" });
+      vi.mocked(p.sendPrompt).mockResolvedValue({
+        queued: true,
+        count: 1,
+        queueId: "q-palette",
+        steers: false,
+      });
     });
     // Wait until the pane knows the agent is running (Stop replaces Send).
     await screen.findByRole("button", { name: "Stop response" });

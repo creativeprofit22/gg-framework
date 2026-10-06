@@ -1,70 +1,51 @@
-// Web port of packages/ggcoder/src/ui/components/PlanModeLogo.tsx — the amber
-// ASCII "PLAN MODE" banner shown when the agent enters plan mode.
+// The amber "PLAN MODE" banner shown when the agent enters plan mode. Set in
+// the "Delta Corps Priest 1" FIGlet font, like the home screen's GG CODER
+// banner. Every line is padded to the same width so the block art never
+// shears, and the last row carries the L's descender.
+
+import { useMemo } from "react";
+import { CritterLine } from "./CritterLine";
+import { pickCritter } from "./critter-sprites";
+import { theme } from "./theme";
 
 const PLAN_MODE_LOGO = [
-  "▗▄▄▖ ▗▖    ▗▄▖ ▗▖  ▗▖    ▗▖  ▗▖ ▗▄▖ ▗▄▄▄ ▗▄▄▄▖",
-  "▐▌ ▐▌▐▌   ▐▌ ▐▌▐▛▚▖▐▌    ▐▛▚▞▜▌▐▌ ▐▌▐▌  █▐▌",
-  "▐▛▀▘ ▐▌   ▐▛▀▜▌▐▌ ▝▜▌    ▐▌  ▐▌▐▌ ▐▌▐▌  █▐▛▀▀▘",
-  "▐▌   ▐▙▄▄▖▐▌ ▐▌▐▌  ▐▌    ▐▌  ▐▌▝▚▄▞▘▐▙▄▄▀▐▙▄▄▖",
+  "   ▄███████▄  ▄█          ▄████████ ███▄▄▄▄          ▄▄▄▄███▄▄▄▄    ▄██████▄  ████████▄     ▄████████",
+  "  ███    ███ ███         ███    ███ ███▀▀▀██▄      ▄██▀▀▀███▀▀▀██▄ ███    ███ ███   ▀███   ███    ███",
+  "  ███    ███ ███         ███    ███ ███   ███      ███   ███   ███ ███    ███ ███    ███   ███    █▀ ",
+  "  ███    ███ ███         ███    ███ ███   ███      ███   ███   ███ ███    ███ ███    ███  ▄███▄▄▄    ",
+  "▀█████████▀  ███       ▀███████████ ███   ███      ███   ███   ███ ███    ███ ███    ███ ▀▀███▀▀▀    ",
+  "  ███        ███         ███    ███ ███   ███      ███   ███   ███ ███    ███ ███    ███   ███    █▄ ",
+  "  ███        ███▌    ▄   ███    ███ ███   ███      ███   ███   ███ ███    ███ ███   ▄███   ███    ███",
+  " ▄████▀      █████▄▄██   ███    █▀   ▀█   █▀        ▀█   ███   █▀   ▀██████▀  ████████▀    ██████████",
+  "             ▀                                                                                       ",
 ];
 
-// "YOUR PLAN" banner shown in the plan-review modal (mirrors the TUI's
-// YOUR_PLAN_LOGO in PlanOverlay.tsx).
-const YOUR_PLAN_LOGO = [
-  "▗▖  ▗▖▗▄▖ ▗▖ ▗▖▗▄▄▖     ▗▄▄▖ ▗▖    ▗▄▖ ▗▖  ▗▖",
-  " ▝▚▞▘▐▌ ▐▌▐▌ ▐▌▐▌ ▐▌    ▐▌ ▐▌▐▌   ▐▌ ▐▌▐▛▚▖▐▌",
-  "  ▐▌ ▐▌ ▐▌▐▌ ▐▌▐▛▀▚▖    ▐▛▀▘ ▐▌   ▐▛▀▜▌▐▌ ▝▜▌",
-  "  ▐▌ ▝▚▄▞▘▝▚▄▞▘▐▌ ▐▌    ▐▌   ▐▙▄▄▖▐▌ ▐▌▐▌  ▐▌",
-];
-
-// Tuned around the verified --warning hue (#e3a23f, OKLCH 76/74).
-const AMBER_GRADIENT = [
-  "#e3a23f",
-  "#f0b860",
-  "#e3a23f",
-  "#c98828",
-  "#e3a23f",
-  "#f0b860",
-  "#c98828",
-];
-
-/** Per-glyph amber gradient sweep, mirroring the TUI PlanGradientText. */
-function GradientLine({ text }: { text: string }): React.ReactElement {
-  let colorIdx = 0;
-  return (
-    <div className="plan-logo-line">
-      {Array.from(text).map((ch, i) => {
-        if (ch === " ") return <span key={i}>{"\u00a0"}</span>;
-        const color = AMBER_GRADIENT[colorIdx % AMBER_GRADIENT.length];
-        colorIdx++;
-        return (
-          <span key={i} style={{ color }}>
-            {ch}
-          </span>
-        );
-      })}
-    </div>
-  );
-}
-
+/**
+ * The plan-mode banner, with the agent's reason on a critter line beneath it:
+ * a critter (picked from the reason, so it stays put on re-render) standing in
+ * the assistant-dot gutter beside the reason in plan-mode amber.
+ */
 export function PlanModeLogo({ reason }: { reason?: string }): React.ReactElement {
-  return (
-    <div className="plan-logo">
-      {PLAN_MODE_LOGO.map((line, i) => (
-        <GradientLine key={i} text={line} />
-      ))}
-      {reason ? <div className="plan-logo-reason">{reason}</div> : null}
-    </div>
+  const critter = useMemo(
+    () => pickCritter(undefined, `plan-mode:${reason ?? ""}`, new Set()),
+    [reason],
   );
-}
-
-/** Amber "YOUR PLAN" banner for the plan-review modal. */
-export function YourPlanLogo(): React.ReactElement {
   return (
-    <div className="plan-logo">
-      {YOUR_PLAN_LOGO.map((line, i) => (
-        <GradientLine key={i} text={line} />
-      ))}
+    <div className="plan-logo" data-swap-row="">
+      {/* Block-glyph art is gibberish read aloud; the sr-only label stands in. */}
+      <div className="plan-logo-art" aria-hidden="true">
+        {PLAN_MODE_LOGO.map((line, i) => (
+          <div key={i} className="plan-logo-line" style={{ "--line": i } as React.CSSProperties}>
+            {line}
+          </div>
+        ))}
+      </div>
+      <span className="sr-only">Plan mode</span>
+      {reason ? (
+        <div className="plan-logo-reason">
+          <CritterLine critter={critter} tone="done" color={theme.warning} text={reason} />
+        </div>
+      ) : null}
     </div>
   );
 }

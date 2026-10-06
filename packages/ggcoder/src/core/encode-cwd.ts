@@ -23,13 +23,7 @@
  */
 export function encodeCwd(cwd: string): string {
   return (
-    cwd
-      // Normalize Windows extended-length prefixes so canonicalized and plain
-      // forms of the same path produce the same folder name.
-      //   \\?\UNC\server\share  →  \\server\share
-      .replace(/^\\\\\?\\UNC\\/i, "\\\\")
-      //   \\?\C:\…  →  C:\…
-      .replace(/^\\\\\?\\/i, "")
+    stripExtendedLengthPrefix(cwd)
       // Path separators → underscore
       .replace(/[\\/]/g, "_")
       // Strip every Windows-reserved character (<>:"|?*) — also covers the
@@ -38,4 +32,24 @@ export function encodeCwd(cwd: string): string {
       // Drop a leading underscore left by a Unix root slash
       .replace(/^_/, "")
   );
+}
+
+/**
+ * Normalize a Windows extended-length (`\\?\`) path back to its plain form.
+ *
+ *   `\\?\C:\Users\dev`        → `C:\Users\dev`
+ *   `\\?\UNC\server\share`    → `\\server\share`
+ *
+ * Rust's `canonicalize()` ALWAYS produces the prefixed form, so it is what the
+ * shell historically handed the sidecar and what old session headers still
+ * record. Nothing else in the system produces it: discovery, the picker and
+ * every UI label use the plain form, and Win32 shell APIs reject the prefix
+ * outright. Both the folder-name encoding and the cwd read back out of a
+ * session header must normalize it, or the same project shows up twice — once
+ * as `C:\proj`, once as `\\?\C:\proj`.
+ *
+ * No-op for plain and POSIX paths.
+ */
+export function stripExtendedLengthPrefix(cwd: string): string {
+  return cwd.replace(/^\\\\\?\\UNC\\/i, "\\\\").replace(/^\\\\\?\\/i, "");
 }

@@ -1,0 +1,272 @@
+<!doctype html>
+<!--
+  chat-thread: a chat window where messages appear one after another; before
+  each reply a typing indicator (three dots, driven by timeline time) plays.
+  Transparent background.
+  Params: --ct-w / --ct-h (window size), --ct-x / --ct-y (center).
+  SCRIPT (top of the script): one entry per message, in order —
+  { who: "me" | "them", at: seconds, typing: seconds of dots before it }.
+  The message text lives in the markup (same order as SCRIPT).
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+  </head>
+  <body>
+    <div
+      id="chat-thread-root"
+      data-composition-id="chat-thread"
+      data-start="0"
+      data-duration="6"
+      data-width="1920"
+      data-height="1080"
+    >
+      <style>
+        [data-composition-id="chat-thread"] {
+          --ct-w: 1120px;
+          --ct-h: 800px;
+          --ct-x: 960px;
+          --ct-y: 540px;
+          --ct-r: max(var(--radius, 18px), 16px);
+          position: absolute;
+          inset: 0;
+          color: var(--ink, #111);
+          font-family: var(--text, sans-serif);
+        }
+        [data-composition-id="chat-thread"] .ct-win {
+          position: absolute;
+          left: calc(var(--ct-x) - var(--ct-w) / 2);
+          top: calc(var(--ct-y) - var(--ct-h) / 2);
+          width: var(--ct-w);
+          height: var(--ct-h);
+          border-radius: calc(var(--ct-r) * 1.4);
+          background: #fff;
+          overflow: hidden;
+          display: flex;
+          flex-direction: column;
+          box-shadow:
+            0 0 0 1px color-mix(in srgb, var(--ink, #111) 7%, transparent),
+            0 1px 2px rgba(0, 0, 0, 0.06),
+            0 12px 32px rgba(0, 0, 0, 0.1),
+            0 40px 90px -24px color-mix(in srgb, var(--ink, #111) 26%, transparent);
+        }
+        [data-composition-id="chat-thread"] .ct-head {
+          flex: none;
+          display: flex;
+          align-items: center;
+          gap: 22px;
+          padding: 30px 40px;
+          border-bottom: 1.5px solid color-mix(in srgb, var(--ink, #111) 7%, transparent);
+        }
+        [data-composition-id="chat-thread"] .ct-avatar {
+          position: relative;
+          width: 68px;
+          height: 68px;
+          border-radius: 50%;
+          background: var(--accent, #2f5bff);
+          color: #fff;
+          display: grid;
+          place-items: center;
+        }
+        [data-composition-id="chat-thread"] .ct-avatar::after {
+          content: "";
+          position: absolute;
+          right: -2px;
+          bottom: -2px;
+          width: 20px;
+          height: 20px;
+          border-radius: 50%;
+          background: color-mix(in srgb, var(--accent, #2f5bff) 55%, #fff);
+          border: 4px solid #fff;
+        }
+        [data-composition-id="chat-thread"] .ct-name {
+          font-size: 32px;
+          font-weight: 600;
+          letter-spacing: -0.01em;
+        }
+        [data-composition-id="chat-thread"] .ct-status {
+          font-size: 24px;
+          color: var(--muted, #888);
+          margin-top: 2px;
+        }
+        [data-composition-id="chat-thread"] .ct-body {
+          flex: 1;
+          display: flex;
+          flex-direction: column;
+          gap: 22px;
+          padding: 40px 40px;
+          background: color-mix(in srgb, var(--field, #f3f4f6) 30%, #fff);
+        }
+        [data-composition-id="chat-thread"] .ct-row {
+          position: relative;
+          display: flex;
+        }
+        [data-composition-id="chat-thread"] .ct-row.me {
+          justify-content: flex-end;
+        }
+        [data-composition-id="chat-thread"] .ct-bubble {
+          max-width: 740px;
+          padding: 22px 30px;
+          font-size: 31px;
+          line-height: 1.36;
+          letter-spacing: -0.005em;
+          border-radius: 32px;
+          box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+        }
+        [data-composition-id="chat-thread"] .them .ct-bubble {
+          background: #fff;
+          border-bottom-left-radius: 10px;
+          box-shadow:
+            0 0 0 1.5px color-mix(in srgb, var(--ink, #111) 7%, transparent),
+            0 1px 2px rgba(0, 0, 0, 0.04),
+            0 6px 16px rgba(0, 0, 0, 0.04);
+          transform-origin: 0% 100%;
+        }
+        [data-composition-id="chat-thread"] .me .ct-bubble {
+          background: var(--accent, #2f5bff);
+          color: #fff;
+          border-bottom-right-radius: 10px;
+          transform-origin: 100% 100%;
+          box-shadow: 0 8px 20px color-mix(in srgb, var(--accent, #2f5bff) 22%, transparent);
+        }
+        [data-composition-id="chat-thread"] .ct-bubble b {
+          font-weight: 650;
+        }
+        [data-composition-id="chat-thread"] .ct-typing {
+          position: absolute;
+          left: 0;
+          top: 0;
+          display: flex;
+          gap: 10px;
+          padding: 28px 30px;
+          background: #fff;
+          border-radius: 32px;
+          border-bottom-left-radius: 10px;
+          box-shadow:
+            0 0 0 1.5px color-mix(in srgb, var(--ink, #111) 7%, transparent),
+            0 6px 16px rgba(0, 0, 0, 0.04);
+          transform-origin: 0% 100%;
+        }
+        [data-composition-id="chat-thread"] .ct-typing i {
+          width: 14px;
+          height: 14px;
+          border-radius: 50%;
+          background: var(--muted, #888);
+        }
+        [data-composition-id="chat-thread"] .ct-input {
+          flex: none;
+          display: flex;
+          align-items: center;
+          gap: 18px;
+          margin: 0 32px 32px;
+          padding: 0 14px 0 32px;
+          height: 84px;
+          border-radius: 42px;
+          background: #fff;
+          box-shadow:
+            0 0 0 1.5px color-mix(in srgb, var(--ink, #111) 9%, transparent),
+            0 1px 2px rgba(0, 0, 0, 0.04);
+          font-size: 28px;
+          color: var(--muted, #888);
+        }
+        [data-composition-id="chat-thread"] .ct-input span {
+          flex: 1;
+        }
+        [data-composition-id="chat-thread"] .ct-send {
+          width: 58px;
+          height: 58px;
+          border-radius: 50%;
+          background: var(--accent, #2f5bff);
+          color: #fff;
+          display: grid;
+          place-items: center;
+        }
+      </style>
+      <div class="ct-win" id="ct-win">
+        <div class="ct-head">
+          <div class="ct-avatar">
+            <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z" /></svg>
+          </div>
+          <div>
+            <!-- edit: contact name + status -->
+            <div class="ct-name">Acme Assistant</div>
+            <div class="ct-status">Online</div>
+          </div>
+        </div>
+        <div class="ct-body">
+          <!-- edit: messages, in order (class "me" = sender, "them" = reply) -->
+          <div class="ct-row me"><div class="ct-bubble">How did signups do last week?</div></div>
+          <div class="ct-row them">
+            <div class="ct-bubble">Up <b>24%</b> — 1,284 new accounts, most of them from the new pricing page.</div>
+          </div>
+          <div class="ct-row me"><div class="ct-bubble">Amazing. Share it with the team?</div></div>
+          <div class="ct-row them"><div class="ct-bubble">Done — posted to <b>#growth</b> with the chart.</div></div>
+        </div>
+        <div class="ct-input">
+          <!-- edit: input placeholder -->
+          <span>Message Acme…</span>
+          <div class="ct-send">
+            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7" /></svg>
+          </div>
+        </div>
+      </div>
+    </div>
+    <script>
+      (function () {
+        const SCRIPT = [
+          { at: 0.5, typing: 0 },
+          { at: 2.0, typing: 1.0 },
+          { at: 3.2, typing: 0 },
+          { at: 4.5, typing: 0.9 },
+        ];
+        const DURATION = 6;
+        const root = document.querySelector('[data-composition-id="chat-thread"]');
+        const rows = root.querySelectorAll(".ct-row");
+        const tl = gsap.timeline({ paused: true });
+
+        tl.fromTo("#ct-win", { opacity: 0, y: 60, scale: 0.96 }, { opacity: 1, y: 0, scale: 1, duration: 0.7, ease: "expo.out" }, 0);
+
+        const dotSets = [];
+        SCRIPT.forEach((m, i) => {
+          const row = rows[i];
+          if (!row) return;
+          const bubble = row.querySelector(".ct-bubble");
+          if (m.typing > 0) {
+            const typing = document.createElement("div");
+            typing.className = "ct-typing";
+            typing.innerHTML = "<i></i><i></i><i></i>";
+            row.appendChild(typing);
+            const start = m.at - m.typing;
+            tl.fromTo(typing, { opacity: 0, scale: 0.6 }, { opacity: 1, scale: 1, duration: 0.3, ease: "back.out(2)" }, start);
+            tl.to(typing, { opacity: 0, scale: 0.85, duration: 0.15, ease: "power2.in" }, m.at - 0.12);
+            dotSets.push({ dots: typing.querySelectorAll("i"), start, end: m.at });
+          }
+          tl.fromTo(
+            bubble,
+            { opacity: 0, scale: 0.7, y: 24 },
+            { opacity: 1, scale: 1, y: 0, duration: 0.55, ease: "back.out(1.5)" },
+            m.at,
+          );
+        });
+
+        // Typing dots: a pure function of timeline time (a wave running left to right).
+        const clock = { t: 0 };
+        const setDots = () => {
+          for (const set of dotSets) {
+            const local = clock.t - set.start;
+            set.dots.forEach((dot, k) => {
+              const phase = local * 2 * Math.PI * 1.6 - k * 0.9;
+              const lift = Math.max(0, Math.sin(phase));
+              dot.style.transform = `translateY(${-9 * lift}px)`;
+              dot.style.opacity = String(0.4 + 0.6 * lift);
+            });
+          }
+        };
+        tl.fromTo(clock, { t: 0 }, { t: DURATION, duration: DURATION, ease: "none", onUpdate: setDots }, 0);
+        window.__timelines = window.__timelines || {};
+        window.__timelines["chat-thread"] = tl;
+      })();
+    </script>
+  </body>
+</html>

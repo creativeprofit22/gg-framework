@@ -8,6 +8,9 @@
 
     /* Bundler mode */
     "moduleResolution": "bundler",
+    "paths": {
+      "@kenkaiiii/gg-core/desktop-session-ux": ["../packages/gg-core/src/desktop-session-ux.ts"]
+    },
     "allowImportingTsExtensions": true,
     "resolveJsonModule": true,
     "isolatedModules": true,

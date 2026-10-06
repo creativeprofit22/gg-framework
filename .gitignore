@@ -11,6 +11,16 @@ coverage/
 .env.*
 ~/.gg/
 .gg/
+!/.gg/
+/.gg/*
+!/.gg/commands/
+/.gg/commands/*
+!/.gg/commands/release.md
+!/.gg/commands/cleanup.md
+
+# After Effects source projects never belong in the repo.
+*.[aA][eE][pP]
+*.[aA][eE][pP][xX]
 
 # Scratch / ad-hoc test files
 test_*.mjs
@@ -40,21 +50,44 @@ target/
 # npm
 .npmrc
 
-# gg-editor: generated from src/skills/*.md by scripts/build-skills.mjs (runs in build/check/test)
-packages/gg-editor/src/skills.ts
-
 # Goal audit generated evidence
 .goal-artifacts/
 .goal-evidence/
 artifacts/
 packages/ggcoder/.goal-evidence/
-scripts/goal-deep-audit/*.json
-scripts/goal-deep-audit/*.log
-.gg/ideal-sim/
 packages/ggcoder/ideal-sim/
 
 # prompt-bench scratch sandboxes
 experiments/prompt-bench/.bench-sandbox-*
 
-# scratch — top coding agents scan
-top-coding-agents.md
+# Local agent config, docs, experiments, benchmarks and one-off tooling.
+# Files already tracked by Git remain tracked, including the CI gates.
+/.gg/
+/.claude/
+/docs/
+/experiments/
+/bench/
+/benchmarks/
+/scripts/
+CLAUDE.md
+packages/*/.bench-*.mjs
+
+# Temporary A/B sidecar builder; private harness and outputs live under /bench/.
+/gg-app/scripts/.review-control-bundle.mjs
+
+# Local research/strategy notes
+/*-vs-*.md
+/*-report.md
+/fixes.md
+/*coding-agent*.md
+
+# Challenge feature: design sandbox and dev-only preview harness.
+#
+# Neither ships. `mockups/` is the standalone HTML/CSS/JS sandbox the fight's
+# visual language was designed in; `dev/` is a browser harness that mounts the
+# real ActivityBar so the offer can be eyeballed without the Tauri runtime.
+# Vite builds a single entry (index.html), so a production build never sees
+# them — a clean build emits dist/index.html and nothing else. Ignored so
+# `git add -A` cannot sweep 216KB of scratch into a release.
+/gg-app/mockups/
+/gg-app/dev/

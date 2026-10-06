@@ -1,0 +1,12 @@
+{
+  "id": "counter-number",
+  "name": "Counter number",
+  "kind": "type",
+  "description": "A huge tabular-nums figure counts up to a target with expo.out, optional prefix/suffix ($, %, ×, M) in the accent color, a hairline that draws across and a small mono label under it. For stats, KPIs, metrics and 'by the numbers' beats. Transparent.",
+  "tags": ["number", "counter", "count-up", "stat", "metric", "kpi", "data", "percentage", "tabular-nums", "big-number"],
+  "fonts": [],
+  "duration": 3.5,
+  "previewAt": 2.6,
+  "license": "original",
+  "previewLook": "duotone-broadcast"
+}

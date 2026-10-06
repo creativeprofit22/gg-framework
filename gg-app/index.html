@@ -5,13 +5,20 @@
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="dark" />
-    <title>gg-coder</title>
-    <style>
+    <title>Supah Coder</title>
+    <!-- Tauri supplies this style's nonce; trusted effect styles reuse it at runtime. -->
+    <style id="app-style-nonce">
       html,
       body {
         background: #0f1115;
       }
+      html[data-appearance-theme="light"],
+      html[data-appearance-theme="light"] body {
+        background: #fcfbfd;
+      }
     </style>
+    <!-- Applies the saved theme before first paint; external to satisfy the CSP. -->
+    <script src="/appearance-boot.js"></script>
   </head>
 
   <body>

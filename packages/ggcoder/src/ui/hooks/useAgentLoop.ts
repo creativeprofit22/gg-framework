@@ -1,6 +1,26 @@
 import { useState, useRef, useCallback, useEffect } from "react";
-import { agentLoop, type AgentEvent, type AgentTool } from "@kenkaiiii/gg-agent";
+import { assertProviderExecutionAllowed, runUnattended } from "../../core/provider-execution-policy.js";
+import { prepareTerminalProgrammaticAssessment, type TerminalProgrammaticAssessment } from "./terminal-programmatic-assessment.js";
+import { renderTerminalProgrammaticAssessment } from "./terminal-programmatic-presentation.js";
+import { NotLoggedInError } from "../../core/auth-storage.js";
+import type { ProgrammaticAssessment } from "@kenkaiiii/gg-core/programmatic-assessment-contract";
+import { randomUUID } from "node:crypto";
+import type { ProgrammaticAssessmentOutcome } from "../../core/programmatic/assessment.js";
+import { captureAssessmentHistoryPolicy, saveAssessmentHistory } from "../../core/programmatic/assessment-history.js";
+import { isPlanModeActive } from "../../core/runtime-mode.js";
+import {
+  guardTerminalTools,
+  type ProgrammaticAdvisoryTools,
+} from "../../core/programmatic/advisory-tools.js";
+import {
+  agentLoop,
+  type AgentEvent,
+  type AgentTool,
+  type AgentTurnTiming,
+  type TransformContextOptions,
+} from "@kenkaiiii/gg-agent";
 import { ProviderError } from "@kenkaiiii/gg-ai";
+import { WORKFLOW_BUSY_MESSAGE, workflowQueuePolicyError } from "../../core/workflow-busy-policy.js";
 import type {
   Message,
   Provider,
@@ -9,16 +29,17 @@ import type {
   ImageContent,
   VideoContent,
 } from "@kenkaiiii/gg-ai";
-import type { IdealReviewStats } from "../../core/ideal-review.js";
 import {
+  CycleDetector,
   detectTextRepetition,
-  toolCallSignature,
+  ToolCallProgressTracker,
+  type CycleDetection,
   type LoopBreakStats,
 } from "../../core/loop-breaker.js";
 import { getClaudeCliUserAgent } from "../../core/claude-code-version.js";
+import { resolveSessionTurnToolResultCharLimit } from "../../core/agent-session.js";
 import { kimiCodingHeaders, isKimiCodingEndpoint } from "../../core/oauth/kimi.js";
 import { log } from "../../core/logger.js";
-import { wrapSteeringContent } from "../../core/steering.js";
 
 /** Extract plain text from this run's user input — the verbatim request that
  *  the re-grounding hook re-pins after a compaction. Captured at run start so
@@ -49,32 +70,6 @@ function estimateTokens(msgs: Message[]): number {
   return Math.round(chars / 4);
 }
 
-/**
- * Merge multiple UserContent items into a single one.
- * Text-only items are joined with newlines. Mixed content (text + images)
- * is flattened into a content array preserving all parts.
- */
-function mergeUserContent(items: UserContent[]): UserContent {
-  if (items.length === 1) return items[0];
-
-  const hasArrayContent = items.some((c) => Array.isArray(c));
-  if (!hasArrayContent) {
-    // All items are strings — join with newlines
-    return (items as string[]).join("\n");
-  }
-
-  // Flatten into a single content array
-  const parts: (TextContent | ImageContent | VideoContent)[] = [];
-  for (const item of items) {
-    if (typeof item === "string") {
-      parts.push({ type: "text", text: item });
-    } else {
-      parts.push(...item);
-    }
-  }
-  return parts;
-}
-
 /** Extract the plain-text portion of a UserContent value (drops images). */
 function textFromUserContent(content: UserContent): string {
   if (typeof content === "string") return content;
@@ -100,8 +95,11 @@ export interface AgentLoopOptions {
   provider: Provider;
   model: string;
   tools: AgentTool[];
+  /** Live host mode, including transitions while completion is saving history. */
+  planModeRef?: { current: boolean };
   webSearch?: boolean;
   maxTokens: number;
+  maxTurns?: number;
   /** Whether the active model supports native image input. */
   supportsImages?: boolean;
   /** Whether the active model supports native video input. */
@@ -115,15 +113,17 @@ export interface AgentLoopOptions {
    *  When `forceRefresh` is true, bypass cache and fetch a new token (used on 401 retry). */
   resolveCredentials?: (opts?: {
     forceRefresh?: boolean;
+    /** Access token the provider just rejected, so the refresh can adopt a
+     *  newer token another process already wrote instead of minting one. */
+    rejectedToken?: string;
   }) => Promise<{ apiKey: string; accountId?: string; projectId?: string }>;
   transformContext?: (
     messages: Message[],
-    options?: { force?: boolean },
+    options: TransformContextOptions,
   ) => Message[] | Promise<Message[]>;
-  getIdealReviewMessage?: (stats: IdealReviewStats, touchedFiles: string[]) => Message | null;
   /** Polled mid-loop when the agent appears stuck (repeated failures / calls /
    *  edits, or degenerate output). Return a user message to break the loop. */
-  getLoopBreakMessage?: (stats: LoopBreakStats) => Message | null;
+  getLoopBreakMessage?: (stats: LoopBreakStats, stage: 1 | 2) => Message | null;
   /** Polled mid-loop after a compaction reduced the context. Return a user
    *  message that re-pins the original request. */
   getRegroundingMessage?: (originalRequest: string) => Message | null;
@@ -139,7 +139,9 @@ export interface RetryInfo {
     | "empty_response"
     | "stream_stall"
     | "overflow_compact"
-    | "tool_argument_glitch";
+    | "tool_argument_glitch"
+    | "runaway_toolcall"
+    | "stream_rule";
   attempt: number;
   maxAttempts: number;
   delayMs: number;
@@ -153,8 +155,15 @@ export interface StreamSnapshot {
   thinkingMs: number;
 }
 
+/** Host-resolved built-in invocation metadata, never inferred from model/prompt text. */
+export interface AgentInvocationOptions {
+  unattended?: boolean;
+  programmaticAssessment?: TerminalProgrammaticAssessment;
+}
+
 export interface UseAgentLoopReturn {
-  run: (userContent: UserContent) => Promise<void>;
+  run: (userContent: UserContent, invocation?: AgentInvocationOptions) => Promise<void>;
+  isBusy: () => boolean;
   abort: () => void;
   reset: () => void;
   /** Queue a message to be processed after the current run completes.
@@ -198,6 +207,7 @@ export function useAgentLoop(
   messages: React.MutableRefObject<Message[]>,
   options: AgentLoopOptions,
   callbacks?: {
+    onRunStart?: (startedAt: number) => void;
     onComplete?: (newMessages: Message[]) => void;
     onTurnText?: (text: string, thinking: string, thinkingMs: number) => void;
     onToolStart?: (
@@ -232,6 +242,7 @@ export function useAgentLoop(
         cacheRead?: number;
         cacheWrite?: number;
       },
+      timing: AgentTurnTiming,
     ) => void;
     onDone?: (
       durationMs: number,
@@ -245,11 +256,18 @@ export function useAgentLoop(
      *  The UI should roll back any pending progressive flushes from the
      *  aborted attempt so the retry's regenerated text doesn't duplicate. */
     onRetry?: () => void;
+    /** Called when a turn ended on a non-clean stop (max_tokens/refusal/error)
+     *  so the UI can warn instead of presenting truncated output as done. */
+    onTruncated?: (
+      reason: "max_tokens" | "refusal" | "provider_error" | "empty_response",
+      continued: boolean,
+    ) => void;
     /** Polled when the agent would otherwise stop. Return a user message to
      *  inject and continue the loop (e.g. "continue with the next plan step"). */
     getFollowUpMessages?: () => Message[] | null;
   },
 ): UseAgentLoopReturn {
+  const onRunStart = callbacks?.onRunStart;
   const onComplete = callbacks?.onComplete;
   const onTurnText = callbacks?.onTurnText;
   const onToolStart = callbacks?.onToolStart;
@@ -262,6 +280,7 @@ export function useAgentLoop(
   const onAborted = callbacks?.onAborted;
   const onQueuedStart = callbacks?.onQueuedStart;
   const onRetry = callbacks?.onRetry;
+  const onTruncated = callbacks?.onTruncated;
   const getFollowUpMessages = callbacks?.getFollowUpMessages;
   const [isRunning, setIsRunning] = useState(false);
   const [streamingText, setStreamingText] = useState("");
@@ -280,6 +299,16 @@ export function useAgentLoop(
   const [linesChanged, setLinesChanged] = useState({ added: 0, removed: 0 });
 
   const abortRef = useRef<AbortController | null>(null);
+  const advisoryRef = useRef<ProgrammaticAdvisoryTools | undefined>(undefined);
+  const assessmentActiveRef = useRef(false);
+  const disposedRef = useRef(false);
+  const liveToolsRef = useRef(options.tools);
+  liveToolsRef.current = options.tools;
+  const livePlanModeRef = useRef(options.planModeRef);
+  livePlanModeRef.current = options.planModeRef;
+  // React state can lag submissions and turns idle before teardown/queue draining ends.
+  const runOwnedRef = useRef(false);
+  const isBusy = useCallback(() => runOwnedRef.current, []);
   const queueRef = useRef<{ content: UserContent; text: string }[]>([]);
   const [queuedCount, setQueuedCount] = useState(0);
   const activeToolCallsRef = useRef<ActiveToolCall[]>([]);
@@ -287,25 +316,27 @@ export function useAgentLoop(
   const thinkingBufferRef = useRef("");
   const thinkingVisibleRef = useRef("");
   const runStartRef = useRef(0);
+  /** Access token most recently handed to the provider, so a 401 retry can name
+   *  the token that was actually rejected. */
+  const lastResolvedApiKey = useRef<string | undefined>(undefined);
   const toolsUsedRef = useRef<Set<string>>(new Set());
   const toolCountsRef = useRef<Map<string, number>>(new Map());
-  const idealReviewStatsRef = useRef<IdealReviewStats>({
-    changedLines: 0,
-    toolCalls: 0,
-    toolFailures: 0,
-    turns: 0,
-    writeCalls: 0,
-    editCalls: 0,
-    bashCalls: 0,
-  });
-  const idealReviewInjectedRef = useRef(false);
   // ── Loop-breaker tracking ──
-  const loopSignatureCountsRef = useRef<Map<string, number>>(new Map());
-  const fileEditCountsRef = useRef<Map<string, number>>(new Map());
+  const loopProgressTrackerRef = useRef(new ToolCallProgressTracker());
+  const cycleDetectorRef = useRef(new CycleDetector());
+  const cyclicPatternRef = useRef<CycleDetection | null>(null);
   const consecutiveFailuresRef = useRef(0);
-  const maxSignatureRepeatsRef = useRef(0);
-  const maxSameFileEditsRef = useRef(0);
-  const loopBreakInjectedRef = useRef(false);
+  const repeatedNoProgressCallsRef = useRef(0);
+  // 0 = no loop-break injected yet; 1 = first nudge sent; 2 = final stop-and-
+  // report injected (no further injections — maxTurns is the backstop).
+  const loopBreakInjectedRef = useRef<0 | 1 | 2>(0);
+  // Text snapshot taken at loop-break injection. textVisibleRef doubles as UI
+  // streaming state (can't be cleared here), so stage 2 only evaluates text
+  // streamed AFTER the snapshot — otherwise a stage-1 text-repetition trigger
+  // would immediately re-fire on the same stale tail. If the buffer no longer
+  // starts with the snapshot, it was cleared at a turn boundary and the whole
+  // buffer is fresh evidence.
+  const loopBreakTextMarkRef = useRef("");
   // ── Re-grounding tracking ──
   const compactionOccurredRef = useRef(false);
   const regroundingInjectedRef = useRef(false);
@@ -353,11 +384,15 @@ export function useAgentLoop(
   }, [streamingText]);
 
   const abort = useCallback(() => {
+    // Assessment tools revoke on this signal; the coordinator must still settle
+    // a host scan that committed before cancellation instead of erasing success.
+    if (!assessmentActiveRef.current) advisoryRef.current?.close();
     abortRef.current?.abort();
   }, []);
 
   const reset = useCallback(() => {
     // Abort any running agent loop first — this kills in-flight subagent processes
+    if (!assessmentActiveRef.current) advisoryRef.current?.close();
     abortRef.current?.abort();
     setIsRunning(false);
     setCurrentTurn(0);
@@ -378,6 +413,9 @@ export function useAgentLoop(
   }, []);
 
   const queueMessage = useCallback((content: UserContent, text?: string) => {
+    const error = workflowQueuePolicyError(text ?? textFromUserContent(content)) ??
+      workflowQueuePolicyError(textFromUserContent(content));
+    if (error) throw new Error(error);
     queueRef.current.push({ content, text: text ?? textFromUserContent(content) });
     setQueuedCount(queueRef.current.length);
   }, []);
@@ -399,13 +437,20 @@ export function useAgentLoop(
   }, []);
 
   const run = useCallback(
-    async (userContent: UserContent) => {
+    async (userContent: UserContent, invocation?: AgentInvocationOptions) => {
+      assertProviderExecutionAllowed(options.provider, invocation?.unattended);
+      if (disposedRef.current) throw new Error("Terminal loop is disposed.");
+      if (runOwnedRef.current) throw new Error(WORKFLOW_BUSY_MESSAGE);
+      runOwnedRef.current = true;
+      let advisory: ProgrammaticAdvisoryTools | undefined;
+      let assessmentController: AbortController | undefined;
+      let refreshAssessmentPrompt: (() => string) | undefined;
       /** Run a single user message through the agent loop. Returns true if aborted. */
-      const runSingle = async (
+      const runSingleInternal = async (
         content: UserContent,
-        credentialOpts?: { forceRefresh?: boolean },
+        credentialOpts?: { forceRefresh?: boolean; rejectedToken?: string },
       ): Promise<boolean> => {
-        const ac = new AbortController();
+        const ac = assessmentController ?? new AbortController();
         abortRef.current = ac;
         let wasAborted = false;
 
@@ -413,7 +458,7 @@ export function useAgentLoop(
         // only call setState at 100ms intervals to avoid saturating the event
         // loop with React renders during fast token streaming. 100ms (10fps) is
         // imperceptible for prose but cuts streaming render CPU ~49% vs 16ms
-        // (bench/RESULTS.md, bench B — the Markdown re-render dominates, so CPU
+        // (the Markdown re-render dominates, so CPU
         // scales with flush count, not delta count). Worst case it adds 100ms
         // to the first visible token — noise next to seconds of provider TTFT.
         let streamFlushTimer: ReturnType<typeof setTimeout> | null = null;
@@ -470,6 +515,7 @@ export function useAgentLoop(
         thinkingBufferRef.current = "";
         thinkingVisibleRef.current = "";
         runStartRef.current = Date.now();
+        onRunStart?.(runStartRef.current);
         log("INFO", "ui", "run_start", {
           provider: options.provider,
           model: options.model,
@@ -478,22 +524,13 @@ export function useAgentLoop(
         });
         toolsUsedRef.current = new Set();
         toolCountsRef.current = new Map();
-        idealReviewStatsRef.current = {
-          changedLines: 0,
-          toolCalls: 0,
-          toolFailures: 0,
-          turns: 0,
-          writeCalls: 0,
-          editCalls: 0,
-          bashCalls: 0,
-        };
-        idealReviewInjectedRef.current = false;
-        loopSignatureCountsRef.current = new Map();
-        fileEditCountsRef.current = new Map();
+        loopProgressTrackerRef.current.reset();
+        cycleDetectorRef.current.reset();
+        cyclicPatternRef.current = null;
         consecutiveFailuresRef.current = 0;
-        maxSignatureRepeatsRef.current = 0;
-        maxSameFileEditsRef.current = 0;
-        loopBreakInjectedRef.current = false;
+        repeatedNoProgressCallsRef.current = 0;
+        loopBreakInjectedRef.current = 0;
+        loopBreakTextMarkRef.current = "";
         compactionOccurredRef.current = false;
         regroundingInjectedRef.current = false;
         charCountRef.current = 0;
@@ -561,12 +598,14 @@ export function useAgentLoop(
             accountId = creds.accountId;
             projectId = creds.projectId;
           }
+          lastResolvedApiKey.current = apiKey;
           log("INFO", "ui", "creds_resolved", {
             ms: String(Date.now() - credsStart),
             sinceRunStartMs: String(Date.now() - runStartRef.current),
             resolved: options.resolveCredentials ? "yes" : "no",
           });
 
+          ac.signal.throwIfAborted();
           const uaStart = Date.now();
           const userAgent =
             options.provider === "anthropic" ? await getClaudeCliUserAgent() : undefined;
@@ -586,19 +625,49 @@ export function useAgentLoop(
           log("INFO", "ui", "agent_loop_invoke", {
             sinceRunStartMs: String(Date.now() - runStartRef.current),
           });
+          ac.signal.throwIfAborted();
+          if (refreshAssessmentPrompt) {
+            userMsg.content = refreshAssessmentPrompt();
+            originalRequestRef.current = userContentText(userMsg.content);
+          }
           const generator = agentLoop(messages.current, {
             provider: options.provider,
             model: options.model,
-            tools: options.tools,
+            tools: advisory?.tools ?? guardTerminalTools(
+                () => liveToolsRef.current,
+                () => advisoryRef.current,
+                () => assessmentActiveRef.current,
+              ),
             webSearch: options.webSearch,
             maxTokens: options.maxTokens,
+            maxTurns: options.maxTurns,
             supportsImages: options.supportsImages,
             supportsVideo: options.supportsVideo,
             thinking: options.thinking,
             apiKey,
+            // Per-turn credential resolution. A run can span many minutes; any
+            // process sharing auth.json that refreshes this grant invalidates
+            // the token resolved above, which would otherwise kill every
+            // remaining turn with an authentication error.
+            ...(options.resolveCredentials
+              ? {
+                  resolveCredentials: async () => {
+                    const live = await options.resolveCredentials!();
+                    lastResolvedApiKey.current = live.apiKey;
+                    return live;
+                  },
+                }
+              : {}),
             baseUrl: options.baseUrl,
             accountId,
             projectId,
+            // Aggregate per-turn budget across parallel tool results — same
+            // fan-out guard the AgentSession applies (see agent-session.ts).
+            maxTurnToolResultChars: resolveSessionTurnToolResultCharLimit(
+              options.model,
+              options.provider,
+              accountId,
+            ),
             signal: ac.signal,
             userAgent,
             defaultHeaders,
@@ -613,33 +682,43 @@ export function useAgentLoop(
                   return result;
                 }
               : undefined,
-            // Drain queued messages as steering — injected between tool calls
-            // and before the agent would stop, so the LLM sees user guidance
-            // within the same run instead of waiting for a new one. User
-            // steering wins; then the loop-breaker; then post-compaction
-            // re-grounding — all polled at the same mid-loop boundary.
+            // Host-generated mid-run guidance only: the loop-breaker, then
+            // post-compaction re-grounding. User messages queued while busy are
+            // NOT injected here — like the desktop app, each one runs after the
+            // current task finishes, as its own run (see the drain below).
             getSteeringMessages: () => {
-              if (queueRef.current.length > 0) {
-                const batch = queueRef.current.splice(0);
-                setQueuedCount(0);
-                const merged = mergeUserContent(batch.map((q) => q.content));
-                // Show the user their verbatim message; send the framed version
-                // so the model treats it as concurrent steering, not a fresh
-                // request that supersedes the original task.
-                onQueuedStart?.(merged);
-                return [{ role: "user" as const, content: wrapSteeringContent(merged) }];
-              }
-
-              // Loop-breaker: at most once per run, when the agent looks stuck.
-              if (!loopBreakInjectedRef.current && options.getLoopBreakMessage) {
-                const loopBreakMessage = options.getLoopBreakMessage({
-                  consecutiveFailures: consecutiveFailuresRef.current,
-                  maxSignatureRepeats: maxSignatureRepeatsRef.current,
-                  maxSameFileEdits: maxSameFileEditsRef.current,
-                  textRepetitionDetected: detectTextRepetition(textVisibleRef.current),
-                });
+              // Loop-breaker: two-stage. Stage 1 nudges the agent to break the
+              // pattern; a FRESH detection after that injects the harsher final
+              // stop-and-report prompt. All loop signals reset after each
+              // injection so stage 2 only fires on new evidence.
+              if (loopBreakInjectedRef.current < 2 && options.getLoopBreakMessage) {
+                const stage = loopBreakInjectedRef.current === 0 ? (1 as const) : (2 as const);
+                // Only evaluate text streamed after the last injection snapshot
+                // (stale repeated tails must not escalate to stage 2).
+                const mark = loopBreakTextMarkRef.current;
+                const freshText =
+                  mark && textVisibleRef.current.startsWith(mark)
+                    ? textVisibleRef.current.slice(mark.length)
+                    : textVisibleRef.current;
+                const loopBreakMessage = options.getLoopBreakMessage(
+                  {
+                    consecutiveFailures: consecutiveFailuresRef.current,
+                    repeatedNoProgressCalls: repeatedNoProgressCallsRef.current,
+                    textRepetitionDetected: detectTextRepetition(freshText),
+                    ...(cyclicPatternRef.current
+                      ? { cyclicPattern: cyclicPatternRef.current }
+                      : {}),
+                  },
+                  stage,
+                );
                 if (loopBreakMessage) {
-                  loopBreakInjectedRef.current = true;
+                  loopBreakInjectedRef.current = stage;
+                  loopProgressTrackerRef.current.reset();
+                  cycleDetectorRef.current.reset();
+                  cyclicPatternRef.current = null;
+                  consecutiveFailuresRef.current = 0;
+                  repeatedNoProgressCallsRef.current = 0;
+                  loopBreakTextMarkRef.current = textVisibleRef.current;
                   return [loopBreakMessage];
                 }
               }
@@ -666,15 +745,7 @@ export function useAgentLoop(
             // has incomplete steps. See App.tsx for the implementation.
             getFollowUpMessages: async () => {
               const followUp = (await getFollowUpMessages?.()) ?? null;
-              if (followUp && followUp.length > 0) return followUp;
-              if (idealReviewInjectedRef.current || !options.getIdealReviewMessage) return null;
-              const idealReviewMessage = options.getIdealReviewMessage(
-                { ...idealReviewStatsRef.current },
-                [...fileEditCountsRef.current.keys()],
-              );
-              if (!idealReviewMessage) return null;
-              idealReviewInjectedRef.current = true;
-              return [idealReviewMessage];
+              return followUp && followUp.length > 0 ? followUp : null;
             },
             // clearToolUses disabled — causes model to output unsolicited context
             // summaries ("KEY CONTEXT TO REMEMBER") when it sees gaps from stripped
@@ -817,31 +888,24 @@ export function useAgentLoop(
                   event.details,
                   tc?.args,
                 );
-                idealReviewStatsRef.current.toolCalls += 1;
-                if (event.isError) idealReviewStatsRef.current.toolFailures += 1;
-                if (toolName === "write") idealReviewStatsRef.current.writeCalls += 1;
-                if (toolName === "edit") idealReviewStatsRef.current.editCalls += 1;
-                if (toolName === "bash") idealReviewStatsRef.current.bashCalls += 1;
                 // ── Loop-breaker signals ──
                 if (event.isError) {
                   consecutiveFailuresRef.current += 1;
                 } else {
                   consecutiveFailuresRef.current = 0;
                 }
-                {
-                  const sig = toolCallSignature(toolName, tc?.args);
-                  const next = (loopSignatureCountsRef.current.get(sig) ?? 0) + 1;
-                  loopSignatureCountsRef.current.set(sig, next);
-                  if (next > maxSignatureRepeatsRef.current) maxSignatureRepeatsRef.current = next;
-                }
-                if ((toolName === "edit" || toolName === "write") && tc?.args) {
-                  const filePath = (tc.args as { file_path?: unknown }).file_path;
-                  if (typeof filePath === "string") {
-                    const next = (fileEditCountsRef.current.get(filePath) ?? 0) + 1;
-                    fileEditCountsRef.current.set(filePath, next);
-                    if (next > maxSameFileEditsRef.current) maxSameFileEditsRef.current = next;
-                  }
-                }
+                repeatedNoProgressCallsRef.current = loopProgressTrackerRef.current.record(
+                  toolName,
+                  tc?.args,
+                  event.result,
+                  event.isError,
+                );
+                cyclicPatternRef.current = cycleDetectorRef.current.record(
+                  toolName,
+                  tc?.args,
+                  event.result,
+                  event.isError,
+                );
                 // Track lines changed for edit tools
                 if (toolName === "edit" && !event.isError) {
                   const diff =
@@ -849,7 +913,6 @@ export function useAgentLoop(
                   const addedLines = (diff.match(/^\+[^+]/gm) ?? []).length;
                   const removedLines = (diff.match(/^-[^-]/gm) ?? []).length;
                   if (addedLines > 0 || removedLines > 0) {
-                    idealReviewStatsRef.current.changedLines += addedLines + removedLines;
                     setLinesChanged((prev) => ({
                       added: prev.added + addedLines,
                       removed: prev.removed + removedLines,
@@ -896,14 +959,20 @@ export function useAgentLoop(
                 break;
 
               case "steering_message":
-                // Steering message was injected — UI already notified via
-                // onQueuedStart inside getSteeringMessages callback.
+                // Host guidance (loop-breaker / re-grounding) was injected;
+                // user-queued prompts never take this path.
                 break;
 
               case "error":
                 // Stream error (e.g. stall retries exhausted) — surface to UI
                 // so the user sees a clear failure instead of fake completion.
                 setStallError(event.error.message);
+                break;
+
+              case "truncated":
+                // Non-clean stop (max_tokens/refusal/provider error) — surface
+                // a warning so truncated output never reads as a clean finish.
+                onTruncated?.(event.reason, event.continued);
                 break;
 
               case "retry": {
@@ -958,8 +1027,7 @@ export function useAgentLoop(
                 }
                 flushStreamState();
                 setRetryInfo(null);
-                idealReviewStatsRef.current.turns = event.turn;
-                onTurnEnd?.(event.turn, event.stopReason, event.usage);
+                onTurnEnd?.(event.turn, event.stopReason, event.usage, event.timing);
                 setCurrentTurn(event.turn);
                 setTotalTokens((prev) => ({
                   input: prev.input + event.usage.inputTokens,
@@ -1037,7 +1105,8 @@ export function useAgentLoop(
             wasAborted = true;
           }
           setIsRunning(false);
-          abortRef.current = null;
+          // Assessment completion still owns cancellable history persistence.
+          if (!assessmentActiveRef.current) abortRef.current = null;
           if (elapsedTimerRef.current) {
             clearInterval(elapsedTimerRef.current);
             elapsedTimerRef.current = null;
@@ -1073,50 +1142,155 @@ export function useAgentLoop(
           onComplete?.(newMsgs);
         }
         return wasAborted;
-      }; // end runSingle
+      }; // end runSingleInternal
+      // Reconstitute explicit host intent after remounts. Tool execution and child
+      // worker creation inherit this context, but ordinary interactive runs do not.
+      const runSingle: typeof runSingleInternal = (...args) =>
+        invocation?.unattended
+          ? runUnattended(() => runSingleInternal(...args))
+          : runSingleInternal(...args);
 
-      // Run the initial message.
-      // On 401, force-refresh the OAuth token and retry once — the provider may
-      // have revoked the token server-side before the stored expiry.
       try {
-        await runSingle(userContent);
-      } catch (err) {
-        if (err instanceof ProviderError && err.statusCode === 401 && options.resolveCredentials) {
-          // Pop the user message we pushed — runSingle will re-push it
-          messages.current.pop();
-          await runSingle(userContent, { forceRefresh: true });
-        } else {
-          throw err;
+        if (invocation?.programmaticAssessment) {
+          assessmentActiveRef.current = true;
+          setIsRunning(true);
+          setActivityPhase("waiting");
+          const preparationStart = Date.now();
+          const assessmentMessageStart = messages.current.length;
+          let providerStarted = false;
+          assessmentController = new AbortController();
+          abortRef.current = assessmentController;
+          const controller = assessmentController;
+          const host = { id: randomUUID(), startedAt: new Date().toISOString() };
+          const { cwd, mode } = invocation.programmaticAssessment;
+          const historyPolicy = await captureAssessmentHistoryPolicy(cwd, mode);
+          let assessment: ProgrammaticAssessment;
+          let outcome: ProgrammaticAssessmentOutcome | undefined;
+          let prepared: Awaited<ReturnType<typeof prepareTerminalProgrammaticAssessment>> | undefined;
+          try {
+            prepared = await prepareTerminalProgrammaticAssessment(
+              invocation.programmaticAssessment, () => liveToolsRef.current, assessmentController.signal,
+            );
+            advisory = prepared.coordinator.scope;
+            advisoryRef.current = advisory;
+            const active = prepared;
+            outcome = await active.coordinator.run(assessmentController.signal, async () => {
+              const prompt = await active.hostPrompt(textFromUserContent(userContent));
+              refreshAssessmentPrompt = active.refreshPrompt;
+              try {
+                providerStarted = true;
+                await runSingle(prompt);
+              } catch (error) {
+                const unavailable = (error instanceof ProviderError || error instanceof NotLoggedInError)
+                  && !textVisibleRef.current && toolsUsedRef.current.size === 0;
+                return { status: unavailable ? "unavailable" : "incomplete" };
+              }
+            }, host);
+            assessment = outcome.assessment;
+          } catch {
+            const { mode } = invocation.programmaticAssessment;
+            const cancelled = assessmentController.signal.aborted;
+            assessment = {
+              version: 1, mode, status: cancelled ? "cancelled" : "incomplete",
+              summary: "Assessment preparation did not complete; no provider run started.",
+              deterministic: mode === "setup" ? { status: "not-run", reason: "setup" }
+                : { status: cancelled ? "cancelled" : "unavailable", reason: "Preparation did not complete; no scan started." },
+              coverage: [], observations: [],
+              limitations: ["Assessment preparation did not complete; no provider run started."],
+            };
+          }
+          assessment.history = await saveAssessmentHistory(cwd, outcome ?? { assessment }, host, historyPolicy, {
+            signal: controller.signal,
+            assertCurrent: () => {
+              if (disposedRef.current || !runOwnedRef.current || !assessmentActiveRef.current ||
+                abortRef.current !== controller || isPlanModeActive(livePlanModeRef.current) || !prepared)
+                throw new Error("Terminal assessment owner or mode changed before history save.");
+              prepared.assertHistoryToolCurrent();
+            },
+          });
+          const text = renderTerminalProgrammaticAssessment(
+            outcome ?? { assessment }, messages.current.slice(assessmentMessageStart),
+          );
+          const notice: Message = { role: "assistant", content: text };
+          messages.current.push(notice);
+          onTurnText?.(text, "", 0);
+          onComplete?.([notice]);
+          if (!providerStarted) {
+            if (assessmentController.signal.aborted) onAborted?.();
+            else onDone?.(Date.now() - preparationStart, [], { counts: {}, tokens: 0 });
+          }
         }
-      }
+        // Run the initial message.
+        // On 401, force-refresh the OAuth token and retry once — the provider may
+        // have revoked the token server-side before the stored expiry.
+        try {
+          if (!invocation?.programmaticAssessment) await runSingle(userContent);
+        } catch (err) {
+          if (err instanceof ProviderError && err.statusCode === 401 && options.resolveCredentials) {
+            // Pop the user message we pushed — runSingle will re-push it
+            messages.current.pop();
+            await runSingle(userContent, {
+              forceRefresh: true,
+              // Name the token the provider rejected so the refresh can adopt a
+              // sibling process's newer token instead of minting one that would
+              // in turn revoke theirs.
+              ...(lastResolvedApiKey.current !== undefined
+                ? { rejectedToken: lastResolvedApiKey.current }
+                : {}),
+            });
+          } else {
+            throw err;
+          }
+        } finally {
+          assessmentActiveRef.current = false;
+          assessmentController = undefined;
+          refreshAssessmentPrompt = undefined;
+          abortRef.current = null;
+          if (advisory) {
+            advisory.close();
+            advisoryRef.current = undefined;
+            advisory = undefined;
+          }
+        }
 
-      // Drain the queue: process follow-up messages that arrived after agent_done.
-      // Most queued messages are consumed mid-run via getSteeringMessages, but
-      // messages that arrive after the agent finishes (no more tool calls to
-      // trigger steering) land here. Batch all remaining into a single run.
-      //
-      // This drains even when the run was aborted. After an interrupt, the
-      // teardown (process kills, stream finish, finally block, React commit of
-      // isRunning=false) is async — during that window a reprompt sees
-      // isRunning still true and gets queued instead of run. Pre-abort queued
-      // messages were already restored to the composer by handleAbort's
-      // drainQueuedText (and reset()/abort paths clear the queue), so anything
-      // left here arrived *after* the abort and is a fresh user intent. Without
-      // this it would be orphaned in the queue forever with no loop to pick it
-      // up.
-      if (queueRef.current.length > 0) {
-        const batch = queueRef.current.splice(0);
-        setQueuedCount(0);
-        const merged = mergeUserContent(batch.map((q) => q.content));
-        // Let React process the onDone state updates before starting next run
-        await new Promise((r) => setTimeout(r, 100));
-        onQueuedStart?.(merged);
-        await runSingle(merged);
+        // Drain the queue: messages sent while the agent was busy run after the
+        // current task, one at a time, oldest first, each as its own run —
+        // matching the desktop app's deferred prompt queue. Entries queued
+        // during a drained run are picked up by this same loop.
+        //
+        // This drains even when the run was aborted. After an interrupt, the
+        // teardown (process kills, stream finish, finally block, React commit of
+        // isRunning=false) is async — during that window a reprompt sees
+        // isRunning still true and gets queued instead of run. Pre-abort queued
+        // messages were already restored to the composer by handleAbort's
+        // drainQueuedText (and reset()/abort paths clear the queue), so anything
+        // left here arrived *after* the abort and is a fresh user intent. Without
+        // this it would be orphaned in the queue forever with no loop to pick it
+        // up.
+        while (!disposedRef.current && queueRef.current.length > 0) {
+          const entry = queueRef.current.shift();
+          if (!entry) break;
+          setQueuedCount(queueRef.current.length);
+          // Let React process the onDone state updates before starting next run
+          await new Promise((r) => setTimeout(r, 100));
+          if (disposedRef.current) return;
+          onQueuedStart?.(entry.content);
+          await runSingle(entry.content);
+        }
+      } finally {
+        assessmentActiveRef.current = false;
+        abortRef.current = null;
+        advisory?.close();
+        advisoryRef.current = undefined;
+        setIsRunning(false);
+        setActivityPhase("idle");
+        runOwnedRef.current = false;
       }
     },
     [
       messages,
       options,
+      onRunStart,
       onComplete,
       onTurnText,
       onToolStart,
@@ -1128,13 +1302,18 @@ export function useAgentLoop(
       onDone,
       onAborted,
       onQueuedStart,
+      onTruncated,
       getFollowUpMessages,
     ],
   );
 
   // Cleanup on unmount
   useEffect(() => {
+    disposedRef.current = false;
     return () => {
+      disposedRef.current = true;
+      if (!assessmentActiveRef.current) advisoryRef.current?.close();
+      liveToolsRef.current = [];
       abortRef.current?.abort();
       if (elapsedTimerRef.current) {
         clearInterval(elapsedTimerRef.current);
@@ -1145,6 +1324,7 @@ export function useAgentLoop(
 
   return {
     run,
+    isBusy,
     abort,
     reset,
     queueMessage,

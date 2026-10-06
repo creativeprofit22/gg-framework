@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Eye, EyeOff } from "lucide-react";
+import { EyeIcon, EyeSlashIcon } from "@phosphor-icons/react";
 import { isGazeEnabled, onGazeEnabledChange, toggleGazeEnabled } from "./gaze/state";
 
 /**
@@ -25,7 +25,7 @@ export function GazeButton(): React.ReactElement {
       aria-pressed={enabled}
       onClick={() => setEnabled(toggleGazeEnabled())}
     >
-      {enabled ? <Eye size={16} /> : <EyeOff size={16} />}
+      {enabled ? <EyeIcon size={16} /> : <EyeSlashIcon size={16} />}
     </button>
   );
 }

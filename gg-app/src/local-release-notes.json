@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-10-06",
+  "label": "Upstream 0.82.2, with clearer failures and a leaner agent",
+  "sections": [
+    {
+      "title": "Upstream 0.82.1 to 0.82.2: in your app",
+      "items": [
+        "No more staring at a dead end when the agent won't start. A pane that can't reach the agent now says `Couldn't connect to the agent.`, shows what went wrong, and gives you a `Try again` button right there.",
+        "The model pickers tell the truth. If the model list fails to load, both pickers say so and suggest reopening the project, instead of claiming they're still connecting.",
+        "Stopping a background task reports back. If `kill` doesn't work, you get a notice saying why, instead of a button that quietly does nothing."
+      ]
+    },
+    {
+      "title": "Upstream 0.82.1 to 0.82.2: in your agent",
+      "items": [
+        "Every request travels lighter. `Code search` and helper agents now load only when a task needs them, so everyday requests stop carrying their full setup. They come up in only a small share of sessions, so most work starts lighter.",
+        "When you name the checks you want, the agent runs `only those`."
+      ]
+    }
+  ]
+}

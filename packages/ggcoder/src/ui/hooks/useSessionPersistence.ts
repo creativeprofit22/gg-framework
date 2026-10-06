@@ -1,11 +1,13 @@
 import { useCallback, type MutableRefObject } from "react";
 import type { Message, Provider } from "@kenkaiiii/gg-ai";
+import type { OpenAICodexContextProfile } from "@kenkaiiii/gg-core/models";
 import {
   appendMessagesToSession as appendSessionMessages,
   createCompactedSessionCheckpoint,
 } from "../../core/session-compaction.js";
-import type { SessionManager } from "../../core/session-manager.js";
+import type { SessionManager, TurnMetricPayload } from "../../core/session-manager.js";
 import { log } from "../../core/logger.js";
+import { findUserSessionPrompt } from "../../core/session-preview.js";
 import type { SessionStats } from "../session-summary.js";
 
 /** Minimal session-store surface the persistence layer mirrors into. */
@@ -21,10 +23,14 @@ interface UseSessionPersistenceOptions {
   sessionStatsRef: MutableRefObject<SessionStats>;
   persistedIndexRef: MutableRefObject<number>;
   messagesRef: MutableRefObject<Message[]>;
+  turnMetricsRef: MutableRefObject<TurnMetricPayload[]>;
   cwdRef: MutableRefObject<string>;
   currentProvider: Provider;
   currentModel: string;
+  openAICodexContextProfile: OpenAICodexContextProfile;
+  openAICodexFast: boolean;
   sessionStore?: PersistenceSessionStore;
+  onCompactedSession?: (sessionId: string) => Promise<void>;
 }
 
 export interface SessionPersistence {
@@ -48,10 +54,14 @@ export function useSessionPersistence({
   sessionStatsRef,
   persistedIndexRef,
   messagesRef,
+  turnMetricsRef,
   cwdRef,
   currentProvider,
   currentModel,
+  openAICodexContextProfile,
+  openAICodexFast,
   sessionStore,
+  onCompactedSession,
 }: UseSessionPersistenceOptions): SessionPersistence {
   const appendMessagesToSession = useCallback(
     async (sessionPath: string, messages: readonly Message[], startIndex: number) => {
@@ -71,9 +81,16 @@ export function useSessionPersistence({
         provider: currentProvider,
         model: currentModel,
         messages: compactedMessages,
+        openAICodexContextProfile,
+        openAICodexFast,
+        preview: findUserSessionPrompt(messagesRef.current),
       });
       sessionPathRef.current = session.path;
       sessionStatsRef.current.sessionId = session.id;
+      for (const metric of turnMetricsRef.current) {
+        await sm.appendTurnMetric(session.path, metric);
+      }
+      await onCompactedSession?.(session.id);
       persistedIndexRef.current = compactedMessages.length;
       if (sessionStore) {
         sessionStore.sessionPath = session.path;
@@ -85,12 +102,17 @@ export function useSessionPersistence({
     [
       currentModel,
       currentProvider,
+      openAICodexContextProfile,
+      openAICodexFast,
       sessionStore,
+      onCompactedSession,
       sessionManagerRef,
       sessionPathRef,
       sessionStatsRef,
+      messagesRef,
       persistedIndexRef,
       cwdRef,
+      turnMetricsRef,
     ],
   );
 

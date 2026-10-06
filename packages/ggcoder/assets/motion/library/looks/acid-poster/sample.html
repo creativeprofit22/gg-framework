@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="assets/fonts/fonts.css" />
+    <link rel="stylesheet" href="assets/looks/acid-poster.css" />
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <style>
+      html,
+      body {
+        margin: 0;
+        width: 1920px;
+        height: 1080px;
+        overflow: hidden;
+      }
+      #root {
+        position: relative;
+        width: 1920px;
+        height: 1080px;
+        background: var(--field);
+        overflow: hidden;
+        font-family: var(--display);
+        color: var(--ink);
+      }
+      .band {
+        position: absolute;
+        left: 0;
+        width: 1920px;
+        height: 104px;
+        background: var(--ink);
+        color: var(--field);
+        overflow: hidden;
+        white-space: nowrap;
+      }
+      .band span {
+        display: inline-block;
+        font-weight: 900;
+        font-stretch: 62%;
+        font-size: 76px;
+        line-height: 104px;
+        letter-spacing: -0.01em;
+      }
+      .word {
+        position: absolute;
+        left: 40px;
+        white-space: nowrap;
+        font-weight: var(--display-weight);
+        letter-spacing: var(--display-tracking);
+        line-height: 0.78;
+      }
+      #w1 {
+        top: 150px;
+        font-size: 300px;
+        font-stretch: var(--display-stretch);
+      }
+      #w2 {
+        top: 424px;
+        font-size: 400px;
+        font-stretch: 50%;
+        letter-spacing: 0;
+      }
+      .block {
+        position: absolute;
+        right: 40px;
+        top: 424px;
+        width: 540px;
+        height: 268px;
+        background: var(--ink);
+        color: var(--field);
+        box-sizing: border-box;
+        padding: 30px 36px;
+      }
+      .block .d {
+        font-weight: 900;
+        font-stretch: 125%;
+        font-size: 104px;
+        line-height: 0.9;
+        letter-spacing: -0.045em;
+      }
+      .block .t {
+        margin-top: 22px;
+        font-weight: 700;
+        font-stretch: 100%;
+        font-size: 44px;
+        line-height: 1.05;
+        letter-spacing: -0.01em;
+      }
+      .arrow {
+        position: absolute;
+        right: 32px;
+        bottom: 32px;
+        width: 96px;
+        height: 96px;
+      }
+      .foot {
+        position: absolute;
+        left: 40px;
+        right: 40px;
+        top: 836px;
+        border-top: 8px solid var(--ink);
+        padding-top: 18px;
+        display: flex;
+        justify-content: space-between;
+        font-weight: 800;
+        font-stretch: 100%;
+        font-size: 40px;
+        letter-spacing: -0.01em;
+      }
+      .flash {
+        position: absolute;
+        inset: 0;
+        background: var(--ink);
+        opacity: 0;
+      }
+    </style>
+  </head>
+  <body>
+    <div
+      id="root"
+      class="look-acid-poster"
+      data-composition-id="main"
+      data-start="0"
+      data-duration="4"
+      data-width="1920"
+      data-height="1080"
+    >
+      <!-- edit: ticker text -->
+      <div class="band" id="band1" style="top: 0" data-layout-allow-overflow><div id="tick1"></div></div>
+      <!-- edit: two poster words -->
+      <div class="word" id="w1">LOUDER</div>
+      <div class="word" id="w2">THAN EVER</div>
+      <!-- edit: date block -->
+      <div class="block" id="block">
+        <svg class="arrow" id="arrow" viewBox="0 0 100 100"><path d="M12 12 L84 84 M84 28 L84 84 L28 84" fill="none" stroke="var(--field)" stroke-width="14" stroke-linecap="square" /></svg>
+        <div class="d">10.31</div>
+        <div class="t">Out Friday,<br />everywhere.</div>
+      </div>
+      <div class="foot" id="foot"><span>RELAY SOUND SYSTEM</span><span>VOL. 2</span><span>RELAYSOUND.FM</span></div>
+      <div class="band" id="band2" style="top: 976px" data-layout-allow-overflow><div id="tick2"></div></div>
+      <div class="flash" id="flash"></div>
+    </div>
+    <script>
+      // Ticker: repeated phrase, moved by the timeline (never a CSS loop).
+      const phrase = "NEW DROP ✱ VOLUME TWO ✱ ";
+      document.getElementById("tick1").innerHTML = ("<span>" + phrase + "</span>").repeat(8);
+      document.getElementById("tick2").innerHTML = ("<span>" + "OUT FRIDAY ✱ 10.31 ✱ " + "</span>").repeat(10);
+
+      const tl = gsap.timeline({ paused: true });
+      const w1 = document.getElementById("w1");
+      const wd = { s: 50 };
+
+      tl.fromTo("#tick1", { x: 0 }, { x: -900, duration: 4, ease: "none" }, 0)
+        .fromTo("#tick2", { x: -1400 }, { x: -500, duration: 4, ease: "none" }, 0)
+        // Beat 1: black frame, cut to lime with the first word already moving.
+        .set("#flash", { opacity: 1 }, 0)
+        .set("#flash", { opacity: 0 }, 0.12)
+        .from("#w1", { x: -36, clipPath: "inset(0 100% 0 0)", duration: 0.5, ease: "expo.out" }, 0.12)
+        .fromTo(
+          wd,
+          { s: 50 },
+          { s: 150, duration: 0.9, ease: "expo.inOut", onUpdate: () => (w1.style.fontStretch = wd.s + "%") },
+          0.12,
+        )
+        // Beat 2: a right-led mask reveals the second word inside the safe area.
+        .from("#w2", { x: 80, clipPath: "inset(0 0 0 100%)", duration: 0.45, ease: "expo.out" }, 0.62)
+        .from("#block", { yPercent: 110, duration: 0.45, ease: "expo.out" }, 0.95)
+        .from("#arrow", { scale: 0, transformOrigin: "0% 0%", duration: 0.35, ease: "back.out(2.5)" }, 1.15)
+        .from("#foot", { clipPath: "inset(0 100% 0 0)", duration: 0.5, ease: "expo.inOut" }, 1.1)
+        // Beat 3: an inverting punch on the word.
+        .set("#flash", { opacity: 1 }, 1.9)
+        .set("#flash", { opacity: 0 }, 1.94)
+        .from("#w1", { scale: 1.04, immediateRender: false, transformOrigin: "0% 50%", duration: 0.5, ease: "expo.out" }, 1.92)
+        .to({}, { duration: 0.1 }, 3.9);
+      window.__timelines = { main: tl };
+    </script>
+  </body>
+</html>

@@ -11,10 +11,14 @@ import {
   type TurnToolCall,
 } from "./autopilot-gate.js";
 import { PROMPT_COMMANDS } from "./prompt-commands.js";
+import { expandPromptCommand } from "./prompt-command-expansion.js";
 
+// Synthetic: no shipped prompt command has an alias, so alias matching needs a
+// fixture to exercise it. Real commands are covered by the PROMPT_COMMANDS
+// loops below.
 const COMMANDS: WorkflowCommandSpec[] = [
   { name: "compare", aliases: [], prompt: "Compare the code you just created…" },
-  { name: "bullet-proof", aliases: ["bp"], prompt: "Audit the project…" },
+  { name: "audit-fixture", aliases: ["af"], prompt: "Audit the project…" },
 ];
 
 describe("isWorkflowCommandText", () => {
@@ -27,9 +31,9 @@ describe("isWorkflowCommandText", () => {
   });
 
   it("matches aliases and is case-insensitive", () => {
-    expect(isWorkflowCommandText("/bp", COMMANDS)).toBe(true);
+    expect(isWorkflowCommandText("/af", COMMANDS)).toBe(true);
     expect(isWorkflowCommandText("/COMPARE", COMMANDS)).toBe(true);
-    expect(isWorkflowCommandText("/Bullet-Proof", COMMANDS)).toBe(true);
+    expect(isWorkflowCommandText("/Audit-Fixture", COMMANDS)).toBe(true);
   });
 
   it("tolerates leading whitespace (matches trim semantics of the prompt path)", () => {
@@ -60,6 +64,11 @@ describe("isWorkflowCommandText", () => {
 });
 
 describe("matchExpandedCommand", () => {
+  it("recognizes the current expansion without treating guidance as user arguments", () => {
+    const command = { name: "custom", prompt: "Review [$ARGUMENTS]." };
+    const text = expandPromptCommand(command.prompt, "login only");
+    expect(matchExpandedCommand(text, [command])).toEqual({ command, args: "login only" });
+  });
   it("matches an exact template body", () => {
     const m = matchExpandedCommand("Compare the code you just created…", COMMANDS);
     expect(m?.command.name).toBe("compare");
@@ -69,13 +78,12 @@ describe("matchExpandedCommand", () => {
   it("matches template + user-instructions suffix and extracts the args", () => {
     const text = `Audit the project…${USER_INSTRUCTIONS_HEADER}only the auth module`;
     const m = matchExpandedCommand(text, COMMANDS);
-    expect(m?.command.name).toBe("bullet-proof");
+    expect(m?.command.name).toBe("audit-fixture");
     expect(m?.args).toBe("only the auth module");
   });
 
-  it("uses the exact separator AgentSession.prompt() inserts", () => {
-    // Lockstep guard: if agent-session.ts ever changes its expansion format,
-    // this literal must change with it or digest labeling silently breaks.
+  it("retains the legacy separator for older saved sessions", () => {
+    // Old sessions must remain recognizable after the prompt format changes.
     expect(USER_INSTRUCTIONS_HEADER).toBe("\n\n## User Instructions\n\n");
   });
 

@@ -1,0 +1,112 @@
+<!doctype html>
+<!--
+  typewriter-caption: a lowercase sentence typed on character by character,
+  with one or more words in --accent and a thin blinking caret. Calm ad
+  captions ("a good deal should not take all day").
+  Markup: wrap accent words in <em>. Params: CPS (characters per second),
+  START (seconds before typing starts), --tc-size, --tc-y.
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+  </head>
+  <body>
+    <div
+      id="typewriter-caption-root"
+      data-composition-id="typewriter-caption"
+      data-start="0"
+      data-duration="4"
+      data-width="1920"
+      data-height="1080"
+    >
+      <style>
+        [data-composition-id="typewriter-caption"] {
+          --tc-size: 58px;
+          --tc-y: 200px;
+          position: absolute;
+          inset: 0;
+        }
+        [data-composition-id="typewriter-caption"] .tc-line {
+          position: absolute;
+          left: 0;
+          right: 0;
+          top: var(--tc-y);
+          text-align: center;
+          font-family: var(--text, sans-serif);
+          font-weight: var(--display-weight, 500);
+          font-size: var(--tc-size);
+          letter-spacing: var(--display-tracking, -0.02em);
+          color: var(--ink, #3a4150);
+          white-space: pre;
+        }
+        [data-composition-id="typewriter-caption"] .tc-line em {
+          font-style: normal;
+          color: var(--accent, #2f5bff);
+        }
+        [data-composition-id="typewriter-caption"] .tc-caret {
+          display: inline-block;
+          width: 3px;
+          height: 0.95em;
+          margin-left: 3px;
+          vertical-align: -0.12em;
+          background: var(--ink, #3a4150);
+        }
+        [data-composition-id="typewriter-caption"] .tc-ghost {
+          visibility: hidden;
+        }
+      </style>
+      <!-- edit: the caption; wrap accent words in <em> -->
+      <div class="tc-line" id="tc-source" hidden>a good <em>deal</em> should not take all day</div>
+      <div class="tc-line" id="tc-out"></div>
+    </div>
+    <script>
+      (function () {
+        const CPS = 22;
+        const START = 0.3;
+        const BLINK_HZ = 1.6;
+        const source = document.getElementById("tc-source");
+        const out = document.getElementById("tc-out");
+        // Flatten the markup into characters that remember whether they are accent.
+        const chars = [];
+        source.childNodes.forEach((node) => {
+          const accent = node.nodeName === "EM";
+          for (const ch of node.textContent) chars.push({ ch, accent });
+        });
+        const esc = (c) => (c === "<" ? "&lt;" : c === "&" ? "&amp;" : c);
+        function render(t) {
+          const shown = Math.max(0, Math.min(chars.length, Math.floor((t - START) * CPS)));
+          let html = "";
+          let inAccent = false;
+          const piece = (list, ghost) => {
+            let s = "";
+            for (const c of list) {
+              if (c.accent !== inAccent) {
+                s += c.accent ? "<em>" : "</em>";
+                inAccent = c.accent;
+              }
+              s += esc(c.ch);
+            }
+            if (inAccent) s += "</em>";
+            inAccent = false;
+            return ghost ? `<span class="tc-ghost">${s}</span>` : s;
+          };
+          html += piece(chars.slice(0, shown), false);
+          // Caret: solid while typing, blinks once the line is complete.
+          const typing = shown < chars.length && t >= START;
+          const on = typing || Math.floor(t * BLINK_HZ * 2) % 2 === 0;
+          html += `<span class="tc-caret" style="opacity:${on ? 1 : 0}"></span>`;
+          // Invisible remainder keeps the line centred on its final width.
+          html += piece(chars.slice(shown), true);
+          out.innerHTML = html;
+        }
+        const clock = { t: 0 };
+        const tl = gsap.timeline({ paused: true });
+        tl.fromTo(clock, { t: 0 }, { t: 4, duration: 4, ease: "none", onUpdate: () => render(clock.t) }, 0);
+        render(0);
+        window.__timelines = window.__timelines || {};
+        window.__timelines["typewriter-caption"] = tl;
+      })();
+    </script>
+  </body>
+</html>

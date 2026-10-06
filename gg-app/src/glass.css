@@ -1,0 +1,1048 @@
+/* ── Liquid glass trial (ported from veditor-app's style.css) ──
+   An experimental layer loaded after App.css. Remove its import in App.tsx to
+   go back to the flat look; nothing in App.css was changed.
+
+   The material: a see-through tint, a rim drawn by stacked inset shadows, and a
+   frosted backdrop. The glass reads because the ambient glow (.app::before)
+   sits behind it. WKWebView (macOS Tauri) draws nothing for SVG backdrop
+   filters, so veditor's turbulence warp is skipped here and the frosted blur is
+   used everywhere, which is what veditor itself shows in Safari. */
+
+:root {
+  /* Button rim: bright lit edges, the cue for what can be pressed. */
+  --liquid-rim:
+    0 0 8px rgb(0 0 0 / 0.03), 0 2px 6px rgb(0 0 0 / 0.08),
+    inset 3px 3px 0.5px -3.5px rgb(255 255 255 / 0.09),
+    inset -3px -3px 0.5px -3.5px rgb(255 255 255 / 0.85),
+    inset 1px 1px 1px -0.5px rgb(255 255 255 / 0.6),
+    inset -1px -1px 1px -0.5px rgb(255 255 255 / 0.6), inset 0 0 6px 6px rgb(255 255 255 / 0.12),
+    inset 0 0 2px 2px rgb(255 255 255 / 0.06), 0 0 12px rgb(0 0 0 / 0.15);
+  /* Small controls (icon circles): the same edges without the wide inner glow. */
+  --liquid-rim-small:
+    inset 1px 1px 1px -0.5px rgb(255 255 255 / 0.6),
+    inset -1px -1px 1px -0.5px rgb(255 255 255 / 0.6), inset 0 0 3px 1px rgb(255 255 255 / 0.1),
+    0 1px 3px rgb(0 0 0 / 0.25);
+  /* Surfaces (composer, menus, modals, toasts): the edges at about half strength. */
+  --liquid-rim-soft:
+    0 0 8px rgb(0 0 0 / 0.03), 0 2px 6px rgb(0 0 0 / 0.08),
+    inset -3px -3px 0.5px -3.5px rgb(255 255 255 / 0.4),
+    inset 1px 1px 1px -0.5px rgb(255 255 255 / 0.28),
+    inset -1px -1px 1px -0.5px rgb(255 255 255 / 0.28), inset 0 0 6px 6px rgb(255 255 255 / 0.05),
+    inset 0 0 2px 2px rgb(255 255 255 / 0.03);
+  --liquid-rim-soft-small:
+    inset 1px 1px 1px -0.5px rgb(255 255 255 / 0.3),
+    inset -1px -1px 1px -0.5px rgb(255 255 255 / 0.3), inset 0 0 3px 1px rgb(255 255 255 / 0.05),
+    0 1px 3px rgb(0 0 0 / 0.2);
+
+  /* Tints. Accent glass is GG's periwinkle instead of veditor's sky blue, and
+     carries light ink rather than the flat fill's near-black label. The flat
+     palette's pastels (--primary, --success) wash out to grey once they are
+     see-through over a dark window, so the glass tints start from deeper,
+     more saturated versions of the same hues. White text on either stays
+     above 4.5:1 over the dark window. */
+  --glass-accent-base: #6b76ff;
+  --glass-success-base: #16a34a;
+  --glass-accent: color-mix(in oklab, var(--glass-accent-base) 58%, transparent);
+  --glass-accent-hover: color-mix(in oklab, var(--glass-accent-base) 72%, transparent);
+  --glass-success: color-mix(in oklab, var(--glass-success-base) 55%, transparent);
+  --glass-success-hover: color-mix(in oklab, var(--glass-success-base) 68%, transparent);
+  --glass-clear: rgb(255 255 255 / 0.06);
+  --glass-clear-hover: rgb(255 255 255 / 0.12);
+  --glass: rgb(22 23 26 / 0.5);
+  --glass-hover: rgb(34 36 40 / 0.6);
+  --glass-field: rgb(12 13 16 / 0.42);
+  --glass-float: rgb(16 18 22 / 0.8);
+  --glass-modal: rgb(22 23 26 / 0.76);
+  --glass-shadow: 0 16px 48px rgb(0 0 0 / 0.35);
+  --glass-surface-shadow: var(--liquid-rim-soft), var(--glass-shadow);
+  --glass-backdrop: blur(12px) saturate(140%);
+
+  /* Veditor's size spring, copied as-is: the "open" spring (response 0.45,
+     damping 0.7) sampled into linear(), which overshoots about 4% and settles,
+     instead of a single bezier bounce. Colours use the shared --t-fast. */
+  --glass-spring-open: linear(
+    0,
+    0.053,
+    0.179,
+    0.337,
+    0.498,
+    0.646,
+    0.77,
+    0.869,
+    0.941,
+    0.991,
+    1.023,
+    1.039,
+    1.046,
+    1.045,
+    1.04,
+    1.033,
+    1.026,
+    1.019,
+    1.012,
+    1.008,
+    1
+  );
+  --glass-spring-open-duration: 510ms;
+}
+
+/* ── Buttons ── */
+.btn-primary,
+.btn-ghost,
+.btn-success,
+.icon-circle,
+.modal-close {
+  -webkit-backdrop-filter: var(--glass-backdrop);
+  backdrop-filter: var(--glass-backdrop);
+  border-color: transparent;
+}
+.btn-primary,
+.btn-ghost,
+.btn-success {
+  box-shadow: var(--liquid-rim);
+}
+.btn-primary {
+  background: var(--glass-accent);
+  color: var(--text);
+}
+.btn-primary:hover:not(:disabled) {
+  background: var(--glass-accent-hover);
+  color: var(--text);
+}
+.btn-ghost {
+  background: var(--glass-clear);
+  color: var(--text-secondary);
+}
+.btn-ghost:hover:not(:disabled) {
+  background: var(--glass-clear-hover);
+  color: var(--text);
+}
+/* Quiet tier (style pack §5 Action tiers): utility/chrome actions in a busy
+   bar (Notes, Tasks, Brain, Radio, Layout). Same size and hit area as a
+   ghost, but no fill or rim at rest, so the bar's one primary and its pending
+   secondaries carry the weight. Hover, focus and an open menu reveal the
+   ghost's hover glass. */
+.btn-ghost.btn-quiet {
+  background: transparent;
+  box-shadow: none;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  color: var(--text-secondary);
+}
+.btn-ghost.btn-quiet:is(:hover, :focus-visible, [aria-expanded="true"]):not(:disabled),
+.winlayout:has(.winlayout-select:not(:disabled)):is(:hover, :focus-within)
+  .btn-ghost.btn-quiet.winlayout-icon-btn {
+  background: var(--glass-clear-hover);
+  color: var(--text);
+}
+.btn-success {
+  background: var(--glass-success);
+  color: var(--text);
+}
+.btn-success:hover:not(:disabled) {
+  background: var(--glass-success-hover);
+  filter: none;
+}
+
+.icon-circle {
+  background: var(--glass-clear);
+  box-shadow: var(--liquid-rim-small);
+}
+.icon-circle:hover:not(:disabled) {
+  background: var(--glass-clear-hover);
+}
+/* Send / stop. Repeats the metal-rim selector so it wins when that rim is mounted. */
+.icon-circle-primary,
+.inputactions-trailing:has(> .action-metal.metal-fx-root) > .icon-circle-primary {
+  background: var(--glass-accent);
+  color: var(--text);
+  box-shadow: var(--liquid-rim-small);
+}
+.icon-circle-primary:hover:not(:disabled),
+.inputactions-trailing:has(> .action-metal.metal-fx-root)
+  > .icon-circle-primary:hover:not(:disabled) {
+  background: var(--glass-accent-hover);
+  color: var(--text);
+}
+.modal-close {
+  background: var(--glass-clear);
+  box-shadow: var(--liquid-rim-small);
+}
+.modal-close:hover {
+  background: var(--glass-clear-hover);
+  border-color: transparent;
+}
+/* Modal buttons ("Got it" and friends in every modal and the What's new window). */
+.modal-btn {
+  background: var(--glass-clear);
+  border-color: transparent;
+  -webkit-backdrop-filter: var(--glass-backdrop);
+  backdrop-filter: var(--glass-backdrop);
+  box-shadow: var(--liquid-rim);
+}
+.modal-btn:hover:not(:disabled) {
+  background: var(--glass-clear-hover);
+  filter: none;
+}
+.modal-btn.primary {
+  background: var(--glass-accent);
+  color: var(--text);
+  box-shadow: var(--liquid-rim);
+}
+.modal-btn.primary:hover:not(:disabled) {
+  background: var(--glass-accent-hover);
+  color: var(--text);
+}
+/* Settings tab capsule: a frosted bar, and the travelling pill is a clear
+   glass bead with the full lit rim, so it reads as the one selected thing. */
+.settings-tabs {
+  background: var(--glass);
+  border-color: transparent;
+  -webkit-backdrop-filter: var(--glass-backdrop);
+  backdrop-filter: var(--glass-backdrop);
+  box-shadow: var(--glass-surface-shadow);
+}
+.settings-tabs-pill {
+  background: var(--glass-clear-hover);
+  border-color: transparent;
+  box-shadow: var(--liquid-rim);
+}
+/* ── Update banner and home update pill: the progress-bar blue ──
+   Same flux gradient as the usage meter and the download bars, with light
+   ink. The installing fill is a lighter wash of the same blue, and the dot
+   and badge turn white to read on it. */
+.update-banner,
+.home-update {
+  background: var(--flux-fill);
+  background-size: 200% 100%;
+  color: #fff;
+  text-shadow: 0 1px 1px rgb(0 20 90 / 0.35);
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.35),
+    inset 0 -1px 2px rgb(0 20 90 / 0.3);
+}
+.update-banner .badge {
+  background: rgb(255 255 255 / 0.18);
+  border-color: rgb(255 255 255 / 0.35);
+  color: #fff;
+}
+.update-banner-dot {
+  background: #fff;
+  animation-name: glass-update-pulse;
+}
+@keyframes glass-update-pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgb(255 255 255 / 0.55);
+  }
+  70% {
+    box-shadow: 0 0 0 7px transparent;
+  }
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+  }
+}
+.update-banner-fill,
+.home-update-fill {
+  background: linear-gradient(90deg, rgb(255 255 255 / 0.28), rgb(255 255 255 / 0.4));
+  box-shadow: 1px 0 0 rgb(255 255 255 / 0.5);
+}
+
+/* ── List rows (projects, sessions, chats) ──
+   Hover lights a row as a pane of clear glass with the soft rim, instead of a
+   flat grey fill; pressed, it deepens a touch. */
+.picker-item:hover {
+  background: var(--glass-clear);
+  border-color: transparent;
+  box-shadow: var(--liquid-rim-soft-small);
+}
+.picker-item:active {
+  background: var(--glass-clear-hover);
+}
+/* Hide-from-list ×: a small glass bead, like the other round controls. */
+.picker-hide {
+  border-radius: 50%;
+  -webkit-backdrop-filter: var(--glass-backdrop);
+  backdrop-filter: var(--glass-backdrop);
+}
+.picker-hide:hover {
+  background: var(--glass-clear-hover);
+  box-shadow: var(--liquid-rim-small);
+}
+/* Menu rows (slash commands, @-mentions, dropdowns, MCP servers): the same
+   clear-glass highlight. */
+.slash-item.active,
+.slash-item:hover,
+.dropdown-option.active,
+.mcp-item:hover {
+  background: var(--glass-clear);
+  box-shadow: var(--liquid-rim-soft-small);
+}
+.slash-item:active {
+  background: var(--glass-clear-hover);
+}
+
+/* Export chat is deliberately NOT glass: it shares the solid light pill of the
+   other floating chat controls ("You have new chats", scroll-to-bottom) in
+   App.css, which reads clearly over any message behind it. */
+
+/* ── Chat: your bubbles and formatted replies ──
+   Your messages are a quiet glass bead: a faint clear fill, a lit top edge and
+   the soft rim, deliberately lighter than the buttons so a long transcript
+   stays calm. No backdrop blur (a long transcript would re-blur every bubble
+   on each scroll frame). */
+.user-msg {
+  background: linear-gradient(180deg, rgb(255 255 255 / 0.1), rgb(255 255 255 / 0.06));
+  border-color: transparent;
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.14),
+    var(--liquid-rim-soft-small);
+}
+/* Queued / promoted keep their dashed outline as the state signal. */
+.user-msg.queued,
+.user-msg.promoted {
+  box-shadow: none;
+}
+/* Ken's bubbles keep his border colour; the rim sits inside it. */
+.user-msg.user-ken,
+.user-msg.user-ken-sent {
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.12);
+}
+
+/* Code blocks: a recessed glass pane, like the slider groove. */
+.markdown pre {
+  background: rgb(0 0 0 / 0.35);
+  border-color: rgb(255 255 255 / 0.08);
+  box-shadow:
+    inset 0 1px 3px rgb(0 0 0 / 0.45),
+    inset 0 -1px 0 rgb(255 255 255 / 0.05);
+}
+/* Inline code: a small clear-glass chip. */
+.markdown :not(pre) > code {
+  background: rgb(255 255 255 / 0.07);
+  box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.09);
+}
+.markdown .code-copy {
+  border-color: transparent;
+  background: var(--glass-float);
+  -webkit-backdrop-filter: var(--glass-backdrop);
+  backdrop-filter: var(--glass-backdrop);
+  box-shadow: var(--liquid-rim-small);
+}
+.markdown .code-copy:hover {
+  border-color: transparent;
+  background: var(--glass-hover);
+}
+
+/* Tables: a rounded glass card. The card is the scroll frame (Markdown.tsx
+   MarkdownTable), so its edge and corners stay put while a wide table scrolls
+   inside it. Grid lines become hairlines, the header row a lit strip, and the
+   zebra a whisper of white. */
+/* Width is owned by App.css (`100%`, inside the `.md-table-scroll` scroller).
+   Never set `max-content` here: cells then can't wrap, so every wide table
+   forces a horizontal scrollbar in narrow chat panes. */
+.markdown .md-table-scroll {
+  border-radius: var(--radius-card);
+  background: rgb(255 255 255 / 0.03);
+  box-shadow: var(--liquid-rim-soft-small);
+}
+.markdown table {
+  border-collapse: separate;
+  border-spacing: 0;
+}
+.markdown th,
+.markdown td {
+  border: 0;
+  border-bottom: 1px solid rgb(255 255 255 / 0.07);
+  padding: 7px var(--space-6);
+}
+/* Narrow panes: tighter cell padding gives the columns' text the room, so
+   tables fit instead of scrolling sideways. */
+@container (max-width: 640px) {
+  .markdown :is(th, td) {
+    padding-inline: var(--space-4);
+  }
+}
+.markdown :is(th, td) + :is(th, td) {
+  border-left: 1px solid rgb(255 255 255 / 0.05);
+}
+.markdown tr:last-child > td {
+  border-bottom: 0;
+}
+.markdown th {
+  background: rgb(255 255 255 / 0.07);
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.1);
+}
+.markdown tbody tr:nth-child(even) td {
+  background: rgb(255 255 255 / 0.025);
+}
+
+/* Blockquotes: a lit glass edge instead of a flat grey rule. */
+.markdown blockquote {
+  border-left: 0;
+  padding: 0.35em 0.9em;
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  background: rgb(255 255 255 / 0.03);
+  box-shadow:
+    inset 2px 0 0 rgb(255 255 255 / 0.38),
+    inset 3px 0 6px -2px rgb(255 255 255 / 0.08);
+}
+/* Dividers: a hairline that fades out at both ends. */
+.markdown hr {
+  border-top: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgb(255 255 255 / 0.16), transparent);
+}
+
+/* Settings cards: frosted panels with the soft rim, like the composer. */
+.settings-card {
+  background: var(--glass);
+  border-color: transparent;
+  -webkit-backdrop-filter: var(--glass-backdrop);
+  backdrop-filter: var(--glass-backdrop);
+  box-shadow: var(--liquid-rim-soft);
+}
+/* The home screen's Settings gear is a bigger icon circle. */
+.home-settings {
+  box-shadow: var(--liquid-rim);
+}
+
+/* Pills and badges: the rank pill, count badges, the window counter ("2/4"),
+   attachment and file chips, and the eye-tracking pill. Clear glass with the
+   small soft rim, so they read as the same material as the buttons without
+   competing with them. Badges tinted by colour (Badge.tsx sets that inline)
+   keep their tint and gain only the rim and the frost. */
+.rank-badge,
+.badge,
+.window-index,
+.attach-chip,
+.user-file-chip,
+.gaze-pill {
+  border-color: transparent;
+  background: var(--glass-clear);
+  -webkit-backdrop-filter: var(--glass-backdrop);
+  backdrop-filter: var(--glass-backdrop);
+  box-shadow: var(--liquid-rim-soft-small);
+}
+.rank-badge:hover {
+  background: var(--glass-clear-hover);
+}
+.mention-chip {
+  -webkit-backdrop-filter: var(--glass-backdrop);
+  backdrop-filter: var(--glass-backdrop);
+  box-shadow: var(--liquid-rim-soft-small);
+}
+
+/* AI providers page: the provider tiles, and the sign-in method cards and text
+   fields in its popup (text fields are shared by every popup). */
+.login-tile {
+  background: var(--glass-clear);
+  border-color: transparent;
+  -webkit-backdrop-filter: var(--glass-backdrop);
+  backdrop-filter: var(--glass-backdrop);
+  box-shadow: var(--liquid-rim-soft);
+}
+.login-tile:hover {
+  background: var(--glass-clear-hover);
+  box-shadow: var(--liquid-rim);
+  filter: none;
+}
+.login-method-card {
+  background: var(--glass-field);
+  border-color: transparent;
+  box-shadow: var(--liquid-rim-soft-small);
+}
+.modal-input {
+  background: var(--glass-field) !important;
+  box-shadow: var(--liquid-rim-soft-small);
+}
+
+/* Enhance pill. Repeats the metal-rim selector so it wins when that rim is mounted. */
+.enhance-pill,
+.enhance-pill-host:has(> .action-metal.metal-fx-root) > .enhance-pill {
+  background: var(--glass-accent);
+  color: var(--text);
+  border-color: transparent;
+  -webkit-backdrop-filter: var(--glass-backdrop);
+  backdrop-filter: var(--glass-backdrop);
+  box-shadow: var(--liquid-rim-small);
+}
+.enhance-pill:hover:not(:disabled),
+.enhance-pill-host:has(> .action-metal.metal-fx-root) > .enhance-pill:hover:not(:disabled) {
+  background: var(--glass-accent-hover);
+  filter: none;
+}
+
+/* ── Hover and press motion (veditor's) ──
+   Hover: the control swells (pills 1.05, small round ones 1.08, big provider
+   tiles 1.03) on the open spring. Press: it dips with a quick --dur-press
+   --ease-out `transform`, which stacks on the hover swell rather than
+   replacing it, then springs back on release. `scale` and `transform` are
+   separate properties, so the two never fight.
+
+   The transition list is repeated on :hover and :active on purpose: App.css
+   swaps in its own lists there (without `scale`), which made the swell jump
+   instantly on the way in and only animate on the way out. Selectors match
+   App.css's specificity and load later, so these win. */
+:is(.btn, .icon-circle, .modal-btn, .modal-close, .enhance-pill, .login-tile) {
+  --glass-hover-scale: 1.05;
+  --glass-press-scale: 0.97;
+}
+:is(.icon-circle, .modal-close) {
+  --glass-hover-scale: 1.08;
+  --glass-press-scale: 0.92;
+}
+.login-tile {
+  --glass-hover-scale: 1.03;
+  --glass-press-scale: 0.98;
+}
+:is(.btn, .icon-circle, .modal-btn, .modal-close, .enhance-pill, .login-tile),
+:is(.btn, .icon-circle, .modal-btn, .modal-close, .enhance-pill, .login-tile):is(
+    :hover,
+    :active
+  ):not(:disabled) {
+  transition:
+    background-color var(--t-fast),
+    border-color var(--t-fast),
+    color var(--t-fast),
+    filter var(--t-fast),
+    box-shadow var(--t-fast),
+    opacity var(--t-fast),
+    transform var(--glass-spring-open-duration) var(--glass-spring-open),
+    scale var(--glass-spring-open-duration) var(--glass-spring-open);
+}
+/* The composer's circles also get a resting list in App.css, which outranks
+   the one above; without `scale` in it their swell grew smoothly but snapped
+   back when the pointer left. Same list, keeping App.css's reflow fade. */
+.inputrow .icon-circle {
+  transition:
+    background-color var(--t-fast),
+    border-color var(--t-fast),
+    color var(--t-fast),
+    filter var(--t-fast),
+    box-shadow var(--t-fast),
+    opacity var(--t-composer),
+    transform var(--glass-spring-open-duration) var(--glass-spring-open),
+    scale var(--glass-spring-open-duration) var(--glass-spring-open);
+}
+:is(.btn, .icon-circle, .modal-btn, .modal-close, .enhance-pill, .login-tile):hover:not(:disabled) {
+  scale: var(--glass-hover-scale);
+}
+/* Overrides App.css's shared `scale: 0.96` press so a held button keeps its
+   hover size and only the transform dips. */
+:is(.btn, .icon-circle, .modal-btn, .modal-close, .enhance-pill, .login-tile):active:not(
+    :disabled
+  ) {
+  scale: var(--glass-hover-scale);
+  transform: scale(var(--glass-press-scale));
+  transition-duration: var(--dur-press);
+  transition-timing-function: var(--ease-out);
+}
+
+/* Question band: the same raised glass card as a table in a reply (the card
+   family it belongs to), rather than a flat grey slab. */
+.ask-band:not(.is-done, .is-closed) {
+  border-color: transparent;
+  background: rgb(255 255 255 / 0.04);
+  box-shadow: var(--liquid-rim-soft-small);
+}
+/* Question options are full-width rows, not floating pills: keep their edges
+   aligned while hovering/pressing, and preserve dark ink on the selected fill.
+   Unpicked rows drop the standalone button's glass rim (three heavy rims
+   stacked in a card read as boxes in a box) and keep the hairline App.css
+   gives them; the picked row keeps its lit rim, so the answer stands out. */
+.ask-options .btn {
+  --glass-hover-scale: 1;
+  --glass-press-scale: 1;
+}
+.ask-options .btn-ghost {
+  box-shadow: none;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+.ask-options .btn-primary:hover:not(:disabled) {
+  color: var(--on-primary);
+}
+
+/* The chromatic metal rim would sit on top of the glass rim; hide it for the trial. */
+.inputactions-trailing > .action-metal,
+.enhance-pill-host > .action-metal,
+.metal-button > .action-metal {
+  display: none;
+}
+
+/* ── Surfaces ── */
+.inputwrap {
+  background: var(--glass);
+  border-color: transparent;
+  -webkit-backdrop-filter: var(--glass-backdrop);
+  backdrop-filter: var(--glass-backdrop);
+  box-shadow: var(--glass-surface-shadow);
+}
+.dropdown-trigger {
+  background: var(--glass-field);
+  border-color: transparent;
+  box-shadow: var(--liquid-rim-soft-small);
+}
+.dropdown-trigger:hover {
+  background: var(--glass-hover);
+}
+.toast {
+  background: var(--glass-float);
+  border-color: transparent;
+  -webkit-backdrop-filter: var(--glass-backdrop);
+  backdrop-filter: var(--glass-backdrop);
+  box-shadow: var(--glass-surface-shadow);
+}
+/* Menus and modals set their fill inline from theme.ts, so the override needs
+   !important. Float/modal tints are thicker so text stays readable. */
+.dropdown-menu,
+.model-menu,
+.slash-menu,
+.bgtasks-menu,
+.winlayout-menu {
+  background: var(--glass-float) !important;
+  border-color: transparent !important;
+  -webkit-backdrop-filter: var(--glass-backdrop);
+  backdrop-filter: var(--glass-backdrop);
+  box-shadow: var(--glass-surface-shadow);
+}
+/* Dense reading text over the chat: solid fill instead of the see-through float tint. */
+.slash-menu {
+  background: var(--surface-2) !important;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+.modal {
+  background: var(--glass-modal) !important;
+  border-color: transparent !important;
+  -webkit-backdrop-filter: var(--glass-backdrop);
+  backdrop-filter: var(--glass-backdrop);
+  box-shadow: var(--glass-surface-shadow);
+}
+.modal-backdrop {
+  background: rgb(0 0 0 / 0.4);
+}
+/* What's new is its own see-through native window, so a backdrop blur has no
+   app content to frost (the desktop behind a window is never blurred). The card
+   brings its own glow for the glass to sit on, and a thick tint keeps the notes
+   readable over any wallpaper. Fill is set inline from theme.ts. */
+.whatsnew-window {
+  background:
+    radial-gradient(
+      70% 55% at 100% 100%,
+      color-mix(in srgb, var(--glow) 30%, transparent),
+      transparent 75%
+    ),
+    radial-gradient(
+      55% 45% at 0% 0%,
+      color-mix(in srgb, var(--glow) 14%, transparent),
+      transparent 80%
+    ),
+    rgb(20 21 25 / 0.9) !important;
+  box-shadow: var(--liquid-rim-soft);
+}
+
+/* ── Sliders, progress bars, switches, checkboxes (veditor's) ──
+   One vocabulary for every control that shows an amount or an on/off state:
+   - a recessed groove (faint fill, dark inner shadow on top, light line below);
+   - an accent fill (sliders, switches) or a lit "flux" gradient (progress);
+   - a glass bead for anything you drag or flip, which swells on hover and
+     further while held, on the same spring as the buttons. */
+:root {
+  --glass-groove: rgb(255 255 255 / 0.1);
+  --glass-groove-shadow:
+    inset 0 1px 2px rgb(0 0 0 / 0.45), inset 0 -1px 1px rgb(255 255 255 / 0.12);
+  /* Progress fill: veditor's blue → cyan flux, nudged toward GG's periwinkle. */
+  --flux-from: #5b63f7;
+  --flux-to: #8fd8ff;
+  --flux-mid: color-mix(in oklab, var(--flux-from), var(--flux-to));
+  --flux-fill: linear-gradient(
+    90deg,
+    var(--flux-from) 0%,
+    var(--flux-mid) 35%,
+    var(--flux-to) 55%,
+    var(--flux-mid) 78%,
+    var(--flux-from) 100%
+  );
+  /* The bead: a bright highlight top-left, the accent underneath. */
+  --glass-bead-accent: radial-gradient(
+    circle at 35% 30%,
+    rgb(255 255 255 / 0.9),
+    color-mix(in oklab, var(--primary) 80%, white) 45%,
+    var(--primary)
+  );
+  --glass-bead-clear: radial-gradient(
+    circle at 35% 30%,
+    rgb(255 255 255 / 0.95),
+    rgb(214 218 228) 45%,
+    rgb(150 156 170)
+  );
+  --glass-bead-shadow: var(--liquid-rim-soft-small), 0 2px 6px rgb(0 0 0 / 0.4);
+  --glass-bead-halo-hover: 0 0 0 4px rgb(255 255 255 / 0.12);
+  --glass-bead-halo-active: 0 0 0 6px rgb(255 255 255 / 0.18);
+}
+
+/* Radio volume slider. The track and fill are separate elements under a
+   transparent range input, so the groove is styled on the track div. */
+.radio-volume-track {
+  inset: 7px 0;
+  border: 0;
+  background: var(--glass-groove);
+  box-shadow: var(--glass-groove-shadow);
+}
+.radio-volume-fill {
+  background: var(--primary);
+  box-shadow: none;
+}
+.radio-volume-input::-webkit-slider-thumb {
+  border: 0;
+  background: var(--glass-bead-accent);
+  box-shadow: var(--glass-bead-shadow);
+  transition:
+    box-shadow var(--t-fast),
+    scale var(--glass-spring-open-duration) var(--glass-spring-open);
+}
+.radio-volume-input:hover::-webkit-slider-thumb {
+  scale: 1.15;
+  box-shadow: var(--glass-bead-shadow), var(--glass-bead-halo-hover);
+}
+.radio-volume-input:active::-webkit-slider-thumb {
+  transform: none;
+  scale: 1.25;
+  box-shadow: var(--glass-bead-shadow), var(--glass-bead-halo-active);
+}
+
+/* Progress bars: the title-bar usage meter, the XP bar on the scorecard, and
+   the model download bar. The usage meter's ripple and floating particles give
+   way to veditor's single white sheen gliding over the fill. */
+.title-usage-track,
+.scorecard-bar,
+.scorecard-stat-bar,
+.hf-progress {
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: rgb(255 255 255 / 0.06) !important;
+  box-shadow:
+    inset 0 2px 3px rgb(0 0 0 / 0.45),
+    inset 0 -1px 2px rgb(255 255 255 / 0.05);
+}
+.title-usage-fill,
+.scorecard-bar span,
+.hf-progress-fill {
+  position: relative;
+  overflow: hidden;
+  border-radius: inherit;
+  background: var(--flux-fill);
+  box-shadow:
+    0 0 8px color-mix(in oklab, var(--flux-from) 55%, transparent),
+    inset 0 1px 0 rgb(255 255 255 / 0.5),
+    inset 0 -1px 2px rgb(0 20 90 / 0.35);
+  transition: width 0.55s var(--ease-out);
+}
+.title-usage-fill {
+  position: absolute;
+}
+/* Per-stat bars compare categories rather than track work, so they keep their
+   quiet grey and only gain the lit top edge. */
+.scorecard-stat-bar span {
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.35);
+}
+.title-usage-particles {
+  display: none;
+}
+/* The sheen. The usage meter reuses its old ripple layer (::before) so the
+   existing "pause while the window is unfocused" rule in App.css still applies. */
+.title-usage-fill::before,
+.hf-progress-fill::after {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  top: 0;
+  left: 0;
+  width: 50%;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, transparent, rgb(255 255 255 / 0.55), transparent);
+  mix-blend-mode: screen;
+  opacity: 1;
+  transform: translateX(-110%);
+  animation: glass-progress-sheen 1.6s linear infinite;
+  pointer-events: none;
+}
+/* The meter is always on screen, so its sheen passes slowly and rests between. */
+.title-usage-fill::before {
+  animation: glass-progress-sheen-idle 6s ease-in-out infinite;
+}
+@keyframes glass-progress-sheen {
+  to {
+    transform: translateX(210%);
+  }
+}
+@keyframes glass-progress-sheen-idle {
+  0%,
+  55% {
+    transform: translateX(-110%);
+  }
+  100% {
+    transform: translateX(210%);
+  }
+}
+
+/* Switches (Autopilot and any other .cl-switch). Veditor has no switch, so this
+   is its slider rebuilt as one: the groove is the track, filling with the
+   accent when on, and the thumb is the glass bead, which slides on the spring.
+   The old Material ripple (the hidden input) is switched off. */
+.cl-switch > input,
+.cl-switch:hover > input,
+.cl-switch > input:focus,
+.cl-switch:hover > input:focus,
+.cl-switch > input:active {
+  opacity: 0;
+}
+.cl-switch > span::before {
+  margin: var(--space-2) 0 var(--space-2) var(--space-5);
+  width: 36px;
+  height: 16px;
+  border-radius: var(--radius-pill);
+  background-color: var(--glass-groove);
+  box-shadow: var(--glass-groove-shadow);
+  transition:
+    background-color var(--t-fast),
+    box-shadow var(--t-fast);
+}
+.cl-switch > span::after {
+  top: 2px;
+  width: 20px;
+  height: 20px;
+  background: var(--glass-bead-clear);
+  box-shadow: var(--glass-bead-shadow);
+  transition:
+    box-shadow var(--t-fast),
+    transform var(--glass-spring-open-duration) var(--glass-spring-open),
+    scale var(--glass-spring-open-duration) var(--glass-spring-open);
+}
+.cl-switch > input:checked + span::before,
+.cl-switch > input:checked:active + span::before {
+  background-color: color-mix(in oklab, var(--primary) 70%, transparent);
+  box-shadow:
+    var(--glass-groove-shadow),
+    0 0 10px color-mix(in oklab, var(--primary) 35%, transparent);
+}
+.cl-switch > input:active + span::before {
+  background-color: var(--glass-groove);
+}
+.cl-switch > input:checked + span::after {
+  background: var(--glass-bead-accent);
+}
+.cl-switch:hover > input:not(:disabled) + span::after {
+  scale: 1.15;
+  box-shadow: var(--glass-bead-shadow), var(--glass-bead-halo-hover);
+}
+.cl-switch > input:active:not(:disabled) + span::after {
+  scale: 1.25;
+  box-shadow: var(--glass-bead-shadow), var(--glass-bead-halo-active);
+}
+.cl-switch > input:disabled + span::before,
+.cl-switch > input:disabled + span::after {
+  opacity: 0.55;
+}
+.cl-switch > input:checked:disabled + span::after {
+  background: var(--glass-bead-accent);
+}
+
+/* Checkboxes and radio buttons in popups (the git setup options, MCP server
+   questions): a small clear glass tile with the soft rim; ticked, it fills with
+   the accent and a dark tick (or dot) pops in from the centre. */
+.modal-radio input:is([type="checkbox"], [type="radio"]) {
+  appearance: none;
+  -webkit-appearance: none;
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  padding: 0;
+  /* 0.35 white keeps the unticked box above 3:1 against the popup. */
+  border: 1px solid rgb(255 255 255 / 0.35);
+  border-radius: 5px;
+  background-color: var(--glass-field);
+  background-repeat: no-repeat;
+  background-position: center;
+  background-size: 0%;
+  box-shadow: var(--liquid-rim-soft-small);
+  cursor: pointer;
+  transition:
+    background-color var(--t-fast),
+    border-color var(--t-fast),
+    background-size 240ms var(--ease-pop);
+}
+.modal-radio input[type="checkbox"] {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%230c0e26' stroke-width='2.25' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m3.5 8.5 3 3 6-7'/%3E%3C/svg%3E");
+}
+.modal-radio input[type="radio"] {
+  border-radius: 50%;
+  background-image: radial-gradient(circle, var(--on-primary) 0 34%, transparent 38%);
+}
+.modal-radio input:is([type="checkbox"], [type="radio"]):hover:not(:disabled) {
+  background-color: var(--glass-hover);
+  border-color: rgb(255 255 255 / 0.55);
+}
+.modal-radio input:is([type="checkbox"], [type="radio"]):checked {
+  background-color: var(--primary);
+  border-color: var(--primary);
+  background-size: 80%;
+  box-shadow:
+    var(--liquid-rim-soft-small),
+    0 0 10px color-mix(in oklab, var(--primary) 35%, transparent);
+}
+.modal-radio input[type="radio"]:checked {
+  background-size: 100%;
+}
+.modal-radio input:is([type="checkbox"], [type="radio"]):checked:hover:not(:disabled) {
+  background-color: var(--primary-hi);
+  border-color: var(--primary-hi);
+}
+.modal-radio input:is([type="checkbox"], [type="radio"]):disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+.modal-radio input:is([type="checkbox"], [type="radio"]):focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
+/* Windows high-contrast mode: system colours, so every state stays visible. */
+@media (forced-colors: active) {
+  .modal-radio input:is([type="checkbox"], [type="radio"]) {
+    border-color: CanvasText;
+  }
+  .modal-radio input:is([type="checkbox"], [type="radio"]):checked,
+  .cl-switch > input:checked + span::before {
+    background-color: Highlight;
+    border-color: Highlight;
+  }
+  .title-usage-track,
+  .scorecard-bar,
+  .scorecard-stat-bar,
+  .hf-progress,
+  .radio-volume-track,
+  .cl-switch > span::before {
+    border: 1px solid CanvasText;
+  }
+  .title-usage-fill,
+  .scorecard-bar span,
+  .hf-progress-fill,
+  .radio-volume-fill {
+    background: Highlight;
+  }
+}
+
+/* ── Accessibility: reduced transparency or more contrast turn it all solid ── */
+@media (prefers-reduced-transparency: reduce), (prefers-contrast: more) {
+  :root {
+    --glass: var(--surface-1);
+    --glass-hover: var(--surface-2);
+    --glass-field: var(--surface-1);
+    --glass-float: var(--surface-2);
+    --glass-modal: var(--surface-2);
+    --glass-clear: var(--surface-2);
+    --glass-clear-hover: var(--surface-3);
+    --glass-backdrop: none;
+    --glass-surface-shadow: inset 0 0 0 1px var(--border-strong), var(--shadow-lg);
+  }
+  .whatsnew-window {
+    background: var(--surface-2) !important;
+  }
+  .modal-btn.primary {
+    background: var(--primary);
+    color: var(--on-primary);
+  }
+  .modal-btn.primary:hover:not(:disabled) {
+    background: var(--primary-hi);
+    color: var(--on-primary);
+  }
+  .btn-primary,
+  .icon-circle-primary,
+  .inputactions-trailing:has(> .action-metal.metal-fx-root) > .icon-circle-primary {
+    background: var(--primary);
+    color: var(--on-primary);
+  }
+  .btn-primary:hover:not(:disabled),
+  .icon-circle-primary:hover:not(:disabled),
+  .enhance-pill:hover:not(:disabled),
+  .enhance-pill-host:has(> .action-metal.metal-fx-root) > .enhance-pill:hover:not(:disabled) {
+    background: var(--primary-hi);
+    color: var(--on-primary);
+  }
+  .btn-success {
+    background: var(--success);
+    color: var(--on-success);
+  }
+  .login-tile,
+  .login-method-card {
+    box-shadow: inset 0 0 0 1px var(--border-strong);
+  }
+  .enhance-pill,
+  .enhance-pill-host:has(> .action-metal.metal-fx-root) > .enhance-pill {
+    background: var(--primary);
+    color: var(--on-primary);
+  }
+}
+/* Reduced motion: no swell or dip; the colour change alone marks hover/press. */
+@media (prefers-reduced-motion: reduce) {
+  :is(.btn, .icon-circle, .modal-btn, .modal-close, .enhance-pill, .login-tile):is(
+      :hover,
+      :active
+    ):not(:disabled) {
+    scale: none;
+    transform: none;
+  }
+  /* The composer circles also skip their reflow fade here, as App.css's
+     reduced rule intends; the list above would otherwise bring it back. */
+  .inputrow .icon-circle {
+    transition:
+      background-color var(--t-fast),
+      border-color var(--t-fast),
+      color var(--t-fast),
+      filter var(--t-fast),
+      box-shadow var(--t-fast);
+  }
+  /* Sliders and switches: no bead swell; the switch thumb jumps instead of
+     sliding and a tick appears without its pop. Their hover glow and colours
+     still fade, like the buttons above. Progress bars snap to each value and
+     drop the sheen. The vendor-prefixed thumb stays in its own rule: an
+     unknown selector would void a combined list. */
+  .radio-volume-input::-webkit-slider-thumb {
+    transition: box-shadow var(--t-fast);
+    scale: none;
+  }
+  .cl-switch > span::before {
+    transition: none;
+  }
+  .cl-switch > span::after {
+    transition: box-shadow var(--t-fast);
+  }
+  .modal-radio input:is([type="checkbox"], [type="radio"]) {
+    transition:
+      background-color var(--t-fast),
+      border-color var(--t-fast);
+  }
+  .cl-switch:hover > input:not(:disabled) + span::after,
+  .cl-switch > input:active:not(:disabled) + span::after {
+    scale: none;
+  }
+  .title-usage-fill,
+  .scorecard-bar span,
+  .hf-progress-fill {
+    transition: none;
+  }
+  .title-usage-fill::before,
+  .hf-progress-fill::after {
+    display: none;
+    animation: none;
+  }
+  /* The update dot re-sets its animation-name above, after App.css's reduced
+     rule; drop it here so the pulse never runs. */
+  .update-banner-dot {
+    animation: none;
+  }
+}

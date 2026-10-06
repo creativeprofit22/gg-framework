@@ -1,0 +1,224 @@
+<!doctype html>
+<!--
+  clay-drop-3d: a soft clay/plastic object drops into a still, milky water
+  plane, sends out ripples and settles with a gentle bob. Hazy sky and
+  blurred mountains behind, soft shadows, depth of field. Stylized, not
+  photoreal: simple forms, soft light, a restrained palette.
+  Requires the bundled Three.js (meta "requires": ["three"]).
+  Params (top of script): IMPACT (s), SHAPE (rounded-box dims + radius).
+  Colors: object = --accent, water/haze = --field, mountains mix --field-2.
+  The sky and mountains are painted into scene.background (a canvas
+  texture) because post-processing drops canvas transparency.
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+  </head>
+  <body>
+    <div
+      id="clay-drop-3d-root"
+      data-composition-id="clay-drop-3d"
+      data-start="0"
+      data-duration="5"
+      data-width="1920"
+      data-height="1080"
+    >
+      <style>
+        [data-composition-id="clay-drop-3d"] {
+          position: absolute;
+          inset: 0;
+          overflow: hidden;
+          background: var(--field, #eef1f7);
+        }
+        [data-composition-id="clay-drop-3d"] canvas {
+          position: absolute;
+          inset: 0;
+          width: 1920px;
+          height: 1080px;
+        }
+      </style>
+      <canvas id="cd-gl" width="1920" height="1080"></canvas>
+    </div>
+    <script type="module">
+      import * as THREE from "three";
+      import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
+      import { RoundedBoxGeometry } from "three/addons/geometries/RoundedBoxGeometry.js";
+      import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";
+      import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
+      import { BokehPass } from "three/addons/postprocessing/BokehPass.js";
+      import { OutputPass } from "three/addons/postprocessing/OutputPass.js";
+
+      const IMPACT = 0.9;
+      const SHAPE = { w: 1.7, h: 0.95, d: 1.15, radius: 0.42 };
+      const W = 1920;
+      const H = 1080;
+
+      const root = document.querySelector('[data-composition-id="clay-drop-3d"]');
+      const css = getComputedStyle(root);
+      const color = (name, fallback) => {
+        const value = css.getPropertyValue(name).trim();
+        return new THREE.Color(/^#|^rgb/.test(value) ? value : fallback);
+      };
+      const FIELD = color("--field", "#eef1f7");
+      const ACCENT = color("--accent", "#2f5bff");
+
+      const renderer = new THREE.WebGLRenderer({
+        canvas: document.getElementById("cd-gl"),
+        antialias: true,
+        preserveDrawingBuffer: true,
+      });
+      renderer.setSize(W, H, false);
+      renderer.setPixelRatio(1);
+      renderer.setClearColor(FIELD, 1);
+      // Neutral keeps brand colors saturated (ACES washes blues to lavender).
+      renderer.toneMapping = THREE.NeutralToneMapping;
+      renderer.toneMappingExposure = 1.0;
+      renderer.shadowMap.enabled = true;
+      renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+      const scene = new THREE.Scene();
+      // Sky: warm haze at the top falling into the field color, blurred
+      // mountain silhouettes sitting on the water's horizon.
+      const HORIZON = 0.43; // fraction of frame height where the water ends
+      const sky = document.createElement("canvas");
+      sky.width = 1920;
+      sky.height = 1080;
+      const g = sky.getContext("2d");
+      const field = `#${FIELD.getHexString()}`;
+      const grad = g.createLinearGradient(0, 0, 0, 1080 * HORIZON);
+      grad.addColorStop(0, `#${FIELD.clone().lerp(new THREE.Color("#f2cdb0"), 0.35).getHexString()}`);
+      grad.addColorStop(1, field);
+      g.fillStyle = grad;
+      g.fillRect(0, 0, 1920, 1080);
+      g.filter = "blur(12px)";
+      g.fillStyle = `#${FIELD.clone().lerp(color("--field-2", "#0b2a8f"), 0.32).getHexString()}`;
+      const baseY = 1080 * HORIZON + 6;
+      const ridge = (pts) => {
+        g.beginPath();
+        g.moveTo(pts[0][0], baseY);
+        for (const [x, y] of pts) g.lineTo(x, baseY - y);
+        g.lineTo(pts[pts.length - 1][0], baseY);
+        g.closePath();
+        g.fill();
+      };
+      ridge([[-40, 40], [120, 120], [250, 64], [330, 86], [480, 10]]);
+      ridge([[1160, 10], [1290, 80], [1420, 190], [1520, 120], [1630, 210], [1750, 104], [1870, 140], [1990, 40]]);
+      g.filter = "none";
+      const skyTexture = new THREE.CanvasTexture(sky);
+      skyTexture.colorSpace = THREE.SRGBColorSpace;
+      scene.background = skyTexture;
+      scene.environment = new THREE.PMREMGenerator(renderer).fromScene(new RoomEnvironment(), 0.04).texture;
+      scene.environmentIntensity = 0.55;
+      scene.fog = new THREE.Fog(FIELD, 7.5, 17);
+
+      const camera = new THREE.PerspectiveCamera(26, W / H, 0.1, 80);
+
+      // Water: a dense plane displaced on the CPU each frame (deterministic).
+      const SEG = 220;
+      const waterGeo = new THREE.PlaneGeometry(44, 44, SEG, SEG);
+      waterGeo.rotateX(-Math.PI / 2);
+      const base = waterGeo.attributes.position.array.slice();
+      const water = new THREE.Mesh(
+        waterGeo,
+        new THREE.MeshPhysicalMaterial({
+          color: FIELD.clone().offsetHSL(0, -0.05, -0.02),
+          roughness: 0.16,
+          metalness: 0,
+          clearcoat: 1,
+          clearcoatRoughness: 0.12,
+        }),
+      );
+      water.receiveShadow = true;
+      scene.add(water);
+
+      // The clay object.
+      const clay = new THREE.Mesh(
+        new RoundedBoxGeometry(SHAPE.w, SHAPE.h, SHAPE.d, 10, SHAPE.radius),
+        new THREE.MeshPhysicalMaterial({
+          color: ACCENT,
+          roughness: 0.42,
+          clearcoat: 0.35,
+          clearcoatRoughness: 0.35,
+          sheen: 0.12,
+          sheenColor: new THREE.Color(0xffffff),
+        }),
+      );
+      clay.castShadow = true;
+      scene.add(clay);
+
+      const sun = new THREE.DirectionalLight(0xffffff, 2.3);
+      sun.position.set(-4, 8, 5);
+      sun.castShadow = true;
+      sun.shadow.mapSize.set(2048, 2048);
+      sun.shadow.radius = 10;
+      sun.shadow.blurSamples = 20;
+      sun.shadow.camera.left = -5;
+      sun.shadow.camera.right = 5;
+      sun.shadow.camera.top = 5;
+      sun.shadow.camera.bottom = -5;
+      scene.add(sun);
+      scene.add(new THREE.HemisphereLight(0xffffff, FIELD, 0.6));
+
+      const composer = new EffectComposer(renderer);
+      composer.setSize(W, H);
+      composer.setPixelRatio(1);
+      composer.addPass(new RenderPass(scene, camera));
+      const bokeh = new BokehPass(scene, camera, { focus: 9, aperture: 0.0016, maxblur: 0.006 });
+      composer.addPass(bokeh);
+      composer.addPass(new OutputPass());
+
+      const pos = waterGeo.attributes.position;
+      function ripples(t) {
+        const since = t - IMPACT;
+        for (let i = 0; i < pos.count; i++) {
+          const x = base[i * 3];
+          const z = base[i * 3 + 2];
+          let y = 0;
+          if (since > 0) {
+            const r = Math.hypot(x, z * 1.15);
+            const front = 2.4 * since;
+            if (r < front + 0.3) {
+              const phase = 6.2 * (r - front);
+              const envelope = Math.exp(-1.1 * since) * Math.exp(-0.28 * r);
+              const edge = Math.min(1, (front + 0.3 - r) / 0.6);
+              y = 0.11 * envelope * edge * Math.sin(phase);
+            }
+          }
+          pos.array[i * 3 + 1] = y;
+        }
+        pos.needsUpdate = true;
+        waterGeo.computeVertexNormals();
+      }
+
+      function renderAt(t) {
+        // Fall with gravity, then a damped bob after impact.
+        let y;
+        if (t < IMPACT) {
+          const p = t / IMPACT;
+          y = 3.2 - (3.2 - 0.1) * p * p;
+        } else {
+          const s = t - IMPACT;
+          y = 0.1 - 0.16 * Math.exp(-2.4 * s) * Math.sin(7.5 * s);
+        }
+        clay.position.set(0, y, 0);
+        const settle = Math.max(0, t - IMPACT);
+        clay.rotation.set(0.12 * Math.exp(-2 * settle), 0.35 + 0.05 * t, -0.06 * Math.exp(-2 * settle));
+        ripples(t);
+        // Slow push-in.
+        const k = Math.min(1, t / 5);
+        camera.position.set(0.35 - 0.35 * k, 1.5 - 0.1 * k, 8.8 - 1.1 * k);
+        camera.lookAt(0, 0.62, 0);
+        bokeh.uniforms.focus.value = camera.position.distanceTo(clay.position);
+        composer.render();
+      }
+
+      const clock = { t: 0 };
+      const tl = gsap.timeline({ paused: true });
+      tl.fromTo(clock, { t: 0 }, { t: 5, duration: 5, ease: "none", onUpdate: () => renderAt(clock.t) }, 0);
+      renderAt(0);
+      window.__timelines = window.__timelines || {};
+      window.__timelines["clay-drop-3d"] = tl;
+    </script>
+  </body>
+</html>

@@ -1,0 +1,139 @@
+<!doctype html>
+<!--
+  scale-through-word: a big word rises in, then the camera dives through one
+  of its letters — the word scales ~1 → 48× around that letter's counter,
+  which floods with --field-2 and becomes the next scene's background.
+  Ends on a full --field-2 frame: cut to a scene whose field is --field-2.
+  Mark the letter to dive through with .stw-target (a letter with a closed
+  counter: O, D, A, B, P, Q, 0, 8...). Transparent until the handoff.
+  Params: --stw-size (font size); --stw-cx / --stw-cy (counter center inside
+  the letter box) and --stw-cw / --stw-ch (counter size, may overshoot a little: the glyph paints over it) — tune these if the
+  display face changes; SCALE_TO, ZOOM_AT, ZOOM (seconds).
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+  </head>
+  <body>
+    <div
+      id="scale-through-word-root"
+      data-composition-id="scale-through-word"
+      data-start="0"
+      data-duration="3"
+      data-width="1920"
+      data-height="1080"
+    >
+      <style>
+        [data-composition-id="scale-through-word"] {
+          --stw-size: 300px;
+          --stw-cx: 50%;
+          --stw-cy: 0.47em;
+          --stw-cw: 0.5em;
+          --stw-ch: 0.62em;
+          position: absolute;
+          inset: 0;
+          overflow: hidden;
+          color: var(--ink, #111);
+        }
+        [data-composition-id="scale-through-word"] .stw-word {
+          position: absolute;
+          left: 50%;
+          top: 50%;
+          font-family: var(--display, sans-serif);
+          font-weight: var(--display-weight, 800);
+          font-stretch: var(--display-stretch, 100%);
+          letter-spacing: var(--display-tracking, -0.03em);
+          font-size: var(--stw-size);
+          line-height: 1;
+          text-transform: uppercase;
+          white-space: nowrap;
+          transform: translate(-50%, -50%);
+        }
+        [data-composition-id="scale-through-word"] .stw-mask {
+          display: block;
+          overflow: hidden;
+          padding: 0.04em 0.02em;
+        }
+        [data-composition-id="scale-through-word"] .stw-inner {
+          display: inline-block;
+        }
+        [data-composition-id="scale-through-word"] .stw-target {
+          position: relative;
+          display: inline-block;
+        }
+        [data-composition-id="scale-through-word"] .stw-glyph {
+          position: relative;
+        }
+        [data-composition-id="scale-through-word"] .stw-counter {
+          position: absolute;
+          left: var(--stw-cx);
+          top: var(--stw-cy);
+          width: var(--stw-cw);
+          height: var(--stw-ch);
+          margin: calc(var(--stw-ch) / -2) 0 0 calc(var(--stw-cw) / -2);
+          border-radius: 46%;
+          background: var(--field-2, #123);
+          transform: scale(0);
+        }
+        [data-composition-id="scale-through-word"] .stw-flood {
+          position: absolute;
+          inset: 0;
+          background: var(--field-2, #123);
+          opacity: 0;
+        }
+      </style>
+      <!-- edit: the word; wrap the letter to dive through in .stw-target -->
+      <div class="stw-word" id="stw-word">
+        <span class="stw-mask"
+          ><span class="stw-inner" id="stw-inner"
+            >F<span class="stw-target" id="stw-target"
+              ><i class="stw-counter" id="stw-counter"></i><span class="stw-glyph">O</span></span
+            >CUS</span
+          ></span
+        >
+      </div>
+      <div class="stw-flood" id="stw-flood"></div>
+    </div>
+    <script>
+      (function () {
+        const SCALE_TO = 48;
+        const ZOOM_AT = 1.1;
+        const ZOOM = 1.4;
+        const word = document.getElementById("stw-word");
+        const target = document.getElementById("stw-target");
+        const counter = document.getElementById("stw-counter");
+        const flood = document.getElementById("stw-flood");
+        const state = { z: 0 };
+        // Offsets ignore transforms, so the counter center is measured in the
+        // word's own box every frame (robust to late font loads).
+        function draw() {
+          let ox = counter.offsetLeft + counter.offsetWidth / 2;
+          let oy = counter.offsetTop + counter.offsetHeight / 2;
+          for (let el = target; el && el !== word; el = el.offsetParent) {
+            ox += el.offsetLeft;
+            oy += el.offsetTop;
+          }
+          const s = Math.pow(SCALE_TO, state.z);
+          const k = Math.min(1, Math.log(s) / Math.log(4));
+          const dx = -(ox - word.offsetWidth / 2) * k;
+          const dy = -(oy - word.offsetHeight / 2) * k;
+          word.style.transformOrigin = `${ox.toFixed(2)}px ${oy.toFixed(2)}px`;
+          word.style.transform = `translate(-50%, -50%) translate(${dx.toFixed(2)}px, ${dy.toFixed(2)}px) scale(${s.toFixed(4)})`;
+          counter.style.transform = `scale(${Math.min(1, state.z / 0.3).toFixed(4)})`;
+          flood.style.opacity = state.z >= 0.985 ? "1" : "0";
+          // Once the cut field covers the frame, retire the outgoing glyphs.
+          // Derive this from seek time so scrubbing backward restores them.
+          word.style.visibility = state.z >= 0.985 ? "hidden" : "visible";
+        }
+        const tl = gsap.timeline({ paused: true });
+        tl.fromTo("#stw-inner", { yPercent: 110 }, { yPercent: 0, duration: 0.8, ease: "expo.out" }, 0.1);
+        tl.fromTo(state, { z: 0 }, { z: 1, duration: ZOOM, ease: "power2.in", onUpdate: draw }, ZOOM_AT);
+        tl.to({}, { duration: Math.max(0, 3 - tl.duration()) });
+        draw();
+        window.__timelines = window.__timelines || {};
+        window.__timelines["scale-through-word"] = tl;
+      })();
+    </script>
+  </body>
+</html>

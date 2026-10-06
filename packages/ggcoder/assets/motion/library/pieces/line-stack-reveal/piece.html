@@ -1,0 +1,98 @@
+<!doctype html>
+<!--
+  line-stack-reveal: a 2–4 line headline, each line rising out of its own
+  overflow-hidden mask (expo.out, 0.08s stagger), with a small mono eyebrow.
+  Add a line by adding another .lsr-mask; add class "lsr-accent" to a line
+  to color it --accent. Transparent background.
+  Params: --lsr-size (font size), --lsr-x / --lsr-y (top-left of the block),
+  STAGGER, RISE (seconds per line), START.
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+  </head>
+  <body>
+    <div
+      id="line-stack-reveal-root"
+      data-composition-id="line-stack-reveal"
+      data-start="0"
+      data-duration="3"
+      data-width="1920"
+      data-height="1080"
+    >
+      <style>
+        [data-composition-id="line-stack-reveal"] {
+          --lsr-size: 176px;
+          --lsr-x: 150px;
+          --lsr-y: 250px;
+          position: absolute;
+          inset: 0;
+          color: var(--ink, #111);
+        }
+        [data-composition-id="line-stack-reveal"] .lsr-block {
+          position: absolute;
+          left: var(--lsr-x);
+          top: var(--lsr-y);
+        }
+        [data-composition-id="line-stack-reveal"] .lsr-eyebrow {
+          font-family: var(--mono, monospace);
+          font-size: 24px;
+          letter-spacing: 0.14em;
+          text-transform: uppercase;
+          color: var(--muted, rgba(0, 0, 0, 0.6));
+          margin: 0 0 40px 0.12em;
+          overflow: hidden;
+        }
+        [data-composition-id="line-stack-reveal"] .lsr-eyebrow span {
+          display: inline-block;
+        }
+        [data-composition-id="line-stack-reveal"] .lsr-mask {
+          overflow: hidden;
+          line-height: 0.98;
+          padding: 0.02em 0 0.06em;
+          margin-bottom: -0.06em;
+        }
+        [data-composition-id="line-stack-reveal"] .lsr-line {
+          display: inline-block;
+          font-family: var(--display, sans-serif);
+          font-weight: var(--display-weight, 800);
+          font-stretch: var(--display-stretch, 100%);
+          letter-spacing: var(--display-tracking, -0.03em);
+          font-size: var(--lsr-size);
+          white-space: nowrap;
+        }
+        [data-composition-id="line-stack-reveal"] .lsr-accent {
+          color: var(--accent, currentColor);
+        }
+      </style>
+      <div class="lsr-block">
+        <!-- edit: eyebrow label (delete the div to drop it) -->
+        <div class="lsr-eyebrow"><span>Chapter 02 — Craft</span></div>
+        <!-- edit: headline lines, one per .lsr-mask (2–4 lines) -->
+        <div class="lsr-mask"><span class="lsr-line">Every frame</span></div>
+        <div class="lsr-mask"><span class="lsr-line">is a decision.</span></div>
+        <div class="lsr-mask"><span class="lsr-line lsr-accent">Make it count.</span></div>
+      </div>
+    </div>
+    <script>
+      (function () {
+        const START = 0.2;
+        const STAGGER = 0.08;
+        const RISE = 1.1;
+        const root = '[data-composition-id="line-stack-reveal"] ';
+        const tl = gsap.timeline({ paused: true });
+        tl.fromTo(root + ".lsr-eyebrow span", { yPercent: 110 }, { yPercent: 0, duration: 0.8, ease: "expo.out" }, START);
+        tl.fromTo(
+          root + ".lsr-line",
+          { yPercent: 112 },
+          { yPercent: 0, duration: RISE, ease: "expo.out", stagger: STAGGER },
+          START + 0.12,
+        );
+        tl.to({}, { duration: 3 - tl.duration() });
+        window.__timelines = window.__timelines || {};
+        window.__timelines["line-stack-reveal"] = tl;
+      })();
+    </script>
+  </body>
+</html>

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { Message } from "@kenkaiiii/gg-ai";
 import { messagesToHistoryItems } from "../cli.js";
 import { PROMPT_COMMANDS } from "./prompt-commands.js";
+import { expandPromptCommand } from "./prompt-command-expansion.js";
 import { DISPLAY_ITEM_CUSTOM_KIND, SessionManager, type SessionEntry } from "./session-manager.js";
 import { getRestoredMessagesForDisplay } from "./session-compaction.js";
 
@@ -72,6 +73,16 @@ describe("continued session replay display filtering", () => {
     }
   });
 
+  it("restores current invocation guidance as the original command, not prompt boilerplate", () => {
+    for (const command of PROMPT_COMMANDS) {
+      expect(
+        replayHistory([
+          { role: "user", content: expandPromptCommand(command.prompt, "login only") },
+        ]),
+      ).toMatchObject([{ kind: "user", text: `/${command.name} login only` }]);
+    }
+  });
+
   it("keeps compact restore/system control out of display but preserves normal slash-command text", () => {
     const persisted: Message[] = [
       { role: "system", content: "internal system control should remain hidden" },
@@ -84,5 +95,32 @@ describe("continued session replay display filtering", () => {
     expect(replayedText).not.toContain("internal system control");
     expect(replayedText).toContain("/help");
     expect(replayedText).toContain("Here are the available commands.");
+  });
+
+  it("uses provenance before role or legacy prefixes", () => {
+    const persisted: Message[] = [
+      {
+        role: "user",
+        content: "generated control with ordinary text",
+        provenance: { source: "runtime", kind: "automation", visibility: "hidden" },
+      },
+      {
+        role: "user",
+        content: "queued follow-up",
+        provenance: { source: "human", kind: "steering", visibility: "transcript" },
+      },
+      {
+        role: "assistant",
+        content: "generated acknowledgement",
+        provenance: { source: "runtime", kind: "compaction_ack", visibility: "hidden" },
+      },
+      {
+        role: "user",
+        content: "summary without prefix",
+        provenance: { source: "runtime", kind: "compaction_summary", visibility: "summary" },
+      },
+    ];
+
+    expect(replayTexts(persisted)).toEqual(["queued follow-up", "summary without prefix"]);
   });
 });

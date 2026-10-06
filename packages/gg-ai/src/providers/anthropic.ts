@@ -13,7 +13,9 @@ import {
   readHeader,
   isHardBillingMessage,
   isRawJsonErrorEcho,
+  isRawHtmlErrorEcho,
   emptyProviderErrorMessage,
+  providerHtmlErrorMessage,
 } from "../errors.js";
 import { StreamResult } from "../utils/event-stream.js";
 import {
@@ -26,6 +28,8 @@ import {
   toAnthropicToolChoice,
   toAnthropicTools,
   isAdaptiveThinkingModel,
+  isForcedToolChoice,
+  rejectsForcedToolChoice,
 } from "./transform.js";
 import { isJsonObject } from "../utils/json.js";
 
@@ -77,6 +81,80 @@ export function fineGrainedToolStreamingEnabled(): boolean {
   if (!raw) return false;
   const v = raw.trim().toLowerCase();
   return v === "1" || v === "true" || v === "yes" || v === "on";
+}
+
+/** Beta that enables server-side refusal fallback (`fallbacks` body param). */
+export const SERVER_FALLBACK_BETA = "server-side-fallback-2026-07-01";
+
+/**
+ * Per-process memo of provider configs whose server-side-fallback request was
+ * rejected (HTTP 400 naming `fallbacks` / the beta). Once a config lands here we
+ * stop sending the param for the rest of the process. Exported for tests.
+ */
+export const anthropicServerFallback = {
+  disabled: new Set<string>(),
+  reset(): void {
+    this.disabled.clear();
+  },
+};
+
+function serverFallbackKey(options: StreamOptions): string {
+  const auth = options.apiKey?.startsWith("sk-ant-oat") ? "oauth" : "key";
+  return `${options.baseUrl ?? process.env.ANTHROPIC_BASE_URL ?? ""}|${auth}`;
+}
+
+/**
+ * True only for the first-party Claude API (`https://api.anthropic.com`). The
+ * SDK falls back to `ANTHROPIC_BASE_URL` when no baseUrl is passed, so that is
+ * checked too. Bedrock / Vertex / Foundry / proxies / Anthropic-compatible
+ * third parties (MiniMax) don't support server-side fallback.
+ */
+export function isDirectAnthropicApi(baseUrl: string | undefined): boolean {
+  const effective = baseUrl ?? process.env.ANTHROPIC_BASE_URL;
+  if (!effective) return true;
+  try {
+    const url = new URL(effective);
+    return url.protocol === "https:" && url.hostname === "api.anthropic.com";
+  } catch {
+    return false;
+  }
+}
+
+/** A 400 that rejects the server-side-fallback param or its beta header. */
+function isServerFallbackRejection(err: unknown): boolean {
+  const status = (err as { status?: unknown } | null)?.status;
+  if (status !== 400) return false;
+  const message = err instanceof Error ? err.message : String(err);
+  return /fallbacks|server-side-fallback/i.test(message);
+}
+
+interface IterationTotals {
+  inputTokens: number;
+  outputTokens: number;
+  cacheRead: number;
+  cacheWrite: number;
+}
+
+/**
+ * Sum token counts across `usage.iterations`. With server-side fallback (and
+ * compaction) the top-level usage covers only the attempt that produced the
+ * returned message; every declined/earlier attempt is billed on its own entry.
+ * Returns null when the array is absent or empty.
+ */
+export function sumUsageIterations(usage: unknown): IterationTotals | null {
+  const iterations = (usage as { iterations?: unknown } | null | undefined)?.iterations;
+  if (!Array.isArray(iterations) || iterations.length === 0) return null;
+  const num = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+  const totals: IterationTotals = { inputTokens: 0, outputTokens: 0, cacheRead: 0, cacheWrite: 0 };
+  for (const it of iterations) {
+    if (!it || typeof it !== "object") continue;
+    const rec = it as Record<string, unknown>;
+    totals.inputTokens += num(rec.input_tokens);
+    totals.outputTokens += num(rec.output_tokens);
+    totals.cacheRead += num(rec.cache_read_input_tokens);
+    totals.cacheWrite += num(rec.cache_creation_input_tokens);
+  }
+  return totals;
 }
 
 function createClient(options: StreamOptions): Anthropic {
@@ -164,28 +242,22 @@ export async function prewarmAnthropicCache(options: {
           ...(system ?? []),
         ]
       : system;
-    const tools = options.tools?.length
-      ? toAnthropicTools(options.tools, {
-          cacheControl,
-          // Keep the serialized tool bytes identical to runStream so the
-          // prewarmed prompt cache actually hits — both are gated by the flag.
-          enableFineGrainedToolStreaming: fineGrainedToolStreamingEnabled(),
-        })
-      : undefined;
+    const tools = [
+      ...toAnthropicTools(options.tools ?? [], {
+        cacheControl,
+        // Keep the serialized tool bytes identical to runStream so the
+        // prewarmed prompt cache actually hits — both are gated by the flag.
+        enableFineGrainedToolStreaming: fineGrainedToolStreamingEnabled(),
+      }),
+      ...(options.serverTools ?? []),
+    ];
     await client.messages.create(
       {
         model: options.model,
         max_tokens: 1,
         messages,
         ...(fullSystem ? { system: fullSystem as Anthropic.MessageCreateParams["system"] } : {}),
-        ...(tools
-          ? {
-              tools: [
-                ...tools,
-                ...(options.serverTools ?? []),
-              ] as Anthropic.MessageCreateParams["tools"],
-            }
-          : {}),
+        ...(tools.length ? { tools: tools as Anthropic.MessageCreateParams["tools"] } : {}),
       } as Anthropic.MessageCreateParamsNonStreaming,
       {
         signal: options.signal ?? undefined,
@@ -212,16 +284,44 @@ export function streamAnthropic(options: StreamOptions): StreamResult {
 }
 
 async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, StreamResponse> {
+  // Fail fast instead of letting the API return an opaque 400: some models
+  // (Sonnet 5.5) reject forced tool use outright.
+  if (
+    options.toolChoice &&
+    options.tools?.length &&
+    isForcedToolChoice(options.toolChoice) &&
+    rejectsForcedToolChoice(options.model)
+  ) {
+    throw new ProviderError(
+      "anthropic",
+      `${options.model} does not support forced tool use; use toolChoice 'auto' and ask for the tool in the prompt.`,
+      { statusCode: 400 },
+    );
+  }
+
   const client = createClient(options);
   const isOAuth = options.apiKey?.startsWith("sk-ant-oat");
-  const useStreaming = options.streaming !== false;
+  // Prewarm uses a single non-streaming request: the stream flag is not part of
+  // the prompt-cache key, and a 1-token response needs no incremental events.
+  const useStreaming = options.streaming !== false && !options.prewarm;
 
   const cacheControl = toAnthropicCacheControl(options.cacheRetention, options.baseUrl);
   const supportsFirstPartyToolExtras =
     !options.baseUrl || options.baseUrl.includes("api.anthropic.com");
   const downgradedImages = downgradeUnsupportedImages(options.messages, options.supportsImages);
   const downgradedMessages = downgradeUnsupportedVideos(downgradedImages, options.supportsVideo);
-  const { system: rawSystem, messages } = toAnthropicMessages(downgradedMessages, cacheControl);
+  // Server-side refusal fallback: first-party API only, and not once this config
+  // has rejected it. Prewarm sends it too so its body/headers stay identical to
+  // the real request's (prompt-cache parity). Replayed `fallback` blocks are only
+  // sent alongside the beta; otherwise they're stripped.
+  const fallbackKey = serverFallbackKey(options);
+  const useServerFallback =
+    options.provider !== "minimax" &&
+    isDirectAnthropicApi(options.baseUrl) &&
+    !anthropicServerFallback.disabled.has(fallbackKey);
+  const { system: rawSystem, messages } = toAnthropicMessages(downgradedMessages, cacheControl, {
+    fallbackBlocks: useServerFallback,
+  });
 
   // OAuth tokens require Claude Code identity in the system prompt
   const system = isOAuth
@@ -245,6 +345,21 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
     if (t.outputConfig) {
       outputConfig = t.outputConfig;
     }
+  }
+
+  if (options.prewarm) {
+    // Thinking config is part of the cache key, so it must stay identical. Budget
+    // thinking requires budget_tokens < max_tokens, which can't hold at 1 — skip
+    // the request entirely rather than warm a different prefix.
+    const budget = (thinking as { budget_tokens?: number } | undefined)?.budget_tokens;
+    if (budget != null && budget >= 1) {
+      return {
+        message: { role: "assistant", content: [] },
+        stopReason: "end_turn",
+        usage: { inputTokens: 0, outputTokens: 0 },
+      };
+    }
+    maxTokens = 1;
   }
 
   const params: Anthropic.MessageCreateParams = {
@@ -302,11 +417,12 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
       ];
       return contextEdits.length ? { context_management: { edits: contextEdits } } : {};
     })(),
+    ...(useServerFallback ? { fallbacks: "default" } : {}),
     stream: useStreaming,
   } as Anthropic.MessageCreateParams;
 
-  // Adaptive thinking models (Opus 4.8, Opus 4.7, Opus 4.6, Sonnet 5) don't need the
-  // interleaved-thinking beta — they have it built in.
+  // Adaptive thinking models (Fable 5.1, Opus 5.5/5, Opus 4.8/4.7/4.6, Sonnet 5.5/5)
+  // don't need the interleaved-thinking beta — they have it built in.
   const hasAdaptiveThinking = isAdaptiveThinkingModel(options.model);
 
   const betaHeaders = [
@@ -323,11 +439,47 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
     // so a pre-warmed cache expires before the user's first turn. cacheControl.ttl
     // is only "1h" on the first-party endpoint (see toAnthropicCacheControl).
     ...(cacheControl?.ttl === "1h" ? ["extended-cache-ttl-2025-04-11"] : []),
+    ...(useServerFallback ? [SERVER_FALLBACK_BETA] : []),
   ];
 
-  const requestOptions = {
+  const toRequestOptions = (
+    betas: string[],
+  ): { signal?: AbortSignal; headers?: Record<string, string> } => ({
     signal: options.signal ?? undefined,
-    ...(betaHeaders.length ? { headers: { "anthropic-beta": betaHeaders.join(",") } } : {}),
+    ...(betas.length ? { headers: { "anthropic-beta": betas.join(",") } } : {}),
+  });
+  const requestOptions = toRequestOptions(betaHeaders);
+
+  /**
+   * Issue the request. If server-side fallback was requested and Anthropic
+   * rejects it with a 400 (e.g. an auth type that doesn't support the beta),
+   * remember that for this config and retry once without the param, the beta
+   * header and any replayed fallback blocks.
+   */
+  const send = async <T>(
+    create: (
+      p: Anthropic.MessageCreateParams,
+      o: ReturnType<typeof toRequestOptions>,
+    ) => Promise<T>,
+  ): Promise<T> => {
+    try {
+      return await create(params, requestOptions);
+    } catch (err) {
+      if (!useServerFallback || !isServerFallbackRejection(err)) throw err;
+      anthropicServerFallback.disabled.add(fallbackKey);
+      const { fallbacks: _dropped, ...rest } = params as Anthropic.MessageCreateParams & {
+        fallbacks?: unknown;
+      };
+      const retryParams = {
+        ...rest,
+        messages: toAnthropicMessages(downgradedMessages, cacheControl, { fallbackBlocks: false })
+          .messages,
+      } as Anthropic.MessageCreateParams;
+      return create(
+        retryParams,
+        toRequestOptions(betaHeaders.filter((b) => b !== SERVER_FALLBACK_BETA)),
+      );
+    }
   };
 
   // Non-streaming fallback: issue a single request/response and synthesize
@@ -342,9 +494,11 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
       const nonStreamingClient = client.withOptions({
         timeout: NON_STREAMING_REQUEST_TIMEOUT_MS,
       });
-      const message = (await nonStreamingClient.messages.create(
-        { ...params, stream: false } as Anthropic.MessageCreateParamsNonStreaming,
-        requestOptions,
+      const message = (await send((p, o) =>
+        nonStreamingClient.messages.create(
+          { ...p, stream: false } as Anthropic.MessageCreateParamsNonStreaming,
+          o,
+        ),
       )) as Anthropic.Message;
       yield* synthesizeEventsFromMessage(message);
       return messageToResponse(message);
@@ -387,9 +541,8 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
     // request before our async iterator attaches listeners, its iterator can miss
     // the already-emitted error/end event and wait forever. That surfaced as the
     // CLI sitting on "Working..." when an OAuth account ran out of usage.
-    const stream = (await client.messages.create(
-      params as Anthropic.MessageCreateParamsStreaming,
-      requestOptions,
+    const stream = (await send((p, o) =>
+      client.messages.create(p as Anthropic.MessageCreateParamsStreaming, o),
     )) as AsyncIterable<Anthropic.MessageStreamEvent>;
 
     for await (const event of stream) {
@@ -611,12 +764,28 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
           if (usage?.output_tokens != null) {
             outputTokens = usage.output_tokens as number;
           }
+          // Server-side fallback / compaction: top-level usage covers only the
+          // serving attempt; `iterations` lists every attempt billed.
+          const totals = sumUsageIterations(usage);
+          if (totals) {
+            inputTokens = totals.inputTokens;
+            outputTokens = totals.outputTokens;
+            cacheRead = totals.cacheRead;
+            cacheWrite = totals.cacheWrite;
+          }
           yield keepalive;
           break;
         }
 
-        // message_stop — loop exits naturally
-
+        // message_stop — loop exits naturally.
+        //
+        // Deliberately NOT breaking early here. Breaking makes the SDK iterator
+        // run `if (!done) controller.abort()` in its `finally`
+        // (core/streaming.js:97), which tears the connection down instead of
+        // returning it to the keep-alive pool — every turn would then pay a
+        // fresh TLS handshake. Draining to the end is what every other Anthropic
+        // client does, and the stall it guards against is handled by the agent
+        // loop's idle timeout.
         default:
           // Unhandled event types (e.g. "ping" heartbeats) — yield keepalive
           // so the idle timer in the agent loop resets on any API activity.
@@ -635,6 +804,21 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
   if (!receivedAnyEvent) {
     throw new ProviderError("anthropic", "Stream ended without producing any events.", {
       statusCode: 504,
+    });
+  }
+
+  // Silent-partial guard: a complete Anthropic stream always emits `message_delta`
+  // (carrying stop_reason) *before* `message_stop`. So consuming events but never
+  // seeing a stop_reason means the stream was truncated mid-flight — a clean TCP
+  // close with no terminal events. Without this guard, normalizeAnthropicStopReason
+  // maps the null stop into "end_turn", making a truncated turn indistinguishable
+  // from a finished one. Throw a 504 so the agent loop treats it as a retryable
+  // transport failure (same bucket as a mid-stream socket destroy). The partial
+  // body is surfaced on `cause` for debugging, never silently returned.
+  if (stopReason === null) {
+    throw new ProviderError("anthropic", "Stream ended before completion (no stop_reason).", {
+      statusCode: 504,
+      cause: { partialContent: contentParts, outputTokens },
     });
   }
 
@@ -753,10 +937,12 @@ function messageToResponse(message: Anthropic.Message): StreamResponse {
   }
 
   const usage = message.usage as unknown as Record<string, unknown>;
-  const inputTokens = (usage.input_tokens as number) ?? 0;
-  const outputTokens = (usage.output_tokens as number) ?? 0;
-  const cacheRead = usage.cache_read_input_tokens as number | undefined;
-  const cacheWrite = usage.cache_creation_input_tokens as number | undefined;
+  const totals = sumUsageIterations(usage);
+  const inputTokens = totals?.inputTokens ?? (usage.input_tokens as number) ?? 0;
+  const outputTokens = totals?.outputTokens ?? (usage.output_tokens as number) ?? 0;
+  const cacheRead = totals?.cacheRead ?? (usage.cache_read_input_tokens as number | undefined);
+  const cacheWrite =
+    totals?.cacheWrite ?? (usage.cache_creation_input_tokens as number | undefined);
 
   return {
     message: {
@@ -826,15 +1012,18 @@ function toError(err: unknown): ProviderError {
           : typeof (err as unknown as { type?: unknown }).type === "string"
             ? ((err as unknown as { type: string }).type as string)
             : undefined;
-    // When neither the nested nor top-level body carries a usable message, the
-    // SDK's err.message is a raw JSON echo of the (often near-empty) error body
-    // — swap in a clean fallback rather than showing that to the user (see
-    // isRawJsonErrorEcho).
+    // The SDK may expose raw JSON or a whole HTML edge/proxy page through either
+    // the parsed body or err.message. Preserve the original on `cause`, but never
+    // send transport markup to the user.
     const fallbackMessage = isRawJsonErrorEcho(err.message)
       ? emptyProviderErrorMessage(err.status)
       : err.message;
-    const message =
-      bodyType && bodyMessage ? `${bodyType}: ${bodyMessage}` : (bodyMessage ?? fallbackMessage);
+    const messageCandidate = bodyMessage ?? err.message;
+    const message = isRawHtmlErrorEcho(messageCandidate)
+      ? providerHtmlErrorMessage(err.status)
+      : bodyType && bodyMessage
+        ? `${bodyType}: ${bodyMessage}`
+        : (bodyMessage ?? fallbackMessage);
 
     // Subscription (OAuth) usage-window exhaustion. Anthropic returns 429 with
     // the unified rate-limit headers; a "rejected" status — or a reset stamp

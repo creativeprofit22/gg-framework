@@ -1,0 +1,28 @@
+// Build-only config: same as tsconfig.json but without the test suite.
+//
+// `dist` is what npm publishes (package.json `files: ["dist"]`), and tests live
+// beside their source as `*.test.ts`, so a plain `tsc` shipped ~3.4MB of
+// compiled test code — a third of the tarball — to every user. Nothing imports
+// it at runtime.
+//
+// Typechecking still covers tests: `pnpm check` runs `tsc --noEmit` against
+// tsconfig.json, which has no excludes. Only emit is narrowed. Test-only helper
+// folders and `*.fixtures.ts` are excluded for the same reason; runtime code
+// must never import them.
+// Declaration maps point to src/, which is not published. Keep the declarations
+// and runtime source maps, without shipping unusable editor navigation metadata.
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "declarationMap": false
+  },
+  "exclude": [
+    "src/**/*.test.ts",
+    "src/**/*.test.tsx",
+    "src/**/__fixtures__/**",
+    "src/**/*.fixtures.ts",
+    "src/test-support/**",
+    "src/test-utils/**",
+    "src/test-fixtures/**"
+  ]
+}

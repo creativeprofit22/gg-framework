@@ -6,15 +6,25 @@ import type {
   ServerToolDefinition,
   StopReason,
   ToolResultContent,
+  ToolResult,
   Usage,
   StreamOptions,
 } from "@kenkaiiii/gg-ai";
+import type { StreamRulesConfig } from "./stream-rules.js";
 
 // ── Tool Results ────────────────────────────────────────────
 
 export interface StructuredToolResult {
   content: ToolResultContent;
   details?: unknown;
+  imageResult?: ToolResult["imageResult"];
+  /** Explicit tool-level failure reported without throwing (for example MCP isError). */
+  isError?: boolean;
+  /** End the run after persisting this result, without another model call or
+   * draining steering/follow-ups. Use a sequential tool to also prevent later
+   * calls in the same batch from running (e.g. a pending plan-review handoff).
+   * Host control metadata only: never serialized into provider tool results. */
+  endRun?: boolean;
 }
 
 export type ToolExecuteResult = string | StructuredToolResult;
@@ -39,6 +49,31 @@ export interface AgentTool<T extends z.ZodType = z.ZodType> extends Tool {
    * batch runs in source order so stateful mutations cannot race each other.
    */
   executionMode?: ToolExecutionMode;
+  /**
+   * Overrides the loop's default 300000ms per-tool deadline. A positive value
+   * sets a deadline; 0 explicitly disables the loop deadline for tools that
+   * own their execution lifetime. Caller/session cancellation always applies.
+   * Omission retains the finite default for ordinary tools.
+   */
+  timeoutMs?: number;
+  /**
+   * What the model is told when this call was dispatched but the run was
+   * aborted before it reported back. Omit for tools with side effects: the
+   * loop then says the outcome is UNKNOWN, which stops a repeated push/deploy.
+   * Set it only when an interrupted call provably did nothing (e.g. a question
+   * still waiting on the user), so the model gets a definite answer instead.
+   */
+  interruptedResult?: string;
+  /** Host-only notification after both batch result caps, before the next provider request.
+   * This describes prepared model input, not provider acknowledgement or tool success.
+   */
+  onResultPrepared?: (result: Readonly<ToolResult>) => void;
+  /**
+   * Whether a mid-run steering message may preempt this tool. Defaults to
+   * true, except for atomic file mutators (`edit`, `write`, …) which always
+   * run to completion so they are never left half-applied.
+   */
+  interruptible?: boolean;
   execute: (
     args: z.infer<T>,
     context: ToolContext,
@@ -77,6 +112,28 @@ export interface AgentToolCallEndEvent {
   details?: unknown;
   isError: boolean;
   durationMs: number;
+  /**
+   * Set only when the call failed schema validation: how many consecutive
+   * times this tool produced this same validation error. 1 means the model
+   * still has room to self-correct; 3 is the threshold that ends the turn.
+   * Logged so a retry loop shows up as a count instead of identical lines.
+   */
+  invalidArgAttempt?: number;
+}
+
+export interface AgentTurnTiming {
+  /** Logical turn start, before context transforms or provider retries. Unix epoch milliseconds. */
+  startedAt: number;
+  /** First provider event, or full-response arrival for non-streaming fallback. */
+  firstProviderEventAt?: number;
+  /** Successful provider response completion. Unix epoch milliseconds. */
+  completedAt: number;
+  /** Time spent awaiting provider attempts, including failed attempts but excluding retry backoff. */
+  providerDurationMs: number;
+  /** Time from logical turn start to the first provider event. */
+  ttftMs?: number;
+  /** Output tokens divided by total provider duration. Omitted when no rate is measurable. */
+  outputTokensPerSecond?: number;
 }
 
 export interface AgentTurnEndEvent {
@@ -84,6 +141,23 @@ export interface AgentTurnEndEvent {
   turn: number;
   stopReason: StopReason;
   usage: Usage;
+  timing: AgentTurnTiming;
+}
+
+/**
+ * A safe point between steps: the assistant message and every tool result for
+ * this turn are now in the message array, and no provider call is in flight.
+ *
+ * Hosts that persist a transcript flush here. Without it a crash mid-run loses
+ * the WHOLE turn — including tool results whose side effects already landed on
+ * disk — because the only flush happens after the loop returns.
+ *
+ * Yielded immediately after tool results are appended, so it pairs with
+ * `turn_end` (which covers the assistant half) to cover every message.
+ */
+export interface AgentCheckpointEvent {
+  type: "checkpoint";
+  turn: number;
 }
 
 export interface AgentDoneEvent {
@@ -105,6 +179,36 @@ export interface AgentMaxTurnsEvent {
   maxTurns: number;
 }
 
+/**
+ * Emitted when the loop was about to stop on an exhausted turn budget but the
+ * host granted an extension instead. The effective budget is raised and the
+ * loop continues with a continuation prompt, so this is NOT terminal — unlike
+ * `max_turns`, which still fires if the extended budget is also spent.
+ */
+export interface AgentTurnBudgetExtendedEvent {
+  type: "turn_budget_extended";
+  /** Turn number at which the budget was exhausted. */
+  turn: number;
+  /** New effective `maxTurns` after the extension. */
+  grantedTurns: number;
+  /** 1-based extension count for this run. */
+  extension: number;
+}
+
+/**
+ * Warning signal emitted when a turn ended on a non-clean stop reason —
+ * `max_tokens` (output clipped at the model's output-token limit), `refusal`,
+ * or a provider-reported `error` stop. Distinguishes a truncated/degraded
+ * completion from a clean one so hosts can warn the user instead of silently
+ * presenting incomplete output as done.
+ */
+export interface AgentTruncatedEvent {
+  type: "truncated";
+  reason: "max_tokens" | "refusal" | "provider_error" | "empty_response";
+  /** True when the loop injected a continuation and will keep going. */
+  continued: boolean;
+}
+
 export interface AgentRetryEvent {
   type: "retry";
   reason:
@@ -114,7 +218,9 @@ export interface AgentRetryEvent {
     | "empty_response"
     | "stream_stall"
     | "overflow_compact"
-    | "tool_argument_glitch";
+    | "tool_argument_glitch"
+    | "runaway_toolcall"
+    | "stream_rule";
   attempt: number;
   maxAttempts: number;
   delayMs: number;
@@ -131,6 +237,30 @@ export interface AgentRetryEvent {
    * than rolling it back.
    */
   preservedChars?: number;
+}
+
+/**
+ * A stream rule matched mid-response. The attempt was aborted and discarded
+ * (no partial message persisted, no partial tool call executed), the rule's
+ * reminder was appended to the context, and the step is retried. Always
+ * followed by a silent `retry` (reason `stream_rule`) so UIs roll back the
+ * streamed partial exactly as for any other replayed attempt.
+ */
+export interface AgentStreamRuleTriggeredEvent {
+  type: "stream_rule_triggered";
+  /** Names of the rules that matched (usually one). */
+  rules: string[];
+  source: "text" | "tool";
+  /** Tool whose streamed arguments matched, for `source: "tool"`. */
+  toolName?: string;
+  attempt: number;
+  maxAttempts: number;
+  /**
+   * ESTIMATED usage of the aborted attempt (providers report none for an
+   * aborted stream): prompt chars/4 in, streamed chars/4 out. Already added to
+   * the run's `totalUsage`.
+   */
+  usage: Usage;
 }
 
 export interface AgentToolCallDeltaEvent {
@@ -179,12 +309,25 @@ export type AgentEvent =
   | AgentSteeringMessageEvent
   | AgentFollowUpMessageEvent
   | AgentRetryEvent
+  | AgentStreamRuleTriggeredEvent
   | AgentTurnEndEvent
+  | AgentCheckpointEvent
   | AgentDoneEvent
   | AgentMaxTurnsEvent
+  | AgentTurnBudgetExtendedEvent
+  | AgentTruncatedEvent
   | AgentErrorEvent;
 
 // ── Agent Options ───────────────────────────────────────────
+
+export interface TransformContextOptions {
+  /** Force a transform after the provider reports context overflow. */
+  force?: boolean;
+  /** Latest successful provider usage, anchored at its assistant message. */
+  usage?: Usage;
+  /** Messages appended after that usage sample and not yet seen by the provider. */
+  pendingMessages: Message[];
+}
 
 export interface AgentOptions {
   provider: StreamOptions["provider"];
@@ -194,25 +337,59 @@ export interface AgentOptions {
   priorMessages?: Message[];
   tools?: AgentTool[];
   serverTools?: ServerToolDefinition[];
+  /** Control whether tools may/must be called, or select a named tool when supported. */
+  toolChoice?: StreamOptions["toolChoice"];
   maxTurns?: number;
+  /**
+   * How many times `onTurnBudgetExhausted` may grant extra turns in one run.
+   * Each grant raises the effective budget by the original `maxTurns`.
+   * Default: 2. Set 0 to disable extensions entirely.
+   */
+  maxTurnExtensions?: number;
   maxTokens?: number;
   temperature?: number;
   thinking?: StreamOptions["thinking"];
   apiKey?: string;
+  /**
+   * Re-resolve the credential at the start of every turn. A run can span many
+   * minutes, and an OAuth grant refreshed by any process (another app window, a
+   * CLI session, the usage poller) invalidates the access token captured when
+   * the run began — so a pinned `apiKey` goes dead mid-run and every remaining
+   * turn fails with an authentication error. Returning the current credential
+   * here keeps a long run alive across rotations.
+   *
+   * Falls back to `apiKey`/`accountId`/`projectId` when omitted or when the
+   * resolver throws. Returning an own `accountId: undefined` explicitly clears
+   * captured OAuth identity after credentials switch to an API key.
+   */
+  resolveCredentials?: () => Promise<{
+    apiKey: string;
+    accountId?: string;
+    projectId?: string;
+  }>;
   baseUrl?: string;
   signal?: AbortSignal;
   accountId?: string;
+  transportSessionId?: StreamOptions["transportSessionId"];
   projectId?: StreamOptions["projectId"];
   cacheRetention?: StreamOptions["cacheRetention"];
+  onContextPrepared?: StreamOptions["onContextPrepared"];
   /** Stable per-session cache routing key for providers that support it. */
   promptCacheKey?: StreamOptions["promptCacheKey"];
   /** Override the User-Agent sent with OAuth-authenticated Anthropic requests. */
   userAgent?: StreamOptions["userAgent"];
-  /** Extra HTTP headers attached to every model request (e.g. Kimi For Coding
-   *  client-identity headers). Merged into the underlying SDK default headers. */
+  /** Extra HTTP headers for the OpenAI-compatible Chat Completions adapter
+   *  (e.g. Kimi For Coding client-identity headers). Forwarded to
+   *  StreamOptions.defaultHeaders with the same provider-specific limitations. */
   defaultHeaders?: StreamOptions["defaultHeaders"];
   /** OpenAI service tier for latency-sensitive first-party API requests. */
   serviceTier?: StreamOptions["serviceTier"];
+  /** Suppress `serviceTier` whenever live per-turn OAuth identity is absent. */
+  serviceTierRequiresAccountId?: boolean;
+  /** Codex Responses-Lite request shape override (see StreamOptions). */
+  responsesLite?: StreamOptions["responsesLite"];
+  /** Codex strict tool schema override (see StreamOptions). */
+  strictTools?: StreamOptions["strictTools"];
   /** Whether the target model supports image input. When false, image blocks
    *  in messages/tool_results are downgraded to text placeholders. Default: true. */
   supportsImages?: boolean;
@@ -227,6 +404,18 @@ export interface AgentOptions {
   clearToolUses?: boolean;
   /** Max characters for a single tool result. Results exceeding this are truncated with a notice. */
   maxToolResultChars?: number;
+  /** Aggregate budget for ALL tool results in one assistant turn. Protects
+   *  against parallel fan-outs injecting huge uncached context in one turn;
+   *  the largest results are trimmed (water-filling) with a re-run notice. */
+  maxTurnToolResultChars?: number;
+  /** Optional post-processing of a SUCCESSFUL tool result (after redaction,
+   *  before the tool_call_end event and the provider context). Return the
+   *  content unchanged to leave it alone. A throw is ignored (original kept).
+   *  Used e.g. to append a warning to untrusted-content results. */
+  transformToolResult?: (
+    call: { name: string; args: Record<string, unknown> },
+    content: ToolResultContent,
+  ) => ToolResultContent;
   /** Max consecutive pause_turn continuations before stopping (default: 5).
    *  Prevents infinite loops when server-side tools keep pausing. */
   maxContinuations?: number;
@@ -235,12 +424,14 @@ export interface AgentOptions {
    * the messages array (e.g. compaction, truncation). Return the same array
    * for no-op, or a new array to replace the conversation context.
    *
+   * The latest provider usage is authoritative for the history through its
+   * assistant response. `pendingMessages` contains context appended afterward.
    * When `options.force` is true, the caller should compact unconditionally
    * (e.g. after a context overflow error from the API).
    */
   transformContext?: (
     messages: Message[],
-    options?: { force?: boolean },
+    options: TransformContextOptions,
   ) => Message[] | Promise<Message[]>;
   /**
    * Polled after tool execution completes each turn. Returns user messages
@@ -250,6 +441,15 @@ export interface AgentOptions {
    */
   getSteeringMessages?: () => Promise<Message[] | null> | Message[] | null;
   /**
+   * Instant interrupt (codex `instant_interrupt`): subscribe to "a steering
+   * message just arrived". While tools are running, the listener preempts
+   * interruptible tools (their AbortSignal fires; unfinished calls get an
+   * "Interrupted" error result) and the loop drains steering and continues.
+   * Distinct from `signal` (the Stop button), which ends the run. Returns an
+   * unsubscribe function.
+   */
+  onSteeringAvailable?: (listener: () => void) => () => void;
+  /**
    * Polled when the agent would otherwise stop (no tool calls, no steering).
    * Returns messages to inject and continue the loop. Lower priority than
    * steering — only checked after getSteeringMessages returns empty.
@@ -257,6 +457,25 @@ export interface AgentOptions {
    * on read.
    */
   getFollowUpMessages?: () => Promise<Message[] | null> | Message[] | null;
+  /**
+   * Consulted when a tool-running turn exhausts the turn budget mid-task,
+   * before the loop emits the terminal `max_turns` event. Return true to grant
+   * another `maxTurns` worth of turns; false (the default when unset) keeps
+   * today's hard cut-off. Hosts should only grant on evidence of progress —
+   * extending a spinning agent just buys it more tokens to spin with.
+   */
+  onTurnBudgetExhausted?: (ctx: {
+    turn: number;
+    maxTurns: number;
+    extension: number;
+  }) => Promise<boolean> | boolean;
+  /**
+   * Regex rules matched against streamed assistant text and tool-call
+   * arguments. A match aborts the attempt, discards it, appends the rule's
+   * reminder and retries the step. Each rule fires at most once per run;
+   * `maxRetries` (default 3) caps rule retries per run. Unset = no matching.
+   */
+  streamRules?: StreamRulesConfig;
 }
 
 // ── Agent Result ────────────────────────────────────────────

@@ -1,0 +1,100 @@
+<!doctype html>
+<!--
+  broadcast-frame: persistent broadcast framing overlay (transparent).
+  Four corner labels, crop marks at the edges, an underline under the
+  bottom-left label, and a running timecode. Mount it on top of every scene
+  for the whole video; change the label text per scene.
+  Params (top of script): TC_START_SECONDS, FPS.
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+  </head>
+  <body>
+    <div
+      id="broadcast-frame-root"
+      data-composition-id="broadcast-frame"
+      data-start="0"
+      data-duration="4"
+      data-width="1920"
+      data-height="1080"
+    >
+      <style>
+        [data-composition-id="broadcast-frame"] {
+          position: absolute;
+          inset: 0;
+          color: var(--ink, #111);
+          font-family: var(--mono, monospace);
+          pointer-events: none;
+        }
+        [data-composition-id="broadcast-frame"] .bf-label {
+          position: absolute;
+          font-size: 22px;
+          font-weight: 500;
+          letter-spacing: 0.06em;
+          text-transform: uppercase;
+          white-space: nowrap;
+        }
+        [data-composition-id="broadcast-frame"] .bf-tl { left: 48px; top: 44px; }
+        [data-composition-id="broadcast-frame"] .bf-tr { right: 48px; top: 44px; }
+        [data-composition-id="broadcast-frame"] .bf-bl { left: 48px; bottom: 44px; }
+        [data-composition-id="broadcast-frame"] .bf-br { right: 48px; bottom: 44px; }
+        [data-composition-id="broadcast-frame"] .bf-rule {
+          position: absolute;
+          left: 0;
+          right: -24px;
+          bottom: -14px;
+          height: 2px;
+          background: currentColor;
+          transform-origin: left center;
+
+        }
+        [data-composition-id="broadcast-frame"] .bf-mark {
+          position: absolute;
+          width: 22px;
+          height: 2px;
+          background: currentColor;
+          opacity: 0.8;
+        }
+      </style>
+      <div class="bf-mark" style="left: 0; top: 120px"></div>
+      <div class="bf-mark" style="right: 0; top: 120px"></div>
+      <div class="bf-mark" style="left: 0; bottom: 120px"></div>
+      <div class="bf-mark" style="right: 0; bottom: 120px"></div>
+      <!-- edit: corner labels -->
+      <div class="bf-label bf-tl">Showreel / 2026</div>
+      <div class="bf-label bf-tr" id="bf-tc">TC 00:00:00</div>
+      <div class="bf-label bf-bl" id="bf-bl">02 / 06&nbsp;&nbsp;Kinetic type<span class="bf-rule" aria-hidden="true"></span></div>
+      <div class="bf-label bf-br">30 FPS&nbsp;&nbsp;1920×1080</div>
+    </div>
+    <script>
+      (function () {
+        const TC_START_SECONDS = 3;
+        const FPS = 30;
+        const tc = document.getElementById("bf-tc");
+        const bl = document.getElementById("bf-bl");
+        const pad = (n) => String(n).padStart(2, "0");
+        const clock = { t: 0 };
+        const tl = gsap.timeline({ paused: true });
+        tl.fromTo(bl.querySelector('.bf-rule'), { scaleX: 0 }, { scaleX: 1, duration: 0.6, ease: "expo.out" }, 0.1);
+        tl.fromTo(
+          clock,
+          { t: 0 },
+          {
+            t: 4,
+            duration: 4,
+            ease: "none",
+            onUpdate() {
+              const s = TC_START_SECONDS + clock.t;
+              tc.textContent = `TC ${pad(Math.floor(s / 60))}:${pad(Math.floor(s % 60))}:${pad(Math.floor((s % 1) * FPS))}`;
+            },
+          },
+          0,
+        );
+        window.__timelines = window.__timelines || {};
+        window.__timelines["broadcast-frame"] = tl;
+      })();
+    </script>
+  </body>
+</html>

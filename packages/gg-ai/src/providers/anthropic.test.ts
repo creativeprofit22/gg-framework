@@ -1,7 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
+import { z } from "zod";
+import type * as AnthropicSDK from "@anthropic-ai/sdk";
 import { ProviderError } from "../errors.js";
 import type { StreamEvent } from "../types.js";
-import { streamAnthropic, fineGrainedToolStreamingEnabled } from "./anthropic.js";
+import {
+  streamAnthropic,
+  prewarmAnthropicCache,
+  fineGrainedToolStreamingEnabled,
+} from "./anthropic.js";
+import { stream as unifiedStream } from "../stream.js";
 
 const createMock = vi.fn();
 const streamMock = vi.fn();
@@ -34,8 +41,10 @@ vi.mock("@anthropic-ai/sdk", () => {
     static nextError: Error | null = null;
     static nextEvents: unknown[] | null = null;
     static nextMessage: unknown = null;
+    static httpCreate: ((params: unknown, options: unknown) => unknown) | null = null;
     messages = {
-      create: createMock.mockImplementation((params: { stream?: boolean }) => {
+      create: createMock.mockImplementation((params: { stream?: boolean }, options: unknown) => {
+        if (AnthropicMock.httpCreate) return AnthropicMock.httpCreate(params, options);
         const error = AnthropicMock.nextError;
         const events = AnthropicMock.nextEvents;
         if (params.stream === false) {
@@ -62,7 +71,528 @@ vi.mock("@anthropic-ai/sdk", () => {
   return { default: AnthropicMock };
 });
 
+describe("Anthropic serialized HTTP tool schemas", () => {
+  it("public stream serializes own special MCP fields alongside Roadmap discriminators", async () => {
+    const { stream } = await import("../stream.js");
+    const { default: RealAnthropic } =
+      await vi.importActual<typeof AnthropicSDK>("@anthropic-ai/sdk");
+    const { default: MockAnthropic } = await import("@anthropic-ai/sdk");
+    const mock = MockAnthropic as unknown as {
+      httpCreate: ((params: unknown, options: unknown) => unknown) | null;
+    };
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        new Response(
+          'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":0}}\n\nevent: message_stop\ndata: {"type":"message_stop"}\n\n',
+          { headers: { "content-type": "text/event-stream" } },
+        ),
+      );
+    const client = new RealAnthropic({
+      apiKey: "test-not-a-credential",
+      maxRetries: 0,
+      fetch: fetchMock,
+    });
+    mock.httpCreate = (params, options) =>
+      client.messages.create(
+        params as Parameters<typeof client.messages.create>[0],
+        options as Parameters<typeof client.messages.create>[1],
+      );
+    const keys = ["constructor", "toString", "hasOwnProperty", "valueOf", "__proto__", "prototype"];
+    const rawInputSchema = JSON.parse(
+      JSON.stringify({
+        oneOf: ["a", "b"].map((value, index) => ({
+          type: "object",
+          properties: Object.fromEntries(
+            keys.map((key) => [key, { type: "string", const: value }]),
+          ),
+          required: index === 0 ? keys : keys.slice(0, -1),
+        })),
+      }),
+    );
+    const actions = [
+      "inspect",
+      "bind-current",
+      "rebind-current",
+      "acquire",
+      "renew",
+      "release",
+      "takeover",
+    ];
+    const parameters = z.record(z.string(), z.unknown());
+    const roadmapParameters = z.discriminatedUnion("action", [
+      z.object({ action: z.literal("inspect") }).strict(),
+      z.object({ action: z.literal("takeover"), confirm_takeover: z.literal(true) }).strict(),
+    ]);
+    const tools = [
+      { name: "mcp_special_fields", description: "test", parameters, rawInputSchema },
+      {
+        name: "roadmap_bind",
+        description: "test",
+        parameters: roadmapParameters,
+        rawInputSchema: {
+          oneOf: actions.map((action) => ({
+            type: "object",
+            properties: {
+              action: { type: "string", const: action },
+              ...(action === "takeover" ? { confirm_takeover: { const: true } } : {}),
+            },
+            required: action === "takeover" ? ["action", "confirm_takeover"] : ["action"],
+          })),
+        },
+      },
+    ];
+    const before = structuredClone(tools.map((tool) => tool.rawInputSchema));
+    const prototypeBefore = Object.getOwnPropertyDescriptors(Object.prototype);
+    const valid = { action: "takeover", confirm_takeover: true };
+    const validationBefore = roadmapParameters.safeParse(valid);
+    try {
+      await stream({
+        provider: "anthropic",
+        model: "claude-sonnet-4-6",
+        apiKey: "test-not-a-credential",
+        messages: [{ role: "user", content: "schema regression fixture" }],
+        tools,
+        fetch: fetchMock,
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const sent = JSON.parse(String(fetchMock.mock.calls[0]![1]?.body)).tools;
+      expect(sent).toHaveLength(2);
+      const schema = sent[0].input_schema;
+      expect(schema.type).toBe("object");
+      expect(Object.keys(schema.properties)).toEqual(keys);
+      for (const key of keys) {
+        expect(Object.hasOwn(schema.properties, key)).toBe(true);
+        expect(schema.properties[key]).toEqual({ enum: ["a", "b"] });
+      }
+      expect(schema.required).toEqual(keys.slice(0, -1));
+      expect(sent[1].input_schema.properties.action.enum).toEqual(actions);
+      expect(sent[1].input_schema.required).toEqual(["action"]);
+      expect(sent[1].input_schema.properties.confirm_takeover).toEqual({ const: true });
+      expect(tools[0]!.parameters).toBe(parameters);
+      expect(tools[0]!.rawInputSchema).toBe(rawInputSchema);
+      expect(tools[1]!.parameters).toBe(roadmapParameters);
+      expect(roadmapParameters.safeParse(valid)).toEqual(validationBefore);
+      expect(roadmapParameters.safeParse({ action: "takeover" }).success).toBe(false);
+      expect(tools.map((tool) => tool.rawInputSchema)).toEqual(before);
+      expect(Object.getOwnPropertyDescriptors(Object.prototype)).toEqual(prototypeBefore);
+    } finally {
+      mock.httpCreate = null;
+    }
+  });
+  it.each([true, false, "prewarm"] as const)(
+    "normalizes compositions before HTTP (%s)",
+    async (mode) => {
+      const { default: RealAnthropic } =
+        await vi.importActual<typeof AnthropicSDK>("@anthropic-ai/sdk");
+      const { default: MockAnthropic } = await import("@anthropic-ai/sdk");
+      const mock = MockAnthropic as unknown as {
+        httpCreate: ((params: unknown, options: unknown) => unknown) | null;
+      };
+      const bodies: Record<string, unknown>[] = [];
+      const client = new RealAnthropic({
+        apiKey: "test-key",
+        maxRetries: 0,
+        fetch: async (_url, init) => {
+          const body = JSON.parse(String(init?.body));
+          bodies.push(body);
+          if (body.stream) {
+            const events = [
+              {
+                type: "message_delta",
+                delta: { stop_reason: "end_turn" },
+                usage: { output_tokens: 1 },
+              },
+              { type: "message_stop" },
+            ];
+            return new Response(
+              events
+                .map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`)
+                .join(""),
+              {
+                headers: { "content-type": "text/event-stream" },
+              },
+            );
+          }
+          return Response.json({
+            id: "msg_test",
+            type: "message",
+            role: "assistant",
+            content: [],
+            stop_reason: "end_turn",
+            usage: { input_tokens: 1, output_tokens: 1 },
+          });
+        },
+      });
+      mock.httpCreate = (params, options) =>
+        client.messages.create(
+          params as Parameters<typeof client.messages.create>[0],
+          options as Parameters<typeof client.messages.create>[1],
+        );
+      const nested = {
+        anyOf: [
+          { type: "string", minLength: 2 },
+          { type: "integer", minimum: 1 },
+        ],
+      };
+      const branch = (action: string) => ({
+        properties: { action: { const: action }, value: nested },
+        required: ["action"],
+      });
+      const actions = [
+        "inspect",
+        "bind-current",
+        "rebind-current",
+        "acquire",
+        "renew",
+        "release",
+        "takeover",
+      ];
+      const literalAlternatives = [
+        { type: "string", const: "auto" },
+        { type: "integer", minimum: 1 },
+      ];
+      const schemas = [
+        {
+          allOf: [
+            { type: "object", properties: { value: nested }, required: ["value"] },
+            { properties: { confirm: { const: true } }, required: ["confirm"] },
+          ],
+        },
+        {
+          type: "object",
+          $defs: { a: branch("a"), b: branch("b") },
+          oneOf: [{ $ref: "#/$defs/a" }, { $ref: "#/$defs/b" }],
+        },
+        { anyOf: actions.map(branch) },
+        ...["oneOf", "anyOf"].map((keyword) => ({
+          type: "object",
+          title: "Workspace actions",
+          $defs: { workspace: { type: "string", minLength: 1 } },
+          properties: {
+            workspace: { $ref: "#/$defs/workspace" },
+            limit: { type: "integer", minimum: 1 },
+            value: nested,
+          },
+          required: ["workspace"],
+          [keyword]: [
+            {
+              properties: {
+                action: { const: "read" },
+                limit: { maximum: 10 },
+                path: { type: "string" },
+              },
+              required: ["action", "path"],
+            },
+            { properties: { action: { const: "list" } }, required: ["action"] },
+          ],
+        })),
+        {
+          oneOf: literalAlternatives.map((value) => ({
+            type: "object",
+            properties: { value },
+            required: ["value"],
+          })),
+        },
+      ];
+      const before = structuredClone(schemas);
+      const tools = schemas.map((rawInputSchema, index) => ({
+        name: `composition_${index}`,
+        description: "test",
+        parameters: z.object({}),
+        rawInputSchema,
+      }));
+      try {
+        if (mode === "prewarm") {
+          await prewarmAnthropicCache({
+            model: "claude-test",
+            apiKey: "test-key",
+            system: "test",
+            tools,
+          });
+        } else {
+          await streamAnthropic({
+            provider: "anthropic",
+            model: "claude-test",
+            apiKey: "test-key",
+            messages: [{ role: "user", content: "test" }],
+            tools,
+            streaming: mode,
+          }).response;
+        }
+        expect(bodies).toHaveLength(1);
+        const sent = bodies[0]!.tools as Array<{
+          input_schema: {
+            type: string;
+            required?: string[];
+            properties: Record<string, Record<string, unknown>>;
+          };
+        }>;
+        for (const [index, tool] of sent.entries()) {
+          expect(tool.input_schema.type).toBe("object");
+          for (const key of ["allOf", "oneOf", "anyOf"])
+            expect(tool.input_schema).not.toHaveProperty(key);
+          expect(tool.input_schema.properties.value).toEqual(
+            index === schemas.length - 1 ? { anyOf: literalAlternatives } : nested,
+          );
+        }
+        expect(sent[0]!.input_schema.required).toEqual(["value", "confirm"]);
+        expect(sent[1]!.input_schema.properties.action.enum).toEqual(["a", "b"]);
+        expect(sent[2]!.input_schema.properties.action.enum).toEqual(actions);
+        expect(sent.at(-1)!.input_schema.required).toEqual(["value"]);
+        for (const tool of sent.slice(3, -1)) {
+          expect(tool.input_schema).toEqual({
+            type: "object",
+            title: "Workspace actions",
+            $defs: { workspace: { type: "string", minLength: 1 } },
+            properties: {
+              workspace: { $ref: "#/$defs/workspace" },
+              limit: {
+                allOf: [{ type: "integer", minimum: 1 }, { anyOf: [{ maximum: 10 }, true] }],
+              },
+              value: nested,
+              action: { enum: ["read", "list"] },
+              path: { type: "string" },
+            },
+            required: ["workspace", "action"],
+          });
+        }
+        expect(schemas).toEqual(before);
+
+        const invalid = [
+          {
+            ...tools[0]!,
+            name: "broken_mcp",
+            rawInputSchema: { oneOf: [{ $ref: "https://invalid.example/schema" }] },
+          },
+        ];
+        if (mode === "prewarm") {
+          await prewarmAnthropicCache({
+            model: "claude-test",
+            apiKey: "test-key",
+            system: "test",
+            tools: invalid,
+          });
+        } else {
+          await expect(
+            streamAnthropic({
+              provider: "anthropic",
+              model: "claude-test",
+              apiKey: "test-key",
+              messages: [],
+              tools: invalid,
+              streaming: mode,
+            }).response,
+          ).rejects.toThrow(/broken_mcp.*incompatible with Anthropic/);
+        }
+        expect(bodies).toHaveLength(1);
+      } finally {
+        mock.httpCreate = null;
+      }
+    },
+  );
+});
+
+describe.each(["none", "short", "long"] as const)(
+  "prewarm tools prefix (%s cache)",
+  (cacheRetention) => {
+    it.each(["server-only", "empty-custom", "custom-only", "both", "neither"] as const)(
+      "matches normal streaming for %s tools",
+      async (scenario) => {
+        const { default: RealAnthropic } =
+          await vi.importActual<typeof AnthropicSDK>("@anthropic-ai/sdk");
+        const { default: MockAnthropic } = await import("@anthropic-ai/sdk");
+        const mock = MockAnthropic as unknown as {
+          httpCreate: ((params: unknown, options: unknown) => unknown) | null;
+        };
+        const bodies: Record<string, unknown>[] = [];
+        const client = new RealAnthropic({
+          apiKey: "test-key",
+          maxRetries: 0,
+          fetch: async (_url, init) => {
+            const body = JSON.parse(String(init?.body));
+            bodies.push(body);
+            if (body.stream) {
+              const events = [
+                {
+                  type: "message_delta",
+                  delta: { stop_reason: "end_turn" },
+                  usage: { output_tokens: 1 },
+                },
+                { type: "message_stop" },
+              ];
+              return new Response(
+                events
+                  .map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`)
+                  .join(""),
+                { headers: { "content-type": "text/event-stream" } },
+              );
+            }
+            return Response.json({
+              id: "msg_test",
+              type: "message",
+              role: "assistant",
+              content: [],
+              stop_reason: "end_turn",
+              usage: { input_tokens: 1, output_tokens: 1 },
+            });
+          },
+        });
+        const customTools = [
+          {
+            name: "lookup",
+            description: "Look up a value",
+            parameters: z.object({ query: z.string() }),
+          },
+        ];
+        const serverTools = [
+          { type: "web_search_20250305", name: "web_search", max_uses: 2 },
+          { type: "web_fetch_20250910", name: "web_fetch", allowed_domains: ["example.com"] },
+        ];
+        const hasCustom = scenario === "custom-only" || scenario === "both";
+        const hasServer =
+          scenario === "server-only" || scenario === "empty-custom" || scenario === "both";
+        const options = {
+          apiKey: "test-key",
+          model: "claude-test",
+          cacheRetention,
+          ...(hasCustom
+            ? { tools: customTools }
+            : scenario === "empty-custom"
+              ? { tools: [] }
+              : {}),
+          ...(hasServer ? { serverTools } : {}),
+        };
+        const before = structuredClone(serverTools);
+        const previousHttpCreate = mock.httpCreate;
+        mock.httpCreate = (params, requestOptions) =>
+          client.messages.create(
+            params as Parameters<typeof client.messages.create>[0],
+            requestOptions as Parameters<typeof client.messages.create>[1],
+          );
+        try {
+          await prewarmAnthropicCache({ ...options, system: "test" });
+          await streamAnthropic({
+            ...options,
+            provider: "anthropic",
+            messages: [
+              { role: "system", content: "test" },
+              { role: "user", content: "." },
+            ],
+          }).response;
+          expect(bodies).toHaveLength(2);
+          expect(bodies[0]!.tools).toEqual(bodies[1]!.tools);
+          const tools = bodies[0]!.tools as Record<string, unknown>[] | undefined;
+          if (scenario === "neither") {
+            expect(bodies[0]).not.toHaveProperty("tools");
+            expect(bodies[1]).not.toHaveProperty("tools");
+          } else {
+            expect(tools).toHaveLength((hasCustom ? 1 : 0) + (hasServer ? 2 : 0));
+            if (hasServer) expect(tools!.slice(hasCustom ? 1 : 0)).toEqual(serverTools);
+            if (hasCustom) {
+              expect(tools![0]).toMatchObject({
+                name: "lookup",
+                input_schema: {
+                  type: "object",
+                  properties: { query: { type: "string" } },
+                  required: ["query"],
+                },
+              });
+              expect(tools![0]!.cache_control).toEqual(
+                cacheRetention === "none"
+                  ? undefined
+                  : { type: "ephemeral", ...(cacheRetention === "long" ? { ttl: "1h" } : {}) },
+              );
+              expect(tools![0]!.eager_input_streaming).toBe(
+                fineGrainedToolStreamingEnabled() ? true : undefined,
+              );
+            }
+          }
+          expect(serverTools).toEqual(before);
+        } finally {
+          mock.httpCreate = previousHttpCreate;
+        }
+      },
+    );
+  },
+);
+
 describe("streamAnthropic request shaping", () => {
+  it.each(["active", "settled"] as const)(
+    "observes image limiting without changing the existing %s-thinking policy",
+    async (trajectory) => {
+      const { default: Anthropic } = await import("@anthropic-ai/sdk");
+      const sdk = Anthropic as unknown as { nextError: Error | null; nextEvents: unknown[] | null };
+      sdk.nextError = null;
+      sdk.nextEvents = [
+        { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 1 } },
+        { type: "message_stop" },
+      ];
+      const observed = vi.fn();
+      const result = unifiedStream({
+        provider: "anthropic",
+        model: "claude-sonnet-4-5",
+        apiKey: "sk-ant-test",
+        thinking: "high",
+        onContextPrepared: observed,
+        messages: [
+          {
+            role: "user",
+            content: Array.from({ length: 91 }, () => ({
+              type: "image" as const,
+              mediaType: "image/png",
+              data: "abc",
+            })),
+          },
+          {
+            role: "assistant",
+            content: [
+              { type: "thinking", text: "retained reasoning", signature: "original-signature" },
+              { type: "text", text: "previous answer" },
+              { type: "tool_call", id: "read_1", name: "read", args: {} },
+            ],
+          },
+          {
+            role: "tool",
+            content: [{ type: "tool_result", toolCallId: "read_1", content: "read result" }],
+          },
+          ...(trajectory === "settled" ? [{ role: "user" as const, content: "continue" }] : []),
+        ],
+      });
+      for await (const _event of result) {
+        /* consume */
+      }
+      expect(observed).toHaveBeenCalledWith(
+        expect.objectContaining({ imagesBefore: 91, imagesAfter: 61, firstImageDropMessage: 0 }),
+      );
+      const params: unknown = createMock.mock.calls.at(-1)?.[0];
+      expect(params).toMatchObject({
+        messages: expect.arrayContaining([
+          expect.objectContaining({
+            role: "assistant",
+            content: [
+              ...(trajectory === "active"
+                ? [
+                    {
+                      type: "thinking",
+                      thinking: "retained reasoning",
+                      signature: "original-signature",
+                    },
+                  ]
+                : []),
+              { type: "text", text: "previous answer" },
+              expect.objectContaining({ type: "tool_use", id: "read_1", name: "read", input: {} }),
+            ],
+          }),
+        ]),
+      });
+      if (trajectory === "settled")
+        expect(JSON.stringify(params)).not.toContain("original-signature");
+      expect(params).not.toHaveProperty("thinking.block_binding");
+      expect(params).not.toHaveProperty("context_management");
+    },
+  );
+
   it("sends thinking, cache, image, and tool transform params", async () => {
     const { default: Anthropic } = await import("@anthropic-ai/sdk");
     const AnthropicMock = Anthropic as unknown as {
@@ -70,7 +600,13 @@ describe("streamAnthropic request shaping", () => {
       nextEvents: unknown[] | null;
     };
     AnthropicMock.nextError = null;
-    AnthropicMock.nextEvents = [{ type: "message_stop" }];
+    // A realistic terminal sequence: the protocol always emits message_delta
+    // (carrying stop_reason) before message_stop. Omitting it now trips the
+    // silent-partial truncation guard, so keep the fixture protocol-accurate.
+    AnthropicMock.nextEvents = [
+      { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 1 } },
+      { type: "message_stop" },
+    ];
 
     const result = streamAnthropic({
       provider: "anthropic",
@@ -117,6 +653,71 @@ describe("streamAnthropic request shaping", () => {
   });
 });
 
+describe("streamAnthropic forced tool choice", () => {
+  const tool = {
+    name: "lookup",
+    description: "Look something up",
+    parameters: z.object({ q: z.string() }),
+  };
+  const endTurn = [
+    { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 1 } },
+    { type: "message_stop" },
+  ];
+
+  it.each([
+    ["required", "required" as const],
+    ["named tool", { name: "lookup" }],
+  ])("fails fast on claude-sonnet-5-5 with %s, sending no request", async (_label, toolChoice) => {
+    createMock.mockClear();
+    const result = streamAnthropic({
+      provider: "anthropic",
+      model: "claude-sonnet-5-5",
+      messages: [{ role: "user", content: "hi" }],
+      tools: [tool],
+      toolChoice,
+      apiKey: "sk-ant-test",
+    });
+    await expect(result.response).rejects.toBeInstanceOf(ProviderError);
+    await expect(result.response).rejects.toMatchObject({
+      provider: "anthropic",
+      statusCode: 400,
+      message: expect.stringMatching(/claude-sonnet-5-5 does not support forced tool use.*'auto'/),
+    });
+    expect(createMock).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["claude-sonnet-5-5", "auto" as const, { type: "auto" }],
+    ["claude-sonnet-5-5", "none" as const, { type: "none" }],
+    ["claude-opus-5-5", "required" as const, { type: "any" }],
+    ["claude-opus-5-5", { name: "lookup" }, { type: "tool", name: "lookup" }],
+  ])("%s sends toolChoice %j unchanged", async (model, toolChoice, expected) => {
+    const { default: Anthropic } = await import("@anthropic-ai/sdk");
+    const AnthropicMock = Anthropic as unknown as {
+      nextError: Error | null;
+      nextEvents: unknown[] | null;
+    };
+    AnthropicMock.nextError = null;
+    AnthropicMock.nextEvents = endTurn;
+    createMock.mockClear();
+
+    const result = streamAnthropic({
+      provider: "anthropic",
+      model,
+      messages: [{ role: "user", content: "hi" }],
+      tools: [tool],
+      toolChoice,
+      apiKey: "sk-ant-test",
+    });
+    for await (const _event of result) {
+      /* consume */
+    }
+
+    const params = createMock.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+    expect(params.tool_choice).toEqual(expected);
+  });
+});
+
 describe("streamAnthropic non-streaming fallback", () => {
   it("sets a client timeout (bypassing the SDK long-request guard) and synthesizes a response", async () => {
     const { default: Anthropic } = await import("@anthropic-ai/sdk");
@@ -137,7 +738,7 @@ describe("streamAnthropic non-streaming fallback", () => {
 
     const result = streamAnthropic({
       provider: "anthropic",
-      model: "claude-opus-4-8",
+      model: "claude-opus-5-5",
       messages: [{ role: "user", content: "hi" }],
       apiKey: "sk-ant-test",
       // A large max_tokens is exactly what tripped the SDK's client-side
@@ -260,6 +861,33 @@ describe("streamAnthropic error normalization", () => {
     await expect(result.response).rejects.not.toThrow(/"message"/);
   });
 
+  it("replaces a raw HTML response body with a clean provider message", async () => {
+    const { default: Anthropic } = await import("@anthropic-ai/sdk");
+    const AnthropicMock = Anthropic as unknown as {
+      APIError: new (status: number, error: unknown, message: string) => Error;
+      nextError: Error | null;
+      nextEvents: unknown[] | null;
+    };
+    AnthropicMock.nextEvents = null;
+    AnthropicMock.nextError = new AnthropicMock.APIError(
+      500,
+      {},
+      "500 <!DOCTYPE html><html><body>Internal Server Error</body></html>",
+    );
+
+    const result = streamAnthropic({
+      provider: "anthropic",
+      model: "claude-test",
+      messages: [{ role: "user", content: "hi" }],
+      apiKey: "sk-ant-test",
+    });
+
+    await expect(result.response).rejects.toMatchObject({
+      provider: "anthropic",
+      statusCode: 500,
+      message: "The provider returned an HTML error page (HTTP 500) instead of an API response.",
+    } satisfies Partial<ProviderError>);
+  });
   it("maps an OAuth usage-window 429 to a usage-limit error with reset time", async () => {
     const { default: Anthropic } = await import("@anthropic-ai/sdk");
     const AnthropicMock = Anthropic as unknown as {
@@ -609,5 +1237,163 @@ describe("streamAnthropic error normalization", () => {
       if (prevCC === undefined) delete process.env.CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING;
       else process.env.CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING = prevCC;
     }
+  });
+
+  it("rejects with a 504 when the stream ends before a stop_reason (silent partial)", async () => {
+    const { default: Anthropic } = await import("@anthropic-ai/sdk");
+    const AnthropicMock = Anthropic as unknown as {
+      nextError: Error | null;
+      nextEvents: unknown[] | null;
+    };
+    AnthropicMock.nextError = null;
+    // Valid prefix, then a CLEAN end with NO message_delta / message_stop --
+    // as if the provider hung up early but politely (the truncate-silent mode).
+    AnthropicMock.nextEvents = [
+      { type: "message_start", message: { usage: { input_tokens: 7 } } },
+      { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+      { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "partial-" } },
+      { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "text" } },
+      { type: "content_block_stop", index: 0 },
+    ];
+
+    const result = streamAnthropic({
+      provider: "anthropic",
+      model: "claude-test",
+      messages: [{ role: "user", content: "hi" }],
+      apiKey: "sk-ant-test",
+    });
+
+    // Attach the response handler up front so its rejection is never orphaned.
+    // StreamResult's background pump rejects the `.response` promise independently
+    // of the async iterator; swallow on both the thenable and `.response` so an
+    // iterator-throws-first race can't surface as a process-level unhandled
+    // rejection (the same footgun the 08 baseline flagged).
+    const caught = result.response.catch((err: unknown) => err);
+    const events: StreamEvent[] = [];
+    const error = await caught;
+    expect(error).toBeInstanceOf(ProviderError);
+    expect((error as ProviderError).provider).toBe("anthropic");
+    // 504 routes into the agent-loop retry bucket via classifyOverload --
+    // the same retryable path a mid-stream socket destroy already takes.
+    expect((error as ProviderError).statusCode).toBe(504);
+    expect((error as ProviderError).message).toMatch(/before completion/i);
+    // The raw partial is preserved on cause for debugging, never returned as a
+    // phantom-complete response.
+    const cause = (error as { cause?: { partialContent?: unknown } }).cause;
+    expect(cause).toBeTruthy();
+    expect(Array.isArray(cause?.partialContent)).toBe(true);
+    // No "done" event with a phantom end_turn ever leaked out.
+    expect(events.find((e) => e.type === "done")).toBeUndefined();
+  });
+
+  it("resolves normally on a full sequence (guard does not false-positive)", async () => {
+    const { default: Anthropic } = await import("@anthropic-ai/sdk");
+    const AnthropicMock = Anthropic as unknown as {
+      nextError: Error | null;
+      nextEvents: unknown[] | null;
+    };
+    AnthropicMock.nextError = null;
+    AnthropicMock.nextEvents = [
+      { type: "message_start", message: { usage: { input_tokens: 7 } } },
+      { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+      { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Hello" } },
+      { type: "content_block_stop", index: 0 },
+      { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 6 } },
+      { type: "message_stop" },
+    ];
+
+    const result = streamAnthropic({
+      provider: "anthropic",
+      model: "claude-test",
+      messages: [{ role: "user", content: "hi" }],
+      apiKey: "sk-ant-test",
+    });
+
+    let text = "";
+    for await (const event of result) {
+      if (event.type === "text_delta") text += event.text;
+    }
+
+    await expect(result.response).resolves.toMatchObject({
+      stopReason: "end_turn",
+      usage: { outputTokens: 6 },
+    });
+    expect(text).toBe("Hello");
+  });
+});
+
+describe("streamAnthropic prewarm", () => {
+  async function setupMock(): Promise<void> {
+    const { default: Anthropic } = await import("@anthropic-ai/sdk");
+    const AnthropicMock = Anthropic as unknown as {
+      nextError: Error | null;
+      nextEvents: unknown[] | null;
+      nextMessage: unknown;
+    };
+    AnthropicMock.nextError = null;
+    AnthropicMock.nextEvents = [
+      { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 1 } },
+      { type: "message_stop" },
+    ];
+    AnthropicMock.nextMessage = {
+      role: "assistant",
+      content: [{ type: "text", text: "." }],
+      stop_reason: "max_tokens",
+      usage: { input_tokens: 3, output_tokens: 1, cache_creation_input_tokens: 5000 },
+    };
+  }
+
+  const base = {
+    provider: "anthropic" as const,
+    model: "claude-opus-5-5",
+    messages: [
+      { role: "system" as const, content: "system prompt" },
+      { role: "user" as const, content: "hello" },
+    ],
+    tools: [
+      {
+        name: "read",
+        description: "read a file",
+        parameters: z.object({ path: z.string() }),
+      },
+    ],
+    apiKey: "sk-ant-test",
+    thinking: "high" as const,
+    cacheRetention: "short" as const,
+    webSearch: true,
+  };
+
+  it("sends the same prefix as a normal request with max_tokens 1", async () => {
+    await setupMock();
+    for await (const _event of streamAnthropic(base)) {
+      /* consume */
+    }
+    const real = createMock.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+    const realHeaders = createMock.mock.calls.at(-1)?.[1] as Record<string, unknown>;
+
+    const result = streamAnthropic({ ...base, prewarm: true });
+    const response = await result.response;
+    const warm = createMock.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+    const warmHeaders = createMock.mock.calls.at(-1)?.[1] as Record<string, unknown>;
+
+    expect(warm.max_tokens).toBe(1);
+    expect(warm.stream).toBe(false);
+    for (const key of ["system", "tools", "messages", "thinking", "output_config", "model"]) {
+      expect(warm[key]).toEqual(real[key]);
+    }
+    expect(warmHeaders.headers).toEqual(realHeaders.headers);
+    expect(response.usage.cacheWrite).toBe(5000);
+  });
+
+  it("skips the request when budget thinking can't stay identical at max_tokens 1", async () => {
+    await setupMock();
+    createMock.mockClear();
+    const response = await streamAnthropic({
+      ...base,
+      model: "claude-sonnet-4-5",
+      prewarm: true,
+    }).response;
+    expect(createMock).not.toHaveBeenCalled();
+    expect(response.usage).toEqual({ inputTokens: 0, outputTokens: 0 });
   });
 });

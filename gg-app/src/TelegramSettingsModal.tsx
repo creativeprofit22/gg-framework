@@ -2,6 +2,9 @@ import { useEffect, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { theme } from "./theme";
 import { Modal } from "./Modal";
+import { ModalDismissButton, useModalEmbedState } from "./modal-embed";
+import { SettingsSection } from "./settings-section";
+import { SettingsHeaderAction } from "./settings-header";
 import { waitForReady, getTelegramStatus, saveTelegramConfig } from "./agent";
 import { toast } from "./toast";
 
@@ -18,6 +21,7 @@ interface Props {
  * already saved (a masked preview is shown instead).
  */
 export function TelegramSettingsModal({ onClose, onSaved }: Props): React.ReactElement {
+  const embedded = useModalEmbedState() === "embed";
   const [botToken, setBotToken] = useState("");
   const [userId, setUserId] = useState("");
   const [tokenPreview, setTokenPreview] = useState<string | null>(null);
@@ -69,61 +73,83 @@ export function TelegramSettingsModal({ onClose, onSaved }: Props): React.ReactE
     );
   }
 
+  const saveButton = (
+    <button
+      // In the Settings header it matches the nav bars' small buttons.
+      className={embedded ? "btn btn-primary btn-sm" : "modal-btn primary"}
+      disabled={!canSave || busy}
+      onClick={() => void save()}
+    >
+      {busy ? "Verifying\u2026" : embedded ? "Save bot" : "Save"}
+    </button>
+  );
+
   return (
     <Modal title="Telegram setup" onClose={onClose}>
-      <div className="modal-label" style={{ color: theme.textMuted }}>
-        Bot token
-      </div>
-      <div className="modal-hint" style={{ color: theme.textDim }}>
-        Create a bot with {link("https://t.me/BotFather", "@BotFather")} (/newbot), then paste its
-        token.
-      </div>
-      <input
-        className="modal-input"
-        style={{ color: theme.text, background: theme.inputBackground }}
-        value={botToken}
-        placeholder={
-          tokenPreview ? `Saved (${tokenPreview}) — leave blank to keep` : "123456789:ABCdef…"
+      {embedded && <SettingsHeaderAction>{saveButton}</SettingsHeaderAction>}
+      <SettingsSection
+        title="Bot token"
+        description={
+          <>
+            Create a bot with {link("https://t.me/BotFather", "@BotFather")} (/newbot), then paste
+            its token.
+          </>
         }
-        autoFocus
-        onChange={(e) => setBotToken(e.target.value)}
-      />
+        dialogHint={
+          <div className="modal-hint" style={{ color: theme.textDim }}>
+            Create a bot with {link("https://t.me/BotFather", "@BotFather")} (/newbot), then paste
+            its token.
+          </div>
+        }
+      >
+        <input
+          className="modal-input"
+          style={{ color: theme.text, background: theme.inputBackground }}
+          value={botToken}
+          placeholder={
+            tokenPreview ? `Saved (${tokenPreview}) — leave blank to keep` : "123456789:ABCdef…"
+          }
+          // A dialog focuses its first field; a Settings page leaves focus on
+          // the tab bar so the arrow keys keep switching tabs.
+          autoFocus={!embedded}
+          onChange={(e) => setBotToken(e.target.value)}
+        />
+      </SettingsSection>
 
-      <div className="modal-label" style={{ color: theme.textMuted, marginTop: 14 }}>
-        Your Telegram user ID
-      </div>
-      <div className="modal-hint" style={{ color: theme.textDim }}>
-        Message {link("https://t.me/userinfobot", "@userinfobot")} for your ID.
-      </div>
-      <input
-        className="modal-input"
-        style={{ color: theme.text, background: theme.inputBackground }}
-        value={userId}
-        placeholder="123456789"
-        inputMode="numeric"
-        onChange={(e) => setUserId(e.target.value.replace(/[^0-9]/g, ""))}
-        onKeyDown={(e) => {
-          if (e.key === "Enter") void save();
-        }}
-      />
+      <SettingsSection
+        title="Your Telegram user ID"
+        description={<>Message {link("https://t.me/userinfobot", "@userinfobot")} for your ID.</>}
+        dialogHint={
+          <div className="modal-hint" style={{ color: theme.textDim }}>
+            Message {link("https://t.me/userinfobot", "@userinfobot")} for your ID.
+          </div>
+        }
+      >
+        <input
+          className="modal-input"
+          style={{ color: theme.text, background: theme.inputBackground }}
+          value={userId}
+          placeholder="123456789"
+          inputMode="numeric"
+          onChange={(e) => setUserId(e.target.value.replace(/[^0-9]/g, ""))}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") void save();
+          }}
+        />
+      </SettingsSection>
 
       {error && (
         <div className="modal-error" style={{ color: theme.error }}>
           {error}
         </div>
       )}
-      <div className="modal-actions">
-        <button className="modal-btn" onClick={onClose}>
-          Cancel
-        </button>
-        <button
-          className="modal-btn primary"
-          disabled={!canSave || busy}
-          onClick={() => void save()}
-        >
-          {busy ? "Verifying\u2026" : "Save"}
-        </button>
-      </div>
+      {/* On the page, Save sits in the screen's header bar instead. */}
+      {!embedded && (
+        <div className="modal-actions">
+          <ModalDismissButton onClick={onClose}>Cancel</ModalDismissButton>
+          {saveButton}
+        </div>
+      )}
     </Modal>
   );
 }

@@ -1,13 +1,20 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import {
+  clampProviderContextImages,
   downgradeUnsupportedVideos,
+  providerImageDropCount,
   toAnthropicMessages,
   toAnthropicThinking,
   toAnthropicTools,
   toOpenAIMessages,
+  toOpenAITools,
+  toGlmReasoningEffort,
+  toLocalReasoningEffort,
   toOpenAIReasoningEffort,
+  toCodexReasoningEffort,
 } from "./transform.js";
+import { supportsStrictToolSampling } from "../utils/strict-tool-schema.js";
 import type { Message, Tool } from "../types.js";
 
 const exampleTools: Tool[] = [
@@ -25,7 +32,300 @@ const exampleTools: Tool[] = [
 
 const MAX_TOKENS = 16_000;
 
+const image = (data: string) => ({ type: "image" as const, mediaType: "image/png", data });
+
+const sentImages = (messages: Message[]): string[] =>
+  messages.flatMap((message) => {
+    if (message.role === "user" && Array.isArray(message.content))
+      return message.content.flatMap((part) => (part.type === "image" ? [part.data] : []));
+    if (message.role === "tool")
+      return message.content.flatMap((result) =>
+        Array.isArray(result.content)
+          ? result.content.flatMap((part) => (part.type === "image" ? [part.data] : []))
+          : [],
+      );
+    return [];
+  });
+
+describe("provider image budgeting", () => {
+  // Two images over budget drop a whole batch: a third of the budget, at most 30.
+  it.each([
+    ["anthropic", 90, 62],
+    ["minimax", 90, 62],
+    ["openai", 200, 172],
+    ["gemini", 200, 172],
+    ["openrouter", 90, 62],
+    ["palsu", 5, 5],
+  ] as const)("caps %s context at %i images, keeping %i", (provider, budget, kept) => {
+    const messages: Message[] = [
+      {
+        role: "user",
+        content: Array.from({ length: budget + 2 }, (_, index) => image(String(index))),
+      },
+    ];
+    const result = sentImages(clampProviderContextImages(messages, provider, true));
+    expect(result).toHaveLength(kept);
+    expect(result.at(-1)).toBe(String(budget + 1));
+  });
+
+  it.each([
+    { name: "nothing within budget", count: 90, budget: 90, expected: 0 },
+    { name: "a whole batch for one image over", count: 91, budget: 90, expected: 30 },
+    { name: "the same batch up to its last image", count: 120, budget: 90, expected: 30 },
+    { name: "the next batch past it", count: 121, budget: 90, expected: 60 },
+    { name: "one at a time for tiny budgets", count: 7, budget: 2, expected: 5 },
+    { name: "never more than exist", count: 3, budget: 0, expected: 3 },
+  ])("drops $name", ({ count, budget, expected }) => {
+    expect(providerImageDropCount(count, budget)).toBe(expected);
+  });
+
+  it("keeps the sent conversation start identical while new images arrive", () => {
+    // A Motion session: every check adds screenshots to an already-full history.
+    const history: Message[] = Array.from({ length: 95 }, (_, index) => ({
+      role: "tool" as const,
+      content: [
+        { type: "tool_result" as const, toolCallId: `t${index}`, content: [image(`i${index}`)] },
+      ],
+    }));
+    const first = clampProviderContextImages(history, "anthropic", true);
+    for (let added = 1; added <= 25; added++) {
+      const longer: Message[] = [
+        ...history,
+        ...Array.from({ length: added }, (_, index) => ({
+          role: "user" as const,
+          content: [image(`new${index}`)],
+        })),
+      ];
+      const sent = clampProviderContextImages(longer, "anthropic", true);
+      expect(sent.slice(0, history.length)).toEqual(first);
+      expect(sentImages(sent).length).toBeLessThanOrEqual(90);
+    }
+  });
+
+  it("is a no-op while supported context is within budget", () => {
+    const messages: Message[] = [{ role: "user", content: [image("one"), image("two")] }];
+    expect(clampProviderContextImages(messages, "openai", true)).toBe(messages);
+  });
+
+  it("removes oldest user/tool images first and preserves newest attachments", () => {
+    const messages: Message[] = [
+      { role: "user", content: [image("old-user")] },
+      {
+        role: "tool",
+        content: [{ type: "tool_result", toolCallId: "t1", content: [image("old-tool")] }],
+      },
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "new" },
+          image("new-1"),
+          image("new-2"),
+          image("new-3"),
+          image("new-4"),
+          image("new-5"),
+        ],
+      },
+    ];
+
+    const result = clampProviderContextImages(messages, "palsu", true);
+    expect(result[0]).toEqual({
+      role: "user",
+      content: [{ type: "text", text: "[image omitted: provider image limit]" }],
+    });
+    expect(result[1]).toEqual({
+      role: "tool",
+      content: [
+        {
+          type: "tool_result",
+          toolCallId: "t1",
+          content: [{ type: "text", text: "[image omitted: provider image limit]" }],
+        },
+      ],
+    });
+    expect(JSON.stringify(result)).toContain("new-1");
+    expect(JSON.stringify(result)).toContain("new-5");
+  });
+
+  it("does not mutate persisted source messages", () => {
+    const messages: Message[] = Array.from({ length: 6 }, (_, index) => ({
+      role: "user" as const,
+      content: [image(`image-${index}`)],
+    }));
+    const before = structuredClone(messages);
+    const result = clampProviderContextImages(messages, "palsu", true);
+    expect(messages).toEqual(before);
+    expect(result).not.toBe(messages);
+    expect(JSON.stringify(result)).not.toContain("image-0");
+    expect(JSON.stringify(result)).toContain("image-5");
+  });
+
+  it("leaves unsupported-image history for the existing downgrade pass", () => {
+    const messages: Message[] = Array.from({ length: 6 }, (_, index) => ({
+      role: "user" as const,
+      content: [image(`image-${index}`)],
+    }));
+    expect(clampProviderContextImages(messages, "palsu", false)).toBe(messages);
+  });
+});
+
 describe("Anthropic transform", () => {
+  it.each(["constructor", "toString", "__proto__"])(
+    "keeps own raw field %s and its required status without changing the MCP validator",
+    (key) => {
+      const rawInputSchema = JSON.parse(
+        JSON.stringify({
+          oneOf: ["inspect", "takeover"].map((action) => ({
+            type: "object",
+            properties: { action: { const: action }, [key]: { type: "string" } },
+            required: ["action", key],
+          })),
+        }),
+      );
+      const before = structuredClone(rawInputSchema);
+      const parameters = z.record(z.string(), z.unknown());
+      const tool = { name: "mcp_members", description: "test", parameters, rawInputSchema };
+      const input = JSON.parse(JSON.stringify({ action: "inspect", [key]: "value" }));
+      const validationBefore = parameters.safeParse(input);
+      const schema = toAnthropicTools([tool])[0]!.input_schema;
+      const properties = schema.properties as Record<string, unknown>;
+      expect(schema.required).toEqual(["action", key]);
+      expect(Object.hasOwn(properties, key)).toBe(true);
+      expect(properties[key]).toEqual({ type: "string" });
+      expect(properties.action).toEqual({ enum: ["inspect", "takeover"] });
+      expect(tool.parameters).toBe(parameters);
+      expect(parameters.safeParse(input)).toEqual(validationBefore);
+      expect(tool.rawInputSchema).toBe(rawInputSchema);
+      expect(rawInputSchema).toEqual(before);
+    },
+  );
+  it.each([false, true])("preserves literal/integer alternatives with raw schema: %s", (raw) => {
+    const parameters = z.union([
+      z.object({ value: z.literal("auto") }),
+      z.object({ value: z.int().min(1) }),
+    ]);
+    const rawInputSchema = {
+      oneOf: [
+        {
+          type: "object",
+          properties: { value: { type: "string", const: "auto" } },
+          required: ["value"],
+        },
+        {
+          type: "object",
+          properties: { value: { type: "integer", minimum: 1 } },
+          required: ["value"],
+        },
+      ],
+    };
+    const before = structuredClone(rawInputSchema);
+    // MCP wrappers accept a record; validation of raw schemas belongs to the server.
+    const tool = {
+      name: "auto_or_count",
+      description: "test",
+      parameters: raw ? z.record(z.string(), z.unknown()) : parameters,
+      ...(raw ? { rawInputSchema } : {}),
+    };
+    const originalParameters = tool.parameters;
+    const expected = raw
+      ? rawInputSchema.oneOf.map((branch) => branch.properties.value)
+      : parameters.options.map((branch) => z.toJSONSchema(branch).properties!.value);
+    expect(toAnthropicTools([tool])[0]?.input_schema.properties).toEqual({
+      value: { anyOf: expected },
+    });
+    expect(tool.parameters).toBe(originalParameters);
+    expect(tool.parameters.parse({ value: "auto" })).toEqual({ value: "auto" });
+    expect(tool.parameters.parse({ value: 1 })).toEqual({ value: 1 });
+    expect(tool.parameters.safeParse({ value: 0 }).success).toBe(raw);
+    expect(tool.parameters.safeParse({ value: "other" }).success).toBe(raw);
+    expect(rawInputSchema).toEqual(before);
+  });
+  it("names incompatible tools without altering other providers' raw schemas", () => {
+    for (const rawInputSchema of [
+      { type: "string" },
+      { allOf: [{ $ref: "#/$defs/missing" }] },
+      { anyOf: [{ type: "string" }, { type: "object" }] },
+    ]) {
+      const tool = {
+        name: "mcp_problem",
+        description: "test",
+        parameters: z.object({}),
+        rawInputSchema,
+      };
+      expect(() => toAnthropicTools([tool])).toThrow(/mcp_problem.*incompatible with Anthropic/);
+      expect(toOpenAITools([tool])[0]).toMatchObject({ function: { parameters: rawInputSchema } });
+    }
+  });
+  it.each(["oneOf", "anyOf"])(
+    "normalizes raw root %s without changing runtime validation",
+    (keyword) => {
+      const parameters = z.discriminatedUnion("action", [
+        z.object({ action: z.literal("inspect") }).strict(),
+        z.object({ action: z.literal("takeover"), confirm: z.literal(true) }).strict(),
+      ]);
+      const rawInputSchema = {
+        type: "object",
+        [keyword]: parameters.options.map((option) => z.toJSONSchema(option)),
+      };
+      const before = structuredClone(rawInputSchema);
+      const tool = { name: "binding", description: "Binding actions", parameters, rawInputSchema };
+      const [definition] = toAnthropicTools([tool]);
+      expect(definition?.input_schema).toMatchObject({
+        type: "object",
+        properties: { action: { enum: ["inspect", "takeover"] }, confirm: { const: true } },
+        required: ["action"],
+      });
+      for (const key of ["oneOf", "anyOf", "allOf"]) {
+        expect(definition?.input_schema).not.toHaveProperty(key);
+      }
+      expect(rawInputSchema).toEqual(before);
+      expect(parameters.safeParse({ action: "takeover" }).success).toBe(false);
+      expect(parameters.safeParse({ action: "takeover", confirm: true }).success).toBe(true);
+      expect(toOpenAITools([tool])[0]).toMatchObject({ function: { parameters: before } });
+    },
+  );
+
+  it.each(["oneOf", "anyOf"])(
+    "retains shared raw %s fields only in Anthropic's projection",
+    (keyword) => {
+      const parameters = z.intersection(
+        z.object({ workspace: z.string().min(1) }),
+        z.discriminatedUnion("action", [
+          z.object({ action: z.literal("read"), path: z.string() }),
+          z.object({ action: z.literal("list") }),
+        ]),
+      );
+      const rawInputSchema = {
+        type: "object",
+        properties: { workspace: { type: "string", minLength: 1 } },
+        required: ["workspace"],
+        [keyword]: [
+          {
+            properties: { action: { const: "read" }, path: { type: "string" } },
+            required: ["action", "path"],
+          },
+          { properties: { action: { const: "list" } }, required: ["action"] },
+        ],
+      };
+      const before = structuredClone(rawInputSchema);
+      const tool = { name: "workspace_actions", description: "test", parameters, rawInputSchema };
+      expect(toAnthropicTools([tool])[0]?.input_schema).toEqual({
+        type: "object",
+        properties: {
+          workspace: { type: "string", minLength: 1 },
+          action: { enum: ["read", "list"] },
+          path: { type: "string" },
+        },
+        required: ["workspace", "action"],
+      });
+      expect(tool.rawInputSchema).toBe(rawInputSchema);
+      expect(rawInputSchema).toEqual(before);
+      expect(toOpenAITools([tool])[0]).toMatchObject({ function: { parameters: before } });
+      expect(parameters.safeParse({ action: "list" }).success).toBe(false);
+      expect(parameters.safeParse({ workspace: "project", action: "read" }).success).toBe(false);
+      expect(parameters.safeParse({ workspace: "project", action: "list" }).success).toBe(true);
+    },
+  );
+
   it("splits system prompt into cached and uncached blocks at the marker", () => {
     const cacheControl = { type: "ephemeral" as const };
     const messages: Message[] = [
@@ -399,6 +699,79 @@ describe("Anthropic transform", () => {
       { type: "text", text: "answer" },
     ]);
   });
+
+  // Baseline #20 (empty-parts): Anthropic rejects empty text blocks with a 400
+  // ("text content blocks must be non-empty"). The serializer must never emit one.
+  it("drops a user message whose string content is empty (case A)", () => {
+    const messages: Message[] = [
+      { role: "user", content: "hi" },
+      { role: "assistant", content: [{ type: "text", text: "prev" }] },
+      { role: "user", content: "" },
+    ];
+    const { messages: out } = toAnthropicMessages(messages);
+    // The empty user turn is gone; the real ones survive.
+    expect(out.map((m) => m.role)).toEqual(["user", "assistant"]);
+    expect(out[0]?.content).toBe("hi");
+  });
+
+  it("filters empty text parts from a user content array (case B)", () => {
+    const messages: Message[] = [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "" },
+          { type: "text", text: "real" },
+        ],
+      },
+    ];
+    const { messages: out } = toAnthropicMessages(messages);
+    const content = out[0]?.content as unknown as Array<Record<string, unknown>>;
+    expect(content).toEqual([{ type: "text", text: "real" }]);
+  });
+
+  it("drops a user message whose only text part is empty", () => {
+    const messages: Message[] = [
+      { role: "user", content: "first" },
+      { role: "assistant", content: [{ type: "text", text: "ack" }] },
+      { role: "user", content: [{ type: "text", text: "" }] },
+    ];
+    const { messages: out } = toAnthropicMessages(messages);
+    expect(out.map((m) => m.role)).toEqual(["user", "assistant"]);
+  });
+
+  it("drops a settled assistant message with empty string content (case D)", () => {
+    const messages: Message[] = [
+      { role: "user", content: "hi" },
+      { role: "assistant", content: "" },
+      { role: "user", content: "next" },
+    ];
+    const { messages: out } = toAnthropicMessages(messages);
+    // The empty assistant turn is dropped; both user turns remain.
+    expect(out.map((m) => m.role)).toEqual(["user", "user"]);
+    expect(out.map((m) => m.content)).toEqual(["hi", "next"]);
+  });
+
+  it("keeps whitespace-only user text intact (API accepts non-empty text)", () => {
+    const messages: Message[] = [{ role: "user", content: [{ type: "text", text: "  \n " }] }];
+    const { messages: out } = toAnthropicMessages(messages);
+    const content = out[0]?.content as unknown as Array<Record<string, unknown>>;
+    expect(content).toEqual([{ type: "text", text: "  \n " }]);
+  });
+
+  it("keeps a non-text user part (image) even with no text", () => {
+    const messages: Message[] = [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "" },
+          { type: "image", mediaType: "image/png", data: "abc" },
+        ],
+      },
+    ];
+    const { messages: out } = toAnthropicMessages(messages);
+    const content = out[0]?.content as unknown as Array<Record<string, unknown>>;
+    expect(content.map((b) => b.type)).toEqual(["image"]);
+  });
 });
 
 describe("OpenAI transform", () => {
@@ -414,16 +787,76 @@ describe("OpenAI transform", () => {
       { role: "user", content: "Hello" },
     ]);
   });
+
+  // Baseline #5: `toolu_*` -> OpenAI must strip the FULL `toolu_` prefix. The old
+  // `slice(5)` left the trailing underscore, producing `call__<id>` (double
+  // underscore; lossy). Pairing must survive: the tool_result references the
+  // same remapped id.
+  it("remaps a toolu_ id to a single-underscore call_ id and preserves pairing", () => {
+    const messages: Message[] = [
+      {
+        role: "assistant",
+        content: [{ type: "tool_call", id: "toolu_01ABC", name: "bash", args: { cmd: "ls" } }],
+      },
+      {
+        role: "tool",
+        content: [{ type: "tool_result", toolCallId: "toolu_01ABC", content: "ok" }],
+      },
+    ];
+    const out = toOpenAIMessages(messages) as unknown as Array<Record<string, unknown>>;
+    const assistant = out.find((m) => m.role === "assistant") as {
+      tool_calls: Array<{ id: string }>;
+    };
+    const toolMsg = out.find((m) => m.role === "tool") as { tool_call_id: string };
+    expect(assistant.tool_calls[0]?.id).toBe("call_01ABC");
+    expect(assistant.tool_calls[0]?.id).not.toContain("call__");
+    // Pairing intact: the result points at the identical remapped id.
+    expect(toolMsg.tool_call_id).toBe("call_01ABC");
+  });
+
+  it("passes through non-anthropic tool ids unchanged", () => {
+    const messages: Message[] = [
+      {
+        role: "assistant",
+        content: [{ type: "tool_call", id: "call_xyz", name: "bash", args: {} }],
+      },
+    ];
+    const out = toOpenAIMessages(messages) as Array<{ tool_calls?: Array<{ id: string }> }>;
+    expect(out[0]?.tool_calls?.[0]?.id).toBe("call_xyz");
+  });
 });
 
 describe("toAnthropicThinking", () => {
-  it("passes Anthropic adaptive effort levels through for Claude Opus 4.8", () => {
-    for (const level of ["low", "medium", "high", "xhigh", "max"] as const) {
-      expect(toAnthropicThinking(level, MAX_TOKENS, "claude-opus-4-8").outputConfig).toEqual({
-        effort: level,
-      });
+  // Opus 4.8 is no longer in ggcoder's model picker, but gg-ai is a standalone
+  // library and Anthropic still serves that ID — keep the wire format correct.
+  it("passes Anthropic adaptive effort levels through for Opus 5.5 / 5 (and legacy 4.8)", () => {
+    for (const model of ["claude-opus-5-5", "claude-opus-5", "claude-opus-4-8"]) {
+      for (const level of ["low", "medium", "high", "xhigh", "max"] as const) {
+        const result = toAnthropicThinking(level, MAX_TOKENS, model);
+        expect(result.outputConfig).toEqual({ effort: level });
+        expect((result.thinking as { type: string }).type).toBe("adaptive");
+      }
     }
   });
+
+  it("passes xhigh through unchanged for Sonnet 5.5", () => {
+    const result = toAnthropicThinking("xhigh", 128000, "claude-sonnet-5-5");
+    expect(result.outputConfig?.effort).toBe("xhigh");
+    expect((result.thinking as { type: string }).type).toBe("adaptive");
+  });
+
+  it.each(["claude-sonnet-5-5", "claude-sonnet-5.5"])(
+    "passes every adaptive effort through for %s",
+    (model) => {
+      for (const level of ["low", "medium", "high", "xhigh", "max"] as const) {
+        expect(toAnthropicThinking(level, MAX_TOKENS, model)).toEqual({
+          thinking: { type: "adaptive" },
+          maxTokens: MAX_TOKENS,
+          outputConfig: { effort: level },
+        });
+      }
+    },
+  );
 
   it("clamps xhigh to high on adaptive Anthropic models that do not support xhigh", () => {
     expect(toAnthropicThinking("xhigh", MAX_TOKENS, "claude-sonnet-5").outputConfig).toEqual({
@@ -434,8 +867,8 @@ describe("toAnthropicThinking", () => {
     });
   });
 
-  it("treats Fable 5 and Mythos 5 as adaptive thinking models (max, xhigh clamps to high)", () => {
-    for (const model of ["claude-fable-5", "claude-mythos-5"]) {
+  it("treats the Fable and Mythos line as adaptive thinking models (max, xhigh clamps to high)", () => {
+    for (const model of ["claude-fable-5-1", "claude-fable-5", "claude-mythos-5"]) {
       const result = toAnthropicThinking("max", MAX_TOKENS, model);
       expect(result.outputConfig).toEqual({ effort: "max" });
       expect((result.thinking as { type: string }).type).toBe("adaptive");
@@ -451,7 +884,7 @@ describe("toAnthropicThinking", () => {
     // strictly less than max_tokens. Previously this returned maxTokens +
     // budget (128K), which exceeds the provider's output-token cap.
     const CEILING = 64_000;
-    for (const level of ["low", "medium", "high", "xhigh", "max"] as const) {
+    for (const level of ["low", "medium", "high", "xhigh", "max", "ultra"] as const) {
       const result = toAnthropicThinking(level, CEILING, "claude-haiku-4-5");
       expect(result.maxTokens).toBeLessThanOrEqual(CEILING);
       const budget = (result.thinking as { budget_tokens?: number }).budget_tokens!;
@@ -463,9 +896,36 @@ describe("toAnthropicThinking", () => {
   });
 });
 
+describe("toCodexReasoningEffort", () => {
+  it.each(["gpt-6-astra", "gpt-6.1-sol"])("resolves %s Ultra without changing Max", (model) => {
+    expect(toCodexReasoningEffort("ultra", model)).toBe("xhigh");
+    expect(toCodexReasoningEffort("max", model)).toBe("max");
+    expect(toCodexReasoningEffort("low", model)).toBe("low");
+  });
+
+  it("keeps the max fallback for catalogs without a multi-agent effort override", () => {
+    expect(toCodexReasoningEffort("ultra", "gpt-6-sol")).toBe("max");
+    expect(toCodexReasoningEffort("ultra", "gpt-5.6-sol")).toBe("max");
+  });
+});
+
 describe("toOpenAIReasoningEffort", () => {
-  it("clamps shared max thinking level to OpenAI's xhigh effort", () => {
+  it("preserves Astra max while retaining existing model mappings", () => {
+    expect(toOpenAIReasoningEffort("max", "gpt-6-astra")).toBe("max");
+    expect(toOpenAIReasoningEffort("max", "gpt-5.6-sol")).toBe("xhigh");
     expect(toOpenAIReasoningEffort("max", "gpt-5.5")).toBe("xhigh");
+    expect(toOpenAIReasoningEffort("ultra", "gpt-6.1-sol")).toBe("xhigh");
+  });
+});
+
+describe("toGlmReasoningEffort", () => {
+  it("keeps max as max — GLM spells its top rung `max`, not xhigh", () => {
+    expect(toGlmReasoningEffort("max")).toBe("max");
+    // Only `ultra` has no GLM counterpart; everything else is server-declared
+    // (`none, minimal, low, medium, high, xhigh, max`) and passes through.
+    expect(toGlmReasoningEffort("ultra")).toBe("max");
+    expect(toGlmReasoningEffort("xhigh")).toBe("xhigh");
+    expect(toGlmReasoningEffort("low")).toBe("low");
   });
 });
 
@@ -512,5 +972,84 @@ describe("video content transforms", () => {
 
   it("keeps video untouched when the model supports it", () => {
     expect(downgradeUnsupportedVideos(videoMessage, true)).toEqual(videoMessage);
+  });
+});
+
+describe("toOpenAITools strict sampling", () => {
+  it("marks strictifiable tools strict and rewrites their parameters", () => {
+    const tools: Tool[] = [
+      {
+        name: "read_file",
+        description: "Read a file.",
+        parameters: z.object({ filePath: z.string(), offset: z.number().optional() }),
+      },
+    ];
+    const [first] = toOpenAITools(tools, { strict: true });
+    if (first?.type !== "function") throw new Error("Expected a function tool");
+    const wire = first.function;
+    expect(wire.strict).toBe(true);
+    const params = wire.parameters;
+    expect(params).toHaveProperty("required", ["filePath", "offset"]);
+    expect(params).toHaveProperty("additionalProperties", false);
+    expect(params).toHaveProperty("properties.offset", {
+      anyOf: [{ type: "number" }, { type: "null" }],
+    });
+  });
+
+  it("silently falls back to the unmodified schema when strict is impossible", () => {
+    const raw = {
+      type: "object",
+      properties: { mode: { oneOf: [{ type: "string" }, { type: "number" }] } },
+      required: ["mode"],
+    };
+    const tools: Tool[] = [
+      {
+        name: "mcp_tool",
+        description: "From an MCP server.",
+        parameters: z.record(z.string(), z.unknown()),
+        rawInputSchema: raw,
+      },
+    ];
+    const [first] = toOpenAITools(tools, { strict: true });
+    const wire = (first as { function: { strict?: boolean; parameters: Record<string, unknown> } })
+      .function;
+    expect(wire.strict).toBeUndefined();
+    expect(wire.parameters).toEqual(raw);
+  });
+
+  it("leaves the wire format untouched when strict is not requested", () => {
+    const [first] = toOpenAITools(exampleTools);
+    const wire = (first as { function: { parameters: Record<string, unknown> } }).function;
+    expect(wire).not.toHaveProperty("strict");
+    expect(wire.parameters).toEqual(expect.objectContaining({ type: "object" }));
+  });
+});
+
+describe("supportsStrictToolSampling", () => {
+  it("enables strict tools only for the provider that documents them", () => {
+    expect(supportsStrictToolSampling("openai")).toBe(true);
+    expect(supportsStrictToolSampling("deepseek")).toBe(false);
+    expect(supportsStrictToolSampling("glm")).toBe(false);
+    expect(supportsStrictToolSampling("moonshot")).toBe(false);
+  });
+});
+
+describe("toLocalReasoningEffort", () => {
+  it("maps every above-high level onto the only top rung local servers know", () => {
+    // Verified against Ollama 0.32: "xhigh" is rejected outright, "max" is not.
+    expect(toLocalReasoningEffort("max")).toBe("max");
+    expect(toLocalReasoningEffort("ultra")).toBe("max");
+    expect(toLocalReasoningEffort("xhigh")).toBe("max");
+  });
+
+  it("passes the three universal levels through untouched", () => {
+    expect(toLocalReasoningEffort("low")).toBe("low");
+    expect(toLocalReasoningEffort("medium")).toBe("medium");
+    expect(toLocalReasoningEffort("high")).toBe("high");
+  });
+
+  it("never emits xhigh, which no local server accepts", () => {
+    const levels = ["low", "medium", "high", "xhigh", "max", "ultra"] as const;
+    expect(levels.map((l) => toLocalReasoningEffort(l))).not.toContain("xhigh");
   });
 });

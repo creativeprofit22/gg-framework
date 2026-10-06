@@ -1,10 +1,18 @@
 import type { PromptSegment } from "./agent";
 
+/** Hint text for a corrected term: what the user originally said, then the note. */
+export function termHint(seg: { original: string; note?: string | undefined }): string {
+  const said = `you said: \u201c${seg.original}\u201d`;
+  return seg.note ? `${said}\n${seg.note}` : said;
+}
+
 /**
  * Render a sequence of enhanced-prompt segments. Plain `text` segments render
  * verbatim; `term` segments are highlighted with a tooltip teaching what the
- * user originally said. Shared by the inline input overlay and the sent chat
- * bubble so the highlight styling is defined in exactly one place.
+ * user originally said. The tooltip comes from the app-wide TooltipLayer (via
+ * `title`), which portals it above everything and keeps it inside the window,
+ * so terms on the first visible line or near a pane edge are not clipped.
+ * `data-tooltip-tap` lets a tap or click toggle the hint, for touch users.
  */
 export function EnhancedSegments({ segments }: { segments: PromptSegment[] }): React.ReactElement {
   return (
@@ -12,14 +20,8 @@ export function EnhancedSegments({ segments }: { segments: PromptSegment[] }): R
       {segments.map((seg, i) => {
         if (seg.kind === "text") return <span key={i}>{seg.text}</span>;
         return (
-          <span key={i} className="enh-term" tabIndex={0}>
+          <span key={i} className="enh-term" tabIndex={0} title={termHint(seg)} data-tooltip-tap="">
             {seg.text}
-            <span className="enh-tip" role="tooltip">
-              <span className="enh-tip-said">
-                you said: <span className="enh-tip-orig">&ldquo;{seg.original}&rdquo;</span>
-              </span>
-              {seg.note && <span className="enh-tip-note">{seg.note}</span>}
-            </span>
           </span>
         );
       })}

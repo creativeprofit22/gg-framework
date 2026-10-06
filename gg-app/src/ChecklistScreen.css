@@ -1,0 +1,183 @@
+/* The Den: Settings' full-width cards/material, without another nav or side pane. */
+.checklist-screen {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 0;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--text);
+}
+/* Reuse Settings' scroll rail and bottom padding so the final check clears the
+   same floating tab capsule, even in a short window. */
+.checklist-scroll {
+  min-height: 0;
+}
+/* Use the existing snapshot transition helper: navigation commits immediately,
+   and only its image dissolves. No timer or invisible interactive exit layer. */
+.checklist-screen {
+  view-transition-name: gg-checklist;
+}
+@keyframes checklist-dissolve-out {
+  to {
+    opacity: 0;
+    filter: blur(6px);
+  }
+}
+::view-transition-group(gg-checklist) {
+  animation-duration: var(--dur-dissolve);
+}
+::view-transition-new(gg-checklist) {
+  animation: dissolve-in var(--dur-dissolve) var(--ease-out) both;
+}
+::view-transition-old(gg-checklist) {
+  animation: checklist-dissolve-out var(--dur-dissolve) var(--ease-in) both;
+}
+@supports not (view-transition-name: gg-checklist) {
+  .checklist-screen {
+    animation: dissolve-in var(--dur-dissolve) var(--ease-out) backwards;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .checklist-screen,
+  ::view-transition-group(gg-checklist),
+  ::view-transition-new(gg-checklist),
+  ::view-transition-old(gg-checklist) {
+    animation: none;
+  }
+}
+.checklist-accessible-title {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+.checklist-screen .checklist-section {
+  padding: var(--space-9) var(--card-inset) var(--space-6);
+  gap: var(--space-5);
+  color: var(--text);
+}
+.checklist-section-heading {
+  display: flex;
+  align-items: center;
+  gap: var(--space-6);
+  justify-content: space-between;
+  min-height: 20px;
+}
+.checklist-section-heading h2 {
+  margin: 0;
+  font-size: var(--fs-lg);
+  font-weight: 600;
+}
+.checklist-section-heading > span {
+  font-size: var(--fs-xs);
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+.checklist-entry {
+  min-width: 0;
+}
+.checklist-entry + .checklist-entry {
+  border-top: 1px solid var(--border);
+}
+.checklist-entry-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-6);
+  min-height: 54px;
+  padding: var(--space-1) 0;
+}
+.checklist-entry-info {
+  flex: 1;
+  min-width: 0;
+  padding: var(--space-4) 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  font: inherit;
+  line-height: 1.25;
+  cursor: help;
+}
+.checklist-entry-title {
+  display: block;
+  font-size: var(--fs-base);
+  font-weight: 500;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+.checklist-entry-status {
+  display: block;
+  margin-top: var(--space-2);
+  font-size: var(--fs-xs);
+  line-height: 1.4;
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+.checklist-entry-attention {
+  color: var(--warning);
+}
+.checklist-screen .checklist-check {
+  flex-shrink: 0;
+  min-height: 32px;
+  min-width: 62px;
+  padding-inline: var(--space-7);
+  font-size: var(--fs-xs);
+  line-height: 1.25;
+}
+.checklist-check[aria-disabled="true"] {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.checklist-entry-info:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 3px;
+}
+.checklist-scroll:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: -2px;
+}
+.checklist-screen .checklist-note {
+  font-size: var(--fs-base);
+  color: var(--text-secondary);
+  line-height: 1.5;
+  padding: var(--space-4) 0;
+}
+.checklist-screen .checklist-note p {
+  margin: 0 0 var(--space-6);
+}
+/* An empty view has no trailing rows to clear the floating tabs: equal top and
+   bottom insets keep its status at the center of the available screen. */
+.checklist-screen .checklist-page.is-empty {
+  min-height: 100%;
+  padding-bottom: var(--space-10);
+  justify-content: center;
+}
+.checklist-empty {
+  margin: 0;
+  text-align: center;
+  font-size: var(--fs-3xl);
+  font-weight: 500;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+.checklist-warning {
+  margin-bottom: var(--space-8);
+  font-size: var(--fs-sm);
+  color: var(--warning);
+  line-height: 1.5;
+}
+.checklist-warning summary {
+  cursor: pointer;
+}
+@media (max-width: 480px) {
+  .checklist-screen .checklist-section {
+    padding-inline: var(--space-7);
+  }
+}

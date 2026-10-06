@@ -29,23 +29,23 @@ describe("buildToolGroupSummary", () => {
     expect(text).toBe("Read 3 files: App.tsx, terminal-history.ts, +1");
   });
 
-  it("adds capped query details to grouped Search Code calls", () => {
+  it("adds capped query details to grouped steroids calls", () => {
     const text = segmentsToPlainText(
       buildToolGroupSummary(
         [
           {
-            name: "mcp__kencode-search__searchCode",
-            args: { query: "serializeCompletedItemToTerminalHistory" },
+            name: "steroids",
+            args: { action: "search", pattern: "serializeCompletedItemToTerminalHistory" },
             status: "done",
           },
           {
-            name: "mcp__kencode-search__searchCode",
-            args: { query: "TerminalHistoryPrinter" },
+            name: "steroids",
+            args: { action: "define", symbol: "TerminalHistoryPrinter" },
             status: "done",
           },
           {
-            name: "mcp__kencode-search__searchCode",
-            args: { query: "currentItem?.type === reasoning" },
+            name: "steroids",
+            args: { action: "search", pattern: "currentItem?.type === reasoning" },
             status: "done",
           },
         ],
@@ -53,49 +53,7 @@ describe("buildToolGroupSummary", () => {
       ),
     );
 
-    expect(text).toBe('Searched code with 3 queries: "serialize…History", "Terminal…Printer", +1');
-  });
-
-  it("adds capped details to grouped kencode reference and repo discovery calls", () => {
-    expect(
-      segmentsToPlainText(
-        buildToolGroupSummary(
-          [
-            {
-              name: "mcp__kencode-search__referenceSources",
-              args: { query: "modern terminal UI inspiration", domain: "ui" },
-              status: "done",
-            },
-            {
-              name: "mcp__kencode-search__referenceSources",
-              args: { query: "agent tool display patterns", domain: "agents" },
-              status: "done",
-            },
-          ],
-          true,
-        ),
-      ),
-    ).toBe('Found references with 2 queries: "modern…inspiration", "agent…patterns"');
-
-    expect(
-      segmentsToPlainText(
-        buildToolGroupSummary(
-          [
-            {
-              name: "mcp__kencode-search__discoverRepos",
-              args: { query: "ink react terminal components" },
-              status: "done",
-            },
-            {
-              name: "mcp__kencode-search__discoverRepos",
-              args: { query: "agent cli tui" },
-              status: "done",
-            },
-          ],
-          true,
-        ),
-      ),
-    ).toBe('Discovered repos with 2 queries: "ink…components", "agent cli tui"');
+    expect(text).toBe('Read real code with 3 queries: "serialize…History", "Terminal…Printer", +1');
   });
 
   it("deduplicates grouped details before applying the cap", () => {

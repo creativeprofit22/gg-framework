@@ -232,6 +232,7 @@ interface InputAreaProps {
   onToggleMarkdown?: () => void;
   cwd: string;
   commands?: SlashCommandInfo[];
+  onDiscoverCommands?: () => void;
   /**
    * Locked badge rendered before the prompt arrow on the first visual line.
    * The user cannot delete or edit it — typed text always follows. Used by
@@ -342,6 +343,7 @@ export function InputArea({
   onToggleMarkdown,
   cwd,
   commands = [],
+  onDiscoverCommands,
   scopeBadge,
   disableMouseTracking,
   mouseScroll,
@@ -406,8 +408,12 @@ export function InputArea({
   const pasteTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Detect if we're in slash command mode
-  const isSlashMode = value.startsWith("/") && !value.includes(" ") && commands.length > 0;
+  const wantsSlashMode = value.startsWith("/") && !value.includes(" ");
+  const isSlashMode = wantsSlashMode && commands.length > 0;
   const slashFilter = isSlashMode ? value.slice(1) : "";
+  useEffect(() => {
+    if (wantsSlashMode) onDiscoverCommands?.();
+  }, [wantsSlashMode, onDiscoverCommands]);
   const filteredCommands = useMemo(
     () => (isSlashMode ? filterCommands(commands, slashFilter) : []),
     [isSlashMode, commands, slashFilter],

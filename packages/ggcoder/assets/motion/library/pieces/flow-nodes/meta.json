@@ -1,0 +1,12 @@
+{
+  "id": "flow-nodes",
+  "name": "Flow nodes",
+  "kind": "diagram",
+  "description": "A row of 3–5 labeled stage boxes (index, display label, mono sub-label). Each box lands, the arrow to the next draws on, then a pulse dot keeps travelling along every connection; the final stage is filled with the accent as the outcome. Edit the NODES array for any pipeline, process or request path.",
+  "tags": ["flow", "pipeline", "process", "arrows", "draw-on", "pulse", "boxes", "explainer", "technical"],
+  "fonts": [],
+  "duration": 5,
+  "previewAt": 3.4,
+  "license": "original",
+  "previewLook": "duotone-broadcast"
+}

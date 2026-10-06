@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useRef, useState, type MutableRefObject } from "react";
-import type { Message, Provider } from "@kenkaiiii/gg-ai";
+import type { Message, Provider, ThinkingLevel } from "@kenkaiiii/gg-ai";
 import type { AgentTool } from "@kenkaiiii/gg-agent";
 import { buildSystemPrompt } from "../../system-prompt.js";
 import type { LanguageId } from "../../core/language-detector.js";
 import type { Skill } from "../../core/skills.js";
+import { applyAsyncSubagentPolicy } from "../../core/subagent-policy.js";
 
 /** Options accepted by {@link useModeState.rebuildSystemPrompt}. */
 export interface RebuildSystemPromptOptions {
@@ -30,6 +31,8 @@ interface UseModeStateOptions {
   currentToolsRef: MutableRefObject<AgentTool[]>;
   // Active provider, consulted so the prompt identity tracks the current model.
   providerRef: MutableRefObject<Provider>;
+  modelRef: MutableRefObject<string>;
+  thinkingLevelRef: MutableRefObject<ThinkingLevel | undefined>;
   approvedPlanPathRef: MutableRefObject<string | undefined>;
   injectedLanguagesRef: MutableRefObject<Set<LanguageId>>;
   messagesRef: MutableRefObject<Message[]>;
@@ -56,12 +59,35 @@ export function useModeState({
   cwdRef,
   currentToolsRef,
   providerRef,
+  modelRef,
+  thinkingLevelRef,
   approvedPlanPathRef,
   injectedLanguagesRef,
   messagesRef,
 }: UseModeStateOptions): ModeState {
   const [planMode, setPlanMode] = useState(initialPlanMode);
   const planModeStateRef = useRef(planMode);
+  const provider = providerRef.current;
+  const model = modelRef.current;
+  const thinkingLevel = thinkingLevelRef.current;
+
+  // Changing effort does not need a disk-backed prompt rebuild. Replace just
+  // the policy suffix so toggles, model switches, and restored UI state cannot
+  // leave delegation instructions from the previous mode in the live prompt.
+  useEffect(() => {
+    const system = messagesRef.current[0];
+    if (system?.role !== "system") return;
+    messagesRef.current[0] = {
+      ...system,
+      content: applyAsyncSubagentPolicy(
+        system.content,
+        provider,
+        model,
+        thinkingLevel,
+        currentToolsRef.current.map((tool) => tool.name),
+      ),
+    };
+  }, [provider, model, thinkingLevel, currentToolsRef, messagesRef]);
 
   useEffect(() => {
     planModeStateRef.current = planMode;
@@ -73,17 +99,33 @@ export function useModeState({
       const approvedPlanPath = options?.clearApprovedPlan
         ? undefined
         : (options?.approvedPlanPath ?? approvedPlanPathRef.current);
-      return buildSystemPrompt(
-        options?.cwd ?? cwdRef.current,
-        skills,
-        options?.planMode ?? planModeStateRef.current,
-        approvedPlanPath,
-        (options?.tools ?? currentToolsRef.current).map((tool) => tool.name),
-        options?.activeLanguages ?? injectedLanguagesRef.current,
+      const toolNames = (options?.tools ?? currentToolsRef.current).map((tool) => tool.name);
+      return applyAsyncSubagentPolicy(
+        await buildSystemPrompt(
+          options?.cwd ?? cwdRef.current,
+          skills,
+          options?.planMode ?? planModeStateRef.current,
+          approvedPlanPath,
+          toolNames,
+          options?.activeLanguages ?? injectedLanguagesRef.current,
+          providerRef.current,
+        ),
         providerRef.current,
+        modelRef.current,
+        thinkingLevelRef.current,
+        toolNames,
       );
     },
-    [skills, approvedPlanPathRef, cwdRef, currentToolsRef, providerRef, injectedLanguagesRef],
+    [
+      skills,
+      approvedPlanPathRef,
+      cwdRef,
+      currentToolsRef,
+      providerRef,
+      modelRef,
+      thinkingLevelRef,
+      injectedLanguagesRef,
+    ],
   );
 
   const replaceSystemPrompt = useCallback(

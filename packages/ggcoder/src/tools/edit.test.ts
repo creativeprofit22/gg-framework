@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { prettifyError } from "zod";
 import fs from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
@@ -55,6 +56,223 @@ describe("createEditTool", () => {
     const written = await fs.readFile(filePath, "utf-8");
     expect(written).toBe("goodbye world\n");
   });
+
+  describe("multi-file `files` form", () => {
+    const ctx = { signal: new AbortController().signal, toolCallId: "multi" };
+    const content = (result: unknown): string =>
+      typeof result === "string" ? result : (result as { content: string }).content;
+
+    it("edits every listed file in one call and returns each diff", async () => {
+      await fs.writeFile(path.join(tmpDir, "a.js"), "const a = 1;\n");
+      await fs.writeFile(path.join(tmpDir, "b.js"), "const b = 1;\n");
+      const tool = createEditTool(tmpDir);
+
+      const result = await tool.execute(
+        {
+          files: [
+            { file_path: "a.js", edits: [{ old_text: "a = 1", new_text: "a = 2" }] },
+            { file_path: "b.js", edits: [{ old_text: "b = 1", new_text: "b = 2" }] },
+          ],
+        },
+        ctx,
+      );
+
+      expect(await fs.readFile(path.join(tmpDir, "a.js"), "utf-8")).toBe("const a = 2;\n");
+      expect(await fs.readFile(path.join(tmpDir, "b.js"), "utf-8")).toBe("const b = 2;\n");
+      expect(content(result)).toContain("Edited 2 files.");
+      expect(resultToString(result)).toContain("+const a = 2;");
+      expect(resultToString(result)).toContain("+const b = 2;");
+    });
+
+    it("keeps the files that succeeded and names only the failed one", async () => {
+      await fs.writeFile(path.join(tmpDir, "a.js"), "const a = 1;\n");
+      await fs.writeFile(path.join(tmpDir, "b.js"), "const b = 1;\n");
+      const tool = createEditTool(tmpDir);
+
+      const result = await tool.execute(
+        {
+          files: [
+            { file_path: "a.js", edits: [{ old_text: "a = 1", new_text: "a = 2" }] },
+            { file_path: "b.js", edits: [{ old_text: "missing", new_text: "x" }] },
+          ],
+        },
+        ctx,
+      );
+
+      expect(await fs.readFile(path.join(tmpDir, "a.js"), "utf-8")).toBe("const a = 2;\n");
+      expect(await fs.readFile(path.join(tmpDir, "b.js"), "utf-8")).toBe("const b = 1;\n");
+      expect(content(result)).toContain("Edited 1 of 2 files. 1 failed");
+      expect(content(result)).toMatch(/### b\.js\nFAILED — .*old_text not found/);
+    });
+
+    it("throws when every file fails, leaving all files unchanged", async () => {
+      await fs.writeFile(path.join(tmpDir, "a.js"), "const a = 1;\n");
+      const tool = createEditTool(tmpDir);
+
+      await expect(
+        tool.execute(
+          { files: [{ file_path: "a.js", edits: [{ old_text: "missing", new_text: "x" }] }] },
+          ctx,
+        ),
+      ).rejects.toThrow(/old_text not found/);
+      expect(await fs.readFile(path.join(tmpDir, "a.js"), "utf-8")).toBe("const a = 1;\n");
+    });
+
+    it.each([
+      ["both forms", { file_path: "a.js", edits: [{ old_text: "a", new_text: "b" }], files: [] }],
+      ["neither form", {}],
+      ["file_path without edits", { file_path: "a.js" }],
+    ])("rejects %s", async (_label, args) => {
+      const tool = createEditTool(tmpDir);
+      await expect(tool.execute(args as never, ctx)).rejects.toThrow(
+        /file_path and edits|not both/,
+      );
+    });
+  });
+
+  it.each([
+    {
+      label: "retention fields without duplicating the first object",
+      original:
+        "const a = { created_at: cutoff };\nconst b = { created_at: cutoff };\nconst c = { created_at: cutoff };\n",
+      oldText: "created_at: cutoff",
+      newText: "created_at: cutoff, retention_acquired_at: cutoff",
+      expected:
+        "const a = { created_at: cutoff, retention_acquired_at: cutoff };\nconst b = { created_at: cutoff, retention_acquired_at: cutoff };\nconst c = { created_at: cutoff, retention_acquired_at: cutoff };\n",
+    },
+    {
+      label: "adjacent matches with a self-containing replacement",
+      original: "aaaa",
+      oldText: "a",
+      newText: "ba",
+      expected: "babababa",
+    },
+    {
+      label: "shorter replacements",
+      original: "abab abab",
+      oldText: "abab",
+      newText: "ab",
+      expected: "ab ab",
+    },
+    {
+      label: "deletion without matching newly joined boundaries",
+      original: "aabb ab",
+      oldText: "ab",
+      newText: "",
+      expected: "ab ",
+    },
+    {
+      label: "fuzzy matches without revisiting replacement text",
+      original: "say(“hello”);\nsay(“hello”);\n",
+      oldText: 'say("hello");',
+      newText: 'say("hello"); extra();',
+      expected: 'say("hello"); extra();\nsay("hello"); extra();\n',
+    },
+    {
+      label: "multiline fuzzy matches with different original lengths",
+      original: "say(“hello”);  \nnext();\nsay(“hello”); \nnext();\n",
+      oldText: 'say("hello");\nnext();',
+      newText: 'say("hello");\nnext();\nextra();',
+      expected: 'say("hello");\nnext();\nextra();\nsay("hello");\nnext();\nextra();\n',
+    },
+    {
+      label: "exact matches without broadening to fuzzy matches",
+      original: 'say(“hello”);\nsay("hello");\nsay("hello");\n',
+      oldText: 'say("hello");',
+      newText: 'say("hello"); extra();',
+      expected: 'say(“hello”);\nsay("hello"); extra();\nsay("hello"); extra();\n',
+    },
+  ])("replace_all handles $label", async ({ original, oldText, newText, expected }) => {
+    const filePath = path.join(tmpDir, "replace-all.txt");
+    await fs.writeFile(filePath, original);
+    const tool = createEditTool(tmpDir);
+    await tool.execute(
+      {
+        file_path: "replace-all.txt",
+        edits: [{ old_text: oldText, new_text: newText, replace_all: true }],
+      },
+      { signal: new AbortController().signal, toolCallId: "replace-all-regression" },
+    );
+    expect(await fs.readFile(filePath, "utf-8")).toBe(expected);
+  });
+
+  it("replaces non-overlapping fuzzy blocks without double-counting shared lines", async () => {
+    const filePath = path.join(tmpDir, "overlap.txt");
+    await fs.writeFile(filePath, "A \nA \nA \n");
+    await createEditTool(tmpDir).execute(
+      {
+        file_path: "overlap.txt",
+        edits: [{ old_text: "A\nA", new_text: "X\nX", replace_all: true }],
+      },
+      { signal: new AbortController().signal, toolCallId: "overlapping-fuzzy" },
+    );
+    expect(await fs.readFile(filePath, "utf-8")).toBe("X\nX\nA \n");
+  });
+
+  it("rejects global elision instead of reporting a single replacement as complete", async () => {
+    const filePath = path.join(tmpDir, "elision.txt");
+    const original =
+      "function f() {\n  keep();\n  return 1;\n}\n\nfunction f() {\n  keep();\n  return 1;\n}\n";
+    await fs.writeFile(filePath, original);
+    await expect(
+      createEditTool(tmpDir).execute(
+        {
+          file_path: "elision.txt",
+          edits: [
+            {
+              old_text: "function f() {\n  ...\n  return 1;\n}",
+              new_text: "function f() {\n  ...\n  return 2;\n}",
+              replace_all: true,
+            },
+          ],
+        },
+        { signal: new AbortController().signal, toolCallId: "global-elision" },
+      ),
+    ).rejects.toThrow(/replace_all.*elision/);
+    expect(await fs.readFile(filePath, "utf-8")).toBe(original);
+  });
+
+  it("still rejects ambiguous overlapping fuzzy matches for a single edit", async () => {
+    const filePath = path.join(tmpDir, "ambiguous-overlap.txt");
+    const original = "A \nA \nA \n";
+    await fs.writeFile(filePath, original);
+    await expect(
+      createEditTool(tmpDir).execute(
+        { file_path: "ambiguous-overlap.txt", edits: [{ old_text: "A\nA", new_text: "X\nX" }] },
+        { signal: new AbortController().signal, toolCallId: "ambiguous-overlap" },
+      ),
+    ).rejects.toThrow(/old_text found 2 times/);
+    expect(await fs.readFile(filePath, "utf-8")).toBe(original);
+  });
+
+  it("permits global literal dots when the complete text actually exists", async () => {
+    const filePath = path.join(tmpDir, "literal-dots.txt");
+    await fs.writeFile(filePath, "header\n...\nend\nheader\n...\nend\n");
+    await createEditTool(tmpDir).execute(
+      {
+        file_path: "literal-dots.txt",
+        edits: [{ old_text: "header\n...\nend", new_text: "changed\n...\nend", replace_all: true }],
+      },
+      { signal: new AbortController().signal, toolCallId: "literal-dots" },
+    );
+    expect(await fs.readFile(filePath, "utf-8")).toBe("changed\n...\nend\nchanged\n...\nend\n");
+  });
+
+  it.each([false, true])(
+    "removes exact invisible characters through the edit tool (replace_all=%s)",
+    async (replaceAll) => {
+      const filePath = path.join(tmpDir, "invisible.txt");
+      await fs.writeFile(filePath, replaceAll ? "a\u200bb\u200b" : "a\u200bb");
+      await createEditTool(tmpDir).execute(
+        {
+          file_path: "invisible.txt",
+          edits: [{ old_text: "\u200b", new_text: "", replace_all: replaceAll }],
+        },
+        { signal: new AbortController().signal, toolCallId: "exact-invisible-removal" },
+      );
+      expect(await fs.readFile(filePath, "utf-8")).toBe("ab");
+    },
+  );
 
   it("applies multiple edits sequentially", async () => {
     const filePath = path.join(tmpDir, "multi.txt");
@@ -123,19 +341,73 @@ describe("createEditTool", () => {
     expect(written).toBe("one two three\n");
   });
 
-  it("throws when file hasn't been read with readFiles tracking", async () => {
+  it("edits an unread file when old_text matches the live content", async () => {
     const filePath = path.join(tmpDir, "unread.txt");
     await fs.writeFile(filePath, "content\n");
 
     const readFiles: ReadTracker = new Map();
     const tool = createEditTool(tmpDir, readFiles);
 
+    await tool.execute(
+      { file_path: "unread.txt", edits: [{ old_text: "content", new_text: "new" }] },
+      { signal: new AbortController().signal, toolCallId: "test-3" },
+    );
+
+    expect(await fs.readFile(filePath, "utf-8")).toBe("new\n");
+    // The model never saw the whole file, so a later full overwrite still needs a read.
+    expect(readFiles.get(filePath)?.seen).toEqual([]);
+  });
+
+  it("still refuses an unread-file edit whose old_text is not in the file", async () => {
+    const filePath = path.join(tmpDir, "unread-miss.txt");
+    await fs.writeFile(filePath, "content\n");
+
+    const tool = createEditTool(tmpDir, new Map());
+
     await expect(
       tool.execute(
-        { file_path: "unread.txt", edits: [{ old_text: "content", new_text: "new" }] },
-        { signal: new AbortController().signal, toolCallId: "test-3" },
+        { file_path: "unread-miss.txt", edits: [{ old_text: "guessed", new_text: "new" }] },
+        { signal: new AbortController().signal, toolCallId: "test-3b" },
       ),
-    ).rejects.toThrow("File must be read first");
+    ).rejects.toThrow(/old_text not found/);
+    expect(await fs.readFile(filePath, "utf-8")).toBe("content\n");
+  });
+
+  it("edits a file changed since it was read against live content, then forgets the read", async () => {
+    const filePath = path.join(tmpDir, "stale.txt");
+    await fs.writeFile(filePath, "alpha\n");
+    const readFiles: ReadTracker = new Map();
+    await markRead(readFiles, filePath);
+    // e.g. the model's own bash script rewrote the file after the read
+    await fs.writeFile(filePath, "alpha changed elsewhere\n");
+    await fs.utimes(filePath, new Date(), new Date(Date.now() + 5000));
+
+    const tool = createEditTool(tmpDir, readFiles);
+    await tool.execute(
+      { file_path: "stale.txt", edits: [{ old_text: "changed", new_text: "edited" }] },
+      { signal: new AbortController().signal, toolCallId: "test-3c" },
+    );
+    expect(await fs.readFile(filePath, "utf-8")).toBe("alpha edited elsewhere\n");
+    // The model never saw the rewritten file whole, so a full overwrite still needs a read.
+    expect(readFiles.get(filePath)?.seen).toEqual([]);
+  });
+
+  it("still refuses a stale-file edit whose old_text is no longer there", async () => {
+    const filePath = path.join(tmpDir, "stale-miss.txt");
+    await fs.writeFile(filePath, "alpha\n");
+    const readFiles: ReadTracker = new Map();
+    await markRead(readFiles, filePath);
+    await fs.writeFile(filePath, "omega\n");
+    await fs.utimes(filePath, new Date(), new Date(Date.now() + 5000));
+
+    const tool = createEditTool(tmpDir, readFiles);
+    await expect(
+      tool.execute(
+        { file_path: "stale-miss.txt", edits: [{ old_text: "alpha", new_text: "beta" }] },
+        { signal: new AbortController().signal, toolCallId: "test-3d" },
+      ),
+    ).rejects.toThrow(/old_text not found/);
+    expect(await fs.readFile(filePath, "utf-8")).toBe("omega\n");
   });
 
   it("allows edit when file is in readFiles tracker", async () => {
@@ -159,7 +431,7 @@ describe("createEditTool", () => {
     expect(written).toBe("gamma beta\n");
   });
 
-  it("rejects edit when the file changed since it was read", async () => {
+  it("applies an edit that matches a file changed since it was read, and forgets the read", async () => {
     const filePath = path.join(tmpDir, "stale.txt");
     await fs.writeFile(filePath, "alpha\n");
 
@@ -172,13 +444,16 @@ describe("createEditTool", () => {
     const future = new Date(Date.now() + 5_000);
     await fs.utimes(filePath, future, future);
 
+    // The edit is validated against the live bytes, so text the formatter
+    // produced applies; the stale read is dropped so a later full-file write
+    // still demands a fresh read.
     const tool = createEditTool(tmpDir, readFiles);
-    await expect(
-      tool.execute(
-        { file_path: "stale.txt", edits: [{ old_text: "ALPHA", new_text: "beta" }] },
-        { signal: new AbortController().signal, toolCallId: "test-stale" },
-      ),
-    ).rejects.toThrow(/modified since/);
+    await tool.execute(
+      { file_path: "stale.txt", edits: [{ old_text: "ALPHA", new_text: "beta" }] },
+      { signal: new AbortController().signal, toolCallId: "test-stale" },
+    );
+    expect(await fs.readFile(filePath, "utf-8")).toBe("beta\n");
+    expect(readFiles.get(filePath)?.seen).toEqual([]);
   });
 
   it("allows consecutive edits without re-reading (recordWrite refreshes)", async () => {
@@ -1061,6 +1336,91 @@ describe("createEditTool", () => {
       expect(contentOf(result)).toBe("Successfully replaced text in clean.ts.");
     });
 
+    it("tells the provider which matching strategy placed the edit", async () => {
+      // Attribution is the point of the telemetry: a regression traced to `...`
+      // elision means something very different from one traced to an exact
+      // match, and only this tool knows which ladder rung fired.
+      const cases: { name: string; file: string; old: string; next: string; expect: string }[] = [
+        { name: "exact.ts", file: "alpha\n", old: "alpha", next: "beta", expect: "text" },
+        {
+          name: "indent.ts",
+          file: "    const x = 1;\n    const y = 2;\n",
+          old: "const x = 1;\nconst y = 2;",
+          next: "const x = 10;\nconst y = 20;",
+          expect: "indent_flex",
+        },
+        {
+          name: "elide.ts",
+          file: "function f() {\n  keep();\n  return 1;\n}\n",
+          old: "function f() {\n  ...\n  return 1;\n}",
+          next: "function g() {\n  ...\n  return 1;\n}",
+          expect: "dotdotdot",
+        },
+      ];
+
+      for (const c of cases) {
+        await fs.writeFile(path.join(tmpDir, c.name), c.file);
+        let seen: string | undefined;
+        const tool = createEditTool(
+          tmpDir,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          async (_p, _c, source) => {
+            seen = source;
+            return "";
+          },
+        );
+
+        await tool.execute(
+          { file_path: c.name, edits: [{ old_text: c.old, new_text: c.next }] },
+          { signal: new AbortController().signal, toolCallId: `test-source-${c.expect}` },
+        );
+
+        expect(seen).toBe(c.expect);
+      }
+    });
+
+    it("blames the riskiest strategy when one batch mixes them", async () => {
+      // A batch that needed an elision is a batch whose breakage should be
+      // attributed to the elision, not to the exact match beside it.
+      await fs.writeFile(
+        path.join(tmpDir, "mixed.ts"),
+        "const a = 1;\nfunction f() {\n  keep();\n  return 1;\n}\n",
+      );
+      let seen: string | undefined;
+      const tool = createEditTool(
+        tmpDir,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        async (_p, _c, source) => {
+          seen = source;
+          return "";
+        },
+      );
+
+      await tool.execute(
+        {
+          file_path: "mixed.ts",
+          edits: [
+            { old_text: "const a = 1;", new_text: "const a = 2;" },
+            {
+              old_text: "function f() {\n  ...\n  return 1;\n}",
+              new_text: "function g() {\n  ...\n  return 1;\n}",
+            },
+          ],
+        },
+        { signal: new AbortController().signal, toolCallId: "test-source-mixed" },
+      );
+
+      expect(seen).toBe("dotdotdot");
+    });
+
     it("leaves the result unchanged when the provider throws", async () => {
       const filePath = path.join(tmpDir, "throws.ts");
       await fs.writeFile(filePath, "alpha\n");
@@ -1423,6 +1783,69 @@ describe("edit anchor guard", () => {
       ),
     ).rejects.toThrow(/has neither/);
     expect(await fs.readFile(filePath, "utf-8")).toBe(content);
+  });
+
+  it("blocks edits outside the workspace with the guard error", async () => {
+    const tool = createEditTool(tmpDir);
+    const outside = path.join(os.homedir(), "Documents", "gg-guard-test-outside.txt");
+
+    const raw = await tool.execute(
+      { file_path: outside, edits: [{ old_text: "a", new_text: "b" }] },
+      { signal: new AbortController().signal, toolCallId: "guard-1" },
+    );
+
+    expect(contentOf(raw)).toContain("outside the workspace");
+    expect(contentOf(raw)).toContain("allowOutsideWorkspaceWrites");
+  });
+});
+
+/**
+ * Models intermittently hand-serialize `edits` into a JSON string instead of
+ * emitting a real array (~1% of edit calls across opus-5/sonnet-5/glm-5.x).
+ * Well-formed strings are coerced; malformed ones must be rejected with a
+ * message that names the mistake, because the stock "expected array, received
+ * string" made the model re-send the identical payload until the agent loop's
+ * repeat counter killed the turn.
+ */
+describe("edit stringified `edits` handling", () => {
+  const parse = (edits: unknown) =>
+    createEditTool(os.tmpdir()).parameters.safeParse({ file_path: "a.ts", edits });
+
+  const errorFor = (edits: unknown): string => {
+    const result = parse(edits);
+    expect(result.success).toBe(false);
+    return result.success ? "" : prettifyError(result.error);
+  };
+
+  it("coerces a well-formed stringified array back into edits", () => {
+    const result = parse(JSON.stringify([{ old_text: "a", new_text: "b" }]));
+    expect(result.success).toBe(true);
+    expect(result.success && result.data.edits).toEqual([{ old_text: "a", new_text: "b" }]);
+  });
+
+  // Verbatim payloads recovered from ~/.gg session logs. Each broke a real
+  // turn: unescaped control characters, a dropped `new_text` key, a `":`
+  // corrupted into `>`, and a stream truncated mid-string.
+  it.each([
+    ["raw control character", '[{"old_text": "a\\nb", "new_text": "c\nd"}]'],
+    ["missing new_text key", '[{"old_text": "a", " * Egress limits"}]'],
+    ["corrupted key delimiter", '[{"old_text">function stopServer() {'],
+    ["truncated mid-payload", '[{"old_text": "a", "new_text": "bb'],
+  ])("rejects %s with actionable guidance", (_label, payload) => {
+    const message = errorFor(payload);
+    expect(message).toContain("JSON-encoded string");
+    expect(message).toContain("real JSON array");
+    expect(message).toContain("split the work");
+    // The unactionable stock message is what caused the retry loop.
+    expect(message).not.toContain("expected array, received string");
+  });
+
+  it("leaves non-string type errors on their default message", () => {
+    expect(errorFor(42)).toContain("expected array, received number");
+  });
+
+  it("still reports per-item errors inside a real array", () => {
+    expect(errorFor([{ old_text: 5 }])).toContain("expected string, received number");
   });
 });
 

@@ -1,0 +1,189 @@
+<!doctype html>
+<!--
+  animated-list: notification cards arrive one by one at the top of a list;
+  each new card springs in (scale from 0, anchored at its top) and pushes the
+  older cards down with the same spring. The list fades out at the bottom.
+  Transparent background.
+  Converted from Magic UI "Animated List" (MIT, (c) Magic UI — see LICENSE):
+  (upstream URL in meta.json)
+  React state + setTimeout + motion layout animations became a paused GSAP
+  timeline: every arrival and every push is a tween with an analytic spring
+  ease (upstream: stiffness 350, damping 40, mass 1).
+  Params: --al-w (card width), --al-x (center x), --al-top (list top),
+  --al-h (visible list height before the fade), FIRST_AT / EVERY (arrival
+  times, s), GAP (px between cards), STIFFNESS / DAMPING (spring).
+  Cards arrive in markup order (first card in the markup arrives first).
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+  </head>
+  <body>
+    <div
+      id="animated-list-root"
+      data-composition-id="animated-list"
+      data-start="0"
+      data-duration="6"
+      data-width="1920"
+      data-height="1080"
+    >
+      <style>
+        [data-composition-id="animated-list"] {
+          --al-w: 940px;
+          --al-x: 960px;
+          --al-top: 110px;
+          --al-h: 900px;
+          --al-r: max(calc(var(--radius, 18px) * 1.3), 20px);
+          position: absolute;
+          inset: 0;
+          color: var(--ink, #111);
+          font-family: var(--text, sans-serif);
+        }
+        [data-composition-id="animated-list"] .al-list {
+          position: absolute;
+          left: calc(var(--al-x) - var(--al-w) / 2 - 40px);
+          top: calc(var(--al-top) - 30px);
+          width: calc(var(--al-w) + 80px);
+          height: calc(var(--al-h) + 30px);
+          -webkit-mask-image: linear-gradient(to bottom, #000 0, #000 72%, transparent 100%);
+          mask-image: linear-gradient(to bottom, #000 0, #000 72%, transparent 100%);
+        }
+        [data-composition-id="animated-list"] .al-item {
+          position: absolute;
+          left: 40px;
+          top: 30px;
+          width: var(--al-w);
+          box-sizing: border-box;
+          display: flex;
+          align-items: center;
+          gap: 28px;
+          padding: 28px 34px;
+          border-radius: var(--al-r);
+          background: #fff;
+          transform-origin: 50% 0%;
+          box-shadow:
+            0 0 0 1px color-mix(in srgb, var(--ink, #111) 6%, transparent),
+            0 1px 2px rgba(0, 0, 0, 0.06),
+            0 12px 32px rgba(0, 0, 0, 0.08);
+        }
+        [data-composition-id="animated-list"] .al-icon {
+          flex: none;
+          width: 88px;
+          height: 88px;
+          border-radius: 24px;
+          display: grid;
+          place-items: center;
+          color: #fff;
+          background: var(--accent, #2f5bff);
+        }
+        [data-composition-id="animated-list"] .al-icon.ink {
+          background: var(--ink, #111);
+        }
+        [data-composition-id="animated-list"] .al-icon.soft {
+          color: var(--accent, #2f5bff);
+          background: color-mix(in srgb, var(--accent, #2f5bff) 14%, #fff);
+        }
+        [data-composition-id="animated-list"] .al-icon.line {
+          color: var(--ink, #111);
+          background: color-mix(in srgb, var(--ink, #111) 7%, #fff);
+        }
+        [data-composition-id="animated-list"] .al-title {
+          display: flex;
+          align-items: baseline;
+          gap: 14px;
+          font-size: 34px;
+          font-weight: 600;
+          letter-spacing: -0.01em;
+        }
+        [data-composition-id="animated-list"] .al-title small {
+          font-size: 25px;
+          font-weight: 400;
+          color: var(--muted, #888);
+        }
+        [data-composition-id="animated-list"] .al-desc {
+          margin-top: 6px;
+          font-size: 28px;
+          color: var(--muted, #888);
+        }
+      </style>
+      <div class="al-list">
+        <!-- edit: cards in arrival order (icon class: "" accent, "ink", "soft", "line") -->
+        <div class="al-item">
+          <div class="al-icon"><svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="5" width="20" height="14" rx="3" /><path d="M2 10h20M6 15h4" /></svg></div>
+          <div><div class="al-title">Payment received <small>· 15m ago</small></div><div class="al-desc">$1,200 from Northwind Traders</div></div>
+        </div>
+        <div class="al-item">
+          <div class="al-icon soft"><svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4" /><path d="M4 21v-1a6 6 0 0 1 6-6h4a6 6 0 0 1 6 6v1" /></svg></div>
+          <div><div class="al-title">New sign-up <small>· 10m ago</small></div><div class="al-desc">maya@studio.co joined the Pro trial</div></div>
+        </div>
+        <div class="al-item">
+          <div class="al-icon ink"><svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a8 8 0 0 1-11.6 7.1L4 21l1.9-5.4A8 8 0 1 1 21 12z" /></svg></div>
+          <div><div class="al-title">New message <small>· 5m ago</small></div><div class="al-desc">“Can we move the demo to Friday?”</div></div>
+        </div>
+        <div class="al-item">
+          <div class="al-icon line"><svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="16" rx="3" /><path d="M3 10h18M8 3v4M16 3v4" /></svg></div>
+          <div><div class="al-title">Event booked <small>· 2m ago</small></div><div class="al-desc">Product demo · Fri 10:00</div></div>
+        </div>
+        <div class="al-item">
+          <div class="al-icon"><svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17l6-6 4 4 8-8" /><path d="M15 7h6v6" /></svg></div>
+          <div><div class="al-title">Goal reached <small>· 1m ago</small></div><div class="al-desc">Monthly revenue passed $50k</div></div>
+        </div>
+        <div class="al-item">
+          <div class="al-icon soft"><svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5" /></svg></div>
+          <div><div class="al-title">Deploy finished <small>· now</small></div><div class="al-desc">v2.4 is live for all customers</div></div>
+        </div>
+      </div>
+    </div>
+    <script>
+      (function () {
+        const FIRST_AT = 0.2;
+        const EVERY = 0.85;
+        const GAP = 22;
+        const STIFFNESS = 350;
+        const DAMPING = 40;
+        const MASS = 1;
+
+        // Analytic damped spring from 0 to 1, as a GSAP ease over SPRING_DUR seconds.
+        const w0 = Math.sqrt(STIFFNESS / MASS);
+        const zeta = DAMPING / (2 * Math.sqrt(STIFFNESS * MASS));
+        const springAt = (t) => {
+          if (zeta < 1) {
+            const wd = w0 * Math.sqrt(1 - zeta * zeta);
+            return 1 - Math.exp(-zeta * w0 * t) * (Math.cos(wd * t) + ((zeta * w0) / wd) * Math.sin(wd * t));
+          }
+          if (zeta === 1) return 1 - Math.exp(-w0 * t) * (1 + w0 * t);
+          const s = Math.sqrt(zeta * zeta - 1);
+          const r1 = -w0 * (zeta - s);
+          const r2 = -w0 * (zeta + s);
+          return 1 - (r2 * Math.exp(r1 * t) - r1 * Math.exp(r2 * t)) / (r2 - r1);
+        };
+        let SPRING_DUR = 0.1;
+        while (SPRING_DUR < 3 && Math.abs(1 - springAt(SPRING_DUR)) > 0.001) SPRING_DUR += 0.01;
+        const spring = (p) => (p >= 1 ? 1 : springAt(p * SPRING_DUR));
+
+        const root = document.querySelector('[data-composition-id="animated-list"]');
+        const items = [...root.querySelectorAll(".al-item")];
+        const heights = items.map((el) => el.offsetHeight);
+        const tl = gsap.timeline({ paused: true });
+
+        gsap.set(items, { y: 0, scale: 0, opacity: 0 });
+        items.forEach((item, k) => {
+          const at = FIRST_AT + k * EVERY;
+          item.style.zIndex = String(10 + k);
+          // Arrive at the top (motion: initial scale 0 / opacity 0, originY 0).
+          tl.fromTo(item, { scale: 0, opacity: 0 }, { scale: 1, opacity: 1, duration: SPRING_DUR, ease: spring }, at);
+          // Push every card already shown down by this card's height + gap.
+          const below = heights[k] + GAP;
+          for (let j = k - 1; j >= 0; j--) {
+            const prev = items.slice(j + 1, k).reduce((sum, el, n) => sum + heights[j + 1 + n] + GAP, 0);
+            tl.fromTo(items[j], { y: prev }, { y: prev + below, duration: SPRING_DUR, ease: spring, immediateRender: false }, at);
+          }
+        });
+        tl.to({}, { duration: 6 - tl.duration() });
+        window.__timelines = window.__timelines || {};
+        window.__timelines["animated-list"] = tl;
+      })();
+    </script>
+  </body>
+</html>

@@ -1,3 +1,4 @@
+import { withoutQwenRuntimeSecret } from "../../tools/safe-env.js";
 import { execFileSync } from "node:child_process";
 import chalk from "chalk";
 import type { ThemeName } from "./theme.js";
@@ -31,6 +32,7 @@ export async function detectTheme(): Promise<ThemeName> {
   if (process.platform === "darwin") {
     try {
       const result = execFileSync("defaults", ["read", "-g", "AppleInterfaceStyle"], {
+        env: withoutQwenRuntimeSecret(),
         encoding: "utf-8",
         timeout: 500,
         stdio: ["pipe", "pipe", "pipe"],

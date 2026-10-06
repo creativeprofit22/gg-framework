@@ -1,0 +1,16 @@
+{
+  "id": "animated-beam",
+  "name": "Animated beam",
+  "kind": "diagram",
+  "description": "Icon nodes on the left send curved gradient beams into a central accent hub, which beams out to nodes on the right. Nodes pop in, faint base paths draw on, then light sweeps along each connection on a staggered expo-out loop. Use for integrations, 'connects everything', data flowing through a product. Edit INPUTS / OUTPUTS / HUB.",
+  "tags": ["beam", "integrations", "hub", "connections", "flow", "icons", "gradient", "launch", "magic-ui"],
+  "fonts": [],
+  "duration": 6,
+  "previewAt": 3.6,
+  "license": "MIT",
+  "source": {
+    "url": "https://github.com/magicuidesign/magicui/blob/main/apps/www/registry/magicui/animated-beam.tsx",
+    "author": "Magic UI"
+  },
+  "previewLook": "soft-light-ad"
+}

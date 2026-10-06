@@ -1,0 +1,11 @@
+{
+  "id": "swiss-grid",
+  "name": "Swiss Grid",
+  "description": "International Typographic Style in motion: a white field, black ink and one signal red on a strict, visible 12-column grid. Huge numbers set in heavy Schibsted Grotesk, flush-left ragged-right text, everything snapping to column edges with mechanical, precise moves.",
+  "tags": ["swiss", "grid", "minimal", "typographic", "white", "red", "data", "editorial"],
+  "fonts": ["Schibsted Grotesk", "Martian Mono"],
+  "bestFor": ["annual reports", "statistics", "design-led brands", "explainers with numbers", "architecture and agencies"],
+  "pieces": [],
+  "samplePieces": [],
+  "previewAt": 2.6
+}

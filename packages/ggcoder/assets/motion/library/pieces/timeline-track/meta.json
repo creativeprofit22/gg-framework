@@ -1,0 +1,12 @@
+{
+  "id": "timeline-track",
+  "name": "Timeline track",
+  "kind": "diagram",
+  "description": "A horizontal timeline whose track fills left to right behind an accent playhead; milestones pop in (dot, mono date above, display label below) as the playhead reaches them, the last one highlighted as 'now'. A mono readout tracks progress. Edit MILESTONES for roadmaps, company history or release trains.",
+  "tags": ["timeline", "roadmap", "history", "milestones", "playhead", "dates", "draw-on", "explainer"],
+  "fonts": [],
+  "duration": 5,
+  "previewAt": 3,
+  "license": "original",
+  "previewLook": "duotone-broadcast"
+}

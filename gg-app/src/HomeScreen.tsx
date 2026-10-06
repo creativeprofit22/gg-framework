@@ -1,83 +1,111 @@
-import { useEffect, useState } from "react";
-import { Settings, Download } from "lucide-react";
+import { useEffect, useId, useMemo, useState, type CSSProperties } from "react";
+import {
+  CodeIcon,
+  ChatCircleTextIcon,
+  DownloadSimpleIcon,
+  FilmSlateIcon,
+  GearSixIcon,
+} from "@phosphor-icons/react";
 import { getVersion } from "@tauri-apps/api/app";
-import { openUrl } from "@tauri-apps/plugin-opener";
 import { AsciiLogo } from "./AsciiLogo";
-import { HomeBackdrop } from "./HomeBackdrop";
-import { MemeLayer } from "./MemeLayer";
-import { SettingsModal } from "./SettingsModal";
-import { TelegramSettingsModal } from "./TelegramSettingsModal";
-import { McpModal } from "./McpModal";
-import { SoundButton } from "./SoundButton";
+import { HomeScenery, withScenery } from "./HomeScenery";
+import { HomeCritters } from "./HomeCritters";
+import { useHomeBackgroundEnabled } from "./home-background";
+import { groundFilter, lightAt } from "./scene-light";
+import { useLocalHour } from "./use-local-hour";
+import { useRandomBiome } from "./use-random-biome";
+import type { SettingsTabId } from "./SettingsScreen";
 import {
   waitForReady,
   getSettings,
   authStatus,
-  getServeStatus,
-  startServe,
-  stopServe,
   openWhatsNewWindow,
   getProgress,
+  setRemoteActive,
+  getServeStatus,
   type ProgressSnapshot,
 } from "./agent";
 import { RankBadge } from "./RankBadge";
 import { ScorecardModal } from "./ScorecardModal";
 import { useAppUpdate } from "./update";
+import { ConfirmModal } from "./ConfirmModal";
+import { LocalUpdateSummaryOption } from "./LocalUpdateSummaryOption";
+import {
+  LOCAL_UPDATE_CONFIRMATION_CONFIRM_LABEL,
+  LOCAL_UPDATE_CONFIRMATION_MESSAGE,
+  LOCAL_UPDATE_CONFIRMATION_TITLE,
+  shouldConfirmLocalUpdate,
+} from "./local-update-confirmation";
 import { toast } from "./toast";
+import type { WhatsNewFeedId } from "./whats-new-status";
+import { error as logError } from "@tauri-apps/plugin-log";
 
 interface Props {
   onProjects: () => void;
-  onLogin: () => void;
+  onChat: () => void;
+  onMotion: () => void;
+  /** Opens full-screen Settings, optionally on a given tab. */
+  onSettings: (tab?: SettingsTabId) => void;
+  /**
+   * Bumped when something OUTSIDE this screen changed serve/auth state (the
+   * macOS tray toggling Remote, or its Settings modal saving a projects
+   * folder). A counter, not a boolean, so repeats always re-fire.
+   */
+  refreshSignal?: number;
+  waitForAgentReady?: () => Promise<unknown>;
+  loadProgress?: () => Promise<ProgressSnapshot | null>;
 }
 
 /**
- * App entry screen: the shimmering GG Coder banner over the primary actions.
- * "Your Projects" requires two prerequisites — a configured project folder AND
- * at least one connected AI provider — and is dimmed until both are met, with
- * toasts guiding the user. Settings (project folder) lives here, beside Projects.
+ * App entry screen: the shimmering Supah Coder banner over the primary actions.
+ * Code, Chat and Motion require a configured workspace folder and connected AI provider;
+ * everything else lives in full-screen Settings (the top-right gear).
  */
-export function HomeScreen({ onProjects, onLogin }: Props): React.ReactElement {
+export function HomeScreen({
+  onProjects,
+  onChat,
+  onMotion,
+  onSettings,
+  refreshSignal = 0,
+  waitForAgentReady = waitForReady,
+  loadProgress = getProgress,
+}: Props): React.ReactElement {
   const [folderSet, setFolderSet] = useState(false);
   const [providerCount, setProviderCount] = useState(0);
-  const [showSettings, setShowSettings] = useState(false);
-  const [showTelegram, setShowTelegram] = useState(false);
-  const [showMcp, setShowMcp] = useState(false);
-  const [serving, setServing] = useState(false);
-  const [telegramConfigured, setTelegramConfigured] = useState(false);
-  const [serveBusy, setServeBusy] = useState(false);
   const [version, setVersion] = useState<string | null>(null);
+  const [showLocalUpdateConfirm, setShowLocalUpdateConfirm] = useState(false);
+  const [summarizeDecisions, setSummarizeDecisions] = useState(false);
   const [progress, setProgress] = useState<ProgressSnapshot | null>(null);
   const [showScorecard, setShowScorecard] = useState(false);
+  const [unreadWhatsNew, setUnreadWhatsNew] = useState<WhatsNewFeedId[]>([]);
   const appUpdate = useAppUpdate();
+  const motionNoteId = useId();
 
   useEffect(() => {
     void getVersion()
       .then(setVersion)
       .catch(() => {});
-    void waitForReady()
-      .then(() => getProgress())
+    void waitForAgentReady()
+      .then(() => loadProgress())
       .then(setProgress)
       .catch(() => {});
-  }, []);
+  }, [loadProgress, waitForAgentReady]);
 
   async function refresh(): Promise<void> {
     // Settings + auth are read NATIVELY (Rust) — do them first, WITHOUT waiting on
-    // the sidecar, so the "Your Projects" gate never stays dimmed just because
-    // the agent is slow/crashed (the original bug, now also covering providers).
+    // the sidecar, so the workspace gate never stays dimmed just because the
+    // agent is slow/crashed.
     const [settings, providers] = await Promise.all([getSettings(), authStatus()]);
     // Prefer the explicit `configured` flag; fall back to a non-empty root so an
     // older sidecar (one that predates the flag) degrades to "set" instead of
     // dimming forever.
     setFolderSet(settings?.configured ?? Boolean(settings?.projectsRoot));
     setProviderCount(providers.filter((p) => p.connected).length);
-    // Serve status lives in the sidecar (the Telegram bot runs there). Best-effort
-    // — gate it on readiness but never let it block the native reads above.
+    // Keep the macOS tray's Remote label in step with the sidecar (it may have
+    // respawned). Best-effort, and never blocks the native reads above.
     void waitForReady()
       .then(() => getServeStatus())
-      .then((serve) => {
-        setServing(serve.running);
-        setTelegramConfigured(serve.configured);
-      })
+      .then((serve) => void setRemoteActive(serve.running))
       .catch(() => {});
   }
 
@@ -90,176 +118,249 @@ export function HomeScreen({ onProjects, onLogin }: Props): React.ReactElement {
     return () => window.removeEventListener("focus", onFocus);
   }, []);
 
+  // Skips the initial 0 so mounting doesn't double-refresh.
+  useEffect(() => {
+    if (refreshSignal > 0) void refresh().catch(() => {});
+  }, [refreshSignal]);
+
+  useEffect(() => {
+    let cancelled = false;
+    let cleanup: (() => void) | undefined;
+    void import("./whats-new-status")
+      .then(({ getWhatsNewStatus, WHATS_NEW_STORAGE_KEY }) => {
+        if (cancelled) return;
+        const refreshUnread = (): void => {
+          setUnreadWhatsNew(getWhatsNewStatus(localStorage, appUpdate.localPatched).unreadFeedIds);
+        };
+        const onStorage = (event: StorageEvent): void => {
+          if (event.key === null || event.key === WHATS_NEW_STORAGE_KEY) refreshUnread();
+        };
+        refreshUnread();
+        window.addEventListener("focus", refreshUnread);
+        window.addEventListener("storage", onStorage);
+        cleanup = () => {
+          window.removeEventListener("focus", refreshUnread);
+          window.removeEventListener("storage", onStorage);
+        };
+      })
+      .catch((error) => {
+        if (!cancelled) void logError(`What's-new status failed: ${String(error)}`);
+      });
+    return () => {
+      cancelled = true;
+      cleanup?.();
+    };
+  }, [appUpdate.localPatched]);
+
   const ready = folderSet && providerCount > 0;
 
-  async function handleServe(): Promise<void> {
-    if (serveBusy) return;
-    if (providerCount === 0) {
+  function handleWorkspace(open: () => void): void {
+    if (ready) {
+      open();
+      return;
+    }
+    // Take the user to the missing prerequisite: the folder first (General),
+    // then a provider.
+    if (!folderSet) {
+      toast("Set a workspace folder first.", "warning");
+      onSettings("general");
+    } else if (providerCount === 0) {
       toast("Connect an AI provider first.", "warning");
-      return;
-    }
-    if (!telegramConfigured) {
-      toast("Set up Telegram first.", "warning");
-      setShowTelegram(true);
-      return;
-    }
-    setServeBusy(true);
-    try {
-      if (serving) {
-        await stopServe();
-        setServing(false);
-        toast("Stopped serving.", "success");
-      } else {
-        await startServe();
-        setServing(true);
-        toast("Serving on Telegram — message your bot.", "success");
-      }
-    } catch (e) {
-      toast(`Serve failed: ${e instanceof Error ? e.message : String(e)}`, "error");
-    } finally {
-      setServeBusy(false);
+      onSettings("providers");
     }
   }
 
-  function handleProjects(): void {
-    if (ready) {
-      onProjects();
-      return;
-    }
-    // Guide the user to the missing prerequisite(s).
-    if (!folderSet) {
-      toast("Set a project folder first. Open Settings.", "warning");
-    }
-    if (providerCount === 0) {
-      toast("Connect an AI provider first.", "warning");
-    }
-  }
+  const showUpdate =
+    appUpdate.phase === "available" ||
+    appUpdate.phase === "installing" ||
+    (appUpdate.localPatched && (appUpdate.phase === "completed" || appUpdate.phase === "error"));
+  const localUpdateStatus =
+    appUpdate.localPatched &&
+    (appUpdate.phase === "installing" ||
+      appUpdate.phase === "completed" ||
+      appUpdate.phase === "error");
+  const unreadLabels = unreadWhatsNew.map((id) => (id === "local" ? "Local Fork" : "Upstream"));
+  const whatsNewLabel =
+    unreadLabels.length > 0
+      ? `What's new, unread from ${unreadLabels.join(" and ")}`
+      : "What's new";
+  const backgroundOn = useHomeBackgroundEnabled();
+  // The critters' terrain for this visit. With the scenery on it has to be one
+  // with a horizon painted behind it, and its ground takes the sky's light.
+  const [visitBiome] = useRandomBiome();
+  const biome = backgroundOn ? withScenery(visitBiome) : visitBiome;
+  const hour = useLocalHour();
+  const sceneStyle = useMemo(
+    (): (CSSProperties & Record<"--scene-ground", string>) | undefined =>
+      backgroundOn ? { "--scene-ground": groundFilter(lightAt(hour)) } : undefined,
+    [backgroundOn, hour],
+  );
 
   return (
-    <div className="home" data-tauri-drag-region>
-      <HomeBackdrop />
-      <MemeLayer />
-      {appUpdate.phase === "available" || appUpdate.phase === "installing" ? (
+    <div className="home" data-tauri-drag-region style={sceneStyle}>
+      {backgroundOn && <HomeScenery hour={hour} />}
+      {/* Above the banner: your rank and What's new. */}
+      <div className="home-version-row">
+        <RankBadge
+          snapshot={progress}
+          onClick={() => setShowScorecard(true)}
+          className="home-rank-badge"
+        />
         <button
-          className="home-update"
-          disabled={appUpdate.phase === "installing"}
-          title={`Update to ${appUpdate.version} — installs and restarts the app`}
-          onClick={() => void appUpdate.install()}
+          className="home-whatsnew"
+          type="button"
+          aria-label={whatsNewLabel}
+          title={whatsNewLabel}
+          onClick={() => void openWhatsNewWindow().catch(() => {})}
         >
-          <Download size={14} strokeWidth={2.25} aria-hidden="true" />
-          {appUpdate.phase === "installing" ? "Installing\u2026" : `Update to ${appUpdate.version}`}
-        </button>
-      ) : (
-        version && (
-          <div className="home-version-row">
-            <span className="home-version">{`v${version}`}</span>
-            <RankBadge
-              snapshot={progress}
-              onClick={() => setShowScorecard(true)}
-              className="home-rank-badge"
+          <span>What&apos;s new</span>
+          {unreadWhatsNew.map((id) => (
+            <span
+              key={id}
+              className={`home-whatsnew-dot feed-${id}`}
+              title={`${id === "local" ? "Local Fork" : "Upstream"} unread`}
+              aria-hidden="true"
             />
-            <button
-              className="home-whatsnew"
-              type="button"
-              title="See the latest updates"
-              onClick={() => void openWhatsNewWindow().catch(() => {})}
-            >
-              What&apos;s new
-            </button>
-          </div>
-        )
+          ))}
+        </button>
+      </div>
+      {showLocalUpdateConfirm && (
+        <ConfirmModal
+          title={LOCAL_UPDATE_CONFIRMATION_TITLE}
+          message={LOCAL_UPDATE_CONFIRMATION_MESSAGE}
+          confirmLabel={LOCAL_UPDATE_CONFIRMATION_CONFIRM_LABEL}
+          content={
+            <LocalUpdateSummaryOption
+              checked={summarizeDecisions}
+              onChange={setSummarizeDecisions}
+            />
+          }
+          onConfirm={() => {
+            setShowLocalUpdateConfirm(false);
+            void appUpdate.install({ summarizeDecisions });
+            setSummarizeDecisions(false);
+          }}
+          onClose={() => {
+            setShowLocalUpdateConfirm(false);
+            setSummarizeDecisions(false);
+          }}
+        />
       )}
       <AsciiLogo />
       <div className="home-tagline">Cause the other coding agents piss me off</div>
-      <div className="home-byline">
-        By Ken Kai
-        <span className="home-byline-sep">{"\u00b7"}</span>
-        <a
-          className="home-link"
-          href="https://skool.com/kenkai"
-          onClick={(e) => {
-            e.preventDefault();
-            void openUrl("https://skool.com/kenkai");
-          }}
-        >
-          Skool
-        </a>
-        <span className="home-byline-sep">{"\u00b7"}</span>
-        <a
-          className="home-link"
-          href="https://youtube.com/@kenkaidoesai"
-          onClick={(e) => {
-            e.preventDefault();
-            void openUrl("https://youtube.com/@kenkaidoesai");
-          }}
-        >
-          YouTube
-        </a>
-      </div>
       <div className="home-actions">
-        <div className="home-projects-row">
+        <button
+          type="button"
+          className={`btn btn-primary home-action${ready ? "" : " is-dimmed"}`}
+          aria-disabled={ready ? undefined : true}
+          onClick={() => handleWorkspace(onProjects)}
+        >
+          <CodeIcon size={18} weight="bold" aria-hidden="true" />
+          Code
+        </button>
+        <button
+          type="button"
+          className={`btn btn-primary home-action${ready ? "" : " is-dimmed"}`}
+          aria-disabled={ready ? undefined : true}
+          onClick={() => handleWorkspace(onChat)}
+        >
+          <ChatCircleTextIcon size={18} weight="bold" aria-hidden="true" />
+          Chat
+        </button>
+        {/* Motion is still being built, so its button says so underneath and
+            sits a tier below Code and Chat (secondary, not primary). */}
+        <div className="home-action-slot">
           <button
-            className={`btn btn-primary btn-lg home-btn${ready ? "" : " is-dimmed"}`}
-            aria-disabled={!ready}
-            onClick={handleProjects}
+            type="button"
+            className={`btn btn-ghost home-action${ready ? "" : " is-dimmed"}`}
+            aria-disabled={ready ? undefined : true}
+            aria-describedby={motionNoteId}
+            onClick={() => handleWorkspace(onMotion)}
           >
-            Your Projects
+            <FilmSlateIcon size={18} weight="bold" aria-hidden="true" />
+            Motion
           </button>
-          <SoundButton />
-          <button
-            className="btn btn-ghost btn-icon home-settings"
-            title="Settings"
-            onClick={() => setShowSettings(true)}
-          >
-            <Settings size={20} strokeWidth={2} aria-hidden="true" />
-          </button>
+          <span id={motionNoteId} className="home-action-note">
+            Still in process
+          </span>
         </div>
-        <div className="home-projects-row">
-          <button className="btn btn-ghost btn-lg home-btn" onClick={onLogin}>
-            Login to AI Providers
-          </button>
+      </div>
+      <button
+        type="button"
+        className="icon-circle home-settings"
+        aria-label="Settings"
+        title="Settings"
+        onClick={() => onSettings()}
+      >
+        <GearSixIcon size={20} weight="bold" aria-hidden="true" />
+      </button>
+      {/* Along the bottom edge: every critter, out playing. The byline sits just
+        above their lane. */}
+      <HomeCritters biome={biome} />
+      {/* Bottom centre: the Local Fork byline (upstream's author links are not shown). */}
+      <div className="home-byline home-links">Built for shipping real projects fast</div>
+      {/* Top centre: the version, or the update button when one is ready. */}
+      <div className="home-version-corner">
+        {showUpdate ? (
           <button
-            className="btn btn-ghost btn-lg home-btn"
-            title="Manage MCP servers"
-            onClick={() => setShowMcp(true)}
+            className={`home-update${appUpdate.phase === "installing" ? " home-update-progress" : ""}`}
+            disabled={appUpdate.phase === "installing" || appUpdate.phase === "completed"}
+            title={
+              localUpdateStatus
+                ? (appUpdate.statusMessage ?? appUpdate.installTitle)
+                : appUpdate.installTitle
+            }
+            onClick={() => {
+              if (shouldConfirmLocalUpdate(appUpdate.localPatched, appUpdate.phase)) {
+                setSummarizeDecisions(false);
+                setShowLocalUpdateConfirm(true);
+              } else {
+                void appUpdate.install();
+              }
+            }}
           >
-            MCP
+            {appUpdate.phase === "installing" && !appUpdate.localPatched && (
+              <span className="home-update-fill" style={{ width: `${appUpdate.progress ?? 0}%` }} />
+            )}
+            <DownloadSimpleIcon size={14} weight="bold" aria-hidden="true" />
+            {localUpdateStatus ? (
+              <>
+                <span className="home-update-status">
+                  {appUpdate.statusMessage ?? appUpdate.installLabel}
+                </span>
+                {/* Outside the clamped text so a long error never hides it. */}
+                {appUpdate.phase === "error" && (
+                  <>
+                    {" "}
+                    <span className="home-update-retry">{"— Retry"}</span>
+                  </>
+                )}
+              </>
+            ) : (
+              /* Both labels occupy the same grid cell; the inactive one is
+                visibility:hidden, so the pill is ALWAYS sized to the wider of
+                the two and never resizes when the install starts or the
+                percentage climbs. */
+              <span className="home-update-swap">
+                <span
+                  className={appUpdate.phase === "installing" ? "home-update-hidden" : undefined}
+                >
+                  {appUpdate.installLabel}
+                </span>
+                <span
+                  className={appUpdate.phase === "installing" ? undefined : "home-update-hidden"}
+                >
+                  {"Installing\u2026"}
+                  <span className="home-update-pct">{`${appUpdate.progress ?? 0}%`}</span>
+                </span>
+              </span>
+            )}
           </button>
-        </div>
-        <div className="home-projects-row">
-          <button
-            className={`btn btn-ghost btn-lg home-btn${serving ? " home-serve-active" : ""}`}
-            disabled={serveBusy}
-            onClick={() => void handleServe()}
-          >
-            {serveBusy ? "Working\u2026" : serving ? "\u25CF Remote · Stop" : "Remote"}
-          </button>
-          <button
-            className="btn btn-ghost btn-icon home-settings"
-            title="Telegram setup"
-            onClick={() => setShowTelegram(true)}
-          >
-            <Settings size={20} strokeWidth={2} aria-hidden="true" />
-          </button>
-        </div>
+        ) : (
+          version && <span className="home-version">{`v${version}`}</span>
+        )}
       </div>
 
-      {showSettings && (
-        <SettingsModal
-          onClose={() => setShowSettings(false)}
-          onSaved={() => {
-            setFolderSet(true);
-            toast("Project folder saved.", "success");
-          }}
-        />
-      )}
-      {showTelegram && (
-        <TelegramSettingsModal
-          onClose={() => setShowTelegram(false)}
-          onSaved={() => setTelegramConfigured(true)}
-        />
-      )}
-      {showMcp && <McpModal onClose={() => setShowMcp(false)} />}
       {showScorecard && progress && (
         <ScorecardModal snapshot={progress} onClose={() => setShowScorecard(false)} />
       )}

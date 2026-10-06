@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { MENTOR_DISPLAY_NAME } from "./brand";
 import { theme } from "./theme";
 import { SPINNER_FRAMES, SPINNER_FRAME_MS } from "./ActivityBar";
 
@@ -26,13 +27,13 @@ export function AutopilotReviewBar({ onCancel }: Props): React.ReactElement {
   }, []);
 
   return (
-    <div className="statusrow running ken-statusrow" style={{ color: theme.textMuted }}>
+    <div className="statusrow running ken-statusrow dissolve-in" style={{ color: theme.textMuted }}>
       <span className="statusrow-left">
         <span className="statusrow-icon spinner ken-spinner" style={{ color: theme.ken }}>
           {SPINNER_FRAMES[frame]}
         </span>
         <span className="working" style={{ color: theme.ken }}>
-          {"Ken reviewing\u2026"}
+          {`${MENTOR_DISPLAY_NAME} reviewing\u2026`}
         </span>
       </span>
       <span className="statusrow-right">

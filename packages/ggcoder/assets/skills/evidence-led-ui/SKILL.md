@@ -9,11 +9,11 @@ compatibility: Full review requires filesystem inspection and rendered screensho
 
 Pick your mode, then follow only that section:
 
-| Situation | Mode | Go to |
-| --- | --- | --- |
-| One control, state, border, icon inset, focus bug, or token tweak | Small edit | § Small-edit path |
-| New screen/page/component, redesign, or "make it look less generic" | Build | § Build loop |
-| "Review this UI", audit screens or flows, pre-ship look | Review | § Review mode |
+| Situation                                                           | Mode       | Go to             |
+| ------------------------------------------------------------------- | ---------- | ----------------- |
+| One control, state, border, icon inset, focus bug, or token tweak   | Small edit | § Small-edit path |
+| New screen/page/component, redesign, or "make it look less generic" | Build      | § Build loop      |
+| "Review this UI", audit screens or flows, pre-ship look             | Review     | § Review mode     |
 
 Every mode obeys § Binding defaults. Preserve the project's visual language unless the user asked for a redesign.
 
@@ -72,12 +72,12 @@ Details and fixes: `references/craft-rulings.md`.
 
 ## Scaling: one agent or several
 
-| Situation | Policy |
-| --- | --- |
-| Small edit, build, redesign | Main thread only. One thesis, one author; never split a design across children. |
-| Review of one or two flows you can render and read yourself | Main thread only. |
-| Review of many screens/flows, or several apps | Build a ledger: rows = flows/screens × {slop tells, states, accessibility contract, responsive}. Fan out read-only general-purpose children (they have the `skill` tool), one per disjoint flow, all in ONE `spawn_agent` call, ≤ 6 per wave. |
-| A dated legal or platform claim needs checking | One `researcher` child. |
+| Situation                                                   | Policy                                                                                                                                                                                                                                        |
+| ----------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Small edit, build, redesign                                 | Main thread only. One thesis, one author; never split a design across children.                                                                                                                                                               |
+| Review of one or two flows you can render and read yourself | Main thread only.                                                                                                                                                                                                                             |
+| Review of many screens/flows, or several apps               | Build a ledger: rows = flows/screens × {slop tells, states, accessibility contract, responsive}. Fan out read-only general-purpose children (they have the `skill` tool), one per disjoint flow, all in ONE `spawn_agent` call, ≤ 6 per wave. |
+| A dated legal or platform claim needs checking              | One `researcher` child.                                                                                                                                                                                                                       |
 
 Each child brief contains: the absolute skill root path (the `Skill root directory` shown when this skill loaded), files to read (`references/anti-defaults.md`, `references/quality-rubric.md`, the accessibility sections of `references/production-contract.md`), the flow's routes and how to run the app, the ledger rows it owns, the instruction to capture desktop and mobile screenshots with the `screenshot` tool, the evidence labels, and the output schema: findings (screen, screenshot or file:line, label, severity, fix) plus explicit `checked` and `not checked` lists. Children do not edit.
 

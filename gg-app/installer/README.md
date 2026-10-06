@@ -10,11 +10,11 @@ critter pink.
 
 `build-pages.mjs` draws all three pages; there are no hand-edited sources.
 
-| Page | Rendered PNG | Final asset (`out/`) | Used by |
-|---|---|---|---|
-| DMG window | `dmg-background.png` (1320×800) | `out/dmg-background.png` | macOS DMG window background |
-| NSIS sidebar | `nsis-sidebar.png` (328×628) | `out/nsis-sidebar.bmp` (164×314, 24-bit) | NSIS Welcome/Finish page |
-| NSIS header | `nsis-header.png` (300×114) | `out/nsis-header.bmp` (150×57, 24-bit) | NSIS page header strip |
+| Page         | Rendered PNG                    | Final asset (`out/`)                     | Used by                     |
+| ------------ | ------------------------------- | ---------------------------------------- | --------------------------- |
+| DMG window   | `dmg-background.png` (1320×800) | `out/dmg-background.png`                 | macOS DMG window background |
+| NSIS sidebar | `nsis-sidebar.png` (328×628)    | `out/nsis-sidebar.bmp` (164×314, 24-bit) | NSIS Welcome/Finish page    |
+| NSIS header  | `nsis-header.png` (300×114)     | `out/nsis-header.bmp` (150×57, 24-bit)   | NSIS page header strip      |
 
 `logo.png` is a copy of `src-tauri/icons/128x128@2x.png`, written by
 `scripts/build-icons.mjs`.

@@ -7,12 +7,12 @@ description: Use when the user asks to review written work — a diff, PR, branc
 
 **Route first:**
 
-| Situation | Mode | Next |
-|---|---|---|
-| Small diff: one concern, ≲ ~400 changed lines, few files | **Single pass** | Method below; both axes yourself, spec first, then standards |
-| Large diff, multi-package PR, or many unrelated concerns | **Fan-out** | Build the ledger, then `## Scaling` |
-| Diff written by an agent (including you, this session) | Either mode **+ agent checks** | Also run `references/agent-diffs.md` |
-| User asks "is it secure?" | Defer | Load the `bulletproof` skill — do not audit security here |
+| Situation                                                | Mode                           | Next                                                         |
+| -------------------------------------------------------- | ------------------------------ | ------------------------------------------------------------ |
+| Small diff: one concern, ≲ ~400 changed lines, few files | **Single pass**                | Method below; both axes yourself, spec first, then standards |
+| Large diff, multi-package PR, or many unrelated concerns | **Fan-out**                    | Build the ledger, then `## Scaling`                          |
+| Diff written by an agent (including you, this session)   | Either mode **+ agent checks** | Also run `references/agent-diffs.md`                         |
+| User asks "is it secure?"                                | Defer                          | Load the `bulletproof` skill — do not audit security here    |
 
 Two questions, kept separate because each contaminates the other:
 
@@ -34,14 +34,15 @@ One line each, anchored and actionable:
 
 `[severity] [spec|standards] path/file.ts:42 — problem. Why it matters. Fix: concrete change.`
 
-| Severity | Means | Example |
-|---|---|---|
-| **blocking** | Must change before merge | Wrong behaviour, missing requirement, deleted/weakened test, swallowed error, hallucinated API or package |
-| **non-blocking** | Should change; may follow up | Duplicate helper, weak assertion on a non-critical path |
-| **nit** | Optional polish | Naming, local readability |
-| **question** | You cannot tell; author must answer | Unclear intent, unverifiable claim |
+| Severity         | Means                               | Example                                                                                                   |
+| ---------------- | ----------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| **blocking**     | Must change before merge            | Wrong behaviour, missing requirement, deleted/weakened test, swallowed error, hallucinated API or package |
+| **non-blocking** | Should change; may follow up        | Duplicate helper, weak assertion on a non-critical path                                                   |
+| **nit**          | Optional polish                     | Naming, local readability                                                                                 |
+| **question**     | You cannot tell; author must answer | Unclear intent, unverifiable claim                                                                        |
 
 Rules:
+
 - Keep **[spec]** and **[standards]** as two separate lists — never merge the lists into one ranking; the axes are not comparable and merging re-ranks by noise. Order by severity within each list.
 - Every finding cites a `file:line` you re-opened yourself. No line → it is a **question**, not a finding.
 - Comment on the code, not the author; say why.
@@ -68,13 +69,13 @@ Never "looks good"/"LGTM" without stating what was and was not verified. Never c
 
 ## Scaling: one agent or several
 
-| Situation | Do |
-|---|---|
-| Single-pass size (one concern, ≲ ~400 changed lines, few files) | Main thread only. Never spawn. |
-| Larger, multi-package, or > ~15 files | Main thread builds a **coverage ledger**: rows = lens (spec, standards/correctness, tests, agent checks) × file group (package/directory). Each row ends `checked-with-findings` / `checked-clean` / `not-checked(reason)`. |
-| Fan-out | ONE `spawn_agent` call, ≤ 6 read-only children per lens and/or file group: `owl` for reading; general-purpose child if it must run tests. |
-| Security-sensitive hunks (auth, input, secrets, deps, CI) | Route to bulletproof's protocol: `auditor` child briefed with the bulletproof skill root, then `skeptic` on its findings. |
-| High-stakes merge (release, > ~1,000 lines) | One fresh-context verifier child tries to disprove each blocking finding. |
+| Situation                                                       | Do                                                                                                                                                                                                                          |
+| --------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Single-pass size (one concern, ≲ ~400 changed lines, few files) | Main thread only. Never spawn.                                                                                                                                                                                              |
+| Larger, multi-package, or > ~15 files                           | Main thread builds a **coverage ledger**: rows = lens (spec, standards/correctness, tests, agent checks) × file group (package/directory). Each row ends `checked-with-findings` / `checked-clean` / `not-checked(reason)`. |
+| Fan-out                                                         | ONE `spawn_agent` call, ≤ 6 read-only children per lens and/or file group: `owl` for reading; general-purpose child if it must run tests.                                                                                   |
+| Security-sensitive hunks (auth, input, secrets, deps, CI)       | Route to bulletproof's protocol: `auditor` child briefed with the bulletproof skill root, then `skeptic` on its findings.                                                                                                   |
+| High-stakes merge (release, > ~1,000 lines)                     | One fresh-context verifier child tries to disprove each blocking finding.                                                                                                                                                   |
 
 **Child brief** (children see nothing else): absolute skill root `…/assets/skills/code-review`; reference file(s) to read; the exact `git diff <base>...<head> -- <paths>` to run; its ledger rows; the spec text verbatim (spec lens) or the repo conventions (standards lens); the output schema — findings in the format above plus explicit `checked` and `not checked` lists. Read-only, no edits.
 

@@ -26,24 +26,24 @@ Never print full connection strings; show host and database name only.
 
 ## Read-only inspection
 
-| Store | Read-only pattern |
-|---|---|
+| Store    | Read-only pattern                                                                                                                                            |
+| -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | Postgres | Dedicated role with `SELECT` only; or `psql` with `BEGIN READ ONLY;` / `SET default_transaction_read_only = on` (a session setting, not a security boundary) |
-| MySQL | User with `SELECT` grant only; `START TRANSACTION READ ONLY` |
-| SQLite | Open with `?mode=ro` or `sqlite3 -readonly`; or inspect a copy |
-| MongoDB | User with the `read` role |
+| MySQL    | User with `SELECT` grant only; `START TRANSACTION READ ONLY`                                                                                                 |
+| SQLite   | Open with `?mode=ro` or `sqlite3 -readonly`; or inspect a copy                                                                                               |
+| MongoDB  | User with the `read` role                                                                                                                                    |
 
 Recommend the user create the read-only role; do not create roles on production yourself without the gate.
 
 ## Branch / clone first
 
-| Platform | Experiment surface (`SNAPSHOT`, verify flags) |
-|---|---|
-| Neon | Branches (copy-on-write, can be created from a past point in the restore window) |
-| Supabase | Branching (preview branches) or restore into a new project |
-| PlanetScale | Development branches |
-| Any Postgres | `pg_dump` → local container; or provider snapshot restored to a new instance |
-| SQLite / D1 / Turso | Copy the file; D1/Turso restore to a point into a new database where supported |
+| Platform            | Experiment surface (`SNAPSHOT`, verify flags)                                    |
+| ------------------- | -------------------------------------------------------------------------------- |
+| Neon                | Branches (copy-on-write, can be created from a past point in the restore window) |
+| Supabase            | Branching (preview branches) or restore into a new project                       |
+| PlanetScale         | Development branches                                                             |
+| Any Postgres        | `pg_dump` → local container; or provider snapshot restored to a new instance     |
+| SQLite / D1 / Turso | Copy the file; D1/Turso restore to a point into a new database where supported   |
 
 Run the migration on the branch, record the result and timing, then present the production step for the user's go-ahead.
 

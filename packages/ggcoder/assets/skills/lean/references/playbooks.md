@@ -51,7 +51,7 @@ SEO blogs claim 2026 "tightenings" (LCP 2.0 s, stricter INP). None appear on web
 **Sweep list:**
 
 - **Event-loop blocking:** sync fs/crypto/zlib in request handlers, `JSON.parse` of huge payloads on the hot path, regex backtracking. Move to workers or streams.
-- **N+1 queries:** one join/include/dataloader instead of a loop of queries. Detection under *Data & queries*.
+- **N+1 queries:** one join/include/dataloader instead of a loop of queries. Detection under _Data & queries_.
 - **Missing indexes:** every frequent filter/sort column; verify with `EXPLAIN ANALYZE` that the plan uses them.
 - **Unpaginated reads:** `SELECT *` on growing tables, `findMany()` without `take`. Cursor pagination for stable ordering.
 - **Connection pools:** sized for the DB's real limit; check for pool exhaustion under load (requests queueing on a connection).

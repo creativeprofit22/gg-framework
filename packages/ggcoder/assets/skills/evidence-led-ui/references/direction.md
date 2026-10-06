@@ -90,25 +90,25 @@ Priority: real product UI at readable scale → real photography of the subject 
 
 Status from the `web-features` package v3.40.1 (published 1 Oct 2026), read 3 Oct 2026 (SNAPSHOT). Re-check on https://webstatus.dev before relying on newer items.
 
-| Feature | Baseline | Use by default? |
-| --- | --- | --- |
-| Container queries (size) | Widely available | Yes, for components that live in varying containers. |
-| `:has()` | Widely available | Yes, for parent/state styling instead of JS class toggling. |
-| `oklch()` / `oklab()`, `color-mix()` | Widely available | Yes, for tokens. |
-| `<dialog>`, `inert` | Widely available | Yes, for modals and disabling background regions. |
-| Subgrid | Widely available | Yes, for aligning card internals across a row. |
-| Popover API | Newly available (Jan 2025) | Yes for menus/tooltips/popovers, with tested focus behaviour. |
-| `text-wrap: balance` | Newly available | Yes on headings (harmless fallback). |
-| `light-dark()` | Newly available | Yes when the project supports themes. |
-| `@starting-style` | Newly available | Yes for entry transitions; content must work without it. |
-| Same-document view transitions | Newly available (Oct 2025) | Yes as progressive enhancement with reduced-motion opt-out. |
-| `details name` (exclusive accordions) | Newly available | Yes for simple accordions. |
-| `field-sizing: content` | Newly available (Jun 2026) | Progressive enhancement for auto-growing textareas; keep a min/max size. |
-| `text-wrap: pretty` | Not Baseline | Progressive enhancement only. |
-| CSS anchor positioning | Not Baseline (Interop 2026 focus area) | Enhancement with a fallback position, or use the project's positioning library. |
-| Scroll-driven animations | Not Baseline (Interop 2026 focus area) | Decorative enhancement only; never required for content. |
-| Cross-document view transitions | Not Baseline (Interop 2026 focus area) | Enhancement only. |
-| `interpolate-size` | Not Baseline | Enhancement only. |
+| Feature                               | Baseline                               | Use by default?                                                                 |
+| ------------------------------------- | -------------------------------------- | ------------------------------------------------------------------------------- |
+| Container queries (size)              | Widely available                       | Yes, for components that live in varying containers.                            |
+| `:has()`                              | Widely available                       | Yes, for parent/state styling instead of JS class toggling.                     |
+| `oklch()` / `oklab()`, `color-mix()`  | Widely available                       | Yes, for tokens.                                                                |
+| `<dialog>`, `inert`                   | Widely available                       | Yes, for modals and disabling background regions.                               |
+| Subgrid                               | Widely available                       | Yes, for aligning card internals across a row.                                  |
+| Popover API                           | Newly available (Jan 2025)             | Yes for menus/tooltips/popovers, with tested focus behaviour.                   |
+| `text-wrap: balance`                  | Newly available                        | Yes on headings (harmless fallback).                                            |
+| `light-dark()`                        | Newly available                        | Yes when the project supports themes.                                           |
+| `@starting-style`                     | Newly available                        | Yes for entry transitions; content must work without it.                        |
+| Same-document view transitions        | Newly available (Oct 2025)             | Yes as progressive enhancement with reduced-motion opt-out.                     |
+| `details name` (exclusive accordions) | Newly available                        | Yes for simple accordions.                                                      |
+| `field-sizing: content`               | Newly available (Jun 2026)             | Progressive enhancement for auto-growing textareas; keep a min/max size.        |
+| `text-wrap: pretty`                   | Not Baseline                           | Progressive enhancement only.                                                   |
+| CSS anchor positioning                | Not Baseline (Interop 2026 focus area) | Enhancement with a fallback position, or use the project's positioning library. |
+| Scroll-driven animations              | Not Baseline (Interop 2026 focus area) | Decorative enhancement only; never required for content.                        |
+| Cross-document view transitions       | Not Baseline (Interop 2026 focus area) | Enhancement only.                                                               |
+| `interpolate-size`                    | Not Baseline                           | Enhancement only.                                                               |
 
 "Newly available" means supported in current versions of all core browsers but not yet for 30 months; check the project's support policy before relying on it without a fallback.
 

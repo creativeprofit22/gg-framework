@@ -16,14 +16,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const require = createRequire(
-  join(
-    dirname(fileURLToPath(import.meta.url)),
-    "..",
-    "..",
-    "packages",
-    "ggcoder",
-    "package.json",
-  ),
+  join(dirname(fileURLToPath(import.meta.url)), "..", "..", "packages", "ggcoder", "package.json"),
 );
 const sharp = require("sharp");
 

@@ -21,7 +21,7 @@ import { pinSize, usePresenceList } from "./usePresenceList";
  * compact, or a run starting), held mounted for EXIT_MS so the exit can play.
  */
 
-/** Exit-animation duration. Must match `.queued-bar.leaving` in App.css. */
+/** Exit duration of `.queued-bar.leaving`: equal to `--dur-strip-out` in App.css; scripts/motion-tokens.test.mjs enforces it. */
 const EXIT_MS = 220;
 
 /** Keys already acted on this app session. Module-level so a remount (chat

@@ -88,6 +88,22 @@ describe("Dropdown", () => {
     expect(screen.queryByRole("listbox")).toBeNull();
   });
 
+  it("puts the form id and description on the trigger", () => {
+    render(
+      <Dropdown
+        id="region-field"
+        describedBy="region-help"
+        label="Station"
+        options={OPTIONS}
+        value="lofi"
+        onChange={vi.fn()}
+      />,
+    );
+    const trigger = screen.getByRole("button", { name: "Station" });
+    expect(trigger.id).toBe("region-field");
+    expect(trigger.getAttribute("aria-describedby")).toBe("region-help");
+  });
+
   it("disables the trigger when there are no options", () => {
     render(
       <Dropdown

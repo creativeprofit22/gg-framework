@@ -457,7 +457,7 @@ export function ProjectPicker({
           {!loading && !projectsError && projects.length === 0 && (
             <div className="picker-empty">
               <span style={{ color: theme.textMuted }}>No projects yet.</span>
-              <span style={{ display: "flex", gap: 8 }}>
+              <span style={{ display: "flex", gap: "var(--space-4)" }}>
                 <button
                   className="btn btn-ghost btn-sm"
                   disabled={busy}

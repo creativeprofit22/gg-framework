@@ -3,12 +3,14 @@ import { describe, expect, it } from "vitest";
 
 const appCss = readFileSync("src/App.css", "utf8");
 
+// Font sizes come from upstream's shared --fs-* scale (the fork's duplicate
+// --font-size-* scale was folded into it); line heights and weights stay fork tokens.
 const TYPE_TOKENS = [
-  "--font-size-xs",
-  "--font-size-sm",
-  "--font-size-md",
-  "--font-size-lg",
-  "--font-size-xl",
+  "--fs-sm",
+  "--fs-base",
+  "--fs-md",
+  "--fs-xl",
+  "--fs-2xl",
   "--line-height-xs",
   "--line-height-sm",
   "--line-height-md",

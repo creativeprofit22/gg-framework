@@ -21,7 +21,7 @@ import { pinSize } from "./usePresenceList";
  * wrong and makes users cancel and re-send needlessly.
  */
 
-/** Exit-transition duration. Must match `.queued-bar.leaving` in App.css. */
+/** Exit duration of `.queued-bar.leaving`: equal to `--dur-strip-out` in App.css; scripts/motion-tokens.test.mjs enforces it. */
 const EXIT_MS = 220;
 
 interface Props {

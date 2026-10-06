@@ -90,6 +90,20 @@ afterEach(() => {
 });
 
 describe("LocalModelsModal", () => {
+  it("says the list couldn't be read instead of 'No models yet', and retries", async () => {
+    getLocalModelsMock.mockRejectedValueOnce(new Error("daemon down"));
+
+    render(<LocalModelsModal onClose={vi.fn()} />);
+
+    expect(await screen.findByText("Couldn't reach the agent to list models.")).toBeTruthy();
+    expect(screen.queryByText(/No models yet/)).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+
+    expect(await screen.findByText("Ollama")).toBeTruthy();
+    expect(screen.queryByText("Couldn't reach the agent to list models.")).toBeNull();
+  });
+
   it("shows one compact context figure per model, capabilities in the tooltip", async () => {
     render(<LocalModelsModal onClose={vi.fn()} />);
 

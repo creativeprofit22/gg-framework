@@ -27,7 +27,7 @@ const GLYPHS =
   "\u30A2\u30AB\u30B5\u30BF\u30CA\u30CF\u30DE\u30E4\u30E9\u30EF\u30F30123456789<>[]{}=+*";
 const randGlyph = (): string => GLYPHS[(Math.random() * GLYPHS.length) | 0];
 
-// Dissolve transition duration — must match the CSS `.enh-diss-fade` transition.
+// The `.enh-diss-fade` transition: equal to `--dur-enhance-dissolve` in App.css; scripts/motion-tokens.test.mjs enforces it.
 const DISSOLVE_MS = 460;
 const GLYPH_SWAP_MS = 40; // how often the decode lead glyph re-rolls
 // Decode duration scales with length so short prompts snap and long ones still

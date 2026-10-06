@@ -1027,6 +1027,12 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   const [thinkingStartTs, setThinkingStartTs] = useState<number | null>(null);
   const [thinkingAccumMs, setThinkingAccumMs] = useState(0);
   const [models, setModels] = useState<ModelOption[]>([]);
+  // The hydration model load failed, so the footer pickers say so instead of
+  // claiming they are still connecting (ported from upstream 0.82.2).
+  const [modelsFailed, setModelsFailed] = useState(false);
+  // Hydration could not reach the agent: shown in place of the dead-end status
+  // line, with a way to try again.
+  const [connectError, setConnectError] = useState<string | null>(null);
   const [modelCatalogRefreshNonce, setModelCatalogRefreshNonce] = useState(0);
   const [commands, setCommands] = useState<SlashCommand[]>([]);
   // Command files that could not be listed, shown by the Ctrl/Cmd+K palette.
@@ -2502,6 +2508,8 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     readyRef.current = false;
     setHydrated(false);
     setStatus("connecting to agent\u2026");
+    setConnectError(null);
+    setModelsFailed(false);
     try {
       const ready = await client.waitForReady();
       if (!isCurrent()) return;
@@ -2522,6 +2530,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       if (!isCurrent()) return;
       // null = the fetch failed; keep whatever the picker already had.
       if (available) setModels(available);
+      setModelsFailed(available === null);
       await refreshCommands();
       if (!isCurrent()) return;
       // Project task list for the Tasks modal + nav button.
@@ -2684,7 +2693,9 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     } catch (err) {
       if (!isCurrent()) return;
       replayEvents();
-      setStatus(`agent failed to start: ${err instanceof Error ? err.message : String(err)}`);
+      const message = err instanceof Error ? err.message : String(err);
+      setStatus(`agent failed to start: ${message}`);
+      setConnectError(message);
       setHydrated(true);
     } finally {
       if (hydrationEventsRef.current === pending) hydrationEventsRef.current = null;
@@ -2757,7 +2768,8 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
             client.getState(),
           ]);
           if (cancelled) return;
-          setModels(available);
+          if (available) setModels(available);
+          setModelsFailed(available === null);
           setState(refreshedState);
         } catch {
           // The normal readiness/hydration path reports daemon failures.
@@ -5283,7 +5295,19 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
               ) : (
                 <>
                   {items.length === 0 &&
-                    (status === "ready" ? (
+                    (connectError !== null ? (
+                      <div className="picker-empty transcript-reveal" role="alert">
+                        <span>Couldn't connect to the agent.</span>
+                        <span style={{ color: theme.textDim }}>{connectError}</span>
+                        <button
+                          type="button"
+                          className="btn btn-sm btn-ghost"
+                          onClick={() => setHydrateNonce((n) => n + 1)}
+                        >
+                          Try again
+                        </button>
+                      </div>
+                    ) : status === "ready" ? (
                       <WakeScreen
                         chat={workspaceMode === "chat"}
                         motion={workspaceMode === "motion"}
@@ -5524,9 +5548,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
               {kenActive && kenInputParts && (
                 <div className="ken-input-highlight" aria-hidden="true">
                   {kenInputParts.lead}
-                  <ShimmerText base={theme.ken} bright="#ffffff">
-                    {kenInputParts.token}
-                  </ShimmerText>
+                  <ShimmerText base={theme.ken}>{kenInputParts.token}</ShimmerText>
                   {kenInputParts.rest}
                 </div>
               )}
@@ -5937,6 +5959,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
                     currentModel={state?.model ?? ""}
                     onSelect={onSelectModel}
                     disabled={running}
+                    loadFailed={modelsFailed}
                     refreshNonce={modelCatalogRefreshNonce}
                     title={
                       workspaceMode === "chat"
@@ -5969,6 +5992,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
                         onSelect={(id) => onSelectKenModel(id)}
                         color={theme.ken}
                         refreshNonce={modelCatalogRefreshNonce}
+                        loadFailed={modelsFailed}
                         title={
                           state?.kenModelOverride
                             ? `${MENTOR_DISPLAY_NAME} is pinned to a separate model — click to change`

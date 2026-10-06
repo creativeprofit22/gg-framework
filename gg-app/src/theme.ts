@@ -61,9 +61,6 @@ export const theme = {
   critter: "var(--critter)",
 } as const;
 
-// User-message chip background — mirrors USER_MESSAGE_BACKGROUND in the TUI.
-export const USER_MESSAGE_BACKGROUND = "var(--inline-user-bg)";
-
 const VAR_REF = /^var\((--[\w-]+)\)$/;
 
 /**

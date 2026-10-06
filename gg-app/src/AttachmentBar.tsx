@@ -4,7 +4,7 @@ import { theme } from "./theme";
 import type { PendingAttachment } from "./attachments";
 import { pinSize, usePresenceList } from "./usePresenceList";
 
-/** Exit-animation duration. Must match `.attach-bar.leaving` / `.attach-chip.leaving` in App.css. */
+/** Exit duration of `.attach-bar.leaving` / `.attach-chip.leaving`: equal to `--dur-strip-out` in App.css; scripts/motion-tokens.test.mjs enforces it. */
 const EXIT_MS = 220;
 
 const keyOf = (a: PendingAttachment): string => String(a.id);

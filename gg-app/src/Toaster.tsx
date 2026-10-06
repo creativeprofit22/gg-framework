@@ -10,7 +10,7 @@ import {
   type ToastTone,
 } from "./toast";
 
-// Must match the .toast-out animation duration in App.css.
+// The .toast-out duration: equal to `--dur-toast-out` in App.css; scripts/motion-tokens.test.mjs enforces it.
 const EXIT_MS = 260;
 
 const TONE_COLOR: Record<ToastTone, string> = {

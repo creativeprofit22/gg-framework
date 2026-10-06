@@ -101,6 +101,26 @@ beforeEach(() => {
 });
 afterEach(cleanup);
 
+describe("LoginScreen read failure", () => {
+  it("says the providers couldn't be read and retries, instead of an empty grid", async () => {
+    // authStatus reports a failed read as [] (the real list is never empty).
+    vi.mocked(authStatus).mockResolvedValueOnce([]).mockResolvedValue(providers([]));
+    await act(async () => {
+      render(<LoginScreen onClose={vi.fn()} />);
+    });
+    expect(screen.getByText("Couldn't read your AI providers.")).toBeTruthy();
+    expect(screen.queryByText("0 connected")).toBeNull();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    });
+
+    expect(authStatus).toHaveBeenCalledTimes(2);
+    expect(screen.queryByText("Couldn't read your AI providers.")).toBeNull();
+    expect(screen.getByText("0 connected")).toBeTruthy();
+  });
+});
+
 describe("LoginScreen cross-window auth", () => {
   it.each([false, true])(
     "ignores an older initial reply after Qwen connected=%s",
@@ -172,7 +192,9 @@ describe("LoginScreen cross-window auth", () => {
     await emit("auth_change", { provider: "qwen-cloud" });
     await act(async () => newer.reject(new Error("Synthetic status failure")));
     expect(screen.queryByText("checking providers…")).toBeNull();
-    expect(screen.getByText("0 connected")).toBeTruthy();
+    // A failed read says so (upstream 0.82.2) instead of a misleading "0 connected".
+    expect(screen.getByRole("alert").textContent).toContain("Couldn't read your AI providers.");
+    expect(screen.queryByText("0 connected")).toBeNull();
     await act(async () => initial.resolve(qwenProviders(true)));
     expect(screen.queryByRole("button", { name: /Qwen Cloud/ })).toBeNull();
   });

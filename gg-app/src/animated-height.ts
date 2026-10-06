@@ -1,6 +1,6 @@
 import { useCallback, useLayoutEffect, useRef, type RefObject } from "react";
 
-/** Matches --dur-row / --ease-out in App.css. */
+/** Equal to `--dur-row` / `--ease-out` in App.css; scripts/motion-tokens.test.mjs enforces it. */
 const DURATION_MS = 220;
 const EASING = "cubic-bezier(0.22, 1, 0.36, 1)";
 

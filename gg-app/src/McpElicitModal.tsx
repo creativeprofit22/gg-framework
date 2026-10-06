@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { theme } from "./theme";
 import { Modal } from "./Modal";
+import { Dropdown } from "./Dropdown";
 import { mcpElicit, subscribe, type McpElicitAction, type SidecarEvent } from "./agent";
 
 /** One `mcp_elicit` SSE frame: a server asking for input mid tool call. */
@@ -265,22 +266,17 @@ export function McpElicitModal(): React.ReactElement | null {
             )}
 
             {choices && !isBoolean && !isMultiSelect(field) && (
-              <select
+              // Not a native <select>: on Windows/Linux the webview's popup can
+              // open but not commit a choice (see supportsNativeSelectPopup).
+              <Dropdown
                 id={fieldId}
-                className="modal-input"
-                style={{ color: theme.text, background: theme.inputBackground }}
+                describedBy={describedBy}
+                label={`${label}${suffix}`}
+                options={[{ value: "", label: "Select…" }, ...choices]}
                 value={typeof value === "string" ? value : ""}
                 disabled={busy}
-                aria-describedby={describedBy}
-                onChange={(e) => setValue(name, e.target.value)}
-              >
-                <option value="">Select…</option>
-                {choices.map((choice) => (
-                  <option key={choice.value} value={choice.value}>
-                    {choice.label}
-                  </option>
-                ))}
-              </select>
+                onChange={(next) => setValue(name, next)}
+              />
             )}
 
             {!choices && !isBoolean && (

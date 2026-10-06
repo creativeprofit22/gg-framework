@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
 import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { resolvePxTokens } from "./test-support/resolve-css-tokens";
 
-const appCss = readFileSync("src/App.css", "utf8");
+const appCss = resolvePxTokens(readFileSync("src/App.css", "utf8"));
 
 // The shared footer affordance block: the hover/focus pill and picker chevron.
 // Only this block is injected — jsdom's CSS parser does not need the rest of

@@ -9,7 +9,7 @@
  * `discard` in critter-fx.ts), so nothing here holds a frame.
  */
 
-/** Matches `--ease-out` / `--ease-in` in App.css. */
+/** Equal to `--ease-out` / `--ease-in` in App.css; scripts/motion-tokens.test.mjs enforces it. */
 const EASE_OUT = "cubic-bezier(0.22, 1, 0.36, 1)";
 const EASE_IN = "cubic-bezier(0.4, 0, 1, 1)";
 

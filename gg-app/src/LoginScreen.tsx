@@ -79,18 +79,31 @@ export function LoginScreen({ onClose }: Props): React.ReactElement {
   }, [refresh]);
 
   const connectedCount = providers.filter((p) => p.connected).length;
+  // The provider list is static in Rust, so an empty list after loading means
+  // the read failed (authStatus reports failure as []). Say so, with a retry,
+  // rather than showing a blank grid.
+  const readFailed = !loading && providers.length === 0;
 
-  const connectedBadge = loading ? null : (
-    <Badge color={connectedCount > 0 ? theme.success : undefined}>
-      {`${connectedCount} connected`}
-    </Badge>
-  );
+  const connectedBadge =
+    loading || readFailed ? null : (
+      <Badge color={connectedCount > 0 ? theme.success : undefined}>
+        {`${connectedCount} connected`}
+      </Badge>
+    );
 
   const tiles = (
     <>
       {loading && (
         <div className="picker-empty" style={{ color: theme.textDim }}>
           {"checking providers\u2026"}
+        </div>
+      )}
+      {readFailed && (
+        <div className="picker-empty" role="alert">
+          <span style={{ color: theme.textMuted }}>Couldn't read your AI providers.</span>
+          <button type="button" className="btn btn-sm btn-ghost" onClick={() => void refresh()}>
+            Try again
+          </button>
         </div>
       )}
       {providers.map((p) => {

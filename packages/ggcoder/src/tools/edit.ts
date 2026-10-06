@@ -284,7 +284,7 @@ export function createEditTool(
       "text edits then run on the result.\n" +
       "Partial-apply by default: failed edits are listed for retry, successful ones are still written — " +
       "re-issue ONLY the listed failures, not the whole batch. " +
-      "Returns a unified diff.\n" +
+      "Returns a short confirmation, not the new text; re-read only if you need it.\n" +
       "Multi-file: pass `files` (one {file_path, edits} entry per file) to change several files in a single call.",
     parameters: EditParams,
     executionMode: "sequential",

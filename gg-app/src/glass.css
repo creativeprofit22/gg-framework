@@ -57,10 +57,9 @@
   --glass-surface-shadow: var(--liquid-rim-soft), var(--glass-shadow);
   --glass-backdrop: blur(12px) saturate(140%);
 
-  /* Veditor's motion, copied as-is. Colours ease quickly; the size change rides
-     the "open" spring (response 0.45, damping 0.7) sampled into linear(), which
-     overshoots about 4% and settles, instead of a single bezier bounce. */
-  --glass-motion: 150ms ease-out;
+  /* Veditor's size spring, copied as-is: the "open" spring (response 0.45,
+     damping 0.7) sampled into linear(), which overshoots about 4% and settles,
+     instead of a single bezier bounce. Colours use the shared --t-fast. */
   --glass-spring-open: linear(
     0,
     0.053,
@@ -354,13 +353,13 @@
 .markdown td {
   border: 0;
   border-bottom: 1px solid rgb(255 255 255 / 0.07);
-  padding: 7px 12px;
+  padding: 7px var(--space-6);
 }
 /* Narrow panes: tighter cell padding gives the columns' text the room, so
    tables fit instead of scrolling sideways. */
 @container (max-width: 640px) {
   .markdown :is(th, td) {
-    padding-inline: 8px;
+    padding-inline: var(--space-4);
   }
 }
 .markdown :is(th, td) + :is(th, td) {
@@ -475,10 +474,10 @@
 
 /* ── Hover and press motion (veditor's) ──
    Hover: the control swells (pills 1.05, small round ones 1.08, big provider
-   tiles 1.03) on the open spring. Press: it dips with a quick 100ms ease-out
-   `transform`, which stacks on the hover swell rather than replacing it, then
-   springs back on release. `scale` and `transform` are separate properties, so
-   the two never fight.
+   tiles 1.03) on the open spring. Press: it dips with a quick --dur-press
+   --ease-out `transform`, which stacks on the hover swell rather than
+   replacing it, then springs back on release. `scale` and `transform` are
+   separate properties, so the two never fight.
 
    The transition list is repeated on :hover and :active on purpose: App.css
    swaps in its own lists there (without `scale`), which made the swell jump
@@ -502,12 +501,12 @@
     :active
   ):not(:disabled) {
   transition:
-    background-color var(--glass-motion),
-    border-color var(--glass-motion),
-    color var(--glass-motion),
-    filter var(--glass-motion),
-    box-shadow var(--glass-motion),
-    opacity var(--glass-motion),
+    background-color var(--t-fast),
+    border-color var(--t-fast),
+    color var(--t-fast),
+    filter var(--t-fast),
+    box-shadow var(--t-fast),
+    opacity var(--t-fast),
     transform var(--glass-spring-open-duration) var(--glass-spring-open),
     scale var(--glass-spring-open-duration) var(--glass-spring-open);
 }
@@ -516,11 +515,11 @@
    back when the pointer left. Same list, keeping App.css's reflow fade. */
 .inputrow .icon-circle {
   transition:
-    background-color var(--glass-motion),
-    border-color var(--glass-motion),
-    color var(--glass-motion),
-    filter var(--glass-motion),
-    box-shadow var(--glass-motion),
+    background-color var(--t-fast),
+    border-color var(--t-fast),
+    color var(--t-fast),
+    filter var(--t-fast),
+    box-shadow var(--t-fast),
     opacity var(--t-composer),
     transform var(--glass-spring-open-duration) var(--glass-spring-open),
     scale var(--glass-spring-open-duration) var(--glass-spring-open);
@@ -535,8 +534,8 @@
   ) {
   scale: var(--glass-hover-scale);
   transform: scale(var(--glass-press-scale));
-  transition-duration: 100ms;
-  transition-timing-function: ease-out;
+  transition-duration: var(--dur-press);
+  transition-timing-function: var(--ease-out);
 }
 
 /* Question band: the same raised glass card as a table in a reply (the card
@@ -700,7 +699,7 @@
   background: var(--glass-bead-accent);
   box-shadow: var(--glass-bead-shadow);
   transition:
-    box-shadow var(--glass-motion),
+    box-shadow var(--t-fast),
     scale var(--glass-spring-open-duration) var(--glass-spring-open);
 }
 .radio-volume-input:hover::-webkit-slider-thumb {
@@ -721,7 +720,7 @@
 .scorecard-stat-bar,
 .hf-progress {
   border: 0;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: rgb(255 255 255 / 0.06) !important;
   box-shadow:
     inset 0 2px 3px rgb(0 0 0 / 0.45),
@@ -738,7 +737,7 @@
     0 0 8px color-mix(in oklab, var(--flux-from) 55%, transparent),
     inset 0 1px 0 rgb(255 255 255 / 0.5),
     inset 0 -1px 2px rgb(0 20 90 / 0.35);
-  transition: width 0.55s cubic-bezier(0.22, 1, 0.36, 1);
+  transition: width 0.55s var(--ease-out);
 }
 .title-usage-fill {
   position: absolute;
@@ -801,15 +800,15 @@
   opacity: 0;
 }
 .cl-switch > span::before {
-  margin: 4px 0 4px 10px;
+  margin: var(--space-2) 0 var(--space-2) var(--space-5);
   width: 36px;
   height: 16px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background-color: var(--glass-groove);
   box-shadow: var(--glass-groove-shadow);
   transition:
-    background-color var(--glass-motion),
-    box-shadow var(--glass-motion);
+    background-color var(--t-fast),
+    box-shadow var(--t-fast);
 }
 .cl-switch > span::after {
   top: 2px;
@@ -818,7 +817,7 @@
   background: var(--glass-bead-clear);
   box-shadow: var(--glass-bead-shadow);
   transition:
-    box-shadow var(--glass-motion),
+    box-shadow var(--t-fast),
     transform var(--glass-spring-open-duration) var(--glass-spring-open),
     scale var(--glass-spring-open-duration) var(--glass-spring-open);
 }
@@ -872,9 +871,9 @@
   box-shadow: var(--liquid-rim-soft-small);
   cursor: pointer;
   transition:
-    background-color var(--glass-motion),
-    border-color var(--glass-motion),
-    background-size 240ms cubic-bezier(0.34, 1.56, 0.64, 1);
+    background-color var(--t-fast),
+    border-color var(--t-fast),
+    background-size 240ms var(--ease-pop);
 }
 .modal-radio input[type="checkbox"] {
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%230c0e26' stroke-width='2.25' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m3.5 8.5 3 3 6-7'/%3E%3C/svg%3E");
@@ -1001,11 +1000,11 @@
      reduced rule intends; the list above would otherwise bring it back. */
   .inputrow .icon-circle {
     transition:
-      background-color var(--glass-motion),
-      border-color var(--glass-motion),
-      color var(--glass-motion),
-      filter var(--glass-motion),
-      box-shadow var(--glass-motion);
+      background-color var(--t-fast),
+      border-color var(--t-fast),
+      color var(--t-fast),
+      filter var(--t-fast),
+      box-shadow var(--t-fast);
   }
   /* Sliders and switches: no bead swell; the switch thumb jumps instead of
      sliding and a tick appears without its pop. Their hover glow and colours
@@ -1013,19 +1012,19 @@
      drop the sheen. The vendor-prefixed thumb stays in its own rule: an
      unknown selector would void a combined list. */
   .radio-volume-input::-webkit-slider-thumb {
-    transition: box-shadow var(--glass-motion);
+    transition: box-shadow var(--t-fast);
     scale: none;
   }
   .cl-switch > span::before {
     transition: none;
   }
   .cl-switch > span::after {
-    transition: box-shadow var(--glass-motion);
+    transition: box-shadow var(--t-fast);
   }
   .modal-radio input:is([type="checkbox"], [type="radio"]) {
     transition:
-      background-color var(--glass-motion),
-      border-color var(--glass-motion);
+      background-color var(--t-fast),
+      border-color var(--t-fast);
   }
   .cl-switch:hover > input:not(:disabled) + span::after,
   .cl-switch > input:active:not(:disabled) + span::after {
@@ -1039,6 +1038,11 @@
   .title-usage-fill::before,
   .hf-progress-fill::after {
     display: none;
+    animation: none;
+  }
+  /* The update dot re-sets its animation-name above, after App.css's reduced
+     rule; drop it here so the pulse never runs. */
+  .update-banner-dot {
     animation: none;
   }
 }

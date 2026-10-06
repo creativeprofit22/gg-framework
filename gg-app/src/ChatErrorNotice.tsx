@@ -90,28 +90,34 @@ export function ChatErrorNotice({
         aria-hidden={!expanded}
         inert={!expanded}
       >
-        {!error.reason && error.headline && <p>{error.headline}</p>}
-        {error.message || error.text ? (
-          <p>{error.message ?? error.text}</p>
-        ) : (
-          <p>No additional detail was supplied.</p>
-        )}
-        {(tone === "history" || !error.reason) && error.guidance && <p>{error.guidance}</p>}
-        {copy.resetLabel && <p>{copy.resetLabel}</p>}
-        {error.provider && <p>Provider: {error.provider}</p>}
-        {error.statusCode != null && <p>HTTP status: {error.statusCode}</p>}
-        {error.requestId && <p>Request: {error.requestId}</p>}
-        {error.occurredAt != null && <p>Reported: {new Date(error.occurredAt).toLocaleString()}</p>}
-        {tone !== "history" && (
-          <button
-            type="button"
-            className="chat-error-motion"
-            aria-pressed={!motion}
-            onClick={() => setMotion((value) => !value)}
-          >
-            {motion ? "Pause critter animation" : "Resume critter animation"}
-          </button>
-        )}
+        {/* The body is the collapsing grid row: closing shrinks it to nothing
+            while it dissolves, so the chat below glides up instead of jumping. */}
+        <div className="chat-error-details-body">
+          {!error.reason && error.headline && <p>{error.headline}</p>}
+          {error.message || error.text ? (
+            <p>{error.message ?? error.text}</p>
+          ) : (
+            <p>No additional detail was supplied.</p>
+          )}
+          {(tone === "history" || !error.reason) && error.guidance && <p>{error.guidance}</p>}
+          {copy.resetLabel && <p>{copy.resetLabel}</p>}
+          {error.provider && <p>Provider: {error.provider}</p>}
+          {error.statusCode != null && <p>HTTP status: {error.statusCode}</p>}
+          {error.requestId && <p>Request: {error.requestId}</p>}
+          {error.occurredAt != null && (
+            <p>Reported: {new Date(error.occurredAt).toLocaleString()}</p>
+          )}
+          {tone !== "history" && (
+            <button
+              type="button"
+              className="chat-error-motion"
+              aria-pressed={!motion}
+              onClick={() => setMotion((value) => !value)}
+            >
+              {motion ? "Pause critter animation" : "Resume critter animation"}
+            </button>
+          )}
+        </div>
       </div>
     </div>
   );

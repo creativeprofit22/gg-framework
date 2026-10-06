@@ -192,12 +192,12 @@ function classifyDirect(tokens: readonly string[]): VerificationCommandClassific
     }
     return classifyTestRunner("node", tokens);
   }
-  if (
-    /^python(?:3(?:\.\d+)?)?(?:\.exe)?$/.test(executable) &&
-    tokens[1] === "-m" &&
-    ["pytest", "unittest"].includes(tokens[2])
-  ) {
-    return classifyTestRunner(tokens[2], tokens.slice(2));
+  if (/^python(?:3(?:\.\d+)?)?(?:\.exe)?$/.test(executable) && tokens[1] === "-m") {
+    if (["pytest", "unittest"].includes(tokens[2])) {
+      return classifyTestRunner(tokens[2], tokens.slice(2));
+    }
+    // `python -m ruff check` is the same bounded check as `ruff check`.
+    if (["ruff", "mypy", "pyright"].includes(tokens[2])) return classifyDirect(tokens.slice(2));
   }
   if (executable === "vitest" || executable === "jest" || executable === "pytest") {
     return classifyTestRunner(executable, tokens);
@@ -311,7 +311,13 @@ function classifyPackageRunner(tokens: readonly string[]): VerificationCommandCl
   return accepted(`bounded ${runner} verification script`);
 }
 
-function classifySegment(segment: string): VerificationCommandClassification {
+/** Trailing stderr redirects that cannot change a check's exit status or write a
+ * file: merging stderr into stdout, or discarding it. Anything else (`> file`,
+ * `2> log`) still reaches the unsafe-syntax rejection. */
+const HARMLESS_STDERR_SUFFIX = /\s+2>(?:&1|\/dev\/null)\s*$/;
+
+function classifySegment(rawSegment: string): VerificationCommandClassification {
+  const segment = rawSegment.replace(HARMLESS_STDERR_SUFFIX, "");
   const candidate =
     hasVerifierExecutable(segment) || /(?:^|\s)(?:pnpm|npm|yarn|bun)(?:\s|$)/i.test(segment);
   if (hasUnsafeShellSyntax(segment))
@@ -406,6 +412,21 @@ export function classifyVerificationCommand(command: string): VerificationComman
     return result;
   }
   return accepted(segments.length === 1 ? results[0].reason : "bounded verification command chain");
+}
+
+/**
+ * True when some segment of `command` is, on its own, a bounded check — i.e.
+ * the chain wraps a real verification attempt. Used to decide whether a
+ * rejected classification deserves user-visible feedback: exploration that
+ * merely mentions a verifier (`ls .venv/bin | grep ruff`, `ruff --version`)
+ * was never a verification attempt and gets no nag.
+ */
+export function containsBoundedCheck(command: string): boolean {
+  return command
+    .split(/(?:&&|\|\||[;|\n])/)
+    .map((segment) => segment.trim())
+    .filter(Boolean)
+    .some((segment) => classifySegment(segment).accepted);
 }
 
 function resultText(result: ToolResult): string {

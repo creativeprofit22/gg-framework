@@ -624,10 +624,11 @@ describe("buildSystemPrompt", () => {
     // Extreme workflow-only caps; response policy and safety floors are independently tested.
     // Raised from 6_500 / 8_000 for the same no-card answer-first rule (~150 chars),
     // then +400 for upstream 0.79's batched-edits rule (~360 chars) kept alongside the
-    // fork's longer response policy.
-    expect(measurements.normal.characters).toBeLessThan(7_650);
-    expect(measurements.planMode.characters).toBeLessThan(9_100);
-    expect(measurements.typescriptProjectContextToolsSkills.characters).toBeLessThan(11_250);
+    // fork's longer response policy. +100 each for upstream 0.82.2's "When the user
+    // names the checks, run only those." line (mirrors upstream's own raise).
+    expect(measurements.normal.characters).toBeLessThan(7_750);
+    expect(measurements.planMode.characters).toBeLessThan(9_200);
+    expect(measurements.typescriptProjectContextToolsSkills.characters).toBeLessThan(11_350);
     expect(measurements.planMode.characters).toBeGreaterThan(measurements.normal.characters);
     expect(measurements.typescriptProjectContextToolsSkills.characters).toBeGreaterThan(
       measurements.normal.characters,
@@ -663,8 +664,8 @@ describe("buildSystemPrompt", () => {
     console.info(`system prompt audit: ${JSON.stringify(audit)}`);
 
     expect(audit.flags).toEqual([]);
-    // +400 for upstream 0.79's batched-edits rule; see the size measurements above.
-    expect(audit.size.characters).toBeLessThan(10_700);
+    // +400 for upstream 0.79's batched-edits rule, +100 for 0.82.2's named-checks line.
+    expect(audit.size.characters).toBeLessThan(10_800);
     expect(prompt.match(/^## .+$/gm)).toEqual([
       "## How to Talk",
       "## How to Work",

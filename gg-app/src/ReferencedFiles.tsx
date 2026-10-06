@@ -3,7 +3,7 @@ import { AtIcon, XIcon } from "@phosphor-icons/react";
 import { theme } from "./theme";
 import { pinSize, usePresenceList } from "./usePresenceList";
 
-/** Exit-animation duration. Must match `.mention-bar.leaving` / `.mention-chip.leaving` in App.css. */
+/** Exit duration of `.mention-bar.leaving` / `.mention-chip.leaving`: equal to `--dur-strip-out` in App.css; scripts/motion-tokens.test.mjs enforces it. */
 const EXIT_MS = 220;
 
 const keyOf = (p: string): string => p;

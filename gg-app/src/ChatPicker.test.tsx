@@ -227,6 +227,24 @@ describe("ChatPicker", () => {
     });
   });
 
+  it("says why a chat didn't open and lets the user try again", async () => {
+    readSettingsMock.mockResolvedValue({ projectsRoot: "/workspaces", configured: true });
+    waitForReadyMock.mockResolvedValue();
+    listSessionsMock.mockResolvedValue([session]);
+    selectWorkspaceMock.mockRejectedValueOnce(new Error("agent not ready"));
+    const onChosen = vi.fn();
+
+    render(<ChatPicker onChosen={onChosen} />);
+    fireEvent.click(await screen.findByText("Plan my week"));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("agent not ready");
+    expect(onChosen).not.toHaveBeenCalled();
+    // `busy` is released, so the row works again.
+    const row = screen.getByText("Plan my week").closest("button");
+    expect(row?.hasAttribute("disabled")).toBe(false);
+  });
+
   it("shows a clear prerequisite error when projectsRoot is unavailable", async () => {
     readSettingsMock.mockResolvedValue({ projectsRoot: "  ", configured: false });
 

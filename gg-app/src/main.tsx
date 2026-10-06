@@ -2,6 +2,7 @@ import { lazy, Suspense } from "react";
 import ReactDOM from "react-dom/client";
 import { error as logError, attachConsole } from "@tauri-apps/plugin-log";
 import App from "./App";
+import { AppErrorBoundary } from "./AppErrorBoundary";
 import { ZoomController } from "./ZoomController";
 import { TooltipLayer } from "./TooltipLayer";
 import { WhatsNewModal } from "./WhatsNewModal";
@@ -83,7 +84,9 @@ if (new URLSearchParams(window.location.search).get("whatsnew") === "1") {
   // amplifying state-updater impurity. A desktop webview gains nothing from it.
   root.render(
     <>
-      <App />
+      <AppErrorBoundary>
+        <App />
+      </AppErrorBoundary>
       <ZoomController />
       <TooltipLayer />
       <WhatsNewModal />

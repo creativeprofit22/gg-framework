@@ -305,7 +305,7 @@ export function McpModal({ onClose, client }: Props): React.ReactElement {
               {s.enabled && s.requiresAuth && !s.ok && (
                 <button
                   className="modal-btn primary"
-                  style={{ padding: "2px 12px", fontSize: 12 }}
+                  style={{ padding: "var(--space-1) var(--space-6)", fontSize: "var(--fs-sm)" }}
                   disabled={loggingIn === s.name}
                   title={`Sign in to "${s.name}"`}
                   onClick={() => void signIn(s.name, s.scope)}
@@ -410,7 +410,7 @@ export function McpModal({ onClose, client }: Props): React.ReactElement {
                     color: projectPath ? theme.text : theme.textMuted,
                     background: theme.inputBackground,
                     width: "100%",
-                    marginTop: 10,
+                    marginTop: "var(--space-5)",
                   }}
                   value={projectPath}
                   placeholder="Type a project path or pick below…"
@@ -428,7 +428,7 @@ export function McpModal({ onClose, client }: Props): React.ReactElement {
             )}
           </SettingsSection>
 
-          <div className="modal-hint" style={{ color: theme.textDim, marginTop: 12 }}>
+          <div className="modal-hint" style={{ color: theme.textDim, marginTop: "var(--space-6)" }}>
             Changes are saved right away. New conversations use them automatically; conversations
             that are already open need to be restarted to pick them up. Tools are available only
             when the server connects and trust requirements are met.

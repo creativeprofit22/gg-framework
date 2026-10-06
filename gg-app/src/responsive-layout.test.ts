@@ -1,7 +1,8 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import { resolvePxTokens } from "./test-support/resolve-css-tokens";
 
-const appCss = readFileSync(new URL("./App.css", import.meta.url), "utf8");
+const appCss = resolvePxTokens(readFileSync(new URL("./App.css", import.meta.url), "utf8"));
 const glassCss = readFileSync(new URL("./glass.css", import.meta.url), "utf8");
 const appearanceCss = readFileSync(new URL("./appearance.css", import.meta.url), "utf8");
 const asciiLogoSource = readFileSync(new URL("./AsciiLogo.tsx", import.meta.url), "utf8");

@@ -22,6 +22,16 @@ export interface ChangelogEntry {
 /** Newest first. Prepended by the `/release` flow. */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.82.2",
+    date: "2026-10-07",
+    items: [
+      "No more mystery empty lists. When your `projects`, sessions or `MCP` servers fail to load, I now tell you what went wrong and give you a way to retry, instead of pretending there is nothing there.",
+      "A crash can no longer leave you staring at a blank window. If something breaks, you get a calm screen with the details and a `Reload window` button, and your chats stay safe.",
+      "The whole app moves as one now. I rebuilt colors, spacing and animations on a single shared system, so every panel, menu and notice looks and feels consistent.",
+      "Your agent got leaner and more focused. I trimmed what it carries on every request, so replies start faster and cost less, and when you name the checks you want, it runs `only those`.",
+    ],
+  },
+  {
     version: "0.82.1",
     date: "2026-10-06",
     items: [

@@ -1,5 +1,14 @@
 # @kenkaiiii/ggcoder
 
+## 5.74.2
+
+### Patch Changes
+
+- Skip verification feedback on exploration commands, accept harmless stderr redirects and `python -m ruff/mypy/pyright` as checks, defer `steroids`/`subagent` tools to cut the per-request prefix, and run only user-named checks
+  - @kenkaiiii/gg-ai@5.74.2
+  - @kenkaiiii/gg-agent@5.74.2
+  - @kenkaiiii/gg-core@5.74.2
+
 ## 5.74.1
 
 ### Patch Changes

@@ -181,10 +181,10 @@ describe("loadModelsInto", () => {
     expect(apply).toHaveBeenCalledWith(OTHER_PROJECT_MODELS);
   });
 
-  it("leaves the picker untouched when every attempt failed", async () => {
+  it("leaves the picker untouched when every attempt failed, and reports it", async () => {
     const apply = vi.fn();
 
-    await loadModelsInto(
+    const ok = await loadModelsInto(
       async () => null,
       apply,
       () => false,
@@ -192,6 +192,43 @@ describe("loadModelsInto", () => {
     );
 
     expect(apply).not.toHaveBeenCalled();
+    expect(ok).toBe(false);
+  });
+
+  it("reports success when the list was applied or dropped as stale", async () => {
+    const applied = await loadModelsInto(
+      async () => MODELS,
+      vi.fn(),
+      () => false,
+      async () => {},
+    );
+    const stale = await loadModelsInto(
+      async () => MODELS,
+      vi.fn(),
+      () => true,
+      async () => {},
+    );
+
+    expect(applied).toBe(true);
+    expect(stale).toBe(true);
+  });
+});
+
+describe("ModelSelect — failed model load", () => {
+  it("says the load failed instead of claiming it is still connecting", () => {
+    supportsNativeMock.mockReturnValue(false);
+    render(
+      <ModelSelect
+        models={[]}
+        currentModel="claude-sonnet-5"
+        onSelect={vi.fn()}
+        title="Switch model"
+        loadFailed
+      />,
+    );
+
+    expect(screen.getByTitle(/Couldn't load models from the agent/)).toBeTruthy();
+    expect(screen.queryByTitle(/still connecting/)).toBeNull();
   });
 });
 

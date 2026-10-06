@@ -1,11 +1,13 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 // agent.ts binds to the Tauri window at import; the button only needs killTask.
-vi.mock("./agent", () => ({ killTask: vi.fn(async () => undefined) }));
+vi.mock("./agent", () => ({ killTask: vi.fn(async () => ({ ok: true })) }));
+vi.mock("./toast", () => ({ toast: vi.fn() }));
 
-import type { BackgroundTask } from "./agent";
+import { killTask, type BackgroundTask } from "./agent";
+import { toast } from "./toast";
 import { BackgroundTasksButton } from "./BackgroundTasksButton";
 import { formatBackgroundTaskStatus, isBackgroundTaskRunning } from "./background-task-status";
 
@@ -61,6 +63,18 @@ describe("BackgroundTasksButton", () => {
     expect(screen.getByText("signal SIGTERM")).toBeTruthy();
     expect(screen.getByText("stopped: no output")).toBeTruthy();
     expect(screen.getAllByRole("button", { name: "kill" })).toHaveLength(1);
+  });
+
+  it("says so when stopping a task fails", async () => {
+    vi.mocked(killTask).mockResolvedValueOnce({ ok: false, error: "process not found" });
+    render(<BackgroundTasksButton tasks={[task()]} />);
+
+    fireEvent.click(screen.getByRole("button", { name: /background task/ }));
+    fireEvent.click(screen.getByRole("button", { name: "kill" }));
+
+    await waitFor(() =>
+      expect(toast).toHaveBeenCalledWith("Couldn't stop the task: process not found", "error"),
+    );
   });
 });
 

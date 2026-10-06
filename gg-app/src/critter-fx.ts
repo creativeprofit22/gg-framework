@@ -10,6 +10,7 @@ import { CRITTER_CELLS } from "./critter-sprites";
 import { renderProp, type PropArt, type PropName } from "./critter-props";
 import type { Critter } from "./critter-types";
 
+/** Equal to `--ease-pop` in App.css; scripts/motion-tokens.test.mjs enforces it. */
 const POP = "cubic-bezier(0.3, 1.6, 0.6, 1)";
 /** One sprite cell in CSS px (matches --critter-px). */
 export const PX = 2;

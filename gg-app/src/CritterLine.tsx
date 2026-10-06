@@ -61,13 +61,7 @@ export function CritterLine({
         className={`subagents-compact-text${changed ? " dissolve-swap" : ""}`}
         style={{ color }}
       >
-        {tone === "working" ? (
-          <ShimmerText base={color} bright="#ffffff">
-            {text}
-          </ShimmerText>
-        ) : (
-          text
-        )}
+        {tone === "working" ? <ShimmerText base={color}>{text}</ShimmerText> : text}
       </span>
     </div>
   );

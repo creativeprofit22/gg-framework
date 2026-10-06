@@ -67,6 +67,8 @@ function modelTooltip(model: LocalModelRow, endpointLabel: string): string {
 export function LocalModelsModal({ onClose }: Props): React.ReactElement {
   const [endpoints, setEndpoints] = useState<LocalEndpointRow[]>([]);
   const [loading, setLoading] = useState(true);
+  // The saved list couldn't be read; shown instead of "No models yet".
+  const [loadError, setLoadError] = useState(false);
   const [scanning, setScanning] = useState(false);
   const [showAdd, setShowAdd] = useState(false);
   const [url, setUrl] = useState("");
@@ -77,25 +79,37 @@ export function LocalModelsModal({ onClose }: Props): React.ReactElement {
 
   // Show the last scan immediately (no probing), then refresh in the background
   // so a server started since the app booted appears without a manual scan.
-  useEffect(() => {
-    let cancelled = false;
+  const load = useCallback((isCancelled: () => boolean): void => {
+    setLoading(true);
+    setLoadError(false);
+    let listed = false;
     void getLocalModels()
       .then((state) => {
-        if (cancelled) return;
+        if (isCancelled()) return;
+        listed = true;
         setEndpoints(state.endpoints);
         setLoading(false);
         return scanLocalModels();
       })
       .then((state) => {
-        if (!cancelled && state) setEndpoints(state.endpoints);
+        if (!isCancelled() && state) setEndpoints(state.endpoints);
       })
       .catch(() => {
-        if (!cancelled) setLoading(false);
+        if (isCancelled()) return;
+        // A failed background scan keeps the list we already showed; only a
+        // failed read of that list is an error worth a retry.
+        if (!listed) setLoadError(true);
+        setLoading(false);
       });
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    load(() => cancelled);
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [load]);
 
   const scan = useCallback(async (): Promise<void> => {
     setScanning(true);
@@ -152,8 +166,19 @@ export function LocalModelsModal({ onClose }: Props): React.ReactElement {
       {/* The "nothing found" line belongs with the instruction that fixes it,
           above the endpoint rows — not stranded at the bottom of a scroll area
           the user has to reach to learn why the list looks empty. */}
-      {!loading && totalModels === 0 && (
-        <div className="mcp-empty" style={{ color: theme.textMuted, marginBottom: 6 }}>
+      {!loading && loadError && (
+        <div className="picker-empty" role="alert" style={{ marginBottom: "var(--space-3)" }}>
+          <span style={{ color: theme.textMuted }}>Couldn't reach the agent to list models.</span>
+          <button type="button" className="btn btn-sm btn-ghost" onClick={() => load(() => false)}>
+            Try again
+          </button>
+        </div>
+      )}
+      {!loading && !loadError && totalModels === 0 && (
+        <div
+          className="mcp-empty"
+          style={{ color: theme.textMuted, marginBottom: "var(--space-3)" }}
+        >
           No models yet. Start Ollama and scan, or download one from the Hugging Face tile.
         </div>
       )}
@@ -163,7 +188,7 @@ export function LocalModelsModal({ onClose }: Props): React.ReactElement {
       ) : (
         <div className="mcp-list">
           {endpoints.map((endpoint) => (
-            <div key={endpoint.id} style={{ marginBottom: 10 }}>
+            <div key={endpoint.id} style={{ marginBottom: "var(--space-5)" }}>
               <div className="mcp-item">
                 <span
                   className="mcp-dot"
@@ -216,7 +241,10 @@ export function LocalModelsModal({ onClose }: Props): React.ReactElement {
 
       {showAdd ? (
         <>
-          <div className="modal-label" style={{ color: theme.textMuted, marginTop: 4 }}>
+          <div
+            className="modal-label"
+            style={{ color: theme.textMuted, marginTop: "var(--space-2)" }}
+          >
             Endpoint URL
           </div>
           <input
@@ -258,7 +286,7 @@ export function LocalModelsModal({ onClose }: Props): React.ReactElement {
           )}
         </>
       ) : (
-        <div className="modal-hint" style={{ color: theme.textDim, marginTop: 12 }}>
+        <div className="modal-hint" style={{ color: theme.textDim, marginTop: "var(--space-6)" }}>
           No tool calling = can’t run the agent. “?” context = server didn’t report one.
         </div>
       )}
@@ -293,7 +321,10 @@ export function LocalModelsModal({ onClose }: Props): React.ReactElement {
               onClick={() => void scan()}
               title="Re-check every local endpoint"
             >
-              <ArrowsClockwiseIcon size={13} style={{ marginRight: 6, verticalAlign: "-2px" }} />
+              <ArrowsClockwiseIcon
+                size={13}
+                style={{ marginRight: "var(--space-3)", verticalAlign: "-2px" }}
+              />
               {scanning ? "Scanning\u2026" : "Scan"}
             </button>
           </>

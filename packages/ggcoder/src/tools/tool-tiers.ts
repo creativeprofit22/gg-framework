@@ -34,13 +34,9 @@ export const CORE_TOOL_NAMES: readonly string[] = [
   "code_search",
   "code_nav",
   "web_fetch",
-  // The local code corpus is a frequent app/orchestrator path. `tasks` follows
-  // upstream into the deferred tier: its schema leaves every request.
-  "steroids",
   "task_output",
   "task_send",
   "task_stop",
-  "subagent",
   "spawn_agent",
   "skill",
   "enter_plan",
@@ -55,13 +51,19 @@ export const CORE_TOOL_NAMES: readonly string[] = [
  * (the child-agent control cluster follows `spawn_agent`).
  *
  * `web_search` moved here after a 30-day usage count over 718 local sessions
- * found it in ~6% of working sessions. `task_send`
+ * found it in ~6% of working sessions. `steroids` (~8%; 8.6% across 723 Local Fork working sessions, 2026-10) and `subagent` (~15%; 5.5% locally)
+ * followed after a 2026-10 count over 255 working sessions, and a GLM-5.3
+ * head-to-head with Dirac (bench/h2h/DIRAC-FINDINGS.md) showed the always-on
+ * prefix — ~5.4k chars for these two schemas — was GG's main per-request
+ * overhead. `spawn_agent` (~22%) stays core. `task_send`
  * stays core even though it is rarer: bash's own description points at it,
  * and promoting it mid-session would change the tool list, which restarts
  * Anthropic's prompt cache (tools are cached ahead of system and messages).
  */
 export const DEFERRED_TOOL_NAMES: readonly string[] = [
   "web_search",
+  "steroids",
+  "subagent",
   "ui_registry",
   "ui_adopt",
   "source_path",

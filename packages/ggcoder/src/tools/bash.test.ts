@@ -208,12 +208,30 @@ describe("renderBashOutput", () => {
     expect(output).toContain("chain only checks with &&");
   });
 
-  it("does not demand another failed baseline solely to record evidence", async () => {
+  it("does not demand reshaping a baseline command solely to record evidence", async () => {
     const output = await renderBashOutput("tests failed", "cat src/example.js; npm test");
     expect(output).toContain("Verification evidence rejected");
-    expect(output).toContain("A failed baseline need not be rerun just to record evidence");
-    expect(output).toContain("fix the bug, then verify with a supported command");
+    expect(output).toContain("do not reshape this command to satisfy this note");
+    expect(output).toContain("after your last edit");
     expect(output).toContain("do not claim verification from this shell exit status");
+  });
+
+  it("keeps teaching the check shape on every rejected check", async () => {
+    expect(await renderBashOutput("ok", "npm test; git diff --stat")).toContain(
+      "Verification evidence rejected",
+    );
+    expect(await renderBashOutput("ok", "npm test | grep passed")).toContain(
+      "Verification evidence rejected",
+    );
+  });
+
+  it.each([
+    "ls -d .venv 2>/dev/null && ls .venv/bin/ | grep -i ruff; .venv/bin/ruff --version",
+    'grep -n -A 30 "\\[tool.ruff" pyproject.toml || echo "no ruff config"',
+    "ls src && echo --- && ls .venv/bin/ | grep -i ruff",
+    'grep -rn "import time" src/*.py; echo "--- ruff config ---"',
+  ])("adds no feedback to exploration that only mentions a verifier: %s", async (command) => {
+    expect(await renderBashOutput("output", command)).toBe("output");
   });
 
   it("explains that mixed checks cannot establish fresh evidence without discarding prior verification", async () => {
@@ -227,7 +245,14 @@ describe("renderBashOutput", () => {
     expect(output).toContain("run the check standalone");
   });
 
-  it.each(["npm test", "npm test && npm run check", "git diff --stat", "npm run build"])(
+  it.each([
+    "npm test",
+    "npm test && npm run check",
+    "git diff --stat",
+    "npm run build",
+    "npm test 2>&1",
+    ".venv/bin/python -m ruff check src/pipelines/",
+  ])(
     "does not add rejection feedback to accepted or snapshot-eligible commands: %s",
     async (command) => {
       expect(await renderBashOutput("output", command)).toBe("output");

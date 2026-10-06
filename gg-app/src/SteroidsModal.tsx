@@ -94,7 +94,7 @@ export function SteroidsModal({ status, onStatus, onClose }: Props): React.React
               ) : !status.installed ? (
                 <button
                   className="modal-btn primary"
-                  style={{ padding: "2px 12px", fontSize: 12 }}
+                  style={{ padding: "var(--space-1) var(--space-6)", fontSize: "var(--fs-sm)" }}
                   disabled={installing}
                   onClick={() => void install()}
                 >
@@ -114,7 +114,7 @@ export function SteroidsModal({ status, onStatus, onClose }: Props): React.React
 
         <div
           className="modal-hint"
-          style={{ color: theme.textDim, ...(embedded ? {} : { marginTop: 12 }) }}
+          style={{ color: theme.textDim, ...(embedded ? {} : { marginTop: "var(--space-6)" }) }}
         >
           <a
             className="home-link"

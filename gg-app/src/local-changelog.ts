@@ -53,10 +53,26 @@ export const CURRENT_LOCAL_RELEASE_NOTES = requireCurrentReleaseNotes(releaseNot
 /** Newest first. Maintained only by the Local Fork release flow. */
 export const LOCAL_CHANGELOG: LocalChangelogEntry[] = [
   {
-    id: "local-2026-10-05-upstream-0821-checklist-and-clearer-errors",
+    id: "local-2026-10-06-upstream-0822-clearer-failures-and-leaner-agent",
     label: CURRENT_LOCAL_RELEASE_NOTES.label,
     date: CURRENT_LOCAL_RELEASE_NOTES.date,
     items: CURRENT_LOCAL_RELEASE_NOTES.sections.flatMap(({ items }) => items),
+  },
+  {
+    id: "local-2026-10-05-upstream-0821-checklist-and-clearer-errors",
+    label: "Upstream 0.82.1, with a project Checklist and clearer error notices",
+    date: "2026-10-05",
+    items: [
+      "Every project gets a health hub. Open `Checklist` from the top of a chat pane to work through setup, tests, security and shipping one check at a time. Results are saved, each pane checks its own project, and you get a nudge when a check is due again.",
+      "When a chat hits a snag, the notice tells you what to do next. Usage limits, sign-in trouble and unavailable models each get their own notice with expandable details and a `Choose model` or `Switch provider` button when switching helps. Rate limits show the time the provider says you can retry, and a rotating crew of critters keeps you company.",
+      "Attachments land every time. `Send` waits until your files finish loading, so nothing gets left behind, and a file that fails to load tells you instead of quietly vanishing.",
+      "Fresh starts feel fresh. A new session opens straight to the welcome screen instead of showing the last run's `cancelled` status.",
+      "Your plans wait for you. When the agent hands over a plan for review, it stops cleanly instead of burning extra turns while you decide.",
+      "`Ultra` on OpenAI thinks the way Codex does, and helper agents now inherit the effort level you picked instead of quietly dropping to the lowest one.",
+      "`Checks passed` means what it says. Mixed shell commands no longer count as fresh verification, and the agent has a clear way to run its checks and look over its changes without hiding a failure.",
+      "Every turn is a little lighter. The agent loads its task list tool only when it needs it and follows shorter house rules, so each request sends about `1,400` fewer characters.",
+      "`Find references` reaches further in JavaScript projects without a config file. It includes callers in files you haven't opened and tells the agent when coverage is incomplete.",
+    ],
   },
   {
     id: "local-2026-10-04-upstream-0810-faster-openai-and-multi-file-edits",

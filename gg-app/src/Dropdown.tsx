@@ -21,6 +21,10 @@ interface Props {
   placeholder?: string;
   /** Extra class on the wrapper (width overrides etc.). */
   className?: string;
+  /** Id for the trigger, so a form `<label htmlFor>` can point at it. */
+  id?: string;
+  /** Id(s) of help text describing the field, set as the trigger's `aria-describedby`. */
+  describedBy?: string;
 }
 
 /**
@@ -44,6 +48,8 @@ export function Dropdown({
   disabled,
   placeholder = "Select\u2026",
   className,
+  id,
+  describedBy,
 }: Props): React.ReactElement {
   const [open, setOpen] = useState(false);
   const [activeIndex, setActiveIndex] = useState(0);
@@ -164,6 +170,7 @@ export function Dropdown({
     <div className={className ? `dropdown ${className}` : "dropdown"} ref={rootRef}>
       <button
         ref={triggerRef}
+        id={id}
         type="button"
         className="dropdown-trigger"
         disabled={unavailable}
@@ -171,6 +178,7 @@ export function Dropdown({
         aria-expanded={open}
         aria-controls={open ? listId : undefined}
         aria-label={label}
+        aria-describedby={describedBy}
         onClick={() => (open ? closeList(false) : openList())}
         onKeyDown={onTriggerKeyDown}
       >

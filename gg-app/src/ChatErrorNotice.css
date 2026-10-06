@@ -2,10 +2,10 @@
   display: grid;
   grid-template-columns: 28px minmax(0, 1fr);
   align-items: start;
-  column-gap: 8px;
-  margin: 6px 0 10px;
+  column-gap: var(--space-4);
+  margin: var(--space-3) 0 var(--space-5);
   font-family: var(--sans);
-  font-size: 14px;
+  font-size: var(--fs-md);
   color: var(--text);
   overflow-wrap: anywhere;
 }
@@ -54,12 +54,12 @@
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 0 8px;
+  gap: 0 var(--space-4);
 }
 .chat-error-headline {
   padding-block: calc((28px - 1.3em) / 2);
   line-height: 1.3;
-  font-size: 14px;
+  font-size: var(--fs-md);
   font-weight: 600;
   color: var(--error);
 }
@@ -74,8 +74,8 @@
   display: flex;
   flex-wrap: wrap;
   align-items: baseline;
-  column-gap: 12px;
-  font-size: 13px;
+  column-gap: var(--space-6);
+  font-size: var(--fs-base);
   line-height: 1.3;
   color: var(--text-muted);
 }
@@ -89,7 +89,7 @@
 }
 .chat-error-recovery .model-select-text,
 .chat-error-recovery .model-button {
-  font-size: 13px;
+  font-size: var(--fs-base);
   font-weight: 400;
   line-height: 1.3;
   padding: calc((28px - 1.3em) / 2) 0;
@@ -99,24 +99,24 @@
 .chat-error-details-toggle,
 .chat-error-motion {
   border: 0;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-muted);
   min-height: 28px;
   cursor: pointer;
   line-height: 1.3;
-  transition: color 150ms ease;
+  transition: color var(--t-fast);
 }
 .chat-error-details-toggle {
   flex: 0 0 auto;
   border: 1px solid var(--border-strong);
-  padding: 4px 8px;
-  font-size: 12px;
+  padding: var(--space-2) var(--space-4);
+  font-size: var(--fs-sm);
   white-space: nowrap;
 }
 .chat-error-motion {
-  padding: 4px 0;
-  font-size: 13px;
+  padding: var(--space-2) 0;
+  font-size: var(--fs-base);
   text-decoration: underline;
   text-underline-offset: 3px;
 }
@@ -132,22 +132,43 @@
   outline: 2px solid var(--primary);
   outline-offset: 3px;
 }
+/* One grid row the body sits in: 1fr at rest, animated to 0fr on the way out,
+   so the collapse needs no measured height. The body clips while it shrinks;
+   the padding lives inside it so the gap above collapses too. */
 .chat-error-details {
+  display: grid;
+  grid-template-rows: 1fr;
   grid-column: 2 / -1;
-  padding-top: 8px;
   color: var(--text-secondary);
-  font-size: 13px;
+  font-size: var(--fs-base);
   line-height: 1.5;
   white-space: pre-wrap;
 }
 .chat-error-details[hidden] {
   display: none;
 }
+.chat-error-details-body {
+  min-height: 0;
+  overflow: hidden;
+  padding-top: var(--space-4);
+}
+/* Leaving: dissolve out and fold the row shut together, over the same
+   duration as DETAILS_EXIT_MS, so it is already 0 tall when it is hidden. */
 .chat-error-details.leaving {
-  animation: dissolve-in var(--dur-dissolve) var(--ease-in) reverse both;
+  animation:
+    dissolve-in var(--dur-dissolve) var(--ease-in) reverse both,
+    chat-error-details-collapse var(--dur-dissolve) var(--ease-in-out) both;
+}
+@keyframes chat-error-details-collapse {
+  from {
+    grid-template-rows: 1fr;
+  }
+  to {
+    grid-template-rows: 0fr;
+  }
 }
 .chat-error-details p {
-  margin: 0 0 8px;
+  margin: 0 0 var(--space-4);
 }
 @media (prefers-reduced-motion: reduce) {
   .chat-error-blink.is-animated {
@@ -158,9 +179,10 @@
   .chat-error-motion {
     transition: none;
   }
-  /* Match the shared reduced-motion dissolve: fade only, no blur. */
+  /* Match the shared reduced-motion dissolve: fade only, no blur and no
+     folding; the row closes once the fade is done. */
   .chat-error-details.leaving {
-    animation-name: fade-in;
+    animation: fade-in var(--dur-dissolve) var(--ease-in) reverse both;
   }
 }
 @media (forced-colors: active) {

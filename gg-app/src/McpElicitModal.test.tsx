@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import type { SidecarEvent } from "./agent";
 import { McpElicitModal } from "./McpElicitModal";
@@ -33,6 +33,11 @@ const askSchema = {
   required: ["name"],
 };
 
+// jsdom has no layout, so no `scrollIntoView` for the Dropdown's active option.
+beforeAll(() => {
+  Element.prototype.scrollIntoView = vi.fn();
+});
+
 beforeEach(() => {
   mcpElicitMock.mockClear();
   listeners.clear();
@@ -63,7 +68,11 @@ describe("McpElicitModal", () => {
 
     fireEvent.change(screen.getByLabelText("Your name *"), { target: { value: "Ken" } });
     fireEvent.change(screen.getByLabelText("How many"), { target: { value: "3" } });
-    fireEvent.change(screen.getByLabelText("Region"), { target: { value: "eu" } });
+    // Region is the shared Dropdown (not a native <select>): open it, pick "Europe".
+    const region = screen.getByRole("button", { name: "Region" });
+    expect(region.id).toBe(screen.getByText("Region", { selector: "label" }).getAttribute("for"));
+    fireEvent.click(region);
+    fireEvent.click(screen.getByRole("option", { name: "Europe" }));
     fireEvent.click(screen.getByRole("checkbox"));
 
     expect((screen.getByRole("button", { name: "Send" }) as HTMLButtonElement).disabled).toBe(

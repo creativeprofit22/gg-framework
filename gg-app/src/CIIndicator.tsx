@@ -59,9 +59,7 @@ export function CIIndicator({ ci }: { ci?: GitHubCI | null }): React.ReactElemen
         {status === "running" ? (
           // In-flight runs shimmer (same sweep as "Hook engaged"); a red fail
           // stops the sweep and a full pass settles to static green.
-          <ShimmerText base="var(--text-muted)" bright="#ffffff">
-            {label}
-          </ShimmerText>
+          <ShimmerText base="var(--text-muted)">{label}</ShimmerText>
         ) : (
           label
         )}

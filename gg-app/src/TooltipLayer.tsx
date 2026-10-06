@@ -34,7 +34,7 @@ import { createPortal } from "react-dom";
 const SHOW_DELAY_MS = 450;
 /** Moving to another titled control within this window skips the delay. */
 const WARM_WINDOW_MS = 300;
-/** How long a hidden tooltip stays on screen fading out. Keep equal to --dur-exit (App.css). */
+/** How long a hidden tooltip stays on screen fading out. Equal to `--dur-exit` in App.css; scripts/motion-tokens.test.mjs enforces it. */
 const EXIT_MS = 120;
 const GAP = 6;
 const MARGIN = 8;

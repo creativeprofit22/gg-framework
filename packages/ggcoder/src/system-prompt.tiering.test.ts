@@ -171,19 +171,14 @@ describe("tool tiering in the system prompt", () => {
     // block must stay a rounding error next to a schema per tool. Raised from
     // 1,200 for the `debug` line (~65 chars, against a ~2.5k-char schema it
     // keeps out of every request), then to 1,500 for the `web_search` line
-    // (~120 chars, against a ~1.2k-char schema).
+    // (~120 chars, against a ~1.2k-char schema). Then to 1,700 for the
+    // `steroids` and `subagent` lines (~170 chars, against ~5.4k chars of
+    // schemas moved out of every request). Fork: 1,660 already covered the
+    // fork-only deferred tools (tauri_package, programmatic_*, command_information,
+    // research_corpus); +200 for upstream 0.82.2 deferring steroids/subagent.
     const indexBlockStart = prompt.indexOf("Available on demand");
     const indexBlock = prompt.slice(indexBlockStart, prompt.indexOf("\n\n", indexBlockStart));
-    // Raised from 1,200 when upstream's `ui_registry`/`ui_adopt` joined the
-    // deferred tier: the index grows one terse line per deferred tool, and both
-    // hints are already at fork brevity. The guard is the ratio, not the
-    // constant — this block stays ~1.2KB against a schema per tool, so tiering
-    // still pays for itself. Raised again (1,260 → 1,310) for upstream's
-    // deferred `debug` line (~66 chars), mirroring upstream's own +50 raise.
-    // Raised again (1,500 → 1,660) for upstream 0.82's deferred `checklist`
-    // and `tasks` lines (~150 chars); deferring `tasks` keeps its ~1.2k-char
-    // schema out of every request, a net saving of ~1.1k chars.
-    expect(indexBlock.length).toBeLessThan(1_660);
+    expect(indexBlock.length).toBeLessThan(1_860);
     // Raised with the "How to Talk" reply-shape rules, then again for the
     // always-on security defaults in Code Quality, then again for the Code
     // Quality minimization ladder (benchmarked: same correctness, 50–76% less

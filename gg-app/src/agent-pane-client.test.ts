@@ -100,6 +100,14 @@ describe("pane agent client", () => {
     await expect(createPaneAgentClient("right").cancelQueued("q1")).resolves.toBeNull();
   });
 
+  it("reports a failed model fetch as null, not an empty catalog", async () => {
+    const client = createPaneAgentClient("right");
+    invoke.mockResolvedValue({ models: [] });
+    await expect(client.listModels()).resolves.toEqual([]);
+    invoke.mockRejectedValue(new Error("unavailable"));
+    await expect(client.listModels()).resolves.toBeNull();
+  });
+
   it("scopes programmatic actions, validates receipts and rejects stale generations", async () => {
     const client = createPaneAgentClient("right");
     const request = { version: 1 as const, action: "scan" as const };

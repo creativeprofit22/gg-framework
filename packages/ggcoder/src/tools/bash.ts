@@ -31,7 +31,10 @@ import { isCatastrophicCommand } from "../core/workspace-guard.js";
 import { checkDestructiveGit } from "../core/destructive-git-guard.js";
 import { shellThreatBlockMessage } from "../core/shell-threats.js";
 import { checkPackageInstall } from "../core/package-threats.js";
-import { classifyVerificationCommand } from "../core/verification-evidence.js";
+import {
+  classifyVerificationCommand,
+  containsBoundedCheck,
+} from "../core/verification-evidence.js";
 import { checkCommandPolicy, type GetNetworkPolicy } from "../core/network-guard.js";
 import {
   BOUNDED_OUTPUT_MAX_BYTES,
@@ -109,12 +112,18 @@ const GUESSED_WAIT_SECONDS = 10;
  * permission error never fails the tool result.
  */
 export async function renderBashOutput(rawOutput: string, command?: string): Promise<string> {
-  const check = command ? classifyVerificationCommand(command) : undefined;
+  // Feedback only when the command wraps a real check. Exploration that merely
+  // mentions a verifier (`ls .venv/bin | grep ruff`) is not a verification
+  // attempt; nagging it made the model reshape harmless commands repeatedly.
+  // Showing the note only once per session was measured and rejected: it cut
+  // notes by a third but raised tool calls 27% (bench/h2h/DIRAC-FINDINGS.md).
+  const check =
+    command && containsBoundedCheck(command) ? classifyVerificationCommand(command) : undefined;
   const feedback =
     check?.candidate && !check.accepted && check.snapshotPreserveOnly
       ? "\n\n[This mixed check/inspection chain cannot establish fresh verification; it can only preserve earlier successful checks. If the current changes are not already verified, run the check standalone or chain only checks with &&. Do not claim fresh verification from this shell exit status.]"
       : check?.candidate && !check.accepted && !check.snapshotEligible
-        ? `\n\n[Verification evidence rejected: ${check.reason}. Run the check as a standalone command, or chain only checks with &&. A failed baseline need not be rerun just to record evidence: fix the bug, then verify with a supported command. Run edits and diff inspection separately; do not claim verification from this shell exit status.]`
+        ? `\n\n[Verification evidence rejected: ${check.reason}. The output is still valid information; do not reshape this command to satisfy this note. When you need verification, run the check once as a standalone command (or chain only checks with &&) after your last edit, and do not claim verification from this shell exit status.]`
         : "";
   const result = truncateTail(rawOutput);
   if (!result.truncated) return result.content + feedback;

@@ -64,9 +64,19 @@ afterEach(() => {
   else Reflect.deleteProperty(HTMLElement.prototype, "scrollTo");
 });
 
-async function setup(running = false): Promise<{
+interface SetupOptions {
+  /** How many readiness checks reject before the agent is reachable. The fork's
+   * hydration tolerates a failed state read, so readiness is the connect gate. */
+  readyFailures?: number;
+}
+
+async function setup(
+  running = false,
+  { readyFailures = 0 }: SetupOptions = {},
+): Promise<{
   input: HTMLTextAreaElement;
   sends: ReturnType<typeof vi.fn>;
+  readyCalls: () => number;
   emit: (event: SidecarEvent) => void;
 }> {
   const state: AgentState = {
@@ -82,9 +92,17 @@ async function setup(running = false): Promise<{
     model: "claude-sonnet-4-6",
     running,
   };
+  let readyCalls = 0;
   mockWindows("main");
   mockIPC((command) => (command === "plugin:log|log" ? null : new Promise(() => {})));
   const { pane, sends, emit } = fakePaneClient(state);
+  const ready = vi.mocked(pane.waitForReady).getMockImplementation();
+  vi.mocked(pane.waitForReady).mockImplementation(async (...args) => {
+    readyCalls++;
+    if (readyCalls <= readyFailures) throw new Error("agent unreachable");
+    if (ready === undefined) throw new Error("fake pane has no readiness stub");
+    return ready(...args);
+  });
   currentPane = pane;
   render(
     <AgentPane
@@ -96,8 +114,10 @@ async function setup(running = false): Promise<{
     />,
   );
   const input = await screen.findByRole<HTMLTextAreaElement>("textbox");
-  await waitFor(() => expect(document.querySelector(".footer-skeleton")).toBeNull());
-  return { input, sends, emit };
+  if (readyFailures === 0) {
+    await waitFor(() => expect(document.querySelector(".footer-skeleton")).toBeNull());
+  }
+  return { input, sends, readyCalls: () => readyCalls, emit };
 }
 function paste(input: HTMLTextAreaElement): void {
   fireEvent.paste(input, {
@@ -287,6 +307,33 @@ describe("composer attachments", () => {
     await screen.findByRole("button", { name: "Remove screenshot.png" });
     fireEvent.click(screen.getByTitle(SEND));
     await waitFor(() => expect(sends).toHaveBeenCalledOnce());
+  });
+
+  it("offers a retry when the agent can't be reached at startup", async () => {
+    const { readyCalls } = await setup(false, { readyFailures: 1 });
+
+    // A failed connect must say so, not sit on "connecting to agent…" forever.
+    const alert = await screen.findByText("Couldn't connect to the agent.");
+    expect(alert.closest("[role='alert']")).toBeTruthy();
+    expect(readyCalls()).toBe(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+
+    await waitFor(() => expect(readyCalls()).toBe(2));
+    await waitFor(() => expect(screen.queryByText("Couldn't connect to the agent.")).toBeNull());
+  });
+
+  it("says the model list failed to load instead of still connecting", async () => {
+    const pending = setup();
+    // null is the pane client's "model fetch failed" result.
+    vi.mocked(currentPane!.listModels).mockResolvedValue(null);
+    await pending;
+
+    const reason = "Couldn't load models from the agent. Reopen the project to try again.";
+    await waitFor(() => expect(screen.getAllByTitle(reason).length).toBeGreaterThan(0));
+    expect(
+      screen.queryByTitle("No models available yet — still connecting to the agent"),
+    ).toBeNull();
   });
 
   it("preserves the draft and explains how to send attachments when addressing Ken", async () => {

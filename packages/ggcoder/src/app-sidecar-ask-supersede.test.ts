@@ -116,6 +116,11 @@ describe("reviewed command questions use the existing desktop bridge", () => {
         });
         const again = await request(`/ask/${question.id}`, sessionId, { action: "cancel" });
         expect(again.status).toBe(409);
+        // The late answer starts its own run (the fixture asks again there). Stop it
+        // and let it end so teardown never kills the daemon mid-run.
+        await observer.waitFor("ask_user", 2);
+        expect((await request("/cancel", sessionId, {})).status).toBe(200);
+        await observer.waitFor("run_end", 2);
       },
       { parkQuestion: true },
     );

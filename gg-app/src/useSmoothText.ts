@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
 /**
  * Paces streamed text so the PAINT rhythm stops being the NETWORK rhythm.
@@ -56,6 +56,8 @@ export interface SmoothText {
   text: string;
   /** True while text is still arriving/revealing: gates the word fade-in. */
   animating: boolean;
+  /** Text present on Activity return must not replay word entrances. */
+  settledLength: number;
 }
 
 interface Reveal {
@@ -142,6 +144,8 @@ function advance(a: Reveal, commit: (text: string) => void): void {
 export function useSmoothText(text: string, holdPartial = false): SmoothText {
   const [revealed, setRevealed] = useState(text);
   const [animating, setAnimating] = useState(false);
+  const [settledLength, setSettledLength] = useState(0);
+  const resuming = useRef(false);
   const anim = useRef<Reveal>({
     current: text,
     target: text,
@@ -153,6 +157,18 @@ export function useSmoothText(text: string, holdPartial = false): SmoothText {
     tail: 0,
     hold: holdPartial,
   });
+
+  useLayoutEffect(() => {
+    if (!resuming.current) return;
+    resuming.current = false;
+    const a = anim.current;
+    a.current = text;
+    a.target = text;
+    a.shown = text;
+    setRevealed(text);
+    setAnimating(false);
+    setSettledLength(text.length);
+  }, [text]);
 
   useEffect(() => {
     const a = anim.current;
@@ -188,14 +204,16 @@ export function useSmoothText(text: string, holdPartial = false): SmoothText {
     }
   }, [text]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const a = anim.current;
     return () => {
       if (a.raf) cancelAnimationFrame(a.raf);
+      a.raf = 0;
       clearTimeout(a.settle);
       clearTimeout(a.tail);
+      resuming.current = true;
     };
   }, []);
 
-  return { text: revealed, animating };
+  return { text: revealed, animating, settledLength };
 }

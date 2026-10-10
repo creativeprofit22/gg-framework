@@ -39,7 +39,7 @@ export function LiveToolPanel({ entries }: Props): React.ReactElement | null {
   const visible = entries.slice(-LIVE_TOOL_PANEL_ROWS);
 
   return (
-    <div className="livetoolpanel dissolve-in">
+    <div className="livetoolpanel">
       {visible.map((entry) => {
         const done = entry.status === "done";
         const parts = buildToolLineParts(entry.name, entry.args, {

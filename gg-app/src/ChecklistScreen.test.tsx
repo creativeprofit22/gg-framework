@@ -67,12 +67,102 @@ describe("ChecklistScreen", () => {
     expect(screen.queryByText(/up to date/)).toBeNull();
     expect(screen.queryByRole("button", { name: "Back to chat" })).toBeNull();
   });
+  it.each([
+    ["not-run", "Not reviewed"],
+    ["passed", "Checked 5 Oct 2026"],
+    ["due", "Review due"],
+    ["needs-work", "1 finding reported"],
+    ["not-applicable", "Not applicable"],
+  ] as const)("gives %s its own visual state without relying on color alone", (status, label) => {
+    render(
+      <ChecklistScreen
+        {...props(
+          ready([
+            item("tests", {
+              status,
+              checkedAt: status === "not-run" ? null : "2026-10-05T09:00:00Z",
+              result: status === "needs-work" ? "issues" : status === "not-run" ? null : "pass",
+              findings: status === "needs-work" ? ["A finding"] : [],
+            }),
+          ]),
+        )}
+      />,
+    );
+    const info = screen.getByRole("group", { name: "tests" });
+    expect(info.closest(".checklist-entry")?.getAttribute("data-state")).toBe(status);
+    expect(within(info).getByText(label)).toBeTruthy();
+    expect(info.querySelector(".checklist-entry-icon")?.getAttribute("aria-hidden")).toBe("true");
+  });
+  it("marks findings recorded before the code changed instead of showing them as current", () => {
+    const findings: Partial<ChecklistEntry> = {
+      status: "needs-work",
+      checkedAt: "2026-10-05T09:00:00Z",
+      result: "issues",
+      findings: ["a.ts:1", "b.ts:2"],
+    };
+    render(
+      <ChecklistScreen
+        {...props(
+          ready([
+            item("tests", { ...findings, changedSinceCheck: true }),
+            item("docs", { ...findings, changedSinceCheck: false }),
+          ]),
+        )}
+      />,
+    );
+    const tests = screen.getByRole("group", { name: "tests" });
+    const docs = screen.getByRole("group", { name: "docs" });
+    expect(
+      within(tests).getByText("2 findings reported · Code changed since, check again"),
+    ).toBeTruthy();
+    expect(within(docs).getByText("2 findings reported")).toBeTruthy();
+  });
+  it("notes findings the owner accepted on a passed item", () => {
+    render(
+      <ChecklistScreen
+        {...props(
+          ready([
+            item("tests", {
+              status: "passed",
+              checkedAt: "2026-10-05T09:00:00Z",
+              result: "pass",
+              accepted: ["god files (deferred by owner)"],
+            }),
+          ]),
+        )}
+      />,
+    );
+    const tests = screen.getByRole("group", { name: "tests" });
+    expect(within(tests).getByText("Checked 5 Oct 2026 · 1 accepted as is")).toBeTruthy();
+  });
+
+  it("overrides a previous pass while checking or displaying an unrecorded-run notice", () => {
+    const p = props(
+      ready([
+        item("tests", { status: "passed", result: "pass", checkedAt: "2026-10-05T09:00:00Z" }),
+      ]),
+    );
+    const view = render(<ChecklistScreen {...p} running activeId="tests" />);
+    const info = screen.getByRole("group", { name: "tests" });
+    expect(info.closest(".checklist-entry")?.getAttribute("data-state")).toBe("checking");
+    expect(within(info).getByText("Checking…")).toBeTruthy();
+    view.rerender(
+      <ChecklistScreen
+        {...p}
+        notice={{ id: "tests", checkedAt: "2026-10-05T09:00:00Z", message: "No result recorded." }}
+      />,
+    );
+    expect(info.closest(".checklist-entry")?.getAttribute("data-state")).toBe("needs-work");
+    expect(within(info).getByText("No result recorded.")).toBeTruthy();
+  });
   it("makes Agent setup's file-writing /init workflow explicit", () => {
     render(<ChecklistScreen {...props(ready([item("agent-setup"), item("tests")]))} />);
     expect(screen.getByRole("button", { name: "Check agent-setup" }).title).toBe(
       "Run /init to create or update project instructions",
     );
-    expect(screen.getByRole("button", { name: "Check tests" }).title).toBe("Check and report only");
+    expect(screen.getByRole("button", { name: "Check tests" }).title).toBe(
+      "Check and report, then choose what to fix",
+    );
   });
   it("keeps rows non-expanding and preserves the Check action and busy state", () => {
     const entry = item("tests");

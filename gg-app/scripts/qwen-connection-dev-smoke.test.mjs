@@ -109,7 +109,7 @@ describe("Qwen native smoke evidence", () => {
       "utf8",
     );
     expect(launcher).toContain("GG_APP_DEV_SMOKE_WINDOW: windowMode");
-    const native = readFileSync(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8");
+    const native = readFileSync(new URL("../src-tauri/src/windows.rs", import.meta.url), "utf8");
     expect(native).toContain('Some("visible") => Ok(false)');
   });
   it("accepts explicitly recorded visible windows but rejects a mixed mode", () => {

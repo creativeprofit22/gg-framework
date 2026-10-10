@@ -1,5 +1,6 @@
 import { useLayoutEffect, useRef } from "react";
 import type { Icon } from "@phosphor-icons/react";
+import { viewportScale } from "./motion-geometry";
 
 /**
  * The Settings screen's floating capsule of tabs, ported from yaatuber's
@@ -7,7 +8,7 @@ import type { Icon } from "@phosphor-icons/react";
  * icon-only tabs, with the selected tab widening to show its label under one
  * pill. Hover only lightens a tab. Selecting one (click, or arrow keys) springs
  * the pill across, glides the tabs its label pushed aside, and unfurls the new
- * label out of its icon (fade + 4px blur + 10px slide).
+ * label out of its icon (sharp opacity entrance).
  */
 
 export interface SettingsTab<Id extends string> {
@@ -71,9 +72,28 @@ function paint(pill: HTMLElement, box: Box): void {
   pill.style.transform = `translate(${box.x}px, ${box.y}px)`;
 }
 
-function cancelAnimations(el: Element): void {
-  if (typeof el.getAnimations !== "function") return;
-  for (const animation of el.getAnimations()) animation.cancel();
+function placementKey(bar: HTMLElement, box: Box): string {
+  const rect = bar.getBoundingClientRect();
+  return [
+    rect.left,
+    rect.top,
+    rect.width,
+    rect.height,
+    viewportScale(bar, rect),
+    box.x,
+    box.y,
+    box.width,
+    box.height,
+  ].join(":");
+}
+
+function cancelOwned(animations: Set<Animation>): void {
+  for (const animation of animations) {
+    animation.onfinish = null;
+    animation.oncancel = null;
+    animation.cancel();
+  }
+  animations.clear();
 }
 
 export function SettingsTabBar<Id extends string>({
@@ -87,6 +107,8 @@ export function SettingsTabBar<Id extends string>({
   const barRef = useRef<HTMLDivElement>(null);
   const pillRef = useRef<HTMLSpanElement>(null);
   const beforeRef = useRef<Before | null>(null);
+  const animationsRef = useRef(new Set<Animation>());
+  const placementRef = useRef("");
 
   function select(id: Id): void {
     const bar = barRef.current;
@@ -113,55 +135,61 @@ export function SettingsTabBar<Id extends string>({
     beforeRef.current = null;
 
     const all = tabButtons(bar);
-    for (const el of [pill, ...all]) cancelAnimations(el);
+    cancelOwned(animationsRef.current);
     const to = boxOf(target);
     paint(pill, to);
     pill.classList.add("is-placed");
+    placementRef.current = placementKey(bar, to);
 
     const motion = readMotion();
     if (!before || motion.reduced) return;
     const spring = { duration: motion.durationMs, easing: motion.easing };
     const barRect = bar.getBoundingClientRect();
-
-    for (const el of all) {
+    const scale = viewportScale(bar, barRect);
+    const moves = all.map((el) => {
       const old = before.tabs.get(el.dataset["tabId"] ?? "");
-      const dx = old ? old.left - el.getBoundingClientRect().left : 0;
-      if (Math.abs(dx) > 0.5) {
-        el.animate([{ transform: `translateX(${dx}px)` }, { transform: "none" }], spring);
-      }
+      return { el, dx: old ? (old.left - el.getBoundingClientRect().left) / scale : 0 };
+    });
+    const animate = (el: Element, frames: Keyframe[]): void => {
+      const animation = el.animate(frames, spring);
+      const owned = animationsRef.current;
+      owned.add(animation);
+      const release = (): void => {
+        owned.delete(animation);
+        animation.onfinish = null;
+        animation.oncancel = null;
+      };
+      animation.onfinish = release;
+      animation.oncancel = release;
+    };
+    for (const { el, dx } of moves) {
+      if (Math.abs(dx) > 0.5)
+        animate(el, [{ transform: `translateX(${dx}px)` }, { transform: "none" }]);
     }
 
     if (before.pill) {
       const from: Box = {
-        x: before.pill.left - barRect.left - bar.clientLeft,
-        y: before.pill.top - barRect.top - bar.clientTop,
-        width: before.pill.width,
-        height: before.pill.height,
+        x: (before.pill.left - barRect.left) / scale - bar.clientLeft,
+        y: (before.pill.top - barRect.top) / scale - bar.clientTop,
+        width: before.pill.width / scale,
+        height: before.pill.height / scale,
       };
-      pill.animate(
-        [
-          {
-            width: `${from.width}px`,
-            height: `${from.height}px`,
-            transform: `translate(${from.x}px, ${from.y}px)`,
-          },
-          {
-            width: `${to.width}px`,
-            height: `${to.height}px`,
-            transform: `translate(${to.x}px, ${to.y}px)`,
-          },
-        ],
-        spring,
-      );
+      animate(pill, [
+        {
+          width: `${from.width}px`,
+          height: `${from.height}px`,
+          transform: `translate(${from.x}px, ${from.y}px)`,
+        },
+        {
+          width: `${to.width}px`,
+          height: `${to.height}px`,
+          transform: `translate(${to.x}px, ${to.y}px)`,
+        },
+      ]);
     }
 
-    target.querySelector(".settings-tab-label")?.animate(
-      [
-        { opacity: 0, filter: "blur(4px)", transform: "translateX(-10px)" },
-        { opacity: 1, filter: "blur(0)", transform: "none" },
-      ],
-      spring,
-    );
+    const label = target.querySelector(".settings-tab-label");
+    if (label) animate(label, [{ opacity: 0 }, { opacity: 1 }]);
   }, [selected]);
 
   // Layout changes that are not a selection (fonts landing, a window resize)
@@ -170,24 +198,41 @@ export function SettingsTabBar<Id extends string>({
     const bar = barRef.current;
     const pill = pillRef.current;
     if (!bar || !pill) return;
+    const owned = animationsRef.current;
     const place = (): void => {
       const target = bar.querySelector<HTMLElement>(":scope > [aria-selected='true']");
-      if (target && target.offsetWidth > 0) paint(pill, boxOf(target));
+      if (!target || target.offsetWidth <= 0) return;
+      const box = boxOf(target);
+      const key = placementKey(bar, box);
+      // Selection itself resizes the dock. Its observer delivery must not
+      // cancel the animation just started by the selection layout effect.
+      if (key === placementRef.current) return;
+      placementRef.current = key;
+      beforeRef.current = null;
+      cancelOwned(owned);
+      paint(pill, box);
     };
     let alive = true;
     void document.fonts?.ready.then(() => {
       if (alive) place();
     });
-    if (typeof ResizeObserver !== "function") {
-      return () => {
-        alive = false;
-      };
-    }
-    const observer = new ResizeObserver(place);
-    observer.observe(bar);
+    const observer = typeof ResizeObserver === "function" ? new ResizeObserver(place) : null;
+    observer?.observe(bar);
+    // CSS zoom can leave local ResizeObserver sizes unchanged. ZoomController
+    // writes the root style; window resize covers repositioning of the dock.
+    const zoomObserver = new MutationObserver(place);
+    zoomObserver.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ["style"],
+    });
+    window.addEventListener("resize", place);
     return () => {
       alive = false;
-      observer.disconnect();
+      observer?.disconnect();
+      zoomObserver.disconnect();
+      window.removeEventListener("resize", place);
+      beforeRef.current = null;
+      cancelOwned(owned);
     };
   }, []);
 

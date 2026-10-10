@@ -201,6 +201,17 @@ describe("foreground verification review", () => {
 });
 
 describe("renderBashOutput", () => {
+  it("stays quiet for a check with read-only commands around it under bash", async () => {
+    // These count (via the host's workspace comparison), so a note would only
+    // make the model re-run a suite that already passed.
+    const command = "cat src/a.js; npm test 2>&1 | grep -E 'pass|fail'";
+    expect(await renderBashOutput("ok", command, true)).toBe("ok");
+    // On the cmd.exe fallback the same chain proves nothing, so the note stays.
+    expect(await renderBashOutput("ok", command, false)).toContain(
+      "Verification evidence rejected",
+    );
+  });
+
   it("explains why a semicolon check cannot prove verification", async () => {
     const output = await renderBashOutput("diff succeeded", "npm test; git diff --stat");
     expect(output).toContain("Verification evidence rejected");
@@ -321,31 +332,28 @@ describe("createBashTool shell snapshot", () => {
 
     expect(tool.description).toContain("Windows cmd.exe");
     expect(tool.description).toContain("dir, findstr, type");
-    expect(tool.description).toContain("will fail");
-    expect(tool.description).not.toContain("Execute a bash command");
+    expect(tool.description).toContain("POSIX commands and $(...) fail");
+    expect(tool.description).not.toContain("non-interactive bash command");
     // 2026-08 guardrail additions (audit P1/P2) must survive in both shells.
-    expect(tool.description).toContain(
-      "Commit, push, amend, or rewrite git history only when the user explicitly asked",
-    );
-    expect(tool.description).toContain("Kill processes by exact PID");
+    // The git-history guardrail moved to the system prompt's Work section
+    // ("Never install packages, delete data, commit/push … unless asked").
+    expect(tool.description).not.toContain("git push");
+    expect(tool.description).toContain("Kill by exact PID");
   });
 
-  it("keeps the bash description byte-for-byte when a POSIX shell resolves", () => {
+  it("keeps the bash description when a POSIX shell resolves", () => {
     const tool = createBashTool(tmpHome, new ProcessManager(), undefined, undefined, {
       platform: "darwin",
       env: {},
       exists: () => true,
     });
 
-    expect(tool.description.startsWith("Execute a bash command.")).toBe(true);
-    expect(tool.description).toContain("non-interactive bash shell with TERM=dumb");
+    expect(tool.description.startsWith("Run a non-interactive bash command")).toBe(true);
+    expect(tool.description).toContain("(TERM=dumb, pipefail)");
     expect(tool.description).not.toContain("cmd.exe");
-    // 2026-08 guardrail additions (audit P1/P2); bash-only line below.
-    expect(tool.description).toContain(
-      "Commit, push, amend, or rewrite git history only when the user explicitly asked",
-    );
-    expect(tool.description).toContain("Never background a command with a trailing & or nohup");
-    expect(tool.description).toContain("Kill processes by exact PID");
+    // 2026-08 guardrail additions (audit P1/P2); git rule now lives in the system prompt.
+    expect(tool.description).toContain("never `&`, nohup or sleep");
+    expect(tool.description).toContain("Kill by exact PID");
   });
 });
 

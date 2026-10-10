@@ -1,9 +1,13 @@
 // @vitest-environment jsdom
 import { act, cleanup, render } from "@testing-library/react";
+import { Activity } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: vi.fn() }));
-vi.mock("./agent", () => ({ openProjectPath: vi.fn(), sendPrompt: vi.fn() }));
+vi.mock("./agent", () => ({
+  openProjectPath: vi.fn(),
+  openUrl: vi.fn(),
+  sendPrompt: vi.fn(),
+}));
 
 import { StreamingMarkdown } from "./StreamingMarkdown";
 
@@ -18,12 +22,17 @@ const wait = async (ms: number): Promise<void> => {
 /** The word spans the streamed words fade in through. */
 const words = (root: HTMLElement): Element[] => [...root.querySelectorAll(".md-word")];
 
+const originalAnimations = Object.getOwnPropertyDescriptor(Element.prototype, "getAnimations");
+
 describe("StreamingMarkdown", () => {
   beforeEach(() => {
     vi.useFakeTimers();
   });
   afterEach(() => {
     cleanup();
+    if (originalAnimations)
+      Object.defineProperty(Element.prototype, "getAnimations", originalAnimations);
+    else Reflect.deleteProperty(Element.prototype, "getAnimations");
     vi.useRealTimers();
   });
 
@@ -64,6 +73,50 @@ describe("StreamingMarkdown", () => {
     expect(container.textContent).toBe("Here's the fix. Done.");
     // Finished: the word spans come off, leaving plain markup.
     expect(words(container)).toHaveLength(0);
+  });
+
+  it("settles an interrupted reveal and hidden words on Activity return, then reveals new growth", async () => {
+    const cancelled = new Set<Element>();
+    Object.defineProperty(Element.prototype, "getAnimations", {
+      configurable: true,
+      value: function (this: Element) {
+        return [{ cancel: () => cancelled.add(this) }];
+      },
+    });
+    const body = (text: string, hidden = false) => (
+      <Activity mode={hidden ? "hidden" : "visible"}>
+        <StreamingMarkdown text={text} streaming />
+      </Activity>
+    );
+    const view = render(body(""));
+    const initial = "A long fictional response with enough words to interrupt before it finishes ";
+    view.rerender(body(initial));
+    await wait(75);
+    expect(view.container.textContent).not.toBe(initial);
+    view.rerender(body(initial, true));
+    const hidden = `${initial}These words arrived while hidden. `;
+    view.rerender(body(hidden, true));
+    view.rerender(body(hidden));
+    expect(view.container.textContent).toBe(hidden.trimEnd());
+    expect(words(view.container).every((word) => cancelled.has(word))).toBe(true);
+    const visible = `${hidden}Visible growth still fades. `;
+    view.rerender(body(visible));
+    await wait(600);
+    expect(view.container.textContent).toBe(visible.trimEnd());
+    const latest = words(view.container);
+    expect(latest.length).toBeGreaterThan(0);
+    expect([...cancelled]).not.toContain(latest[latest.length - 1]);
+  });
+
+  it("keeps the first live chunk eligible for word feedback", () => {
+    const cancel = vi.fn();
+    Object.defineProperty(Element.prototype, "getAnimations", {
+      configurable: true,
+      value: () => [{ cancel }],
+    });
+    const { container } = render(<StreamingMarkdown text="A new visible chunk " streaming />);
+    expect(words(container).length).toBeGreaterThan(0);
+    expect(cancel).not.toHaveBeenCalled();
   });
 
   it("renders a finished reply as plain markup with no fade", () => {

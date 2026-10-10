@@ -61,12 +61,18 @@ afterEach(async () => {
 });
 
 /** Exactly what a provider transform serializes for one tool definition. */
-function serializeTool(tool: { name: string; description: string; parameters: unknown }): string {
+function serializeTool(tool: {
+  name: string;
+  description: string;
+  parameters: unknown;
+  rawInputSchema?: Record<string, unknown>;
+}): string {
   return JSON.stringify(
     {
       name: tool.name,
       description: tool.description,
-      input_schema: z.toJSONSchema(tool.parameters as z.ZodType),
+      // The transform sends a pre-built schema when a tool has one.
+      input_schema: tool.rawInputSchema ?? z.toJSONSchema(tool.parameters as z.ZodType),
     },
     null,
     2,
@@ -219,7 +225,7 @@ describe("cached prompt prefix golden", () => {
     expect(actual).toBe(expected);
   });
 
-  it("keeps the volatile date outside the cached span", async () => {
+  it("keeps the volatile date and the working directory outside the cached span", async () => {
     const { text, cwd } = await buildPrefix();
     const normalized = normalize(text, cwd);
     const marker = normalized.indexOf("<!-- uncached -->");
@@ -227,6 +233,9 @@ describe("cached prompt prefix golden", () => {
     // Nothing above the marker may carry today's date, or every turn after
     // midnight would miss the cache for the whole prefix.
     expect(normalized.slice(0, marker)).not.toContain("Today's date:");
+    // Nor the working directory, or every checkout/worktree of the same project
+    // would write its own copy of the cached system block.
+    expect(normalized.slice(0, marker)).not.toContain("<CWD>");
   });
 
   it("covers every core tool, so a description edit cannot slip past the golden", async () => {
@@ -254,21 +263,7 @@ describe("cached prompt prefix golden", () => {
     // subagent/spawn_agent and the agent-control tools (need a roster), skill
     // (needs a catalog), enter_plan/exit_plan (need plan callbacks), tool_search
     // (needs a deferred catalog), generate_image.
-    expect(coreNames).toEqual([
-      "read",
-      "write",
-      "edit",
-      "bash",
-      "find",
-      "grep",
-      "code_search",
-      "code_nav",
-      "ls",
-      "web_fetch",
-      "task_output",
-      "task_send",
-      "task_stop",
-    ]);
+    expect(coreNames).toEqual(["read", "write", "edit", "bash", "grep"]);
     // Every core name this config builds must be a declared core tool — a tool
     // silently promoted into the cached tier fails here.
     for (const name of coreNames) {

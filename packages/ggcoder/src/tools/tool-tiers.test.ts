@@ -50,8 +50,9 @@ describe("tool tiers", () => {
     expect(CORE_TOOL_NAMES).not.toContain("programmatic_command");
     expect(DEFAULT_TOOL_NAMES).toContain("programmatic_command");
     expect(BUILTIN_TOOL_NAMES).toContain("programmatic_command");
+    // Local Fork: the former system-prompt rule now lives only in this hint.
     expect(TOOL_PROMPT_HINTS.programmatic_command).toBe(
-      "Review/create commands; separately approve isolated runs.",
+      "Review/create commands only on explicit request; runs and shell actions need separate approval.",
     );
   });
 
@@ -59,7 +60,7 @@ describe("tool tiers", () => {
     expect(DEFERRED_TOOL_NAMES).toContain("programmatic_profile");
     expect(DEFAULT_TOOL_NAMES).toContain("programmatic_profile");
     expect(BUILTIN_TOOL_NAMES).toContain("programmatic_profile");
-    expect(TOOL_PROMPT_HINTS.programmatic_profile).toBe("Inspect/persist.");
+    expect(TOOL_PROMPT_HINTS.programmatic_profile).toBe("Inspect/persist profiles.");
   });
 
   it("partitions tools by tier, preserving order within each tier", () => {

@@ -273,6 +273,7 @@
 .slash-item.active,
 .slash-item:hover,
 .dropdown-option.active,
+.model-menu-item[aria-checked="true"],
 .mcp-item:hover {
   background: var(--glass-clear);
   box-shadow: var(--liquid-rim-soft-small);
@@ -415,8 +416,7 @@
 .badge,
 .window-index,
 .attach-chip,
-.user-file-chip,
-.gaze-pill {
+.user-file-chip {
   border-color: transparent;
   background: var(--glass-clear);
   -webkit-backdrop-filter: var(--glass-backdrop);
@@ -598,8 +598,8 @@
 .dropdown-menu,
 .model-menu,
 .slash-menu,
-.bgtasks-menu,
-.winlayout-menu {
+.winlayout-menu,
+.pop-panel {
   background: var(--glass-float) !important;
   border-color: transparent !important;
   -webkit-backdrop-filter: var(--glass-backdrop);
@@ -767,11 +767,13 @@
   opacity: 1;
   transform: translateX(-110%);
   animation: glass-progress-sheen 1.6s linear infinite;
+  animation-play-state: var(--loop-play-state, running);
   pointer-events: none;
 }
 /* The meter is always on screen, so its sheen passes slowly and rests between. */
 .title-usage-fill::before {
   animation: glass-progress-sheen-idle 6s ease-in-out infinite;
+  animation-play-state: var(--loop-play-state, running);
 }
 @keyframes glass-progress-sheen {
   to {

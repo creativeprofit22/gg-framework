@@ -1,6 +1,6 @@
 import { GGAIError } from "../errors.js";
 import type { ContentPart, ImageContent, Message, Tool, ToolChoice } from "../types.js";
-import { resolveToolSchema } from "../utils/zod-to-json-schema.js";
+import { resolveToolSchema, zodToClosedJsonSchema } from "../utils/zod-to-json-schema.js";
 import { makeStrictToolSchema, UnsupportedStrictSchemaError } from "../utils/strict-tool-schema.js";
 import { readSseStream } from "../utils/sse.js";
 import { toolResultText } from "./transform.js";
@@ -262,6 +262,8 @@ export function serializeResponsesTools(
       } catch (error) {
         if (!(error instanceof UnsupportedStrictSchemaError)) throw error;
         strict = null;
+        // The fallback loses strict mode's closed objects; restore Zod's own.
+        if (!tool.rawInputSchema) parameters = zodToClosedJsonSchema(tool.parameters);
       }
     }
     return {

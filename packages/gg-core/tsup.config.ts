@@ -22,7 +22,9 @@ export default defineConfig({
     "src/progress-contract.ts",
   ],
   format: ["esm", "cjs"],
-  dts: true,
+  // tsup's declaration build sets `baseUrl`, which TypeScript 6 deprecates.
+  // Silence that for the dts step only, not the whole repo.
+  dts: { compilerOptions: { ignoreDeprecations: "6.0" } },
   clean: true,
   sourcemap: true,
   // Keep heavy optional, dynamic-imported deps external so they are resolved at

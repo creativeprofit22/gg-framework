@@ -7,6 +7,7 @@ import {
   GearSixIcon,
 } from "@phosphor-icons/react";
 import { getVersion } from "@tauri-apps/api/app";
+import { error as logError } from "@tauri-apps/plugin-log";
 import { AsciiLogo } from "./AsciiLogo";
 import { HomeScenery, withScenery } from "./HomeScenery";
 import { HomeCritters } from "./HomeCritters";
@@ -38,7 +39,12 @@ import {
 } from "./local-update-confirmation";
 import { toast } from "./toast";
 import type { WhatsNewFeedId } from "./whats-new-status";
-import { error as logError } from "@tauri-apps/plugin-log";
+
+// A failed setup check leaves the workspace buttons dimmed, so leave a trace in
+// the app log instead of failing silently. The next focus retries.
+function logSetupCheckFailure(e: unknown): Promise<void> {
+  return logError(`Home setup check failed: ${String(e)}`);
+}
 
 interface Props {
   onProjects: () => void;
@@ -110,17 +116,17 @@ export function HomeScreen({
   }
 
   useEffect(() => {
-    void refresh().catch(() => {});
+    void refresh().catch(logSetupCheckFailure);
     // Re-check when the window regains focus so a folder/provider set elsewhere
     // (or after a sidecar respawn) reflects without an app restart.
-    const onFocus = (): void => void refresh().catch(() => {});
+    const onFocus = (): void => void refresh().catch(logSetupCheckFailure);
     window.addEventListener("focus", onFocus);
     return () => window.removeEventListener("focus", onFocus);
   }, []);
 
   // Skips the initial 0 so mounting doesn't double-refresh.
   useEffect(() => {
-    if (refreshSignal > 0) void refresh().catch(() => {});
+    if (refreshSignal > 0) void refresh().catch(logSetupCheckFailure);
   }, [refreshSignal]);
 
   useEffect(() => {
@@ -211,7 +217,7 @@ export function HomeScreen({
           type="button"
           aria-label={whatsNewLabel}
           title={whatsNewLabel}
-          onClick={() => void openWhatsNewWindow().catch(() => {})}
+          onClick={() => void openWhatsNewWindow("calm").catch(() => {})}
         >
           <span>What&apos;s new</span>
           {unreadWhatsNew.map((id) => (

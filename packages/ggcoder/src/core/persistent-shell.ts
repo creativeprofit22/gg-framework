@@ -11,6 +11,9 @@
  */
 import type { ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import type { ForegroundExecutionReason } from "../types.js";
 
 import {
@@ -46,6 +49,43 @@ export interface PersistentRunResult {
   outputSnapshot: BoundedOutputTailSnapshot;
 }
 
+/** Shell state captured after a completed command (ported from upstream). */
+export interface StateSnapshot {
+  cwd: string | null;
+  env: string;
+}
+
+/** Single-quote for bash. */
+export function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+/**
+ * Split a state file (`pwd -P` line, then `export -p`) into cwd + env script.
+ * Variables the new shell must own (PWD, OLDPWD, SHLVL) are dropped.
+ */
+export function parseStateSnapshot(text: string): StateSnapshot | null {
+  if (!text.trim()) return null;
+  // The cwd may in theory contain a newline, so split at the first export line.
+  const m = /\n(?=declare -|export )/.exec(text);
+  const cwd = (m ? text.slice(0, m.index) : text.replace(/\n$/, "")) || null;
+  const env = m
+    ? text
+        .slice(m.index + 1)
+        .split("\n")
+        .filter((line) => !/^(declare -\S+|export) (PWD|OLDPWD|SHLVL)(=|$)/.test(line))
+        .join("\n")
+    : "";
+  return { cwd, env };
+}
+
+/** Restore script: env first (its PWD is filtered), then cd, then report where we landed. */
+export function buildRestoreScript(snapshot: StateSnapshot): string {
+  const env = snapshot.env.trim() ? `{ ${snapshot.env}\n} >/dev/null 2>&1\n` : "";
+  const cd = snapshot.cwd ? `builtin cd -- ${shellQuote(snapshot.cwd)} >/dev/null 2>&1\n` : "";
+  return `${env}${cd}builtin pwd -P`;
+}
+
 function longestSentinelPrefix(candidate: Buffer, sentinel: Buffer): number {
   const maxLength = Math.min(candidate.length, sentinel.length - 1);
   for (let length = maxLength; length > 0; length -= 1) {
@@ -60,6 +100,10 @@ export class PersistentShell {
   private child: ChildProcess | null = null;
   private busy = false;
   private closing = false;
+  /** Private temp dir holding the post-command state snapshot (lazy). */
+  private stateDir: string | null = null;
+  /** Set when a fresh shell was spawned and must replay the last snapshot. */
+  private restorePending = false;
   private readonly owned = new Map<
     ChildProcess,
     { closed: Promise<void>; cleanup?: Promise<void> }
@@ -106,6 +150,37 @@ export class PersistentShell {
     return this.busy;
   }
 
+  /** State file path, creating the private (0700) temp dir on first use. */
+  private get statePath(): string | null {
+    if (!this.stateDir) {
+      try {
+        this.stateDir = mkdtempSync(path.join(os.tmpdir(), "gg-psh-"));
+      } catch {
+        return null;
+      }
+    }
+    return path.join(this.stateDir, "state.sh");
+  }
+
+  private readSnapshot(): StateSnapshot | null {
+    if (!this.stateDir) return null;
+    try {
+      return parseStateSnapshot(readFileSync(path.join(this.stateDir, "state.sh"), "utf-8"));
+    } catch {
+      return null;
+    }
+  }
+
+  private removeStateDir(): void {
+    if (!this.stateDir) return;
+    try {
+      rmSync(this.stateDir, { recursive: true, force: true });
+    } catch {
+      // Best effort; tmpdir cleanup reclaims it eventually.
+    }
+    this.stateDir = null;
+  }
+
   private ensureChild(): ChildProcess {
     if (this.closing) throw new Error("Persistent shell is shutting down");
     if (this.child && this.child.exitCode === null && !this.child.killed) {
@@ -134,6 +209,9 @@ export class PersistentShell {
     // Don't let a lingering session shell keep the parent process alive.
     child.unref();
     this.child = child;
+    // A replacement for a timed-out/killed/exited shell replays the snapshot
+    // taken after the last completed command (cwd + exported env).
+    this.restorePending = this.stateDir !== null;
     return child;
   }
 
@@ -206,7 +284,19 @@ export class PersistentShell {
     // into stdout so the sentinel is ordered after every command output byte.
     // Prior calls and explicit launches may have disabled pipefail. Restore it
     // before every command so bounded checks cannot inherit false success.
-    const wrapped = `set -o pipefail && { ${command}\n} </dev/null 2>&1; echo "${sentinelText}$?"\n`;
+    let restore = "";
+    if (this.restorePending) {
+      this.restorePending = false;
+      const snap = this.readSnapshot();
+      if (snap) restore = `{ ${buildRestoreScript(snap)}\n} >/dev/null 2>&1\n`;
+    }
+    // Snapshot cwd + exported env before the sentinel (builtins only) so a
+    // shell stopped in a later command can be restored to this point.
+    const statePath = this.statePath;
+    const capture = statePath
+      ? `{ builtin pwd -P; builtin export -p; } >${shellQuote(statePath.replace(/\\/g, "/"))} 2>/dev/null; `
+      : "";
+    const wrapped = `${restore}set -o pipefail && { ${command}\n} </dev/null 2>&1; __gg_psh_rc=$?; ${capture}echo "${sentinelText}$__gg_psh_rc"\n`;
 
     return new Promise<PersistentRunResult>((resolve) => {
       const outputTail = new BoundedOutputTail(BOUNDED_OUTPUT_MAX_LINES, this.maxOutputBytes);
@@ -457,11 +547,13 @@ export class PersistentShell {
     this.closing = true;
     this.takeChild();
     await Promise.all([...this.owned.keys()].map((child) => this.startCleanup(child)));
+    this.removeStateDir();
   }
 
   /** Immediately kill the session tree from synchronous process-exit hooks. */
   killNow(): void {
     const childToKill = this.takeChild();
+    this.removeStateDir();
     if (childToKill?.pid === undefined) return;
     try {
       this.lifecycle.killProcessTree({

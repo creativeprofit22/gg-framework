@@ -374,7 +374,9 @@ describe("ModelSelect — in-webview menu", () => {
     fireEvent.click(trigger);
 
     const menu = screen.getByRole("menu", { name: "Switch model" });
-    expect(menu.parentElement).toBe(document.body);
+    // Portalled out of the clipped footer (inside upstream's FloatingSurface).
+    expect(menu.closest("div[style*='overflow']")).toBeNull();
+    expect(menu.parentElement?.parentElement).toBe(document.body);
     expect(menu.style.left).toBe("12px");
     expect(menu.style.bottom).toBe("69px");
     expect(menu.style.visibility).toBe("visible");

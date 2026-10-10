@@ -1,6 +1,6 @@
 ---
 name: durable
-description: Use when user data must not be lost or corrupted — creating the first table/schema, writing or running migrations, backfills/imports, any destructive op (delete, drop, truncate, reset, overwrite), before the agent itself runs a command against a database that may hold real data, setting up backups/recovery, or moving data between systems; plus "is my data safe / back up my app" checks. Any store — SQL, document, serverless, files, queues. Do NOT use for query speed or pool sizing (that is lean), access control over data (that is bulletproof), or privacy/legal deletion regimes (that is compliance-guard).
+description: "Use when data could be lost: migrations, destructive ops, real databases. Do NOT use for query speed."
 license: Data-durability engineering guidance, not a DBA certification. Sources and snapshot date are recorded at the foot of each reference file.
 compatibility: Snapshot dated 3 October 2026. Version behaviours, provider retention defaults and tool flags decay — re-verify with web access before asserting them as current.
 ---

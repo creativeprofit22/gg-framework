@@ -369,6 +369,9 @@ export function classifyOverload(
     statusCode === 503 ||
     statusCode === 504 ||
     statusCode === 507 ||
+    // Cloudflare edge errors (origin unreachable, timed out). api.anthropic.com
+    // returned a 520 HTML page mid-run in the 2026-10-09 arena; it is transient.
+    (statusCode !== undefined && statusCode >= 520 && statusCode <= 524) ||
     msg.includes("api_error") ||
     msg.includes("server_error") ||
     msg.includes("internal server error") ||
@@ -1054,6 +1057,8 @@ export async function* agentLoop(
           clearToolUses: options.clearToolUses,
           userAgent: options.userAgent,
           defaultHeaders: options.defaultHeaders,
+          providerOptions: options.providerOptions,
+          fetch: options.fetch,
           // Flip to non-streaming fallback after repeated stream stalls.
           ...(useNonStreamingFallback ? { streaming: false } : {}),
         });
@@ -1944,8 +1949,10 @@ export async function* agentLoop(
         maxToolResultChars: options.maxToolResultChars,
         maxTurnToolResultChars: options.maxTurnToolResultChars,
         transformToolResult: options.transformToolResult,
+        resolveTool: options.resolveTool,
         toolMap,
         invalidToolArgumentCounts,
+        countedInvalidArguments: new Set<string>(),
         markFatalToolArgumentError,
         seenToolCalls: new Set<string>(),
       };
@@ -2142,8 +2149,16 @@ interface ToolBatchExecutionOptions {
   maxToolResultChars?: number;
   maxTurnToolResultChars?: number;
   transformToolResult?: AgentOptions["transformToolResult"];
+  resolveTool?: AgentOptions["resolveTool"];
   toolMap: Map<string, AgentTool>;
   invalidToolArgumentCounts: Map<string, number>;
+  /**
+   * Invalid-argument failures already counted in this batch. One assistant
+   * response is one attempt: parallel calls failing the same way (Haiku 5.5
+   * once sent 10 broken `edit` calls at once) add a single strike, so the
+   * model always sees the error before the 3-attempt limit can end the run.
+   */
+  countedInvalidArguments: Set<string>;
   /**
    * `recoverable` flags the case where the failing call's raw args were a
    * completely empty object -- the signature of a provider stream that cut
@@ -2198,7 +2213,11 @@ async function executeSingleToolCall(
   let endRun = false;
   let invalidArgAttempt: number | undefined;
 
-  const tool = options.toolMap.get(toolCall.name);
+  let tool = options.toolMap.get(toolCall.name);
+  if (!tool && options.resolveTool) {
+    tool = options.resolveTool(toolCall.name);
+    if (tool) options.toolMap.set(tool.name, tool);
+  }
   if (tool) {
     // Only deduplicate within this assistant response. Sort object keys so
     // semantically identical provider JSON cannot run a side effect twice.
@@ -2297,8 +2316,11 @@ async function executeSingleToolCall(
         // received Z" lines so the next call comes back with valid args.
         const prettyError = prettifyError(err);
         const failureKey = `${toolCall.name}:${prettyError}`;
-        const failureCount = (options.invalidToolArgumentCounts.get(failureKey) ?? 0) + 1;
+        const alreadyCounted = options.countedInvalidArguments.has(failureKey);
+        const failureCount =
+          (options.invalidToolArgumentCounts.get(failureKey) ?? 0) + (alreadyCounted ? 0 : 1);
         options.invalidToolArgumentCounts.set(failureKey, failureCount);
+        options.countedInvalidArguments.add(failureKey);
         invalidArgAttempt = failureCount;
         const hints = argumentHints(tool, toolCall.args);
         resultContent =

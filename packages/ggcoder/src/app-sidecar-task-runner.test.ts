@@ -188,6 +188,8 @@ async function taskRunnerHarness(
       newSession,
       getAppMarkers: () => [],
       getPlanMode: () => planMode,
+      // Upstream 0.86.0 autopilot rule: these tasks leave no unverified code.
+      getVerificationProblem: () => null,
       persistAppMarker: async () => {},
       persistAutopilotMarker: async () => {},
       getPersistedTranscriptCount: () => messages.length,

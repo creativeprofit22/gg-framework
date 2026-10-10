@@ -1,6 +1,6 @@
 ---
 name: shared-language
-description: Use when a project's domain vocabulary is fuzzy or drifting (two names for one thing, one name for two), naming decisions keep recurring, or a hard-to-reverse architectural decision needs recording so it is not re-litigated or re-suggested — including mid-build when a term settles or a change contradicts an ADR. Do NOT use for throwaway scripts, projects too small to have recurring vocabulary, interviewing for requirements (clarify), or renames with no vocabulary decision (refactoring).
+description: Use when domain terms drift or a decision needs an ADR. Do NOT use for renames.
 ---
 
 # Shared Language

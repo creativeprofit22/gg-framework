@@ -7,11 +7,9 @@ import { ZoomController } from "./ZoomController";
 import { TooltipLayer } from "./TooltipLayer";
 import { WhatsNewModal } from "./WhatsNewModal";
 import { Toaster } from "./Toaster";
-// Experimental: webcam gaze → window focus. Disabled for now; re-enable by
-// uncommenting this import + the <GazeController /> mount below (and the
-// <GazeButton /> in App.tsx). The full implementation lives in src/gaze/.
-// import { GazeController } from "./GazeController";
 import { tagPlatform } from "./platform";
+import { parseMode } from "./whatsnew-content";
+import { installMotionAttribute } from "./window-motion";
 import { appearance } from "./appearance";
 import { startNativeAppearance } from "./appearance-native";
 import "./App.css";
@@ -49,6 +47,10 @@ window.addEventListener("unhandledrejection", (e) => {
 // first render so CSS can gate the macOS-only traffic-light insets.
 tagPlatform();
 
+// <html data-motion> drives every CSS loop's play state (App.css), so set it
+// before the first paint: a window restored in the background starts still.
+installMotionAttribute();
+
 // React render/effect failures land in the shared log file like window errors do.
 function captureReactError(culprit: string, error: unknown, componentStack?: string): void {
   void logError(`${culprit}: ${String(error)}${componentStack ? `\n${componentStack}` : ""}`);
@@ -64,7 +66,8 @@ const root = ReactDOM.createRoot(document.getElementById("root") as HTMLElement,
 // The dedicated, screen-centered "What's new" window reuses this same entry with
 // a `?whatsnew=1` flag (see Rust `open_whatsnew_window`). Render ONLY the notes
 // for that window — no agent, no sidecar, no app shell.
-if (new URLSearchParams(window.location.search).get("whatsnew") === "1") {
+const params = new URLSearchParams(window.location.search);
+if (params.get("whatsnew") === "1") {
   // Mark the root so the stylesheet can make html/body transparent — the native
   // window is transparent (see Rust `open_whatsnew_window`) so the rounded card's
   // corners show through instead of sitting on a hard rectangular window edge.
@@ -72,7 +75,7 @@ if (new URLSearchParams(window.location.search).get("whatsnew") === "1") {
   root.render(
     <>
       <Suspense fallback={null}>
-        <WhatsNewWindow />
+        <WhatsNewWindow mode={parseMode(params.get("mode"))} />
       </Suspense>
       {/* Subscribe immediately, even while the release history is loading. */}
       <Toaster />
@@ -90,7 +93,6 @@ if (new URLSearchParams(window.location.search).get("whatsnew") === "1") {
       <ZoomController />
       <TooltipLayer />
       <WhatsNewModal />
-      {/* <GazeController /> */}
     </>,
   );
 }

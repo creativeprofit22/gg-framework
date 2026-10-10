@@ -1,6 +1,6 @@
 ---
 name: evidence-led-ui
-description: Use when building or changing web/mobile UI: net-new screens or pages, redesigns, design systems, visual polish, UI review, and mid-build edits touching colour, type, spacing, icons, focus/hover/selected states, borders, dropdown icons, motion, or UI copy layout. Also use when output looks generic or AI-made. Small styling fixes take the small-edit path. Do NOT use for behavior-only wiring with no visual state, copy-only text changes, database/API schemas, CLI output, or standalone image generation; speed/bundle work is lean, legal/privacy review of public pages is compliance-guard.
+description: Use when building or reviewing UI visuals. Do NOT use for behaviour-only changes.
 license: See LICENSES.md
 compatibility: Full review requires filesystem inspection and rendered screenshots (deferred `screenshot` tool); web research and device tooling are optional and unavailable checks must be reported as unverified.
 ---

@@ -792,6 +792,8 @@ export function toAnthropicMessages(
 } {
   let systemText: string | undefined;
   const out: Anthropic.MessageParam[] = [];
+  // `out` indices of real user messages (not tool results), for cache anchors.
+  const userTurnIdx: number[] = [];
   const idMap = new Map<string, string>();
   const keepFallbackBlocks = options?.fallbackBlocks === true;
   // Client tool calls dropped by the fallback replay rules; their results go too.
@@ -824,6 +826,7 @@ export function toAnthropicMessages(
       } else if (!msg.content.some((p) => !(p.type === "text" && p.text === ""))) {
         continue;
       }
+      userTurnIdx.push(out.length);
       out.push({
         role: "user",
         content:
@@ -898,30 +901,38 @@ export function toAnthropicMessages(
     }
   }
 
-  // Add cache_control to the last user message to cache conversation history
+  // Conversation cache breakpoints. The last user-role message (a real user
+  // message or tool results) always gets one, so the history is cached.
+  //
+  // With a 1-h TTL, only entries ending at a real user message are worth the
+  // 1-h write price: once the next user message arrives, the encoding above
+  // strips thinking from every earlier assistant turn, so a finished turn's
+  // tool-loop entries can never be read again (measured on Haiku 5.5: the next
+  // turn reads up to the previous user message and re-writes the loop). So:
+  //  - a request that opens a turn writes its user message at 1 h, and pins the
+  //    previous turn's opening message too, so that 1-h entry is found even when
+  //    the finished loop is longer than Anthropic's ~20-block cache lookback;
+  //  - a tool-loop request pins its turn's opening message at 1 h (a read that
+  //    refreshes it, so a >5 min tool run falls back to it) and writes the
+  //    growing loop at the 5-min default, which the next request reads within
+  //    seconds. Anthropic requires 1-h breakpoints before 5-min ones; this order
+  //    holds. With tools and system that is at most 4 breakpoints, the API cap.
   if (cacheControl && out.length > 0) {
-    for (let i = out.length - 1; i >= 0; i--) {
-      if (out[i].role === "user") {
-        const content = out[i].content;
-        if (typeof content === "string") {
-          out[i] = {
-            role: "user",
-            content: [
-              {
-                type: "text",
-                text: content,
-                cache_control: cacheControl,
-              } as Anthropic.TextBlockParam,
-            ],
-          };
-        } else if (Array.isArray(content) && content.length > 0) {
-          const last = content[content.length - 1];
-          content[content.length - 1] = {
-            ...last,
-            cache_control: cacheControl,
-          } as (typeof content)[number];
+    let tail = out.length - 1;
+    while (tail >= 0 && out[tail]?.role !== "user") tail--;
+    if (tail !== -1) {
+      if (cacheControl.ttl === "1h") {
+        const anchor = userTurnIdx.at(-1);
+        if (anchor === tail) {
+          const previous = userTurnIdx.at(-2);
+          if (previous !== undefined) markAnthropicCacheBreakpoint(out, previous, cacheControl);
+          markAnthropicCacheBreakpoint(out, tail, cacheControl);
+        } else {
+          if (anchor !== undefined) markAnthropicCacheBreakpoint(out, anchor, cacheControl);
+          markAnthropicCacheBreakpoint(out, tail, { type: "ephemeral" });
         }
-        break;
+      } else {
+        markAnthropicCacheBreakpoint(out, tail, cacheControl);
       }
     }
   }
@@ -952,6 +963,31 @@ export function toAnthropicMessages(
   }
 
   return { system, messages: out };
+}
+
+/** Put `cache_control` on the last content block of `out[index]` (a user-role message). */
+function markAnthropicCacheBreakpoint(
+  out: Anthropic.MessageParam[],
+  index: number,
+  cacheControl: { type: "ephemeral"; ttl?: "1h" },
+): void {
+  const message = out[index];
+  if (!message) return;
+  const content = message.content;
+  if (typeof content === "string") {
+    out[index] = {
+      role: message.role,
+      content: [
+        { type: "text", text: content, cache_control: cacheControl } as Anthropic.TextBlockParam,
+      ],
+    };
+  } else if (content.length > 0) {
+    const last = content[content.length - 1];
+    content[content.length - 1] = {
+      ...last,
+      cache_control: cacheControl,
+    } as (typeof content)[number];
+  }
 }
 
 export function toAnthropicTools(
@@ -1015,27 +1051,14 @@ export function isForcedToolChoice(choice: ToolChoice): boolean {
 
 /**
  * Anthropic models with built-in adaptive thinking (Fable 5.x, Mythos 5.x,
- * Opus 5.5/5, Opus 4.8/4.7/4.6, Sonnet 5.5/5). Matches both dashed (`opus-4-8`) and
+ * Opus 5.5/5, Opus 4.8/4.7/4.6, Sonnet 5.5/5, Haiku 5.5). Matches both dashed (`opus-4-8`) and
  * dotted (`opus-4.8`) forms so callers don't have to enumerate variants. These
  * models don't need the `interleaved-thinking` beta header — it's built in.
  * (`opus-5` can't false-match `claude-opus-4-5-…` — the `4-` breaks the literal;
- * it also covers `opus-5-5`; `sonnet-5` likewise covers `sonnet-5-5`.)
+ * it also covers `opus-5-5`; likewise `haiku-5` never matches `haiku-4-5`.)
  */
 export function isAdaptiveThinkingModel(model: string): boolean {
-  return /opus-5|opus-4[-.]8|opus-4[-.]7|opus-4[-.]6|sonnet-5|fable-5|mythos-5/.test(model);
-}
-
-/**
- * Adaptive Anthropic models that accept `output_config.effort: "xhigh"`:
- * Opus 5.x / 4.8 / 4.7 and Sonnet 5.5, per the "Effort levels" table at
- * https://platform.claude.com/docs/en/build-with-claude/effort (Sonnet 5.5 also
- * verified live). The docs also list Sonnet 5 and Fable/Mythos 5.x; those still
- * clamp to high until checked live. `sonnet-5[-.]5` (dashed or dotted id) is
- * explicit because a bare `sonnet-5` would widen the set to Sonnet 5. Keep in sync with
- * `isAnthropicXhighModel` in gg-core's thinking-level.ts (gg-ai must not import gg-core).
- */
-function supportsAnthropicXhighEffort(model: string): boolean {
-  return /opus-5|opus-4-8|opus-4-7|sonnet-5[-.]5/.test(model);
+  return /opus-5|opus-4[-.]8|opus-4[-.]7|opus-4[-.]6|sonnet-5|haiku-5|fable-5|mythos-5/.test(model);
 }
 
 export function toAnthropicThinking(
@@ -1051,14 +1074,21 @@ export function toAnthropicThinking(
     // Adaptive thinking — model decides when/how much to think.
     // budget_tokens is deprecated on Opus 5.x / 4.8 / 4.7 / 4.6 and Sonnet 5.x.
     // Anthropic's output_config.effort accepts low, medium, high, xhigh, and max.
-    // xhigh is limited to supportsAnthropicXhighEffort models (Opus 5.x / 4.8 /
-    // 4.7 and Sonnet 5.5; clamped to high elsewhere); all support max.
+    // xhigh is supported by Opus 5.x / 4.8 / 4.7, Sonnet 5.5 and Haiku 5.5;
+    // all support max.
     let effort: string = level;
-    if (effort === "xhigh" && !supportsAnthropicXhighEffort(model)) {
+    if (effort === "xhigh" && !/opus-5|opus-4-8|opus-4-7|sonnet-5[-.]5|haiku-5[-.]5/.test(model)) {
       effort = "high";
     }
     return {
-      thinking: { type: "adaptive" } as unknown as Anthropic.ThinkingConfigParam,
+      // "omitted" (what Claude Code sends): the model still thinks, but
+      // thinking blocks stream empty (signature only). The app never renders
+      // reasoning text, and "summarized" costs speed on Haiku 5.5: bench/h2h
+      // measured output tok/s over each whole request at 151 (summarized) vs
+      // 191 (omitted); Claude Code 195. Sonnet/Opus 5.5 measured even either way.
+      // The UI's "Thinking…" timer keys off the empty thinking_delta emitted
+      // when a thinking block opens, so it is unaffected.
+      thinking: { type: "adaptive", display: "omitted" },
       maxTokens,
       outputConfig: { effort },
     };
@@ -1069,7 +1099,7 @@ export function toAnthropicThinking(
   // thinking `max_tokens` is the TOTAL response envelope (thinking + visible
   // output), so it must stay ≤ the ceiling and `budget_tokens` must be strictly
   // less than it. The previous code returned `maxTokens + budget`, which blew
-  // past the ceiling (e.g. Haiku 4.5: 64K + 64K = 128K) and could trip the
+  // past the ceiling (e.g. a 64K model: 64K + 64K = 128K) and could trip the
   // provider's `max_tokens > maximum allowed` rejection. Now the ceiling is the
   // envelope and the budget is a fraction of it with a reserved visible floor.
   const VISIBLE_FLOOR = 1024;

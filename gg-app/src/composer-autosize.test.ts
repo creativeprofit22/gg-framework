@@ -461,6 +461,30 @@ describe("wrap animation (FLIP)", () => {
     expect(trace).toEqual(["translate(36px, 10px)", "commit", "release"]);
   });
 
+  it.each([0.5, 0.95, 1, 1.25, 1.5, 2])(
+    "uses local pixels for wrapping and send at zoom %s",
+    (scale) => {
+      const { stack, el } = harness(51, [
+        new DOMRect(36 * scale, 10 * scale, 200 * scale, 51 * scale),
+        new DOMRect(0, 0, 200 * scale, 51 * scale),
+      ]);
+      stack.style.width = "200px";
+      stack.style.boxSizing = "border-box";
+      el.value = "a draft that wraps";
+      const writes: string[] = [];
+      Object.defineProperty(stack.style, "transform", {
+        get: () => "",
+        set: (value: string) => writes.push(value),
+      });
+      autosizeComposer(el, null);
+      expect(writes).toEqual(["translate(36px, 10px)", ""]);
+      expect(el.style.height).toBe("51px");
+      el.value = "";
+      autosizeComposer(el, null);
+      expect(writes).toHaveLength(2);
+    },
+  );
+
   it("does not touch transform when the row does not reflow", () => {
     const { stack, el } = harness(30, [rect(36, 10)]);
     autosizeComposer(el, null);

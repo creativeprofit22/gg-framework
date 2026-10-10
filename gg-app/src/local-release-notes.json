@@ -1,21 +1,31 @@
 {
   "schemaVersion": 1,
-  "date": "2026-10-06",
-  "label": "Upstream 0.82.2, with clearer failures and a leaner agent",
+  "date": "2026-10-09",
+  "label": "Upstream 0.86.0, with /commit, leaner Claude runs and Project Health",
   "sections": [
     {
-      "title": "Upstream 0.82.1 to 0.82.2: in your app",
+      "title": "Upstream 0.82.2 to 0.86.0: in your app",
       "items": [
-        "No more staring at a dead end when the agent won't start. A pane that can't reach the agent now says `Couldn't connect to the agent.`, shows what went wrong, and gives you a `Try again` button right there.",
-        "The model pickers tell the truth. If the model list fails to load, both pickers say so and suggest reopening the project, instead of claiming they're still connecting.",
-        "Stopping a background task reports back. If `kill` doesn't work, you get a notice saying why, instead of a button that quietly does nothing."
+        "Meet `Project Health`, a score from `0` to `100` in your workspace header. It checks your project for oversized files, messy hygiene, missing safety nets and leaked secrets, lists the worst offenders, and `Review` hands any of them to the agent to sort out.",
+        "Split panes stop doubling up on background work. Panes on the same project now share `one` set of git and GitHub checks instead of each running their own, so three panes on one repo do a third of the polling they used to.",
+        "What's New moved into the new campfire scene, where pixel critters gather round the fire and each update is a story in its light. The `Local Fork` and `Decisions` tabs live right inside it, next to upstream's own notes.",
+        "Popovers got a glow-up. `Background tasks` and `Schedules` open in a glassy panel with tiny critters showing what each job is up to, and each task now has a `Stop` button. The model picker closes with the same smooth motion and still opens clear of a narrow footer.",
+        "Links in chat open straight in your default app, `mailto:` and `tel:` included. If a link can't open, you get a notice saying so instead of a click that does nothing.",
+        "Ask the new `Don't embarrass me` checklist to look at your project the way a seasoned developer would on day one, and any result your code has moved past is marked `Code changed since` so you never trust a stale verdict."
       ]
     },
     {
-      "title": "Upstream 0.82.1 to 0.82.2: in your agent",
+      "title": "Upstream 0.82.2 to 0.86.0: in your agent",
       "items": [
-        "Every request travels lighter. `Code search` and helper agents now load only when a task needs them, so everyday requests stop carrying their full setup. They come up in only a small share of sessions, so most work starts lighter.",
-        "When you name the checks you want, the agent runs `only those`."
+        "Meet the built-in `/commit`, in every project. One command runs your checks and tests, has a reviewer look over the change, then commits it, and pushes when your branch already tracks a remote. Because the commit is now where work gets proven, plain replies stop showing an `Unverified` badge just because no checks ran yet.",
+        "Autopilot asks for proof before Ken reviews. If a run changed code without checking it, the agent runs its checks once first. Work that still isn't proven after that comes back to you with the reason, so Ken never signs off on untested changes.",
+        "Checks count even with harmless commands around them. A test run next to something like `cat` or `git diff --stat` now counts as a real check, while anything that could hide a failure or write files still doesn't.",
+        "Claude runs reuse more and break fewer edits. Every copy of a project now shares one cached set of instructions, busy tool loops use a short-lived cache while your own messages hold the long one, and Claude gets a simpler edit tool about a `quarter` the size of the old one.",
+        "Fewer runs die on a bad network day. When a provider hiccups with a Cloudflare `520` to `524` error, the agent now retries instead of stopping your task cold.",
+        "Every request travels far lighter. The agent now uses upstream's trimmed instructions and small starter toolset, keeps only the Local Fork rules that add something upstream lacks, and loads rarely used tools the moment it reaches for them. Each request sends about `21,000` fewer characters.",
+        "Meet `Claude Haiku 5.5`. It replaces Haiku 4.5 with a `1M` token memory and room for `128K` tokens of output, and `Kimi K2.7 Code HighSpeed` joins Moonshot.",
+        "You can watch Claude think again. Newer Claude models show their reasoning as readable summaries, and `Codex` thoughts arrive in tidy separate sections instead of one long wall of text.",
+        "A restarted shell picks up where it left off. If the agent's shell has to restart after a stall, it comes back in the same folder with the same environment instead of starting from scratch."
       ]
     }
   ]

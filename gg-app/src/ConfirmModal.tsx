@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import { theme } from "./theme";
 import { Modal } from "./Modal";
+import { ModalDismissButton } from "./modal-embed";
 
 interface Props {
   title: string;
@@ -37,9 +38,7 @@ export function ConfirmModal({
       </div>
       {content}
       <div className="modal-actions">
-        <button className="modal-btn" onClick={onClose}>
-          {cancelLabel}
-        </button>
+        <ModalDismissButton onClick={onClose}>{cancelLabel}</ModalDismissButton>
         <button className="modal-btn primary" disabled={busy} onClick={onConfirm}>
           {busy ? "\u2026" : confirmLabel}
         </button>

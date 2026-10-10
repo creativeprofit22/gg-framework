@@ -1,4 +1,5 @@
 import { createContext, useContext } from "react";
+import { withViewTransition } from "./view-transition";
 
 /**
  * Lets a modal's content render as a page section instead of a floating
@@ -47,13 +48,26 @@ export function useModalEmbedState(): ModalEmbedState {
 export function ModalDismissButton({
   onClick,
   children,
+  disabled = false,
+  animateDismiss = true,
 }: {
   onClick: () => void;
   children: React.ReactNode;
+  disabled?: boolean;
+  /** Async dismissals animate their eventual state update instead. */
+  animateDismiss?: boolean;
 }): React.ReactElement | null {
   if (useModalEmbedState() === "panel") return null;
   return (
-    <button className="modal-btn" type="button" onClick={onClick}>
+    <button
+      className="modal-btn"
+      type="button"
+      disabled={disabled}
+      onClick={() => {
+        if (animateDismiss) withViewTransition(onClick);
+        else onClick();
+      }}
+    >
       {children}
     </button>
   );

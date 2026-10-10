@@ -1,6 +1,6 @@
 ---
 name: code-review
-description: Use when the user asks to review written work — a diff, PR, branch, commit range, or agent-generated change — or says "review before merge", "is this really done?", "check what the agent did". Checks spec compliance and build quality separately, verifies PR/"done" claims against the diff, and reports file:line findings by severity. Do NOT use while still mid-build (finish and run checks instead), for a plain diff summary, or for security review (bulletproof), performance (lean), migrations/data loss (durable), or UI review (evidence-led-ui).
+description: Use when asked to review a diff, PR or finished work. Do NOT use mid-build.
 ---
 
 # Code Review

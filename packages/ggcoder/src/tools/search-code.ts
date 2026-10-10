@@ -10,14 +10,9 @@ import { resolvePath, toPosixPath } from "./path-utils.js";
 import { truncateTail } from "./truncate.js";
 
 const SearchCodeParams = z.object({
-  query: z.string().describe("Natural-language description of the code you're looking for"),
-  path: z.string().optional().describe("Directory to scope the search to (defaults to cwd)"),
-  max_results: z
-    .number()
-    .int()
-    .min(1)
-    .optional()
-    .describe("Maximum ranked symbol chunks to return (default: 8)"),
+  query: z.string(),
+  path: z.string().optional(),
+  max_results: z.number().int().min(1).optional().describe("Default 8"),
 });
 
 const DEFAULT_MAX_RESULTS = 8;
@@ -31,11 +26,7 @@ export function createSearchCodeTool(
 ): AgentTool<typeof SearchCodeParams> {
   return {
     name: "code_search",
-    description:
-      "Find the most relevant functions/classes/types for a query. Returns whole ranked " +
-      "symbol chunks (not lines) — far fewer tokens than reading whole files. Indexes " +
-      "TypeScript/JavaScript, Python, Go, Rust, Java and C#; use grep for other languages " +
-      "or exact strings.",
+    description: "Find functions/classes by what they do; returns whole symbols.",
     parameters: SearchCodeParams,
     async execute({ query, path: searchPath, max_results }) {
       const dir = searchPath ? resolvePath(cwd, searchPath) : cwd;

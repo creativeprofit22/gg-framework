@@ -16,11 +16,9 @@ import { assertProviderExecutionAllowed, runUnattended } from "./core/provider-e
 import http from "node:http";
 import { nativeDevAuthFile, isNativeManagedAuthProvider } from "./app-sidecar-native-auth.js";
 import fs from "node:fs/promises";
-import { watch as fsWatch } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { parseArgs } from "node:util";
 import { spawn, type ChildProcess } from "node:child_process";
 import {
   GGAIError,
@@ -30,7 +28,6 @@ import {
 } from "@kenkaiiii/gg-ai";
 import type { AddressInfo } from "node:net";
 import { restoreAppErrorPayload, type AppErrorPayload } from "./app-error.js";
-import { runJsonMode } from "./modes/json-mode.js";
 import { appSettingsFile } from "./app-sidecar-paths.js";
 import {
   createAppSidecarKenLifecycle,
@@ -75,8 +72,6 @@ import {
 } from "@kenkaiiii/gg-core/desktop-session-ux";
 import { RunClaim } from "./core/run-claim.js";
 import {
-  CHAT_AGENT_IDS,
-  chatAgentSessionsDir,
   createChatAgent,
   parseChatAgentId,
   switchChatAgent,
@@ -145,11 +140,8 @@ import { cleanupToolOutputs } from "./tools/overflow.js";
 import { spawnedTasks } from "./tools/subagent-shared.js";
 import { readCappedBody } from "./utils/http-body.js";
 import {
-  fetchSubscriptionUsage,
-  SubscriptionUsageError,
   XIAOMI_CREDITS_KEY,
   dualAuthProvider,
-  oauthStorageKey,
   discoverLocalModels,
   findProbedModel,
   formatLocalModelId,
@@ -162,8 +154,6 @@ import {
   type PlanAcceptResult,
   type PlanMutationFailure,
   type PlanRevisionResult,
-  type SubscriptionUsageProvider,
-  type SubscriptionUsageSnapshot,
 } from "@kenkaiiii/gg-core";
 import {
   LocalEndpointError,
@@ -203,8 +193,17 @@ import {
 } from "./core/model-registry.js";
 import { resolveStartOrFallback } from "./core/resolve-start.js";
 import { getGitBranch, getGitDirtyFileCount, isGitRepo } from "./utils/git.js";
-import { getGitHubOpenCounts, getGitHubRepoSlug } from "./utils/github.js";
-import { startGitHubCIPoll, type GitHubCI } from "./utils/github-ci.js";
+import { getGitHubRepoSlug, type GitHubOpenCounts } from "./utils/github.js";
+import { type GitHubCI } from "./utils/github-ci.js";
+import type { ProjectHealthScan } from "./core/project-health-scan.js";
+import { scoreProjectHealth, type ProjectHealth } from "./core/project-health-score.js";
+import { createRepoPolls, type RepoPolls } from "./app-sidecar/repo-polls.js";
+
+let daemonRepoPolls: RepoPolls | undefined;
+/** One set of repo pollers per daemon process, shared by every logical session. */
+function getDaemonRepoPolls(): RepoPolls {
+  return (daemonRepoPolls ??= createRepoPolls());
+}
 import { extractPlanSteps } from "./utils/plan-steps.js";
 import {
   clampThinkingLevel,
@@ -213,7 +212,6 @@ import {
   isThinkingLevelSupported,
   resolveInitialThinkingLevel,
 } from "./core/thinking-level.js";
-import { parseThinkingLevel } from "./cli/thinking-arg.js";
 import { PROMPT_COMMANDS } from "./core/prompt-commands.js";
 import { AppSidecarProgrammaticChat, bindProgrammaticAssessmentEvents, programmaticChatIdentity } from "./app-sidecar-programmatic-chat.js";
 import { loadCustomCommands } from "./core/custom-commands.js";
@@ -245,7 +243,12 @@ import {
 import { readChecklistSnapshot } from "./core/checklist-snapshot.js";
 import { initLogger, log } from "./core/logger.js";
 import { installTerminationHandlers } from "./core/shutdown.js";
-import { KeepAwake } from "./core/keep-awake.js";
+import { keepAwake } from "./app-sidecar/keep-awake.js";
+import { searchProjectFiles } from "./app-sidecar/file-search.js";
+import { runJsonModeIfRequested } from "./app-sidecar/json-mode.js";
+import { daemonJson, daemonReadBody, json, readBody } from "./app-sidecar/http.js";
+import { createUsageService } from "./app-sidecar/usage.js";
+import { type ProgressManager, createProgressManager } from "./app-sidecar/progress-manager.js";
 import {
   RADIO_STATIONS,
   getCurrentStation,
@@ -288,12 +291,6 @@ import {
 } from "./core/ask-user.js";
 import { createAskUserTool } from "./tools/ask-user.js";
 import { commandCreationReviewer } from "./core/programmatic/command-creation.js";
-import { buildSnapshot, levelForXp, rankForLevel } from "./core/progress/ranks.js";
-import { loadProgress, peekProgress, updateProgress } from "./core/progress/store.js";
-import { awardPrompt, awardCommits } from "./core/progress/engine.js";
-import { detectNewCommits, repoKey } from "./core/progress/git-xp.js";
-import { rebuildFromSessions } from "./core/progress/rebuild.js";
-import type { ProgressFile, ProgressSnapshot } from "./core/progress/types.js";
 import { AppSidecarReloadCoordinator } from "./app-sidecar-reload.js";
 import { AppSidecarSessionRouter, sessionEventFrame } from "./app-sidecar-session-router.js";
 import { createAppSidecarPhaseDeletionCoordinator, type PhaseDeletionSession } from "./app-sidecar-phase-deletion.js";
@@ -437,10 +434,6 @@ import {
   shouldCaptureToolFailure,
   wrapSidecarHandler,
 } from "./core/sidecar-error-reporter.js";
-
-/** App-wide idle-sleep guard: every window's runs share one OS assertion. The
- *  `keepAwake` setting is applied at daemon start and live via /keep-awake. */
-const keepAwake = new KeepAwake();
 
 const AUTOMATION_PROVENANCE: MessageProvenance = {
   source: "runtime",
@@ -756,116 +749,9 @@ async function prepareAttachments(
   return out;
 }
 
-// ── @-mention file search (chat-input file picker) ─────────────────────────
-// Lists project files for the webview's `@` picker. Empty query → newest files
-// by mtime; a query → fuzzy-ranked basename/path matches. Honors .gitignore and
-// skips node_modules/.git so the picker mirrors the agent's `find` tool.
-interface FileHit {
-  /** Project-relative POSIX path, e.g. "src/App.tsx". */
-  path: string;
-  /** File name only, e.g. "App.tsx". */
-  name: string;
-}
-
 /** Shown inline in the Tasks modal when a confirmed delete could not be saved. */
 const TASK_DELETE_FAILED_MESSAGE =
   "The task could not be deleted. It is still in the list. Try again.";
-
-const FILE_SEARCH_LIMIT = 20;
-// Upper bound on files walked per search (baseline #8 memory cap). Far above the
-// 20-result output limit, so relevance/recency ranking is unaffected in practice.
-const FILE_SEARCH_SCAN_CAP = 50_000;
-
-/** Score a candidate path against a lowercased query. Higher is better; a
- *  negative score means "no match". Basename hits beat path hits; prefix beats
- *  substring; shorter paths break ties. */
-function scoreFile(relPath: string, name: string, query: string): number {
-  const lcPath = relPath.toLowerCase();
-  const lcName = name.toLowerCase();
-  let score = -1;
-  if (lcName === query) score = 1000;
-  else if (lcName.startsWith(query)) score = 800;
-  else if (lcName.includes(query)) score = 600;
-  else if (lcPath.startsWith(query)) score = 400;
-  else if (lcPath.includes(query)) score = 200;
-  else if (subsequenceMatch(lcPath, query)) score = 100;
-  if (score < 0) return -1;
-  // Prefer shorter paths (closer to root, less nesting) on equal match class.
-  return score - relPath.length * 0.1;
-}
-
-/** True when every char of `needle` appears in `haystack` in order (fuzzy). */
-function subsequenceMatch(haystack: string, needle: string): boolean {
-  let i = 0;
-  for (const ch of haystack) {
-    if (ch === needle[i]) i++;
-    if (i === needle.length) return true;
-  }
-  return needle.length === 0;
-}
-
-async function searchProjectFiles(cwd: string, rawQuery: string): Promise<FileHit[]> {
-  const fg = await import("fast-glob");
-  const ignore = await import("ignore");
-  const query = rawQuery.trim().toLowerCase();
-
-  let gitignore: string[] = [];
-  try {
-    const content = await fs.readFile(path.join(cwd, ".gitignore"), "utf-8");
-    gitignore = content
-      .split("\n")
-      .map((l) => l.trim())
-      .filter((l) => l && !l.startsWith("#"));
-  } catch {
-    // No .gitignore — nothing extra to ignore.
-  }
-  const ig = ignore.default().add(gitignore);
-
-  // `stats: true` gives mtime without a second stat pass, so the empty-query
-  // "recent files" path is a single walk. Stream + hard scan cap (baseline #8):
-  // collecting the full result array retained ~0.9 MB per 1k files (18.5 MB at
-  // 20k), unbounded. Bail after FILE_SEARCH_SCAN_CAP entries so a giant repo
-  // can't balloon RSS; the newest/most-relevant matches still surface because
-  // the cap is far above the 20-result output limit.
-  const entries: { path: string; stats?: { mtimeMs: number } }[] = [];
-  const scanStream = fg.default.stream("**/*", {
-    cwd,
-    dot: false,
-    onlyFiles: true,
-    ignore: ["**/node_modules/**", "**/.git/**", "**/.gg/**"],
-    suppressErrors: true,
-    followSymbolicLinks: false,
-    stats: true,
-  });
-  for await (const entry of scanStream) {
-    entries.push(entry as unknown as { path: string; stats?: { mtimeMs: number } });
-    if (entries.length >= FILE_SEARCH_SCAN_CAP) {
-      (scanStream as unknown as { destroy: () => void }).destroy();
-      log("DEBUG", "app-sidecar", "file search scan cap hit", {
-        cap: String(FILE_SEARCH_SCAN_CAP),
-        cwd,
-      });
-      break;
-    }
-  }
-  const files = entries.filter((e) => !ig.ignores(e.path));
-
-  if (!query) {
-    return files
-      .sort((a, b) => (b.stats?.mtimeMs ?? 0) - (a.stats?.mtimeMs ?? 0))
-      .slice(0, FILE_SEARCH_LIMIT)
-      .map((e) => ({ path: e.path, name: path.posix.basename(e.path) }));
-  }
-
-  const scored: { hit: FileHit; score: number }[] = [];
-  for (const e of files) {
-    const name = path.posix.basename(e.path);
-    const score = scoreFile(e.path, name, query);
-    if (score >= 0) scored.push({ hit: { path: e.path, name }, score });
-  }
-  scored.sort((a, b) => b.score - a.score);
-  return scored.slice(0, FILE_SEARCH_LIMIT).map((s) => s.hit);
-}
 
 /**
  * Detect whether a restored user message is actually an injected self-correction
@@ -915,94 +801,6 @@ async function probeMcp(
 interface SseClient {
   id: number;
   res: http.ServerResponse;
-}
-
-/**
- * Sub-agents spawn the ggcoder CLI in JSON mode to run a delegated task. In the
- * packaged desktop app the only runnable entry is THIS bundle (there's no
- * sibling `cli.js`), so the subagent tool ends up spawning the sidecar itself.
- * Without this guard that would boot a second HTTP server, emit no NDJSON, and
- * hang until the 10-minute hard timeout. So when invoked with `--json`, behave
- * exactly like `ggcoder --json …`: stream the sub-agent run as NDJSON and exit,
- * never starting the HTTP/SSE server. Mirrors the `values.json` branch in cli.ts.
- */
-async function runJsonModeIfRequested(): Promise<boolean> {
-  if (!process.argv.includes("--json")) return false;
-  const { values, positionals } = parseArgs({
-    args: process.argv.slice(2),
-    options: {
-      json: { type: "boolean" },
-      provider: { type: "string" },
-      model: { type: "string" },
-      "max-turns": { type: "string" },
-      "system-prompt": { type: "string" },
-      "agent-prompt": { type: "string" },
-      "agent-context": { type: "string" },
-      tools: { type: "string" },
-      "mcp-servers": { type: "string" },
-      "prompt-cache-key": { type: "string" },
-      thinking: { type: "string" },
-    },
-    allowPositionals: true,
-    strict: true,
-  });
-  const maxTurnsRaw = values["max-turns"];
-  // Optional tool allow-list forwarded by the subagent spawner from an agent
-  // definition's `tools:` frontmatter. Mirrors the identical parsing in
-  // cli.ts's `values.json` branch — keep both in sync (see subagent.ts).
-  const parsedTools = values.tools
-    ? values.tools
-        .split(",")
-        .map((t) => t.trim())
-        .filter(Boolean)
-    : [];
-  const allowedTools = parsedTools.length > 0 ? parsedTools : undefined;
-  // MCP servers the agent definition asked for. Without forwarding these, an
-  // allow-listed child connects no MCP at all and loses live code search.
-  const parsedMcpServers = values["mcp-servers"]
-    ? values["mcp-servers"]
-        .split(",")
-        .map((s) => s.trim())
-        .filter(Boolean)
-    : [];
-  const allowedMcpServers = parsedMcpServers.length > 0 ? parsedMcpServers : undefined;
-  await runJsonMode({
-    message: positionals[0] ?? "",
-    provider: (values.provider ?? "anthropic") as Provider,
-    model: values.model ?? "claude-opus-5-5",
-    cwd: process.cwd(),
-    systemPrompt: values["system-prompt"],
-    agentPrompt: values["agent-prompt"],
-    agentContext: values["agent-context"] === "none" ? "none" : undefined,
-    maxTurns: maxTurnsRaw ? parseInt(maxTurnsRaw, 10) : undefined,
-    allowedTools,
-    allowedMcpServers,
-    promptCacheKey: values["prompt-cache-key"],
-    thinkingLevel: parseThinkingLevel(values.thinking),
-  }).catch(async (err: unknown) => {
-    process.stderr.write((err instanceof Error ? err.message : String(err)) + "\n");
-    process.exit(1);
-  });
-  return true;
-}
-
-// ── Daemon-level HTTP helpers (shared by the session-management routes) ─────
-// The per-session route table has its own local copies; these serve the
-// daemon's own POST /session / DELETE /session routes.
-function daemonReadBody(
-  req: http.IncomingMessage,
-  res: http.ServerResponse,
-): Promise<string | null> {
-  return readCappedBody(req, res);
-}
-
-function daemonJson(res: http.ServerResponse, status: number, body: unknown): void {
-  // No CORS headers: only the Rust proxy (no Origin) should call this daemon.
-  // Granting origins would let any web page read responses from loopback.
-  res.writeHead(status, {
-    "content-type": "application/json",
-  });
-  res.end(JSON.stringify(body));
 }
 
 function hasDaemonAuth(req: http.IncomingMessage, expectedToken: string): boolean {
@@ -1284,171 +1082,7 @@ async function main(): Promise<void> {
       ctx.broadcast("progress", { ...snapshot, origin: ctx.id === originId });
   });
 
-  type UsageResult =
-    | (SubscriptionUsageSnapshot & { connected: true; error?: never; stale?: boolean })
-    | {
-        provider: SubscriptionUsageProvider;
-        displayName: string;
-        connected: boolean;
-        windows: [];
-        fetchedAt: number;
-        error?: string;
-        stale?: boolean;
-      };
-  const usageCache = new Map<
-    SubscriptionUsageProvider,
-    { expiresAt: number; result: UsageResult }
-  >();
-  const usageRequests = new Map<SubscriptionUsageProvider, Promise<UsageResult>>();
-  // Last snapshot that actually carried windows, per provider. Replayed while a
-  // fetch is failing so the title meter never blinks out of existence. Bounded
-  // by USAGE_LAST_GOOD_MAX_AGE_MS — a provider that never recovers must stop
-  // reporting rather than freeze a percentage (and a long-past reset time) on
-  // screen forever. The 429 backoff alone runs to 24h, far past any usefulness.
-  const usageLastGood = new Map<SubscriptionUsageProvider, UsageResult>();
-  const USAGE_LAST_GOOD_MAX_AGE_MS = 30 * 60_000;
-  // 429 backoff: quota endpoints are auxiliary UI data. Honor Retry-After when
-  // provided; otherwise retain the unavailable snapshot for 30 minutes. Clamp
-  // the provider value so a malformed header can neither hammer the endpoint
-  // nor suppress usage data forever.
-  const usageRateLimitedUntil = new Map<SubscriptionUsageProvider, number>();
-  // Providers currently in a logged rate-limit episode (cleared on success).
-  const usageRateLimitLogged = new Set<SubscriptionUsageProvider>();
-  const USAGE_RATE_LIMIT_FALLBACK_BACKOFF_MS = 30 * 60_000;
-  const USAGE_RATE_LIMIT_MIN_BACKOFF_MS = 60_000;
-  const USAGE_RATE_LIMIT_MAX_BACKOFF_MS = 24 * 60 * 60_000;
-
-  function clearUsageRateLimit(provider: SubscriptionUsageProvider): void {
-    usageRateLimitedUntil.delete(provider);
-    if (usageRateLimitLogged.delete(provider)) {
-      log("INFO", "app-sidecar", "subscription usage recovered", { provider });
-    }
-  }
-
-  async function fetchUsageProvider(provider: SubscriptionUsageProvider): Promise<UsageResult> {
-    const displayName =
-      provider === "anthropic" ? "Anthropic" : provider === "openai" ? "Codex" : "Kimi";
-    // Kimi plan usage is tracked on the OAuth credential specifically — the
-    // Moonshot platform API key is metered per-token, not per plan window.
-    const authKey = oauthStorageKey(provider) ?? provider;
-    if (!(await auth.hasProviderAuth(authKey))) {
-      // Logged out: drop the replay cache so a later login on a DIFFERENT
-      // account can never inherit the previous one's numbers.
-      usageLastGood.delete(provider);
-      return { provider, displayName, connected: false, windows: [], fetchedAt: Date.now() };
-    }
-    try {
-      let credentials = await auth.resolveCredentials(authKey);
-      try {
-        const snapshot = {
-          ...(await fetchSubscriptionUsage(provider, credentials)),
-          connected: true as const,
-        };
-        clearUsageRateLimit(provider);
-        return snapshot;
-      } catch (error) {
-        // A provider can revoke an access token before its stored expiry. Refresh
-        // once on 401, matching inference auth recovery, then retry the usage call.
-        if (error instanceof SubscriptionUsageError && error.status === 401) {
-          // Name the rejected token. This poller runs on a timer alongside live
-          // agent runs, so an unconditional refresh here would invalidate the
-          // token those runs are holding and fail them mid-turn — a background
-          // status check must never be able to log out the foreground.
-          credentials = await auth.resolveCredentials(authKey, {
-            forceRefresh: true,
-            rejectedToken: credentials.accessToken,
-          });
-          const snapshot = {
-            ...(await fetchSubscriptionUsage(provider, credentials)),
-            connected: true as const,
-          };
-          clearUsageRateLimit(provider);
-          return snapshot;
-        }
-        throw error;
-      }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (error instanceof SubscriptionUsageError && error.status === 429) {
-        const backoffMs = Math.min(
-          USAGE_RATE_LIMIT_MAX_BACKOFF_MS,
-          Math.max(
-            USAGE_RATE_LIMIT_MIN_BACKOFF_MS,
-            error.retryAfterMs ?? USAGE_RATE_LIMIT_FALLBACK_BACKOFF_MS,
-          ),
-        );
-        usageRateLimitedUntil.set(provider, Date.now() + backoffMs);
-        // Rate limits on this auxiliary endpoint are expected (every GG process
-        // on the machine polls it) and already handled by the backoff plus the
-        // last-good replay. Log the transition, not every retry.
-        if (!usageRateLimitLogged.has(provider)) {
-          usageRateLimitLogged.add(provider);
-          log("INFO", "app-sidecar", "subscription usage rate-limited; backing off", {
-            provider,
-            backoffMs: String(backoffMs),
-          });
-        }
-      } else {
-        log("WARN", "app-sidecar", "subscription usage fetch failed", { provider, message });
-      }
-
-      const connected = await auth.hasProviderAuth(authKey);
-      // Transient failures (notably the 429s these auxiliary quota endpoints
-      // hand out) must not blank the meter. Keep serving the last good
-      // snapshot, flagged `stale`, so the bar stays put instead of flickering
-      // out for the whole backoff window and back in on the next success.
-      // Past the max age it's dropped — no data beats confidently wrong data.
-      const lastGood = usageLastGood.get(provider);
-      if (lastGood && Date.now() - lastGood.fetchedAt >= USAGE_LAST_GOOD_MAX_AGE_MS) {
-        usageLastGood.delete(provider);
-      } else if (connected && lastGood) {
-        return { ...lastGood, stale: true };
-      }
-      return {
-        provider,
-        displayName,
-        connected,
-        windows: [],
-        fetchedAt: Date.now(),
-        error: connected ? "Usage is temporarily unavailable." : undefined,
-      };
-    }
-  }
-
-  async function subscriptionUsage(provider: SubscriptionUsageProvider): Promise<UsageResult> {
-    const cached = usageCache.get(provider);
-    if (cached && cached.expiresAt > Date.now()) return cached.result;
-    const inFlight = usageRequests.get(provider);
-    if (inFlight) return inFlight;
-    const request = fetchUsageProvider(provider);
-    usageRequests.set(provider, request);
-    try {
-      const result = await request;
-      // Never re-store a replay — it would keep its original `fetchedAt`, but
-      // writing it back muddies the "last GOOD" contract for no gain.
-      if (result.connected && !result.error && !result.stale && result.windows.length > 0) {
-        usageLastGood.set(provider, result);
-      }
-      // Anthropic can return utilization before it assigns reset timestamps
-      // (notably before the account's first active request). Retry that partial
-      // snapshot quickly; complete snapshots keep the normal one-minute cache.
-      const missingReset =
-        result.connected &&
-        result.windows.length > 0 &&
-        result.windows.some((window) => window.resetsAt === undefined);
-      const rateLimitedUntil = usageRateLimitedUntil.get(provider) ?? 0;
-      usageCache.set(provider, {
-        result,
-        expiresAt:
-          rateLimitedUntil > Date.now()
-            ? rateLimitedUntil
-            : Date.now() + (missingReset ? 10_000 : 60_000),
-      });
-      return result;
-    } finally {
-      if (usageRequests.get(provider) === request) usageRequests.delete(provider);
-    }
-  }
+  const { subscriptionUsage } = createUsageService(auth);
 
   const server = http.createServer(
     wrapSidecarHandler((req: http.IncomingMessage, res: http.ServerResponse) => {
@@ -1859,133 +1493,6 @@ function buildKenContext(
     injectedPrompts,
     pendingQuestions,
   });
-}
-
-// ── Progress ("Ranks") ──────────────────────────────────────────────────
-// Daemon-level XP/rank manager: one durable file (~/.gg/progress.json), awards
-// applied under a file lock, snapshots broadcast to EVERY session's SSE clients,
-// and an fs.watch on ~/.gg so writes from OTHER daemon processes (dev + packaged
-// app side by side) re-broadcast here too — deduped by the lastEvent nonce.
-// XP failures are debug-log-only; progress must never break a run.
-
-interface ProgressManager {
-  /** Current snapshot for GET /progress + the SSE ready path. */
-  snapshot: () => ProgressSnapshot;
-  /** Award XP for one successfully completed run (prompt + any new commits). */
-  awardRun: (cwd: string, runStartedAt: number, originId?: string) => Promise<void>;
-  /** Close the ~/.gg fs.watch + clear any pending debounce (leak-free shutdown). */
-  dispose: () => void;
-}
-
-async function createProgressManager(
-  agentDir: string,
-  broadcastAll: (snapshot: ProgressSnapshot, originId?: string) => void,
-): Promise<ProgressManager> {
-  // Boot: recovery chain main → backup → coding + chat session rebuild → empty.
-  const coderSessionsDir = path.join(agentDir, "sessions");
-  let file: ProgressFile = await loadProgress({
-    rebuild: () =>
-      rebuildFromSessions([
-        coderSessionsDir,
-        ...CHAT_AGENT_IDS.map((agentId) => chatAgentSessionsDir(coderSessionsDir, agentId)),
-      ]),
-  });
-  // Don't re-celebrate an old levelUp event on boot.
-  let lastSeenNonce: string | null = file.lastEvent?.nonce ?? null;
-  log("INFO", "app-sidecar", "progress loaded", {
-    xp: String(file.xp),
-    level: String(levelForXp(file.xp)),
-  });
-
-  function snapshot(): ProgressSnapshot {
-    return buildSnapshot(file);
-  }
-
-  async function awardRun(cwd: string, runStartedAt: number, originId?: string): Promise<void> {
-    try {
-      const now = Date.now();
-      const updated = await updateProgress(async (f) => {
-        const levelBefore = levelForXp(f.xp);
-        awardPrompt(f, now, cwd);
-
-        // Commit XP: probe repo root + HEAD, then score lastHead..HEAD bounded
-        // by the run window. First sight of a repo records HEAD, scores nothing.
-        const probe = await detectNewCommits(cwd, undefined, runStartedAt);
-        if (probe) {
-          const key = repoKey(probe.repoRoot);
-          const lastHead = f.repos[key]?.lastHead;
-          if (lastHead && lastHead !== probe.head) {
-            const detected = await detectNewCommits(cwd, lastHead, runStartedAt);
-            if (detected && detected.commits.length > 0) {
-              awardCommits(f, detected.commits, now, cwd);
-            }
-          }
-          f.repos[key] = { lastHead: probe.head };
-        }
-
-        // One combined lastEvent per run so other windows celebrate exactly once.
-        const levelAfter = levelForXp(f.xp);
-        const levelUp =
-          levelAfter > levelBefore
-            ? { from: levelBefore, to: levelAfter, rankName: rankForLevel(levelAfter).name }
-            : null;
-        f.lastEvent = { nonce: randomUUID(), levelUp };
-        return { file: f, levelledUp: levelUp !== null };
-      });
-      file = updated;
-      lastSeenNonce = updated.lastEvent?.nonce ?? null;
-      broadcastAll(buildSnapshot(updated), originId);
-    } catch (err) {
-      log("DEBUG", "app-sidecar", "progress award failed", {
-        message: err instanceof Error ? err.message : String(err),
-      });
-    }
-  }
-
-  // Watch ~/.gg (dir watch survives the atomic tmp+rename) for progress.json
-  // writes from other daemon processes; debounce, reload read-only, dedupe by nonce.
-  let watchDebounce: NodeJS.Timeout | null = null;
-  let progressWatcher: ReturnType<typeof fsWatch> | null = null;
-  try {
-    const watcher = fsWatch(agentDir, (_event, filename) => {
-      if (filename !== "progress.json") return;
-      if (watchDebounce) clearTimeout(watchDebounce);
-      watchDebounce = setTimeout(() => {
-        void (async () => {
-          const reloaded = await peekProgress();
-          if (!reloaded) return;
-          const nonce = reloaded.lastEvent?.nonce ?? null;
-          if (nonce === lastSeenNonce) return;
-          file = reloaded;
-          lastSeenNonce = nonce;
-          broadcastAll(buildSnapshot(reloaded));
-        })();
-      }, 150);
-    });
-    watcher.unref();
-    progressWatcher = watcher;
-  } catch (err) {
-    log("DEBUG", "app-sidecar", "progress watch unavailable", {
-      message: err instanceof Error ? err.message : String(err),
-    });
-  }
-
-  // Dispose closes the fs.watch handle (baseline #8: it was previously never
-  // closed — a per-daemon leak) and clears any pending debounce timer.
-  function dispose(): void {
-    if (watchDebounce) {
-      clearTimeout(watchDebounce);
-      watchDebounce = null;
-    }
-    try {
-      progressWatcher?.close();
-    } catch {
-      // Already closed / never opened — nothing to do.
-    }
-    progressWatcher = null;
-  }
-
-  return { snapshot, awardRun, dispose };
 }
 
 type WorkspaceMode = "code" | "chat" | "motion";
@@ -2447,6 +1954,8 @@ async function createSession(
       signal: abort.signal,
       deferApprovedPlanHydration: durableRoadmapExecution,
       captureVerificationWorkspace,
+      // A run must not end mid-plan with nothing submitted: nobody could review it.
+      planSubmissionGate: true,
       onEnterPlan: async (reason) => {
         deactivateApprovedPlan();
         await created.setPlanMode(true);
@@ -2917,6 +2426,15 @@ async function createSession(
   let gitHubIssues: number | null = null;
   let gitHubPRs: number | null = null;
   let gitHubCI: GitHubCI | null = null;
+  let projectHealthScan: ProjectHealthScan | null = null;
+  let scoredHealth: { scan: ProjectHealthScan; ci: GitHubCI | null; health: ProjectHealth | null } | null = null;
+  function currentProjectHealth(): ProjectHealth | null {
+    if (!projectHealthScan) return null;
+    if (scoredHealth?.scan !== projectHealthScan || scoredHealth.ci !== gitHubCI) {
+      scoredHealth = { scan: projectHealthScan, ci: gitHubCI, health: scoreProjectHealth(projectHealthScan, gitHubCI) };
+    }
+    return scoredHealth.health;
+  }
   // Shared shape merged into /state + the SSE `ready` frame so the footer can
   // render context %, branch, and tasks immediately on connect.
   function footerExtras(): DesktopContextSnapshot & {
@@ -2927,6 +2445,7 @@ async function createSession(
     gitHubPRs: number | null;
     gitHubRepoUrl: string | null;
     gitHubCI: GitHubCI | null;
+    projectHealth: ProjectHealth | null;
     tasks: ReturnType<typeof session.listBackgroundProcesses>;
     additionalRoots: string[];
     kenState: KenState | null;
@@ -2940,6 +2459,7 @@ async function createSession(
       gitHubIssues,
       gitHubPRs,
       gitHubCI,
+      projectHealth: currentProjectHealth(),
       gitHubRepoUrl: gitHubSlug ? `https://github.com/${gitHubSlug}` : null,
       tasks: session.listBackgroundProcesses(),
       // Roots added with /add-dir — the header shows a badge when non-empty.
@@ -2968,9 +2488,10 @@ async function createSession(
 
   // Refresh the GitHub counts and broadcast only on change. Transient failures
   // keep the last-known numbers so the chips don't flicker off on a timeout.
-  async function refreshGitHubCounts(): Promise<void> {
-    if (!gitHubSlug) return;
-    const counts = await getGitHubOpenCounts(gitHubSlug);
+  function refreshGitHubCounts(): void {
+    gitHubCountsSub?.refresh();
+  }
+  function applyGitHubCounts(counts: GitHubOpenCounts | null | undefined): void {
     if (!counts) return;
     if (counts.issues !== gitHubIssues || counts.prs !== gitHubPRs) {
       gitHubIssues = counts.issues;
@@ -4363,6 +3884,7 @@ async function createSession(
         // plan-mode session. A submitted plan takes the planPending branch.
         isPlanMode: () => session.getPlanMode(),
         planPending: () => planGate.pending()?.state === "pending-review",
+        verificationProblem: () => session.getVerificationProblem(),
         reviewPlan: async () => {
           const checkpoint = planGate.current();
           planReviewIdentity = checkpoint
@@ -4420,9 +3942,15 @@ async function createSession(
         },
         // Autopilot-injected run: GG Coder receives the framed prompt (no human
         // is watching this turn) while run_start keeps the clean label.
-        runPrompt: async (body) => {
+        runPrompt: async (body, opts) => {
           let completed = false;
           await runAgent(body, async () => {
+            // Plan feedback is revised read-only: exit_plan left plan mode.
+            if (opts?.planRevision && !session.getPlanMode()) {
+              deactivateApprovedPlan();
+              await session.setPlanMode(true);
+              broadcast("plan_mode", { active: true });
+            }
             await promptActiveSession(frameAutopilotInjection(body), AUTOMATION_PROVENANCE);
             completed = true;
           });
@@ -4794,44 +4322,27 @@ async function createSession(
   };
   scheduleTasksPoll(1500);
 
-  // Files can change outside the agent (editor saves, terminal commits), so keep
-  // the dirty count current while idle. Branch/repo state already refreshes after
-  // agent runs; polling only the count avoids spawning three git processes per tick.
-  let gitPoll: NodeJS.Timeout | undefined;
-  let gitPollStopped = false;
-  const scheduleGitPoll = (delay: number): void => {
-    if (gitPollStopped) return;
-    gitPoll = setTimeout(() => {
-      void getGitDirtyFileCount(cwd)
-        .catch(() => gitDirtyFileCount)
-        .then((nextDirtyFileCount) => {
-          if (gitPollStopped) return;
-          if (nextDirtyFileCount !== gitDirtyFileCount) {
-            gitDirtyFileCount = nextDirtyFileCount;
-            broadcast("extras", footerExtras());
-          }
-          scheduleGitPoll(5000);
-        });
-    }, delay);
-    gitPoll.unref?.();
-  };
-  scheduleGitPoll(5000);
-
-  // GitHub issue/PR counts change outside the app (web UI, teammates), so poll
-  // on a slow cadence. Network-bound, so keep it well under the search API's
-  // rate budget (2 calls per tick). No-op when the origin isn't a GitHub repo.
-  let gitHubPoll: NodeJS.Timeout | undefined;
-  let gitHubPollStopped = false;
-  const scheduleGitHubPoll = (delay: number): void => {
-    if (gitHubPollStopped) return;
-    gitHubPoll = setTimeout(() => {
-      void refreshGitHubCounts().finally(() => scheduleGitHubPoll(60_000));
-    }, delay);
-    gitHubPoll.unref?.();
-  };
-  scheduleGitHubPoll(2000);
-  const ciPoll = startGitHubCIPoll(cwd, (next) => {
+  // Files, issue/PR counts and CI change outside the agent. Pollers are
+  // daemon-wide and shared per repo (app-sidecar/repo-polls.ts), so N panes on
+  // one repo spawn one git/gh process per tick instead of N. Each session only
+  // subscribes and re-broadcasts on its own SSE stream as `extras`.
+  const repoPolls = getDaemonRepoPolls();
+  const dirtySub = repoPolls.dirtyFiles.subscribe(path.resolve(cwd), (next) => {
+    if (next !== gitDirtyFileCount) {
+      gitDirtyFileCount = next;
+      broadcast("extras", footerExtras());
+    }
+  });
+  const gitHubCountsSub = gitHubSlug
+    ? repoPolls.gitHubCounts.subscribe(gitHubSlug, applyGitHubCounts)
+    : undefined;
+  const ciPoll = repoPolls.gitHubCI.subscribe(path.resolve(cwd), (next) => {
     gitHubCI = next;
+    broadcast("extras", footerExtras());
+  });
+  const healthPoll = repoPolls.projectHealth.subscribe(path.resolve(cwd), (next) => {
+    if (JSON.stringify(next) === JSON.stringify(projectHealthScan)) return;
+    projectHealthScan = next;
     broadcast("extras", footerExtras());
   });
 
@@ -4955,18 +4466,6 @@ async function createSession(
   const decisionSummaryService = new AppSidecarDecisionSummaryService(
     (options: DecisionSummarySessionOptions) => new AgentSession(options),
   );
-
-  function readBody(req: http.IncomingMessage, res: http.ServerResponse): Promise<string | null> {
-    return readCappedBody(req, res);
-  }
-
-  function json(res: http.ServerResponse, status: number, body: unknown): void {
-    const payload = JSON.stringify(redactValue(body, { secrets: environmentSecrets(process.env) }));
-    res.writeHead(status, {
-      "content-type": "application/json",
-    });
-    res.end(payload);
-  }
 
   async function cancelActiveOperation(): Promise<
     ActiveOperationCancellationResult & { drained: string; runState: RunState }
@@ -8101,12 +7600,11 @@ async function createSession(
     asks.cancelAll();
     tasksPollStopped = true;
     if (tasksPoll) clearTimeout(tasksPoll);
-    gitPollStopped = true;
-    if (gitPoll) clearTimeout(gitPoll);
-    gitHubPollStopped = true;
-    if (gitHubPoll) clearTimeout(gitHubPoll);
+    dirtySub.unsubscribe();
+    gitHubCountsSub?.unsubscribe();
     if (phaseLeaseHeartbeat) clearInterval(phaseLeaseHeartbeat);
-    ciPoll.stop();
+    ciPoll.unsubscribe();
+    healthPoll.unsubscribe();
     // Stop the Telegram serve loop + dispose its per-chat sessions.
     if (serveController) await serveController.stop().catch(() => {});
     for (const c of clients) c.res.end();

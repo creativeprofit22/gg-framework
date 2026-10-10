@@ -1,6 +1,6 @@
 ---
 name: tdd
-description: Use when the user asks for test-driven development, red-green-refactor, "write the test first", or wants a feature or bug fix built test-first — including mid-build when they ask to switch to test-first. Do NOT use when tests are a verification step after the build, the project has no suite and the user has not asked for one, the change is throwaway probe code, or the goal is restructuring without behaviour change (refactoring) or finding an unknown cause (root-cause).
+description: Use when asked for test-first development. Do NOT use for post-build tests.
 ---
 
 # TDD

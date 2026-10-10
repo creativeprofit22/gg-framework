@@ -24,7 +24,10 @@ vi.mock("./ZoomController", () => ({ ZoomController: () => null }));
 vi.mock("./WhatsNewModal", () => ({ WhatsNewModal: () => null }));
 vi.mock("./Confetti", () => ({ Confetti: () => null }));
 vi.mock("./sounds", () => ({ playSound: vi.fn() }));
-vi.mock("./agent", () => ({ getVerifiedDecisions: async () => [] }));
+vi.mock("./agent", () => ({
+  getVerifiedDecisions: async () => [],
+  revealWhatsNewWindow: async () => {},
+}));
 
 const VISIBLE = { ignore: "script, style, .sr-only *" };
 
@@ -91,7 +94,12 @@ it("renders queued startup and later native failures through the standalone entr
   fireEvent.click(screen.getByRole("button", { name: "Close" }));
   fireEvent.click(screen.getByRole("button", { name: "Got it" }));
   fireEvent.keyDown(document, { key: "Escape" });
-  expect(mocks.close).toHaveBeenCalledTimes(3);
+  // Upstream's redesign plays a close animation and latches after the first
+  // trigger, so ×, "Got it" and Escape together close the window exactly once.
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 600));
+  });
+  expect(mocks.close).toHaveBeenCalledTimes(1);
   // The cold `import("./main")` above now transforms the whole Phosphor icon
   // set (~10s on Windows); the default 5s budget measured import cost, not behavior.
 }, 30_000);

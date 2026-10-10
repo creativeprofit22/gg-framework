@@ -1,3 +1,5 @@
+import { viewportScale } from "./motion-geometry";
+
 // Auto-grow the chat textarea to fit its content, up to a CSS max-height after
 // which it scrolls — without disturbing the transcript scrolling above it.
 //
@@ -93,8 +95,9 @@ export function autosizeComposer(
         row.classList.toggle("is-multiline", multiline);
         const last = stack?.getBoundingClientRect();
         if (stack && first && last && !snap) {
-          const dx = first.left - last.left;
-          const dy = first.top - last.top;
+          const scale = viewportScale(stack, last);
+          const dx = (first.left - last.left) / scale;
+          const dy = (first.top - last.top) / scale;
           if (dx || dy) {
             stack.style.transition = "none";
             stack.style.transform = `translate(${dx}px, ${dy}px)`;

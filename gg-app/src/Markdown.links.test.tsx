@@ -6,8 +6,7 @@ const { openUrl, openProjectPath } = vi.hoisted(() => ({
   openUrl: vi.fn(),
   openProjectPath: vi.fn(),
 }));
-vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl }));
-vi.mock("./agent", () => ({ openProjectPath, sendPrompt: vi.fn() }));
+vi.mock("./agent", () => ({ openProjectPath, openUrlStrict: openUrl, sendPrompt: vi.fn() }));
 
 import { Markdown } from "./Markdown";
 import { displayStreamingMarkdown } from "./streaming-markdown";

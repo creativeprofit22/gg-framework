@@ -8,6 +8,7 @@ import {
   STEROIDS_COLLAPSIBLE_TABLE_MARKER,
   type SlashCommandInputPolicy,
 } from "@kenkaiiii/gg-core";
+import { checklistSetupStep } from "./checklist-prompt.js";
 import { isGgApp } from "./runtime-mode.js";
 import { renderResearchPolicy } from "./research-policy.js";
 import { renderProgrammaticAdvisoryPolicy } from "./programmatic/advisory-policy.js";
@@ -221,11 +222,40 @@ After writing:
 2. Re-read the file and confirm every remaining line passes the bar: **project-specific, supported by a local file you actually read, and not already in the agent's context per the list above.**
 3. Report in one line: which file, how many bytes, and how many lines you removed as redundant.
 
-## Step 6: Restart Notice
+## Step 6: Update the checklist
+
+${checklistSetupStep(["agent-setup"])}
+
+## Step 7: Restart Notice
 
 End your reply with this exact notice so the user doesn't miss it:
 
 ${CLAUDE_MD_RESTART_NOTICE}`,
+  },
+  {
+    // The verification point for every project: replies leave checks to the
+    // commit, which is the one real end of a piece of work. A project's own
+    // `.gg/commands/commit.md` (from /setup-commit) is shadowed by this name,
+    // so step 1 defers to it.
+    name: "commit",
+    aliases: [],
+    description: "Run checks, review, commit with AI message, and push if tracking a remote",
+    prompt: `# Commit: check, review, commit and push
+
+1. If \`.gg/commands/commit.md\` exists, read it and follow it instead of these steps: it is this project's own commit procedure. If it runs no tests while the project has some, run them too.
+2. Run the project's checks: everything under Verification in your instructions, plus the tests. If none are listed, use the project's own scripts (package.json \`check\`/\`typecheck\`, \`lint\`, \`format:check\`, \`test\`; pyproject, go.mod or Cargo.toml equivalents). Run each standalone, unpiped. Fix every failure (auto-fix formatting/lint where the project has a fix script), then re-run what failed.
+3. Review changes: run \`git status\`, \`git diff --staged\` and \`git diff\`.
+4. Fast review gate: spawn ONE subagent with the full diff. Instructions: review ONLY the diff for real bugs, regressions, leftover debug code and unintended changes. Score each issue 0-100 confidence (pre-existing issues and stylistic nitpicks are false positives, score low). Report ONLY issues with confidence >= 80, with file:line and a one-line fix. If none, reply "CLEAR". This is a last check, not a deep audit - be fast.
+5. If CLEAR: continue to step 6 without asking anything.
+   If issues >= 80 were reported: show them and ask with \`ask_user\` (one \`choice\` question, \`id: "land"\`) offering exactly:
+   - "Fix it first, then commit & push" (recommended, hint: keeps the branch green)
+   - "Commit & push anyway" (hint: issue stays open in the log)
+   On fix-first: fix, re-run step 2, then continue (no re-review).
+6. Stage the relevant files with \`git add <specific files>\`; never \`git add -A\`. Never stage secrets or files the user did not change on purpose.
+7. Commit message: one line, starting with Add/Update/Fix/Remove/Refactor, specific and concise.
+8. \`git commit -m "<message>"\`, never with \`--no-verify\`; if a hook fails, fix the cause and commit again. Then \`git push\` if the branch has an upstream; if it has none, say so instead of pushing.
+
+If any check still fails and cannot be fixed, stop before committing and say which one and why.`,
   },
   {
     name: "setup-commit",
@@ -246,7 +276,7 @@ Create the directory \`.gg/commands/\` if it doesn't exist, then write \`.gg/com
 \`\`\`markdown
 ---
 name: commit
-description: Group all uncommitted work by intent, verify, commit in order, and push once
+description: Group all uncommitted work by intent, verify, commit in order, and push once if tracking a remote
 ---
 
 Clicking \`/commit\` authorizes this entire workflow. Execute directly: never enter plan mode, create a plan, pause for confirmation, or ask how to group changes.
@@ -260,20 +290,24 @@ Scope comes from git, not this conversation: handle every uncommitted change in 
 5. Spawn ONE subagent with the full diff for a fast review of real bugs, regressions, debug leftovers, and unintended changes. Require confidence scores and report only findings at least 80; pre-existing issues and style nitpicks score low.
 6. If review is CLEAR, continue. Otherwise show the findings and use one \`ask_user\` choice with a \`detail\` of one plain sentence naming which review findings are blocking: fix first (recommended) or commit anyway. On fix-first, fix and rerun affected checks without another review. If \`ask_user\` is unavailable, ask the same choice in prose.
 7. For each group, stage exact paths or hunks, never \`git add -A\` or interactive \`git add -p\` (stage a hunk with \`git apply --cached\`). The index must hold only that group, including anything staged before the run; inspect its staged diff before committing.
-8. Create ordered commits with concise Add/Update/Fix/Remove/Refactor messages, then push exactly once after all commits. Never force-push.
+8. Create ordered commits with concise Add/Update/Fix/Remove/Refactor messages, then push exactly once after all commits if the branch tracks a remote; if it has none, say so instead of pushing. Never force-push.
 
 Finish with the created commits, anything left uncommitted and why, passed checks, review result, and push result.
 \`\`\`
 
-Replace [PROJECT-SPECIFIC QUALITY COMMANDS] with the actual commands.
+Replace [PROJECT-SPECIFIC QUALITY COMMANDS] with the actual lint/typecheck/format-check/test commands, tests included: /commit is where this project's work gets verified.
 
 If the project has no quality commands, write step 4 as: \`No project quality checks are configured; say so and continue.\` Never leave the placeholder or describe missing files inside the recipe.
 
 Keep the command file under 30 lines.
 
-## Step 3: Confirm
+## Step 3: Update the checklist
 
-Report that /commit now commits all uncommitted work in the repository (from this or any earlier session) as grouped, ordered commits, verifies them, and pushes once; mention which local scripts/docs verified the commands.`,
+${checklistSetupStep(["commit-gate"])}
+
+## Step 4: Confirm
+
+Report that /commit now commits all uncommitted work in the repository (from this or any earlier session) as grouped, ordered commits, verifies them, and pushes once when the branch tracks a remote; mention which local scripts/docs verified the commands.`,
   },
   {
     name: "setup-programmatic",
@@ -400,6 +434,10 @@ For EVERY file in \`.github/workflows/\`, apply and report one line per change:
   a pointer that CI lives in \`.github/workflows/\` and must stay green, and a rule to
   never commit with \`--no-verify\`. If \`CLAUDE.md\` exists, keep AGENTS.md short and
   point to it.
+
+## Update the checklist
+
+${checklistSetupStep(["ci", "git-github"])}
 
 ## Finish
 

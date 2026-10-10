@@ -23,6 +23,8 @@
     "src/**/*.fixtures.ts",
     "src/test-support/**",
     "src/test-utils/**",
-    "src/test-fixtures/**"
+    "src/test-fixtures/**",
+    // Dev-only benchmarks, run from source via tsx (`pnpm bench:*`).
+    "src/**/*-benchmark.ts"
   ]
 }

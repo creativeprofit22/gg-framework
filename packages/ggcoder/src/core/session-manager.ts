@@ -12,7 +12,7 @@ import {
 } from "@kenkaiiii/gg-ai";
 import { indeterminateOutcomeText, type AgentTurnTiming } from "@kenkaiiii/gg-agent";
 import type { OpenAICodexContextProfile } from "@kenkaiiii/gg-core/models";
-import { withFileLock } from "./file-lock.js";
+import { withFileLock } from "@kenkaiiii/gg-core";
 import { ASK_USER_INTERRUPTED_TEXT } from "./ask-user.js";
 import { log } from "./logger.js";
 import { encodeCwd } from "./encode-cwd.js";
@@ -2155,13 +2155,13 @@ export class SessionManager {
 
     const index = byId ?? this.buildIndex(entries);
     const branch: SessionEntry[] = [];
-    let current = leafId;
+    let current: string | null = leafId;
 
     while (current) {
       const entry = index.get(current);
       if (!entry) break;
       branch.push(entry);
-      current = entry.parentId!;
+      current = entry.parentId;
     }
 
     return branch.reverse();

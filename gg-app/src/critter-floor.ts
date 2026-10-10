@@ -37,6 +37,7 @@ import type {
   VariantOwner,
 } from "./critter-types";
 import { makeCritterWork } from "./critter-work";
+import { readMotionLevel, subscribeMotion } from "./window-motion";
 
 export type FloorAgentStatus = "running" | "idle" | "done" | "error" | "interrupted";
 
@@ -205,7 +206,13 @@ export function createCritterFloor(
   const reduced = options.reducedMotion;
   const ambient = options.ambient === true;
   const rand = (a: number, b: number): number => a + random() * (b - a);
-  const now = (): number => performance.now();
+  // The floor's own clock: it stops while the window rests (see "Resting"),
+  // so jobs, tweens and pending timers resume where they left off instead of
+  // all coming due at once on focus.
+  let resting = false;
+  let restedAt = 0;
+  let restedTotal = 0;
+  const now = (): number => (resting ? restedAt : performance.now()) - restedTotal;
 
   const floor = el("div", "critter-floor");
   const tooltip = el("div", "critter-tooltip");
@@ -215,7 +222,12 @@ export function createCritterFloor(
   const critters = new Map<string, Critter>();
   const pending = new Map<string, number>();
   const sprites = new Map<string, SpriteSet>();
-  const timers = new Set<number>();
+  /** Script timers by our id; `handle` is the live setTimeout (0 while resting). */
+  const timers = new Map<
+    number,
+    { readonly fn: () => void; readonly due: number; handle: number }
+  >();
+  let nextTimerId = 1;
   let latest = new Map<string, FloorAgent>();
   let floorWidth = lane.clientWidth;
   let laneReadyAt = 0;
@@ -226,16 +238,28 @@ export function createCritterFloor(
   let tooltipKey: string | null = null;
   let destroyed = false;
 
+  // Every script step, prop flicker and bubble timeout goes through `later`,
+  // so freezing these timers freezes the floor's behaviour in one place.
+  const arm = (id: number): void => {
+    const entry = timers.get(id);
+    if (!entry) return;
+    entry.handle = window.setTimeout(
+      () => {
+        timers.delete(id);
+        if (!destroyed) entry.fn();
+      },
+      Math.max(0, entry.due - now()),
+    );
+  };
   const later = (ms: number, fn: () => void): number => {
-    const id = window.setTimeout(() => {
-      timers.delete(id);
-      if (!destroyed) fn();
-    }, ms);
-    timers.add(id);
+    const id = nextTimerId++;
+    timers.set(id, { fn, due: now() + ms, handle: 0 });
+    if (!resting) arm(id);
     return id;
   };
   const cancelLater = (id: number): void => {
-    window.clearTimeout(id);
+    const entry = timers.get(id);
+    if (entry) window.clearTimeout(entry.handle);
     timers.delete(id);
   };
   const live = (): readonly Critter[] => [...critters.values()];
@@ -290,6 +314,11 @@ export function createCritterFloor(
   }
   function maybeCollapseLane(): void {
     if (critters.size > 0 || pending.size > 0 || collapseTimer) return;
+    if (resting) {
+      // Its timer would be frozen: shut the empty lane now.
+      lane.classList.remove("open", "closing");
+      return;
+    }
     if (lane.classList.contains("open")) lane.classList.add("closing");
     const delay = reduced ? COLLAPSE_DELAY_MS : (options.closeAfterMs ?? COLLAPSE_DELAY_MS);
     collapseTimer = later(delay, () => {
@@ -300,13 +329,8 @@ export function createCritterFloor(
   }
 
   // ── Frame loop: runs only while critters exist and the window is in use ──
-  // Like the decorative CSS loops (`.app:not(.window-focused)` in App.css),
-  // a background window doesn't animate: a 60Hz tick in every idle-but-visible
-  // window is a steady drain on battery for something nobody is watching.
-  const inUse = (): boolean => !document.hidden && document.hasFocus();
-  let pausedAt = 0;
   function startLoop(): void {
-    if (rafId || destroyed || critters.size === 0 || !inUse()) return;
+    if (rafId || destroyed || critters.size === 0 || resting) return;
     lastFrameTs = now();
     rafId = requestAnimationFrame(frame);
   }
@@ -314,35 +338,78 @@ export function createCritterFloor(
     if (rafId) cancelAnimationFrame(rafId);
     rafId = 0;
   }
-  function frame(ts: number): void {
+  function frame(): void {
     rafId = 0;
-    const dt = Math.min(0.05, Math.max(0, (ts - lastFrameTs) / 1000));
-    lastFrameTs = ts;
-    for (const c of critters.values()) tick(c, ts, dt);
-    if (!reduced) social.scan(ts);
+    const t = now();
+    const dt = Math.min(0.05, Math.max(0, (t - lastFrameTs) / 1000));
+    lastFrameTs = t;
+    for (const c of critters.values()) tick(c, t, dt);
+    if (!reduced) social.scan(t);
     if (tooltipKey) positionTooltip();
     startLoop();
   }
-  const onWindowState = (): void => {
-    if (!inUse()) {
-      if (!pausedAt) pausedAt = now();
-      stopLoop();
-      return;
-    }
-    if (pausedAt) {
-      // Tweens run on wall-clock time; give back the time they spent frozen
-      // so a walk resumes mid-stride instead of snapping to its end.
-      const t = now();
-      for (const c of critters.values()) {
-        if (c.tween) c.tween.t0 += t - Math.max(pausedAt, c.tween.t0);
+
+  // ── Resting: a window the user isn't looking at holds a still pose ──
+  // Every repaint is a round trip through WebKit's shared GPU process, so a
+  // background window doesn't animate (see `data-motion` in App.css, which
+  // covers the CSS loops). Here the frame loop stops, the floor clock and its
+  // script timers freeze, and looping Web Animations (gear spin, typing bob,
+  // the fly's buzz…) rest on their first frame. One-shot reactions to agent
+  // events (summon, wave goodbye, tip over) still play, so a background window
+  // still shows an agent arriving or finishing.
+  const restingLoops = new Set<Animation>();
+  /** One-shots already being waited on, so each gets a single listener. */
+  const watchedOneShots = new WeakSet<Animation>();
+  const isScriptAnimation = (a: Animation): boolean =>
+    typeof CSSAnimation === "undefined" || !(a instanceof CSSAnimation);
+  const floorAnimations = (): Animation[] =>
+    typeof floor.getAnimations === "function"
+      ? floor.getAnimations({ subtree: true }).filter(isScriptAnimation)
+      : [];
+  /** Rest running loops. A one-shot still playing may hand its script on to
+   *  a new loop when it ends (timers are frozen, so nothing else can), so
+   *  settle again when it finishes: event-driven, nothing polls while hidden
+   *  (a hidden page's one-shots don't advance until it's shown). */
+  function settleLoops(): void {
+    if (!resting || destroyed) return;
+    for (const a of floorAnimations()) {
+      if (a.playState !== "running") continue;
+      if (a.effect?.getTiming().iterations === Number.POSITIVE_INFINITY) {
+        a.currentTime = 0;
+        a.pause();
+        restingLoops.add(a);
+      } else if (!watchedOneShots.has(a)) {
+        watchedOneShots.add(a);
+        // `finished` rejects when the script cancels it; either way, settle.
+        void a.finished.then(settleLoops, settleLoops);
       }
-      pausedAt = 0;
     }
+  }
+  function rest(): void {
+    if (resting) return;
+    resting = true;
+    restedAt = performance.now();
+    stopLoop();
+    for (const entry of timers.values()) {
+      window.clearTimeout(entry.handle);
+      entry.handle = 0;
+    }
+    settleLoops();
+  }
+  function wake(): void {
+    if (!resting) return;
+    restedTotal += performance.now() - restedAt;
+    resting = false;
+    for (const a of restingLoops) {
+      // Cancelled while resting (its script ended): leave it cancelled.
+      if (a.playState === "paused") a.play();
+    }
+    restingLoops.clear();
+    for (const id of [...timers.keys()]) arm(id);
     startLoop();
-  };
-  document.addEventListener("visibilitychange", onWindowState);
-  window.addEventListener("focus", onWindowState);
-  window.addEventListener("blur", onWindowState);
+  }
+  const stopMotionWatch = subscribeMotion((level) => (level === "full" ? wake() : rest()));
+  if (readMotionLevel() !== "full") rest();
 
   // ── Script runner ──
   const canAct = (c: Critter): boolean =>
@@ -838,6 +905,15 @@ export function createCritterFloor(
       // It may already be mid-tool by the time it lands.
       if (c.agent.activity) onActivity(c, c.agent.activity);
     };
+    if (resting) {
+      // Landing in a resting window: no beam or greeting (their timers are
+      // frozen), just stand there in the working pose.
+      c.el.classList.remove("summoning");
+      c.mode = "pause";
+      c.timer = reduced ? Number.POSITIVE_INFINITY : rand(0.3, 1.2);
+      if (c.agent.activity) onActivity(c, c.agent.activity);
+      return;
+    }
     if (reduced) {
       c.el.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 300, easing: "ease-out" });
       later(300, settle);
@@ -977,6 +1053,7 @@ export function createCritterFloor(
 
   /** Say goodbye, then reverse the summon: light up, stretch thin, zip up the beam. */
   function teleportOut(c: Critter, finished: boolean): void {
+    if (resting) return leaveNow(c);
     beginLeaving(c);
     if (finished) {
       fx.setBadge(c, "ok", "\u2713");
@@ -1015,7 +1092,16 @@ export function createCritterFloor(
   }
 
   /** Tips over (dropping whatever it held); nearby teammates come to check. */
+  /** A resting window applies a departure at once: its farewell timers are
+   *  frozen, so the animated goodbye would leave a finished agent standing
+   *  there until focus. The activity bar already shows the outcome. */
+  function leaveNow(c: Critter): void {
+    beginLeaving(c);
+    remove(c);
+  }
+
   function fallOver(c: Critter): void {
+    if (resting) return leaveNow(c);
     const held = c.react.querySelector(".critter-prop") !== null;
     if (held && !reduced) fx.dropProps(c);
     beginLeaving(c);
@@ -1134,6 +1220,11 @@ export function createCritterFloor(
   function summon(agent: FloorAgent): void {
     const t = now();
     const laneWait = openLane();
+    if (resting) {
+      // The spawn queue's timers are frozen while resting: land it now.
+      create(agent);
+      return;
+    }
     const at = Math.max(t + laneWait, nextSpawnAt);
     nextSpawnAt = at + SPAWN_GAP_MS;
     const id = later(at - t, () => {
@@ -1171,6 +1262,12 @@ export function createCritterFloor(
 
   function sync(agents: readonly FloorAgent[]): void {
     if (destroyed) return;
+    syncAgents(agents);
+    // Agent events can start a work loop in a resting window: rest it too.
+    if (resting) settleLoops();
+  }
+
+  function syncAgents(agents: readonly FloorAgent[]): void {
     latest = new Map(agents.map((agent) => [agent.key, agent]));
     for (const agent of agents) {
       const existing = critters.get(agent.key);
@@ -1203,12 +1300,11 @@ export function createCritterFloor(
       c.tween?.resolve();
       c.tween = null;
     }
-    for (const id of timers) window.clearTimeout(id);
+    for (const entry of timers.values()) window.clearTimeout(entry.handle);
     timers.clear();
+    restingLoops.clear();
     resizeObserver?.disconnect();
-    document.removeEventListener("visibilitychange", onWindowState);
-    window.removeEventListener("focus", onWindowState);
-    window.removeEventListener("blur", onWindowState);
+    stopMotionWatch();
     critters.clear();
     pending.clear();
     discard(floor);

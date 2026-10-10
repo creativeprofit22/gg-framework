@@ -18,8 +18,8 @@ const SKILLS_DIR = path.resolve(
 );
 
 describe("checklist items", () => {
-  it("has 23 items with unique ids", () => {
-    expect(CHECKLIST_ITEMS).toHaveLength(23);
+  it("has 24 items with unique ids", () => {
+    expect(CHECKLIST_ITEMS).toHaveLength(24);
     expect(new Set(CHECKLIST_IDS).size).toBe(CHECKLIST_ITEMS.length);
   });
 

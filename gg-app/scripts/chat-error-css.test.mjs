@@ -12,19 +12,17 @@ const ruleBody = (css, selector) => {
 };
 
 describe("chat error details exit", () => {
-  it("folds the details shut while they dissolve, so the chat does not jump", () => {
-    const leaving = ruleBody(noticeStyles, ".chat-error-details.leaving");
-    expect(leaving).toContain("chat-error-details-collapse var(--dur-dissolve)");
-    expect(noticeStyles).toMatch(
-      /@keyframes chat-error-details-collapse\s*\{[^@]*to\s*\{\s*grid-template-rows:\s*0fr;/,
-    );
-    expect(ruleBody(noticeStyles, ".chat-error-details")).toContain("display: grid;");
-    expect(ruleBody(noticeStyles, ".chat-error-details-body")).toContain("min-height: 0;");
+  it("measures the fold including padding and uses distinct sharp opacity exits", () => {
+    expect(noticeSource).toContain("useAnimatedHeight(detailsRef, expanded, error)");
+    expect(ruleBody(noticeStyles, ".chat-error-details")).toContain("overflow: hidden;");
+    expect(ruleBody(noticeStyles, ".chat-error-details-body")).toContain("padding-top: var(--space-4)");
+    expect(ruleBody(noticeStyles, ".chat-error-details.leaving .chat-error-details-body")).toContain("details-out var(--dur-row)");
+    expect(noticeStyles).not.toMatch(/reverse|blur\(/);
   });
 
   it("hides the details only once the fold has finished", () => {
     const exitMs = Number(noticeSource.match(/DETAILS_EXIT_MS = (\d+);/)?.[1]);
-    const dissolveMs = Number(appStyles.match(/--dur-dissolve:\s*(\d+)ms;/)?.[1]);
+    const dissolveMs = Number(appStyles.match(/--dur-row:\s*(\d+)ms;/)?.[1]);
     expect(exitMs).toBeGreaterThan(0);
     expect(exitMs).toBe(dissolveMs);
   });

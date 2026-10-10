@@ -140,6 +140,40 @@ function harness(history: HistoryEntry[] = []): {
 }
 
 describe("checklist workspace navigation", () => {
+  it("consumes entrances before hiding and settles messages received while hidden", async () => {
+    const { emit } = harness();
+    const original = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "animate");
+    const animate = vi.fn(
+      (_frames: Keyframe[] | PropertyIndexedKeyframes | null) =>
+        ({ cancel: vi.fn() }) as unknown as Animation,
+    );
+    Object.defineProperty(HTMLElement.prototype, "animate", { configurable: true, value: animate });
+    try {
+      render(<App />);
+      const open = await screen.findByRole("button", { name: "Checklist" });
+      const input = screen.getByRole<HTMLTextAreaElement>("textbox");
+      fireEvent.change(input, { target: { value: "visible message" } });
+      fireEvent.keyDown(input, { key: "Enter" });
+      await waitFor(() => expect(animate).toHaveBeenCalled());
+      const entrances = () =>
+        animate.mock.calls.filter(
+          (args) => JSON.stringify(args[0]) === '[{"opacity":0},{"opacity":1}]',
+        ).length;
+      const count = entrances();
+      expect(count).toBeGreaterThan(0);
+      fireEvent.change(input, { target: { value: "preserved draft" } });
+      fireEvent.click(open);
+      await screen.findByRole("button", { name: "Check Git & GitHub" });
+      act(() => emit({ type: "text_delta", data: { text: "received while hidden" } }));
+      fireEvent.click(screen.getByRole("button", { name: "Back to chat" }));
+      expect(entrances()).toBe(count);
+      expect(input.value).toBe("preserved draft");
+      expect(document.querySelector(".row-enter")).toBeNull();
+    } finally {
+      if (original) Object.defineProperty(HTMLElement.prototype, "animate", original);
+      else Reflect.deleteProperty(HTMLElement.prototype, "animate");
+    }
+  });
   it.each(["reopen", "normal-chat completion"])(
     "clears a stale no-result notice after a later record on %s",
     async (refresh) => {

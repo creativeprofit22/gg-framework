@@ -26,6 +26,52 @@ function record(
   });
 }
 
+describe("verificationProblem (upstream 0.86.0 rule on the fork ledger)", () => {
+  const editFile = (ledger: SessionVerificationEvidenceLedger, filePath: string) =>
+    ledger.recordToolResult({ name: "edit", args: { file_path: filePath }, isError: false });
+
+  it("owes a check after a code edit and clears once one passes", () => {
+    const ledger = new SessionVerificationEvidenceLedger();
+    expect(ledger.verificationProblem()).toBeNull();
+    editFile(ledger, "src/app.ts");
+    expect(ledger.verificationProblem()).toMatch(/^Unverified: no successful check/);
+    record(ledger, "after-edit");
+    expect(ledger.verificationProblem()).toBeNull();
+  });
+
+  it("keeps a failed check outstanding until that check passes again", () => {
+    const ledger = new SessionVerificationEvidenceLedger();
+    editFile(ledger, "src/app.ts");
+    record(ledger, "fails", 1);
+    expect(ledger.verificationProblem()).toMatch(/^Unverified: a check failed/);
+    record(ledger, "passes");
+    expect(ledger.verificationProblem()).toBeNull();
+  });
+
+  it("ignores docs and plan files, and an earlier pass does not cover a later edit", () => {
+    const ledger = new SessionVerificationEvidenceLedger();
+    editFile(ledger, ".gg/plans/plan.md");
+    editFile(ledger, "README.md");
+    expect(ledger.verificationProblem()).toBeNull();
+    record(ledger, "early");
+    editFile(ledger, "src/app.test.ts");
+    expect(ledger.verificationProblem()).toMatch(/^Unverified: no successful check/);
+    ledger.clear();
+    expect(ledger.verificationProblem()).toBeNull();
+  });
+
+  it("does not count a code edit refused in plan mode", () => {
+    const ledger = new SessionVerificationEvidenceLedger();
+    ledger.recordToolResult({
+      name: "write",
+      args: { file_path: "src/sneaky.ts" },
+      isError: false,
+      planMode: true,
+    });
+    expect(ledger.verificationProblem()).toBeNull();
+  });
+});
+
 describe("request-scoped host verification", () => {
   it.each([0, 1])("does not inherit an earlier turn's result (%s)", (exitCode) => {
     const ledger = new SessionVerificationEvidenceLedger();

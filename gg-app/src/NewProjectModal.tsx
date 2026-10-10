@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { theme } from "./theme";
 import { Modal } from "./Modal";
+import { ModalDismissButton } from "./modal-embed";
 import { createProject } from "./agent";
 
 interface Props {
@@ -65,9 +66,7 @@ export function NewProjectModal({ projectsRoot, onClose, onCreated }: Props): Re
         </div>
       )}
       <div className="modal-actions">
-        <button className="modal-btn" onClick={onClose}>
-          Cancel
-        </button>
+        <ModalDismissButton onClick={onClose}>Cancel</ModalDismissButton>
         <button className="modal-btn primary" disabled={!canCreate} onClick={() => void create()}>
           {busy ? "Creating\u2026" : "Create"}
         </button>

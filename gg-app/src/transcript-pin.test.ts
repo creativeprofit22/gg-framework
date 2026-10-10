@@ -165,6 +165,24 @@ describe("wheel intent", () => {
     expect(pinAfterWheel(true, up, short)).toBe(true);
   });
 
+  it("keeps following while WebKit's elastic bottom scroll settles", () => {
+    // Safari/WKWebView can report offsets beyond the scrollable range. The
+    // rebound moves up, but it is not a request to read older messages.
+    const stretched = { ...atBottom, scrollTop: 1680 };
+    const settling = pinAfterWheel(true, up, stretched);
+    expect(settling).toBe(true);
+    expect(pinAfterScroll(settling, stretched.scrollTop, atBottom)).toBe(true);
+  });
+
+  it("does not mistake a rebound plus arriving text for an upward reader scroll", () => {
+    // New text can arrive between elastic scrolling and its scroll event.
+    // A last offset beyond the old bottom must not become the direction baseline.
+    const stretched = { ...atBottom, scrollTop: 1680 };
+    const settledWithNewText = { ...atBottom, scrollHeight: 2020, scrollTop: 1620 };
+    const settling = pinAfterWheel(true, up, stretched);
+    expect(pinAfterScroll(settling, stretched.scrollTop, settledWithNewText)).toBe(true);
+  });
+
   it("resumes following on a wheel down at the very bottom, where no scroll event follows", () => {
     expect(pinAfterWheel(false, down, atBottom)).toBe(true);
   });

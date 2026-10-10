@@ -3,12 +3,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { UpdateInfo } from "./update";
 import { useAppUpdate } from "./update";
+import { error as logError } from "@tauri-apps/plugin-log";
 import { HomeScreen } from "./HomeScreen";
 import { CHANGELOG } from "./changelog";
 import { LOCAL_CHANGELOG } from "./local-changelog";
 import { WHATS_NEW_STORAGE_KEY } from "./whats-new-status";
 
 const agentMocks = vi.hoisted(() => ({
+  openUrl: vi.fn(),
   waitForReady: vi.fn().mockResolvedValue(undefined),
   getSettings: vi.fn().mockResolvedValue({ configured: true, projectsRoot: "C:/projects" }),
   authStatus: vi.fn().mockResolvedValue([]),
@@ -24,6 +26,7 @@ const agentMocks = vi.hoisted(() => ({
 
 vi.mock("@tauri-apps/api/app", () => ({ getVersion: vi.fn().mockResolvedValue("1.2.3") }));
 vi.mock("./agent", () => agentMocks);
+vi.mock("@tauri-apps/plugin-log", () => ({ error: vi.fn(async () => undefined) }));
 vi.mock("./update", () => ({ useAppUpdate: vi.fn() }));
 vi.mock("./AsciiLogo", () => ({ AsciiLogo: () => null }));
 vi.mock("./HomeScenery", () => ({ HomeScenery: () => null, withScenery: (b: unknown) => b }));
@@ -189,6 +192,7 @@ describe("HomeScreen What's New trigger", () => {
     fireEvent.click(screen.getByRole("button", { name: "What's new" }));
 
     expect(agentMocks.openWhatsNewWindow).toHaveBeenCalledOnce();
+    expect(agentMocks.openWhatsNewWindow).toHaveBeenCalledWith("calm");
   });
 
   it("reports both unread sources accessibly", async () => {
@@ -298,5 +302,20 @@ describe("HomeScreen workspace actions", () => {
     expect(screen.getByRole("button", { name: "Chat" }).hasAttribute("aria-describedby")).toBe(
       false,
     );
+  });
+});
+
+// Upstream: a failed setup check is logged rather than swallowed.
+describe("HomeScreen setup check", () => {
+  it("logs a failed setup check instead of swallowing it", async () => {
+    vi.mocked(useAppUpdate).mockReturnValue(updateInfo({ phase: "idle" }));
+    agentMocks.getSettings.mockRejectedValueOnce(new Error("settings unreadable"));
+
+    await renderHome();
+
+    await waitFor(() =>
+      expect(logError).toHaveBeenCalledWith("Home setup check failed: Error: settings unreadable"),
+    );
+    expect(screen.getByRole("button", { name: "Code" }).getAttribute("aria-disabled")).toBe("true");
   });
 });

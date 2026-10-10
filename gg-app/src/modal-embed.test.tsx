@@ -2,10 +2,16 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { Modal } from "./Modal";
+import { withViewTransition } from "./view-transition";
+
+vi.mock("./view-transition", () => ({
+  withViewTransition: vi.fn((update: () => void) => update()),
+}));
 import { EmbeddedModal, ModalDismissButton } from "./modal-embed";
 
 afterEach(() => {
   cleanup();
+  vi.clearAllMocks();
 });
 
 function Panel({ onClose }: { onClose: () => void }): React.ReactElement {
@@ -18,6 +24,25 @@ function Panel({ onClose }: { onClose: () => void }): React.ReactElement {
 }
 
 describe("Modal embedding", () => {
+  it("keeps disabled and async-owned dismissals out of the transition helper", () => {
+    const dismiss = vi.fn();
+    const { rerender } = render(
+      <ModalDismissButton onClick={dismiss} disabled>
+        Cancel
+      </ModalDismissButton>,
+    );
+    fireEvent.click(screen.getByRole("button"));
+    expect(dismiss).not.toHaveBeenCalled();
+    rerender(
+      <ModalDismissButton onClick={dismiss} animateDismiss={false}>
+        Cancel
+      </ModalDismissButton>,
+    );
+    fireEvent.click(screen.getByRole("button"));
+    expect(dismiss).toHaveBeenCalledOnce();
+    expect(withViewTransition).not.toHaveBeenCalled();
+  });
+
   it("is a dialog with its Cancel button by default", () => {
     const onClose = vi.fn();
     render(<Panel onClose={onClose} />);
@@ -25,6 +50,7 @@ describe("Modal embedding", () => {
     expect(screen.getByRole("dialog", { name: "Panel" })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
     expect(onClose).toHaveBeenCalledOnce();
+    expect(withViewTransition).toHaveBeenCalledOnce();
   });
 
   it("renders as a page section inside EmbeddedModal, without dismiss controls", () => {

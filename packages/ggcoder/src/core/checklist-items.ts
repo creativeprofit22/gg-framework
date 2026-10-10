@@ -16,6 +16,7 @@ export const CHECKLIST_GROUPS = [
   "Safety",
   "Performance",
   "Shipping",
+  "Handover",
 ] as const;
 
 export type ChecklistGroup = (typeof CHECKLIST_GROUPS)[number];
@@ -32,6 +33,8 @@ export interface ChecklistItem {
   readonly skill?: string;
   /** Built-in setup command that fixes most gaps, when one exists. */
   readonly setupCommand?: string;
+  /** Detailed review lenses for items no bundled skill covers; rendered into the run prompt only. */
+  readonly guide?: readonly string[];
 }
 
 /** In recommended run order. */
@@ -242,6 +245,29 @@ export const CHECKLIST_ITEMS = [
     description: "I use this to check that I'll hear about crashes and know where to look.",
     check:
       "Crashes and errors are reported somewhere the team sees them, logs can be found, and services have health checks where relevant. Not applicable for code with no running deployment.",
+  },
+  {
+    id: "senior-review",
+    group: "Handover",
+    title: "Don't embarrass me",
+    description:
+      "I use this so an experienced developer taking over the project thinks a pro built it.",
+    check:
+      "Review the whole project the way an experienced developer taking it over would, find the tells of inexperienced or unreviewed AI-generated work, and rank them by how quickly that developer would notice and how much credibility each costs.",
+    guide: [
+      '**First five minutes.** Read what a newcomer sees first: the root listing, README, package metadata and `git log --oneline -30`. Tells: committed junk (`.DS_Store`, build output, `node_modules`, logs, `.env`, archives, stray screenshots, `*.bak`, `old/`, `copy`/`final`/`v2` files); AI leftovers in the root (planning, summary or "fixes" notes, chat dumps); a README that is still the framework template, or padded with emoji, hype and features the code doesn\'t have; placeholder metadata (`my-app`, `vite-project`, empty description, version `0.0.0`); more than one lockfile or package manager; commit messages like "fix", "update", "wip" or "asdf".',
+      '**AI and prototype leftovers in code.** Comments that narrate obvious code or talk to the user ("Here we…", "Updated to fix…", "NEW:", "You can now…"); emoji in logs or comments; TODO or "implement later" stubs on live paths; placeholder or mock data shipped as real (lorem ipsum, "John Doe", fake responses, fake loading delays); commented-out blocks; stray debug prints.',
+      "**One way of doing each thing.** Two libraries for one job (two HTTP clients, date libraries, UI kits or state libraries); several styling approaches mixed; languages mixed without reason (for example JS beside TS); parallel versions of a file or helper (`utils2`, `ButtonNew`, the same formatter written twice); inconsistent naming of files, folders and functions.",
+      "**Structure.** God files and components that do everything; a flat or arbitrary folder layout; business logic inside UI components or route handlers. Also the opposite tell: abstraction for its own sake (factories, managers or interfaces with one implementation, unused config layers).",
+      "**Silenced tools.** `any`, `as any`, `@ts-ignore`, `@ts-nocheck`, blanket lint disables, strict mode turned off, non-null assertions used to quiet errors, or the language's equivalents.",
+      "**Defensive noise.** try/catch around everything that logs and carries on, fallbacks like `|| []` and optional chaining everywhere hiding real bugs, `alert()` or raw error dumps shown to users, catch blocks that swallow errors.",
+      "**Stack fluency.** Fighting the framework instead of following its conventions (for example React effects for derived state, fetching without cleanup, index keys; hand-rolled routing, auth or validation the stack already provides); deprecated APIs or majors far behind; reinventing the standard library; a dependency added for a one-liner.",
+      "**Hard-coded values.** localhost URLs, ports, endpoints, magic numbers, IDs and settings baked into code instead of config or environment.",
+      "**Credibility killers.** Note these, but leave the full audit to their own checklist item and name it: secret keys in client code or Git (Secrets kept out), authorisation only in the frontend (Security audit), no tests or tests that assert nothing (Tests), a build, lint or type check that fails (Lint, format & type checks).",
+      "**Honesty.** The README, comments and docs describe what the code really does, the setup steps work, and nothing claims features, tests or coverage that don't exist.",
+      "**Judging.** Flag only what an experienced developer would broadly agree is a rookie tell, not taste; a pattern used consistently by the project's own conventions is not a finding. Agent instruction files (AGENTS.md, CLAUDE.md, `.gg/`, editor rules) are normal practice; flag them only when stale, contradictory or full of junk. In a large project, sample each area and name what you sampled under `Scope:`.",
+      "**Reporting.** Order findings by how fast a reviewer would spot them and how much credibility they cost, first-five-minute tells first. For each, say what the reviewer would conclude and the fix. Briefly name what already looks professional so the user knows what to keep. Never suggest rewriting published Git history; for weak commit messages, suggest a convention going forward.",
+    ],
   },
 ] as const satisfies readonly ChecklistItem[];
 

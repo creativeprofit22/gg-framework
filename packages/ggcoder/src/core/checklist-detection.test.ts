@@ -26,7 +26,7 @@ describe("checklist setup detection", () => {
     const result = await readChecklistSnapshot(root, new Date());
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.value.items).toHaveLength(23);
+    expect(result.value.items).toHaveLength(24);
     expect(result.value.items.find((item) => item.id === "git-github")).toMatchObject({
       status: "not-run",
       checkedAt: null,

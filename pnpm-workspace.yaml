@@ -8,9 +8,6 @@ packages:
 # Dependabot) no longer reads that field, which made its lockfiles drop these
 # overrides and fail our frozen CI installs.
 onlyBuiltDependencies:
-  - "@electron/get"
-  - better-sqlite3
-  - electron
   - esbuild
   - onnxruntime-node
 

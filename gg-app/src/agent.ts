@@ -100,7 +100,7 @@ export type { PhaseLaunchErrorEvent, PhaseLaunchErrorCode } from "./notes-types"
 const appWindow = getCurrentWebviewWindow();
 
 // appWindow.listen lifecycle map:
-// - local-patched-update, model, gaze, tray, and window-order listeners follow
+// - local-patched-update, model, tray, and window-order listeners follow
 //   their owning React effect;
 // - readiness listeners live only until waitForPaneReady settles;
 // - each pane client owns one agent-pane-ready listener for its subscription;
@@ -608,6 +608,9 @@ export interface AgentState extends DesktopContextSnapshot, DesktopSessionUXStat
   gitHubRepoUrl?: string | null;
   /** GitHub Actions for the current commit; null when no runs are available. */
   gitHubCI?: GitHubCI | null;
+  /** Raw Project Health from the sidecar (code mode); validate with
+   *  `parseProjectHealth` before use. null until the first scan lands. */
+  projectHealth?: unknown;
   /** Extra workspace roots added with /add-dir. Absent on older sidecars. */
   additionalRoots?: string[];
   /** True when the active model can accept native video input. */
@@ -683,11 +686,15 @@ export interface ChecklistEntry {
   result: "pass" | "issues" | "not-applicable" | null;
   summary: string | null;
   findings: string[];
+  /** Findings the owner chose to leave as is; they don't block a pass. */
+  accepted?: string[];
   evidence: string[];
   /** Read-only setup observations, not an audit result. */
   detection?: { summary: string; facts: string[] } | null;
   /** The instructions Check sends to the agent (built by the sidecar from the item). */
   runPrompt: string | null;
+  /** The project's commit or working tree changed after this result was recorded. */
+  changedSinceCheck?: boolean;
 }
 
 export interface ChecklistSnapshot {
@@ -729,8 +736,10 @@ function checklistEntry(value: unknown): value is ChecklistEntry {
     (value.commit === null ||
       (text("commit", 64) && /^[0-9a-f]{4,64}$/i.test(String(value.commit)))) &&
     typeof value.uncommittedChanges === "boolean" &&
+    (value.changedSinceCheck === undefined || typeof value.changedSinceCheck === "boolean") &&
     nullable("summary", 300) &&
     checklistStrings(value.findings, 300) &&
+    (value.accepted === undefined || checklistStrings(value.accepted, 300)) &&
     checklistStrings(value.evidence, 200) &&
     (detection === undefined ||
       detection === null ||
@@ -1037,11 +1046,22 @@ function isPromptSegment(value: unknown): value is PromptSegment {
   );
 }
 
-export async function openUrl(url: string): Promise<void> {
+/** Open an external URL via the Rust `open_url` command; logs and rethrows on failure. */
+export async function openUrlStrict(url: string): Promise<void> {
   try {
     await invoke("open_url", { url });
   } catch (e) {
     await logError(`open_url failed: ${String(e)}`);
+    throw e;
+  }
+}
+
+/** Fire-and-forget variant of {@link openUrlStrict}: failures are logged and swallowed. */
+export async function openUrl(url: string): Promise<void> {
+  try {
+    await openUrlStrict(url);
+  } catch {
+    // Already logged by openUrlStrict.
   }
 }
 
@@ -2611,48 +2631,21 @@ export async function setupWindows(count: number): Promise<void> {
 }
 
 /** Open the dedicated, screen-centered "What's new" window (or refocus it if it's
- *  already open). Only the main window calls this, exactly once per update — see
- *  WhatsNewTrigger. */
-export async function openWhatsNewWindow(): Promise<void> {
+ *  already open). `hype` is the one-time post-update show (the main window's
+ *  WhatsNewModal trigger); `calm` is the home screen's "What's new" button. */
+export async function openWhatsNewWindow(mode: "hype" | "calm"): Promise<void> {
   try {
-    await invoke("open_whatsnew_window");
+    await invoke("open_whatsnew_window", { mode });
   } catch (e) {
     await logError(`open_whatsnew_window failed: ${String(e)}`);
     throw e;
   }
 }
 
-// ── Gaze focus (webcam eye/head tracking → window focus) ───────────
-
-/** Payload of the `gaze-target` event broadcast to every window. `target` is the
- *  window the gaze currently rests on (null off any window); `committed` is the
- *  window that currently holds focus. Each window paints a solid ring when it's
- *  `committed`, a soft highlight when it's the (un-committed) `target`. */
-export interface GazeTargetEvent {
-  target: string | null;
-  committed: string | null;
-}
-
-/** Map a normalized monitor point to a window. With `commit`, commit OS focus to
- *  the hit window. `committed` is the currently-focused window so the broadcast
- *  border persists. Always broadcasts `gaze-target`. Returns the hit label. */
-export async function gazeFocus(
-  nx: number,
-  ny: number,
-  commit: boolean,
-  committed: string | null,
-): Promise<string | null> {
-  try {
-    return await invoke<string | null>("gaze_focus", { nx, ny, commit, committed });
-  } catch (e) {
-    await logError(`gaze_focus failed: ${String(e)}`);
-    return null;
-  }
-}
-
-/** Subscribe THIS window to gaze-target broadcasts. Returns an unlisten fn. */
-export async function onGazeTarget(cb: (e: GazeTargetEvent) => void): Promise<SafeTauriUnlisten> {
-  return listenAppWindow<GazeTargetEvent>("gaze-target", (e) => cb(e.payload));
+/** Show the What's new window, which Rust builds hidden. Called by the page
+ *  after its first paint; a window never revealed closes itself after 8s. */
+export function revealWhatsNewWindow(): Promise<void> {
+  return invoke("reveal_whatsnew_window");
 }
 
 // ── macOS menu-bar tray ────────────────────────────────────────────────────

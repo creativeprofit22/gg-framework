@@ -1,4 +1,4 @@
-import { useLayoutEffect, useMemo } from "react";
+import { useLayoutEffect, useMemo, useRef } from "react";
 import { Markdown } from "./Markdown";
 import { displayStreamingMarkdown } from "./streaming-markdown";
 import { useSmoothText } from "./useSmoothText";
@@ -22,7 +22,16 @@ export function StreamingMarkdown({
   streaming?: boolean;
   onGrow?: () => void;
 }): React.ReactElement {
-  const { text: revealed, animating } = useSmoothText(text, streaming);
+  const contentRef = useRef<HTMLDivElement>(null);
+  const { text: revealed, animating, settledLength } = useSmoothText(text, streaming);
+  useLayoutEffect(() => {
+    if (revealed.length > settledLength) return;
+    // Keep word elements stable, but consume their CSS effects after a hidden
+    // screen returns. Later words mount normally and retain their own feedback.
+    for (const word of contentRef.current?.querySelectorAll(".md-word") ?? []) {
+      for (const animation of word.getAnimations?.() ?? []) animation.cancel();
+    }
+  }, [revealed, settledLength]);
   useLayoutEffect(() => {
     onGrow?.();
   }, [revealed, onGrow]);
@@ -41,5 +50,9 @@ export function StreamingMarkdown({
   // goes false after 0.7s of quiet, which stripped the spans off the words on
   // screen, and the next chunk put them back, so every visible word faded in a
   // second time. That was the flicker. They come off once, when it finishes.
-  return <Markdown animate={unfinished}>{shown}</Markdown>;
+  return (
+    <Markdown animate={unfinished} contentRef={contentRef}>
+      {shown}
+    </Markdown>
+  );
 }

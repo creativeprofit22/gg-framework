@@ -7,6 +7,11 @@ import { streamOpenAI } from "./providers/openai.js";
 import { streamQwenCloud } from "./providers/qwen-cloud.js";
 import { streamOpenAICodex } from "./providers/openai-codex.js";
 import { streamGemini } from "./providers/gemini.js";
+import { GEMINI_EMBED_BATCH_SIZE, embedGemini } from "./providers/gemini-embeddings.js";
+import {
+  embedOpenAICompatible,
+  rerankCohereCompatible,
+} from "./providers/openai-compat-retrieval.js";
 import { providerRegistry } from "./provider-registry.js";
 import {
   clampProviderContextImages,
@@ -15,6 +20,21 @@ import {
 } from "./providers/transform.js";
 import { sanitizeMessagesForWire } from "./utils/well-formed.js";
 import { observePreparedContext } from "./utils/context-observation.js";
+
+/** OpenAI's documented cap: an embeddings `input` array may hold at most 2048 entries. */
+const OPENAI_EMBED_BATCH_SIZE = 2048;
+
+/**
+ * OpenRouter documents no per-request input cap for `/embeddings`, and it
+ * forwards to upstreams that have their own (Gemini: 100). 64 is a conservative
+ * default proven in production; callers can raise it with `batchSize`.
+ */
+const OPENROUTER_EMBED_BATCH_SIZE = 64;
+
+/** Local servers document no input cap; keep requests modest for small machines. */
+const LOCAL_EMBED_BATCH_SIZE = 64;
+
+const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
 
 /** Z.AI coding API endpoint — the primary endpoint for all GLM models. */
 const GLM_CODING_BASE_URL = "https://api.z.ai/api/coding/paas/v4";
@@ -75,6 +95,14 @@ providerRegistry.register("openai", {
     }
     return streamOpenAI(options);
   },
+  // OpenAI API-key auth only; ChatGPT-subscription (Codex) tokens have no embeddings API.
+  // OpenAI has no task/input-type parameter, so `inputType` is ignored.
+  embed: (request) =>
+    embedOpenAICompatible(request, {
+      provider: "openai",
+      baseUrl: request.baseUrl ?? "https://api.openai.com/v1",
+    }),
+  embedBatchSize: OPENAI_EMBED_BATCH_SIZE,
 });
 
 providerRegistry.register("azure", {
@@ -83,6 +111,9 @@ providerRegistry.register("azure", {
 
 providerRegistry.register("gemini", {
   stream: (options) => streamGemini(options),
+  // Native Gemini API with an AI Studio key — not the Code Assist OAuth endpoint above.
+  embed: (request) => embedGemini(request),
+  embedBatchSize: GEMINI_EMBED_BATCH_SIZE,
 });
 
 providerRegistry.register("glm", {
@@ -121,7 +152,21 @@ providerRegistry.register("openrouter", {
   stream: (options) =>
     streamOpenAI({
       ...options,
-      baseUrl: options.baseUrl ?? "https://openrouter.ai/api/v1",
+      baseUrl: options.baseUrl ?? OPENROUTER_BASE_URL,
+    }),
+  embed: (request) =>
+    embedOpenAICompatible(request, {
+      provider: "openrouter",
+      baseUrl: request.baseUrl ?? OPENROUTER_BASE_URL,
+      inputTypeFields: (inputType) => ({
+        input_type: inputType === "query" ? "search_query" : "search_document",
+      }),
+    }),
+  embedBatchSize: OPENROUTER_EMBED_BATCH_SIZE,
+  rerank: (request) =>
+    rerankCohereCompatible(request, {
+      provider: "openrouter",
+      baseUrl: request.baseUrl ?? OPENROUTER_BASE_URL,
     }),
 });
 
@@ -129,7 +174,7 @@ providerRegistry.register("huggingface", {
   // Hugging Face Inference Providers router — one HF token (hf.co/settings/tokens,
   // "Make calls to Inference Providers" permission) routes to whichever hosted
   // backend serves each open model. Chat Completions-compatible; model ids are
-  // Hub repo paths ("Qwen/Qwen3-Coder-480B-A35B-Instruct"), optionally with an
+  // Hub repo paths ("moonshotai/Kimi-K2.7-Code"), optionally with an
   // ":auto"/":fastest"/":cheapest" provider-selection suffix. Billing follows
   // each backend's per-token rates on the HF account (small free tier).
   stream: (options) =>
@@ -209,20 +254,41 @@ providerRegistry.register("local", {
   // vLLM). There is no default endpoint: the baseUrl comes from the endpoint
   // credential the discovery layer wrote, so a missing one is a wiring bug, not
   // something to paper over with a guess at someone else's port.
-  stream: (options) => {
-    if (!options.baseUrl) {
-      throw new GGAIError(
-        "Local provider requires a baseUrl (e.g. http://127.0.0.1:11434/v1). " +
-          "No local endpoint was resolved for this model — re-scan for local models.",
-      );
-    }
-    return streamOpenAI({
+  stream: (options) =>
+    streamOpenAI({
       ...options,
+      baseUrl: requireLocalBaseUrl(options.baseUrl),
       model: localWireModelId(options.model),
       webSearch: false,
-    });
-  },
+    }),
+  // Every supported local server exposes OpenAI-compatible `/v1/embeddings`
+  // (the model must be an embedding model). None has an input-type parameter.
+  embed: (request) =>
+    embedOpenAICompatible(request, {
+      provider: "local",
+      baseUrl: requireLocalBaseUrl(request.baseUrl),
+      wireModel: localWireModelId(request.model),
+    }),
+  embedBatchSize: LOCAL_EMBED_BATCH_SIZE,
+  // llama.cpp (`llama-server --rerank`) and vLLM serve `/v1/rerank`; Ollama and
+  // LM Studio don't, and answer with a 404 ProviderError.
+  rerank: (request) =>
+    rerankCohereCompatible(request, {
+      provider: "local",
+      baseUrl: requireLocalBaseUrl(request.baseUrl),
+      wireModel: localWireModelId(request.model),
+    }),
 });
+
+function requireLocalBaseUrl(baseUrl: string | undefined): string {
+  if (!baseUrl) {
+    throw new GGAIError(
+      "Local provider requires a baseUrl (e.g. http://127.0.0.1:11434/v1). " +
+        "No local endpoint was resolved for this model — re-scan for local models.",
+    );
+  }
+  return baseUrl;
+}
 
 // ── Public API ─────────────────────────────────────────────
 
@@ -234,6 +300,10 @@ providerRegistry.register("local", {
  * Providers are resolved via the provider registry. Built-in providers
  * (anthropic, openai, glm, moonshot) are registered at module load.
  * Extensions can register custom providers via `providerRegistry.register()`.
+ * The same registry backs `embed()` and `rerank()`: a provider entry may also
+ * carry `embed` / `rerank` functions (check `providerRegistry.supports(name,
+ * "embed")`), and `providerOptions` passes provider-specific body fields to all
+ * three.
  *
  * ```ts
  * // Stream events

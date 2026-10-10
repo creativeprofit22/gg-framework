@@ -1,6 +1,6 @@
 ---
 name: compliance-guard
-description: Use when shipping something real users reach and the work carries legal exposure — pre-launch or "is this safe to ship" reviews; mid-build features adding personal data, pixels/cookies, payments or auto-renewal, uploads/UGC, email/SMS/push, AI chatbots, minors, biometrics, scraping; drafting privacy policies, terms, disclosures. Also when a feature may need a licence or be illegal: health, finance, money movement, crypto, gambling, adult content, background checks, automated hiring/lending/housing decisions. Do NOT use for local-only scripts, prototypes with no real users or data, or changes touching no data, money, users or public surface; security hardening is bulletproof's lane.
+description: Use when shipping to real users risks legal exposure (personal data, payments, minors). Do NOT use for local work.
 license: Apache-2.0. Content is engineering guidance, not legal advice. See references/provenance.md.
 compatibility: Static review works offline from the bundled references. Legal status changes constantly; date-sensitive claims must be re-verified with web access before being stated as current. Never certifies compliance.
 ---

@@ -1,9 +1,12 @@
 {
   "name": "@kenkaiiii/gg-agent",
-  "version": "5.74.2",
+  "version": "5.78.0",
   "type": "module",
   "description": "Agentic loop system with tool execution for LLMs",
   "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/kenkaiiii/gg-framework.git",

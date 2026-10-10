@@ -74,7 +74,8 @@ describe("code_nav", () => {
       warning: "Reference coverage is partial. Use grep to check additional callers.",
     });
     const navigation = createCodeNavTool(tmpDir, manager);
-    expect(navigation.description).toContain("reference coverage is partial");
+    // The description no longer pre-warns; the partial-coverage notice rides on the result.
+    expect(navigation.description).toContain("references (callers)");
     const result = String(
       await navigation.execute(
         { op: "references", file: "widget.fake", line: 1, symbol: "Widget" },

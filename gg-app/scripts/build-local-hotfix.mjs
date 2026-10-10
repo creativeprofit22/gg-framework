@@ -383,6 +383,26 @@ export function assertInstalledSmokeIdentity(
   return INSTALLED_SMOKE_IDENTITY;
 }
 
+/**
+ * Native modules that own the identity data-root wiring since the 0.86.0 module split.
+ * Kept in the original lib.rs source order (data-root branch first) so first-match
+ * tamper checks still target the same code.
+ */
+export const IDENTITY_RUST_SOURCES = [
+  "paths.rs",
+  "identity.rs",
+  "daemon.rs",
+  "settings.rs",
+  "auth.rs",
+  "lib.rs",
+];
+
+export function readIdentityRustShell(srcTauri) {
+  return IDENTITY_RUST_SOURCES.map((file) =>
+    readFileSync(join(srcTauri, "src", file), "utf8"),
+  ).join("\n");
+}
+
 export function assertIdentityDataRootWiring({ corePaths, sidecarPaths, appSidecar, rustShell }) {
   const requirements = [
     [corePaths.includes("process.env.GG_AGENT_DIR"), "gg-core must read GG_AGENT_DIR"],
@@ -562,7 +582,7 @@ async function main() {
       join(repoRoot, "packages", "ggcoder", "src", "app-sidecar.ts"),
       "utf8",
     ),
-    rustShell: readFileSync(join(srcTauri, "src", "lib.rs"), "utf8"),
+    rustShell: readIdentityRustShell(srcTauri),
   });
 
   if (!env.GG_NODE_SOURCE) {

@@ -24,7 +24,8 @@ import {
   FilePlusIcon,
   PlusIcon,
 } from "@phosphor-icons/react";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openUrlStrict, sendPrompt } from "./agent";
+import { PRODUCT_DISPLAY_NAME } from "./brand";
 import { STEROIDS_COLLAPSIBLE_TABLE_MARKER } from "@kenkaiiii/gg-core/slash-command-contract";
 import { codeLanguage, codeNodeText } from "./markdown-prompt";
 import { KenPromptActionContext } from "./ken-prompt-context";
@@ -57,6 +58,8 @@ interface Props {
    * again once the stream settles, so finished prose carries no extra DOM.
    */
   animate?: boolean;
+  /** Lets streaming content settle existing word effects on Activity return. */
+  contentRef?: React.RefObject<HTMLDivElement | null>;
 }
 
 // Only link destinations get local-path exceptions; images retain the default filter.
@@ -114,7 +117,7 @@ function ExternalLink({
         if (!href) return;
         try {
           if (isExternalHref(href)) {
-            await openUrl(href);
+            await openUrlStrict(href);
           } else {
             const { openProjectPath } = await import("./agent");
             await openProjectPath(href, paneId, "url");
@@ -344,8 +347,61 @@ function pendingPromptLabel(action: PendingPromptAction): string {
   return "Continuing here…";
 }
 
-/** A complete Ken prompt with one primary action and two guarded destinations. */
+const PromptSendContext = createContext<((text: string) => Promise<boolean>) | null>(null);
+
+/** Ken's dispatcher (Local Fork) owns prompt actions when mounted; otherwise
+ * fall back to upstream's single send button (PromptSendProvider / sendPrompt). */
 function PromptBlock({ body }: { body: string }): React.ReactElement {
+  const dispatcher = useContext(KenPromptActionContext);
+  return dispatcher ? <KenPromptBlock body={body} /> : <SendPromptBlock body={body} />;
+}
+
+function SendPromptBlock({ body }: { body: string }): React.ReactElement {
+  const ready = useContext(PromptReadyContext);
+  const onSend = useContext(PromptSendContext);
+  const [sent, setSent] = useState(false);
+  const send = useCallback(() => {
+    const text = body.replace(/\n$/, "").trim();
+    if (!text) return;
+    // Route through App so it can render the shimmering "Sent to GG Coder" user
+    // bubble; fall back to a direct send if no handler is provided. Stays "Sent"
+    // (disabled) afterward so the user can see it landed and can't double-fire.
+    // A send that failed re-enables the button so the prompt isn't lost.
+    setSent(true);
+    const delivered = onSend
+      ? onSend(text)
+      : sendPrompt(text).then(
+          () => true,
+          () => {
+            toast(`Couldn't send the prompt to ${PRODUCT_DISPLAY_NAME}. Try again.`, "error");
+            return false;
+          },
+        );
+    void delivered.then((ok) => {
+      if (!ok) setSent(false);
+    });
+  }, [body, onSend]);
+  return (
+    <div className="ken-prompt-block">
+      <pre className="ken-prompt-body">{body.replace(/\n$/, "")}</pre>
+      {ready && (
+        <button
+          type="button"
+          className={`ken-prompt-send${sent ? " sent" : ""}`}
+          onClick={send}
+          disabled={sent}
+          title={sent ? `Sent to ${PRODUCT_DISPLAY_NAME}` : `Send this prompt to ${PRODUCT_DISPLAY_NAME}`}
+        >
+          {sent ? <CheckIcon size={12} /> : <ArrowElbowDownLeftIcon size={12} />}
+          {sent ? "Sent" : `Send to ${PRODUCT_DISPLAY_NAME}`}
+        </button>
+      )}
+    </div>
+  );
+}
+
+/** A complete Ken prompt with one primary action and two guarded destinations. */
+function KenPromptBlock({ body }: { body: string }): React.ReactElement {
   const ready = useContext(PromptReadyContext);
   const dispatcher = useContext(KenPromptActionContext);
   const panelId = useId();
@@ -811,13 +867,13 @@ function CodeBlock({ children }: { children?: React.ReactNode }): React.ReactEle
   const [copied, setCopied] = useState(false);
   const [expanded, setExpanded] = useState(false);
   const blockRef = useRef<HTMLDivElement>(null);
-  const captureHeight = useAnimatedHeight(blockRef, expanded);
 
   // Raw text drives both the copy fallback and the fold decision. The rendered
   // `children` is the highlighted tree; while folded we deliberately do NOT
   // mount it, so a thousand-line dump costs seven lines of DOM instead of a
   // thousand highlighted spans. That withheld markup is the memory win.
   const text = codeNodeText(children);
+  const captureHeight = useAnimatedHeight(blockRef, expanded, expanded ? text : undefined);
   const collapsible = shouldCollapseCode(text);
   const folded = collapsible && !expanded;
   const { preview, hiddenLines } = collapsedCode(text);
@@ -834,7 +890,7 @@ function CodeBlock({ children }: { children?: React.ReactNode }): React.ReactEle
         setCopied(true);
         setTimeout(() => setCopied(false), 1500);
       })
-      .catch(() => {});
+      .catch(() => toast("Couldn't copy to the clipboard.", "error"));
   }, [text]);
 
   return (
@@ -1016,11 +1072,13 @@ const MemoizedMarkdownBlock = memo(
 export const Markdown = memo(function Markdown({
   children,
   animate = false,
+  contentRef,
 }: Props): React.ReactElement {
   const blocks = useMemo(() => parseMarkdownIntoBlocks(children), [children]);
   const [rowExpanded, setRowExpanded] = useState(false);
-  const rootRef = useRef<HTMLDivElement>(null);
-  const captureHeight = useAnimatedHeight(rootRef, rowExpanded);
+  const ownRootRef = useRef<HTMLDivElement>(null);
+  const rootRef = contentRef ?? ownRootRef;
+  const captureHeight = useAnimatedHeight(rootRef, rowExpanded, rowExpanded ? children : undefined);
   // Oversized content mounts only its leading blocks. Fenced-code folding above
   // handles one huge block; this handles the other shape, hundreds of ordinary
   // blocks in a single row, which no per-block rule would catch.
@@ -1088,3 +1146,7 @@ export const Markdown = memo(function Markdown({
 
 /** Typed action boundary for every completed Ken prompt fence. */
 export { KenPromptActionProvider } from "./ken-prompt-context";
+
+/** Provider for the upstream send-button click handler (used when no Ken
+ * prompt dispatcher is mounted). */
+export const PromptSendProvider = PromptSendContext.Provider;

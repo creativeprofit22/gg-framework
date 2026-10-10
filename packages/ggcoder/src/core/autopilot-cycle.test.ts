@@ -5,6 +5,7 @@ import {
   frameAutopilotInjection,
   AUTOPILOT_INJECTION_PREAMBLE,
   AUTOPILOT_PLAN_DRAFTING_REASON,
+  AUTOPILOT_VERIFY_PROMPT,
   type AutopilotCycleDeps,
   type AutopilotCycleEmit,
 } from "./autopilot-cycle.js";
@@ -347,6 +348,82 @@ describe("driveAutopilotCycle — work branch (unchanged behavior)", () => {
     });
     await driveAutopilotCycle(deps);
     expect(order).toEqual(["reset", "review", "run", "review"]);
+  });
+});
+
+// Upstream 0.86.0 (0a5be0d3) cases, run against the fork cycle.
+describe("host verification control", () => {
+  it("asks once for checks, then hands still-unverified work back before any review", async () => {
+    const deps = makeDeps([{ kind: "all_clear" }], {
+      verificationProblem: () => "Unverified: current checks are missing.",
+    });
+    await driveAutopilotCycle(deps);
+    expect(deps.ran).toEqual([AUTOPILOT_VERIFY_PROMPT]);
+    expect(deps.review).not.toHaveBeenCalled();
+    expect(deps.resetReviewer).not.toHaveBeenCalled();
+    expect(deps.emitted).toEqual([
+      { type: "autopilot_human", data: { reason: "Unverified: current checks are missing." } },
+    ]);
+  });
+
+  it("does not ask for checks while a plan is pending (plan mode cannot run them)", async () => {
+    const deps = makeDeps([{ kind: "all_clear" }], {
+      verificationProblem: () => "Unverified: current checks are missing.",
+      planPending: () => true,
+    });
+    await driveAutopilotCycle(deps);
+    expect(deps.ran).toEqual([]);
+    expect(deps.emitted).toEqual([
+      { type: "autopilot_human", data: { reason: "Unverified: current checks are missing." } },
+    ]);
+  });
+
+  it("reviews work once the injected check run verifies it", async () => {
+    let problem: string | null = "Unverified: current checks are missing.";
+    const ran: string[] = [];
+    const deps = makeDeps([{ kind: "all_clear" }], {
+      verificationProblem: () => problem,
+      runPrompt: async (body: string) => {
+        ran.push(body);
+        problem = null;
+        return true; // Local Fork: runPrompt reports whether the run succeeded.
+      },
+    });
+    await driveAutopilotCycle(deps);
+    expect(ran).toEqual([AUTOPILOT_VERIFY_PROMPT]);
+    expect(deps.review).toHaveBeenCalledTimes(1);
+    expect(deps.emitted.map((e) => e.type)).toEqual(["autopilot_done"]);
+  });
+
+  it("rejects ALL_CLEAR if verification becomes stale during the review", async () => {
+    let problem: string | null = null;
+    const deps = makeDeps([], {
+      verificationProblem: () => problem,
+      review: vi.fn(async (): Promise<AutopilotVerdict> => {
+        problem = "Unverified: code changed during review.";
+        return { kind: "all_clear", evidenceLimitation: "corpus_unverified" };
+      }),
+    });
+    await driveAutopilotCycle(deps);
+    expect(deps.emitted).toEqual([{ type: "autopilot_human", data: { reason: problem } }]);
+    expect(deps.ran).toEqual([]);
+  });
+
+  it("never approves a plan over outstanding verification", async () => {
+    const pending = pendingFlag();
+    const deps = makeDeps(
+      [],
+      {
+        planPending: pending.get,
+        verificationProblem: () => "Unverified: a check failed.",
+      },
+      [{ kind: "all_clear" }],
+    );
+    await driveAutopilotCycle(deps);
+    expect(deps.reviewPlan).not.toHaveBeenCalled();
+    // Local Fork: plan approval is markPlanReady (no accept/implement deps).
+    expect(deps.counters.ready).toBe(0);
+    expect(deps.ran).toEqual([]);
   });
 });
 

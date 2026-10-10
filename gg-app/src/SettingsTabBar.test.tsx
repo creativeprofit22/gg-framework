@@ -7,6 +7,12 @@ import { SettingsTabBar, type SettingsTab } from "./SettingsTabBar";
 
 afterEach(() => {
   cleanup();
+  vi.restoreAllMocks();
+  Object.defineProperty(Element.prototype, "animate", {
+    configurable: true,
+    writable: true,
+    value: undefined,
+  });
 });
 
 type Id = "general" | "providers" | "steroids";
@@ -116,6 +122,59 @@ describe("SettingsTabBar", () => {
     const stops = screen.getAllByRole("tab").filter((t) => t.tabIndex === 0);
     expect(stops.map((t) => t.getAttribute("aria-label"))).toEqual(["General"]);
   });
+
+  it.each([0.5, 0.95, 1, 1.25, 1.5, 2])(
+    "normalizes snapshots and owns retargeted animations at zoom %s",
+    (scale) => {
+      const calls: { el: Element; frames: Keyframe[]; cancel: ReturnType<typeof vi.fn> }[] = [];
+      Object.defineProperty(Element.prototype, "animate", {
+        configurable: true,
+        writable: true,
+        value: vi.fn(),
+      });
+      vi.spyOn(Element.prototype, "animate").mockImplementation(function (this: Element, frames) {
+        const cancel = vi.fn();
+        calls.push({ el: this, frames: frames as Keyframe[], cancel });
+        return { cancel, onfinish: null, oncancel: null } as unknown as Animation;
+      });
+      const { unmount } = render(<Harness />);
+      const bar = screen.getByRole("tablist");
+      bar.style.width = "300px";
+      bar.style.boxSizing = "border-box";
+      bar.getBoundingClientRect = () => new DOMRect(20, 10, 300 * scale, 54 * scale);
+      const pill = document.querySelector<HTMLElement>(".settings-tabs-pill");
+      if (!pill) throw new Error("Missing pill");
+      pill.getBoundingClientRect = () =>
+        new DOMRect(20 + 12 * scale, 10 + 6 * scale, 90 * scale, 42 * scale);
+      for (const tab of screen.getAllByRole("tab")) {
+        Object.defineProperty(tab, "offsetWidth", { get: () => 100 });
+        Object.defineProperty(tab, "offsetHeight", { get: () => 42 });
+      }
+      fireEvent.click(screen.getByRole("tab", { name: "AI Providers" }));
+      const start = calls.find((c) => c.el === pill)?.frames[0];
+      expect(start?.width).toBe("90px");
+      expect(start?.height).toBe("42px");
+      const coordinates = String(start?.transform)
+        .match(/[-\d.]+/g)
+        ?.map(Number);
+      expect(coordinates?.[0]).toBeCloseTo(12, 8);
+      expect(coordinates?.[1]).toBeCloseTo(6, 8);
+      const first = [...calls];
+      fireEvent.click(screen.getByRole("tab", { name: "Steroids" }));
+      expect(first.every((c) => c.cancel.mock.calls.length === 1)).toBe(true);
+      expect(calls.every((c) => c.frames.every((frame) => frame.filter === undefined))).toBe(true);
+      const second = calls.slice(first.length);
+      fireEvent(window, new Event("resize"));
+      expect(second.every((c) => c.cancel.mock.calls.length === 0)).toBe(true);
+      bar.style.width = "320px";
+      fireEvent(window, new Event("resize"));
+      expect(second.every((c) => c.cancel.mock.calls.length === 1)).toBe(true);
+      fireEvent.click(screen.getByRole("tab", { name: "General" }));
+      const final = calls.slice(first.length + second.length);
+      unmount();
+      expect(final.every((c) => c.cancel.mock.calls.length === 1)).toBe(true);
+    },
+  );
 
   it("marks a tab that needs attention", () => {
     render(<Harness />);

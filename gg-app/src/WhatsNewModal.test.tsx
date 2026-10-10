@@ -62,6 +62,7 @@ describe("WhatsNewModal", () => {
     localStorage.setItem(WHATS_NEW_STORAGE_KEY, JSON.stringify(seen));
     render(<WhatsNewModal />);
     await waitFor(() => expect(mocks.openWhatsNewWindow).toHaveBeenCalledOnce());
+    expect(mocks.openWhatsNewWindow).toHaveBeenCalledWith("hype");
   });
 
   it("does not mark feeds seen when the native open request fails", async () => {

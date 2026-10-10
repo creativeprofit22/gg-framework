@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
 
 /**
- * Whether THIS window holds OS focus. Drives the prominent input border and
- * pauses decorative animations in background windows (see
- * `.app:not(.window-focused)` in App.css).
+ * Whether THIS window holds OS focus. Drives the prominent input border and the
+ * home scenery/dither render loops. CSS loops, critters, spinners and clocks
+ * follow the fuller `window-motion.ts` level (focused / visible / hidden).
  *
  * Seeded from `document.hasFocus()`, not `true`: a window restored at launch
  * that never receives focus gets no blur event, and would otherwise count as

@@ -1293,6 +1293,10 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
               : s,
           );
           break;
+        case "plan_mode":
+          // Back in plan mode to revise a plan (no new "entering plan" banner).
+          setState((s) => (s ? { ...s, planMode: d.active === true } : s));
+          break;
         case "plan_enter":
           setState((s) => (s ? { ...s, planMode: true } : s));
           pushItem({ kind: "plan", id: nextId(), reason: String(d.reason ?? "") });
@@ -1705,6 +1709,7 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
                           (d.gitBranch !== undefined && d.gitBranch !== s.gitBranch)
                         ? null
                         : s.gitHubCI,
+                  projectHealth: d.projectHealth !== undefined ? d.projectHealth : s.projectHealth,
                   additionalRoots: (d.additionalRoots as string[] | undefined) ?? s.additionalRoots,
                 }
               : s,

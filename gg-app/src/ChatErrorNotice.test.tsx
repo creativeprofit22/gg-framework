@@ -1,5 +1,12 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+beforeEach(() => {
+  Object.defineProperty(Element.prototype, "animate", {
+    configurable: true,
+    value: vi.fn(() => ({ cancel: vi.fn() })),
+  });
+});
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { ChatErrorNotice } from "./ChatErrorNotice";
 import { ERROR_CRITTER_BLINKS, assignErrorCritters } from "./ErrorCritter";
@@ -15,6 +22,7 @@ import {
 
 afterEach(() => {
   cleanup();
+  Reflect.deleteProperty(Element.prototype, "animate");
   vi.useRealTimers();
 });
 const limit: ChatErrorData = {
@@ -114,7 +122,7 @@ describe("compact chat errors", () => {
     const toggle = screen.getByRole("button", { name: "Show error details" });
     const details = container.querySelector<HTMLElement>(".chat-error-details");
     fireEvent.click(toggle);
-    expect(details?.classList.contains("dissolve-in")).toBe(true);
+    expect(details?.classList.contains("dissolve-in")).toBe(false);
     expect(details?.getAttribute("aria-hidden")).toBe("false");
     expect(onContentGrow).toHaveBeenCalledOnce();
     fireEvent.click(toggle);
@@ -123,12 +131,20 @@ describe("compact chat errors", () => {
     expect(details?.classList.contains("leaving")).toBe(true);
     expect(details?.hasAttribute("inert")).toBe(true);
     expect(details?.getAttribute("aria-hidden")).toBe("true");
-    act(() => vi.advanceTimersByTime(339));
+    act(() => vi.advanceTimersByTime(219));
     expect(details?.hidden).toBe(false);
     act(() => vi.advanceTimersByTime(1));
     expect(details?.hidden).toBe(true);
     unmount();
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("closes immediately without WAAPI", () => {
+    Reflect.deleteProperty(Element.prototype, "animate");
+    const { container } = render(<ChatErrorNotice critterId="cat" error={limit} active />);
+    fireEvent.click(screen.getByRole("button", { name: "Show error details" }));
+    fireEvent.click(screen.getByRole("button", { name: "Hide error details" }));
+    expect(container.querySelector<HTMLElement>(".chat-error-details")?.hidden).toBe(true);
   });
 
   it("can reopen details during their exit without a stale timer hiding them", () => {

@@ -936,8 +936,8 @@ describe("compact", () => {
     });
 
     it("re-sizes the request for the active model's own context window", async () => {
-      // gpt-oss-120b has half Qwen3-Coder's window: a request sized for one
-      // must not be replayed unchanged against the other.
+      // DeepSeek V4.1 Flash has four times Kimi K2.7 Code's window: a request
+      // sized for one must not be replayed unchanged against the other.
       const mockStream = vi.mocked(stream);
       mockStream.mockReset();
       mockStream
@@ -951,12 +951,12 @@ describe("compact", () => {
       await compact(buildConversation(30), {
         ...baseOptions,
         provider: "huggingface",
-        model: "Qwen/Qwen3-Coder-480B-A35B-Instruct",
+        model: "moonshotai/Kimi-K2.7-Code",
       });
 
       const [cheap, active] = mockStream.mock.calls.map(([request]) => request);
-      expect(cheap?.model).toBe("openai/gpt-oss-120b");
-      expect(active?.model).toBe("Qwen/Qwen3-Coder-480B-A35B-Instruct");
+      expect(cheap?.model).toBe("deepseek-ai/DeepSeek-V4.1-Flash");
+      expect(active?.model).toBe("moonshotai/Kimi-K2.7-Code");
       expect(active?.maxTokens).not.toBe(cheap?.maxTokens);
     });
 

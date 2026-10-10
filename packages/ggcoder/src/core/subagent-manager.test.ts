@@ -200,15 +200,15 @@ describe("SubAgentManager", () => {
       "request",
     );
 
-    await instance.spawn("override-child", "fast", "fake", { model: "claude-haiku-4-5" });
+    await instance.spawn("override-child", "fast", "fake", { model: "claude-retired-model" });
 
     const parentLowest = getSupportedThinkingLevels("anthropic", "claude-opus-5-5")[0];
-    const overrideLowest = getSupportedThinkingLevels("anthropic", "claude-haiku-4-5")[0];
+    const overrideLowest = getSupportedThinkingLevels("anthropic", "claude-retired-model")[0];
     // The ladders must differ, or this test could not tell the two apart.
     expect(overrideLowest).not.toBe(parentLowest);
     const initializeCall = requestSpy.mock.calls.find(([, command]) => command === "initialize");
     expect(initializeCall?.[2]).toMatchObject({
-      options: { model: "claude-haiku-4-5", thinkingLevel: overrideLowest },
+      options: { model: "claude-retired-model", thinkingLevel: overrideLowest },
     });
   });
 

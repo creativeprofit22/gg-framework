@@ -105,6 +105,14 @@ jobs:
           node bench/size-gate.mjs --only dist:ggcoder
           node bench/startup-gate.mjs
 
+      # Lint and formatting are OS-independent, so one leg is enough.
+      - name: Lint + format check
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          pnpm lint
+          pnpm format:check
+
       - name: Typecheck
         shell: bash
         run: |
@@ -175,6 +183,8 @@ jobs:
           cache: pnpm
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
 
       # Both `cargo test` and the Windows packaged build compile the same large
       # Tauri dependency tree; without a cache the packaged smoke would rebuild
@@ -282,6 +292,18 @@ jobs:
         shell: bash
         timeout-minutes: 10
         run: pnpm --filter gg-app smoke:tasks-actions
+
+      - name: Rust format check
+        if: runner.os == 'Linux'
+        working-directory: gg-app/src-tauri
+        shell: bash
+        run: cargo fmt --check
+
+      # Every OS: lib.rs has Windows- and macOS-only code paths.
+      - name: Rust lint (clippy)
+        working-directory: gg-app/src-tauri
+        shell: bash
+        run: cargo clippy --all-targets -- -D warnings
 
       - name: Rust unit tests (path + window-chrome resolution)
         working-directory: gg-app/src-tauri

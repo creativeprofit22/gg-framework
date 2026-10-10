@@ -83,7 +83,17 @@ try {
     for (const feed of feeds) {
       await page.getByRole("tab", { name: new RegExp(feed.label) }).click();
       assert.deepEqual(
-        await page.locator('[role="tabpanel"]:visible .whatsnew-item').allTextContents(),
+        // Each note in either layout (campfire story or history row); the
+        // story number beside it is decorative, so read the copy without it.
+        await page
+          .locator('[role="tabpanel"]:visible :is(.wn-camp-story, .wn-history-item)')
+          .evaluateAll((items) =>
+            items.map((item) => {
+              const copy = item.cloneNode(true);
+              copy.querySelectorAll('[aria-hidden="true"]').forEach((node) => node.remove());
+              return copy.textContent.replace(/\s+/g, " ").trim();
+            }),
+          ),
         feed.entries.flatMap(({ items }) => items.map((item) => item.replace(/`([^`]+)`/g, "$1"))),
       );
     }

@@ -30,6 +30,7 @@
 }
 .chat-error-blink.is-animated {
   animation: chat-error-blink 3.2s step-end infinite;
+  animation-play-state: var(--loop-play-state, running);
 }
 @keyframes chat-error-blink {
   0%,
@@ -43,7 +44,8 @@
     opacity: 1;
   }
 }
-.app:not(.window-focused) .chat-error-blink {
+/* Background windows rest with the eyes open rather than freezing mid-blink. */
+:root:is([data-motion="still"], [data-motion="off"]) .chat-error-blink {
   animation: none;
   opacity: 0;
 }
@@ -132,12 +134,10 @@
   outline: 2px solid var(--primary);
   outline-offset: 3px;
 }
-/* One grid row the body sits in: 1fr at rest, animated to 0fr on the way out,
-   so the collapse needs no measured height. The body clips while it shrinks;
-   the padding lives inside it so the gap above collapses too. */
+/* The stable shell owns measured height; all spacing is inside it. */
 .chat-error-details {
-  display: grid;
-  grid-template-rows: 1fr;
+  display: flow-root;
+  overflow: hidden;
   grid-column: 2 / -1;
   color: var(--text-secondary);
   font-size: var(--fs-base);
@@ -152,19 +152,18 @@
   overflow: hidden;
   padding-top: var(--space-4);
 }
-/* Leaving: dissolve out and fold the row shut together, over the same
-   duration as DETAILS_EXIT_MS, so it is already 0 tall when it is hidden. */
-.chat-error-details.leaving {
-  animation:
-    dissolve-in var(--dur-dissolve) var(--ease-in) reverse both,
-    chat-error-details-collapse var(--dur-dissolve) var(--ease-in-out) both;
+.chat-error-details:not([hidden]) .chat-error-details-body {
+  animation: fade-in var(--dur-row) var(--ease-out) both;
 }
-@keyframes chat-error-details-collapse {
+.chat-error-details.leaving .chat-error-details-body {
+  animation: details-out var(--dur-row) var(--ease-in) both;
+}
+@keyframes details-out {
   from {
-    grid-template-rows: 1fr;
+    opacity: 1;
   }
   to {
-    grid-template-rows: 0fr;
+    opacity: 0;
   }
 }
 .chat-error-details p {
@@ -179,10 +178,8 @@
   .chat-error-motion {
     transition: none;
   }
-  /* Match the shared reduced-motion dissolve: fade only, no blur and no
-     folding; the row closes once the fade is done. */
-  .chat-error-details.leaving {
-    animation: fade-in var(--dur-dissolve) var(--ease-in) reverse both;
+  .chat-error-details:not([hidden]) .chat-error-details-body {
+    animation: none;
   }
 }
 @media (forced-colors: active) {

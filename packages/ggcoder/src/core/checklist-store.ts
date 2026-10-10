@@ -15,6 +15,7 @@ import {
   getChecklistItem,
   type ChecklistItem,
 } from "./checklist-items.js";
+import { retryWindowsReplace } from "./session-storage.js";
 
 export const CHECKLIST_RESULTS = ["pass", "issues", "not-applicable"] as const;
 export type ChecklistResult = (typeof CHECKLIST_RESULTS)[number];
@@ -38,6 +39,8 @@ export interface ChecklistEntry {
   readonly result: ChecklistResult;
   readonly summary: string;
   readonly findings: readonly string[];
+  /** Findings the owner chose to leave as is, each with the reason. They don't block `pass`. */
+  readonly accepted: readonly string[];
   readonly evidence: readonly string[];
 }
 
@@ -71,6 +74,7 @@ const StoredEntry = z.object({
   result: z.enum(CHECKLIST_RESULTS),
   summary: clip(SUMMARY_MAX).catch(""),
   findings: clippedList(FINDING_MAX),
+  accepted: clippedList(FINDING_MAX),
   evidence: clippedList(EVIDENCE_MAX),
 });
 
@@ -150,9 +154,10 @@ export async function readChecklist(
   return { ok: true, value: { version: 1, items } };
 }
 
-/** Canonical JSON: ids sorted, fixed key order, 2-space indent, trailing newline. */
+/** Canonical JSON: ids sorted, fixed key order, 2-space indent, trailing newline.
+ * `accepted` is written only when non-empty, so records without it stay unchanged. */
 export function serializeChecklist(record: ChecklistRecord): string {
-  const items: Record<string, ChecklistEntry> = {};
+  const items: Record<string, Omit<ChecklistEntry, "accepted"> & { accepted?: string[] }> = {};
   for (const id of Object.keys(record.items).sort()) {
     const e = record.items[id];
     if (!e) continue;
@@ -163,28 +168,54 @@ export function serializeChecklist(record: ChecklistRecord): string {
       result: e.result,
       summary: e.summary,
       findings: [...e.findings],
+      ...(e.accepted.length > 0 ? { accepted: [...e.accepted] } : {}),
       evidence: [...e.evidence],
     };
   }
   return JSON.stringify({ version: 1, items }, null, 2) + "\n";
 }
 
+/** Windows refuses `mkdir` with one of these, not EEXIST, while a released lock
+ * dir is still pending delete. */
+const PENDING_DELETE_CODES = new Set(["EACCES", "EBUSY", "EPERM"]);
+
+/** Whether the lock dir is still there; a refused stat means it is mid-delete. */
+async function lockDirExists(lockPath: string): Promise<boolean> {
+  try {
+    await fs.stat(lockPath);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "ENOENT";
+  }
+}
+
 /** Atomic directory creation serializes distinct tools/processes, not just one session.
  * Fail closed on a busy/interrupted writer; never steal a live lock after a timeout. */
 async function acquireWriteLock(lockPath: string, signal?: AbortSignal): Promise<Result<void>> {
   const started = performance.now();
+  let refusedWithoutLock = 0;
   while (true) {
     if (signal?.aborted) return { ok: false, error: "Checklist recording cancelled" };
     try {
       await fs.mkdir(lockPath);
       return { ok: true, value: undefined };
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
-        return {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "EEXIST") {
+        const fault: Result<void> = {
           ok: false,
           error: `Could not lock ${CHECKLIST_FILE}: ${(error as Error).message}`,
         };
+        if (!code || !PENDING_DELETE_CODES.has(code)) return fault;
+        // Contention while the releasing writer's lock dir is still there. With no
+        // lock dir, retry in case its delete just finished; a refusal that persists
+        // is a genuine fault (e.g. an unwritable project), never one to wait out.
+        if (!(await lockDirExists(lockPath))) {
+          if (++refusedWithoutLock > 3) return fault;
+          continue;
+        }
       }
+      refusedWithoutLock = 0;
     }
     if (performance.now() - started >= 2500) {
       return {
@@ -224,7 +255,7 @@ export async function writeChecklistEntry(
       ...(signal ? { signal } : {}),
     });
     if (signal?.aborted) return { ok: false, error: "Checklist recording cancelled" };
-    await fs.rename(temp, target);
+    await retryWindowsReplace(() => fs.rename(temp, target));
     return { ok: true, value: next };
   } catch (err) {
     return { ok: false, error: `Could not write ${CHECKLIST_FILE}: ${(err as Error).message}` };
@@ -258,6 +289,7 @@ export interface ChecklistRow {
   readonly result: ChecklistResult | null;
   readonly summary: string | null;
   readonly findings: readonly string[];
+  readonly accepted: readonly string[];
   readonly evidence: readonly string[];
 }
 
@@ -284,6 +316,7 @@ export function checklistView(
       result: entry?.result ?? null,
       summary: entry?.summary ?? null,
       findings: entry?.findings ?? [],
+      accepted: entry?.accepted ?? [],
       evidence: entry?.evidence ?? [],
     };
   });

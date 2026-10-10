@@ -308,6 +308,10 @@ describe("classifyOverload", () => {
       new ProviderError("anthropic", "Bad Gateway", { statusCode: 502 }),
       new ProviderError("anthropic", "Service Unavailable", { statusCode: 503 }),
       new ProviderError("anthropic", "Gateway Timeout", { statusCode: 504 }),
+      // Cloudflare edge errors in front of the provider (an HTML body, no api_error).
+      ...[520, 521, 522, 523, 524].map(
+        (statusCode) => new ProviderError("anthropic", "<!DOCTYPE html><html>", { statusCode }),
+      ),
       new ProviderError("openai", "exceeded request buffer limit while retrying upstream", {
         statusCode: 507,
       }),
@@ -520,6 +524,23 @@ describe("agentLoop", () => {
         promptCacheKey: "shared-cache-family",
         toolChoice: "none",
       }),
+    );
+  });
+
+  it("forwards providerOptions and fetch to stream()", async () => {
+    mockStream.mockReturnValueOnce(mockOkResult("Done") as unknown as ReturnType<typeof stream>);
+    const customFetch = vi.fn() as unknown as typeof globalThis.fetch;
+    const providerOptions = { provider: { zdr: true, data_collection: "deny" } };
+
+    await collectLoop([{ role: "user", content: "test" }], {
+      provider: "openrouter",
+      model: "some/model",
+      providerOptions,
+      fetch: customFetch,
+    });
+
+    expect(mockStream).toHaveBeenCalledWith(
+      expect.objectContaining({ providerOptions, fetch: customFetch }),
     );
   });
 
@@ -2337,6 +2358,70 @@ describe("agentLoop", () => {
     expect(result.totalTurns).toBe(3);
   });
 
+  it("counts one strike per response when parallel calls fail with the same invalid arguments", async () => {
+    // Haiku 5.5 sent ten broken `edit` calls in one response; counting each
+    // call ended the run before the model ever saw the error.
+    const brokenBatch = {
+      message: {
+        role: "assistant" as const,
+        // Distinct args (identical calls are deduplicated earlier), same error.
+        content: ["a", "b", "c", "d"].map((id, i) => ({
+          type: "tool_call" as const,
+          id,
+          name: "bash",
+          args: { command: 100 + i },
+        })),
+      },
+      stopReason: "tool_use",
+      usage: { inputTokens: 50, outputTokens: 25 },
+    };
+    const fixed = {
+      message: {
+        role: "assistant" as const,
+        content: [{ type: "tool_call" as const, id: "e", name: "bash", args: { command: "ls" } }],
+      },
+      stopReason: "tool_use",
+      usage: { inputTokens: 50, outputTokens: 25 },
+    };
+    const done = {
+      message: { role: "assistant" as const, content: [{ type: "text" as const, text: "done" }] },
+      stopReason: "end_turn",
+      usage: { inputTokens: 50, outputTokens: 5 },
+    };
+    for (const response of [brokenBatch, fixed, done]) {
+      mockStream.mockReturnValueOnce({
+        [Symbol.asyncIterator]: async function* () {
+          yield* [];
+        },
+        response: Promise.resolve(response),
+      } as unknown as ReturnType<typeof stream>);
+    }
+
+    const { events, result } = await collectLoop(
+      [
+        { role: "system", content: "sys" },
+        { role: "user", content: "test" },
+      ],
+      {
+        provider: "anthropic",
+        model: "test",
+        tools: [
+          {
+            name: "bash",
+            description: "test",
+            parameters: z.object({ command: z.string() }),
+            execute: () => "ok",
+          },
+        ],
+      },
+    );
+
+    expect(events.filter((e) => e.type === "tool_call_end" && e.isError)).toHaveLength(4);
+    expect(events.filter((e) => e.type === "error")).toHaveLength(0);
+    expect(mockStream).toHaveBeenCalledTimes(3);
+    expect(result.totalTurns).toBe(3);
+  });
+
   it("auto-continues once after repeated EMPTY tool arguments, then stops if it recurs", async () => {
     // Empty args (`{}`) is the signature of a provider stream that closed the
     // tool_use block before ever sending argument tokens -- recoverable, so
@@ -2503,6 +2588,43 @@ describe("agentLoop", () => {
 
     expect(events.some((e) => e.type === "max_turns")).toBe(false);
     expect(events.some((e) => e.type === "agent_done")).toBe(true);
+  });
+});
+
+describe("agentLoop resolveTool", () => {
+  beforeEach(() => mockStream.mockReset());
+
+  it("runs a tool the model named before it was in the toolset", async () => {
+    const usage: Usage = { inputTokens: 1, outputTokens: 1 };
+    mockStream
+      .mockReturnValueOnce(
+        mockToolCallResult("late_tool", usage) as unknown as ReturnType<typeof stream>,
+      )
+      .mockReturnValueOnce(mockOkResult("done") as unknown as ReturnType<typeof stream>);
+    const lateTool: AgentTool = {
+      name: "late_tool",
+      description: "loaded on demand",
+      parameters: emptyParams,
+      execute: () => "late result",
+    };
+    const tools: AgentTool[] = [];
+    const resolveTool = vi.fn((name: string) => {
+      if (name !== "late_tool") return undefined;
+      tools.push(lateTool);
+      return lateTool;
+    });
+
+    const { events } = await collectLoop([{ role: "user", content: "go" }], {
+      provider: "anthropic",
+      model: "test",
+      tools,
+      resolveTool,
+    });
+
+    const end = events.find((e) => e.type === "tool_call_end");
+    expect(end).toMatchObject({ isError: false, result: "late result" });
+    expect(resolveTool).toHaveBeenCalledWith("late_tool");
+    expect(tools.map((t) => t.name)).toEqual(["late_tool"]);
   });
 });
 

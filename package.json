@@ -35,7 +35,6 @@
     "commands:install:trace": "node packages/ggcoder/scripts/install-trace-command.mjs",
     "commands:install:ux-audit": "node packages/ggcoder/scripts/install-ux-audit-command.mjs",
     "commands:install:ux-plan": "node packages/ggcoder/scripts/install-ux-plan-command.mjs",
-    "prepare": "pnpm build",
     "app:update:local-fixes": "pnpm --filter gg-app update:local-fixes",
     "app:build:local-patched": "pnpm --filter gg-app build:local-patched",
     "audit:generated:web": "node scripts/audit-generated.mjs web",
@@ -50,12 +49,9 @@
     "@eslint/js": "^10.0.1",
     "eslint": "^10.10.0",
     "eslint-config-prettier": "^10.1.8",
+    "playwright": "^1.63.0",
     "prettier": "^3.9.6",
     "tsup": "^8.5.1",
     "typescript-eslint": "^8.70.0"
-  },
-  "dependencies": {
-    "marked": "^15.0.12",
-    "playwright": "^1.63.0"
   }
 }

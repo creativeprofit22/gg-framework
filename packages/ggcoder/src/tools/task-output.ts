@@ -10,22 +10,15 @@ import { truncateTail, describeCompressed } from "./truncate.js";
 import { compressToolOutput } from "./compress.js";
 
 const TaskOutputParams = z.object({
-  id: z.string().describe("The background process ID"),
-  from_start: z
-    .boolean()
-    .optional()
-    .describe("If true, read output from the beginning instead of incrementally"),
+  id: z.string(),
+  from_start: z.boolean().optional(),
   wait_ms: z
     .number()
     .int()
     .min(1000)
     .max(MAX_PROCESS_WAIT_MS)
     .optional()
-    .describe(
-      `Block until the process exits or a declared wake condition fires, up to this many ms (max ${MAX_PROCESS_WAIT_MS}), then read. ` +
-        "For dev servers, declare a readiness wake.pattern when starting, then check HTTP once it matches. " +
-        "Omit wait_ms to read immediately; never wait for a ready server to exit.",
-    ),
+    .describe(`Block until exit or a wake fires (max ${MAX_PROCESS_WAIT_MS})`),
 });
 
 export interface TaskOutputDetails {
@@ -54,14 +47,7 @@ export function createTaskOutputTool(
 ): AgentTool<typeof TaskOutputParams> {
   return {
     name: "task_output",
-    description:
-      "Read output from a background process. Returns new output since last read by default. " +
-      "Use from_start=true to read from the beginning. Progress and exit status arrive " +
-      "automatically for background processes \u2014 call this when you need the full output, " +
-      "not merely to check whether something finished. Set wait_ms to block until the " +
-      "process exits OR its declared wake condition fires (wait_agent is for child agents). " +
-      "A wake match is not an exit or proof of success: inspect the output. " +
-      "For dev servers, check HTTP readiness, then finish while leaving the server running.",
+    description: "Read a background process's new output (a wake match is not success).",
     parameters: TaskOutputParams,
     executionMode: "sequential",
     // Waiting can exceed the default per-tool ceiling but remains process-bounded.

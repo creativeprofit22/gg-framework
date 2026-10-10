@@ -32,11 +32,8 @@ import {
 import { editTargetLabel } from "./edit-targets.js";
 
 const SubAgentParams = z.object({
-  task: z.string().describe("The task to delegate to the sub-agent"),
-  agent: z
-    .string()
-    .optional()
-    .describe("Named agent definition to use (from ~/.gg/agents/ or .gg/agents/)"),
+  task: z.string(),
+  agent: z.string().optional().describe("Named agent"),
   checks: AcceptanceChecksParam,
 });
 
@@ -53,7 +50,7 @@ export interface SubAgentDetails {
 }
 
 const SUBAGENT_DESCRIPTION =
-  "Spawn an isolated sub-agent to handle a focused task and block until it answers. The sub-agent runs as a separate process with its own context window, tools, and system prompt, and sees none of this conversation — so its task must stand alone.";
+  "Run an isolated sub-agent on a focused task and wait for its answer. It sees none of this conversation, so the task must stand alone.";
 
 /**
  * The `subagent` tool description. When `spawn_agent` is also active it
@@ -65,7 +62,7 @@ export function subAgentDescription(
   rosterOnSpawnAgent: boolean,
 ): string {
   if (rosterOnSpawnAgent && agents.length > 0) {
-    return `${SUBAGENT_DESCRIPTION}\n\nNamed agents: the same roster listed on \`spawn_agent\`; pass one as \`agent\`.`;
+    return `${SUBAGENT_DESCRIPTION} Named agents: see \`spawn_agent\`.`;
   }
   return SUBAGENT_DESCRIPTION + renderAgentRoster(agents);
 }

@@ -1,9 +1,15 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { QueuedBar } from "./QueuedBar";
+import { useLayoutEffect } from "react";
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  Reflect.deleteProperty(Element.prototype, "animate");
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
+});
 
 const ONE = [{ id: "q1", text: "check the railway logs" }];
 const THREE = [
@@ -19,6 +25,12 @@ describe("QueuedBar", () => {
   });
 
   describe("exit animation", () => {
+    beforeEach(() => {
+      Object.defineProperty(Element.prototype, "animate", {
+        configurable: true,
+        value: vi.fn(() => ({ cancel: vi.fn() })),
+      });
+    });
     it("holds the last message on screen so the exit can play", () => {
       // Unmounting the instant the queue empties leaves nothing to animate, so
       // the bar keeps its final snapshot and marks itself leaving.
@@ -69,10 +81,42 @@ describe("QueuedBar", () => {
     });
   });
 
-  // The enter keyframe grows max-height to --pin-h. Without it the strip runs
-  // toward a 220px guess, is fully open in a frame or two, and shoves the
-  // transcript up in one jump as a queued message lands.
-  it("pins its real height on mount so the strip grows open smoothly", () => {
+  it.each(["reduced motion", "missing WAAPI"])(
+    "removes the final message immediately with %s",
+    (mode) => {
+      vi.useFakeTimers();
+      if (mode === "reduced motion") {
+        vi.stubGlobal(
+          "matchMedia",
+          vi.fn(() => ({ matches: true })),
+        );
+        Object.defineProperty(Element.prototype, "animate", {
+          configurable: true,
+          value: vi.fn(() => ({ cancel: vi.fn() })),
+        });
+      }
+      const { rerender } = render(<QueuedBar messages={ONE} onCancel={vi.fn()} />);
+      rerender(<QueuedBar messages={[]} onCancel={vi.fn()} />);
+      expect(document.querySelector(".queued-bar")).toBeNull();
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
+
+  it("inserts the queued message in the parent's first layout transaction", () => {
+    const observed = vi.fn();
+    function Parent({ messages }: { messages: typeof ONE }) {
+      useLayoutEffect(() => {
+        observed(document.querySelector(".chat-queue")?.textContent);
+      }, [messages]);
+      return <QueuedBar messages={messages} onCancel={vi.fn()} />;
+    }
+    const { rerender } = render(<Parent messages={[]} />);
+    rerender(<Parent messages={ONE} />);
+    expect(observed).toHaveBeenLastCalledWith(expect.stringContaining(ONE[0].text));
+  });
+
+  // The retained strip's exit still needs its actual size, never a guessed cap.
+  it("pins its real height for the retained strip exit", () => {
     render(<QueuedBar messages={ONE} onCancel={vi.fn()} />);
     const bar = document.querySelector<HTMLElement>(".queued-bar");
     expect(bar?.style.getPropertyValue("--pin-h")).toMatch(/^\d+px$/);
@@ -143,6 +187,28 @@ describe("QueuedBar", () => {
     expect(document.querySelector(".queued-list")).toBeTruthy();
 
     rerender(<QueuedBar messages={ONE} onCancel={vi.fn()} />);
+    expect(document.querySelector(".queued-list")).toBeNull();
+  });
+
+  it("retains an inert list through collapse and revives it without stale removal", () => {
+    vi.useFakeTimers();
+    Object.defineProperty(Element.prototype, "animate", {
+      configurable: true,
+      value: vi.fn(() => ({ cancel: vi.fn() })),
+    });
+    const { rerender } = render(<QueuedBar messages={THREE} onCancel={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: /cancel/ }));
+    fireEvent.click(screen.getByRole("button", { name: "hide" }));
+    expect(document.querySelector(".queued-list-shell")?.hasAttribute("inert")).toBe(true);
+    expect(document.querySelectorAll(".queued-list-item")).toHaveLength(3);
+    act(() => vi.advanceTimersByTime(75));
+    fireEvent.click(screen.getByRole("button", { name: /cancel/ }));
+    act(() => vi.advanceTimersByTime(220));
+    expect(document.querySelectorAll(".queued-list-item")).toHaveLength(3);
+    expect(document.querySelector(".queued-list-shell")?.hasAttribute("inert")).toBe(false);
+    rerender(<QueuedBar messages={ONE} onCancel={vi.fn()} />);
+    expect(document.querySelector(".queued-list-shell")?.getAttribute("aria-hidden")).toBe("true");
+    act(() => vi.advanceTimersByTime(220));
     expect(document.querySelector(".queued-list")).toBeNull();
   });
 

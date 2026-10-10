@@ -20,12 +20,15 @@ import {
   useState,
   type SetStateAction,
 } from "react";
+import { createChatLayoutMotion } from "./chat-layout-motion";
+import { createEntranceLifetime, dissolveInVisible, enterTranscriptRow } from "./transcript-motion";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { theme } from "./theme";
 import { WorkingBeam } from "./WorkingBeam";
 import { ChatErrorNotice } from "./ChatErrorNotice";
 import { withViewTransition } from "./view-transition";
+import { parseProjectHealth } from "./project-health";
 import { assignErrorCritters } from "./ErrorCritter";
 import { activeChatErrorId, readChatError, type ChatErrorItem } from "./chat-error";
 import { usePaneSwapViewState, type RegisterPaneSwapViewState } from "./usePaneSwapViewState";
@@ -163,8 +166,6 @@ import { PlanReviewModal } from "./PlanReviewModal";
 import { ReviewDock, type ReviewDockItem } from "./ReviewDock";
 import { McpElicitModal } from "./McpElicitModal";
 import { WindowLayoutButton } from "./WindowLayoutButton";
-// Experimental gaze focus — disabled for now (see main.tsx).
-// import { GazeButton } from "./GazeButton";
 import { RadioButton } from "./RadioButton";
 import { ProjectPicker } from "./ProjectPicker";
 import { ChatPicker } from "./ChatPicker";
@@ -1174,6 +1175,11 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   const [needsProject, setNeedsProject] = useState(true);
   const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>("code");
   commandModeRef.current = workspaceMode;
+  const rawProjectHealth = state?.projectHealth;
+  const projectHealth = useMemo(
+    () => (workspaceMode === "code" ? parseProjectHealth(rawProjectHealth) : null),
+    [workspaceMode, rawProjectHealth],
+  );
   // False until the boot-time workspace-restore check resolves.
   const [restoreChecked, setRestoreChecked] = useState(false);
   // Every window starts from the mode-neutral home screen before choosing Code or Chat.
@@ -1427,6 +1433,16 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   // reveal fully-formed in one pass instead of popping in piecemeal (cwd, git,
   // thinking, model each arriving separately would reflow the bar mid-load).
   const [hydrated, setHydrated] = useState(false);
+  // Rows at or after this id arrived live (after hydration) and may play an entrance.
+  const [liveFromId, setLiveFromId] = useState(Number.POSITIVE_INFINITY);
+  const entrances = useMemo(() => createEntranceLifetime(liveFromId), [liveFromId]);
+  const chatView = useMemo(() => ({ visible: !showChecklist }), [showChecklist]);
+  // Children consume before playback. This parent effect also settles messages
+  // received while Activity is hidden, when their own effects cannot run.
+  useLayoutEffect(() => {
+    const last = items[items.length - 1];
+    if (last) entrances.settle(last.id);
+  }, [entrances, items, showChecklist]);
 
   const readyRef = useRef(false);
   // Mirror of `state` for use inside the memoized event handler (which doesn't
@@ -1434,6 +1450,15 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   // provider without re-subscribing the SSE listener on every state change.
   const stateRef = useRef<AgentState | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const liveRegionRef = useRef<HTMLDivElement>(null);
+  const chatLayout = useMemo(
+    () =>
+      createChatLayoutMotion(() => ({
+        transcript: scrollRef.current,
+        surfaces: [liveRegionRef.current],
+      })),
+    [],
+  );
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const projectNotesActionsRef = useRef<ProjectNotesPromptActions>(null);
   const observedSessionResetOperationsRef = useRef<Set<string>>(new Set());
@@ -1492,6 +1517,14 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     // this jump; measuring it from the pre-jump offset would read up as down.
     lastScrollTopRef.current = el.scrollTop;
   }, []);
+
+  // Motion continuity (upstream 9494aa2c): commit captured layout before paint.
+  useLayoutEffect(() => {
+    if (chatLayout.commit(stickToBottomRef.current, scrollToBottom) && scrollRef.current) {
+      lastScrollTopRef.current = scrollRef.current.scrollTop;
+    }
+  });
+  useLayoutEffect(() => () => chatLayout.cancel(), [chatLayout, hydrateNonce]);
 
   // Same as scrollToBottom, but a no-op while the user has scrolled up to read.
   const maybeScrollToBottom = useCallback(() => {
@@ -1624,6 +1657,8 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     let raf2 = 0;
     raf1 = requestAnimationFrame(() => {
       maybeScrollToBottom();
+      // After the first pin, so the rows that dissolve are the ones in view.
+      if (scrollRef.current) dissolveInVisible(scrollRef.current);
       raf2 = requestAnimationFrame(maybeScrollToBottom);
     });
     let cancelled = false;
@@ -2507,6 +2542,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     };
     readyRef.current = false;
     setHydrated(false);
+    setLiveFromId(Number.POSITIVE_INFINITY);
     setStatus("connecting to agent\u2026");
     setConnectError(null);
     setModelsFailed(false);
@@ -2699,6 +2735,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       setHydrated(true);
     } finally {
       if (hydrationEventsRef.current === pending) hydrationEventsRef.current = null;
+      if (isCurrent()) setLiveFromId(idSeq + 1);
     }
   }, [
     client,
@@ -3114,9 +3151,9 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     );
   }
 
-  // Top-right commit affordance: once a project-local `/commit` exists it shows
-  // `/commit`; until then it offers `/setup-commit` to generate one. Only shown
-  // when at least one of the two is available from the sidecar.
+  // Top-right commit affordance. `/commit` is built in (it runs the project's
+  // checks, reviews, commits and pushes), so every project gets it; the
+  // `/setup-commit` fallback only covers an older sidecar that lacks it.
   const hasCommit = commands.some((c) => c.name === "commit");
   const hasSetupCommit = commands.some((c) => c.name === "setup-commit");
   const commitCommand = hasCommit ? "commit" : hasSetupCommit ? "setup-commit" : null;
@@ -3378,6 +3415,15 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   // schedule that comes due mid-sentence deletes what the user was typing.
   // Returns whether the prompt was dispatched; `onError` replaces the default
   // failure report for callers (the checklist) that surface it themselves.
+  // Project Health → agent. The prompt (from the sidecar) has the agent check
+  // the findings and ask with ask_user before fixing anything. Like a checklist
+  // run it leaves the composer draft alone and returns to the chat.
+  function reviewProjectHealth(prompt: string, label: string): boolean {
+    if (!submitText(prompt, label, { keepInput: true })) return false;
+    if (showChecklist) withViewTransition(() => setShowChecklist(false));
+    return true;
+  }
+
   function submitText(
     text: string,
     label?: string,
@@ -5060,7 +5106,9 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
         gitHubCI={state?.gitHubCI}
         additionalRoots={state?.additionalRoots}
         navHidden={navHidden}
-        onToggleNav={toggleNav}
+        projectHealth={projectHealth}
+        onReviewHealth={reviewProjectHealth}
+        onToggleNav={() => withViewTransition(toggleNav)}
         paneChromeSlotRef={props.paneChromeSlotRef}
         leading={
           <BackButton
@@ -5208,7 +5256,6 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
                 Checklist
               </button>
               <RadioButton />
-              {/* <GazeButton /> */}
               <WindowLayoutButton
                 onArrange={() => {
                   setNavHiddenPersisted(true);
@@ -5323,6 +5370,9 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
                         createElement(TranscriptRow, {
                           key: it.id,
                           item: it,
+                          view: chatView,
+                          animateIn: it.id >= liveFromId,
+                          consumeEntrance: entrances.consume,
                           kenTalking: it.id === talkingKenId,
                           errorActive: it.id === currentErrorId,
                           errorCritterId: errorCritters.get(it.id),
@@ -5409,7 +5459,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
         {/* Sub-agents walk on top of the pinned region as critters; the lane
           opens (pushing the chat up) only while one is out. */}
         <CritterFloor groups={critterGroups} />
-        <div className="liveregion">
+        <div ref={liveRegionRef} className="liveregion">
           {/* Starting points sit just above the activity bar, only for an empty,
             loaded, ready conversation. They fill the composer (never send) and
             hide as soon as the user types or attaches something. */}
@@ -6323,7 +6373,41 @@ function KenReply({
 // object reference for every untouched row, and `onImageLoad` is a stable
 // useCallback, so a default shallow `memo` re-renders only the rows whose
 // `item` actually changed and the rest bail out.
+// Entrance wrapper (upstream 9494aa2c): live rows keep a stable wrapper and
+// consume entrance eligibility once; the body below renders the row itself.
 const TranscriptRow = memo(function TranscriptRow({
+  view,
+  animateIn = false,
+  consumeEntrance,
+  ...rest
+}: React.ComponentProps<typeof TranscriptRowBody> & {
+  view: { readonly visible: boolean };
+  animateIn?: boolean;
+  consumeEntrance: (id: number) => boolean;
+}): React.ReactElement | null {
+  const entranceRef = useRef<HTMLDivElement>(null);
+  const itemId = rest.item.id;
+  useLayoutEffect(() => {
+    if (!view.visible || !animateIn) return;
+    const el = entranceRef.current;
+    if (!consumeEntrance(itemId)) {
+      for (const word of el?.querySelectorAll(".md-word") ?? []) {
+        for (const animation of word.getAnimations?.() ?? []) animation.cancel();
+      }
+      return;
+    }
+    if (el) return enterTranscriptRow(el);
+  }, [animateIn, consumeEntrance, itemId, view]);
+  const row = createElement(TranscriptRowBody, rest);
+  if (!animateIn) return row;
+  return (
+    <div ref={entranceRef} data-kind={rest.item.kind}>
+      {row}
+    </div>
+  );
+});
+
+const TranscriptRowBody = memo(function TranscriptRowBody({
   item,
   kenTalking = false,
   errorActive = false,

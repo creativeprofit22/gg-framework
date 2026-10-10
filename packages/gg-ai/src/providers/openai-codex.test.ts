@@ -780,8 +780,8 @@ describe("streamOpenAICodex", () => {
     const body = JSON.parse(init.body as string) as Record<string, unknown>;
     expect(init.headers).toMatchObject({
       originator: "codex_cli_rs",
-      version: "0.159.1",
-      "User-Agent": "codex_cli_rs/0.159.1",
+      version: "0.161.0",
+      "User-Agent": "codex_cli_rs/0.161.0",
       "X-OpenAI-Internal-Codex-Responses-Lite": "true",
     });
     expect(body).toMatchObject({
@@ -872,7 +872,7 @@ describe("streamOpenAICodex", () => {
     // The server rejects parallel_tool_calls under lite, so the header and the
     // flag must flip together; the Codex identity and verbosity stay.
     expect(headers).not.toHaveProperty("X-OpenAI-Internal-Codex-Responses-Lite");
-    expect(headers).toMatchObject({ originator: "codex_cli_rs", version: "0.159.1" });
+    expect(headers).toMatchObject({ originator: "codex_cli_rs", version: "0.161.0" });
     expect(body.parallel_tool_calls).toBe(true);
     expect(body.reasoning).not.toHaveProperty("context");
     expect(body.text).toEqual({ verbosity: "low" });
@@ -1372,6 +1372,46 @@ describe("streamOpenAICodex", () => {
     expect(events).toContainEqual({ type: "thinking_delta", text: "a" });
     expect(events).toContainEqual({ type: "thinking_delta", text: "b" });
     expect(events).toContainEqual({ type: "thinking_delta", text: "c" });
+  });
+
+  it("separates reasoning summary sections with a blank line", async () => {
+    // Real gpt-6-luna stream shape: one bold headline per summary part, across
+    // two reasoning items. Glued together they render as "**A****B**".
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        createSseResponse([
+          { type: "response.output_item.added", item: { id: "rs_1", type: "reasoning" } },
+          { type: "response.reasoning_summary_part.added", item_id: "rs_1", summary_index: 0 },
+          { type: "response.reasoning_summary_text.delta", delta: "**Comparing plans**" },
+          { type: "response.reasoning_summary_part.added", item_id: "rs_1", summary_index: 1 },
+          { type: "response.reasoning_summary_text.delta", delta: "**Checking costs**" },
+          { type: "response.output_item.added", item: { id: "rs_2", type: "reasoning" } },
+          { type: "response.reasoning_summary_part.added", item_id: "rs_2", summary_index: 0 },
+          { type: "response.reasoning_summary_text.delta", delta: "**Verifying**" },
+          {
+            type: "response.completed",
+            response: { usage: { input_tokens: 10, output_tokens: 5 } },
+          },
+        ]),
+      ),
+    );
+
+    const result = streamOpenAICodex({
+      provider: "openai",
+      model: "gpt-6-luna",
+      messages: [{ role: "user", content: "hi" }],
+      apiKey: "token",
+      accountId: "acct",
+      thinking: "high",
+    });
+
+    let thinking = "";
+    for await (const event of result) {
+      if (event.type === "thinking_delta") thinking += event.text;
+    }
+
+    expect(thinking).toBe("**Comparing plans**\n\n**Checking costs**\n\n**Verifying**");
   });
 
   it("emits only missing final text from output_text.done", async () => {

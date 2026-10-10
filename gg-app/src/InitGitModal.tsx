@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { theme } from "./theme";
 import { Modal } from "./Modal";
+import { ModalDismissButton } from "./modal-embed";
 import {
   DEFAULT_GIT_BOOTSTRAP_OPTIONS,
   buildGitBootstrapPrompt,
@@ -125,9 +126,7 @@ export function InitGitModal({ defaultName, onClose, onInitialize }: Props): Rea
       </div>
 
       <div className="modal-actions">
-        <button className="modal-btn" onClick={onClose}>
-          Cancel
-        </button>
+        <ModalDismissButton onClick={onClose}>Cancel</ModalDismissButton>
         <button className="modal-btn primary" disabled={!canInit} onClick={initialize}>
           Initialize
         </button>

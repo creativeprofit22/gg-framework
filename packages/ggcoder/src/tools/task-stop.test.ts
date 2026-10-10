@@ -16,9 +16,7 @@ describe("task_stop tool", () => {
     const tool = createTaskStopTool(processManager);
 
     expect(tool.description).toBe(
-      "Stop a managed background process by closing stdin (EOF) first, waiting up to two seconds " +
-        "for a clean exit, then escalating through configured process-tree cleanup if needed. " +
-        "Returns the final state and unread output.",
+      "Stop a background process (stdin EOF first, then process-tree kill).",
     );
     expect(tool.executionMode).toBe("sequential");
 

@@ -1,11 +1,13 @@
-import { useEffect, useId, useState, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, type ReactNode } from "react";
+import { useAnimatedHeight } from "./animated-height";
+import { prefersReducedMotion } from "./transcript-motion";
 import { ErrorCritter } from "./ErrorCritter";
 import { usePresenceList } from "./usePresenceList";
 import { chatErrorCopy, chatErrorTone, type ChatErrorData } from "./chat-error";
 import "./ChatErrorNotice.css";
 
-// Matches --dur-dissolve; retain the details until their exit has finished.
-const DETAILS_EXIT_MS = 340;
+// Matches --dur-row and useAnimatedHeight; retain content through the fold.
+const DETAILS_EXIT_MS = 220;
 const OPEN_DETAILS = ["details"] as const;
 const CLOSED_DETAILS = [] as const;
 
@@ -24,10 +26,13 @@ export function ChatErrorNotice({
   onContentGrow?: (() => void) | undefined;
 }): React.ReactElement {
   const [expanded, setExpanded] = useState(false);
+  const detailsRef = useRef<HTMLDivElement>(null);
+  const capture = useAnimatedHeight(detailsRef, expanded, error);
+  const immediate = prefersReducedMotion() || typeof Element.prototype.animate !== "function";
   const details = usePresenceList(
     expanded ? OPEN_DETAILS : CLOSED_DETAILS,
     (key) => key,
-    DETAILS_EXIT_MS,
+    immediate ? 0 : DETAILS_EXIT_MS,
   );
   const detailsLeaving = details[0]?.leaving ?? false;
   const [motion, setMotion] = useState(true);
@@ -73,7 +78,10 @@ export function ChatErrorNotice({
             aria-label={expanded ? "Hide error details" : "Show error details"}
             aria-expanded={expanded}
             aria-controls={detailsId}
-            onClick={() => setExpanded((value) => !value)}
+            onClick={() => {
+              capture();
+              setExpanded((value) => !value);
+            }}
           >
             Details
           </button>
@@ -85,13 +93,14 @@ export function ChatErrorNotice({
       </div>
       <div
         id={detailsId}
-        className={`chat-error-details${detailsLeaving ? " leaving" : " dissolve-in"}`}
-        hidden={details.length === 0}
+        ref={detailsRef}
+        className={`chat-error-details${detailsLeaving ? " leaving" : ""}`}
+        style={{ height: expanded ? undefined : 0 }}
+        hidden={!expanded && (immediate || details.length === 0)}
         aria-hidden={!expanded}
         inert={!expanded}
       >
-        {/* The body is the collapsing grid row: closing shrinks it to nothing
-            while it dissolves, so the chat below glides up instead of jumping. */}
+        {/* Padding stays inside the measured shell, including during exit. */}
         <div className="chat-error-details-body">
           {!error.reason && error.headline && <p>{error.headline}</p>}
           {error.message || error.text ? (

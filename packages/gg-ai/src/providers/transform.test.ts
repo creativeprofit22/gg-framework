@@ -228,7 +228,14 @@ describe("Anthropic transform", () => {
     const originalParameters = tool.parameters;
     const expected = raw
       ? rawInputSchema.oneOf.map((branch) => branch.properties.value)
-      : parameters.options.map((branch) => z.toJSONSchema(branch).properties!.value);
+      : // zodToJsonSchema strips Zod's no-op ±MAX_SAFE_INTEGER bounds.
+        parameters.options.map((branch) => {
+          const { maximum, ...value } = z.toJSONSchema(branch).properties!.value as Record<
+            string,
+            unknown
+          >;
+          return maximum === Number.MAX_SAFE_INTEGER ? value : { ...value, maximum };
+        });
     expect(toAnthropicTools([tool])[0]?.input_schema.properties).toEqual({
       value: { anyOf: expected },
     });
@@ -365,6 +372,60 @@ describe("Anthropic transform", () => {
     expect(result.system?.[0]).toHaveProperty("cache_control");
     expect(result.system?.[1]).not.toHaveProperty("cache_control");
     expect(result.system?.[1]?.text).toBe("Today's date: 17 May 2026");
+  });
+
+  describe("conversation cache breakpoints with a 1-h TTL", () => {
+    const long = { type: "ephemeral" as const, ttl: "1h" as const };
+    const short = { type: "ephemeral" as const };
+    const call = (id: string): Message => ({
+      role: "assistant",
+      content: [{ type: "tool_call", id, name: "bash", args: { command: "ls" } }],
+    });
+    const result = (id: string): Message => ({
+      role: "tool",
+      content: [{ type: "tool_result", toolCallId: id, content: "ok" }],
+    });
+    // cache_control per wire message (last block), in order.
+    const marks = (messages: Message[], cc: typeof long | typeof short) =>
+      toAnthropicMessages(messages, cc).messages.map((m) => {
+        const content = m.content;
+        if (typeof content === "string") return undefined;
+        return (content.at(-1) as { cache_control?: unknown } | undefined)?.cache_control;
+      });
+
+    it("writes the opening user message of a turn at 1 h", () => {
+      expect(marks([{ role: "user", content: "fix it" }], long)).toEqual([long]);
+    });
+
+    it("pins the turn's user message at 1 h and caches the tool loop at 5 min", () => {
+      const messages: Message[] = [
+        { role: "user", content: "fix it" },
+        call("a"),
+        result("a"),
+        call("b"),
+        result("b"),
+      ];
+
+      expect(marks(messages, long)).toEqual([long, undefined, undefined, undefined, short]);
+    });
+
+    it("keeps the previous turn's opening message pinned when a new turn starts", () => {
+      const messages: Message[] = [
+        { role: "user", content: "fix it" },
+        call("a"),
+        result("a"),
+        { role: "assistant", content: "Fixed." },
+        { role: "user", content: "thanks, now test it" },
+      ];
+
+      expect(marks(messages, long)).toEqual([long, undefined, undefined, undefined, long]);
+    });
+
+    it("keeps a single breakpoint on the last message with a 5-min TTL", () => {
+      const messages: Message[] = [{ role: "user", content: "fix it" }, call("a"), result("a")];
+
+      expect(marks(messages, short)).toEqual([undefined, undefined, short]);
+    });
   });
 
   it("adds cache_control only to the last tool definition", () => {
@@ -834,23 +895,33 @@ describe("toAnthropicThinking", () => {
       for (const level of ["low", "medium", "high", "xhigh", "max"] as const) {
         const result = toAnthropicThinking(level, MAX_TOKENS, model);
         expect(result.outputConfig).toEqual({ effort: level });
-        expect((result.thinking as { type: string }).type).toBe("adaptive");
+        expect(result.thinking).toEqual({ type: "adaptive", display: "omitted" });
       }
     }
   });
 
-  it("passes xhigh through unchanged for Sonnet 5.5", () => {
-    const result = toAnthropicThinking("xhigh", 128000, "claude-sonnet-5-5");
-    expect(result.outputConfig?.effort).toBe("xhigh");
-    expect((result.thinking as { type: string }).type).toBe("adaptive");
+  // Reasoning text is never rendered, and "summarized" slows output on
+  // Haiku 5.5 (bench/h2h: 151 → 191 tok/s per request with "omitted").
+  it.each([
+    "claude-haiku-5-5",
+    "claude-sonnet-5-5",
+    "claude-sonnet-5",
+    "claude-opus-5-5",
+    "claude-fable-5-1",
+    "claude-mythos-5",
+  ])("asks %s to omit thinking text", (model) => {
+    expect(toAnthropicThinking("low", MAX_TOKENS, model).thinking).toEqual({
+      type: "adaptive",
+      display: "omitted",
+    });
   });
 
-  it.each(["claude-sonnet-5-5", "claude-sonnet-5.5"])(
+  it.each(["claude-sonnet-5-5", "claude-sonnet-5.5", "claude-haiku-5-5", "claude-haiku-5.5"])(
     "passes every adaptive effort through for %s",
     (model) => {
       for (const level of ["low", "medium", "high", "xhigh", "max"] as const) {
         expect(toAnthropicThinking(level, MAX_TOKENS, model)).toEqual({
-          thinking: { type: "adaptive" },
+          thinking: { type: "adaptive", display: "omitted" },
           maxTokens: MAX_TOKENS,
           outputConfig: { effort: level },
         });
@@ -879,13 +950,13 @@ describe("toAnthropicThinking", () => {
   });
 
   it("keeps budget-based max_tokens within the model ceiling (no doubling)", () => {
-    // Haiku 4.5 is a legacy budget model. max_tokens is the total response
+    // An older, non-adaptive id takes the legacy budget path. max_tokens is the total response
     // envelope and must stay ≤ the ceiling (64K here); budget_tokens must be
     // strictly less than max_tokens. Previously this returned maxTokens +
     // budget (128K), which exceeds the provider's output-token cap.
     const CEILING = 64_000;
     for (const level of ["low", "medium", "high", "xhigh", "max", "ultra"] as const) {
-      const result = toAnthropicThinking(level, CEILING, "claude-haiku-4-5");
+      const result = toAnthropicThinking(level, CEILING, "claude-retired-model");
       expect(result.maxTokens).toBeLessThanOrEqual(CEILING);
       const budget = (result.thinking as { budget_tokens?: number }).budget_tokens!;
       expect(budget).toBeGreaterThan(0);

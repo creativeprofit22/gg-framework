@@ -123,21 +123,20 @@ describe("selectSubAgent", () => {
 
   it("gives a sub-agent on a model that cannot reason no thinking level", () => {
     expect(
-      selectSubAgent([], undefined, "huggingface", "Qwen/Qwen3-Coder-480B-A35B-Instruct")
-        .thinkingLevel,
+      selectSubAgent([], undefined, "huggingface", "moonshotai/Kimi-K2.7-Code").thinkingLevel,
     ).toBeUndefined();
   });
 
   it("honours an explicit model id, at that model's lowest thinking level", () => {
-    const pinned = agent({ name: "pinned", model: "claude-haiku-4-5" });
-    const haikuLowest = getSupportedThinkingLevels("anthropic", "claude-haiku-4-5")[0];
-    // Haiku's ladder differs from Opus's, so this proves the rung follows the
+    const pinned = agent({ name: "pinned", model: "claude-retired-model" });
+    const pinnedLowest = getSupportedThinkingLevels("anthropic", "claude-retired-model")[0];
+    // A retired model's ladder differs from Opus's, so this proves the rung follows the
     // model the child runs on, not the parent.
-    expect(haikuLowest).not.toBe(getSupportedThinkingLevels("anthropic", "claude-opus-5-5")[0]);
+    expect(pinnedLowest).not.toBe(getSupportedThinkingLevels("anthropic", "claude-opus-5-5")[0]);
 
     expect(selectSubAgent([pinned], "pinned", "anthropic", "claude-opus-5-5")).toMatchObject({
-      model: "claude-haiku-4-5",
-      thinkingLevel: haikuLowest,
+      model: "claude-retired-model",
+      thinkingLevel: pinnedLowest,
     });
   });
 

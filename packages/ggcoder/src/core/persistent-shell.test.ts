@@ -1,8 +1,10 @@
 import { spawn, type SpawnOptions } from "node:child_process";
 import { describe, it, expect, afterEach, vi } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
+import path from "node:path";
 import { localProcessLifecycle } from "../tools/operations.js";
-import { PersistentShell } from "./persistent-shell.js";
+import { PersistentShell, buildRestoreScript, parseStateSnapshot } from "./persistent-shell.js";
 import { resolveShell } from "./shell.js";
 
 const isWindows = os.platform() === "win32";
@@ -136,9 +138,9 @@ d("PersistentShell", () => {
     await sh.run("export GG_PSH_STATE=set", 10_000, signal());
     const timedOut = await sh.run("sleep 30", 300, signal());
     expect(timedOut).toMatchObject({ reason: "timedOut", exitCode: null, signal: null });
-    // Fresh shell: the exported var from before the timeout is gone.
+    // Fresh shell, restored from the snapshot taken before the timeout.
     const res = await sh.run('echo "[$GG_PSH_STATE]"', 10_000, signal());
-    expect(res.output).toBe("[]\n");
+    expect(res.output).toBe("[set]\n");
   });
 
   it("stops a silent command as inactive; the next call gets a fresh shell", async () => {
@@ -147,7 +149,22 @@ d("PersistentShell", () => {
     const inactive = await sh.run("sleep 30", 10_000, signal(), undefined, undefined, 300);
     expect(inactive).toMatchObject({ reason: "inactive", exitCode: null, signal: null });
     const res = await sh.run('echo "[$GG_PSH_STATE]"', 10_000, signal());
-    expect(res.output).toBe("[]\n");
+    expect(res.output).toBe("[set]\n");
+  });
+
+  it("restores the working directory in the shell started after a kill", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "gg-psh-cwd-"));
+    try {
+      const sh = make();
+      const before = await sh.run(`cd '${dir.replace(/\\/g, "/")}' && pwd -P`, 10_000, signal());
+      expect(before.exitCode).toBe(0);
+      sh.kill();
+      const after = await sh.run("pwd -P", 10_000, signal());
+      expect(after.exitCode).toBe(0);
+      expect(after.output).toBe(before.output);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("output keeps re-arming the inactivity limit", async () => {
@@ -203,5 +220,31 @@ d("PersistentShell", () => {
     expect(busy.output).toContain("busy");
     const done = await slow;
     expect(done.output).toBe("done\n");
+  });
+});
+
+// Pure — runs on every OS, Windows included.
+describe("state snapshot", () => {
+  it("splits cwd from export -p and drops shell-owned variables", () => {
+    const text =
+      "/a dir\n" +
+      'declare -x OLDPWD="/x"\ndeclare -x PWD="/a dir"\ndeclare -x SHLVL="1"\n' +
+      'declare -x X="1"\ndeclare -x Y="multi\nline"\n';
+    const snap = parseStateSnapshot(text)!;
+    expect(snap.cwd).toBe("/a dir");
+    expect(snap.env).not.toMatch(/PWD|SHLVL/);
+    expect(snap.env).toContain('declare -x X="1"');
+    expect(snap.env).toContain('declare -x Y="multi\nline"');
+  });
+
+  it("handles bash 3.2-style output and empty input", () => {
+    expect(parseStateSnapshot("")).toBeNull();
+    expect(parseStateSnapshot("/only\n")).toEqual({ cwd: "/only", env: "" });
+  });
+
+  it("builds a restore script that quotes the cwd and reports where it landed", () => {
+    const script = buildRestoreScript({ cwd: "/it's here", env: 'declare -x X="1"' });
+    expect(script).toContain(`builtin cd -- '/it'\\''s here'`);
+    expect(script.trim().endsWith("builtin pwd -P")).toBe(true);
   });
 });

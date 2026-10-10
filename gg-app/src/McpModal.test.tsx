@@ -7,9 +7,9 @@ import { toast } from "./toast";
 
 let eventHandler: ((event: SidecarEvent) => void) | undefined;
 
-vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: vi.fn() }));
 vi.mock("./toast", () => ({ toast: vi.fn() }));
 vi.mock("./agent", () => ({
+  openUrl: vi.fn(),
   listProjects: vi.fn(),
   isMcpAuthDoneEvent: vi.fn(
     (event: SidecarEvent) =>

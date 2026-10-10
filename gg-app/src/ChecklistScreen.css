@@ -80,7 +80,24 @@
   white-space: nowrap;
 }
 .checklist-entry {
+  --checklist-status-color: var(--text-muted);
   min-width: 0;
+}
+.checklist-entry[data-state="passed"] {
+  --checklist-status-color: var(--success);
+}
+.checklist-entry[data-state="due"],
+.checklist-entry[data-state="needs-work"] {
+  --checklist-status-color: var(--warning);
+}
+.checklist-entry[data-state="checking"] {
+  --checklist-status-color: var(--info);
+}
+.checklist-entry[data-state="passed"] .checklist-entry-title {
+  color: var(--success);
+}
+.checklist-entry[data-state="not-applicable"] .checklist-entry-title {
+  color: var(--text-muted);
 }
 .checklist-entry + .checklist-entry {
   border-top: 1px solid var(--border);
@@ -93,6 +110,9 @@
   padding: var(--space-1) 0;
 }
 .checklist-entry-info {
+  display: flex;
+  align-items: center;
+  gap: var(--space-6);
   flex: 1;
   min-width: 0;
   padding: var(--space-4) 0;
@@ -104,6 +124,13 @@
   font: inherit;
   line-height: 1.25;
   cursor: help;
+}
+.checklist-entry-icon {
+  flex-shrink: 0;
+  color: var(--checklist-status-color);
+}
+.checklist-entry-copy {
+  min-width: 0;
 }
 .checklist-entry-title {
   display: block;
@@ -117,11 +144,9 @@
   margin-top: var(--space-2);
   font-size: var(--fs-xs);
   line-height: 1.4;
-  color: var(--text-secondary);
+  color: var(--checklist-status-color);
+  font-weight: 500;
   overflow-wrap: anywhere;
-}
-.checklist-entry-attention {
-  color: var(--warning);
 }
 .checklist-screen .checklist-check {
   flex-shrink: 0;
@@ -175,6 +200,11 @@
 }
 .checklist-warning summary {
   cursor: pointer;
+}
+@media (forced-colors: active) {
+  .checklist-entry-icon {
+    color: CanvasText;
+  }
 }
 @media (max-width: 480px) {
   .checklist-screen .checklist-section {

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -24,6 +24,7 @@ function entry(overrides: Partial<ChecklistEntry> = {}): ChecklistEntry {
     result: "pass",
     summary: "All good.",
     findings: [],
+    accepted: [],
     evidence: ["pnpm lint — 0 errors"],
     ...overrides,
   };
@@ -138,6 +139,26 @@ describe("readChecklist", () => {
 });
 
 describe("writeChecklistEntry", () => {
+  it("round-trips accepted findings and omits the key when there are none", async () => {
+    const accepted = ["MED god files: split later (deferred by owner)"];
+    const result = await writeChecklistEntry(root, "senior-review", entry({ accepted }), NOW);
+    expect(result.ok).toBe(true);
+    await writeChecklistEntry(root, "tests", entry(), NOW);
+    const raw = JSON.parse(await fs.readFile(path.join(root, CHECKLIST_FILE), "utf-8")) as {
+      items: Record<string, Record<string, unknown>>;
+    };
+    expect(raw.items["senior-review"]?.accepted).toEqual(accepted);
+    expect(raw.items.tests).not.toHaveProperty("accepted");
+    const read = await readChecklist(root, NOW);
+    expect(read.ok && read.value.items["senior-review"]?.accepted).toEqual(accepted);
+    expect(read.ok && read.value.items.tests?.accepted).toEqual([]);
+    const view = read.ok ? checklistView(CHECKLIST_ITEMS, read.value, NOW) : [];
+    expect(view.find((row) => row.id === "senior-review")).toMatchObject({
+      status: "passed",
+      accepted,
+    });
+  });
+
   it("writes canonical JSON with sorted ids and keeps other entries", async () => {
     await writeChecklistEntry(root, "tests", entry(), NOW);
     const result = await writeChecklistEntry(root, "ci", entry({ result: "issues" }), NOW);
@@ -153,11 +174,63 @@ describe("writeChecklistEntry", () => {
   it("merges concurrent store callers without losing any item or leaving locks", async () => {
     const ids = CHECKLIST_ITEMS.map((item) => item.id);
     const results = await Promise.all(ids.map((id) => writeChecklistEntry(root, id, entry(), NOW)));
-    expect(results.every((result) => result.ok)).toBe(true);
+    expect(results.filter((result) => !result.ok)).toEqual([]);
     const stored = await readChecklist(root, NOW);
     expect(stored.ok).toBe(true);
     if (stored.ok) expect(Object.keys(stored.value.items).sort()).toEqual([...ids].sort());
     expect(await fs.readdir(root)).toEqual([CHECKLIST_FILE]);
+  });
+
+  function errno(code: string): NodeJS.ErrnoException {
+    return Object.assign(new Error(`${code}: mkdir`), { code });
+  }
+
+  it("waits out a released lock that Windows refuses with EPERM while it is pending delete", async () => {
+    const realMkdir = fs.mkdir;
+    let lockAttempts = 0;
+    const spy = vi.spyOn(fs, "mkdir").mockImplementation(async (target, options) => {
+      if (String(target).endsWith(".lock")) {
+        lockAttempts += 1;
+        if (lockAttempts === 1) {
+          // The releasing writer's lock dir is still there, mid-delete.
+          await realMkdir(target, options);
+          throw errno("EPERM");
+        }
+        // Its delete finished before we polled again.
+        await fs.rm(String(target), { recursive: true, force: true });
+      }
+      return realMkdir(target, options);
+    });
+    try {
+      expect(await writeChecklistEntry(root, "tests", entry(), NOW)).toMatchObject({ ok: true });
+      expect(lockAttempts).toBe(2);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(await fs.readdir(root)).toEqual([CHECKLIST_FILE]);
+  });
+
+  it("still fails closed with the real error when no lock dir exists to wait for", async () => {
+    const realMkdir = fs.mkdir;
+    let lockAttempts = 0;
+    const spy = vi.spyOn(fs, "mkdir").mockImplementation(async (target, options) => {
+      if (String(target).endsWith(".lock")) {
+        lockAttempts += 1;
+        throw errno("EACCES");
+      }
+      return realMkdir(target, options);
+    });
+    try {
+      const result = await writeChecklistEntry(root, "tests", entry(), NOW);
+      expect(result).toEqual({
+        ok: false,
+        error: `Could not lock ${CHECKLIST_FILE}: EACCES: mkdir`,
+      });
+      expect(lockAttempts).toBeLessThanOrEqual(5);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(await fs.readdir(root)).toEqual([]);
   });
 
   it("cancels a waiting writer without removing another writer's lock", async () => {

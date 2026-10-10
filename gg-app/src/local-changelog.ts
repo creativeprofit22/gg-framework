@@ -53,10 +53,22 @@ export const CURRENT_LOCAL_RELEASE_NOTES = requireCurrentReleaseNotes(releaseNot
 /** Newest first. Maintained only by the Local Fork release flow. */
 export const LOCAL_CHANGELOG: LocalChangelogEntry[] = [
   {
-    id: "local-2026-10-06-upstream-0822-clearer-failures-and-leaner-agent",
+    id: "local-2026-10-09-upstream-0860-commit-leaner-claude-and-project-health",
     label: CURRENT_LOCAL_RELEASE_NOTES.label,
     date: CURRENT_LOCAL_RELEASE_NOTES.date,
     items: CURRENT_LOCAL_RELEASE_NOTES.sections.flatMap(({ items }) => items),
+  },
+  {
+    id: "local-2026-10-06-upstream-0822-clearer-failures-and-leaner-agent",
+    label: "Upstream 0.82.2, with clearer failures and a leaner agent",
+    date: "2026-10-06",
+    items: [
+      "No more staring at a dead end when the agent won't start. A pane that can't reach the agent now says `Couldn't connect to the agent.`, shows what went wrong, and gives you a `Try again` button right there.",
+      "The model pickers tell the truth. If the model list fails to load, both pickers say so and suggest reopening the project, instead of claiming they're still connecting.",
+      "Stopping a background task reports back. If `kill` doesn't work, you get a notice saying why, instead of a button that quietly does nothing.",
+      "Every request travels lighter. `Code search` and helper agents now load only when a task needs them, so everyday requests stop carrying their full setup. They come up in only a small share of sessions, so most work starts lighter.",
+      "When you name the checks you want, the agent runs `only those`.",
+    ],
   },
   {
     id: "local-2026-10-05-upstream-0821-checklist-and-clearer-errors",

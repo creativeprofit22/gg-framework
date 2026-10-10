@@ -62,7 +62,9 @@ describe("BackgroundTasksButton", () => {
     expect(screen.getByText("exit 0")).toBeTruthy();
     expect(screen.getByText("signal SIGTERM")).toBeTruthy();
     expect(screen.getByText("stopped: no output")).toBeTruthy();
-    expect(screen.getAllByRole("button", { name: "kill" })).toHaveLength(1);
+    // Upstream redesign labels the per-task control "Stop <command>".
+    expect(screen.getAllByRole("button", { name: /^Stop / })).toHaveLength(1);
+    expect(screen.getByRole("button", { name: "Stop running cmd" })).toBeTruthy();
   });
 
   it("says so when stopping a task fails", async () => {
@@ -70,7 +72,7 @@ describe("BackgroundTasksButton", () => {
     render(<BackgroundTasksButton tasks={[task()]} />);
 
     fireEvent.click(screen.getByRole("button", { name: /background task/ }));
-    fireEvent.click(screen.getByRole("button", { name: "kill" }));
+    fireEvent.click(screen.getByRole("button", { name: /^Stop / }));
 
     await waitFor(() =>
       expect(toast).toHaveBeenCalledWith("Couldn't stop the task: process not found", "error"),

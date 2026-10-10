@@ -1,7 +1,9 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { FloatingSurface } from "./FloatingSurface";
 import { theme } from "./theme";
 import { MENTOR_DISPLAY_NAME, PRODUCT_DISPLAY_NAME } from "./brand";
+import { useScrollEdges } from "./popover";
 import { modelDisplayName } from "./model-name";
 import { groupByProvider } from "./provider-labels";
 import { supportsNativeSelectPopup } from "./platform";
@@ -116,6 +118,8 @@ export function ModelSelect({
   const rootRef = useRef<HTMLSpanElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const onScroll = useScrollEdges(scrollRef, open);
   const menuId = useId();
   const following = Boolean(onSelectFollow && followActive);
   const value = following ? FOLLOW_VALUE : currentModel;
@@ -155,6 +159,10 @@ export function ModelSelect({
   useEffect(() => {
     setOpen(false);
   }, [models, refreshNonce]);
+
+  useEffect(() => {
+    if (unavailable) setOpen(false);
+  }, [unavailable]);
 
   useLayoutEffect(() => {
     if (!open) return;
@@ -207,13 +215,13 @@ export function ModelSelect({
   function chooseModel(modelId: string): void {
     setOpen(false);
     onSelect(modelId);
-    requestAnimationFrame(() => triggerRef.current?.focus());
+    triggerRef.current?.focus();
   }
 
   function chooseFollow(): void {
     setOpen(false);
     onSelectFollow?.();
-    requestAnimationFrame(() => triggerRef.current?.focus());
+    triggerRef.current?.focus();
   }
 
   function moveMenuFocus(event: React.KeyboardEvent<HTMLDivElement>): void {
@@ -245,10 +253,7 @@ export function ModelSelect({
         role="menuitemradio"
         aria-checked={active}
         disabled={toolless}
-        style={{
-          color: toolless ? theme.textDim : active ? theme.primary : theme.text,
-          background: active ? theme.surface2 : "transparent",
-        }}
+        style={{ color: toolless ? theme.textDim : active ? theme.primary : theme.text }}
         onClick={() => chooseModel(model.id)}
         title={
           toolless
@@ -329,58 +334,64 @@ export function ModelSelect({
       >
         {label ?? modelDisplayName(models, currentModel)}
       </button>
-      {open &&
-        createPortal(
-          <div
-            ref={menuRef}
-            id={menuId}
-            className="model-menu"
-            role="menu"
-            aria-label={title}
-            onKeyDown={moveMenuFocus}
-            style={{
-              background: theme.surface2,
-              borderColor: theme.border,
-              left: menuPosition?.left ?? 0,
-              bottom: menuPosition?.bottom ?? 0,
-              visibility: menuPosition ? "visible" : "hidden",
-            }}
-          >
-            <div className="model-menu-title" style={{ color: theme.textMuted }} aria-hidden="true">
-              {title}
-            </div>
-            {onSelectFollow && (
-              <button
-                className="model-menu-item model-menu-follow"
-                role="menuitemradio"
-                aria-checked={following}
-                style={{
-                  color: following ? theme.primary : theme.text,
-                  background: following ? theme.surface2 : "transparent",
-                }}
-                onClick={chooseFollow}
-                title={`${MENTOR_DISPLAY_NAME} adopts whatever model ${PRODUCT_DISPLAY_NAME} is using`}
+      {createPortal(
+        <FloatingSurface>
+          {open && !unavailable && (
+            <div
+              ref={menuRef}
+              id={menuId}
+              className="model-menu"
+              role="menu"
+              aria-label={title}
+              onKeyDown={moveMenuFocus}
+              style={{
+                background: theme.surface2,
+                borderColor: theme.border,
+                left: menuPosition?.left ?? 0,
+                bottom: menuPosition?.bottom ?? 0,
+                visibility: menuPosition ? "visible" : "hidden",
+              }}
+            >
+              <div
+                className="model-menu-title"
+                style={{ color: theme.textMuted }}
+                aria-hidden="true"
               >
-                Follow {PRODUCT_DISPLAY_NAME}
-              </button>
-            )}
-            {groups.map((group) => (
-              <div key={group.provider} className="model-menu-section">
-                <div
-                  className="model-menu-subtitle"
-                  style={{ color: theme.textMuted }}
-                  aria-hidden="true"
-                >
-                  {group.label}
-                </div>
-                <div className="model-menu-grid" role="group" aria-label={group.label}>
-                  {group.models.map((model) => renderItem(model))}
-                </div>
+                {title}
               </div>
-            ))}
-          </div>,
-          document.body,
-        )}
+              <div ref={scrollRef} className="pop-scroll model-menu-scroll" onScroll={onScroll}>
+                {onSelectFollow && (
+                  <button
+                    className="model-menu-item model-menu-follow"
+                    role="menuitemradio"
+                    aria-checked={following}
+                    style={{ color: following ? theme.primary : theme.text }}
+                    onClick={chooseFollow}
+                    title={`${MENTOR_DISPLAY_NAME} adopts whatever model ${PRODUCT_DISPLAY_NAME} is using`}
+                  >
+                    Follow {PRODUCT_DISPLAY_NAME}
+                  </button>
+                )}
+                {groups.map((group) => (
+                  <div key={group.provider} className="model-menu-section">
+                    <div
+                      className="model-menu-subtitle"
+                      style={{ color: theme.textMuted }}
+                      aria-hidden="true"
+                    >
+                      {group.label}
+                    </div>
+                    <div className="model-menu-grid" role="group" aria-label={group.label}>
+                      {group.models.map((model) => renderItem(model))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </FloatingSurface>,
+        document.body,
+      )}
     </span>
   );
 }

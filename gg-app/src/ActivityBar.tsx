@@ -6,6 +6,7 @@ import { ShimmerText } from "./ShimmerText";
 import { outcomePhrase } from "./activity-copy";
 import { GgFace } from "./GgFace";
 import type { GgFaceMood } from "./gg-face";
+import { useMotionLevel } from "./window-motion";
 
 // Braille rotation spinner — the native language of CLI coding tools (ora,
 // npm, cargo). Smooth, monospace, and unmistakably "ours" rather than the
@@ -246,16 +247,23 @@ export function ActivityBar({
     (hasActivity ? activity.phase === "working" || activity.phase === "reviewing" : running);
   const bareIdle = !active && !hasActivity && !doneStatus;
   const startedAt = activity?.startedAt;
+  const motion = useMotionLevel();
   useEffect(() => {
     if (bareIdle) setReadyPhrase((cur) => pickReadyPhrase(cur));
   }, [bareIdle]);
   useEffect(() => {
-    if (!active) return;
-    setFallbackStart(startedAt ?? Date.now());
+    if (active) setFallbackStart(startedAt ?? Date.now());
+  }, [active, startedAt]);
+  // The elapsed clock keeps counting in a visible background window (it's
+  // status, not decoration); a hidden window skips the ticks and catches up
+  // the moment it's shown.
+  const clockLive = active && motion !== "off";
+  useEffect(() => {
+    if (!clockLive) return;
     setNow(Date.now());
     const timer = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(timer);
-  }, [active, startedAt]);
+  }, [clockLive]);
 
   const showToolsToggle =
     Boolean(onToggleTools) && (hasToolFeed || toolsHidden || hasActivity || Boolean(doneStatus));
@@ -313,6 +321,7 @@ export function ActivityBar({
                 state="listening"
                 size={20}
                 theme="dark"
+                paused={motion !== "full"}
                 aria-hidden="true"
                 style={{ flexShrink: 0 }}
               />

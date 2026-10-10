@@ -10,7 +10,12 @@ import type {
   KenPromptActionResult,
 } from "./ken-prompt-actions";
 
-vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: vi.fn() }));
+import type * as AgentModule from "./agent";
+
+vi.mock("./agent", async (importOriginal) => ({
+  ...(await importOriginal<typeof AgentModule>()),
+  openUrlStrict: vi.fn(),
+}));
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 vi.mock("@tauri-apps/api/webviewWindow", () => ({
@@ -145,7 +150,7 @@ describe("Markdown links", () => {
     ["README.md:12:3", "./README.md"],
     ["src/App.tsx:12", "src/App.tsx"],
   ])("opens local destination %s", async (destination, expected) => {
-    const { openUrl } = await import("@tauri-apps/plugin-opener");
+    const { openUrlStrict: openUrl } = await import("./agent");
     const openProjectPath = vi.spyOn(await import("./agent"), "openProjectPath");
     render(<Markdown>{`[file](${destination})`}</Markdown>);
     const link = screen.getByRole("link");
@@ -186,7 +191,7 @@ describe("Markdown links", () => {
     "Dockerfile:12:3:4",
     "file://server/share/file.md",
   ])("does not open blocked destination %s", async (destination) => {
-    const { openUrl } = await import("@tauri-apps/plugin-opener");
+    const { openUrlStrict: openUrl } = await import("./agent");
     render(<Markdown>{`[blocked](${destination})`}</Markdown>);
     const link = screen.getByText("blocked");
     expect(link.getAttribute("href")).toBe("");
@@ -216,7 +221,7 @@ describe("Markdown links", () => {
     "https:12",
     "mailto:12",
   ])("preserves external destination %s", async (destination) => {
-    const { openUrl } = await import("@tauri-apps/plugin-opener");
+    const { openUrlStrict: openUrl } = await import("./agent");
     render(<Markdown>{`[external](${destination})`}</Markdown>);
     fireEvent.click(screen.getByRole("link"));
     await waitFor(() => expect(openUrl).toHaveBeenCalledWith(destination));
@@ -224,7 +229,7 @@ describe("Markdown links", () => {
   });
 
   it("opens web links and reports opening errors", async () => {
-    const { openUrl } = await import("@tauri-apps/plugin-opener");
+    const { openUrlStrict: openUrl } = await import("./agent");
     const { toast } = await import("./toast");
     vi.mocked(openUrl).mockRejectedValueOnce(new Error("No application"));
     render(<Markdown>{"[web](https://example.com)"}</Markdown>);

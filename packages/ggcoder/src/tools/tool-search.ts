@@ -5,11 +5,7 @@ import { CONTEXT_LIMITS, type ContextLimits } from "../core/context-limits.js";
 import type { DeferredToolCatalog } from "../core/mcp/deferred-catalog.js";
 
 const ToolSearchParams = z.object({
-  query: z
-    .string()
-    .describe(
-      "The capability you need, e.g. 'search UI design screenshots' or 'query github code'",
-    ),
+  query: z.string(),
 });
 
 /** Outcome of waiting for the MCP server behind a cached-only catalog entry. */
@@ -46,11 +42,7 @@ export function createToolSearchTool(
   const limits = typeof isVisibleOrLimits === "function" ? configuredLimits : isVisibleOrLimits;
   return {
     name: "tool_search",
-    description:
-      "Load a tool that is listed as available on demand. Searches the catalog of " +
-      "built-in capabilities and connected integrations (MCP servers) by capability. " +
-      "Matching tools become available immediately — call them on your next step. " +
-      "Use this when you need a capability not in your current toolset.",
+    description: "Load on-demand/integration tools by capability; callable next step.",
     parameters: ToolSearchParams,
     async execute({ query }) {
       const matches = catalog

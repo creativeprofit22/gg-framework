@@ -5,7 +5,12 @@ import { afterEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 import { buildSystemPrompt } from "./system-prompt.js";
 import { createTools } from "./tools/index.js";
-import { CORE_TOOL_NAMES, DEFERRED_TOOL_NAMES, partitionToolsByTier } from "./tools/tool-tiers.js";
+import {
+  AUTO_LOADED_TOOL_NAMES,
+  CORE_TOOL_NAMES,
+  DEFERRED_TOOL_NAMES,
+  partitionToolsByTier,
+} from "./tools/tool-tiers.js";
 
 const tempDirs: string[] = [];
 
@@ -57,9 +62,12 @@ describe("tool tiering in the system prompt", () => {
     );
 
     for (const name of DEFERRED_TOOL_NAMES) {
-      expect(countOccurrences(prompt, `- **${name}**:`), `index line for ${name}`).toBe(1);
+      // Auto-loaded follow-ups (task_*, child control, exit_plan) load with
+      // their trigger, so the index skips them.
+      const expected = AUTO_LOADED_TOOL_NAMES.has(name) ? 0 : 1;
+      expect(countOccurrences(prompt, `- **${name}**:`), `index line for ${name}`).toBe(expected);
     }
-    expect(prompt).toContain("Available on demand (call `tool_search` to load):");
+    expect(prompt).toContain("On demand (call by name;");
   });
 
   it("keeps cross-tool steering without repeating live tool descriptions", async () => {

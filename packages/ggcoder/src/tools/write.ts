@@ -28,8 +28,8 @@ function isPlanModeRef(value: unknown): value is { current: boolean } {
 }
 
 const WriteParams = z.object({
-  file_path: z.string().describe("The file path to write to"),
-  content: z.string().describe("The content to write"),
+  file_path: z.string(),
+  content: z.string(),
 });
 
 export function createWriteTool(
@@ -51,8 +51,7 @@ export function createWriteTool(
   return {
     name: "write",
     description:
-      "Write content to a file. Creates parent directories if needed. " +
-      "Existing files must be read first before overwriting. Use for new files or complete rewrites.",
+      "Create or fully overwrite a file (read existing files first). Creates parent dirs.",
     parameters: WriteParams,
     executionMode: "sequential",
     async execute({ file_path, content }) {

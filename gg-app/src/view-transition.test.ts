@@ -43,6 +43,31 @@ describe("withViewTransition", () => {
     expect(update).toHaveBeenCalledOnce();
   });
 
+  it("does not start a nested transition inside a committing update", () => {
+    const start = vi.fn<StartViewTransition>((cb) => {
+      cb();
+      return { ready: Promise.resolve(), finished: Promise.resolve() };
+    });
+    stubStart(start);
+    stubReducedMotion(false);
+    const child = vi.fn();
+    withViewTransition(() => withViewTransition(child, true));
+    expect(start).toHaveBeenCalledOnce();
+    expect(child).toHaveBeenCalledOnce();
+    expect(document.documentElement.hasAttribute("data-view-transition-update")).toBe(false);
+  });
+
+  it("falls back if starting the optional API throws", () => {
+    stubStart(() => {
+      throw new Error("unavailable");
+    });
+    stubReducedMotion(false);
+    const update = vi.fn();
+    withViewTransition(update, true);
+    expect(update).toHaveBeenCalledOnce();
+    expect(document.documentElement.dataset.localTransitions).toBeUndefined();
+  });
+
   it("runs the update inside the transition and swallows a skipped animation", async () => {
     const skipped = Promise.reject(new Error("skipped"));
     const start = vi.fn<StartViewTransition>((cb) => {

@@ -63,12 +63,8 @@ function sandboxAwareEnv(sandboxed: boolean): Record<string, string> {
 const NO_DEADLINE = 0;
 const FOREGROUND_TIMEOUT_CLEANUP_GRACE_MS = 1_000;
 const FOREGROUND_LIMITS_DESCRIPTION =
-  "Finite build, test, lint, format, migration, and one-shot commands run in foreground. " +
-  "A command still running after the soft limit (default 2 min, configurable) is handed off to a background " +
-  "task — not killed — and the result gives its ID and output so far; then call task_output " +
-  "with that id and wait_ms, which returns the moment it exits. A command with no output for a " +
-  "long time (default 10 min, configurable) or past the hard limit (default 60 min, configurable) is stopped automatically, " +
-  "including after hand-off. Omit timeout unless you need a hard bound. Long output is truncated (tail kept). ";
+  "Output tail is kept. Runs past the soft limit (default 2 min) hand off to a background task, " +
+  "not killed: continue with task_output id + wait_ms.";
 const MAX_OUTPUT_BYTES = BOUNDED_OUTPUT_MAX_BYTES;
 
 /** Host-authored rejection: no process started, so this is not a failed check. */
@@ -111,14 +107,21 @@ const GUESSED_WAIT_SECONDS = 10;
  * re-running the command. The offload is best-effort — a full disk or
  * permission error never fails the tool result.
  */
-export async function renderBashOutput(rawOutput: string, command?: string): Promise<string> {
+export async function renderBashOutput(
+  rawOutput: string,
+  command?: string,
+  /** bash with pipefail (not the cmd.exe fallback): see classifyVerificationCommand. */
+  posixShell = false,
+): Promise<string> {
   // Feedback only when the command wraps a real check. Exploration that merely
   // mentions a verifier (`ls .venv/bin | grep ruff`) is not a verification
   // attempt; nagging it made the model reshape harmless commands repeatedly.
   // Showing the note only once per session was measured and rejected: it cut
   // notes by a third but raised tool calls 27% (bench/h2h/DIRAC-FINDINGS.md).
   const check =
-    command && containsBoundedCheck(command) ? classifyVerificationCommand(command) : undefined;
+    command && containsBoundedCheck(command)
+      ? classifyVerificationCommand(command, { posixShell })
+      : undefined;
   const feedback =
     check?.candidate && !check.accepted && check.snapshotPreserveOnly
       ? "\n\n[This mixed check/inspection chain cannot establish fresh verification; it can only preserve earlier successful checks. If the current changes are not already verified, run the check standalone or chain only checks with &&. Do not claim fresh verification from this shell exit status.]"
@@ -733,7 +736,7 @@ async function renderStructuredForegroundResult(
     };
   }
 
-  let output = await renderBashOutput(execution.rawOutput, command);
+  let output = await renderBashOutput(execution.rawOutput, command, !execution.isCmdFallback);
   if (execution.outputCapped) {
     output =
       `[Foreground output tail capped at ${BOUNDED_OUTPUT_MAX_LINES} lines / ` +
@@ -810,72 +813,24 @@ function formatDuration(ms: number): string {
 }
 
 const BashParams = z.object({
-  command: z.string().describe("The bash command to execute"),
+  command: z.string(),
   review: z
     .boolean()
     .optional()
-    .describe(
-      "For a local foreground check, append read-only Git status/worktree diff after success. Keeps the check exit status separate; no shell chaining needed. Staged/untracked contents are not included.",
-    ),
-  timeout: z
-    .number()
-    .int()
-    .min(1000)
-    .optional()
-    .describe(
-      "Optional hard limit in milliseconds. Usually omit it: long commands are handed off to a " +
-        "background task automatically instead of being killed. Setting it keeps the command in " +
-        "the foreground (no hand-off) until it exits, hits this limit, or produces no output for " +
-        "the inactivity limit.",
-    ),
-  run_in_background: z
-    .boolean()
-    .optional()
-    .describe(
-      "Run long-lived or interactive commands in managed background mode. Use true for dev " +
-        "servers, watchers, REPLs, scaffolders, and programs waiting for input; the call returns " +
-        "after spawn with an ID, PID, and log. Default false for finite foreground commands.",
-    ),
-  persist: z
-    .boolean()
-    .optional()
-    .describe(
-      "Run in the persistent session shell: cd, exported env vars, and shell state " +
-        "survive across persist:true calls. Use for multi-step workflows in another " +
-        "directory or with sourced environments. Default false (fresh shell per call).",
-    ),
+    .describe("Local foreground check only: append git status/diff after success"),
+  timeout: z.number().int().min(1000).optional().describe("Hard limit ms; disables hand-off"),
+  run_in_background: z.boolean().optional(),
+  persist: z.boolean().optional().describe("Keep cd/env across calls"),
   wake: z
     .object({
-      pattern: z
-        .string()
-        .min(1)
-        .max(200)
-        .optional()
-        .describe(
-          "A regex; the moment NEW output matches it you are actively woken with the " +
-            "matching line — no task_output polling. Use for signals in long builds, " +
-            "dev servers and watchers (e.g. 'compiled with errors', 'listening on').",
-        ),
-      silence_seconds: z
-        .number()
-        .int()
-        .min(10)
-        .max(3600)
-        .optional()
-        .describe(
-          "Wake me if the task produces no output at all for this many seconds while " +
-            "still running — a stall/hang detector for commands that should be chatty.",
-        ),
+      pattern: z.string().min(1).max(200).optional(),
+      silence_seconds: z.number().int().min(10).max(3600).optional(),
     })
     .refine((rules) => rules.pattern !== undefined || rules.silence_seconds !== undefined, {
       message: "Provide wake.pattern, wake.silence_seconds, or both.",
     })
     .optional()
-    .describe(
-      "Wake conditions for a background task (run_in_background only). You are " +
-        "notified automatically the instant one holds, instead of polling " +
-        "task_output. Each condition fires once; exit always notifies regardless.",
-    ),
+    .describe("Notify on output match or silence"),
 });
 
 export function createBashTool(
@@ -902,46 +857,17 @@ export function createBashTool(
   // for mid-session PATH changes.
   const isCmdFallback = resolveShell("", shellOpts ?? {}).isCmdFallback;
   const description = isCmdFallback
-    ? "Execute a command under Windows cmd.exe (no bash was found on this system). " +
-      "The working directory is already set to the project root — " +
-      "don't cd into it redundantly. Use cd only when you need a different directory. " +
-      "Returns exit code and combined stdout/stderr. " +
-      "Use cmd.exe syntax (dir, findstr, type, del); POSIX commands and bash syntax " +
-      "(ls, grep, cat, &&-chains relying on bash semantics, $(...), single-quoting) will fail. " +
-      FOREGROUND_LIMITS_DESCRIPTION +
-      "Set run_in_background=true for long-lived or interactive commands " +
-      "(dev servers, watchers, REPLs, scaffolders, programs that prompt for input); the call returns " +
-      "after spawn. Use task_output to read output, task_send to type input/answer prompts, and " +
-      "task_stop to stop background processes. " +
-      "Commit, push, amend, or rewrite git history only when the user explicitly asked. " +
-      "Kill processes by exact PID (taskkill /PID), never by image name alone."
-    : "Execute a bash command. The shell's working directory is already set to the project root — " +
-      "don't cd into it redundantly. Use cd only when you need a different directory. " +
-      "Returns exit code and combined stdout/stderr. " +
-      "Pipelines run with pipefail — a piped command reports the failing stage's exit " +
-      "code, so piping tests through tail/head cannot mask a failure. " +
-      "Commands run in a non-interactive bash shell with TERM=dumb. " +
-      FOREGROUND_LIMITS_DESCRIPTION +
-      "Set run_in_background=true for long-lived or interactive commands " +
-      "(dev servers, watchers, REPLs, scaffolders, programs that prompt for input); the call returns " +
-      "after spawn. Use task_output to read output, task_send to type input/answer prompts, and " +
-      "task_stop to stop background processes. " +
-      "Commit, push, amend, or rewrite git history only when the user explicitly asked. " +
-      "Never background a command with a trailing & or nohup — use run_in_background instead. " +
-      "Kill processes by exact PID, never broad patterns like pkill -f node. " +
-      "Set persist=true to run in a foreground session shell where cd/env state survives across " +
-      "persist:true calls. " +
-      "With run_in_background, also set wake (pattern and/or silence_seconds) to be " +
-      "actively notified the moment matching output appears or the task stalls. " +
-      "Never sleep to wait for a background process — task_output with wait_ms returns " +
-      "when it exits or a declared wake fires.";
+    ? "Run a Windows cmd.exe command (no bash on this system) in the project root. Use cmd " +
+      "syntax (dir, findstr, type); POSIX commands and $(...) fail. " +
+      FOREGROUND_LIMITS_DESCRIPTION
+    : "Run a non-interactive bash command (TERM=dumb, pipefail) in the project root. " +
+      FOREGROUND_LIMITS_DESCRIPTION;
   return {
     name: "bash",
     description:
       description +
-      " For dev servers, set a readiness wake.pattern, use task_output with wait_ms, " +
-      "then check HTTP and finish while leaving the server running. " +
-      "Do not use silence as readiness; healthy servers normally go quiet.",
+      " Servers/watchers/REPLs: run_in_background + wake.pattern, then task_output wait_ms; " +
+      "never `&`, nohup or sleep. Leave servers running. Kill by exact PID.",
     parameters: BashParams,
     executionMode: "sequential",
     // Bash owns its limits (yield hand-off, inactivity, hard backstop); the

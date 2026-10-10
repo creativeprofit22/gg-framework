@@ -170,6 +170,7 @@ import type { BackgroundProcess } from "./process-manager.js";
 import type { DebugManager } from "../tools/debug.js";
 import { REVIEW_REJECTED_BEFORE_START } from "../tools/bash.js";
 import { buildProcessCompletionFollowUp } from "./process-gate.js";
+import { PLAN_SUBMISSION_NUDGE, shouldNudgePlanSubmission } from "./plan-submission-gate.js";
 import { canonicalProjectKey } from "../project-notes-repository.js";
 import { buildSubAgentCompletionFollowUp, type SubAgentManager } from "./subagent-manager.js";
 import { applyAsyncSubagentPolicy } from "./subagent-policy.js";
@@ -500,6 +501,10 @@ export interface AgentSessionOptions {
   onTasksChanged?: () => void;
   /** Mode-owned completion policy; absent in Coder/chat/worker sessions. */
   completionReview?: CompletionReview;
+  /** Remind the agent to submit its plan (exit_plan) when a run is about to
+   *  stop still in plan mode. Desktop only: an unsubmitted plan there leaves
+   *  nothing to review. See plan-submission-gate.ts. */
+  planSubmissionGate?: boolean;
 }
 
 // ── Tool-result policy ─────────────────────────────────────
@@ -707,6 +712,8 @@ export class AgentSession {
   private runStartedAt = 0;
   /** Gate injections spent this run, capped by MAX_PROCESS_GATE_INJECTIONS. */
   private processGateInjected = 0;
+  /** Plan-submission reminders spent this run (plan-submission-gate.ts). */
+  private planSubmissionNudges = 0;
   /** Mirror of the last `hook_armed` value, so the event fires only on an edge. */
   private preFinalArmed = false;
   private compactionOccurred = false;
@@ -1144,11 +1151,12 @@ export class AgentSession {
     if (!this.opts.allowedTools && this.settingsManager.get("deferredBuiltinTools")) {
       const additionalToolNames = new Set(additionalTools.map((tool) => tool.name));
       const tierableBuiltIns = builtInTools.filter((tool) => !additionalToolNames.has(tool.name));
-      const { core, deferred } = partitionToolsByTier(tierableBuiltIns);
-      this.registerTools([
-        ...core.map((tool) => this.withWaitAgentPromotion(tool)),
-        ...additionalTools,
-      ]);
+      // Wrap before partitioning so a deferred trigger (spawn_agent) still
+      // promotes its follow-ups once the catalog loads it.
+      const { core, deferred } = partitionToolsByTier(
+        tierableBuiltIns.map((tool) => this.withWaitAgentPromotion(tool)),
+      );
+      this.registerTools([...core, ...additionalTools]);
       if (deferred.length > 0) {
         this.deferredBuiltinToolNames = deferred.map((tool) => tool.name);
         this.deferredBuiltinTools = new Map(deferred.map((tool) => [tool.name, tool]));
@@ -1620,23 +1628,49 @@ export class AgentSession {
    * through the guarded registry, so capability policies still apply.
    */
   private withWaitAgentPromotion(tool: AgentTool): AgentTool {
-    if (tool.name !== "spawn_agent") return tool;
+    // Likewise a background `bash` is always followed by `task_output` (and
+    // sometimes `task_send`/`task_stop`) — upstream 987257de.
+    const followUps =
+      tool.name === "spawn_agent"
+        ? { names: ["wait_agent"], when: () => true }
+        : tool.name === "bash"
+          ? {
+              names: ["task_output", "task_send", "task_stop"],
+              when: (args: unknown) =>
+                (args as { run_in_background?: unknown } | undefined)?.run_in_background === true,
+            }
+          : undefined;
+    if (!followUps) return tool;
     return {
       ...tool,
       execute: async (args, context) => {
         const result = await tool.execute(args, context);
-        if (!this.registeredTools.has("wait_agent")) {
-          const promoted = this.mcpCatalog?.promote(["wait_agent"]) ?? [];
-          for (const promotedTool of promoted) {
-            if (this.deferredBuiltinTools.has(promotedTool.name)) {
-              this.searchedPromotedBuiltinNames.add(promotedTool.name);
-            }
-          }
-          if (promoted.length > 0) this.registerTools(promoted);
+        if (followUps.when(args)) {
+          const missing = followUps.names.filter((name) => !this.registeredTools.has(name));
+          if (missing.length > 0) this.promoteDeferredBuiltins(missing);
         }
         return result;
       },
     };
+  }
+
+  /** Promote deferred built-ins through the guarded registry. */
+  private promoteDeferredBuiltins(names: string[]): AgentTool[] {
+    const promoted = this.mcpCatalog?.promote(names) ?? [];
+    for (const promotedTool of promoted) {
+      if (this.deferredBuiltinTools.has(promotedTool.name)) {
+        this.searchedPromotedBuiltinNames.add(promotedTool.name);
+      }
+    }
+    if (promoted.length > 0) this.registerTools(promoted);
+    return promoted;
+  }
+
+  /** Resolve a deferred built-in called by name (append-only promotion). */
+  private promoteDeferredBuiltin(name: string): AgentTool | undefined {
+    if (!this.deferredBuiltinTools.has(name)) return undefined;
+    if (!this.registeredTools.has(name)) this.promoteDeferredBuiltins([name]);
+    return this.tools.find((t) => t.name === name);
   }
 
   /** Append tools, replacing any same-named entry (cached stub → live tool). */
@@ -2593,6 +2627,7 @@ ${content}
     };
     this.runStartedAt = Date.now();
     this.processGateInjected = 0;
+    this.planSubmissionNudges = 0;
     this.compactionOccurred = false;
     // Post-turn compaction may have landed between runs — adopt its armed
     // signal so the re-grounding hook fires for this run exactly as it would
@@ -2675,6 +2710,7 @@ ${content}
               isError: event.isError,
               details: event.details,
               workspace,
+              planMode: this.getPlanMode(),
             });
           // Upstream saves completion-review state whenever verification state
           // changes; the evidence ledger replaced that save point here.
@@ -3266,6 +3302,25 @@ ${content}
 
     if (diagnosticMessages.length > 0) return diagnosticMessages;
 
+    if (
+      shouldNudgePlanSubmission({
+        enabled: this.opts.planSubmissionGate === true,
+        planMode: this.planModeRef.current,
+        aborted: this.opts.signal?.aborted === true,
+        nudgesThisRun: this.planSubmissionNudges,
+      })
+    ) {
+      this.planSubmissionNudges += 1;
+      log("INFO", "plan-gate", "Run stopping in plan mode without a submitted plan; reminding");
+      return [
+        {
+          role: "user",
+          content: buildNotificationSteeringText([PLAN_SUBMISSION_NUDGE]),
+          provenance: { source: "runtime", kind: "notification", visibility: "hidden" },
+        },
+      ];
+    }
+
     if (this.opts.completionReview) {
       const followUp = await this.opts.completionReview.followUp(
         (request, signal) => this.callCompletionReviewer(request, signal),
@@ -3544,6 +3599,11 @@ ${content}
         ),
         // Warn when web/MCP output contains instruction-like text (see injection-detect.ts).
         transformToolResult: flagUntrustedToolResult,
+        // A deferred built-in called by its advertised name runs directly
+        // instead of costing a turn on "Unknown tool" then tool_search.
+        ...(options.disableTools
+          ? {}
+          : { resolveTool: (name: string) => this.promoteDeferredBuiltin(name) }),
         // Self-correction hooks (same as the TUI): loop-break + re-grounding are
         // polled mid-loop; the ideal review is polled when the agent would stop.
         getSteeringMessages: () => this.getHookSteeringMessages(),
@@ -4521,6 +4581,13 @@ ${content}
   }
 
   async newSession(preserveConversation = false): Promise<void> {
+    // A background post-turn compaction replaces `this.messages` when it
+    // lands; finishing after the reset would swap the old history back into
+    // the fresh session (e.g. an accepted plan's build would inherit the
+    // planning conversation and lose the approved-plan prompt). Await only when
+    // one is pending so an idle reset still invalidates in-flight work
+    // synchronously, before the caller's next tick.
+    if (this.postTurnCompaction) await this.postTurnCompaction;
     this.commandCreation?.cancel();
     this.programmaticProfile?.cancel();
     this.discoveryReview?.close();
@@ -5366,6 +5433,9 @@ ${content}
    */
   async setPlanMode(active: boolean): Promise<void> {
     this.planModeRef.current = active;
+    // Plan mode always ends with `exit_plan`; a deferred one must be callable
+    // without a tool_search turn.
+    if (active) this.promoteDeferredBuiltin("exit_plan");
     // Entering plan mode discards any prior approved-plan contract (a new plan
     // is about to be drafted); exiting keeps it (set explicitly via accept).
     if (active) {
@@ -5753,7 +5823,9 @@ ${content}
       this.provider,
       this.model,
       this.thinkingLevel,
-      this.tools.map((tool) => tool.name),
+      // Deferred spawn_agent/wait_agent are one call away (resolveTool loads
+      // them on first use), so the policy must still see them.
+      [...this.tools.map((tool) => tool.name), ...this.deferredBuiltinToolNames],
     ).trim();
   }
 
@@ -5778,6 +5850,11 @@ ${content}
 
   getRunVerificationActivity() {
     return this.verificationEvidenceLedger.runActivity();
+  }
+
+  /** Why current code changes are not proven by a passing check, or null. */
+  getVerificationProblem(): string | null {
+    return this.verificationEvidenceLedger.verificationProblem();
   }
 
   getVerificationEvidence() {

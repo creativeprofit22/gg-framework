@@ -3,7 +3,7 @@ import { prettifyError } from "zod";
 import fs from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
-import { createEditTool } from "./edit.js";
+import { createEditTool, createFlatEditTool } from "./edit.js";
 import { lineHash } from "../core/hashline.js";
 import { recordRead, type ReadTracker } from "./read-tracker.js";
 
@@ -61,6 +61,135 @@ describe("createEditTool", () => {
     const ctx = { signal: new AbortController().signal, toolCallId: "multi" };
     const content = (result: unknown): string =>
       typeof result === "string" ? result : (result as { content: string }).content;
+
+    it.each([
+      [
+        "the files shape sent under `edits`",
+        { edits: [{ file_path: "a.js", edits: [{ old_text: "a = 1", new_text: "a = 2" }] }] },
+      ],
+      [
+        "a single file's edits wrapped in an extra `edits` level",
+        { file_path: "a.js", edits: [{ edits: [{ old_text: "a = 1", new_text: "a = 2" }] }] },
+      ],
+      [
+        "`files` flattened into `edits`, each item naming its file",
+        { edits: [{ file_path: "a.js", old_text: "a = 1", new_text: "a = 2" }] },
+      ],
+    ])("recovers %s instead of failing the call", async (_label, args) => {
+      await fs.writeFile(path.join(tmpDir, "a.js"), "const a = 1;\n");
+      const tool = createEditTool(tmpDir);
+
+      await tool.execute(tool.parameters.parse(args), ctx);
+
+      expect(await fs.readFile(path.join(tmpDir, "a.js"), "utf-8")).toBe("const a = 2;\n");
+    });
+
+    it("exposes a flat three-field schema to Claude and applies it", async () => {
+      await fs.writeFile(path.join(tmpDir, "a.js"), "const a = 1;\nconst b = 1;\n");
+      const tool = createFlatEditTool(tmpDir);
+
+      await tool.execute(
+        tool.parameters.parse({
+          file_path: "a.js",
+          old_text: " = 1",
+          new_text: " = 2",
+          replace_all: true,
+        }),
+        ctx,
+      );
+
+      expect(await fs.readFile(path.join(tmpDir, "a.js"), "utf-8")).toBe(
+        "const a = 2;\nconst b = 2;\n",
+      );
+      expect(tool.rawInputSchema).toEqual({
+        type: "object",
+        properties: {
+          file_path: { type: "string" },
+          old_text: { type: "string" },
+          new_text: { type: "string" },
+          replace_all: { type: "boolean" },
+        },
+        required: ["file_path", "old_text", "new_text"],
+      });
+
+      // Nested calls (resumed sessions, callers inside GG) still work.
+      await tool.execute(
+        tool.parameters.parse({
+          file_path: "a.js",
+          edits: [{ old_text: "a = 2", new_text: "a = 9" }],
+        }),
+        ctx,
+      );
+      expect(await fs.readFile(path.join(tmpDir, "a.js"), "utf-8")).toBe(
+        "const a = 9;\nconst b = 2;\n",
+      );
+    });
+
+    it("applies a single flat edit instead of dropping its fields", async () => {
+      await fs.writeFile(path.join(tmpDir, "a.js"), "const a = 1;\nconst b = 1;\nconst c = 1;\n");
+      const tool = createEditTool(tmpDir);
+
+      await tool.execute(
+        tool.parameters.parse({ file_path: "a.js", old_text: "a = 1", new_text: "a = 2" }),
+        ctx,
+      );
+      await tool.execute(
+        tool.parameters.parse({
+          file_path: "a.js",
+          old_text: " = 1",
+          new_text: " = 3",
+          replace_all: true,
+        }),
+        ctx,
+      );
+
+      expect(await fs.readFile(path.join(tmpDir, "a.js"), "utf-8")).toBe(
+        "const a = 2;\nconst b = 3;\nconst c = 3;\n",
+      );
+    });
+
+    it("does not lift a flat edit that carries other keys", () => {
+      const tool = createEditTool(tmpDir);
+      const parsed = tool.parameters.parse({
+        file_path: "a.js",
+        old_text: "a = 1",
+        new_text: "a = 2",
+        lines: ["x"],
+      });
+
+      expect(parsed).not.toHaveProperty("edits");
+    });
+
+    it("groups flattened per-item file_path edits by file, stringified or not", async () => {
+      await fs.writeFile(path.join(tmpDir, "a.js"), "const a = 1;\nconst c = 1;\n");
+      await fs.writeFile(path.join(tmpDir, "b.js"), "const b = 1;\n");
+      const tool = createEditTool(tmpDir);
+      const flat = [
+        { file_path: "a.js", old_text: "a = 1", new_text: "a = 2" },
+        { file_path: "b.js", old_text: "b = 1", new_text: "b = 2" },
+        { file_path: "a.js", old_text: "c = 1", new_text: "c = 2" },
+      ];
+
+      const result = await tool.execute(
+        tool.parameters.parse({ edits: JSON.stringify(flat) }),
+        ctx,
+      );
+
+      expect(await fs.readFile(path.join(tmpDir, "a.js"), "utf-8")).toBe(
+        "const a = 2;\nconst c = 2;\n",
+      );
+      expect(await fs.readFile(path.join(tmpDir, "b.js"), "utf-8")).toBe("const b = 2;\n");
+      expect(content(result)).toContain("Edited 2 files.");
+    });
+
+    it("keeps rejecting flattened items that carry a non-text form", () => {
+      const tool = createEditTool(tmpDir);
+      const parsed = tool.parameters.parse({
+        edits: [{ file_path: "a.js", old_text: "a = 1", new_text: "a = 2", lines: ["x"] }],
+      });
+
+      expect(parsed).not.toHaveProperty("files");
+    });
 
     it("edits every listed file in one call and returns each diff", async () => {
       await fs.writeFile(path.join(tmpDir, "a.js"), "const a = 1;\n");
@@ -1838,6 +1967,41 @@ describe("edit stringified `edits` handling", () => {
     expect(message).toContain("split the work");
     // The unactionable stock message is what caused the retry loop.
     expect(message).not.toContain("expected array, received string");
+  });
+
+  // Verbatim shape from bench/h2h (Haiku 5.5): the `edits` string ends where
+  // old_text should, and new_text lands at the top level.
+  it("recovers old_text cut off into the edits string with new_text at the top level", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "edit-split-"));
+    try {
+      const source =
+        'const q = "x";\nconst totalPages = Math.floor(n / per);\nconst start = page * per;\n';
+      await fs.writeFile(path.join(dir, "p.js"), source);
+      const tool = createEditTool(dir);
+      const args = tool.parameters.parse({
+        file_path: "p.js",
+        edits: '[{"old_text">const totalPages = Math.floor(n / per);\nconst start = page * per;',
+        new_text: "const totalPages = Math.ceil(n / per);\nconst start = (page - 1) * per;",
+      });
+
+      await tool.execute(args, { signal: new AbortController().signal, toolCallId: "split" });
+
+      expect(await fs.readFile(path.join(dir, "p.js"), "utf-8")).toBe(
+        'const q = "x";\nconst totalPages = Math.ceil(n / per);\nconst start = (page - 1) * per;\n',
+      );
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not recover the split shape when extra keys make it ambiguous", () => {
+    const result = createEditTool(os.tmpdir()).parameters.safeParse({
+      file_path: "a.ts",
+      edits: '[{"old_text">a',
+      new_text: "b",
+      old_text: "c",
+    });
+    expect(result.success).toBe(false);
   });
 
   it("leaves non-string type errors on their default message", () => {

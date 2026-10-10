@@ -8,7 +8,7 @@ tracks** and they must go in this order. Read this whole file, then execute.
 
 - **Track A — npm framework packages** (`@kenkaiiii/gg-ai`, `gg-agent`, `gg-core`,
   `ggcoder`, and dependents) via **Changesets**. These are the engine the
-  CLI ships from. The spine is a *fixed group* — one changeset bumps them together.
+  CLI ships from. The spine is a _fixed group_ — one changeset bumps them together.
 - **Track B — gg-app desktop** (`gg-app`, currently a `0.1.x` line, `private: true`,
   never on npm). Released by pushing a `v*` git tag, which triggers
   `.github/workflows/release.yml` to build/sign/notarize installers and publish a
@@ -37,6 +37,7 @@ the user which tracks to run — common sense: if npm package source changed, re
 npm; if the app changed, release the app. Run both detections:
 
 **Track A (npm) needed?** Compare against the last spine tag:
+
 ```bash
 LAST_NPM=$(git tag --sort=-creatordate | grep '@kenkaiiii/ggcoder@' | head -1)
 # Real source/metadata changes. Ignore generated changelogs, pure tests, and a
@@ -55,6 +56,7 @@ NPM_CHANGES=$(
 )
 if [[ -n "$NPM_CHANGES" ]]; then printf '%s\n' "$NPM_CHANGES"; else echo "(no npm source changes)"; fi
 ```
+
 Exclude the `gg-pixel` SDK (not on the spine), generated changelogs, pure tests,
 and package manifests whose only change is version noise from the previous publish.
 Dependency, export, bin, script, and other package metadata changes still trigger Track A.
@@ -63,7 +65,7 @@ If only `gg-app/` or non-package files changed, Track A is **not** needed.
 **Track B (desktop) needed?** Track B is needed if **EITHER** of these is true:
 
 1. **Track A ran** (npm spine was published). The app bundles that spine as its
-   sidecar, so a spine release *always* requires a matching app release. This
+   sidecar, so a spine release _always_ requires a matching app release. This
    alone is sufficient — stop here and mark Track B needed.
 2. `gg-app/` itself changed since the last `v*` tag:
    ```bash
@@ -151,12 +153,14 @@ stop and say there's nothing to release.
    product, never like a git log.
 
    **a. Find what actually changed since the last desktop release:**
+
    ```bash
    LAST_APP=$(git tag --sort=-creatordate | grep -E '^v[0-9]' | head -1)
    git log --oneline "$LAST_APP"..HEAD | grep -ivE 'version packages|update gg-app'
    git diff "$LAST_APP" HEAD -- gg-app/ packages/ | head -400   # skim the real
      # diff, not just commit subjects, to find the user-facing wins
    ```
+
    Read the diffs, not just the commit subjects, so you describe what the user
    can now SEE or DO, not how it was implemented. Drop pure internals (refactors,
    type fixes, build plumbing, test-only changes) unless they produce a felt win
@@ -182,6 +186,7 @@ stop and say there's nothing to release.
    - Keep each bullet punchy at roughly 1 to 3 short sentences.
 
    **c. Worked example** — raw commits become one feature bullet, not fragments:
+
    ```text
    commit subjects: "Fix enhance-animation handoff flash"
                     "Dim input while enhancer runs"
@@ -196,6 +201,7 @@ stop and say there's nothing to release.
             `1 hour` of smart caching out of every chat so you spend less and
             wait less."
    ```
+
    Match that energy: confident, warm, a little swagger, zero jargon. Before
    writing the file, compare every pair of bullets: if they describe the same
    user-facing feature, merge them.
@@ -203,22 +209,25 @@ stop and say there's nothing to release.
    **d. PREPEND one new entry** to the top of the `CHANGELOG` array (newest
    first). NEVER delete or rewrite old entries — the window already caps itself
    at the 20 most-recent bullets across versions, so history just scrolls.
+
    ```ts
    export const CHANGELOG: ChangelogEntry[] = [
      {
-       version: "<NEW>",          // the bumped version, no leading "v"
+       version: "<NEW>", // the bumped version, no leading "v"
        date: "<YYYY-MM-DD today>",
        items: [
          "<feature bullet with `highlighted specifics`>",
          "<a second bullet only for a genuinely different feature>",
-       ],                          // ≈1 to 5 DISTINCT feature highlights, best first
+       ], // ≈1 to 5 DISTINCT feature highlights, best first
      },
      // ...every existing entry stays exactly as-is below.
    ];
    ```
+
    If genuinely nothing user-facing shipped (pure refactor/chore release), add a
    single honest-but-warm line rather than inventing hype, e.g. "Tuned things
    under the hood so GG Coder stays fast and stable."
+
 3. Confirm the bump touched exactly the four version files plus the changelog:
    `git status --short gg-app/`.
 4. Stage **only** those five files (never `git add -A`):
@@ -256,6 +265,7 @@ stop and say there's nothing to release.
 ## 4. Report back
 
 Summarize what shipped, bottom line first:
+
 - npm: which packages + version (or "skipped").
 - desktop: `v<NEW>` tag pushed, release workflow run id + that it publishes a
   **non-draft** release automatically (no manual publish step).

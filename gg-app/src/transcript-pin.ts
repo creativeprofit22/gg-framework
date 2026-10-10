@@ -75,6 +75,10 @@ export function pinAfterWheel(pinned: boolean, wheel: WheelIntent, el: ScrollGeo
   // carries a little vertical noise; only a mostly-vertical gesture means up
   // or down.
   if (wheel.ctrlKey || Math.abs(wheel.deltaY) <= Math.abs(wheel.deltaX)) return pinned;
+  // WKWebView can stretch past the bottom. Its upward rebound is not a move
+  // into older content; unpinning here leaves follow off when it settles at
+  // exactly the same bottom (where no downward scroll event can re-enable it).
+  if (distanceFromBottom(el) < -AT_BOTTOM_PX) return pinned;
   // Without overflow there is nothing to scroll up to.
   if (wheel.deltaY < 0) return el.scrollHeight > el.clientHeight ? false : pinned;
   // Down near the bottom resumes following — even at the very bottom, where

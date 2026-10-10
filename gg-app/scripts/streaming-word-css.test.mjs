@@ -13,7 +13,10 @@ describe("streaming word spans", () => {
     // re-wrapped the instant it finished: the flicker at the end of each one.
     const rule = css.match(/\.markdown \.md-word \{([^}]*)\}/)?.[1];
     expect(rule).toBeDefined();
-    expect(rule).toContain("animation:");
+    expect(rule).toContain("animation: md-word-fade var(--dur-row) var(--ease-out)");
+    const frames = css.match(/@keyframes md-word-fade \{([\s\S]*?)\n\}/)?.[1];
+    expect(frames).toContain("opacity: 0");
+    expect(frames).not.toMatch(/filter|transform|translate/);
     expect(rule).not.toMatch(/display\s*:/);
     expect(rule).not.toMatch(/white-space\s*:/);
   });

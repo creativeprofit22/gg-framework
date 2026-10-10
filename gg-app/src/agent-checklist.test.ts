@@ -92,6 +92,13 @@ describe("getChecklist boundary", () => {
       }),
     ],
     [
+      "oversized accepted finding",
+      (value) => ({
+        ...value,
+        items: value.items.map((item) => ({ ...item, accepted: ["x".repeat(301)] })),
+      }),
+    ],
+    [
       "oversized evidence",
       (value) => ({
         ...value,

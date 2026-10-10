@@ -2,7 +2,11 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { XIcon } from "@phosphor-icons/react";
 import { theme } from "./theme";
 import type { QueuedMessage } from "./agent";
-import { pinSize } from "./usePresenceList";
+import { pinSize, usePresenceList } from "./usePresenceList";
+import { useAnimatedHeight } from "./animated-height";
+import { prefersReducedMotion } from "./transcript-motion";
+
+const EMPTY: readonly QueuedMessage[] = [];
 
 /**
  * Strip above the composer showing user messages waiting to be injected into the
@@ -37,6 +41,16 @@ function preview(text: string): string {
 export function QueuedBar({ messages, onCancel }: Props): React.ReactElement | null {
   const [open, setOpen] = useState(false);
   const wasMultiple = useRef(false);
+  const listRef = useRef<HTMLDivElement>(null);
+  const expanded = open && messages.length > 1;
+  const immediate = prefersReducedMotion() || typeof Element.prototype.animate !== "function";
+  const list = usePresenceList(
+    expanded ? messages : EMPTY,
+    (message) => message.id,
+    immediate ? 0 : EXIT_MS,
+  );
+  const capture = useAnimatedHeight(listRef, expanded, list);
+  const shown = immediate && !expanded ? EMPTY : list;
   // Messages held one beat past the real queue emptying, so the bar can play
   // its exit animation instead of vanishing the instant the agent consumes the
   // last item. Without this the element unmounts immediately and there is
@@ -52,7 +66,7 @@ export function QueuedBar({ messages, onCancel }: Props): React.ReactElement | n
   }, [messages.length]);
 
   useEffect(() => {
-    if (messages.length > 0) {
+    if (messages.length > 0 || immediate) {
       setVisible(messages);
       setLeaving(false);
       return;
@@ -65,25 +79,27 @@ export function QueuedBar({ messages, onCancel }: Props): React.ReactElement | n
       setLeaving(false);
     }, EXIT_MS);
     return () => clearTimeout(timer);
-  }, [messages]);
+  }, [messages, immediate]);
 
   const barRef = useRef<HTMLDivElement>(null);
-  const empty = visible.length === 0;
-  // Measure on mount (the enter grows to this height) and again when leaving
-  // starts (the exit folds from it). Without it the max-height keyframe runs
-  // toward a 220px guess, crosses the strip's real ~28px within a frame or two,
-  // and the transcript above is shoved up in one jump instead of gliding, which
-  // made a queued send's bubble lurch upward as it landed.
-  useLayoutEffect(() => pinSize(barRef.current), [leaving, empty]);
+  // Nonempty props join the parent's first layout transaction; visible only
+  // supplies the retained snapshot after the queue empties.
+  const currentQueue = messages.length > 0 ? messages : visible;
+  const empty = currentQueue.length === 0 || (immediate && messages.length === 0);
+  const exiting = leaving && messages.length === 0;
+  // The retained exit folds from its actual size, never a guessed cap.
+  useLayoutEffect(() => pinSize(barRef.current), [exiting, empty]);
 
   if (empty) return null;
 
-  const single = visible.length === 1 ? visible[0]! : null;
+  const single = currentQueue.length === 1 ? currentQueue[0] : null;
 
   return (
     <div
       ref={barRef}
-      className={`queued-bar${leaving ? " leaving" : ""}`}
+      className={`queued-bar chat-queue${exiting ? " leaving" : ""}`}
+      inert={exiting}
+      aria-hidden={exiting}
       style={{ borderColor: theme.border, color: theme.textMuted }}
     >
       <div className="queued-bar-row">
@@ -107,43 +123,59 @@ export function QueuedBar({ messages, onCancel }: Props): React.ReactElement | n
         ) : (
           <>
             <span className="queued-bar-text">
-              {visible.length} messages waiting to run in order
+              {currentQueue.length} messages waiting to run in order
             </span>
             <button
               className="queued-toggle"
               style={{ color: theme.textDim }}
-              aria-expanded={open}
-              onClick={() => setOpen((o) => !o)}
+              aria-expanded={expanded}
+              onClick={() => {
+                capture();
+                setOpen((o) => !o);
+              }}
             >
-              {open ? "hide" : "cancel\u2026"}
+              {expanded ? "hide" : "cancel\u2026"}
             </button>
           </>
         )}
       </div>
 
-      {open && visible.length > 1 && (
-        <div className="queued-list">
-          {visible.map((m, i) => (
-            <div key={m.id} className="queued-list-item">
-              <span className="queued-index" style={{ color: theme.textDim }}>
-                {i + 1}
-              </span>
-              <span className="queued-list-text" title={m.text}>
-                {preview(m.text)}
-              </span>
-              <button
-                className="queued-cancel"
-                style={{ color: theme.textDim }}
-                title="Cancel this queued message"
-                aria-label={`Cancel queued message ${i + 1}`}
-                onClick={() => onCancel(m.id)}
+      <div
+        ref={listRef}
+        className="queued-list-shell"
+        style={{ height: expanded ? undefined : 0 }}
+        inert={!expanded}
+        aria-hidden={!expanded}
+      >
+        {shown.length > 0 && (
+          <div className={`queued-list${expanded ? "" : " leaving"}`}>
+            {list.map(({ item: m, leaving: rowLeaving }, i) => (
+              <div
+                key={m.id}
+                className="queued-list-item"
+                inert={rowLeaving}
+                aria-hidden={rowLeaving}
               >
-                <XIcon size={12} weight="bold" aria-hidden="true" />
-              </button>
-            </div>
-          ))}
-        </div>
-      )}
+                <span className="queued-index" style={{ color: theme.textDim }}>
+                  {i + 1}
+                </span>
+                <span className="queued-list-text" title={m.text}>
+                  {preview(m.text)}
+                </span>
+                <button
+                  className="queued-cancel"
+                  style={{ color: theme.textDim }}
+                  title="Cancel this queued message"
+                  aria-label={`Cancel queued message ${i + 1}`}
+                  onClick={() => onCancel(m.id)}
+                >
+                  <XIcon size={12} weight="bold" aria-hidden="true" />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

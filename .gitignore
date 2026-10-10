@@ -9,7 +9,9 @@ coverage/
 # Auth & secrets
 .env
 .env.*
-~/.gg/
+.npmrc
+
+# Local agent config and maintainer-only notes
 .gg/
 !/.gg/
 /.gg/*
@@ -17,6 +19,9 @@ coverage/
 /.gg/commands/*
 !/.gg/commands/release.md
 !/.gg/commands/cleanup.md
+/.claude/
+.claude/*.lock
+CLAUDE.md
 
 # After Effects source projects never belong in the repo.
 *.[aA][eE][pP]
@@ -34,8 +39,6 @@ Thumbs.db
 .vscode/
 .idea/
 
-# Local tool locks
-.claude/*.lock
 
 # Python
 __pycache__/
@@ -47,9 +50,6 @@ __pycache__/
 target/
 .build/
 
-# npm
-.npmrc
-
 # Goal audit generated evidence
 .goal-artifacts/
 .goal-evidence/
@@ -57,25 +57,32 @@ artifacts/
 packages/ggcoder/.goal-evidence/
 packages/ggcoder/ideal-sim/
 
-# prompt-bench scratch sandboxes
-experiments/prompt-bench/.bench-sandbox-*
-
-# Local agent config, docs, experiments, benchmarks and one-off tooling.
-# Files already tracked by Git remain tracked, including the CI gates.
-/.gg/
-/.claude/
-/docs/
-/experiments/
-/bench/
+# Local benchmarks, experiments and one-off tooling. Only the pieces CI or
+# contributors rely on are un-ignored below; everything else stays local.
+/bench/*
+!/bench/baseline/
+/bench/baseline/*
+!/bench/baseline/sizes.json
+!/bench/size-gate.mjs
+!/bench/startup-gate.mjs
+!/bench/ui-library-real-flow/
+/bench/ui-library-real-flow/runs/
+/bench/ui-library-real-flow/live-approval.json
 /benchmarks/
+/experiments/*
+!/experiments/prompt-bench/
+experiments/prompt-bench/.bench-sandbox-*
 /scripts/
-CLAUDE.md
 packages/*/.bench-*.mjs
 
 # Temporary A/B sidecar builder; private harness and outputs live under /bench/.
 /gg-app/scripts/.review-control-bundle.mjs
 
 # Local research/strategy notes
+# Dated agent audit / study reports are maintainer notes, not public docs.
+/docs/*-audit-*.md
+/bench/ui-library-real-flow/REPORT.md
+/experiments/prompt-bench/review-bench.md
 /*-vs-*.md
 /*-report.md
 /fixes.md

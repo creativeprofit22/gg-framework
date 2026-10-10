@@ -95,7 +95,9 @@ describe("Phase 25 automation safety and pure helpers", () => {
 
   it("routes reminder permission exclusively through the OS-backed Tauri command", () => {
     const frontend = readFileSync(join(here, "..", "src", "roadmap-reminders.ts"), "utf8");
-    const rust = readFileSync(join(here, "..", "src-tauri", "src", "lib.rs"), "utf8");
+    const rust = ["lib.rs", "notifications.rs"]
+      .map((file) => readFileSync(join(here, "..", "src-tauri", "src", file), "utf8"))
+      .join("\n");
     const capability = JSON.parse(
       readFileSync(join(here, "..", "src-tauri", "capabilities", "default.json"), "utf8"),
     );

@@ -17,6 +17,7 @@ import {
   providerHtmlErrorMessage,
 } from "../errors.js";
 import { StreamResult } from "../utils/event-stream.js";
+import { mergeProviderOptions } from "../utils/provider-options.js";
 import {
   downgradeUnsupportedImages,
   downgradeUnsupportedVideos,
@@ -417,6 +418,10 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
     }
   }
 
+  // Caller-supplied provider-specific body fields (e.g. OpenRouter's `provider`
+  // routing object). Merged last so they can only fill fields gg-ai left unset.
+  const requestParams = mergeProviderOptions(params, options.providerOptions);
+
   // Dump only non-sensitive request metadata for stall diagnosis. Prompt text,
   // tool definitions, and tool arguments are deliberately never persisted.
   if (getEnvironment()?.GGAI_DUMP_REQUEST) {
@@ -427,7 +432,7 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
     const dumpDir = fs.mkdtempSync(path.join(os.tmpdir(), "ggai-request-"), { encoding: "utf8" });
     fs.chmodSync(dumpDir, 0o700);
     const dumpPath = path.join(dumpDir, `${ts}.json`);
-    const dump = buildOpenAIRequestDiagnostic(params);
+    const dump = buildOpenAIRequestDiagnostic(requestParams);
     fs.writeFileSync(dumpPath, JSON.stringify(dump, null, 2), { mode: 0o600 });
     const requestLogPath = path.join(os.tmpdir(), OPENAI_REQUEST_LOG_FILENAME);
     fs.appendFileSync(
@@ -444,7 +449,7 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
   // request/response often recovers from broken SSE connections.
   if (!useStreaming) {
     try {
-      const completion = (await client.chat.completions.create(params, {
+      const completion = (await client.chat.completions.create(requestParams, {
         signal: options.signal ?? undefined,
       })) as OpenAI.ChatCompletion;
       yield* synthesizeEventsFromCompletion(completion, !!options.thinking, endpointKey);
@@ -456,7 +461,7 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
 
   let stream: AsyncIterable<OpenAI.ChatCompletionChunk>;
   try {
-    stream = (await client.chat.completions.create(params, {
+    stream = (await client.chat.completions.create(requestParams, {
       signal: options.signal ?? undefined,
     })) as AsyncIterable<OpenAI.ChatCompletionChunk>;
   } catch (err) {

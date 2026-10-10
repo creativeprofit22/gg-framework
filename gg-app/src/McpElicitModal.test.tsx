@@ -3,6 +3,11 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import type { SidecarEvent } from "./agent";
 import { McpElicitModal } from "./McpElicitModal";
+import { withViewTransition } from "./view-transition";
+
+vi.mock("./view-transition", () => ({
+  withViewTransition: vi.fn((update: () => void) => update()),
+}));
 
 const mcpElicitMock = vi.hoisted(() => vi.fn(async () => {}));
 const listeners = vi.hoisted(() => new Set<(e: SidecarEvent) => void>());
@@ -40,11 +45,44 @@ beforeAll(() => {
 
 beforeEach(() => {
   mcpElicitMock.mockClear();
+  vi.mocked(withViewTransition).mockClear();
   listeners.clear();
 });
 afterEach(cleanup);
 
 describe("McpElicitModal", () => {
+  it.each(["Cancel", "Close", "Escape"])(
+    "answers immediately and animates only the settled %s dismissal",
+    async (path) => {
+      let resolve: () => void = () => {};
+      mcpElicitMock.mockImplementationOnce(
+        () =>
+          new Promise<void>((done) => {
+            resolve = done;
+          }),
+      );
+      render(<McpElicitModal />);
+      emitElicit({
+        id: "pending",
+        server: "fixture",
+        message: "Fictional request",
+        requestedSchema: askSchema,
+      });
+      if (path === "Escape") fireEvent.keyDown(document, { key: "Escape" });
+      else fireEvent.click(screen.getByRole("button", { name: path }));
+      expect(mcpElicitMock).toHaveBeenCalledExactlyOnceWith("pending", "cancel", undefined);
+      expect(withViewTransition).not.toHaveBeenCalled();
+      expect((screen.getByRole("button", { name: "Cancel" }) as HTMLButtonElement).disabled).toBe(
+        true,
+      );
+      fireEvent.keyDown(document, { key: "Escape" });
+      expect(mcpElicitMock).toHaveBeenCalledOnce();
+      await act(async () => resolve());
+      expect(withViewTransition).toHaveBeenCalledOnce();
+      expect(screen.queryByRole("dialog")).toBeNull();
+    },
+  );
+
   it("renders nothing until a server asks", () => {
     render(<McpElicitModal />);
     expect(screen.queryByRole("dialog")).toBeNull();

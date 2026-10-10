@@ -18,25 +18,15 @@ import type { ReceiptCall } from "./subagent-receipt.js";
 export const MAX_ACCEPTANCE_CHECKS = 10;
 
 export const AcceptanceCheckSchema = z.object({
-  type: z
-    .enum(["file_exists", "file_changed", "command_passed"])
-    .describe(
-      "file_exists: the path exists when the helper finishes. file_changed: the helper " +
-        "wrote or edited the path. command_passed: the helper ran this exact command and " +
-        "its last run exited 0 with no file edits after it.",
-    ),
-  target: z.string().min(1).max(500).describe("The file path or the exact shell command"),
+  type: z.enum(["file_exists", "file_changed", "command_passed"]),
+  target: z.string().min(1).max(500).describe("Path or exact command"),
 });
 
 export const AcceptanceChecksParam = z
   .array(AcceptanceCheckSchema)
   .max(MAX_ACCEPTANCE_CHECKS)
   .optional()
-  .describe(
-    "Optional conditions the result must meet. Checked by code from the filesystem and the " +
-      "helper's real tool calls when it finishes, at no model cost, and reported as " +
-      "PASS / FAIL / UNVERIFIED alongside its answer.",
-  );
+  .describe("Verified by code on finish");
 
 export type AcceptanceCheck = z.infer<typeof AcceptanceCheckSchema>;
 

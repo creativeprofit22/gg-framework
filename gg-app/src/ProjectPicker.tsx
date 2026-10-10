@@ -301,7 +301,9 @@ export function ProjectPicker({
       .then((picked) => {
         if (typeof picked === "string") choose(picked);
       })
-      .catch(() => {});
+      .catch((reason: unknown) => {
+        setFolderError(describeActionFailure("open the folder picker", reason));
+      });
   }
 
   // Save a parent folder as the discovery root, then immediately refresh so its

@@ -18,7 +18,7 @@ export default tseslint.config(
         "error",
         { argsIgnorePattern: "^_", varsIgnorePattern: "^_" },
       ],
-      "@typescript-eslint/no-explicit-any": "warn",
+      "@typescript-eslint/no-explicit-any": "error",
       "@typescript-eslint/consistent-type-imports": "error",
     },
   },
@@ -28,8 +28,6 @@ export default tseslint.config(
       "**/node_modules/",
       "**/*.js",
       "**/*.mjs",
-      // Python package — not TypeScript.
-      "packages/gg-pixel-py/",
     ],
   },
 );

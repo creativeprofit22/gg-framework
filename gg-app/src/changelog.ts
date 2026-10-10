@@ -22,6 +22,67 @@ export interface ChangelogEntry {
 /** Newest first. Prepended by the `/release` flow. */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.86.0",
+    date: "2026-10-10",
+    items: [
+      "Meet the built-in `/commit`, in every project. One command runs your checks and tests, reviews the change, then commits and pushes it. Because the commit is now where your work gets proven, plain replies stop nagging you with `Unverified` badges.",
+      "Claude just got a lot cheaper and quicker in GG Coder. I rebuilt the caching and handed Claude a simpler edit tool, so long agent runs reuse more and break fewer edits. In my benchmarks, Sonnet runs cost up to `45%` less.",
+      "Fewer runs die on a bad network day. When a provider hiccups with a Cloudflare `520` to `524` error, I now retry it for you automatically instead of stopping your task cold.",
+    ],
+  },
+  {
+    version: "0.85.0",
+    date: "2026-10-09",
+    items: [
+      "The engine under GG Coder just learned to search by meaning. I built `embeddings` and `reranking` right into it, working across OpenAI, OpenRouter, Gemini and your own local models, so it now has the foundation for smarter, privacy-first retrieval without a single extra moving part on your machine.",
+    ],
+  },
+  {
+    version: "0.84.0",
+    date: "2026-10-09",
+    items: [
+      "Meet `Project Health`, a live score from `0` to `100` sitting right in your workspace header. My little owl inspects your repo for giant files, messy hygiene, missing safety nets and leaked secrets, shows you the worst offenders, and one click on `Review` hands any of it to your agent to sort out.",
+      "Your checklist finally respects your judgment. When you decide a finding is fine as is, choose `Accept these findings as is` and the item counts as reviewed without nagging you about it ever again. Plus checklist saves on Windows no longer trip over themselves.",
+      "Every popover got a glow up. `Background tasks` and `Schedules` now open in a sleek glassy panel with tiny pixel critters that hop, doze or tip over to show you what each job is up to at a glance. The model picker, slash commands and file mentions got matching polish, and your chat gently dissolves into view when it loads.",
+    ],
+  },
+  {
+    version: "0.83.1",
+    date: "2026-10-08",
+    items: [
+      "Run as many windows as you like and your Mac barely notices. Any window you're not looking at now rests: critters, spinners and sparkles hold still and pick up right where they left off when you come back. Windows on the same repo also share `one` set of git and GitHub checks instead of each running their own.",
+      "`Claude Haiku 5.5` just got a turbo boost. It now writes about `25%` faster, and when it fumbles an edit I quietly catch the slip and land the change instead of letting your run fail.",
+      "Links behave perfectly now. Every link you click in chat, settings or sign-in opens straight in your default app, `mailto:` and `tel:` links included, and nothing gets left running in the background afterwards.",
+    ],
+  },
+  {
+    version: "0.83.0",
+    date: "2026-10-08",
+    items: [
+      "Meet `Claude Haiku 5.5`, the new speed demon in your model picker. It replaces Haiku 4.5 with a massive `1M` token memory, room for `128K` tokens of output and the full thinking range from low all the way to max. Fast, cheap and smarter than any Haiku before it. Plus `Kimi K2.7 Code HighSpeed` lands on Moonshot, and Hugging Face gets Kimi K2.7 Code and DeepSeek V4.1 Flash for fast, affordable coding.",
+      "Your agent got a serious diet. I cut the hidden instructions it reads every turn by about `70%` and taught it to load rarely used tools only the moment it actually reaches for them. Every reply starts faster, every chat costs less and you get more room to work before anything needs compacting.",
+      "You can finally watch Claude think again. Newer Claude models were quietly hiding their reasoning, so I switched it back on as clean, readable summaries, and `Codex` thoughts now land in tidy separate sections instead of one long wall of text.",
+      "Ask the new `Don't embarrass me` checklist to look at your project the way a seasoned developer would on day one. It catches the rookie tells before anyone else does, and every checklist result now warns you with `Code changed since` when your code has moved on, so you never trust a stale verdict.",
+      "This very window got a glow-up. What's new is now a cozy campfire scene where a crew of pixel critters gathers round the fire and every update is a story told in its light. Under the hood I rebuilt big chunks of the app into cleaner pieces, so fixes and new features reach you faster.",
+    ],
+  },
+  {
+    version: "0.82.4",
+    date: "2026-10-07",
+    items: [
+      "Plans never get stuck in limbo again. Whether `Autopilot` approves, hands a plan back to you or hits a snag, the `Accept` box now shows up the moment the plan is truly yours, and it even comes back after a reload. If an accept can't go through, I tell you why and let you try again instead of silently doing nothing.",
+      "Planning got sharper and safer. If your agent drafts a plan but forgets to submit it, I nudge it to finish the job, and when you or Ken send feedback it revises in `read-only` mode, so no code gets touched until you approve.",
+    ],
+  },
+  {
+    version: "0.82.3",
+    date: "2026-10-07",
+    items: [
+      "Your workspace just got a smoother rhythm. I cleaned up the jumps when you hit `Send`, open details or close menus and dialogs, and coming back from `Checklist` no longer replays the chat you've already read. Less motion in your way, more flow.",
+      "See your project's health at a glance. I gave `Checklist` clearer colors and distinct icons, so you can spot what's passed, what's due and what needs attention without reading every line.",
+    ],
+  },
+  {
     version: "0.82.2",
     date: "2026-10-07",
     items: [

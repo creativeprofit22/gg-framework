@@ -393,24 +393,24 @@ describe("spawn_agent worker", () => {
   });
 
   it("retries an unavailable pinned model on the parent model at the parent's lowest thinking level", async () => {
-    // Haiku's ladder bottoms out at "high", Opus's at "low". The retry used
+    // A retired, unregistered model's ladder bottoms out at "high", Opus's at "low". The retry used
     // to keep the pinned model's rung, so it would run Opus at "high".
     const { getSupportedThinkingLevels } = await import("../core/thinking-level.js");
-    const haikuLowest = getSupportedThinkingLevels("anthropic", "claude-haiku-4-5")[0];
+    const pinnedLowest = getSupportedThinkingLevels("anthropic", "claude-retired-model")[0];
     const opusLowest = getSupportedThinkingLevels("anthropic", "claude-opus-5-5")[0];
-    expect(haikuLowest).not.toBe(opusLowest);
+    expect(pinnedLowest).not.toBe(opusLowest);
     agentLoopMock
       .mockImplementationOnce(async function* rejectsPinnedModel(messages: Message[]) {
         // Rejected before any output or tool call — the only case that may retry.
-        if (messages.length > 0) throw new Error("model not found: claude-haiku-4-5");
+        if (messages.length > 0) throw new Error("model not found: claude-retired-model");
         yield { type: "agent_done", totalTurns: 0, totalUsage: usage };
       })
       .mockImplementationOnce(answersCleanly);
 
     const { done } = await runWorkerTurn({
-      model: "claude-haiku-4-5",
+      model: "claude-retired-model",
       fallbackModel: "claude-opus-5-5",
-      thinkingLevel: haikuLowest,
+      thinkingLevel: pinnedLowest,
     });
 
     expect(done).toMatchObject({ status: "completed", output: "Final report." });
@@ -419,7 +419,7 @@ describe("spawn_agent worker", () => {
       return { model, thinking };
     });
     expect(attempts).toEqual([
-      { model: "claude-haiku-4-5", thinking: haikuLowest },
+      { model: "claude-retired-model", thinking: pinnedLowest },
       { model: "claude-opus-5-5", thinking: opusLowest },
     ]);
   });

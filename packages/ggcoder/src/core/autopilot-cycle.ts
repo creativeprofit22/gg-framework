@@ -26,6 +26,11 @@ import { CORPUS_UNVERIFIED_REASON, type AutopilotVerdict } from "./autopilot-ver
 export const AUTOPILOT_PLAN_DRAFTING_REASON =
   "GG Coder is still drafting a plan (plan mode is active with nothing submitted). Finish or cancel the plan yourself; autopilot can't prompt a read-only session.";
 
+/** Injected when Autopilot finds the work unchecked before its review. */
+export const AUTOPILOT_VERIFY_PROMPT =
+  "Run the project's checks for your changes (see Verification), standalone and unpiped, " +
+  "and fix any failures.";
+
 /** Situational-awareness preamble prepended to EVERY build-session run that
  *  Autopilot Ken injects (fix prompts, plan-revision prompts, the post-approval
  *  "implement it now" run). GG Coder otherwise can't tell an autopilot-injected
@@ -119,12 +124,17 @@ export interface AutopilotCycleDeps {
   /** Compare-and-swap the reviewed generation into revision-requested. */
   requestPlanRevision: (feedback: string) => Promise<boolean>;
   /** Feed a PROMPT verdict to GG Coder; true only when the injected work completes. */
-  runPrompt: (body: string) => Promise<boolean>;
+  /** `planRevision` marks a plan-feedback run: the host puts the session back
+   *  in read-only plan mode first, so revising can't start editing code. */
+  runPrompt: (body: string, opts?: { planRevision?: boolean }) => Promise<boolean>;
   /** Called BEFORE runPrompt: record the injected body (digest labeling) and
    *  broadcast the autopilot_prompted marker. */
   onInjected: (body: string, round: number) => void;
   /** Broadcast one of the cycle's terminal SSE frames. */
   emit: (event: AutopilotCycleEmit) => void;
+  /** Why current code changes are unproven (upstream 0.86.0 rule), or null.
+   *  Absent: treated as no problem. */
+  verificationProblem?: () => string | null;
 }
 
 /**
@@ -142,15 +152,40 @@ export interface AutopilotCycleDeps {
 export async function driveAutopilotCycle(
   deps: AutopilotCycleDeps,
 ): Promise<AutopilotCycleOutcome> {
+  const stopIfUnverified = (): boolean => {
+    const reason = deps.verificationProblem?.() ?? null;
+    if (!reason) return false;
+    deps.emit({ type: "autopilot_human", data: { reason } });
+    return true;
+  };
+  // Upstream 0.86.0: plain replies leave checks to /commit, so a turn often
+  // ends unchecked. Autopilot asks for the checks once before reviewing; only
+  // work still unchecked after that goes back to the human.
+  const ensureVerified = async (round: number): Promise<boolean> => {
+    if (!deps.verificationProblem?.()) return true;
+    // A pending plan is reviewed in plan mode, where checks cannot run.
+    if (deps.planPending()) {
+      stopIfUnverified();
+      return false;
+    }
+    deps.onInjected(AUTOPILOT_VERIFY_PROMPT, round);
+    await deps.runPrompt(AUTOPILOT_VERIFY_PROMPT);
+    return !deps.isCancelled() && !stopIfUnverified();
+  };
   if (deps.isCancelled()) return "cancelled";
+  if (!(await ensureVerified(1))) return deps.isCancelled() ? "cancelled" : "human";
   await deps.resetReviewer();
   let remediationRounds = 0;
   for (;;) {
     if (deps.isCancelled()) return "cancelled";
+    if (!(await ensureVerified(remediationRounds + 1))) {
+      return deps.isCancelled() ? "cancelled" : "human";
+    }
     if (deps.planPending()) {
       const verdict = await deps.reviewPlan();
       if (deps.isCancelled()) return "cancelled";
       if (!verdict) return "review-failed";
+      if (stopIfUnverified()) return "human";
       if (verdict.kind === "human") {
         deps.emit({ type: "autopilot_human", data: { reason: verdict.reason } });
         return "human";
@@ -165,7 +200,7 @@ export async function driveAutopilotCycle(
         remediationRounds += 1;
         const body = buildPlanRevisionPrompt(verdict.body);
         deps.onInjected(body, remediationRounds);
-        if ((await deps.runPrompt(body)) !== true) {
+        if ((await deps.runPrompt(body, { planRevision: true })) !== true) {
           return deps.isCancelled() ? "cancelled" : "run-failed";
         }
         continue;
@@ -195,6 +230,7 @@ export async function driveAutopilotCycle(
     const verdict = await deps.review();
     if (deps.isCancelled()) return "cancelled";
     if (!verdict) return "review-failed";
+    if (stopIfUnverified()) return "human";
     if (verdict.kind === "all_clear") {
       deps.emit({
         type: "autopilot_done",

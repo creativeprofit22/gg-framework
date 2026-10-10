@@ -31,8 +31,21 @@ describe("prompt commands", () => {
       "a `detail` of one plain sentence naming which review findings are blocking",
     );
     expect(setupCommit?.prompt).toContain("rerun affected checks without another review");
-    expect(setupCommit?.prompt).toContain("push exactly once after all commits");
+    expect(setupCommit?.prompt).toContain(
+      "push exactly once after all commits if the branch tracks a remote; if it has none, say so instead of pushing",
+    );
     expect(setupCommit?.prompt).not.toContain("current index tree");
+  });
+
+  it("pushes from the built-in /commit only when the branch tracks a remote", () => {
+    const commit = PROMPT_COMMANDS.find((command) => command.name === "commit");
+
+    expect(commit?.description).toBe(
+      "Run checks, review, commit with AI message, and push if tracking a remote",
+    );
+    expect(commit?.prompt).toContain(
+      "Then `git push` if the branch has an upstream; if it has none, say so instead of pushing.",
+    );
   });
 
   it("scopes generated /commit commands to all uncommitted git work, not the session", () => {
@@ -93,6 +106,34 @@ describe("prompt commands", () => {
     expect(compare?.prompt).toContain("exact file and line");
     expect(compare?.prompt).toContain("concrete correction");
     expect(compare?.prompt).toContain("Press Ctrl+T to open the task list");
+  });
+
+  // The commit is where work gets verified; replies leave checks to it.
+  it("builds /commit in for every project: checks with tests, review, commit, push", () => {
+    const cmd = PROMPT_COMMANDS.find((command) => command.name === "commit");
+    expect(cmd?.prompt).toContain("Verification in your instructions, plus the tests");
+    expect(cmd?.prompt).toContain("Run each standalone, unpiped");
+    expect(cmd?.prompt).toContain("Fix every failure");
+    expect(cmd?.prompt).toContain("spawn ONE subagent with the full diff");
+    expect(cmd?.prompt).toContain("never `git add -A`");
+    expect(cmd?.prompt).toContain("never with `--no-verify`");
+    expect(cmd?.prompt).toContain("stop before committing");
+    // Never pushes somewhere unconfigured.
+    expect(cmd?.prompt).toContain("if it has none, say so instead of pushing");
+  });
+
+  it("lets a project's own commit.md, which the built-in name shadows, take over", () => {
+    const cmd = PROMPT_COMMANDS.find((command) => command.name === "commit");
+    expect(cmd?.prompt).toContain(
+      "If `.gg/commands/commit.md` exists, read it and follow it instead of these steps",
+    );
+    expect(cmd?.prompt).toContain("If it runs no tests while the project has some, run them too");
+  });
+
+  it("makes /setup-commit include the project's tests", () => {
+    const cmd = PROMPT_COMMANDS.find((command) => command.name === "setup-commit");
+    expect(cmd?.prompt).toContain("[PROJECT-SPECIFIC QUALITY COMMANDS]");
+    expect(cmd?.prompt).toContain("tests included");
   });
 
   it("defines /steroids as profile, discover, ask, then index only what was chosen", () => {

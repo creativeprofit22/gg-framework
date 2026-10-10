@@ -89,4 +89,34 @@ describe("ProcessManager spawn failure", () => {
       }),
     ).rejects.toMatchObject({ code: "ENOENT" });
   });
+
+  it("never signals a pid for a child that failed to spawn", async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "gg-process-wait-"));
+    tempDirs.push(directory);
+    const signalled: unknown[] = [];
+    const pm = new ProcessManager({
+      bgDir: directory,
+      kill: (pid) => {
+        signalled.push(pid);
+        return true;
+      },
+      killProcessTree: (pid) => void signalled.push(pid),
+    });
+    managers.push(pm);
+
+    // Local Fork: start() rejects on spawn failure (see "rejects safely when the
+    // child fails to spawn") instead of upstream's pid-0 settle; the upstream
+    // invariant kept here is that no pid is ever signalled.
+    await expect(
+      pm.start("echo hi", process.cwd(), {
+        file: "definitely-not-a-real-binary-xyz",
+        args: [],
+        isCmdFallback: false,
+        sandboxed: false,
+      }),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+    expect(pm.list()).toEqual([]);
+    pm.shutdownAll();
+    expect(signalled).toEqual([]);
+  });
 });

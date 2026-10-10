@@ -1,6 +1,6 @@
 ---
 name: root-cause
-description: Use when a bug resists the obvious fix, behaviour makes no sense, a symptom keeps coming back, a test is flaky, something "worked last week", or the user asks why something happens and the answer is not on the surface — including mid-build when a second fix attempt fails. Do NOT use for bugs with a clear repro and an obvious cause (reproduce, fix, re-run directly), security incident triage (bulletproof), or reviewing a diff (code-review).
+description: Use when a bug resists the obvious fix or is flaky. Do NOT use when the cause is obvious.
 ---
 
 # Root-Cause

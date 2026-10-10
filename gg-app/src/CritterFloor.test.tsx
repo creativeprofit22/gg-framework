@@ -21,12 +21,18 @@ beforeAll(() => {
   Element.prototype.getAnimations = vi.fn(() => []) as unknown as Element["getAnimations"];
 });
 
+// These tests act out the animated floor of the window the user is looking
+// at; jsdom reports an unfocused document, which the floor treats as resting.
+let windowFocused = true;
 beforeEach(() => {
   vi.useFakeTimers();
   localStorage.clear();
+  windowFocused = true;
+  vi.spyOn(document, "hasFocus").mockImplementation(() => windowFocused);
 });
 afterEach(() => {
   vi.useRealTimers();
+  vi.restoreAllMocks();
 });
 
 function line(
@@ -184,6 +190,23 @@ describe("CritterFloor", () => {
     });
     expect(critters(container)).toBe(0);
     expect(lane(container).classList.contains("open")).toBe(false);
+  });
+
+  it("in a background window, lands and clears agents at once and shuts the empty lane", async () => {
+    windowFocused = false;
+    const { container, rerender } = render(
+      <CritterFloor groups={[group(1, [line("a", "running"), line("b", "running")])]} />,
+    );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(critters(container)).toBe(2);
+    expect(container.querySelector(".critter.summoning")).toBeNull();
+
+    rerender(<CritterFloor groups={[group(1, [line("a", "idle"), line("b", "error")])]} />);
+    expect(critters(container)).toBe(0);
+    expect(lane(container).classList.contains("open")).toBe(false);
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it("summons an idle agent back when a follow-up sets it running again", async () => {

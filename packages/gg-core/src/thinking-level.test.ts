@@ -32,9 +32,7 @@ describe("getLowestThinkingLevel", () => {
   });
 
   it("is undefined only for a model that cannot reason at all", () => {
-    expect(
-      getLowestThinkingLevel("huggingface", "Qwen/Qwen3-Coder-480B-A35B-Instruct"),
-    ).toBeUndefined();
+    expect(getLowestThinkingLevel("huggingface", "moonshotai/Kimi-K2.7-Code")).toBeUndefined();
   });
 });
 
@@ -115,6 +113,18 @@ describe("thinking-level helpers", () => {
     expect(getNextThinkingLevel("anthropic", "claude-sonnet-5-5", "max")).toBeUndefined();
     expect(isThinkingLevelSupported("anthropic", "claude-sonnet-5-5", "xhigh")).toBe(true);
     expect(isThinkingLevelSupported("anthropic", "claude-sonnet-5", "xhigh")).toBe(false);
+  });
+
+  it("cycles Haiku 5.5 through the full adaptive ladder, including xhigh", () => {
+    expect(getSupportedThinkingLevels("anthropic", "claude-haiku-5-5")).toEqual([
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+    ]);
+    expect(getNextThinkingLevel("anthropic", "claude-haiku-5-5", "high")).toBe("xhigh");
+    expect(getNextThinkingLevel("anthropic", "claude-haiku-5-5", "max")).toBeUndefined();
   });
 
   it("cycles Claude Fable 5.1 through the adaptive ladder without xhigh", () => {

@@ -5,21 +5,10 @@ import { checkDestructiveGit } from "../core/destructive-git-guard.js";
 import { shellThreatBlockMessage } from "../core/shell-threats.js";
 
 const TaskSendParams = z.object({
-  id: z.string().describe("The background process ID to send input to"),
-  input: z
-    .string()
-    .optional()
-    .describe("Text to type into the process's stdin (e.g. an answer to a prompt or a REPL line)"),
-  enter: z
-    .boolean()
-    .optional()
-    .describe(
-      "Append a newline (press Enter) after the input. Defaults to true when input is supplied; set true without input to press Enter only.",
-    ),
-  eof: z
-    .boolean()
-    .optional()
-    .describe("Close stdin after any text/newline, signalling end-of-input (Ctrl-D)."),
+  id: z.string(),
+  input: z.string().optional(),
+  enter: z.boolean().optional().describe("Default true"),
+  eof: z.boolean().optional().describe("Close stdin (Ctrl-D)"),
 });
 
 export function createTaskSendTool(
@@ -28,11 +17,7 @@ export function createTaskSendTool(
 ): AgentTool<typeof TaskSendParams> {
   return {
     name: "task_send",
-    description:
-      "Send text, press Enter, or close stdin for a running background process (started with " +
-      "run_in_background). Text is followed by Enter by default. Use enter=true without input " +
-      "for a newline only, or eof=true without input to close stdin without a newline. After " +
-      "sending, call task_output to read the process's response.",
+    description: "Type into a background process's stdin.",
     parameters: TaskSendParams,
     executionMode: "sequential",
     async execute({ id, input, enter, eof }) {

@@ -1,6 +1,6 @@
 ---
 name: clarify
-description: Use when requirements or a design are genuinely unsettled — the user asks to interrogate, sharpen, or stress-test a plan or spec before building, a new app or feature request leaves costly-to-reverse product decisions open, or mid-build discovery hits a decision that materially changes the result (scope, data model, UX, tradeoff). Settled terms and hard-to-reverse calls hand off to shared-language. Do NOT use for routine changes, clear bug reports (root-cause), reviewing finished work (code-review), or work whose requirements are already settled — bias to action there.
+description: Use when requirements are genuinely unsettled. Do NOT use for routine work.
 ---
 
 # Clarify

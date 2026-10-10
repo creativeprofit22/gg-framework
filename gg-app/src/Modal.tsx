@@ -58,6 +58,8 @@ interface ModalProps {
   onClose: () => void;
   /** Extra class on the `.modal` box (e.g. width overrides). */
   className?: string;
+  /** Async dismissals own the transition around their eventual removal. */
+  animateDismiss?: boolean;
 }
 
 /**
@@ -98,20 +100,23 @@ function ModalDialog({
   onClose,
   className,
   canClose = true,
+  animateDismiss = true,
 }: ModalProps): React.ReactElement {
   const dialogRef = useRef<HTMLDivElement>(null);
   const titleId = useId();
-  // The modal's own dismissals (Escape, backdrop, ×) animate out. Closes the
-  // parent triggers itself (Save, Cancel) stay instant: they usually open the
-  // next thing, and a fading ghost would sit over it.
-  const dismiss = (): void => withViewTransition(onClose);
+  // Escape, backdrop, × and ModalDismissButton share dismissal motion.
+  // Save/Confirm/navigation remain separate actions owned by the parent.
+  const dismiss = (): void => {
+    if (animateDismiss) withViewTransition(onClose);
+    else onClose();
+  };
   // Focus handling stays local (not the shared useDialogFocus): the modal also
   // inerts the background, honours stacked dialogs and skips hidden controls.
   const onCloseRef = useRef(dismiss);
 
   useEffect(() => {
-    onCloseRef.current = canClose ? () => withViewTransition(onClose) : () => undefined;
-  }, [onClose, canClose]);
+    onCloseRef.current = canClose ? dismiss : () => undefined;
+  });
 
   useEffect(() => {
     const returnFocus =

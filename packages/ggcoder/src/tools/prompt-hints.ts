@@ -11,51 +11,44 @@
  * Cross-tool preferences for those tools live in TOOL_STEERING instead.
  */
 export const TOOL_PROMPT_HINTS: Record<string, string> = {
-  ui_registry: "Inspect public Bklit/Kokonut components, shadcn source and Motion APIs.",
-  ui_adopt: "Plan/adopt Bklit/Kokonut source without overwrites or installs.",
-  code_nav:
-    "Language-server navigation: `definition`, `references`, `symbols` (file outline), `hover` " +
-    "(type/signature). Exact and cross-file, unlike text search.",
-  code_search:
-    "Find the most relevant functions/classes/types for a query via AST chunking + BM25 " +
-    "ranking. Returns whole ranked symbol chunks with `file:line → symbol` headers — far fewer " +
-    "tokens than reading whole files. TS/JS, Python, Go, Rust, Java, C#.",
-  source_path: "Resolve installed dependency source; inspect before use.",
-  tauri_package: "Inspect/configure/package/verify Tauri v2 JSON apps.",
-  programmatic_profile: "Inspect/persist.",
-  programmatic_command: "Review/create commands; separately approve isolated runs.",
-  programmatic_scan: "Scan approved profiles; persist lifecycle summaries.",
-  command_information: "Read command metadata/prompt; no execution permission.",
-  web_search:
-    "Search the web. Use before web_fetch to find pages; supports include/exclude_domains and a time_range recency filter.",
-  web_fetch:
-    "Fetch page content as Markdown (or text/html). Pass `urls` to fetch many at once; reads PDFs, follows safe redirects, and prefers a site's /llms.txt for docs.",
-  task_output: "Read new output from a background process by id; wait_ms blocks until it exits.",
-  task_stop: "Stop a background process by id.",
-  screenshot: "Capture browser PNGs; supports waits/interactions.",
-  debug: "Node.js breakpoints, stepping and live variables.",
-  send_message: "Steer a running child without a new turn.",
-  followup_task: "Start an idle child's next turn with its context.",
-  wait_agent: "Wait for child agents; for processes use task_output.",
-  list_agents: "List child IDs, states, turns and tokens.",
-  interrupt_agent: "Interrupt a child's turn; preserve follow-up context.",
-  checklist: "Read/record completed project checks; no unasked audits.",
-  tasks:
-    "Manage the project task list. Never proactively — only on explicit request, or at a slash-command's task-handoff step.",
-  enter_plan:
-    "Enter read-only plan mode for complex/risky tasks before implementation; draft a plan under .gg/plans/.",
-  exit_plan: "Submit a .gg/plans/ markdown plan for user approval and leave plan mode.",
-  subagent: "Delegate focused, isolated subtasks (research, parallel exploration).",
-  skill: "Invoke a named skill for specialized instructions.",
-  tool_search:
-    "Load any tool listed as available on demand, plus the extended catalog of " +
-    "integrations (MCP servers) — e.g. 'take a screenshot', 'search public GitHub code'. " +
-    "Matches become callable on your next step. Check the catalog BEFORE concluding you " +
-    "lack a capability.",
-  generate_image: "Generate/edit images only on explicit request; `image` edits.",
-  research_corpus: "Read-only corpus search/show; no indexing or installs.",
-  steroids:
-    "Local corpus of real, current open-source repos: how projects do X, where a symbol lives.",
+  ui_registry: "Browse Bklit/Kokonut/shadcn components.",
+  ui_adopt: "Adopt Bklit/Kokonut component source.",
+  find: "Glob search.",
+  ls: "List a dir.",
+  code_nav: "Exact definitions/callers.",
+  code_search: "Find code by meaning (“where is X”).",
+  task_send: "Process stdin.",
+  spawn_agent: "Parallel child agents.",
+  source_path: "Dependency source.",
+  web_search: "Web search.",
+  web_fetch: "Fetch URLs/PDFs.",
+  task_output: "Process output.",
+  task_stop: "Stop a process.",
+  screenshot: "Screenshot/click UI.",
+  debug: "Node debugger.",
+  send_message: "Steer a child.",
+  followup_task: "Re-task a child.",
+  wait_agent: "Await children.",
+  list_agents: "List children.",
+  interrupt_agent: "Interrupt a child.",
+  checklist:
+    "Read/record project checks with evidence and scope; re-record an item after fixing it. No unasked audits.",
+  tasks: "Task list; only if asked.",
+  ask_user: "Ask the user via clickable options; mark your pick `recommended`.",
+  enter_plan: "Plan mode.",
+  exit_plan: "Submit a plan.",
+  subagent: "Blocking child agent.",
+  skill: "Load a named skill's instructions.",
+  tool_search: "Load on-demand and integration tools by capability.",
+  generate_image: "Images; only if asked.",
+  steroids: "Real-repo examples.",
+  tauri_package: "Package/verify Tauri v2 apps.",
+  programmatic_profile: "Inspect/persist profiles.",
+  programmatic_command:
+    "Review/create commands only on explicit request; runs and shell actions need separate approval.",
+  programmatic_scan: "Scan approved profiles.",
+  command_information: "Read command metadata; no execution permission.",
+  research_corpus: "Read-only corpus search/show.",
 };
 
 /**
@@ -74,23 +67,15 @@ export const TOOL_STEERING_CLAUSES: ReadonlyArray<{
     text: "Prefer `edit` over `write` for changes to existing files.",
   },
   {
-    needs: ["bash", "find", "grep"],
+    needs: ["bash", "grep"],
     // A head-to-head against the pi agent found the strict
     // "rather than bash" wording split exploration into one ls/find per turn
     // (~50s per suite); one combined read-only bash command does it in one.
-    text: "Use `find`/`grep` to locate files and search content; when orienting in an unfamiliar tree, one read-only `bash` command that combines several lookups (`ls`, `find`, `rg`, `cat` of the small relevant files) is fine and saves turns — list and read in the same step rather than listing first and reading next turn.",
+    text: "To orient, combine `ls`/`find`/`rg`/`cat` in one `bash` call.",
   },
   {
-    needs: ["code_search", "grep", "read"],
-    text: "Prefer `code_search` for “where/how is X implemented”; use `grep` for exact strings or unindexed file types.",
-  },
-  {
-    needs: ["code_nav", "grep"],
-    text: "For “who calls this” / “where is this defined”, use `code_nav` — it resolves symbols exactly, across files; `grep` only matches text and misses renames, re-exports and shadowing.",
-  },
-  {
-    needs: ["read", "grep", "ls", "find"],
-    text: "Batch independent read-only calls (read, grep, ls, find) into one turn — they run in parallel, so it's faster than one per turn; only serialize a call that depends on a previous result.",
+    needs: ["read", "grep"],
+    text: "Batch independent reads/searches in one turn; they run in parallel.",
   },
 ];
 

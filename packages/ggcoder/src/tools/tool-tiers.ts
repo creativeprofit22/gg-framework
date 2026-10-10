@@ -29,18 +29,7 @@ export const CORE_TOOL_NAMES: readonly string[] = [
   "edit",
   "bash",
   "grep",
-  "find",
-  "ls",
-  "code_search",
-  "code_nav",
-  "web_fetch",
-  "task_output",
-  "task_send",
-  "task_stop",
-  "spawn_agent",
   "skill",
-  "enter_plan",
-  "exit_plan",
   "tool_search",
 ];
 
@@ -55,12 +44,47 @@ export const CORE_TOOL_NAMES: readonly string[] = [
  * followed after a 2026-10 count over 255 working sessions, and a GLM-5.3
  * head-to-head with Dirac (bench/h2h/DIRAC-FINDINGS.md) showed the always-on
  * prefix — ~5.4k chars for these two schemas — was GG's main per-request
- * overhead. `spawn_agent` (~22%) stays core. `task_send`
- * stays core even though it is rarer: bash's own description points at it,
- * and promoting it mid-session would change the tool list, which restarts
- * Anthropic's prompt cache (tools are cached ahead of system and messages).
+ * overhead.
+ *
+ * The 2026-10 prompt diet (bench/prompt-diet, GLM-5.3-Flash, 22 tasks) counted
+ * 1,429 sessions over 60 days and deferred every built-in under the one-in-five
+ * rule: find/ls (8%), code_search/code_nav (5%), spawn_agent (4%), web_fetch
+ * (3%), enter_plan/exit_plan (1%), task_send (0%). Together ~1.9k tokens per
+ * request. Promotion appends to the tool list, so a session that does reach
+ * one pays a cache restart once; the bench showed no pass-rate or speed loss.
+ * `exit_plan` is promoted automatically whenever plan mode turns on,
+ * `wait_agent` as soon as a spawn succeeds, and the task_* trio as soon as
+ * bash starts a background process (task_output 12%, task_stop 4%).
  */
+/**
+ * Deferred tools that load themselves when their trigger runs (bash in the
+ * background, a spawn, plan mode), so the model never needs to discover them:
+ * they get no line in the prompt's on-demand index, only `tool_search` hints.
+ */
+export const AUTO_LOADED_TOOL_NAMES: ReadonlySet<string> = new Set([
+  "task_output",
+  "task_send",
+  "task_stop",
+  "wait_agent",
+  "send_message",
+  "followup_task",
+  "list_agents",
+  "interrupt_agent",
+  "exit_plan",
+]);
+
 export const DEFERRED_TOOL_NAMES: readonly string[] = [
+  "task_output",
+  "task_stop",
+  "find",
+  "ls",
+  "code_search",
+  "code_nav",
+  "web_fetch",
+  "task_send",
+  "spawn_agent",
+  "enter_plan",
+  "exit_plan",
   "web_search",
   "steroids",
   "subagent",

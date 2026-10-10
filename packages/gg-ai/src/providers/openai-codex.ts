@@ -17,6 +17,7 @@ import {
 } from "../errors.js";
 import { StreamResult } from "../utils/event-stream.js";
 import { providerDiag } from "../utils/diag.js";
+import { mergeProviderOptions } from "../utils/provider-options.js";
 import { normalizePromptCacheKey } from "./prompt-cache-key.js";
 import { downgradeUnsupportedImages, downgradeUnsupportedVideos } from "./transform.js";
 import { parseToolArguments } from "../utils/json.js";
@@ -185,7 +186,9 @@ async function* runStream(
     headers["x-client-request-id"] = transportSessionId;
   }
 
-  const encodedRequest = await encodeCodexRequest(body);
+  const encodedRequest = await encodeCodexRequest(
+    mergeProviderOptions(body, options.providerOptions),
+  );
   if (encodedRequest.compressed) headers["Content-Encoding"] = "zstd";
   providerDiag("codex_request_body", {
     rawBytes: encodedRequest.rawBytes,
@@ -300,6 +303,9 @@ async function* runStream(
   let outputTokens = 0;
   let cacheRead = 0;
   let cacheWrite = 0;
+  // Whether any visible reasoning text has streamed yet — a section break is
+  // only needed between sections, never before the first one.
+  let thinkingTextEmitted = false;
 
   // ── Diagnostic: log the first occurrence of each raw SSE event type with
   // timing, so we can see what Codex sends during the pre-reasoning window
@@ -415,6 +421,16 @@ async function* runStream(
       }
     }
 
+    // Each reasoning summary section (Codex sends a short bold headline per
+    // section) arrives as its own part with no separator in the text. Without a
+    // break they render glued together — "**A****B**" — which also breaks the
+    // markdown bold. Mirror the Codex CLI: a blank line between sections.
+    if (type === "response.reasoning_summary_part.added") {
+      if (options.thinking && thinkingTextEmitted) {
+        yield { type: "thinking_delta", text: "\n\n" };
+      }
+    }
+
     // Thinking delta
     if (
       type === "response.reasoning_summary_text.delta" ||
@@ -423,7 +439,10 @@ async function* runStream(
       type === "response.reasoning.delta"
     ) {
       const delta = event.delta as string;
-      if (options.thinking) yield { type: "thinking_delta", text: delta };
+      if (options.thinking && delta) {
+        thinkingTextEmitted = true;
+        yield { type: "thinking_delta", text: delta };
+      }
     }
 
     // Reasoning item started — the model has begun reasoning on the server.

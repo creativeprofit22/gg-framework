@@ -2,8 +2,11 @@
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: vi.fn() }));
-vi.mock("./agent", () => ({ openProjectPath: vi.fn(), sendPrompt: vi.fn() }));
+vi.mock("./agent", () => ({
+  openProjectPath: vi.fn(),
+  openUrl: vi.fn(),
+  sendPrompt: vi.fn(),
+}));
 
 import { Markdown } from "./Markdown";
 

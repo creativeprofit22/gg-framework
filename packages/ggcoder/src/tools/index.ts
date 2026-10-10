@@ -14,7 +14,7 @@ import { UiRegistry } from "../core/ui-registry.js";
 import { adoptionOperations } from "../core/ui-adoption.js";
 import { createUiRegistryTool } from "./ui-registry.js";
 import { createUiAdoptTool } from "./ui-adopt.js";
-import { createEditTool } from "./edit.js";
+import { createEditTool, createFlatEditTool } from "./edit.js";
 import { createBashTool } from "./bash.js";
 import type { ForegroundLimitSettings } from "./foreground-limits.js";
 import { createTauriPackageTool } from "./tauri-package.js";
@@ -298,7 +298,8 @@ export async function createTools(
       getDiagnostics,
       opts?.getWriteGuardSettings,
     ),
-    createEditTool(
+    // Claude models get the flat edit shape (see createFlatEditTool).
+    (opts?.provider === "anthropic" ? createFlatEditTool : createEditTool)(
       cwd,
       readFiles,
       ops,
@@ -378,12 +379,14 @@ export async function createTools(
   }
 
   let subAgentManager: SubAgentManager | undefined;
+  const baseProvider = opts?.provider;
+  const baseModel = opts?.model;
   if (
     !opts?.disableSubagents &&
     opts?.agents &&
     opts.agents.length > 0 &&
-    opts.provider &&
-    opts.model
+    baseProvider &&
+    baseModel
   ) {
     // Children keep their own research ledgers; permalinks in their reports
     // are the only way delegated corpus research reaches this session's gate.
@@ -395,8 +398,8 @@ export async function createTools(
         createSubAgentTool(
           cwd,
           opts.agents,
-          () => opts.getProvider?.() ?? opts.provider!,
-          () => opts.getModel?.() ?? opts.model!,
+          () => opts.getProvider?.() ?? baseProvider,
+          () => opts.getModel?.() ?? baseModel,
           opts.getCacheKey,
           planModeRef,
           opts.getThinkingLevel,
@@ -406,8 +409,8 @@ export async function createTools(
     subAgentManager = new SubAgentManager({
       cwd,
       agents: opts.agents,
-      getProvider: () => opts.getProvider?.() ?? opts.provider!,
-      getModel: () => opts.getModel?.() ?? opts.model!,
+      getProvider: () => opts.getProvider?.() ?? baseProvider,
+      getModel: () => opts.getModel?.() ?? baseModel,
       getThinkingLevel: opts.getThinkingLevel,
       getCacheKey: opts.getCacheKey,
       getBaseUrl: opts.getBaseUrl,

@@ -1,6 +1,6 @@
 ---
 name: refactoring
-description: Use for behavior-preserving restructuring: extract, move, split, deduplicate, plan a refactor, or migrate an implementation behind an unchanged contract. Baseline tests, small steps, revert-on-red. Do NOT use for requested behavior or API-contract changes (including new return/error semantics), even when called a "refactor"; use the normal implementation workflow with regression tests and update affected callers together. Also exclude bug fixes (root-cause when stubborn), performance work (lean), data migrations (durable), styling/copy, TDD's refactor step (tdd), and rewrites.
+description: Use for behaviour-preserving restructuring behind an unchanged contract. Do NOT use for renames, bug fixes or behaviour changes.
 license: Behavior-preservation methodology synthesized from public sources (Fowler's Refactoring catalog, Tidy First?, and community agent skills by bienhoang, wondelai, mattpocock, jeffallan, vasilyu1983), audited 2026-09-12.
 ---
 

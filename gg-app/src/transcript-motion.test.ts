@@ -1,6 +1,12 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { dissolveInAbove, teleport } from "./transcript-motion";
+import {
+  createEntranceLifetime,
+  enterTranscriptRow,
+  dissolveInAbove,
+  dissolveInVisible,
+  teleport,
+} from "./transcript-motion";
 
 interface FakeAnimation {
   keyframes: Keyframe[];
@@ -23,6 +29,29 @@ afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
   document.body.replaceChildren();
+});
+
+describe("entrance lifetime", () => {
+  it("consumes before playback and never replays cancelled or paged rows", () => {
+    const lifetime = createEntranceLifetime(10);
+    expect(lifetime.consume(9)).toBe(false);
+    expect(lifetime.consume(10)).toBe(true);
+    expect(lifetime.consume(10)).toBe(false);
+    lifetime.settle(14); // messages committed while chat is hidden
+    expect(lifetime.consume(12)).toBe(false);
+    expect(lifetime.consume(14)).toBe(false);
+    expect(lifetime.consume(15)).toBe(true);
+    expect(createEntranceLifetime(100).consume(100)).toBe(true);
+  });
+
+  it("uses opacity alone and cancels on deactivation", () => {
+    const row = document.createElement("div");
+    const animations = stubAnimate(row);
+    const cancel = enterTranscriptRow(row);
+    expect(animations[0]?.keyframes).toEqual([{ opacity: 0 }, { opacity: 1 }]);
+    cancel();
+    expect(animations[0]?.cancel).toHaveBeenCalledOnce();
+  });
 });
 
 describe("teleport", () => {
@@ -87,5 +116,50 @@ describe("dissolveInAbove", () => {
       expect(anims[0]?.options.fill).toBeUndefined();
     }
     expect(firstAnims).toHaveLength(0);
+  });
+});
+
+describe("dissolveInVisible", () => {
+  function box(top: number, height: number): DOMRect {
+    return {
+      top,
+      bottom: top + height,
+      left: 0,
+      right: 0,
+      width: 0,
+      height,
+      x: 0,
+      y: top,
+    } as DOMRect;
+  }
+
+  it("blur-fades in only the restored rows that are on screen, holding nothing", () => {
+    const scroller = document.createElement("div");
+    const above = document.createElement("div");
+    const visible = [document.createElement("div"), document.createElement("div")];
+    const below = document.createElement("div");
+    scroller.append(above, ...visible, below);
+    document.body.appendChild(scroller);
+    const scrollerAnims = stubAnimate(scroller);
+    vi.spyOn(scroller, "getBoundingClientRect").mockReturnValue(box(100, 400));
+    vi.spyOn(above, "getBoundingClientRect").mockReturnValue(box(-200, 80));
+    vi.spyOn(visible[0] as HTMLElement, "getBoundingClientRect").mockReturnValue(box(120, 80));
+    vi.spyOn(visible[1] as HTMLElement, "getBoundingClientRect").mockReturnValue(box(420, 160));
+    vi.spyOn(below, "getBoundingClientRect").mockReturnValue(box(700, 80));
+    const [aboveAnims, firstAnims, secondAnims, belowAnims] = [above, ...visible, below].map(
+      stubAnimate,
+    );
+
+    dissolveInVisible(scroller);
+
+    // The rows dissolve, never the scroller itself (that would blur the frame).
+    expect(scrollerAnims).toHaveLength(0);
+    expect(aboveAnims).toHaveLength(0);
+    expect(belowAnims).toHaveLength(0);
+    for (const anims of [firstAnims, secondAnims]) {
+      expect(anims).toHaveLength(1);
+      expect(anims?.[0]?.keyframes[0]).toMatchObject({ opacity: 0, filter: "blur(8px)" });
+      expect(anims?.[0]?.options.fill).toBeUndefined();
+    }
   });
 });

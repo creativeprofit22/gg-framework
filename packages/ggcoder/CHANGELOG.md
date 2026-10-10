@@ -1,5 +1,71 @@
 # @kenkaiiii/ggcoder
 
+## 5.78.0
+
+### Minor Changes
+
+- Add a built-in `/commit` that runs the project's checks and tests, reviews, commits and pushes, and make it the verification point so plain replies no longer show unchecked edits as Unverified. Give Claude models a flat edit tool schema, cache Anthropic tool-loop turns at 5 minutes (1 hour kept on user messages), keep the working directory out of the cached system prompt, count checks with read-only commands around them as verification, and retry Cloudflare 520-524 provider errors.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.78.0
+- @kenkaiiii/gg-agent@5.78.0
+- @kenkaiiii/gg-core@5.78.0
+
+## 5.77.0
+
+### Patch Changes
+
+- Updated dependencies [60a2495]
+  - @kenkaiiii/gg-ai@5.77.0
+  - @kenkaiiii/gg-agent@5.77.0
+  - @kenkaiiii/gg-core@5.77.0
+
+## 5.76.0
+
+### Minor Changes
+
+- Add a Project Health scan and 0–100 score (file size, repo hygiene, safety net, debt markers) served to the app, let checklist records carry owner-accepted findings that no longer block a pass, and remove dead TUI code.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.76.0
+- @kenkaiiii/gg-agent@5.76.0
+- @kenkaiiii/gg-core@5.76.0
+
+## 5.75.1
+
+### Patch Changes
+
+- Share git/GitHub repo pollers across app windows on the same repo, recover Haiku 5.5's split `edits`/`new_text` edit arguments, and request "omitted" Anthropic adaptive thinking for faster Haiku 5.5 output.
+  - @kenkaiiii/gg-ai@5.75.1
+  - @kenkaiiii/gg-agent@5.75.1
+  - @kenkaiiii/gg-core@5.75.1
+
+## 5.75.0
+
+### Minor Changes
+
+- Add Claude Haiku 5.5 (1M context, 128K output, full low→max thinking) in place of Haiku 4.5, Kimi K2.7 Code HighSpeed on Moonshot, and Kimi K2.7 Code plus DeepSeek V4.1 Flash on Hugging Face (replacing Qwen3 Coder 480B). Anthropic thinking now streams as readable summaries instead of empty blocks, and Codex reasoning sections are separated. The system prompt shrank from ~31.5K to ~9.2K characters: rarely used tools are deferred and load automatically the first time the model calls them, and follow-up tools (`wait_agent`, `task_output`) are promoted as soon as their trigger runs. Checklist findings are flagged when the code has changed since they were recorded.
+
+### Patch Changes
+
+- 4f763ed: Add a "Don't embarrass me" checklist item. It reviews the project the way an experienced developer taking it over would. It flags rookie and unreviewed-AI tells such as committed junk, leftover AI notes and comments, duplicated libraries, silenced type checks and hard-coded values. Findings are ranked by how quickly a reviewer would spot them.
+- 4f763ed: Packages now declare Node.js 22 or newer as their supported runtime, matching what CI tests. `ggcoder` no longer ships its internal benchmark scripts in the npm tarball, and `gg-core` now has a README covering the model registry, auth storage and local-model discovery.
+- Updated dependencies [4f763ed]
+  - @kenkaiiii/gg-ai@5.75.0
+  - @kenkaiiii/gg-agent@5.75.0
+  - @kenkaiiii/gg-core@5.75.0
+
+## 5.74.3
+
+### Patch Changes
+
+- Fix plans getting stuck awaiting approval: the desktop review box now opens once a submitted plan is genuinely waiting on the user (including after autopilot hands it back, errors, or is skipped, and on reconnect), a run that stops mid-plan is reminded to submit, plan revisions run in read-only plan mode, and accepting a plan waits for background compaction.
+  - @kenkaiiii/gg-ai@5.74.3
+  - @kenkaiiii/gg-agent@5.74.3
+  - @kenkaiiii/gg-core@5.74.3
+
 ## 5.74.2
 
 ### Patch Changes

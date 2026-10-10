@@ -145,7 +145,7 @@ describe("embedded chat touched-files bloat guard", () => {
       read("../../../../../gg-app/src/AgentPane.tsx"),
       read("../../../../../gg-app/src/useAgentEvents.ts"),
       read("../../../../../gg-app/src/agent.ts"),
-      read("../../../../../gg-app/src-tauri/src/lib.rs"),
+      read("../../../../../gg-app/src-tauri/src/commands/agent.rs"),
       read("../../../../../gg-app/src/ProgrammaticAssessment.tsx"),
     ]);
     const setupProjection = await read("../../app-sidecar-programmatic-projection.ts");

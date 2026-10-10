@@ -6245,6 +6245,20 @@ describe("AgentPane lifecycle", () => {
     expect(document.querySelector(".user-ken-sent")?.textContent).toContain("Sent to");
   });
 
+  it("a failed Ken prompt send leaves no bubble, explains itself, and re-enables Continue", async () => {
+    const pane = client("pane-ken-send-fails", 1);
+    vi.mocked(pane.sendPrompt).mockRejectedValueOnce(new Error("agent_prompt failed"));
+    const send = await renderKenPromptPane(pane);
+
+    fireEvent.click(send);
+
+    expect(await screen.findByText("Couldn’t send the prompt. Try again.")).toBeTruthy();
+    expect(pane.sendPrompt).toHaveBeenCalledOnce();
+    expect(document.querySelector(".user-ken-sent")).toBeNull();
+    const retry = (await screen.findAllByRole("button", { name: "Continue here" }))[0];
+    await waitFor(() => expect((retry as HTMLButtonElement).disabled).toBe(false));
+  });
+
   it.each(
     (["typed-queued", "typed-idle", "toolbar", "ken"] as const).flatMap((source) =>
       (["reset", "anonymous-reset", "generation"] as const).flatMap((replacement) =>

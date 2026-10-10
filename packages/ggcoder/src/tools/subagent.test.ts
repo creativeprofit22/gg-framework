@@ -183,18 +183,18 @@ describe("createSubAgentTool model and thinking routing", () => {
   });
 
   it("re-resolves the lowest thinking level for the parent model on a retry", async () => {
-    // Haiku's ladder bottoms out at "high", Opus's at "low": the retry must
+    // A retired, unregistered model's ladder bottoms out at "high", Opus's at "low": the retry must
     // not carry the pinned model's rung over to the parent model.
-    const haikuLowest = getSupportedThinkingLevels("anthropic", "claude-haiku-4-5")[0];
+    const pinnedLowest = getSupportedThinkingLevels("anthropic", "claude-retired-model")[0];
     const opusLowest = getSupportedThinkingLevels("anthropic", "claude-opus-5-5")[0];
-    expect(haikuLowest).not.toBe(opusLowest);
+    expect(pinnedLowest).not.toBe(opusLowest);
     spawnMock
-      .mockImplementationOnce(() => mockExit("model not found: claude-haiku-4-5", 1))
+      .mockImplementationOnce(() => mockExit("model not found: claude-retired-model", 1))
       .mockImplementationOnce(() => mockExit("", 0, "fallback succeeded"));
 
     await createSubAgentTool(
       process.cwd(),
-      [{ ...pinned, model: "claude-haiku-4-5" }],
+      [{ ...pinned, model: "claude-retired-model" }],
       () => "anthropic",
       () => "claude-opus-5-5",
     ).execute(
@@ -202,8 +202,8 @@ describe("createSubAgentTool model and thinking routing", () => {
       { signal: new AbortController().signal, toolCallId: "test-call" },
     );
 
-    expect(spawnedModels()).toEqual(["claude-haiku-4-5", "claude-opus-5-5"]);
-    expect(spawnedFlag("--thinking")).toEqual([haikuLowest, opusLowest]);
+    expect(spawnedModels()).toEqual(["claude-retired-model", "claude-opus-5-5"]);
+    expect(spawnedFlag("--thinking")).toEqual([pinnedLowest, opusLowest]);
   });
 
   it("returns cache reads and writes with the normalized token totals", async () => {

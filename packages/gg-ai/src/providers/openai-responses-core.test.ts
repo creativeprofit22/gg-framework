@@ -146,15 +146,31 @@ describe("provider-neutral Responses parsing", () => {
         type: "function",
         name: "read",
         description: "Read a file",
+        // Upstream trims the blanket `additionalProperties: false` from
+        // non-strict schemas; Zod still rejects unknown args at parse time.
         parameters: {
           type: "object",
           properties: { path: { type: "string" } },
           required: ["path"],
-          additionalProperties: false,
         },
         strict: null,
       },
     ]);
+  });
+
+  it("restores closed objects when the transport requests strict tools", () => {
+    const [tool] = serializeResponsesTools(
+      [
+        {
+          name: "read",
+          description: "Read a file",
+          parameters: z.object({ path: z.string() }),
+        },
+      ],
+      { strict: true },
+    );
+
+    expect(tool).toMatchObject({ strict: true, parameters: { additionalProperties: false } });
   });
 
   it("characterizes Codex and Azure request and result bytes at the shared seam", async () => {

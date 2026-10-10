@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { ArrowsClockwiseIcon, XIcon } from "@phosphor-icons/react";
 import { theme } from "./theme";
 import { Modal } from "./Modal";
+import { ModalDismissButton } from "./modal-embed";
 import { ListSkeleton } from "./Skeleton";
 import {
   addLocalEndpoint,
@@ -312,9 +313,7 @@ export function LocalModelsModal({ onClose }: Props): React.ReactElement {
           </button>
         ) : (
           <>
-            <button className="modal-btn" onClick={onClose}>
-              Close
-            </button>
+            <ModalDismissButton onClick={onClose}>Close</ModalDismissButton>
             <button
               className="modal-btn primary"
               disabled={scanning}

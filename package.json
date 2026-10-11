@@ -25,6 +25,8 @@
     "test:ux-audit-command": "node --test packages/ggcoder/scripts/install-ux-audit-command.test.mjs",
     "test:ux-plan-command": "node --test packages/ggcoder/scripts/install-ux-plan-command.test.mjs",
     "test:release-ci-gate": "node --test scripts/verify-release-ci.test.mjs",
+    "test:search-bench": "node --test \"bench/search/*.test.mjs\"",
+    "bench:search": "node bench/search-bench.mjs",
     "commands:install:contract": "node packages/ggcoder/scripts/install-contract-command.mjs",
     "commands:install:flow": "node packages/ggcoder/scripts/install-flow-command.mjs",
     "commands:install:parity": "node packages/ggcoder/scripts/install-parity-command.mjs",

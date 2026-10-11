@@ -63,7 +63,12 @@ packages/ggcoder/ideal-sim/
 !/bench/baseline/
 /bench/baseline/*
 !/bench/baseline/sizes.json
+!/bench/baseline/search.json
 !/bench/size-gate.mjs
+!/bench/search-bench.mjs
+!/bench/search/
+# Raw per-call search benchmark results stay local (zipped evidence goes to .gg/verification/).
+/bench/search-results/
 !/bench/startup-gate.mjs
 !/bench/ui-library-real-flow/
 /bench/ui-library-real-flow/runs/

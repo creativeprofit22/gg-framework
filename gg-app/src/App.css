@@ -106,6 +106,9 @@
   /* Shape system — generous and soft, matching the reference: pills for
      controls, heavy rounding on cards, no hairline boxes. */
   --radius-sm: 4px;
+  /* Blocks nested inside a card and their compact controls (Notes overview,
+     saved prompt, completion gates, the phase view select). */
+  --radius-control: 6px;
   --radius-button: 8px;
   --radius-card: 14px;
   --radius-pill: 9999px;
@@ -117,6 +120,10 @@
   --shadow-sm: 0 2px 6px rgba(0, 0, 0, 0.45);
   --shadow-md: 0 8px 28px rgba(0, 0, 0, 0.45);
   --shadow-lg: 0 16px 44px -12px rgba(0, 0, 0, 0.7);
+  /* raised: solid cards resting on a panel (Notes phase cards and detail):
+     a tight contact shadow plus a short, inset-spread lift. Light and the
+     accessibility fallback live in appearance.css and below. */
+  --shadow-raised: 0 1px 2px rgb(0 0 0 / 0.36), 0 6px 16px -8px rgb(0 0 0 / 0.55);
 
   /* Motion. Every transition and entrance/exit draws its curve and length from
      the tokens below; scripts/motion-tokens.test.mjs rejects a raw
@@ -1233,6 +1240,11 @@ select {
 @media (prefers-reduced-transparency: reduce), (prefers-contrast: more) {
   .home {
     --home-ink-backing: var(--bg);
+  }
+  /* Raised cards trade the soft lift for a crisp edge, as glass.css does for
+     --glass-surface-shadow. appearance.css keeps a Light copy. */
+  :root {
+    --shadow-raised: inset 0 0 0 1px var(--border-strong);
   }
 }
 /* The campfire scenery (HomeScenery.tsx): the critters' clearing in the
@@ -13774,7 +13786,7 @@ select {
 .notes-roadmap-workspace {
   min-width: 0;
   padding: var(--space-6);
-  background: var(--surface-2);
+  background: var(--surface-1);
 }
 /* Detail sits beside the list instead of inside the selected card. */
 .notes-roadmap-workspace.has-detail {
@@ -13786,7 +13798,6 @@ select {
 }
 .notes-roadmap-workspace.has-detail .notes-roadmap-list {
   padding-inline-start: var(--space-6);
-  border-inline-end: 1px solid var(--border);
 }
 .notes-roadmap-workspace.has-detail .notes-phase-detail {
   position: sticky;
@@ -13804,15 +13815,18 @@ select {
 .notes-roadmap-row {
   min-width: 0;
   overflow: hidden;
-  border: 1px solid var(--border);
+  /* Raised by fill and shadow, not an outline; the transparent edge keeps the
+     box size and lets forced colours draw it. The start stripe is status. */
+  border: 1px solid transparent;
   border-inline-start: 3px solid var(--border-strong);
   border-radius: var(--radius-card);
-  background: var(--surface-1);
+  background: var(--surface-2);
+  box-shadow: var(--shadow-raised);
   transition: border-color var(--t-fast);
 }
 .notes-roadmap-row.is-selected {
   border-inline-start-color: var(--primary);
-  border-color: var(--border-strong);
+  background: var(--surface-3);
 }
 .notes-roadmap-row.is-blocked {
   border-inline-start-color: var(--warning);
@@ -13930,9 +13944,10 @@ select {
 .notes-phase-detail {
   min-width: 0;
   margin: 0 var(--space-6) var(--space-6);
-  border: 1px solid var(--border-strong);
+  border: 1px solid transparent;
   border-radius: var(--radius-card);
   background: var(--surface-2);
+  box-shadow: var(--shadow-raised);
 }
 /* Keep unbroken prompts and source coordinates from defining the panel's min-content width. */
 .notes-phase-detail :is(section, details, form, dl, ul, li, div) {
@@ -13981,14 +13996,13 @@ select {
   margin: 0 var(--space-6) var(--space-5);
   padding: var(--space-6);
   gap: var(--space-6);
-  border: 1px solid color-mix(in srgb, var(--warning) 55%, var(--border));
+  border: 1px solid transparent;
   border-radius: var(--radius-button);
-  background: color-mix(in srgb, var(--warning) 9%, var(--surface-1));
+  background: color-mix(in srgb, var(--warning) 9%, var(--surface-3));
 }
 
 .notes-phase-reconciliation.is-success {
-  border-color: color-mix(in srgb, var(--success) 55%, var(--border));
-  background: color-mix(in srgb, var(--success) 8%, var(--surface-1));
+  background: color-mix(in srgb, var(--success) 8%, var(--surface-3));
 }
 
 .notes-phase-reconciliation h4,
@@ -14085,7 +14099,7 @@ select {
   min-width: 0;
   height: 34px;
   border: 1px solid var(--border-strong);
-  border-radius: 6px;
+  border-radius: var(--radius-control);
   background: var(--surface-2);
   color: var(--text);
   font-family: var(--sans);
@@ -14118,10 +14132,12 @@ select {
   display: grid;
   gap: var(--space-6);
   padding: var(--space-7) var(--space-8);
-  border: 1px solid var(--border-strong);
+  /* Nested inside the raised detail card: one fill step up, no outline. The
+     start stripe carries the phase tone. */
+  border: 1px solid transparent;
   border-inline-start: 3px solid var(--notes-phase-overview-accent);
-  border-radius: 7px;
-  background: color-mix(in srgb, var(--surface-2) 72%, var(--bg));
+  border-radius: var(--radius-control);
+  background: var(--surface-3);
 }
 
 .notes-phase-overview-positive {
@@ -14167,7 +14183,8 @@ select {
 
 .notes-phase-overview-eyebrow {
   margin-bottom: var(--space-2) !important;
-  color: var(--text-dim);
+  /* --text-dim falls to 4.19:1 on the surface-3 overview fill in Dark. */
+  color: var(--text-muted);
   font-size: var(--fs-sm);
   line-height: var(--line-height-xs);
   font-weight: var(--font-weight-strong);
@@ -14223,10 +14240,10 @@ select {
   gap: var(--space-7);
   margin: var(--space-6) 0;
   padding: var(--space-6) var(--space-7);
-  border: 1px solid color-mix(in srgb, var(--warning) 42%, var(--border));
+  border: 1px solid transparent;
   border-inline-start: 3px solid var(--warning);
-  border-radius: 7px;
-  background: color-mix(in srgb, var(--warning) 9%, var(--surface-2));
+  border-radius: var(--radius-control);
+  background: color-mix(in srgb, var(--warning) 9%, var(--surface-3));
 }
 .notes-phase-blocker-copy {
   display: grid;
@@ -14289,7 +14306,7 @@ select {
 
 .notes-phase-overview-completion dt {
   margin-bottom: var(--space-2);
-  color: var(--text-dim);
+  color: var(--text-muted);
   font-size: var(--fs-sm);
   line-height: var(--line-height-xs);
 }
@@ -14414,9 +14431,9 @@ select {
 }
 .notes-phase-saved-prompt {
   margin: 0;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: color-mix(in srgb, var(--surface-2) 70%, var(--bg));
+  border: 1px solid transparent;
+  border-radius: var(--radius-control);
+  background: var(--surface-3);
 }
 
 .notes-phase-saved-prompt summary {
@@ -15161,8 +15178,9 @@ select {
 .notes-phase-reference-options {
   gap: 0;
   margin-top: var(--space-5);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-button);
+  border: 1px solid transparent;
+  border-radius: var(--radius-control);
+  background: var(--surface-3);
   overflow: hidden;
 }
 .notes-phase-reference-options li {
@@ -15219,8 +15237,9 @@ select {
 }
 .notes-completion-gates dl {
   margin: 0;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-button);
+  border: 1px solid transparent;
+  border-radius: var(--radius-control);
+  background: var(--surface-3);
   overflow: hidden;
 }
 .notes-completion-gates dl > div {
@@ -15939,6 +15958,10 @@ select {
   .roadmap-reminder-alert,
   .notes-section,
   .notes-phase-detail,
+  .notes-phase-overview,
+  .notes-phase-saved-prompt,
+  .notes-phase-reconciliation,
+  .notes-phase-blocker-alert,
   .notes-phase-execution,
   .notes-reference-form,
   .notes-reference-detail,

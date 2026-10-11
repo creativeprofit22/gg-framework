@@ -80,6 +80,7 @@
   --glass-clear: rgb(24 24 35 / 0.04);
   --glass-clear-hover: rgb(24 24 35 / 0.08);
   --glass-shadow: 0 16px 48px rgb(31 27 45 / 0.18);
+  --shadow-raised: 0 1px 2px rgb(31 27 45 / 0.08), 0 6px 16px -8px rgb(31 27 45 / 0.16);
 }
 /* Mirrors glass.css's solid accessibility fallback: its `:root` rule loses to
    the Light tints above on specificity, so Light needs its own copy. Keep the
@@ -93,6 +94,7 @@
     --glass-modal: var(--surface-2);
     --glass-clear: var(--surface-2);
     --glass-clear-hover: var(--surface-3);
+    --shadow-raised: inset 0 0 0 1px var(--border-strong);
   }
 }
 :root[data-appearance-theme="light"],

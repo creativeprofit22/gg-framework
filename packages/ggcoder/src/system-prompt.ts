@@ -402,6 +402,24 @@ export const SUBAGENT_RETURN_CONTRACT =
   `- Under ~400 words; write larger findings to a file and return its path.`;
 
 /**
+ * Style packs plus the matching verify commands for the given languages, as
+ * prompt sections. Shared by the main prompt, the sub-agent prompt and the
+ * mid-session language update so all three say the same thing.
+ */
+export function renderLanguageGuidance(
+  languages: Set<LanguageId> | undefined,
+  cwd: string,
+): string[] {
+  if (!languages || languages.size === 0) return [];
+  const sections: string[] = [];
+  const stylePacks = renderStylePacksSection(languages, cwd);
+  if (stylePacks) sections.push(stylePacks);
+  const verifySection = renderVerifySection(detectVerifyCommands(cwd, languages));
+  if (verifySection) sections.push(verifySection);
+  return sections;
+}
+
+/**
  * Build a sub-agent's system prompt: its own definition PLUS the scaffolding
  * that teaches correct tool use.
  *
@@ -431,6 +449,8 @@ export async function buildSubAgentSystemPrompt(
     environment?: SystemPromptEnvironment;
     /** Byte budgets for skill catalog / project instructions / total ceiling. */
     contextLimits?: ContextLimits;
+    /** Detected project languages; rendered only with `context: "project"`. */
+    activeLanguages?: Set<LanguageId>;
   },
 ): Promise<string> {
   const limits = opts.contextLimits ?? CONTEXT_LIMITS;
@@ -448,6 +468,9 @@ export async function buildSubAgentSystemPrompt(
 
   if ((opts.context ?? "project") === "project") {
     sections.push(renderProjectContextSection(await collectProjectContext(opts.cwd, limits)));
+    // A code-writing child follows the same per-language defaults as the
+    // parent, or its code drifts from what the main session would write.
+    sections.push(...renderLanguageGuidance(opts.activeLanguages, opts.cwd));
     const platformClis = renderPlatformClisSection(detectPlatformClis(opts.cwd));
     if (platformClis) sections.push(platformClis);
   }
@@ -520,14 +543,7 @@ export async function buildSystemPrompt(
 
   sections.push(renderProjectContextSection(await collectProjectContext(cwd, limits)));
 
-  if (activeLanguages && activeLanguages.size > 0) {
-    const stylePacks = renderStylePacksSection(activeLanguages, cwd);
-    if (stylePacks) sections.push(stylePacks);
-
-    const verifyCmds = detectVerifyCommands(cwd, activeLanguages);
-    const verifySection = renderVerifySection(verifyCmds);
-    if (verifySection) sections.push(verifySection);
-  }
+  sections.push(...renderLanguageGuidance(activeLanguages, cwd));
 
   // The active skill schema already contains this catalog. Keep a fallback for other hosts.
   if (skills && skills.length > 0 && !(toolNames ?? DEFAULT_TOOL_NAMES).includes("skill")) {

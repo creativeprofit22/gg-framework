@@ -122,6 +122,11 @@ async function pane(
     phaseLeaseHeartbeat: null,
     ciPoll: { unsubscribe: () => {} },
     healthPoll: { unsubscribe: () => {} },
+    // Upstream 0.87.1 dispose: abort owned work + cancel HF pull, goal-aware repo watch.
+    abortOwnedWork: () => {},
+    cancelHfPull: () => false,
+    repoWatchStopped: false,
+    repoWatch: { unsubscribe: () => {} },
     serveController: null,
     clients: [],
     kenLifecycle: { abort: () => {} },

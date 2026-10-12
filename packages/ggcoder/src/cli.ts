@@ -3,7 +3,7 @@
 // long sessions — tool results are capped at 50KB each but accumulate
 // across thousands of turns, and Ink/React state plus the SDK clients
 // share the same heap. 8GB gives ample headroom; --expose-gc is unused
-// today but matches gg-boss for consistency. NODE_OPTIONS overrides via
+// today but kept so manual heap debugging works. NODE_OPTIONS overrides via
 // Node's standard flag merge.
 
 // Catch stray abort-related promise rejections that escape the normal error

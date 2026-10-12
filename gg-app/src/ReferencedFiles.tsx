@@ -16,11 +16,14 @@ const keyOf = (p: string): string => p;
 export function ReferencedFiles({
   paths,
   onRemove,
+  sendCount = 0,
 }: {
   paths: readonly string[];
   onRemove: (path: string) => void;
+  /** Composer sends so far. A change drops chips the send cleared without an exit (see usePresenceList). */
+  sendCount?: number;
 }): React.ReactElement | null {
-  const shown = usePresenceList(paths, keyOf, EXIT_MS);
+  const shown = usePresenceList(paths, keyOf, EXIT_MS, sendCount);
   const empty = shown.length === 0;
   const barLeaving = !empty && shown.every((s) => s.leaving);
   const barRef = useRef<HTMLDivElement>(null);

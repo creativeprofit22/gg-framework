@@ -87,4 +87,89 @@ describe("AgentSession language style packs (shared/app path)", () => {
       await session.dispose();
     }
   }, 20_000);
+
+  it("appends packs for a new language once the prompt is cached, without re-rendering it", async () => {
+    const { AgentSession } = await import("./agent-session.js");
+    const session = new AgentSession({
+      provider: "anthropic",
+      model: "claude-sonnet-4-6",
+      cwd: tempProject,
+      transient: true,
+      projectCustomization: false,
+      loadExtensions: false,
+      orchestrationPrompt: false,
+      selfCorrectionHooks: false,
+    });
+    await session.initialize();
+    try {
+      // A finished exchange means the system prompt is now a cached prefix.
+      session
+        .getMessages()
+        .push({ role: "user", content: "hello" }, { role: "assistant", content: "hi" });
+      const before = systemPrompt(session);
+
+      await fs.writeFile(path.join(tempProject, "tsconfig.json"), "{}");
+      await session.prompt("next task");
+
+      expect(systemPrompt(session)).toBe(before);
+      const updates = session
+        .getMessages()
+        .filter(
+          (m) =>
+            m.role === "user" &&
+            typeof m.content === "string" &&
+            m.content.includes("## Language Style Packs"),
+        );
+      expect(updates).toHaveLength(1);
+      expect(String(updates[0]?.content)).toContain("TypeScript");
+      // It sits just before the user's new request, so the request stays the
+      // last thing the model reads.
+      const messages = session.getMessages();
+      const at = messages.indexOf(updates[0]!);
+      expect(messages[at + 1]).toMatchObject({ role: "user", content: "next task" });
+
+      // Announced once: the next turn adds nothing more.
+      await session.prompt("third task");
+      expect(
+        session
+          .getMessages()
+          .filter(
+            (m) => typeof m.content === "string" && m.content.includes("## Language Style Packs"),
+          ),
+      ).toHaveLength(1);
+    } finally {
+      await session.dispose();
+    }
+  }, 20_000);
+
+  it("gives packs to code-writing sub-agents but not to user-facing specialist agents", async () => {
+    await fs.writeFile(path.join(tempProject, "tsconfig.json"), "{}");
+    const { AgentSession } = await import("./agent-session.js");
+    const base = {
+      provider: "anthropic" as const,
+      model: "claude-sonnet-4-6",
+      cwd: tempProject,
+      transient: true,
+      projectCustomization: false,
+      loadExtensions: false,
+      orchestrationPrompt: false,
+      selfCorrectionHooks: false,
+    };
+    const child = new AgentSession({ ...base, agentPrompt: "You implement one task." });
+    const specialist = new AgentSession({
+      ...base,
+      agentPrompt: "You make videos.",
+      agentRole: "primary",
+      agentContext: "none",
+    });
+    await child.initialize();
+    await specialist.initialize();
+    try {
+      expect(systemPrompt(child)).toContain("## Language Style Packs");
+      expect(systemPrompt(specialist)).not.toContain("## Language Style Packs");
+    } finally {
+      await child.dispose();
+      await specialist.dispose();
+    }
+  }, 20_000);
 });

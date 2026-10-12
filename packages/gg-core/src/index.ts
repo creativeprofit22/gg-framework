@@ -10,6 +10,7 @@ export * from "./logger.js";
 export * from "./file-lock.js";
 export * from "./claude-code-version.js";
 export * from "./auth-storage.js";
+export * from "./auth-providers.js";
 export * from "./provider-usage.js";
 export * from "./oauth/types.js";
 export * from "./oauth/pkce.js";

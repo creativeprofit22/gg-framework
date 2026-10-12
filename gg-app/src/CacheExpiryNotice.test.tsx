@@ -108,6 +108,32 @@ describe("CacheExpiryNotice", () => {
     expectExitThenGone();
   });
 
+  it("hides in the send's own commit, before the run starts", () => {
+    const { rerender } = render(
+      <CacheExpiryNotice expiry={status()} running={false} onCompact={vi.fn()} />,
+    );
+    // Folding away later (when run_start lands) resized the transcript after
+    // the send had already moved it: the chat slid up, then back down.
+    rerender(
+      <CacheExpiryNotice expiry={status()} running={false} onCompact={vi.fn()} sendCount={1} />,
+    );
+    expect(document.querySelector(".queued-bar")).toBeNull();
+    // The same lapse stays answered; a later one shows again.
+    rerender(
+      <CacheExpiryNotice expiry={status()} running={false} onCompact={vi.fn()} sendCount={1} />,
+    );
+    expect(screen.queryByText(TEXT)).toBeNull();
+    rerender(
+      <CacheExpiryNotice
+        expiry={status({ lastRequestAt: 900_000 })}
+        running={false}
+        onCompact={vi.fn()}
+        sendCount={1}
+      />,
+    );
+    expect(screen.getByText(TEXT)).toBeTruthy();
+  });
+
   it("'Send anyway' dismisses once per expiry per chat", () => {
     vi.useFakeTimers();
     const { rerender, unmount } = render(

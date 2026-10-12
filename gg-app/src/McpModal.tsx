@@ -228,8 +228,7 @@ export function McpModal({ onClose, client }: Props): React.ReactElement {
 
   const addButton = (
     <button
-      // In the Settings header it matches the nav bars' small buttons.
-      className={embedded ? "btn btn-primary btn-sm" : "modal-btn primary"}
+      className="btn btn-primary btn-sm"
       disabled={!line.trim() || busy}
       onClick={() => void add()}
     >
@@ -304,8 +303,8 @@ export function McpModal({ onClose, client }: Props): React.ReactElement {
               ) : null}
               {s.enabled && s.requiresAuth && !s.ok && (
                 <button
-                  className="modal-btn primary"
-                  style={{ padding: "var(--space-1) var(--space-6)", fontSize: "var(--fs-sm)" }}
+                  type="button"
+                  className="btn btn-primary btn-sm"
                   disabled={loggingIn === s.name}
                   title={`Sign in to "${s.name}"`}
                   onClick={() => void signIn(s.name, s.scope)}
@@ -314,8 +313,10 @@ export function McpModal({ onClose, client }: Props): React.ReactElement {
                 </button>
               )}
               <button
+                type="button"
                 className="mcp-delete"
                 style={{ color: theme.textDim }}
+                aria-label={`Delete ${s.name}`}
                 title={`Remove "${s.name}"`}
                 onClick={() => void remove(s.name, s.scope)}
               >

@@ -77,6 +77,23 @@ export const CRITTER_LINES = {
       "{n} critters scurried off to dig in…",
     ],
   },
+  /** Some have finished: `{n}` is how many are still working. */
+  stillWorking: {
+    one: [
+      "One critter is still on the case…",
+      "One critter is still digging in…",
+      "One critter is still hard at work…",
+      "One critter is still at it…",
+      "One critter is still busy…",
+    ],
+    many: [
+      "{n} critters are still on the case…",
+      "{n} critters are still digging in…",
+      "{n} critters are still hard at work…",
+      "{n} critters are still at it…",
+      "{n} critters are still busy…",
+    ],
+  },
   succeeded: {
     one: [
       "The critter is back with the goods",
@@ -165,9 +182,10 @@ export function summarizeCritters(
   };
   const total = agents.length;
   if (aborted) return { text: say(CRITTER_LINES.calledBack, total), tone: "stopped" };
-  if (agents.some(isWorking)) {
-    return { text: say(CRITTER_LINES.launched, total), tone: "working" };
-  }
+  // Counts only the critters still out, so it drops as each one finishes.
+  const working = agents.filter(isWorking).length;
+  if (working === total) return { text: say(CRITTER_LINES.launched, total), tone: "working" };
+  if (working > 0) return { text: say(CRITTER_LINES.stillWorking, working), tone: "working" };
   // An idle background agent has finished its work (it just stays available
   // for a follow-up), so it counts as a success here, as it does on the floor.
   const failed = agents.filter((a) => a.status === "error" || a.status === "interrupted").length;

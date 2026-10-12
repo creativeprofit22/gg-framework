@@ -114,9 +114,7 @@ export function BackgroundTasksButton({ tasks }: { tasks: BackgroundTask[] }): R
                           <span className="pop-item-main is-code bgtasks-cmd" title={t.command}>
                             {shortCommand(t.command)}
                           </span>
-                          <span className="pop-item-meta">
-                            {formatBackgroundTaskStatus(t)}
-                          </span>
+                          <span className="pop-item-meta">{formatBackgroundTaskStatus(t)}</span>
                         </span>
                         {running && (
                           <button

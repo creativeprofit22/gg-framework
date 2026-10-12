@@ -292,6 +292,51 @@ describe("CritterFloor", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it("brings working critters straight back when the chat is shown again, with no summon", async () => {
+    // A goal window hides the chat behind its Workers view with <Activity>,
+    // which tears down the floor's effects; going back rebuilt it and beamed
+    // every working critter in again.
+    const { Activity } = await import("react");
+    const working = [group(1, [line("a", "running"), line("b", "running")])];
+    const view = (shown: boolean) => (
+      <Activity mode={shown ? "visible" : "hidden"}>
+        <CritterFloor groups={working} />
+      </Activity>
+    );
+    const { container, rerender } = render(view(true));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1500);
+    });
+    expect(critters(container)).toBe(2);
+    const ground = terrain(container);
+
+    rerender(view(false));
+    rerender(view(true));
+    // Back at once: no wait for the ground to rise, no beam, same terrain.
+    expect(critters(container)).toBe(2);
+    expect(container.querySelectorAll(".critter.summoning")).toHaveLength(0);
+    expect(container.querySelector(".critter-beam")).toBeNull();
+    expect(lane(container).classList.contains("open")).toBe(true);
+    expect(terrain(container)).toBe(ground);
+
+    // One that finished while the chat was hidden is gone, and a new one is
+    // still summoned the usual way.
+    rerender(
+      <Activity mode="visible">
+        <CritterFloor
+          groups={[
+            group(1, [line("a", "running"), line("b", "done")]),
+            group(2, [line("c", "running")]),
+          ]}
+        />
+      </Activity>,
+    );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(100);
+    });
+    expect(container.querySelectorAll(".critter.summoning").length).toBeGreaterThan(0);
+  });
+
   it("removes critters whose agents disappear (session switch) and cleans up on unmount", async () => {
     const { container, rerender, unmount } = render(
       <CritterFloor groups={[group(1, [line("a", "running")])]} />,

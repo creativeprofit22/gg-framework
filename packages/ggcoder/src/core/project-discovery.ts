@@ -23,6 +23,11 @@ export interface DiscoverProjectsOptions {
   extraRoots?: readonly string[];
   /** Project paths the user dismissed from the picker. */
   hiddenPaths?: readonly string[];
+  /**
+   * Folders whose contents are never projects (Goal workspaces under
+   * `~/.gg/goals`). Anything at or below one of these is dropped.
+   */
+  excludeRoots?: readonly string[];
 }
 
 export interface DiscoveredProject {
@@ -82,11 +87,22 @@ export async function discoverProjects(
     });
   }
 
+  // Hiding is by normalized path key so a row dismissed once stays gone
+  // regardless of which store re-surfaces it later.
   const hidden = new Set(
     (options.hiddenPaths ?? []).map((hiddenPath) => discoveryPathKey(hiddenPath, process.platform)),
   );
+  const excluded = (options.excludeRoots ?? []).map((root) => path.resolve(root));
+  const isExcluded = (target: string): boolean =>
+    excluded.some((root) => {
+      const relative = path.relative(root, path.resolve(target));
+      return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+    });
   return Array.from(byPath.values())
-    .filter((project) => !hidden.has(discoveryPathKey(project.path, process.platform)))
+    .filter(
+      (project) =>
+        !hidden.has(discoveryPathKey(project.path, process.platform)) && !isExcluded(project.path),
+    )
     .map((project) => ({
       ...project,
       lastActiveDisplay: formatRelativeTime(project.lastActiveMs),
@@ -788,7 +804,8 @@ function fallbackDashDecode(entry: string): string | null {
   return "/" + body.replace(/-/g, "/");
 }
 
-function formatRelativeTime(ms: number): string {
+/** Short "5m ago" style label for a millisecond timestamp; "—" for 0. */
+export function formatRelativeTime(ms: number): string {
   if (ms === 0) return "—";
   const diff = Date.now() - ms;
   if (diff < 60_000) return "just now";

@@ -8,8 +8,14 @@ import type { PendingAttachment } from "./attachments";
 
 const EXIT_MS = 220;
 
-function List({ items }: { items: readonly string[] }): React.ReactElement {
-  const shown = usePresenceList(items, (s) => s, EXIT_MS);
+function List({
+  items,
+  flush = 0,
+}: {
+  items: readonly string[];
+  flush?: number;
+}): React.ReactElement {
+  const shown = usePresenceList(items, (s) => s, EXIT_MS, flush);
   return (
     <ul>
       {shown.map((p) => (
@@ -63,6 +69,20 @@ describe("usePresenceList", () => {
       vi.advanceTimersByTime(EXIT_MS * 2);
     });
     expect(rows()).toEqual(["a:no", "b:no"]);
+  });
+
+  it("drops leaving items in the same render when flush changes", () => {
+    const { rerender } = render(<List items={["a", "b", "c"]} />);
+    rerender(<List items={["c"]} />);
+    rerender(<List items={["c"]} />);
+    expect(rows()).toEqual(["a:yes", "b:yes", "c:no"]);
+    // A send clears the rest: nothing may still be folding after its commit.
+    rerender(<List items={[]} flush={1} />);
+    expect(rows()).toEqual([]);
+    // Later removals animate out again.
+    rerender(<List items={["d"]} flush={1} />);
+    rerender(<List items={[]} flush={1} />);
+    expect(rows()).toEqual(["d:yes"]);
   });
 
   it("lets every item leave when the list is cleared at once", () => {
@@ -123,6 +143,16 @@ describe("AttachmentBar exit animation", () => {
     expect(document.querySelector(".attach-bar")).toBeNull();
   });
 
+  it("drops the bar in the send's own commit, so the transcript never resizes mid-move", () => {
+    const { rerender } = render(
+      <AttachmentBar attachments={[PNG]} onRemove={vi.fn()} onOpenImage={vi.fn()} />,
+    );
+    rerender(
+      <AttachmentBar attachments={[]} onRemove={vi.fn()} onOpenImage={vi.fn()} sendCount={1} />,
+    );
+    expect(document.querySelector(".attach-bar")).toBeNull();
+  });
+
   it("does not let a leaving chip's remove button fire again", () => {
     const onRemove = vi.fn();
     const { rerender } = render(
@@ -155,6 +185,12 @@ describe("ReferencedFiles exit animation", () => {
     act(() => {
       vi.advanceTimersByTime(EXIT_MS);
     });
+    expect(document.querySelector(".mention-bar")).toBeNull();
+  });
+
+  it("drops cleared @-file chips in the send's own commit", () => {
+    const { rerender } = render(<ReferencedFiles paths={["src/a.ts"]} onRemove={vi.fn()} />);
+    rerender(<ReferencedFiles paths={[]} onRemove={vi.fn()} sendCount={1} />);
     expect(document.querySelector(".mention-bar")).toBeNull();
   });
 });

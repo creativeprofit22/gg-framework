@@ -51,6 +51,36 @@ export function catTargets(command: string): string[] {
   return [...new Set(targets)];
 }
 
+/** A line-range view of one literal file path; `end` undefined means "to EOF". */
+interface RangeTarget {
+  target: string;
+  start: number;
+  end: number;
+}
+
+/**
+ * Line-range views a command prints: `sed -n 'A,Bp' FILE`, `sed -n 'Ap' FILE`,
+ * `head -N FILE` and `head -n N FILE`. Exactly one literal file per command,
+ * nothing piped or redirected — the output must be the raw lines.
+ */
+export function rangeTargets(command: string): RangeTarget[] {
+  const out: RangeTarget[] = [];
+  for (const seg of command.split(/;|&&|\n/).map((s) => s.trim())) {
+    const sed = /^sed -n (['"]?)(\d+)(?:,(\d+))?p\1 (\S+)$/.exec(seg);
+    const head = /^head (?:-n ?)?-?(\d+) (\S+)$/.exec(seg);
+    const [target, start, end] = sed
+      ? [sed[4], Number(sed[2]), Number(sed[3] ?? sed[2])]
+      : head
+        ? [head[2], 1, Number(head[1])]
+        : [undefined, 0, 0];
+    if (!target || !SAFE_PATH.test(target) || target.includes("*") || target.startsWith("-")) {
+      continue;
+    }
+    if (start >= 1 && end >= start) out.push({ target, start, end });
+  }
+  return out;
+}
+
 /**
  * Expand one target to concrete files. A `*` is matched within its own
  * directory only (shell semantics, dotfiles excluded); a glob that matches
@@ -108,8 +138,27 @@ export async function recordBashReads(
     const command = call.args["command"];
     if (!result || result.isError || typeof command !== "string") continue;
     const targets = catTargets(command);
-    if (targets.length === 0) continue;
+    const ranges = rangeTargets(command);
+    if (targets.length === 0 && ranges.length === 0) continue;
     const output = resultText(result);
+    for (const { target, start, end } of ranges) {
+      try {
+        const resolved = resolvePath(cwd, target);
+        const stat = await ops.stat(resolved);
+        if (!stat.isFile() || stat.size > MAX_FILE_BYTES) continue;
+        const content = await ops.readFile(resolved);
+        const lines = content.split("\n");
+        if (content.endsWith("\n")) lines.pop();
+        const last = Math.min(end, lines.length);
+        if (start > last) continue;
+        // Credit only lines the model literally received, in order.
+        if (!output.includes(lines.slice(start - 1, last).join("\n"))) continue;
+        recordRead(tracker, resolved, content, stat.mtimeMs, [start, last]);
+        recorded.push(resolved);
+      } catch {
+        // Missing or unreadable: nothing was proven.
+      }
+    }
     const files: string[] = [];
     for (const target of targets) {
       try {

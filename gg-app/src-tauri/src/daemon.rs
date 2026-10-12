@@ -10,7 +10,7 @@ pub(crate) const DAEMON_SESSION_STARTUP_TIMEOUT: Duration = Duration::from_secs(
 // took ~20s on a loaded machine, so the old 30s port wait was too tight.
 // The webview's `PANE_STARTUP_TIMEOUT_MS` (gg-app/src/agent.ts) must exceed
 // this plus `DAEMON_SESSION_STARTUP_TIMEOUT`.
-pub(crate) const DAEMON_PORT_WAIT_TIMEOUT: Duration = Duration::from_secs(90);
+pub(crate) const DAEMON_PORT_WAIT_TIMEOUT: Duration = DAEMON_START_TIMEOUT;
 
 pub(crate) const DAEMON_PORT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
@@ -51,17 +51,32 @@ pub(crate) fn pane_cwd_for(webview: &WebviewWindow, pane_id: &str) -> Option<Pat
         .clone()
 }
 
+/// How long a session start waits for the daemon's port. Deliberately generous:
+/// a first launch after install/update can spend well over 30s while macOS
+/// Gatekeeper/XProtect scans `ggnode` and the native modules, and the crash-loop
+/// backoff alone sums to 31s. A daemon that has failed for good ends the wait
+/// early through `Daemon::failure`.
+pub(crate) const DAEMON_START_TIMEOUT: Duration = Duration::from_secs(180);
+
 /// Await the daemon's HTTP port (set by its `GG_APP_LISTENING` handshake),
-/// polling until `DAEMON_PORT_WAIT_TIMEOUT` elapses. Returns `None` if the
-/// daemon never came up. Mirrors the webview's `waitForReady` poll cadence.
-pub(crate) async fn await_daemon_port(app: &tauri::AppHandle) -> Option<u16> {
+/// polling until `DAEMON_PORT_WAIT_TIMEOUT` elapses. Fails with the daemon's
+/// terminal failure as soon as one is recorded, or with a timeout message if
+/// the daemon neither listens nor fails.
+pub(crate) async fn await_daemon_port(app: &tauri::AppHandle) -> Result<u16, String> {
     let deadline = daemon_port_wait_deadline(std::time::Instant::now());
     loop {
-        if let Some(p) = *app.state::<Daemon>().port.lock_or_recover() {
-            return Some(p);
+        let daemon: State<Daemon> = app.state();
+        if let Some(port) = *daemon.port.lock_or_recover() {
+            return Ok(port);
+        }
+        if let Some(failure) = daemon.failure.lock_or_recover().clone() {
+            return Err(failure);
         }
         if std::time::Instant::now() >= deadline {
-            return None;
+            return Err(format!(
+                "The agent daemon did not start within {} seconds.",
+                DAEMON_PORT_WAIT_TIMEOUT.as_secs()
+            ));
         }
         tokio::time::sleep(DAEMON_PORT_POLL_INTERVAL).await;
     }
@@ -71,12 +86,84 @@ pub(crate) fn daemon_port_wait_deadline(start: std::time::Instant) -> std::time:
     start + DAEMON_PORT_WAIT_TIMEOUT
 }
 
+/// A pane's readiness as `sidecar_port` reports it: the failed start's reason,
+/// else the daemon port once the pane has a session, else `None` (starting).
+pub(crate) fn pane_readiness(
+    pane: Option<&PaneSession>,
+    port: Option<u16>,
+) -> Result<Option<u16>, String> {
+    let Some(pane) = pane else {
+        return Ok(None);
+    };
+    if let Some(error) = &pane.startup_error {
+        return Err(error.clone());
+    }
+    Ok(pane.session_id.as_ref().and(port))
+}
+
 /// Frontend compatibility readiness seam, explicitly routed to one pane.
+/// Errors with the concrete reason once that pane's session start has failed.
 #[tauri::command]
-pub(crate) fn sidecar_port(webview: WebviewWindow, pane_id: Option<String>) -> Option<u16> {
+pub(crate) fn sidecar_port(
+    webview: WebviewWindow,
+    pane_id: Option<String>,
+) -> Result<Option<u16>, String> {
     let pane_id = pane_id.as_deref().unwrap_or(PRIMARY_PANE_ID);
-    pane_session_for(&webview, pane_id)?;
-    port_for(&webview)
+    validate_pane_id(pane_id)?;
+    let pane = {
+        let windows: State<Windows> = webview.state();
+        let registry = windows.map.lock_or_recover();
+        resolve_owned_pane(&registry, webview.label(), pane_id).cloned()
+    };
+    pane_readiness(pane.as_ref(), port_for(&webview))
+}
+
+/// "Try again" after a failed start. A daemon that gave up (spawn failure or
+/// crash circuit breaker) is respawned with a fresh retry budget and every
+/// pane's session restarted; otherwise only this pane's failed session is
+/// restarted. No-op while a start is in flight or the session is live.
+#[tauri::command]
+pub(crate) fn retry_window_session(webview: WebviewWindow, pane_id: Option<String>) {
+    let app = webview.app_handle().clone();
+    let daemon_failure = app.state::<Daemon>().failure.lock_or_recover().take();
+    if let Some(reason) = daemon_failure {
+        log::info!("retrying daemon after failure: {reason}");
+        {
+            let daemon: State<Daemon> = app.state();
+            *daemon.respawn_attempts.lock_or_recover() = 0;
+            *daemon.last_fatal.lock_or_recover() = None;
+        }
+        // Fresh generations retire stale bridges before new sessions bind.
+        clear_runtime_pane_sessions(&app);
+        spawn_daemon(app.clone(), false);
+        recreate_all_window_sessions(app);
+        return;
+    }
+
+    let pane_id = pane_id.unwrap_or_else(|| PRIMARY_PANE_ID.to_string());
+    if validate_pane_id(&pane_id).is_err() {
+        return;
+    }
+    let target = {
+        let windows: State<Windows> = app.state();
+        let registry = windows.map.lock_or_recover();
+        resolve_owned_pane(&registry, webview.label(), &pane_id).and_then(|pane| {
+            pane.startup_error.as_ref()?;
+            let cwd = pane.cwd.clone()?;
+            Some((pane.mode, pane.chat_agent, cwd, pane.session_path.clone()))
+        })
+    };
+    if let Some((mode, chat_agent, cwd, session_path)) = target {
+        let _ = start_pane_session(
+            app,
+            webview.label().to_string(),
+            pane_id,
+            mode,
+            chat_agent,
+            cwd,
+            session_path,
+        );
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -172,6 +259,25 @@ pub(crate) fn daemon_respawn_delay(attempt: u32) -> Option<std::time::Duration> 
     Some(std::time::Duration::from_secs(1 << (attempt - 1)))
 }
 
+/// The user-facing reason once the crash loop exhausts its respawn budget,
+/// carrying the last `GG_APP_FATAL` reason when the daemon reported one.
+pub(crate) fn crash_loop_message(last_fatal: Option<&str>) -> String {
+    let reason = last_fatal
+        .map(|line| line.strip_prefix("GG_APP_FATAL").unwrap_or(line).trim())
+        .filter(|reason| !reason.is_empty());
+    match reason {
+        Some(reason) => format!("The agent daemon kept crashing on startup: {reason}"),
+        None => "The agent daemon stopped after repeated crashes.".to_string(),
+    }
+}
+
+/// Record a terminal daemon failure so waiting session starts end with it.
+pub(crate) fn fail_daemon(app: &tauri::AppHandle, message: String) {
+    log::error!("{message}");
+    *app.state::<Daemon>().failure.lock_or_recover() = Some(message.clone());
+    emit_daemon_error(app, &message);
+}
+
 pub(crate) fn emit_daemon_error(app: &tauri::AppHandle, message: &str) {
     for label in app.webview_windows().keys() {
         let _ = app.emit_to(
@@ -202,8 +308,7 @@ pub(crate) fn spawn_daemon(app: tauri::AppHandle, is_respawn: bool) {
     let auth_token = match generate_daemon_auth_token() {
         Ok(token) => token,
         Err(message) => {
-            log::error!("{message}");
-            emit_daemon_error(&app, &message);
+            fail_daemon(&app, message);
             return;
         }
     };
@@ -211,8 +316,7 @@ pub(crate) fn spawn_daemon(app: tauri::AppHandle, is_respawn: bool) {
         match (generate_daemon_auth_token(), generate_daemon_auth_token()) {
             (Ok(instance_id), Ok(start_token)) => (instance_id, start_token),
             (Err(message), _) | (_, Err(message)) => {
-                log::error!("{message}");
-                emit_daemon_error(&app, &message);
+                fail_daemon(&app, message);
                 return;
             }
         };
@@ -301,8 +405,7 @@ pub(crate) fn spawn_daemon(app: tauri::AppHandle, is_respawn: bool) {
                     ),
                 )
             );
-            log::error!("{message}");
-            emit_daemon_error(&app, &message);
+            fail_daemon(&app, message);
             return;
         }
     };
@@ -450,6 +553,12 @@ pub(crate) fn spawn_daemon(app: tauri::AppHandle, is_respawn: bool) {
                             Some(DaemonPredecessorProof::from_terminated(identity));
                     }
                 }
+                // A daemon that died on its own leaves its MCP/LSP children
+                // running in its (now leaderless) process group, and on Windows
+                // `taskkill /T` can no longer reach them through the dead
+                // parent. The ledger sweep kills dead-leader groups, so run it
+                // now rather than waiting for the next app launch.
+                sweep_orphan_sidecars(&app2.config().identifier);
                 let mut attempts = daemon.respawn_attempts.lock_or_recover();
                 if planned || started_at.elapsed() >= DAEMON_STABLE_UPTIME {
                     *attempts = 0;
@@ -459,10 +568,9 @@ pub(crate) fn spawn_daemon(app: tauri::AppHandle, is_respawn: bool) {
             };
 
             let Some(delay) = daemon_respawn_delay(attempt) else {
-                let message =
-                    "Agent daemon stopped after repeated crashes. Restart Supah Coder to try again.";
                 log::error!("daemon crash circuit breaker opened after {attempt} crashes");
-                emit_daemon_error(&app2, message);
+                let last_fatal = app2.state::<Daemon>().last_fatal.lock_or_recover().clone();
+                fail_daemon(&app2, crash_loop_message(last_fatal.as_deref()));
                 return;
             };
 
@@ -491,8 +599,10 @@ pub(crate) fn spawn_daemon(app: tauri::AppHandle, is_respawn: bool) {
             let reader = BufReader::new(stderr);
             for line in reader.lines().map_while(Result::ok) {
                 log::error!("[daemon:stderr] {line}");
+                // Not surfaced yet: the crash is respawned, and only a crash
+                // loop that exhausts the budget reports this reason.
                 if line.starts_with("GG_APP_FATAL") {
-                    emit_daemon_error(&app3, &line);
+                    *app3.state::<Daemon>().last_fatal.lock_or_recover() = Some(line);
                 }
             }
         });
@@ -539,7 +649,7 @@ pub(crate) async fn daemon_create_session(
     chat_agent: ChatAgent,
     cwd: &Path,
     session_path: Option<&str>,
-) -> Result<String, String> {
+) -> Result<(String, Option<String>), String> {
     let client = app.state::<reqwest::Client>().inner().clone();
     let auth_token = app
         .state::<Daemon>()
@@ -564,7 +674,17 @@ pub(crate) async fn daemon_create_session(
         .json::<serde_json::Value>()
         .await
         .map_err(|error| format!("agent daemon returned an invalid response: {error}"))?;
-    parse_daemon_create_session_response(status, &value)
+    let id = parse_daemon_create_session_response(status, &value)?;
+    Ok((id, json_session_path(&value)))
+}
+
+/// The conversation file a daemon response names, if any.
+pub(crate) fn json_session_path(value: &serde_json::Value) -> Option<String> {
+    value
+        .get("sessionPath")
+        .and_then(|path| path.as_str())
+        .filter(|path| !path.is_empty())
+        .map(str::to_string)
 }
 
 /// DELETE /session/:id on the daemon and require an acknowledged success response.
@@ -701,12 +821,15 @@ pub(crate) fn launch_pane_session(
 ) -> PaneStartupCompletion {
     let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
     tauri::async_runtime::spawn(async move {
+        let started_at = std::time::Instant::now();
+        // The conversation file the daemon opened (a fresh session has none
+        // until now), recorded on bind so a daemon respawn reopens it.
+        let opened_path: std::sync::Arc<std::sync::Mutex<Option<String>>> = Default::default();
         let daemon_app = app.clone();
+        let daemon_opened_path = opened_path.clone();
         let daemon_session = async move {
-            let port = await_daemon_port(&daemon_app)
-                .await
-                .ok_or_else(|| "daemon did not start in time".to_string())?;
-            let session_id = daemon_create_session(
+            let port = await_daemon_port(&daemon_app).await?;
+            let (session_id, path) = daemon_create_session(
                 &daemon_app,
                 port,
                 mode,
@@ -715,6 +838,7 @@ pub(crate) fn launch_pane_session(
                 session_path.as_deref(),
             )
             .await?;
+            *daemon_opened_path.lock_or_recover() = path;
             Ok((port, session_id))
         };
         let bind_app = app.clone();
@@ -729,14 +853,16 @@ pub(crate) fn launch_pane_session(
             generation,
             daemon_session,
             move |session_id| {
+                let opened = opened_path.lock_or_recover().take();
                 let windows: State<Windows> = bind_app.state();
                 let mut registry = windows.map.lock_or_recover();
-                bind_pane_session(
+                bind_pane_session_with_path(
                     &mut registry,
                     &bind_label,
                     &bind_pane_id,
                     generation,
                     session_id.to_string(),
+                    opened,
                 )
             },
             move |message| {
@@ -760,7 +886,8 @@ pub(crate) fn launch_pane_session(
         match outcome {
             PaneStartupOutcome::Ready { port, session_id } => {
                 log::info!(
-                    "pane session bound: window_label={label} pane_id={pane_id} generation={generation} session_id={session_id}"
+                    "pane session bound: window_label={label} pane_id={pane_id} generation={generation} session_id={session_id} elapsed_ms={}",
+                    started_at.elapsed().as_millis()
                 );
                 start_event_bridge(
                     app.clone(),
@@ -788,6 +915,10 @@ pub(crate) fn launch_pane_session(
                 }
             }
             PaneStartupOutcome::Failed(message) => {
+                log::error!(
+                    "pane session start failed: window_label={label} pane_id={pane_id} generation={generation} error={message} elapsed_ms={}",
+                    started_at.elapsed().as_millis()
+                );
                 let _ = app.emit_to(
                     EventTarget::webview_window(label.clone()),
                     "agent-pane-error",
@@ -797,6 +928,15 @@ pub(crate) fn launch_pane_session(
                         "error": message,
                     }),
                 );
+                // Upstream readiness contract: the primary pane's failure also
+                // surfaces as `sidecar-error` so the webview shows the cause.
+                if pane_id == PRIMARY_PANE_ID {
+                    let _ = app.emit_to(
+                        EventTarget::webview_window(label.clone()),
+                        "sidecar-error",
+                        message,
+                    );
+                }
             }
             PaneStartupOutcome::Superseded => {}
         }
@@ -1092,6 +1232,98 @@ mod tests {
     }
 
     #[test]
+    fn daemon_start_wait_outlasts_the_crash_loop_and_slow_first_launch() {
+        // Live bug: a 30s wait gave up on a daemon still being scanned by
+        // macOS on first launch, and that window never got a session.
+        let backoff: u64 = (1..=DAEMON_MAX_RESPAWNS)
+            .map(|attempt| daemon_respawn_delay(attempt).unwrap().as_secs())
+            .sum();
+        assert!(DAEMON_START_TIMEOUT.as_secs() >= backoff + 120);
+    }
+
+    #[test]
+    fn window_readiness_reports_the_failed_start_reason() {
+        // Upstream test ported to the per-pane readiness seam.
+        let mut pane = PaneSession {
+            generation: 1,
+            ..Default::default()
+        };
+        assert_eq!(pane_readiness(None, Some(9)), Ok(None));
+        assert_eq!(pane_readiness(Some(&pane), Some(9)), Ok(None));
+        pane.session_id = Some("sid".into());
+        assert_eq!(pane_readiness(Some(&pane), None), Ok(None));
+        assert_eq!(pane_readiness(Some(&pane), Some(9)), Ok(Some(9)));
+        pane.session_id = None;
+        pane.startup_error = Some("boom".into());
+        assert_eq!(pane_readiness(Some(&pane), Some(9)), Err("boom".into()));
+    }
+
+    #[test]
+    fn stale_start_failure_does_not_mask_a_newer_attempt() {
+        // Upstream test ported to the pane registry's generation check.
+        let mut registry = PaneRegistry::default();
+        let first = record_pane_target(
+            &mut registry,
+            "main",
+            PRIMARY_PANE_ID,
+            WorkspaceMode::Code,
+            ChatAgent::General,
+            PathBuf::from("/p"),
+            None,
+        );
+        let second = record_pane_target(
+            &mut registry,
+            "main",
+            PRIMARY_PANE_ID,
+            WorkspaceMode::Code,
+            ChatAgent::General,
+            PathBuf::from("/p"),
+            None,
+        );
+        assert!(!record_pane_startup_error(
+            &mut registry,
+            "main",
+            PRIMARY_PANE_ID,
+            first,
+            "old failure".into()
+        ));
+        let pane = resolve_owned_pane(&registry, "main", PRIMARY_PANE_ID).unwrap();
+        assert!(pane.startup_error.is_none());
+        assert!(record_pane_startup_error(
+            &mut registry,
+            "main",
+            PRIMARY_PANE_ID,
+            second,
+            "new failure".into()
+        ));
+        let pane = resolve_owned_pane(&registry, "main", PRIMARY_PANE_ID).unwrap();
+        assert_eq!(pane.startup_error.as_deref(), Some("new failure"));
+        assert!(!record_pane_startup_error(
+            &mut registry,
+            "gone",
+            PRIMARY_PANE_ID,
+            second,
+            "closed window".into()
+        ));
+    }
+
+    #[test]
+    fn crash_loop_message_carries_the_fatal_reason() {
+        assert_eq!(
+            crash_loop_message(Some("GG_APP_FATAL EACCES: ~/.gg/settings.json")),
+            "The agent daemon kept crashing on startup: EACCES: ~/.gg/settings.json"
+        );
+        assert_eq!(
+            crash_loop_message(Some("GG_APP_FATAL ")),
+            "The agent daemon stopped after repeated crashes."
+        );
+        assert_eq!(
+            crash_loop_message(None),
+            "The agent daemon stopped after repeated crashes."
+        );
+    }
+
+    #[test]
     fn daemon_crash_loop_opens_circuit_breaker() {
         assert!(daemon_respawn_delay(0).is_none());
         assert!(daemon_respawn_delay(DAEMON_MAX_RESPAWNS + 1).is_none());
@@ -1180,5 +1412,75 @@ mod tests {
         );
         assert!(remove_restore_target(&mut targets, "main").is_some());
         assert!(restore_target(&targets, "main").is_none());
+    }
+
+    #[test]
+    fn stale_pane_session_generation_cannot_overwrite_newer_result() {
+        // Upstream's stale_window_session_generation_cannot_overwrite_newer_result,
+        // ported to the pane registry.
+        let mut registry = PaneRegistry::default();
+        let generation = record_pane_target(
+            &mut registry,
+            "main",
+            PRIMARY_PANE_ID,
+            WorkspaceMode::Code,
+            ChatAgent::General,
+            PathBuf::from("/new-project"),
+            None,
+        );
+        assert!(!bind_pane_session_with_path(
+            &mut registry,
+            "main",
+            PRIMARY_PANE_ID,
+            generation - 1,
+            "stale-session".into(),
+            Some("/sessions/stale.jsonl".into())
+        ));
+        assert!(bind_pane_session_with_path(
+            &mut registry,
+            "main",
+            PRIMARY_PANE_ID,
+            generation,
+            "new-session".into(),
+            Some("/sessions/new.jsonl".into())
+        ));
+        let pane = resolve_owned_pane(&registry, "main", PRIMARY_PANE_ID).unwrap();
+        assert_eq!(pane.session_id.as_deref(), Some("new-session"));
+        assert_eq!(pane.session_path.as_deref(), Some("/sessions/new.jsonl"));
+    }
+
+    #[test]
+    fn a_fresh_session_records_its_path_so_a_daemon_respawn_reopens_it() {
+        // Live bug: a goal window opened without a path; after a daemon
+        // respawn it was recreated with none and lost its conversation.
+        let mut registry = PaneRegistry::default();
+        let generation = record_pane_target(
+            &mut registry,
+            "main",
+            PRIMARY_PANE_ID,
+            WorkspaceMode::Code,
+            ChatAgent::General,
+            PathBuf::from("/project"),
+            None,
+        );
+        assert!(bind_pane_session_with_path(
+            &mut registry,
+            "main",
+            PRIMARY_PANE_ID,
+            generation,
+            "sid".into(),
+            Some("/sessions/fresh.jsonl".into())
+        ));
+        let targets = recovery_targets(&registry);
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].5.as_deref(), Some("/sessions/fresh.jsonl"));
+        assert_eq!(
+            json_session_path(&serde_json::json!({ "sessionId": "x", "sessionPath": "" })),
+            None
+        );
+        assert_eq!(
+            json_session_path(&serde_json::json!({ "sessionId": "x", "sessionPath": "/s.jsonl" })),
+            Some("/s.jsonl".into())
+        );
     }
 }

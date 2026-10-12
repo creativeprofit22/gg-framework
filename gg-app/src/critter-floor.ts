@@ -84,6 +84,15 @@ export interface CritterFloorOptions {
   readonly closeAfterMs?: number;
   /** Injected for tests; defaults to Math.random. */
   readonly random?: () => number;
+  /**
+   * Whether an agent's critter was already on this floor before it was
+   * rebuilt (the chat was hidden behind another view and shown again). Such a
+   * critter is put straight back where it works, with no beam, greeting or
+   * terrain reroll: it never left.
+   */
+  readonly wasHere?: (key: string) => boolean;
+  /** Told when a critter lands on the floor (true) or leaves it for good (false). */
+  readonly onPresence?: (key: string, here: boolean) => void;
 }
 
 export interface CritterFloorController {
@@ -98,6 +107,8 @@ const LANE_OPEN_MS = 240;
 const COLLAPSE_DELAY_MS = 450;
 const SPAWN_GAP_MS = 220;
 const SUMMON_MS = 900;
+/** How long a restored lane keeps its transitions off, so its scenery doesn't replay. */
+const RESTORE_SETTLE_MS = 60;
 /** Every work action gets at least this long, so rapid tool calls don't jitter. */
 const MIN_JOB_MS = 1200;
 /** When a different tool arrives, the current action wraps up this soon after. */
@@ -300,6 +311,7 @@ export function createCritterFloor(
   // While the last critter has gone and the collapse is pending the lane is
   // "closing" (still open), so its terrain can sink before the lane shuts.
   function openLane(): number {
+    lane.classList.remove("instant");
     if (collapseTimer) {
       cancelLater(collapseTimer);
       collapseTimer = 0;
@@ -314,6 +326,7 @@ export function createCritterFloor(
   }
   function maybeCollapseLane(): void {
     if (critters.size > 0 || pending.size > 0 || collapseTimer) return;
+    lane.classList.remove("instant");
     if (resting) {
       // Its timer would be frozen: shut the empty lane now.
       lane.classList.remove("open", "closing");
@@ -814,7 +827,7 @@ export function createCritterFloor(
   }
 
   // ── Summon in / teleport out / fall over ──
-  function create(agent: FloorAgent): void {
+  function create(agent: FloorAgent, returning = false): void {
     const taken = new Set([...critters.values()].map((c) => c.def.id));
     const pinned = CRITTERS.find((critter) => critter.id === agent.critterId);
     const def = pinned ?? pickCritter(agent.agentName, agent.key, taken);
@@ -889,13 +902,14 @@ export function createCritterFloor(
     root.addEventListener("click", () => onClick(c));
     critters.set(c.key, c);
     place(c);
-    summonIn(c);
+    summonIn(c, returning);
+    options.onPresence?.(c.key, true);
     startLoop();
   }
 
   /** Beam + ring, then a white silhouette grows out of the floor and fades
    *  into the critter's colours. */
-  function summonIn(c: Critter): void {
+  function summonIn(c: Critter, returning: boolean): void {
     const settle = (): void => {
       c.el.classList.remove("summoning");
       if (c.leaving) return;
@@ -905,9 +919,9 @@ export function createCritterFloor(
       // It may already be mid-tool by the time it lands.
       if (c.agent.activity) onActivity(c, c.agent.activity);
     };
-    if (resting) {
-      // Landing in a resting window: no beam or greeting (their timers are
-      // frozen), just stand there in the working pose.
+    if (resting || returning) {
+      // Landing in a resting window (its timers are frozen), or coming back
+      // into view: no beam or greeting, just stand there in the working pose.
       c.el.classList.remove("summoning");
       c.mode = "pause";
       c.timer = reduced ? Number.POSITIVE_INFINITY : rand(0.3, 1.2);
@@ -1129,6 +1143,7 @@ export function createCritterFloor(
     c.tween = null;
     discard(c.el);
     critters.delete(c.key);
+    options.onPresence?.(c.key, false);
     if (tooltipKey === c.key) hideTooltip(c.key);
     if (critters.size === 0) stopLoop();
     // A follow-up landed while it was waving goodbye: bring it straight back.
@@ -1217,6 +1232,24 @@ export function createCritterFloor(
   }
 
   // ── Reconcile with the agent list ──
+  /**
+   * Put a critter that was already out straight back (see wasHere): the lane
+   * opens at once with its scenery in place, without rolling a new terrain.
+   */
+  function restore(agent: FloorAgent): void {
+    if (collapseTimer) {
+      cancelLater(collapseTimer);
+      collapseTimer = 0;
+    }
+    lane.classList.remove("closing");
+    if (!lane.classList.contains("open")) {
+      lane.classList.add("instant", "open");
+      laneReadyAt = now();
+      later(RESTORE_SETTLE_MS, () => lane.classList.remove("instant"));
+    }
+    create(agent, true);
+  }
+
   function summon(agent: FloorAgent): void {
     const t = now();
     const laneWait = openLane();
@@ -1277,7 +1310,9 @@ export function createCritterFloor(
       }
       // Only working agents are summoned: finished ones (including a resumed
       // session's history) stay off the floor until a follow-up wakes them.
-      if (!pending.has(agent.key) && agent.status === "running") summon(agent);
+      if (pending.has(agent.key) || agent.status !== "running") continue;
+      if (options.wasHere?.(agent.key)) restore(agent);
+      else summon(agent);
     }
     // Agents that vanished from the list (session switch, transcript reload).
     for (const [key, id] of pending) {

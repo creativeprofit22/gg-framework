@@ -8,7 +8,9 @@ import { getQwenCloudThinkingLabel } from "@kenkaiiii/gg-core/qwen-cloud-token-p
 import {
   Activity,
   createElement,
+  lazy,
   memo,
+  Suspense,
   useCallback,
   useContext,
   useEffect,
@@ -107,6 +109,9 @@ import {
   workspaceProductName,
   NewSessionError,
   PlanMutationError,
+  kickoffGoal,
+  pauseGoal,
+  resumeGoal,
 } from "./agent";
 import { createSafeTauriUnlisten, type SafeTauriUnlisten } from "./tauri-listener";
 import { ActivityBar } from "./ActivityBar";
@@ -114,14 +119,40 @@ import { KenActivityBar } from "./KenActivityBar";
 import { useTaskActivity } from "./useTaskActivity";
 import { useKenMentor } from "./useKenMentor";
 import { useAutopilot } from "./useAutopilot";
-import { useAgentEvents } from "./useAgentEvents";
+import { useAgentEvents, type RunEnd } from "./useAgentEvents";
 import { HookNotice, type HookKind, type VerificationReason } from "./HookNotice";
 import { PlanDecisionNotice, type PlanDecision } from "./PlanDecisionNotice";
 import { StreamingMarkdown } from "./StreamingMarkdown";
 import { createLiveTextStore, LiveTextContext, useLiveText } from "./live-text";
 import { LiveToolPanel, type LiveToolEntry } from "./LiveToolPanel";
 import { SubAgentFeed, type SubAgentLine } from "./SubAgentFeed";
-import { CritterFloor, type CritterGroup } from "./CritterFloor";
+import { CritterFloor, collectFloorAgents, type CritterGroup } from "./CritterFloor";
+import { COORDINATOR_KEY, goalViewFor } from "./goal-world-agents";
+import {
+  EMPTY_TALLY,
+  blockingAsk,
+  coordinatorAtWork,
+  floorPhase,
+  tallyGoal,
+  type GoalTally,
+} from "./goal-progress";
+import { latestKenLine } from "./goal-ken-talk";
+import type { Item as GoalTranscriptItem } from "./transcript-item";
+import {
+  FINISH_SETTLE_MS,
+  goalFinishOf,
+  goalIsQuiet,
+  openStretch,
+  recordRun,
+  type GoalFinish,
+  type GoalRun,
+} from "./goal-finish";
+import { dropHiddenFocus } from "./hidden-focus";
+import { GoalSettingsModal } from "./GoalSettingsModal";
+// The farm loads on demand; it is only needed once a goal has started.
+const GoalWorld = lazy(() =>
+  import("./GoalWorld").then((module) => ({ default: module.GoalWorld })),
+);
 import { CompactionNotice } from "./CompactionNotice";
 import { ModelSelect } from "./ModelSelect";
 import { SlashMenu } from "./SlashMenu";
@@ -173,6 +204,10 @@ import { BackButton } from "./BackButton";
 import { Badge } from "./Badge";
 import { AutopilotToggle } from "./AutopilotToggle";
 import { HomeScreen } from "./HomeScreen";
+// Lazy: Goals is an opt-in surface; keep its picker out of the startup bundle.
+const GoalPicker = lazy(() =>
+  import("./GoalPicker").then((module) => ({ default: module.GoalPicker })),
+);
 import { SettingsModal } from "./LazySettingsModal";
 import { initialEntryView, type EntryView } from "./app-entry-view";
 import { submitDisposition, withoutSupersedingMessage } from "./submit-disposition";
@@ -965,6 +1000,8 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   const [autopilotPending, setAutopilotPending] = useState<(() => boolean) | null>(null);
   const autopilotPendingRef = useRef<(() => boolean) | null>(null);
   const [running, setRunning] = useState(false);
+  // Bumped on each transcript reload; restarts the goal header's tally.
+  const [transcriptEpoch, setTranscriptEpoch] = useState(0);
   // Last composer keystroke (0 = none since this pane opened). The first
   // keystroke after opening or a >4 min idle pause prewarms the prompt cache.
   const lastKeystrokeAtRef = useRef(0);
@@ -2273,6 +2310,23 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     setProgrammaticOpen(false);
   }, [programmaticGeneration]);
 
+  // A goal cut off by a daemon restart carries on (pane-scoped).
+  const resumeCutOffGoal = useCallback(() => {
+    void resumeGoal(paneId).catch((e: unknown) =>
+      toast(
+        `Couldn't pick the goal back up: ${e instanceof Error ? e.message : String(e)}`,
+        "error",
+      ),
+    );
+  }, [paneId]);
+  // Every run of a started goal, for its finish card (see goal-finish).
+  const [goalRuns, setGoalRuns] = useState<readonly GoalRun[]>([]);
+  const goalRunTargetRef = useRef<string | null>(null);
+  const recordGoalRun = useCallback((run: RunEnd) => {
+    const goalId = goalRunTargetRef.current;
+    if (goalId) setGoalRuns((runs) => recordRun(runs, { ...run, goalId }));
+  }, []);
+
   const { handleEvent, pushItem, acceptSubmission, endStreamingText, replacePlanReview } =
     useAgentEvents({
       client,
@@ -2321,6 +2375,8 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       onSessionReset: onAuthoritativeSessionReset,
       shouldApplySessionReset,
       onContinuationAccepted,
+      onGoalNeedsResume: resumeCutOffGoal,
+      onRunEnd: recordGoalRun,
     });
 
   const programmaticBusy = running || planGateBusy || autopilotReviewing || kenRunning;
@@ -2603,6 +2659,8 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
             return (parsed ? parsed.text : h.text).trim();
           })
           .filter((t, i, a) => t.length > 0 && a[i - 1] !== t);
+        // Reloaded rows get new keys; the goal tally starts again from them.
+        setTranscriptEpoch((epoch) => epoch + 1);
         setItems(
           history.flatMap((h): Item | Item[] => {
             if (h.mcpToolFailure)
@@ -2723,6 +2781,23 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
         const deferredAsks = isPendingAskSnapshot(st.deferredAsks) ? st.deferredAsks : undefined;
         setItems((previous) => reconcilePendingAsks(previous, pendingAsks, nextId, deferredAsks));
       }
+      // A new goal's coordinator speaks first; a goal cut off mid-work carries on.
+      if (st?.goal?.needsKickoff) {
+        void kickoffGoal(paneId).catch((e: unknown) =>
+          toast(
+            `Couldn't start the goal's first reply: ${e instanceof Error ? e.message : String(e)}`,
+            "error",
+          ),
+        );
+      }
+      if (st?.goal?.needsResume) {
+        void resumeGoal(paneId).catch((e: unknown) =>
+          toast(
+            `Couldn't pick the goal back up: ${e instanceof Error ? e.message : String(e)}`,
+            "error",
+          ),
+        );
+      }
       replayEvents();
       readyRef.current = true;
       setHydrated(true);
@@ -2749,6 +2824,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     replacePlanReview,
     captureKenHydration,
     clearKenStream,
+    paneId,
   ]);
 
   useEffect(() => {
@@ -3570,6 +3646,165 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
           item.kind === "subagent_group",
       ),
     [items],
+  );
+
+  // ── Goal world ── (ported from upstream App.tsx; goal calls are pane-scoped)
+  const [goalChatFor, setGoalChatFor] = useState<string | null>(null);
+  const [showGoalSettings, setShowGoalSettings] = useState(false);
+  const setGoalPaused = useCallback(
+    (paused: boolean) => {
+      const act = paused
+        ? pauseGoal(paneId).then(() => {
+            if (running) requestCancel();
+          })
+        : resumeGoal(paneId).then((resumed) => {
+            if (!resumed && !state?.goal?.paused) {
+              toast(
+                "Nothing to carry on: the goal finished. Tell GG Goals what's next in the chat.",
+              );
+            }
+          });
+      void act.catch((e: unknown) =>
+        toast(
+          `Couldn't ${paused ? "pause" : "resume"} the goal: ${e instanceof Error ? e.message : String(e)}`,
+          "error",
+        ),
+      );
+    },
+    [paneId, running, requestCancel, state?.goal?.paused],
+  );
+  const workspaceHeaderRef = useRef<HTMLDivElement>(null);
+  const { activeGoalId, view: goalView } = goalViewFor(state?.goal, goalChatFor);
+  const goalWorldOpen = goalView === "workers";
+  // When the current run began, for the activity bar's timer (survives the chat hiding).
+  const [runStartedAt, setRunStartedAt] = useState<number | null>(null);
+  useEffect(() => {
+    setRunStartedAt((prev) => (running ? (prev ?? Date.now()) : null));
+  }, [running]);
+  const chatScrollOnHideRef = useRef<{ pinned: boolean; top: number } | null>(null);
+  useLayoutEffect(() => {
+    if (goalWorldOpen) {
+      chatScrollOnHideRef.current = {
+        pinned: stickToBottomRef.current,
+        top: lastScrollTopRef.current,
+      };
+      dropHiddenFocus();
+      return;
+    }
+    const saved = chatScrollOnHideRef.current;
+    chatScrollOnHideRef.current = null;
+    const el = scrollRef.current;
+    if (!saved || !el) return;
+    stickToBottomRef.current = saved.pinned;
+    if (saved.pinned) scrollToBottom();
+    else {
+      el.scrollTop = saved.top;
+      lastScrollTopRef.current = el.scrollTop;
+    }
+  }, [goalWorldOpen, scrollToBottom]);
+  useEffect(() => {
+    if (!goalWorldOpen) return;
+    document.addEventListener("focusin", dropHiddenFocus);
+    return () => document.removeEventListener("focusin", dropHiddenFocus);
+  }, [goalWorldOpen]);
+  const goalWorkers = useMemo(
+    () => (activeGoalId ? collectFloorAgents(critterGroups) : []),
+    [activeGoalId, critterGroups],
+  );
+  const goalWaitingOnUser = useMemo(
+    () =>
+      activeGoalId !== null &&
+      items.some((item) => item.kind === "ask" && !item.sent && !item.cancelled),
+    [activeGoalId, items],
+  );
+  // The fork's pane Item is a superset of upstream's transcript Item; goal helpers read only shared kinds.
+  const goalItems = items as unknown as readonly GoalTranscriptItem[];
+  const goalAsk = useMemo(
+    () => (activeGoalId ? blockingAsk(goalItems) : null),
+    [activeGoalId, goalItems],
+  );
+  const [seenGoalAsks, setSeenGoalAsks] = useState<ReadonlySet<string>>(() => new Set());
+  useEffect(() => {
+    if (!goalAsk || goalView !== "chat") return;
+    setSeenGoalAsks((seen) => (seen.has(goalAsk.id) ? seen : new Set([...seen, goalAsk.id])));
+  }, [goalAsk, goalView]);
+  const goalAskNotice = useMemo(
+    () =>
+      goalAsk && !seenGoalAsks.has(goalAsk.id)
+        ? { question: goalAsk.question, more: goalAsk.more }
+        : null,
+    [goalAsk, seenGoalAsks],
+  );
+  const kenSaid = useMemo(
+    () => (activeGoalId ? latestKenLine(goalItems, (id) => liveText.get(id) !== undefined) : null),
+    [activeGoalId, goalItems, liveText],
+  );
+  useEffect(() => {
+    goalRunTargetRef.current = activeGoalId;
+  }, [activeGoalId]);
+  const [goalClosedAt, setGoalClosedAt] = useState(0);
+  const [goalFinish, setGoalFinish] = useState<GoalFinish | null>(null);
+  const goalStretch = useMemo(
+    () => (activeGoalId ? openStretch(goalRuns, activeGoalId, goalClosedAt) : []),
+    [activeGoalId, goalRuns, goalClosedAt],
+  );
+  const goalQuiet =
+    goalStretch.length > 0 &&
+    goalIsQuiet({
+      paused: state?.goal?.paused === true,
+      running,
+      waitingOnUser: goalWaitingOnUser,
+      workers: goalWorkers,
+    });
+  const finishInputsRef = useRef({ groups: critterGroups, said: kenSaid });
+  useEffect(() => {
+    finishInputsRef.current = { groups: critterGroups, said: kenSaid };
+  }, [critterGroups, kenSaid]);
+  useEffect(() => {
+    if (!goalQuiet) return;
+    const timer = window.setTimeout(() => {
+      const { groups, said } = finishInputsRef.current;
+      const last = goalStretch[goalStretch.length - 1];
+      if (last) setGoalClosedAt(last.endedAt);
+      setGoalFinish(goalFinishOf(goalStretch, groups, said));
+    }, FINISH_SETTLE_MS);
+    return () => window.clearTimeout(timer);
+  }, [goalQuiet, goalStretch]);
+  useEffect(() => {
+    if (goalFinish && (running || goalView === "chat")) setGoalFinish(null);
+  }, [goalFinish, running, goalView]);
+  const shownGoalFinish = goalFinish?.goalId === activeGoalId ? goalFinish : null;
+  const tallySource = `${activeGoalId ?? ""}:${transcriptEpoch}`;
+  const tallyInput = useMemo(
+    () => [
+      ...goalWorkers.map((worker) => ({ key: worker.key, phase: floorPhase(worker.status) })),
+      ...(running && coordinatorAtWork(liveToolFeed)
+        ? [{ key: COORDINATOR_KEY, phase: "working" as const }]
+        : []),
+    ],
+    [goalWorkers, running, liveToolFeed],
+  );
+  const [tallyState, setTallyState] = useState<{ source: string; tally: GoalTally }>({
+    source: "",
+    tally: EMPTY_TALLY,
+  });
+  useEffect(() => {
+    setTallyState((prev) => {
+      const base = prev.source === tallySource ? prev.tally : EMPTY_TALLY;
+      const tally = tallyGoal(base, tallyInput);
+      return prev.source === tallySource && tally === prev.tally
+        ? prev
+        : { source: tallySource, tally };
+    });
+  }, [tallySource, tallyInput]);
+  const goalTally = useMemo(
+    () =>
+      !activeGoalId
+        ? null
+        : tallyState.source === tallySource
+          ? tallyState.tally
+          : tallyGoal(EMPTY_TALLY, tallyInput),
+    [activeGoalId, tallyState, tallySource, tallyInput],
   );
 
   const pendingAskAnswers = useRef(new Set<number>());
@@ -4755,6 +4990,11 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     onUserTargetChange?.();
     onProjectChosen();
   }, [onUserTargetChange]);
+  // A Goal is a code workspace rooted at its Goal folder. Bind it through this
+  // pane's client (pane-scoped) before the shared reset + re-hydrate.
+  const handleGoalChosen = useCallback((): void => {
+    handlePickerChosen();
+  }, [handlePickerChosen]);
 
   const startRoadmapPhase = useCallback(
     async (phaseId: string): Promise<PhaseStartResult> => {
@@ -4906,6 +5146,10 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
               setWorkspaceMode("motion");
               setEntryView("motion");
             }}
+            onGoals={() => {
+              setWorkspaceMode("code");
+              setEntryView("goals");
+            }}
             onSettings={(tab) => {
               setSettingsTab(tab ?? "general");
               setEntryView("settings");
@@ -4935,6 +5179,14 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
             bindChat={bindPickerChat}
             showWindowControls={kind === "primary"}
           />
+        ) : entryView === "goals" ? (
+          <Suspense fallback={null}>
+            <GoalPicker
+              openGoal={bindPickerProject}
+              onChosen={handleGoalChosen}
+              onClose={() => setEntryView("home")}
+            />
+          </Suspense>
         ) : entryView === "motion" ? (
           <ChatPicker
             mode="motion"
@@ -4991,6 +5243,17 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
           />
         ) : workspaceMode === "motion" ? (
           <ChatPicker mode="motion" bindChat={bindPickerMotion} {...pickerProps} />
+        ) : state?.goal ? (
+          <Suspense fallback={null}>
+            <GoalPicker
+              openGoal={bindPickerProject}
+              onChosen={() => {
+                setShowPicker(false);
+                handleGoalChosen();
+              }}
+              onClose={pickerProps.onClose}
+            />
+          </Suspense>
         ) : (
           <ProjectPicker
             initialProjectPath={state?.cwd ?? null}
@@ -5084,7 +5347,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
 
   const content = (
     <div
-      className={`app agent-pane${props.focused !== false ? " pane-focused" : ""}${isFileDragOver ? " app-file-dragover" : ""}${windowFocused && props.windowFocused !== false ? " window-focused" : ""}${workspaceMode === "code" && showChecklist ? " checklist-open" : ""}`}
+      className={`app agent-pane${props.focused !== false ? " pane-focused" : ""}${isFileDragOver ? " app-file-dragover" : ""}${windowFocused && props.windowFocused !== false ? " window-focused" : ""}${workspaceMode === "code" && showChecklist ? " checklist-open" : ""}${goalWorldOpen && !showChecklist ? " goal-world-open" : ""}`}
       data-glow={glowState}
       style={{ background: "var(--workspace-pane-bg, var(--bg))", ...glowStyle }}
       onPointerDown={() => props.onFocus?.(paneId)}
@@ -5096,8 +5359,10 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       {confettiNonce && <Confetti key={confettiNonce} />}
 
       <WorkspaceHeader
+        ref={workspaceHeaderRef}
         workspaceMode={workspaceMode}
         cwd={state?.cwd}
+        goalName={state?.goal?.name ?? null}
         gitBranch={state?.gitBranch}
         gitDirtyFileCount={state?.gitDirtyFileCount}
         gitHubIssues={state?.gitHubIssues}
@@ -5185,6 +5450,44 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
           </span>
         ) : (
           <>
+            {state?.goal && (
+              <span className="picker-head-actions goal-head-actions">
+                {goalView !== null && (
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-ghost"
+                    aria-pressed={goalView === "workers"}
+                    title={goalView === "workers" ? "Show the chat" : "Show the workers"}
+                    onClick={() => setGoalChatFor(goalView === "workers" ? activeGoalId : null)}
+                  >
+                    {goalView === "workers"
+                      ? goalWaitingOnUser
+                        ? "Chat •"
+                        : "Chat"
+                      : goalTally && goalTally.working > 0
+                        ? `Workers (${goalTally.working})`
+                        : "Workers"}
+                  </button>
+                )}
+                {state.goal.phase === "active" && (
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-ghost"
+                    onClick={() => setGoalPaused(!state.goal?.paused)}
+                  >
+                    {state.goal.paused ? "Resume" : "Pause"}
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className="btn btn-sm btn-ghost btn-quiet"
+                  title="Goal settings"
+                  onClick={() => setShowGoalSettings(true)}
+                >
+                  Settings
+                </button>
+              </span>
+            )}
             <span className="picker-head-actions">
               <AutopilotToggle
                 checked={state?.autopilot ?? false}
@@ -5316,9 +5619,31 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
         />
       )}
 
+      {/* Kept alive while hidden (Chat view), so switching back doesn't rebuild the farm. */}
+      {activeGoalId && (
+        <Activity mode={goalWorldOpen && !showChecklist ? "visible" : "hidden"}>
+          <Suspense fallback={null}>
+            <GoalWorld
+              key={activeGoalId}
+              headerRef={workspaceHeaderRef}
+              goalId={activeGoalId}
+              running={running}
+              liveTools={liveToolFeed}
+              waitingOnUser={goalWaitingOnUser}
+              workers={goalWorkers}
+              ask={goalAskNotice}
+              kenSaid={kenSaid}
+              onShowChat={() => setGoalChatFor(activeGoalId)}
+              finish={shownGoalFinish}
+              onCloseFinish={() => setGoalFinish(null)}
+            />
+          </Suspense>
+        </Activity>
+      )}
+
       {/* React owns chat visibility rather than a stylesheet override. Activity
           keeps the draft and transcript state, and suspends hidden child effects. */}
-      <Activity mode={showChecklist ? "hidden" : "visible"}>
+      <Activity mode={showChecklist || goalWorldOpen ? "hidden" : "visible"}>
         {/* Non-scrolling frame the same size as the chat viewport. The banner
           lives HERE, not inside `.transcript` — `.transcript` scrolls, and an
           absolutely positioned child of a scrolling container is pinned to the
@@ -5487,6 +5812,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
           {/* Automatic review stays in this pane's task row; manual @Ken keeps its own bar. */}
           {(workspaceMode !== "code" || running || autopilotReviewing || !kenRunning) && (
             <ActivityBar
+              runStartedAt={runStartedAt}
               running={running}
               activity={activity}
               cancelling={cancelling}
@@ -6213,6 +6539,17 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
         />
       )}
 
+      {showGoalSettings && state?.goal && (
+        <GoalSettingsModal
+          context={state.goal.context ?? []}
+          instructions={state.goal.instructions ?? ""}
+          busy={running}
+          onClose={() => setShowGoalSettings(false)}
+          onSaved={(next) =>
+            setState((s) => (s?.goal ? { ...s, goal: { ...s.goal, ...next } } : s))
+          }
+        />
+      )}
       {confirmNewSession && (
         <ConfirmModal
           title={workspaceMode === "chat" ? "New Chat" : "New Session"}

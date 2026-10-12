@@ -390,7 +390,9 @@ function SendPromptBlock({ body }: { body: string }): React.ReactElement {
           className={`ken-prompt-send${sent ? " sent" : ""}`}
           onClick={send}
           disabled={sent}
-          title={sent ? `Sent to ${PRODUCT_DISPLAY_NAME}` : `Send this prompt to ${PRODUCT_DISPLAY_NAME}`}
+          title={
+            sent ? `Sent to ${PRODUCT_DISPLAY_NAME}` : `Send this prompt to ${PRODUCT_DISPLAY_NAME}`
+          }
         >
           {sent ? <CheckIcon size={12} /> : <ArrowElbowDownLeftIcon size={12} />}
           {sent ? "Sent" : `Send to ${PRODUCT_DISPLAY_NAME}`}

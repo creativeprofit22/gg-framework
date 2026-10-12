@@ -75,41 +75,20 @@ pub(crate) fn app_settings_get(app: tauri::AppHandle) -> serde_json::Value {
 }
 
 /// Update only the user-facing projects root while preserving sidecar-owned
-/// preferences in the same file (models, hidden projects, extra roots, and
-/// forward-compatible fields).
-pub(crate) fn write_projects_root(
-    path: &Path,
-    projects_root: &str,
-) -> Result<serde_json::Value, String> {
-    let mut settings = match std::fs::read(path) {
-        Ok(bytes) => serde_json::from_slice::<serde_json::Value>(&bytes)
-            .map_err(|error| format!("failed to parse {}: {error}", path.display()))?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
-        Err(error) => return Err(format!("failed to read {}: {error}", path.display())),
-    };
-    let object = settings
-        .as_object_mut()
-        .ok_or_else(|| format!("app settings must be a JSON object: {}", path.display()))?;
-    object.insert(
-        "projectsRoot".to_string(),
-        serde_json::Value::String(projects_root.to_string()),
-    );
-
-    let parent = path
-        .parent()
-        .ok_or_else(|| format!("app settings path has no parent: {}", path.display()))?;
-    std::fs::create_dir_all(parent)
-        .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
-    let filename = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| format!("invalid app settings filename: {}", path.display()))?;
-    let dir = cap_std::fs::Dir::open_ambient_dir(parent, cap_std::ambient_authority())
-        .map_err(|error| format!("failed to open {}: {error}", parent.display()))?;
-    let mut bytes = serde_json::to_vec_pretty(&settings).map_err(|error| error.to_string())?;
-    bytes.push(b'\n');
-    atomic_write_identity_file(&dir, parent, filename, &bytes)?;
-    Ok(settings)
+/// preferences in the same file. Change ONLY projectsRoot: gg-app.json also
+/// holds the sidecar's per-project model/autopilot/Ken prefs, extra project
+/// folders, hidden projects and local endpoints — overwriting the file wiped
+/// all of them. Holds the sidecar's lock and writes atomically.
+pub(crate) fn write_projects_root(path: &Path, projects_root: &str) -> Result<(), String> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    with_settings_lock(path, || {
+        let existing = std::fs::read_to_string(path).ok();
+        let body = merge_projects_root(existing.as_deref(), projects_root);
+        let pretty = serde_json::to_string_pretty(&body).map_err(|e| e.to_string())?;
+        write_atomic(path, &pretty)
+    })
 }
 
 /// Native: update gg-app settings directly in this app identity's data root.
@@ -125,6 +104,85 @@ pub(crate) fn app_settings_save(
     }
     write_projects_root(&app_settings_path(&app.config().identifier), trimmed)?;
     Ok(serde_json::json!({ "projectsRoot": trimmed }))
+}
+
+/// The settings object with `projectsRoot` set and every other key kept. A
+/// missing, unreadable or non-object file starts from an empty object.
+pub(crate) fn merge_projects_root(
+    existing: Option<&str>,
+    projects_root: &str,
+) -> serde_json::Value {
+    let mut body = existing
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+        .filter(|v| v.is_object())
+        .unwrap_or_else(|| serde_json::json!({}));
+    body["projectsRoot"] = serde_json::Value::String(projects_root.to_string());
+    body
+}
+
+/// Temp file + rename, so the sidecar never reads a half-written gg-app.json.
+fn write_atomic(path: &Path, contents: &str) -> Result<(), String> {
+    let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
+    std::fs::write(&tmp, contents).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        e.to_string()
+    })
+}
+
+/// Hold the same `<file>.lock` the sidecar takes (gg-core `withFileLock`:
+/// created exclusively, `{pid,timestamp}` body, stale after 10s), so a Settings
+/// save can't interleave with a sidecar read-modify-write of the same file.
+/// Gives up waiting after 5s and writes anyway, like the sidecar's lock.
+fn with_settings_lock<T>(path: &Path, f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    use std::io::Write;
+    const STALE_MS: u128 = 10_000;
+    let lock = PathBuf::from(format!("{}.lock", path.display()));
+    let now_ms = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0)
+    };
+    let start = std::time::Instant::now();
+    let mut held = false;
+    while start.elapsed() < std::time::Duration::from_secs(5) {
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&lock)
+        {
+            Ok(mut file) => {
+                let _ = write!(
+                    file,
+                    "{{\"pid\":{},\"timestamp\":{}}}",
+                    std::process::id(),
+                    now_ms()
+                );
+                held = true;
+                break;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                let stale = std::fs::read_to_string(&lock)
+                    .ok()
+                    .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                    .and_then(|v| v.get("timestamp").and_then(|t| t.as_u64()))
+                    .map(|ts| now_ms().saturating_sub(ts as u128) > STALE_MS)
+                    .unwrap_or(true);
+                if stale {
+                    let _ = std::fs::remove_file(&lock);
+                    continue;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(_) => break,
+        }
+    }
+    let result = f();
+    if held {
+        let _ = std::fs::remove_file(&lock);
+    }
+    result
 }
 
 /// Native: create a new project folder under the configured projects root.
@@ -338,6 +396,33 @@ pub(crate) fn window_restore_target(webview: WebviewWindow) -> Option<RestoreEnt
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn saving_projects_root_keeps_every_other_setting() {
+        let existing = r#"{
+            "projectsRoot": "/old",
+            "projectModels": {"/p": {"provider": "anthropic", "model": "m"}},
+            "autopilot": {"/p": true},
+            "hiddenProjects": ["/x"],
+            "localEndpoints": [{"id": "lan", "baseUrl": "http://h:1"}],
+            "someFutureKey": 7
+        }"#;
+        let merged = merge_projects_root(Some(existing), "/new");
+        assert_eq!(merged["projectsRoot"], "/new");
+        assert_eq!(merged["projectModels"]["/p"]["model"], "m");
+        assert_eq!(merged["autopilot"]["/p"], true);
+        assert_eq!(merged["hiddenProjects"][0], "/x");
+        assert_eq!(merged["localEndpoints"][0]["id"], "lan");
+        assert_eq!(merged["someFutureKey"], 7);
+    }
+
+    #[test]
+    fn saving_projects_root_over_a_missing_or_broken_file_starts_fresh() {
+        for existing in [None, Some("not json"), Some("[1,2]")] {
+            let merged = merge_projects_root(existing, "/new");
+            assert_eq!(merged, serde_json::json!({ "projectsRoot": "/new" }));
+        }
+    }
 
     #[test]
     fn keep_for_snapshot_excludes_only_unselected_picker_windows() {

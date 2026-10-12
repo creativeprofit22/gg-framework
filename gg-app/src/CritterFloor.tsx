@@ -72,6 +72,11 @@ export function CritterFloor({ groups, random = Math.random }: Props): React.Rea
   const openedRef = useRef(false);
   const controllerRef = useRef<CritterFloorController | null>(null);
   const syncedRef = useRef<readonly CritterGroup[] | null>(null);
+  // The critters out on the floor. Kept here, not in the floor: when the chat
+  // is hidden behind another view (a goal's Workers) its effects are torn
+  // down and the floor rebuilt on return; those critters come straight back
+  // instead of being summoned all over again.
+  const hereRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     const lane = laneRef.current;
@@ -86,6 +91,11 @@ export function CritterFloor({ groups, random = Math.random }: Props): React.Rea
       onLaneOpen: () => {
         if (openedRef.current) rerollBiome();
         openedRef.current = true;
+      },
+      wasHere: (key) => hereRef.current.has(key),
+      onPresence: (key, here) => {
+        if (here) hereRef.current.add(key);
+        else hereRef.current.delete(key);
       },
     });
     controllerRef.current = controller;

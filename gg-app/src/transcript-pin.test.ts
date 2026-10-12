@@ -1,5 +1,11 @@
+// @vitest-environment jsdom
 import { describe, expect, it } from "vitest";
-import { distanceFromBottom, pinAfterScroll, pinAfterWheel } from "./transcript-pin";
+import {
+  distanceFromBottom,
+  isHiddenScroller,
+  pinAfterScroll,
+  pinAfterWheel,
+} from "./transcript-pin";
 
 /**
  * A transcript as App drives it, minus the DOM (jsdom has no layout).
@@ -191,5 +197,20 @@ describe("wheel intent", () => {
     const farUp = { ...atBottom, scrollTop: 200 };
 
     expect(pinAfterWheel(false, down, farUp)).toBe(false);
+  });
+});
+
+describe("isHiddenScroller", () => {
+  it("knows a scroller hidden behind another view, so its scroll can't move the pin", () => {
+    // Regression: going to a goal's Workers and back left the chat pushed up,
+    // because the hide's scroll unpinned it from the bottom.
+    const frame = document.createElement("div");
+    const scroller = document.createElement("div");
+    frame.appendChild(scroller);
+    document.body.appendChild(frame);
+    expect(isHiddenScroller(scroller)).toBe(false);
+    frame.style.display = "none";
+    expect(isHiddenScroller(scroller)).toBe(true);
+    frame.remove();
   });
 });

@@ -219,6 +219,9 @@
   /* The plan review dissolving out. PlanReviewModal's EXIT_FALLBACK_MS must
      stay longer than this so `animationend` normally wins. */
   --dur-plan-out: 300ms;
+  /* One breath of something live and working (a goal's working count, its
+     "Running now" pill), with the shared `live-breathe` keyframes. */
+  --dur-breathe: 1.8s;
 
   /* Keyboard focus: one ring for every control, drawn with box-shadow so it
      follows the control's radius. :focus-visible means pointer clicks never
@@ -1693,8 +1696,8 @@ select {
   padding: 0 var(--space-11);
   font-size: var(--fs-lg);
 }
-/* A pill with a caption hung under it (Motion's "Still in process"). The
-   caption is out of flow, so the three pills stay level and the home column
+/* A pill with a caption hung under it (Goals' "In beta"). The
+   caption is out of flow, so the pills stay level and the home column
    keeps its centring. */
 .home-action-slot {
   position: relative;
@@ -3992,6 +3995,197 @@ select {
   font-size: var(--fs-xs);
   letter-spacing: 0.02em;
 }
+
+/* ── New goal modal ── */
+.goal-modal {
+  width: min(520px, 90vw);
+  /* Fits any window: the fields scroll inside .goal-modal-body, while the
+     title and the buttons stay in view on the modal's own glass (no fill of
+     their own, so nothing shows as a separate slab). */
+  max-height: calc(100dvh - 2 * var(--space-8));
+  display: flex;
+  flex-direction: column;
+}
+.goal-modal-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  /* Room for focus rings at the edges, taken back from the layout. */
+  margin: 0 calc(-1 * var(--space-3));
+  padding: 0 var(--space-3) var(--space-1);
+}
+.goal-modal .modal-head,
+.goal-modal .modal-actions,
+.goal-modal .modal-error {
+  flex: 0 0 auto;
+}
+/* Short windows: smaller boxes, so less of the form needs scrolling. */
+@media (max-height: 760px) {
+  .goal-modal .goal-textarea {
+    min-height: 56px;
+  }
+  .goal-modal .goal-context-box {
+    height: 92px;
+  }
+  .goal-modal .modal-actions {
+    margin-top: var(--space-8);
+  }
+}
+.goal-textarea {
+  display: block;
+  resize: vertical;
+  min-height: 84px;
+  max-height: 40vh;
+  line-height: 1.45;
+}
+.goal-context-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-6);
+  margin-top: var(--space-11);
+  margin-bottom: var(--space-5);
+}
+.goal-context-head .goal-context-label {
+  margin: 0;
+}
+.goal-optional {
+  font-weight: 400;
+}
+.goal-add {
+  position: relative;
+}
+.goal-add > .btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-3);
+  line-height: 1.3;
+}
+/* The goal's attached folders and files: one fixed-height box whether it's
+   empty or holds twenty, so the modal never grows as things are added. Chips
+   wrap and the box scrolls. */
+.goal-context-box {
+  box-sizing: border-box;
+  /* Three rows of chips and a peek of a fourth, so a longer list reads as scrollable. */
+  height: 128px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+}
+.goal-context-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}
+.goal-context-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-3);
+  max-width: 100%;
+  min-width: 0;
+  /* The remove button carries its own 24px target, so the chip's end is tight. */
+  padding: var(--space-1) var(--space-1) var(--space-1) var(--space-4);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-button);
+  background: var(--surface-2);
+  font-size: var(--fs-sm);
+  line-height: 1.3;
+}
+.goal-context-icon {
+  flex: 0 0 auto;
+}
+.goal-context-name {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+/* Always visible (touch and keyboard can't hover), 24px for an easy target. */
+.goal-context-remove {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  transition:
+    color var(--t-fast),
+    background-color var(--t-fast);
+}
+.goal-context-remove:hover:not(:disabled) {
+  background: var(--surface-3);
+  color: var(--text);
+}
+.goal-context-remove:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+.goal-context-empty {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 var(--space-8);
+  text-align: center;
+  font-size: var(--fs-sm);
+  line-height: 1.45;
+}
+.goal-preview {
+  color: var(--text-muted);
+}
+.goal-name-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-6);
+}
+/* Same tight first-label spacing as `.modal-head + .modal-label`, for the
+   first field inside a goal modal's scrolling body. */
+.modal-head + .goal-name-head > .modal-label,
+.goal-modal-body > .modal-label:first-child,
+.goal-modal-body > .goal-name-head:first-child > .modal-label {
+  margin-top: var(--space-2);
+}
+.goal-name-count {
+  font-size: var(--fs-sm);
+  font-variant-numeric: tabular-nums;
+}
+/* Let the row shrink inside its flex wrapper so the goal text truncates to
+   one line instead of widening the row. */
+.goal-item {
+  min-width: 0;
+}
+/* Name then its context badge, kept together on the left of the row. */
+.goal-title {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  min-width: 0;
+}
+.goal-title > .picker-name {
+  /* Names are capped at 15 characters; older longer ones are clipped to match. */
+  max-width: 16ch;
+}
+.goal-title > .badge {
+  flex: 0 0 auto;
+}
+/* The goal text shares the row with the delete button's lane, like the title. */
+.goal-meta {
+  min-width: 0;
+  padding-right: 38px;
+}
 .modal-radio-group {
   display: flex;
   gap: var(--space-9);
@@ -4884,17 +5078,6 @@ select {
   margin-top: var(--space-6);
   overflow: hidden;
 }
-.hf-progress-fill {
-  height: 100%;
-  border-radius: var(--radius-sm);
-  background: #9b8cf7;
-  transition: width var(--t-out);
-}
-@media (prefers-reduced-motion: reduce) {
-  .hf-progress-fill {
-    transition: none;
-  }
-}
 .hf-progress-line {
   margin-top: var(--space-3);
   font-size: var(--fs-xs);
@@ -5237,6 +5420,17 @@ select {
   color: var(--text-secondary);
   background: var(--gloss-neutral);
   box-shadow: var(--gloss-shadow-neutral);
+}
+/* A goal working right now: its "Running now" pill (the shared Badge in the
+   success tint) breathes with the header's working count. */
+.goal-status-running {
+  animation: live-breathe var(--dur-breathe) var(--ease-in-out) infinite;
+  animation-play-state: var(--loop-play-state, running);
+}
+@media (prefers-reduced-motion: reduce) {
+  .goal-status-running {
+    animation: none;
+  }
 }
 .picker-preview {
   flex: 1;
@@ -5601,6 +5795,791 @@ select {
      spills onto the chat-head border or the tool panel/footer beyond this
      frame. */
   overflow: hidden;
+}
+
+/* ── Goal world ──────────────────────────────────────────────────────────
+   A started goal's Workers view: the pixel workshop fills everything below
+   the header, edge to edge. The canvas covers the stage at a whole-number
+   scale and may overhang it by under one cell, which the stage clips. */
+.goal-world {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+}
+.goal-world-stage {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+/* The farm's pokeable things as buttons, for keyboard and screen-reader users:
+   hidden until focused, then a small chip bottom-right naming what's poked. */
+.goal-world-pokes {
+  position: absolute;
+  right: var(--space-4);
+  bottom: var(--space-4);
+  z-index: 1;
+}
+.goal-world-poke {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+.goal-world-poke:focus-visible {
+  position: static;
+  width: auto;
+  height: auto;
+  overflow: visible;
+  clip-path: none;
+  padding: var(--space-2) var(--space-4);
+  border-radius: var(--radius-button);
+  line-height: 1.25;
+  font: inherit;
+  font-size: var(--fs-sm);
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border-strong);
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+.goal-world-canvas {
+  /* Sized and centred by GoalWorld so the whole farmstead fits the window. */
+  position: absolute;
+  left: 0;
+  top: 0;
+  display: block;
+  image-rendering: pixelated;
+  /* Blank until the farm's first frame is drawn, then it fades up instead of
+     popping in (see GoalWorld's `data-ready`). */
+  opacity: 0;
+  transition: opacity var(--dur-dissolve) var(--ease-out);
+}
+.goal-world-canvas[data-ready] {
+  opacity: 1;
+}
+@media (prefers-reduced-motion: reduce) {
+  .goal-world-canvas {
+    transition: none;
+  }
+}
+
+/* The Workers view runs under the window chrome: the title bar and nav turn
+   to glass so the sky shows through, and the world fills the whole window.
+   The glass tokens go solid under reduced transparency / more contrast. */
+.app.goal-world-open .goal-world {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+}
+/* Opening the Workers view: the farm and the header's frost fade in as one
+   (the animation restarts each time the view is shown). Not a view
+   transition: WebKit leaves backdrop blur out of its snapshots, so the frost
+   used to pop in late after a crossfade. */
+.app.goal-world-open .goal-world,
+.app.goal-world-open .chat-head::before,
+.app.goal-world-open .chat-head::after {
+  animation: fade-in var(--dur-dissolve) var(--ease-out) backwards;
+}
+@media (prefers-reduced-motion: reduce) {
+  .app.goal-world-open .goal-world,
+  .app.goal-world-open .chat-head::before,
+  .app.goal-world-open .chat-head::after {
+    animation: none;
+  }
+}
+.app.goal-world-open .chat-head {
+  position: relative;
+  z-index: 1;
+  background: transparent;
+  /* No hairline: a hard edge across the sky is exactly what the fade avoids.
+     Transparent rather than removed, so the header keeps its height. */
+  border-bottom-color: transparent;
+}
+/* A gradual frost, so the world reads through and the header has no edge.
+   Two blur layers sit behind the header's content and run a little past its
+   bottom; each fades out lower down than the last, so the blur ramps from
+   strongest under the title to none over the world. Kept light: a heavier
+   blur smears the sky's one-cell stars and weather into a flat band. */
+.app.goal-world-open .chat-head::before,
+.app.goal-world-open .chat-head::after {
+  content: "";
+  position: absolute;
+  inset: 0 0 -32px;
+  z-index: -1;
+  pointer-events: none;
+}
+.app.goal-world-open .chat-head::before {
+  /* The tint that keeps the title and controls readable, fading with the blur. */
+  background: linear-gradient(to bottom, rgb(6 8 14 / 0.55), rgb(6 8 14 / 0.22) 55%, transparent);
+  -webkit-backdrop-filter: blur(1.5px) saturate(140%);
+  backdrop-filter: blur(1.5px) saturate(140%);
+  -webkit-mask-image: linear-gradient(to bottom, rgb(0 0 0) 40%, transparent);
+  mask-image: linear-gradient(to bottom, rgb(0 0 0) 40%, transparent);
+}
+.app.goal-world-open .chat-head::after {
+  -webkit-backdrop-filter: blur(3px);
+  backdrop-filter: blur(3px);
+  -webkit-mask-image: linear-gradient(to bottom, rgb(0 0 0) 10%, transparent 60%);
+  mask-image: linear-gradient(to bottom, rgb(0 0 0) 10%, transparent 60%);
+}
+/* Legible over a bright farm: the header's dimmer text (the title, the
+   level, the usage meter, the counts, the toggle chevron) goes to full ink,
+   with a soft dark halo that holds it off the grass and sky behind. */
+.app.goal-world-open .chat-head {
+  text-shadow:
+    0 1px 2px rgb(0 0 0 / 0.7),
+    0 0 8px rgb(0 0 0 / 0.45);
+}
+.app.goal-world-open .chat-head-title,
+.app.goal-world-open .chat-head-cwd,
+.app.goal-world-open .chat-head-branch,
+.app.goal-world-open .chat-head-sep,
+.app.goal-world-open .title-usage-window,
+.app.goal-world-open .title-usage-reset,
+.app.goal-world-open .goal-tally,
+.app.goal-world-open .rank-level,
+.app.goal-world-open .nav-toggle {
+  color: var(--text);
+}
+/* The level pill gets a darker glass so its coloured rank name (gradient
+   text, which a text shadow smears) reads on its own. */
+.app.goal-world-open .rank-badge,
+.app.goal-world-open .chat-head-nav .btn-ghost {
+  background: rgb(10 12 18 / 0.62);
+  color: var(--text);
+}
+.app.goal-world-open .rank-name {
+  text-shadow: none;
+}
+.app.goal-world-open .rank-badge,
+.app.goal-world-open .nav-toggle,
+.app.goal-world-open .title-usage-track {
+  /* Icons and pills: a drop shadow follows their shape, unlike a box shadow. */
+  filter: drop-shadow(0 1px 2px rgb(0 0 0 / 0.55));
+}
+@media (prefers-reduced-transparency: reduce), (prefers-contrast: more) {
+  .app.goal-world-open .chat-head {
+    background: var(--surface-1);
+    border-bottom-color: var(--border);
+  }
+  .app.goal-world-open .chat-head::before,
+  .app.goal-world-open .chat-head::after {
+    display: none;
+  }
+}
+
+/* Chat | Workers, in the header of a started goal. */
+.goal-view-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--space-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--surface-1);
+}
+.goal-view-option {
+  position: relative;
+  height: 26px;
+  padding: 0 var(--space-6);
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: var(--sans);
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  line-height: 1.3;
+  cursor: pointer;
+  transition:
+    background-color var(--t-fast),
+    color var(--t-fast);
+}
+.goal-view-option:hover:not([aria-pressed="true"]) {
+  color: var(--text);
+}
+.goal-view-option[aria-pressed="true"] {
+  background: var(--surface-3);
+  color: var(--text);
+}
+.goal-view-option:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+/* A question is waiting in the conversation while you watch the workers. */
+.goal-view-option[data-attention="true"]::after {
+  content: "";
+  position: absolute;
+  top: 4px;
+  right: 6px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--warning);
+}
+
+/* A started goal's workers, just right of the level badge: how many are
+   working now, and the tasks done (and failed) so far. Plain words, counts in
+   the text colour, so it reads at a glance without being one more badge. */
+.goal-tally {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-4);
+  margin: 0;
+  font-family: var(--sans);
+  font-size: var(--fs-sm);
+  line-height: 1.3;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+.goal-tally-part + .goal-tally-part::before {
+  content: "\00b7";
+  margin-right: var(--space-4);
+  color: var(--text-dim);
+}
+.goal-tally-n {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  color: var(--text);
+}
+.goal-tally-part[data-tone="failed"] .goal-tally-n {
+  color: var(--error);
+}
+/* While anyone's working, the count breathes with them. */
+.goal-tally-part[data-live] .goal-tally-n {
+  animation: live-breathe var(--dur-breathe) var(--ease-in-out) infinite;
+  animation-play-state: var(--loop-play-state, running);
+}
+/* Something live and working, breathing gently (see --dur-breathe). */
+@keyframes live-breathe {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.6;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .goal-tally-part[data-live] .goal-tally-n {
+    animation: none;
+  }
+}
+
+/* ── Ken needs you (GoalAskNotice.tsx) ───────────────────────────────────
+   Ken (GG Goals) is blocked on a question: a card just under the header, in
+   the storybook style of his dialogue box (art shared through --ken-frame,
+   --ken-plate, --ken-swirl below), with his thinking face beside the
+   question. It drops in and settles when it appears, then stays still until
+   the user goes to the chat. */
+.goal-ask {
+  position: absolute;
+  top: var(--goal-head, 0px);
+  left: 0;
+  right: 0;
+  z-index: 2;
+  display: flex;
+  justify-content: center;
+  padding: 0 var(--space-6);
+  pointer-events: none;
+}
+.goal-ask-sign {
+  position: relative;
+  max-width: min(560px, 100%);
+  padding-top: 46px; /* room for the name plate, clear of the header */
+  animation: goal-ask-drop 520ms var(--ease-out) both;
+  pointer-events: auto;
+}
+/* The board: Ken's parchment box (cut corners, double frame, swirls), with
+   his name plate on its top edge, as in KenDialogue. */
+.goal-ask-board {
+  position: relative;
+  isolation: isolate;
+  display: flex;
+  align-items: center;
+  gap: var(--space-5);
+  padding: var(--space-4) var(--space-3) var(--space-1);
+  border: 16px solid transparent;
+  border-image: var(--ken-frame) 20 fill / 16px stretch;
+  filter: drop-shadow(0 4px 10px rgb(0 0 0 / 0.35));
+  color: var(--ken-ink);
+}
+.goal-ask-board::before {
+  content: "";
+  position: absolute;
+  inset: -12px;
+  z-index: -1;
+  background: var(--ken-swirl) right -10px bottom -40px / 220px auto no-repeat;
+  opacity: 0.75;
+  clip-path: polygon(
+    10px 0,
+    calc(100% - 10px) 0,
+    100% 10px,
+    100% calc(100% - 10px),
+    calc(100% - 10px) 100%,
+    10px 100%,
+    0 calc(100% - 10px),
+    0 10px
+  );
+}
+.goal-ask-title {
+  position: absolute;
+  left: -4px;
+  top: -34px;
+  margin: 0;
+  min-width: 170px;
+  height: 28px;
+  border-style: solid;
+  border-width: 0 26px;
+  border-image: var(--ken-plate) 0 34 fill / 0 26px stretch;
+  color: #fff8ec;
+  font:
+    14px/28px "Young Serif",
+    Georgia,
+    serif;
+  letter-spacing: 0.02em;
+  text-align: center;
+  white-space: nowrap;
+  text-shadow: 0 1px 0 #000;
+}
+/* Ken's thinking face, head and shoulders, at a whole 2x so the pixels
+   stay even (the crop trims his empty left edge and his chest). */
+.goal-ask-ken {
+  flex: 0 0 auto;
+  width: 64px;
+  height: 58px;
+  overflow: hidden;
+}
+.goal-ask-ken canvas {
+  display: block;
+  width: 72px;
+  height: 88px;
+  margin-left: -4px;
+  image-rendering: pixelated;
+}
+.goal-ask-text {
+  min-width: 0;
+  flex: 1 1 auto;
+  padding-top: var(--space-2);
+}
+.goal-ask-question {
+  margin: 0;
+  font:
+    15px/1.4 "Young Serif",
+    Georgia,
+    serif;
+  color: var(--ken-ink);
+  /* Two lines at most; the whole question is in the chat. */
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+}
+.goal-ask-more {
+  margin: var(--space-1) 0 0;
+  font:
+    13px/1.3 "Young Serif",
+    Georgia,
+    serif;
+  color: #7a5a38;
+}
+/* The button: dark and gold, like the name plate. */
+.goal-ask-answer {
+  flex: 0 0 auto;
+  height: 30px;
+  padding: 0 var(--space-6);
+  border: 1.5px solid #b8933f;
+  border-radius: 6px;
+  background: linear-gradient(#4a3419, #1c130a);
+  color: #fff8ec;
+  font:
+    13px/1.3 "Young Serif",
+    Georgia,
+    serif;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  cursor: pointer;
+  box-shadow: 0 2px 0 rgb(0 0 0 / 0.3);
+  transition:
+    filter var(--dur-press) var(--ease-hover),
+    border-color var(--dur-press) var(--ease-hover);
+}
+.goal-ask-answer:hover {
+  filter: brightness(1.25);
+  border-color: #e0c06a;
+}
+.goal-ask-answer:active {
+  filter: brightness(0.9);
+  box-shadow: none;
+}
+.goal-ask-answer:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 3px;
+}
+/* Drops in from under the header and settles with a little give. */
+@keyframes goal-ask-drop {
+  0% {
+    opacity: 0;
+    transform: translateY(-24px);
+  }
+  50% {
+    opacity: 1;
+  }
+  75% {
+    transform: translateY(3px);
+  }
+  100% {
+    opacity: 1;
+    transform: none;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .goal-ask-sign {
+    animation: goal-ask-fade var(--dur-enter) linear both;
+  }
+}
+
+/* ── Job done (GoalFinishCard.tsx) ─────────────────────────────────────
+   A stretch of goal work finished: the end-of-level card, centred over the
+   farm, on the same board, plate and button as "Ken needs you". Ken's face
+   and the line he ended on, then the score in a row, then the way out. The
+   farm carries on behind it; nothing is blocked. */
+.goal-finish {
+  position: absolute;
+  inset: var(--goal-head, 0px) 0 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-6);
+  pointer-events: none;
+}
+.goal-finish-sign {
+  width: min(500px, 100%);
+  padding-top: 34px; /* room for the name plate */
+  animation: goal-ask-drop 520ms var(--ease-out) both;
+  pointer-events: auto;
+}
+@media (prefers-reduced-motion: reduce) {
+  .goal-finish-sign {
+    animation: goal-ask-fade var(--dur-enter) linear both;
+  }
+}
+.goal-finish-board {
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--space-4);
+  padding-bottom: var(--space-3);
+}
+.goal-finish-board .goal-ask-title {
+  margin: 0;
+  font-weight: normal;
+}
+.goal-finish-said {
+  display: flex;
+  align-items: center;
+  gap: var(--space-5);
+}
+.goal-finish-line {
+  min-width: 0;
+  margin: 0;
+  font:
+    15px/1.4 "Young Serif",
+    Georgia,
+    serif;
+  color: var(--ken-ink);
+}
+/* The score: four cells on a row, split by fine rules in the frame's brown. */
+.goal-finish-stats {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin: 0;
+  padding: var(--space-3) 0;
+  border-block: 1px solid #c9a477;
+}
+.goal-finish-stat {
+  min-width: 0;
+  padding: 0 var(--space-2);
+  text-align: center;
+}
+.goal-finish-stat + .goal-finish-stat {
+  border-inline-start: 1px solid #c9a477;
+}
+.goal-finish-stat dt {
+  font:
+    12px/1.3 "Young Serif",
+    Georgia,
+    serif;
+  color: #7a5a38;
+}
+.goal-finish-stat dd {
+  margin: var(--space-1) 0 0;
+  font:
+    20px/1.2 "Young Serif",
+    Georgia,
+    serif;
+  color: var(--ken-ink);
+  font-variant-numeric: tabular-nums;
+}
+.goal-finish-note {
+  display: block;
+  font-size: var(--fs-sm);
+  line-height: 1.3;
+  color: #8a2e1c;
+}
+.goal-finish-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-3);
+}
+/* Close: the quiet one, outlined on the parchment beside the dark button. */
+.goal-finish-close {
+  height: 30px;
+  padding: 0 var(--space-5);
+  border: 1.5px solid #8a643c;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ken-ink);
+  font:
+    13px/1.3 "Young Serif",
+    Georgia,
+    serif;
+  cursor: pointer;
+  transition:
+    background-color var(--dur-press) var(--ease-hover),
+    border-color var(--dur-press) var(--ease-hover);
+}
+.goal-finish-close:hover {
+  background-color: rgb(138 100 60 / 0.12);
+  border-color: #4a3520;
+}
+.goal-finish-close:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 3px;
+}
+@media (max-width: 520px) {
+  .goal-finish-stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    row-gap: var(--space-3);
+  }
+  .goal-finish-stat:nth-child(3) {
+    border-inline-start: none;
+  }
+}
+
+/* ── Ken's dialogue box (KenDialogue) ──
+   Little Ken, bottom left of the Workers view, now and then saying a line
+   like a game's dialogue box: his portrait stands behind a parchment box
+   (cut corners, a fine double frame, faint swirls), his name plate (dark,
+   angled ends, gold caps) on its top edge, a purple ▼ once the line is out.
+   Art, not theme: the parchment and gold are literal like the farm's own
+   sign above. Frames are 9-slice SVGs, so corners stay crisp at any size.
+   Hidden most of the time; data-phase drives the entrance ("entering",
+   "talking" are up; "hidden", "leaving" down). Transitions, not keyframes,
+   so an interrupted line reverses from where it is. In: the box lifts and
+   opens, the name plate slides in, Ken rises from behind the box and
+   settles. Out, quicker: Ken sinks, then the box drops away. ENTER_MS /
+   EXIT_MS in KenDialogue.tsx match these timings. */
+/* Ken's storybook art, shared by his dialogue box and his question sign. */
+:is(.ken-dialogue, .goal-ask, .goal-finish) {
+  --ken-ink: #4a3520;
+  --ken-frame: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='48' height='48' viewBox='0 0 48 48'%3E%3Cpolygon points='12,0 36,0 48,12 48,36 36,48 12,48 0,36 0,12' fill='%238a643c'/%3E%3Cpolygon points='12.62,1.5 35.38,1.5 46.5,12.62 46.5,35.38 35.38,46.5 12.62,46.5 1.5,35.38 1.5,12.62' fill='%23fff7e6'/%3E%3Cpolygon points='13.45,3.5 34.55,3.5 44.5,13.45 44.5,34.55 34.55,44.5 13.45,44.5 3.5,34.55 3.5,13.45' fill='%23c9a477'/%3E%3Cpolygon points='13.86,4.5 34.14,4.5 43.5,13.86 43.5,34.14 34.14,43.5 13.86,43.5 4.5,34.14 4.5,13.86' fill='%23f6e5c8'/%3E%3C/svg%3E");
+  --ken-plate: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='36' viewBox='0 0 120 36'%3E%3Cdefs%3E%3ClinearGradient id='p' x1='0' y1='0' x2='0' y2='1'%3E%3Cstop offset='0' stop-color='%234a3419'/%3E%3Cstop offset='1' stop-color='%231c130a'/%3E%3C/linearGradient%3E%3ClinearGradient id='g' x1='0' y1='0' x2='0' y2='1'%3E%3Cstop offset='0' stop-color='%23f8e594'/%3E%3Cstop offset='.55' stop-color='%23c99f3e'/%3E%3Cstop offset='1' stop-color='%238a6420'/%3E%3C/linearGradient%3E%3C/defs%3E%3Cpolygon points='22,4 98,4 108,18 98,32 22,32 12,18' fill='url(%23p)' stroke='%23b8933f' stroke-width='1.5'/%3E%3Cpolygon points='2,18 15,6 28,18 15,30' fill='url(%23g)' stroke='%234a3108' stroke-width='1.2'/%3E%3Ccircle cx='15' cy='18' r='4.4' fill='%239a7426' stroke='%234a3108' stroke-width='1'/%3E%3Ccircle cx='13.8' cy='16.8' r='1.6' fill='%23fff6c8'/%3E%3Cpolygon points='92,18 105,6 118,18 105,30' fill='url(%23g)' stroke='%234a3108' stroke-width='1.2'/%3E%3Ccircle cx='105' cy='18' r='4.4' fill='%239a7426' stroke='%234a3108' stroke-width='1'/%3E%3Ccircle cx='103.8' cy='16.8' r='1.6' fill='%23fff6c8'/%3E%3C/svg%3E");
+  --ken-swirl: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='220' height='140' viewBox='0 0 220 140' fill='none' stroke='%23e4cca4' stroke-width='1.6'%3E%3Ccircle cx='150' cy='96' r='40'/%3E%3Ccircle cx='150' cy='96' r='27'/%3E%3Cpath d='M150 69a13 13 0 1 1-13 13'/%3E%3Cpath d='M110 96c0-40 30-66 70-66'/%3E%3Cpath d='M190 96c0 30-20 44-40 44'/%3E%3Ccircle cx='60' cy='40' r='22'/%3E%3Cpath d='M60 18a11 11 0 1 0 11 11'/%3E%3Cpath d='M38 40c-14 0-26 12-26 30'/%3E%3C/svg%3E");
+}
+@font-face {
+  font-family: "Young Serif";
+  src: url("./assets/fonts/young-serif/young-serif-normal.woff2") format("woff2");
+  font-display: swap;
+}
+.ken-dialogue {
+  position: absolute;
+  left: var(--space-8);
+  bottom: var(--space-8);
+  z-index: 2;
+  width: min(400px, calc(100% - 2 * var(--space-8)));
+  padding-top: 118px;
+}
+.ken-dialogue-portrait {
+  position: absolute;
+  left: 26px;
+  top: 0;
+  overflow: hidden; /* Ken rises from behind the box's top edge */
+}
+.ken-dialogue-portrait canvas {
+  display: block;
+  width: 108px;
+  height: 132px;
+  image-rendering: pixelated;
+}
+.ken-dialogue-box {
+  position: relative;
+  z-index: 1;
+  isolation: isolate;
+  display: block;
+  width: 100%;
+  margin: 0;
+  padding: var(--space-5) 28px var(--space-1) var(--space-3);
+  border: 16px solid transparent;
+  border-image: var(--ken-frame) 20 fill / 16px stretch;
+  background: none;
+  filter: drop-shadow(0 4px 10px rgba(0, 0, 0, 0.35));
+  color: var(--ken-ink);
+  font:
+    14px/1.42 "Young Serif",
+    Georgia,
+    serif;
+  text-align: start;
+  cursor: pointer;
+  transform-origin: 50% 100%;
+}
+.ken-dialogue-box::before {
+  content: "";
+  position: absolute;
+  inset: -12px;
+  z-index: -1;
+  background: var(--ken-swirl) right -10px bottom -18px / 260px auto no-repeat;
+  opacity: 0.75;
+  clip-path: polygon(
+    10px 0,
+    calc(100% - 10px) 0,
+    100% 10px,
+    100% calc(100% - 10px),
+    calc(100% - 10px) 100%,
+    10px 100%,
+    0 calc(100% - 10px),
+    0 10px
+  );
+}
+.ken-dialogue-box:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+.ken-dialogue-name {
+  position: absolute;
+  left: -4px;
+  top: -34px;
+  z-index: 2;
+  min-width: 150px;
+  height: 28px;
+  border-style: solid;
+  border-width: 0 26px;
+  border-image: var(--ken-plate) 0 34 fill / 0 26px stretch;
+  color: #fff8ec;
+  font:
+    14px/28px "Young Serif",
+    Georgia,
+    serif;
+  letter-spacing: 0.02em;
+  text-align: center;
+  text-shadow: 0 1px 0 #000;
+}
+.ken-dialogue-text {
+  display: block;
+  /* Room for three lines, so the box never grows as a line types out. */
+  min-height: calc(3 * 1.42em);
+}
+.ken-dialogue-more {
+  position: absolute;
+  right: -2px;
+  bottom: 0;
+  border: 6px solid transparent;
+  border-top: 8px solid #6b3fa0;
+  border-bottom: 0;
+  filter: drop-shadow(0 1px 0 #2c1846);
+  opacity: 0;
+}
+.ken-dialogue-more[data-on] {
+  opacity: 1;
+  animation: ken-more-bob 900ms steps(2, jump-none) infinite;
+}
+@keyframes ken-more-bob {
+  50% {
+    transform: translateY(2px);
+  }
+}
+
+/* Down: nothing shows or takes a click; each part waits where it comes from. */
+.ken-dialogue:is([data-phase="hidden"], [data-phase="leaving"]) {
+  pointer-events: none;
+}
+.ken-dialogue[data-phase="hidden"] :is(.ken-dialogue-portrait, .ken-dialogue-box) {
+  visibility: hidden;
+}
+.ken-dialogue:is([data-phase="hidden"], [data-phase="leaving"]) .ken-dialogue-box {
+  opacity: 0;
+  transform: translateY(12px) scaleY(0.9);
+  transition:
+    opacity 180ms var(--ease-in) 100ms,
+    transform 200ms var(--ease-in) 100ms;
+}
+.ken-dialogue:is([data-phase="entering"], [data-phase="talking"]) .ken-dialogue-box {
+  transition:
+    opacity 200ms var(--ease-out),
+    transform 300ms var(--ease-out);
+}
+.ken-dialogue:is([data-phase="hidden"], [data-phase="leaving"]) .ken-dialogue-name {
+  opacity: 0;
+  transform: translateX(-14px);
+  transition:
+    opacity 120ms var(--ease-in),
+    transform 140ms var(--ease-in);
+}
+.ken-dialogue:is([data-phase="entering"], [data-phase="talking"]) .ken-dialogue-name {
+  transition:
+    opacity 200ms var(--ease-out) 90ms,
+    transform 260ms var(--ease-out) 90ms;
+}
+.ken-dialogue:is([data-phase="hidden"], [data-phase="leaving"]) .ken-dialogue-portrait canvas {
+  transform: translateY(100%);
+  transition: transform 160ms var(--ease-in);
+}
+.ken-dialogue:is([data-phase="entering"], [data-phase="talking"]) .ken-dialogue-portrait canvas {
+  transition: transform var(--duration-spring) var(--ease-spring) 130ms;
+}
+/* Less motion: a short fade, nothing moves. */
+@media (prefers-reduced-motion: reduce) {
+  .ken-dialogue :is(.ken-dialogue-box, .ken-dialogue-name, .ken-dialogue-portrait canvas) {
+    transform: none !important;
+    transition: opacity 120ms linear !important;
+  }
+  .ken-dialogue:is([data-phase="hidden"], [data-phase="leaving"]) .ken-dialogue-portrait canvas {
+    opacity: 0;
+  }
+  .ken-dialogue-more[data-on] {
+    animation: none;
+  }
+}
+@keyframes goal-ask-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+/* High contrast drops the frame art: a plain system outline instead. */
+@media (forced-colors: active) {
+  .goal-ask-board,
+  .ken-dialogue-box {
+    border-image: none;
+    border: 2px solid CanvasText;
+    background: Canvas;
+  }
+  .goal-ask-title,
+  .ken-dialogue-name {
+    border-image: none;
+  }
+  .goal-ask-answer,
+  .goal-finish-close {
+    border: 2px solid ButtonText;
+  }
 }
 
 /* ── Floating chat controls ─────────────────────────────────────────────
@@ -6539,6 +7518,19 @@ select {
   opacity: 0;
 }
 
+/* The footer's Critters mark (CritterIcon.tsx), sized like Ken's face. */
+.critter-icon {
+  display: inline-block;
+  flex: 0 0 auto;
+}
+.critter-icon > img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  image-rendering: pixelated;
+  user-select: none;
+}
+
 /* GG Coder's robot face (GgFace.tsx): same stacking as Ken's, with a blink
    layer only on the Ready mood. */
 .gg-face {
@@ -7453,6 +8445,12 @@ select {
 }
 .critter-lane.open {
   height: calc(var(--critter-size) + 48px);
+}
+/* Critters coming back into view (the chat shown again after a goal's
+   Workers view): the lane and its scenery are simply there, nothing replays. */
+.critter-lane.instant,
+.critter-lane.instant * {
+  transition: none !important;
 }
 .critter-floor {
   position: absolute;
@@ -10090,9 +11088,10 @@ select {
 }
 
 /* App-update banner — its own row below the footer so it reads as a distinct,
-   noticeable announcement. Same green gradient as the home-screen update pill
-   (--fx-update-from → --fx-update-to) with dark text; a light sweep draws the eye. The whole
-   row is the click target that downloads, installs, and restarts. */
+   noticeable announcement. Themed on the critter meadow: dark glass, a strip of
+   the home screen's pixel grass along the bottom edge, and three critters
+   hopping by the words (UpdateBanner.tsx). The whole row is the click target
+   that downloads, installs, and restarts. */
 .update-banner {
   position: relative;
   flex: 0 0 auto;
@@ -10101,10 +11100,13 @@ select {
   justify-content: center;
   gap: 9px;
   width: 100%;
-  padding: var(--space-4) var(--rail);
+  /* The grass takes the bottom 4px, so the line box sits 2px higher; the total
+     height is unchanged. */
+  padding: calc(var(--space-4) - 2px) var(--rail) calc(var(--space-4) + 2px);
   border: none;
-  background: linear-gradient(135deg, var(--fx-update-from) 0%, var(--fx-update-to) 100%);
-  color: var(--on-fx-update);
+  background: linear-gradient(180deg, #141a1d 0%, #0f1513 100%);
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.06);
+  color: #eef3ea;
   font-family: var(--sans);
   font-size: var(--fs-base);
   font-weight: 600;
@@ -10112,7 +11114,35 @@ select {
   overflow: hidden;
   transition: filter var(--t-fast);
 }
-/* Light sweep across the banner to draw the eye to a pending update. */
+.update-banner .badge {
+  background: var(--critter);
+  border-color: rgb(42 10 30 / 0.35);
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.4);
+  color: #2a0a1e;
+}
+/* The slot the banner arrives in. It opens to the banner's height while the
+   banner dissolves in (the shared blur-to-sharp entrance), so the composer
+   above eases up instead of jumping. Both run once, on the slot, so the swap
+   to the progress bar inside it never replays them; `backwards` leaves no
+   filter on the banner at rest. */
+.update-banner-slot {
+  flex: 0 0 auto;
+  display: grid;
+  grid-template-rows: 1fr;
+  overflow: hidden;
+  animation: update-banner-in var(--dur-dissolve) var(--ease-out) backwards;
+}
+.update-banner-slot > .update-banner {
+  min-height: 0;
+}
+@keyframes update-banner-in {
+  from {
+    grid-template-rows: 0fr;
+    opacity: 0;
+    filter: blur(6px);
+  }
+}
+/* A faint green sweep across the banner to draw the eye to a pending update. */
 .update-banner::after {
   content: "";
   position: absolute;
@@ -10120,7 +11150,7 @@ select {
   background: linear-gradient(
     100deg,
     transparent 30%,
-    rgba(255, 255, 255, 0.28) 50%,
+    rgb(127 232 154 / 0.07) 50%,
     transparent 70%
   );
   transform: translateX(-100%);
@@ -10141,63 +11171,118 @@ select {
   }
 }
 .update-banner:hover:not(.update-banner-busy) {
-  filter: brightness(1.08);
+  filter: brightness(1.15);
 }
 .update-banner-busy {
   cursor: default;
-  filter: saturate(0.7) brightness(0.92);
+}
+/* The meadow strip: one 12×4 tile of grass over soil, repeated. */
+.update-banner-grass {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: var(--space-2);
+  background-size: 12px 4px;
+  background-repeat: repeat-x;
+  image-rendering: pixelated;
+  pointer-events: none;
+}
+/* The crew stands on the grass, so it drops below the centred text. */
+.update-banner-crew {
+  display: inline-flex;
+  gap: 3px;
+  align-self: flex-end;
+  transform: translateY(6px);
+}
+.update-banner-critter {
+  position: relative;
+  display: block;
+  flex: none;
+  width: var(--space-8);
+  height: var(--space-8);
+  transform-origin: 50% 100%;
+}
+.update-banner-critter img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  image-rendering: pixelated;
+  user-select: none;
+}
+/* Waiting: each critter hops in turn (the delays are set inline). */
+.update-banner-critter.hopping {
+  animation: update-banner-hop 2.4s var(--ease-in-out) infinite;
+  animation-play-state: var(--loop-play-state, running);
+}
+@keyframes update-banner-hop {
+  0%,
+  20%,
+  100% {
+    transform: none;
+  }
+  8% {
+    transform: translateY(-4px) scale(0.94, 1.06);
+  }
+}
+/* Installing: the legs step by blinking frame B over frame A. */
+.update-banner-critter .step {
+  opacity: 0;
+  animation: update-banner-step 0.36s steps(1, end) infinite;
+  animation-play-state: var(--loop-play-state, running);
+}
+@keyframes update-banner-step {
+  50% {
+    opacity: 1;
+  }
 }
 /* Installing state: the banner box itself becomes the progress track — same
    padding/font as the available state, so the swap causes zero layout shift.
-   The fill is absolutely positioned (out of flow); only the centered
-   percentage occupies the same line box the label text did. */
-.update-banner-progress {
-  /* The busy filter desaturates to grey — right for a static "busy" row, but
-     it muddied the greens here. Progress keeps the vibrant gradient as the
-     track and sweeps a lighter mint from the same family across it. */
-  filter: none;
-}
+   The fill, grass and crew are absolutely positioned (out of flow); only the
+   centred percentage occupies the line box the label text did. */
 .update-banner-fill {
   position: absolute;
   top: 0;
   bottom: 0;
   left: 0;
-  background: linear-gradient(135deg, var(--fx-update-fill-from) 0%, var(--fx-update-fill-to) 100%);
-  /* Hairline dark leading edge so the fill boundary reads crisply. */
-  box-shadow: 1px 0 0 rgba(4, 19, 13, 0.15);
+  background: linear-gradient(90deg, rgb(108 191 82 / 0.16), rgb(127 232 154 / 0.3));
+  /* Hairline mint leading edge so the fill boundary reads crisply. */
+  box-shadow: 1px 0 0 rgb(127 232 154 / 0.7);
   transition: width 180ms linear;
+  pointer-events: none;
+}
+/* The crew marches along the grass at the front of the fill. */
+.update-banner-march {
+  position: absolute;
+  bottom: 3px;
+  display: inline-flex;
+  gap: var(--space-1);
+  translate: -100% 0;
+  transition: left 180ms linear;
   pointer-events: none;
 }
 .update-banner-pct {
   position: relative; /* above the fill */
+  display: inline-flex;
+  align-items: center;
+  /* The Install badge's box (an --fs-xs line at 1.5, 2px padding, 2px border)
+     sets the ready banner's height; the percentage reserves the same, so
+     clicking Install doesn't shrink the bar. */
+  min-height: calc(var(--fs-xs) * 1.5 + var(--space-2));
   font-variant-numeric: tabular-nums; /* steady width as the digits climb */
 }
-.update-banner-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--on-fx-update);
-  box-shadow: 0 0 0 0 rgba(4, 19, 13, 0.55);
-  animation: update-pulse 1.8s ease-out infinite;
-  animation-play-state: var(--loop-play-state, running);
-}
-@keyframes update-pulse {
-  0% {
-    box-shadow: 0 0 0 0 rgba(4, 19, 13, 0.5);
-  }
-  70% {
-    box-shadow: 0 0 0 7px transparent;
-  }
-  100% {
-    box-shadow: 0 0 0 0 transparent;
-  }
-}
-/* Both loops run for as long as an update waits, so reduced motion stops them
-   outright. The banner's colour and dot still mark it. */
+/* The sweep, the hops and the steps run for as long as an update waits, so
+   reduced motion stops them outright; the crew stands still. */
 @media (prefers-reduced-motion: reduce) {
   .update-banner::after,
-  .update-banner-dot {
+  .update-banner-critter.hopping,
+  .update-banner-critter .step {
     animation: none;
+  }
+  /* No growing or blur: the banner just fades in at its full height. */
+  .update-banner-slot {
+    animation-name: fade-in;
   }
 }
 /* Home-screen update pill — small green-gradient chip floating above the ASCII
@@ -12328,9 +13413,6 @@ select {
   color: var(--text-dim);
   font-size: var(--fs-sm);
   text-align: center;
-}
-.memory-modal-error {
-  color: var(--error);
 }
 /* Visually hidden, still read by screen readers. */
 .sr-only {
@@ -16394,7 +17476,7 @@ select {
 }
 .ask-detail {
   margin: -4px 0 var(--space-5);
-  font-size: 13.5px;
+  font-size: var(--fs-md);
   line-height: 1.5;
   /* Secondary, not muted: this sits on a raised surface, and muted grey on grey
      was genuinely hard to read. */
@@ -16615,6 +17697,28 @@ select {
 .ask-foot {
   display: flex;
   margin-top: var(--space-6);
+}
+/* A question asking for information (a URL, a name): its own field and an
+   Answer button, right under the question, so the answer is typed where it's
+   asked. The field reuses .modal-input; it sits on the band's raised surface
+   like the option rows do, so it reads as a control. */
+.ask-text {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-width: min(360px, 100%);
+}
+.ask-text-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  background: var(--surface-3);
+  border-color: var(--border);
+  color: var(--text);
+  font-size: var(--fs-base);
+  padding: var(--space-4) var(--space-5);
+}
+.ask-text .btn {
+  flex: 0 0 auto;
 }
 @media (prefers-reduced-motion: reduce) {
   .ask-answered-bubble.is-live .shimmer-text {

@@ -3,11 +3,12 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type { ToolCall, ToolResult } from "@kenkaiiii/gg-ai";
-import { catTargets, recordBashReads } from "./bash-read-evidence.js";
+import { catTargets, rangeTargets, recordBashReads } from "./bash-read-evidence.js";
 import { localOperations } from "./operations.js";
 import type { ReadTracker } from "./read-tracker.js";
 import { createEditTool } from "./edit.js";
 import { createWriteTool } from "./write.js";
+import { useFakeHome } from "../test-support/fake-home.js";
 
 function call(command: string, id = "c1"): ToolCall {
   return { type: "tool_call", id, name: "bash", args: { command } };
@@ -43,16 +44,53 @@ describe("catTargets", () => {
   });
 });
 
+describe("rangeTargets", () => {
+  it.each([
+    ["sed -n 1,20p a.js", [{ target: "a.js", start: 1, end: 20 }]],
+    ["sed -n '5,9p' src/a.ts", [{ target: "src/a.ts", start: 5, end: 9 }]],
+    ['sed -n "7p" a.ts', [{ target: "a.ts", start: 7, end: 7 }]],
+    ["head -20 a.js", [{ target: "a.js", start: 1, end: 20 }]],
+    ["head -n 15 a.js", [{ target: "a.js", start: 1, end: 15 }]],
+    [
+      "sed -n 1,10p a.ts && sed -n 11,30p a.ts",
+      [
+        { target: "a.ts", start: 1, end: 10 },
+        { target: "a.ts", start: 11, end: 30 },
+      ],
+    ],
+  ])("%s", (command, expected) => {
+    expect(rangeTargets(command)).toEqual(expected);
+  });
+
+  it.each([
+    "sed -n 1,20p a.js | grep x",
+    "sed -n 1,20p a.js b.js",
+    "sed -n 1,20p $FILE",
+    "sed -n 1,20p src/*.js",
+    "sed -n '/start/,/end/p' a.js",
+    "sed -n 20,10p a.js",
+    "sed -i 1,20p a.js",
+    "head -c 100 a.js",
+    "nl -ba a.js | sed -n 1,20p",
+  ])("ignores %s", (command) => {
+    expect(rangeTargets(command)).toEqual([]);
+  });
+});
+
 describe("recordBashReads", () => {
   let dir: string;
   const content = "line one\nline two\nline three\n";
 
+  let restoreHome: () => void;
+
   beforeEach(async () => {
     dir = await fs.mkdtemp(path.join(os.tmpdir(), "bash-read-"));
+    restoreHome = useFakeHome(path.join(dir, "home"));
     await fs.mkdir(path.join(dir, "src"));
     await fs.writeFile(path.join(dir, "src/a.js"), content);
   });
   afterEach(async () => {
+    restoreHome();
     await fs.rm(dir, { recursive: true, force: true });
   });
 
@@ -139,7 +177,7 @@ describe("recordBashReads", () => {
     expect(await fs.readFile(path.join(dir, "src/a.js"), "utf8")).toBe("new\n");
   });
 
-  it("still refuses write when the cat output was trimmed", async () => {
+  it("does not count a trimmed cat as a read: a write reports every line it removed", async () => {
     const tracker: ReadTracker = new Map();
     await recordBashReads(
       tracker,
@@ -149,12 +187,60 @@ describe("recordBashReads", () => {
       [result("line one\n…")],
     );
     const write = createWriteTool(dir, tracker);
-    await expect(
-      write.execute(
+    const out = String(
+      await write.execute(
         { file_path: "src/a.js", content: "new\n" },
         { signal: new AbortController().signal, toolCallId: "w2" },
       ),
-    ).rejects.toThrow(/read first/i);
+    );
+    expect(out).toContain("removed 3 lines you had not seen");
+  });
+
+  it("records the lines a sed -n range showed, so a write reports only the rest", async () => {
+    const tracker: ReadTracker = new Map();
+    const recorded = await recordBashReads(
+      tracker,
+      dir,
+      localOperations,
+      [call("sed -n 1,2p src/a.js")],
+      [result("line one\nline two\n")],
+    );
+    expect(recorded).toEqual([path.join(dir, "src/a.js")]);
+    expect(tracker.get(path.join(dir, "src/a.js"))?.seen).toEqual([[1, 2]]);
+
+    const write = createWriteTool(dir, tracker);
+    const out = String(
+      await write.execute(
+        { file_path: "src/a.js", content: "new\n" },
+        { signal: new AbortController().signal, toolCallId: "w1" },
+      ),
+    );
+    expect(out).toContain("removed 1 line you had not seen");
+    expect(out).toContain("3|-line three");
+  });
+
+  it("credits sed ranges that together cover the file as a full read", async () => {
+    const tracker: ReadTracker = new Map();
+    await recordBashReads(
+      tracker,
+      dir,
+      localOperations,
+      [call("sed -n 1,2p src/a.js && sed -n 3,40p src/a.js")],
+      [result("line one\nline two\nline three\n")],
+    );
+    expect(tracker.get(path.join(dir, "src/a.js"))?.seen).toBe("all");
+  });
+
+  it("does not credit a sed range whose lines are not in the output", async () => {
+    const tracker: ReadTracker = new Map();
+    await recordBashReads(
+      tracker,
+      dir,
+      localOperations,
+      [call("sed -n 1,3p src/a.js")],
+      [result("line one\n[output trimmed]\n")],
+    );
+    expect(tracker.size).toBe(0);
   });
 
   it("a fresh cat replaces a stale full read, so write is allowed again", async () => {

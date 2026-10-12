@@ -29,6 +29,8 @@ interface Props {
   /** Id of an element describing whose model this is (e.g. GG's or Ken's
    *  role), so the role is announced with the control, not only in a tooltip. */
   describedBy?: string;
+  /** Who the follow choice follows (the product name by default). */
+  followLabel?: string;
   /** The model list failed to load. With no models, the locked picker says
    *  so instead of claiming it is still connecting. */
   loadFailed?: boolean;
@@ -111,6 +113,7 @@ export function ModelSelect({
   followActive,
   refreshNonce = 0,
   describedBy,
+  followLabel = PRODUCT_DISPLAY_NAME,
   loadFailed,
 }: Props): React.ReactElement {
   const [open, setOpen] = useState(false);
@@ -295,8 +298,8 @@ export function ModelSelect({
           {onSelectFollow && (
             <option value={FOLLOW_VALUE}>
               {following
-                ? `Follow ${PRODUCT_DISPLAY_NAME} (${modelDisplayName(models, currentModel)})`
-                : `Follow ${PRODUCT_DISPLAY_NAME}`}
+                ? `Follow ${followLabel} (${modelDisplayName(models, currentModel)})`
+                : `Follow ${followLabel}`}
             </option>
           )}
           {!known && currentModel !== "" && <option value={currentModel}>{currentModel}</option>}
@@ -367,9 +370,9 @@ export function ModelSelect({
                     aria-checked={following}
                     style={{ color: following ? theme.primary : theme.text }}
                     onClick={chooseFollow}
-                    title={`${MENTOR_DISPLAY_NAME} adopts whatever model ${PRODUCT_DISPLAY_NAME} is using`}
+                    title={`${MENTOR_DISPLAY_NAME} adopts whatever model ${followLabel} is using`}
                   >
-                    Follow {PRODUCT_DISPLAY_NAME}
+                    {`Follow ${followLabel}`}
                   </button>
                 )}
                 {groups.map((group) => (

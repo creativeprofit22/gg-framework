@@ -140,7 +140,22 @@ jobs:
                 sudo apt-get install -y --no-install-recommends ffmpeg
                 ;;
               macOS) HOMEBREW_NO_AUTO_UPDATE=1 brew install ffmpeg ;;
-              Windows) choco install ffmpeg --version=8.0.1 -y --no-progress ;;
+              Windows)
+                # The Chocolatey community feed intermittently 504s; retry
+                # with backoff, and still fail the step if every attempt fails.
+                for attempt in 1 2 3 4; do
+                  if choco install ffmpeg --version=8.0.1 -y --no-progress; then
+                    break
+                  fi
+                  if [ "$attempt" -eq 4 ]; then
+                    echo "choco install ffmpeg failed after $attempt attempts" >&2
+                    exit 1
+                  fi
+                  delay=$((attempt * 30))
+                  echo "choco install ffmpeg failed (attempt $attempt); retrying in ${delay}s" >&2
+                  sleep "$delay"
+                done
+                ;;
               *) echo "Unsupported media-test runner: $RUNNER_OS" >&2; exit 1 ;;
             esac
           fi

@@ -114,6 +114,14 @@ export interface AskUserBridge {
   readonly pendingRequests: AskUserPrompt[];
   /** Detached snapshots of deferred prompts that still accept a late answer. */
   readonly deferredRequests: AskUserPrompt[];
+  /** Ids of every question that can still be answered (pending or deferred). */
+  readonly openIds: () => string[];
+  /**
+   * Every question that can still be answered, in the order asked, so a
+   * reconnecting window can show the cards again (a reload lost them, leaving
+   * the agent waiting on a question nobody could see).
+   */
+  readonly openPrompts: () => Array<{ prompt: AskUserPrompt; deferred: boolean }>;
 }
 
 export interface AskParkOptions {
@@ -255,6 +263,11 @@ export function createAskUserBridge(opts: AskUserBridgeOptions): AskUserBridge {
     get deferredRequests() {
       return structuredClone([...deferred.values()]);
     },
+    openIds: () => [...pending.keys(), ...deferred.keys()],
+    openPrompts: () => [
+      ...[...deferred.values()].map((prompt) => ({ prompt, deferred: true })),
+      ...[...pending.values()].map(({ prompt }) => ({ prompt, deferred: false })),
+    ],
   };
 }
 
@@ -295,6 +308,8 @@ export function withoutDeferral(bridge: AskUserBridge): AskUserBridge {
     get deferredRequests() {
       return bridge.deferredRequests;
     },
+    openIds: () => bridge.openIds(),
+    openPrompts: () => bridge.openPrompts(),
   };
 }
 

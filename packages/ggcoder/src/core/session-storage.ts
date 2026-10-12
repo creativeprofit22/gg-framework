@@ -181,8 +181,12 @@ export async function openSessionReadStream(filePath: string): Promise<{
   close: () => void;
 }> {
   const resolved = await resolveSessionPath(filePath);
+  // Check before opening: a missing file rejects here, and a stream opened
+  // first would be left with no error listener, so its own ENOENT would
+  // surface as an uncaught exception on top of this rejection.
+  const gzip = await isGzipSessionPath(resolved);
   const input: ReadStream = createReadStream(resolved);
-  if (await isGzipSessionPath(resolved)) {
+  if (gzip) {
     const stream = input.pipe(createGunzip());
     return {
       path: resolved,
@@ -262,6 +266,8 @@ async function replaceFile(tempPath: string, filePath: string): Promise<void> {
   }
 }
 
+/** Write via a synced sibling temp file + rename (Windows-safe replace), so a
+ *  crash or a concurrent reader never sees a half-written file. */
 export async function atomicWriteSessionFile(filePath: string, content: string): Promise<void> {
   const tempPath = temporarySiblingPath(filePath);
   try {
@@ -272,6 +278,9 @@ export async function atomicWriteSessionFile(filePath: string, content: string):
     await fs.unlink(tempPath).catch(() => {});
   }
 }
+
+/** Upstream name for {@link atomicWriteSessionFile}, used by non-session stores. */
+export const atomicWrite = atomicWriteSessionFile;
 
 async function writeRedirect(filePath: string, targetPath: string): Promise<void> {
   if (path.dirname(filePath) !== path.dirname(targetPath)) {

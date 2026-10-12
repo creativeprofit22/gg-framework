@@ -1,7 +1,11 @@
 import type { AgentTool, ToolExecuteResult } from "@kenkaiiii/gg-agent";
 import type { Provider, ThinkingLevel, ToolCall, ToolResult } from "@kenkaiiii/gg-ai";
 import type { ContextLimits } from "../core/context-limits.js";
-import { SubAgentManager, type SubAgentSnapshot } from "../core/subagent-manager.js";
+import {
+  SubAgentManager,
+  type ChildModelPick,
+  type SubAgentSnapshot,
+} from "../core/subagent-manager.js";
 import { ProcessManager } from "../core/process-manager.js";
 import { LspManager } from "../core/lsp/manager.js";
 import { TestImpactIndex } from "../core/test-impact.js";
@@ -79,6 +83,12 @@ export interface CreateToolsOptions {
   /** Permission-filtered persistent inventory for command prerequisites, not a turn execution allowlist. */
   getAvailableToolNames?: () => readonly string[];
   agents?: AgentDefinition[];
+  /** Start spawned children with the parent's extra workspace roots too (see SubAgentManager). */
+  shareWorkspaceRoots?: boolean;
+  /** The agent a spawned child is when the spawn names none (see SubAgentManager). */
+  defaultSubAgent?: string;
+  /** Default provider/model for spawned children (see SubAgentManagerOptions). */
+  getChildModel?: () => ChildModelPick | undefined;
   skills?: Skill[];
   /** Byte budgets for skill catalog / MCP descriptions in tool schemas. */
   contextLimits?: ContextLimits;
@@ -398,8 +408,9 @@ export async function createTools(
         createSubAgentTool(
           cwd,
           opts.agents,
-          () => opts.getProvider?.() ?? baseProvider,
-          () => opts.getModel?.() ?? baseModel,
+          // A one-shot child follows the same pick as spawned workers.
+          () => opts.getChildModel?.()?.provider ?? opts.getProvider?.() ?? baseProvider,
+          () => opts.getChildModel?.()?.model ?? opts.getModel?.() ?? baseModel,
           opts.getCacheKey,
           planModeRef,
           opts.getThinkingLevel,
@@ -408,6 +419,12 @@ export async function createTools(
     );
     subAgentManager = new SubAgentManager({
       cwd,
+      // A child may also be started in one of the parent's extra roots (GG
+      // Goals sends each worker to the attached project it works on).
+      getWorkspaceRoots: () => opts.getWriteGuardSettings?.()?.additionalRoots ?? [],
+      shareWorkspaceRoots: opts.shareWorkspaceRoots,
+      defaultAgent: opts.defaultSubAgent,
+      getChildModel: opts.getChildModel,
       agents: opts.agents,
       getProvider: () => opts.getProvider?.() ?? baseProvider,
       getModel: () => opts.getModel?.() ?? baseModel,

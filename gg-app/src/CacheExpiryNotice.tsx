@@ -19,6 +19,9 @@ import { pinSize, usePresenceList } from "./usePresenceList";
  * Reuses QueuedBar's `.queued-bar*` classes so both strips share one look and
  * one motion: it grows open when shown and folds shut when hidden (dismiss,
  * compact, or a run starting), held mounted for EXIT_MS so the exit can play.
+ * Sending a message hides it at once instead: the send is the choice the
+ * notice asked about, and it must leave in the send's own layout commit
+ * (see usePresenceList's `flush`) rather than when the run starts.
  */
 
 /** Exit duration of `.queued-bar.leaving`: equal to `--dur-strip-out` in App.css; scripts/motion-tokens.test.mjs enforces it. */
@@ -57,14 +60,27 @@ interface Props {
   expiry: CacheExpiryStatus | null | undefined;
   running: boolean;
   onCompact: () => void;
+  /** Composer sends so far. A change hides the notice in that same commit. */
+  sendCount?: number;
 }
 
 export function CacheExpiryNotice({
   expiry,
   running,
   onCompact,
+  sendCount = 0,
 }: Props): React.ReactElement | null {
   const [, setDismissTick] = useState(0);
+  // The expiry a send went out under. A later lapse has a new key and shows
+  // again; until then the send already answered this one.
+  const [seenSendCount, setSeenSendCount] = useState(sendCount);
+  const [sentKey, setSentKey] = useState<string | null>(null);
+  let hiddenKey = sentKey;
+  if (sendCount !== seenSendCount) {
+    hiddenKey = expiry ? expiryKey(expiry) : null;
+    setSeenSendCount(sendCount);
+    setSentKey(hiddenKey);
+  }
   const [now, setNow] = useState(() => Date.now());
 
   // /state is a snapshot: a chat left open past its TTL must flip to expired
@@ -87,7 +103,12 @@ export function CacheExpiryNotice({
   if (expiry && !running) {
     const expired = expiry.expired || (expiry.expiresAt !== null && now >= expiry.expiresAt);
     const key = expiryKey(expiry);
-    if (expired && expiry.prefixTokens >= expiry.minTokens && !dismissed.has(key)) {
+    if (
+      expired &&
+      expiry.prefixTokens >= expiry.minTokens &&
+      !dismissed.has(key) &&
+      key !== hiddenKey
+    ) {
       liveKey = key;
       liveTokens = formatTokens(expiry.prefixTokens);
       liveLead =
@@ -101,7 +122,7 @@ export function CacheExpiryNotice({
     () => (liveKey === null ? [] : [{ key: liveKey, lead: liveLead, tokens: liveTokens }]),
     [liveKey, liveLead, liveTokens],
   );
-  const shown = usePresenceList(items, keyOfShown, EXIT_MS);
+  const shown = usePresenceList(items, keyOfShown, EXIT_MS, sendCount);
   // A new lapse can arrive while the previous one is still folding away; the
   // live one wins.
   const current = shown.find((p) => !p.leaving) ?? shown[0];

@@ -13,8 +13,10 @@ import {
   type Memory,
   type MemorySnapshot,
 } from "./agent";
+import { theme } from "./theme";
 import { Badge } from "./Badge";
 import { Modal } from "./Modal";
+import { ListSkeleton } from "./Skeleton";
 
 interface Props {
   onClose: () => void;
@@ -174,10 +176,19 @@ export function MemoryModal({ onClose }: Props): React.ReactElement {
         aria-labelledby={`brain-tab-${activeTab}`}
       >
         {isLoading ? (
-          <div className="memory-modal-state">Loading {label}…</div>
+          <ListSkeleton rows={4} />
         ) : error ? (
-          <div className="memory-modal-state memory-modal-error" role="alert">
-            Couldn’t load {label}: {error}
+          <div className="picker-empty" role="alert">
+            <span style={{ color: theme.textMuted }}>
+              Couldn't load {label}: {error}
+            </span>
+            <button
+              type="button"
+              className="btn btn-sm btn-ghost"
+              onClick={() => void (activeTab === "memories" ? refreshMemories() : refreshJiwa())}
+            >
+              Try again
+            </button>
           </div>
         ) : entries.length === 0 ? (
           <div className="memory-modal-state">

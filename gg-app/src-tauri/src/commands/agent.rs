@@ -31,9 +31,7 @@ pub(crate) async fn agent_state(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>()
-        .await
-        .map_err(|e| e.to_string())
+    sidecar_json(res).await
 }
 
 /// Proxy: shared durable chat memories.
@@ -274,9 +272,7 @@ pub(crate) async fn agent_keep_awake_get(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>()
-        .await
-        .map_err(|e| e.to_string())
+    sidecar_json(res).await
 }
 
 /// Proxy: turn keep-awake on/off; applies live to in-flight runs.
@@ -293,9 +289,7 @@ pub(crate) async fn agent_keep_awake_set(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>()
-        .await
-        .map_err(|e| e.to_string())
+    sidecar_json(res).await
 }
 
 /// Proxy: the active provider's subscription quota snapshot. Account-wide, so
@@ -505,24 +499,37 @@ pub(crate) async fn sidecar_get_json(
         .send()
         .await
         .map_err(|e| e.to_string())?;
+    sidecar_json(res).await
+}
+
+/// Decode a sidecar response: the JSON body on 2xx, otherwise an error taken
+/// from the body's `message`, then `error`, then the HTTP status reason. A
+/// non-JSON error body falls back to the status reason.
+pub(crate) async fn sidecar_json(res: reqwest::Response) -> Result<serde_json::Value, String> {
     let status = res.status();
-    let body = res
-        .json::<serde_json::Value>()
-        .await
-        .map_err(|e| e.to_string())?;
     if status.is_success() {
-        return Ok(body);
+        return res
+            .json::<serde_json::Value>()
+            .await
+            .map_err(|e| e.to_string());
     }
-    Err(body
-        .get("message")
-        .or_else(|| body.get("error"))
+    let body = res.json::<serde_json::Value>().await.ok();
+    Err(sidecar_error_message(status, body.as_ref()))
+}
+
+/// Pick the user-facing error for a non-2xx sidecar response.
+pub(crate) fn sidecar_error_message(
+    status: reqwest::StatusCode,
+    body: Option<&serde_json::Value>,
+) -> String {
+    body.and_then(|b| b.get("message").or_else(|| b.get("error")))
         .and_then(|value| value.as_str())
         .unwrap_or_else(|| {
             status
                 .canonical_reason()
                 .unwrap_or("sidecar request failed")
         })
-        .to_string())
+        .to_string()
 }
 
 /// Proxy: resumed conversation history (user + assistant text) for hydration.
@@ -838,38 +845,15 @@ pub(crate) async fn agent_new_session(
 ) -> Result<serde_json::Value, String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
     let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
-    let response = client
+    let res = client
         .post(format!("{}/new-session", sidecar_base(port)))
         .header("x-gg-session", &gg_sid)
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    let status = response.status();
-    let body = response.text().await.unwrap_or_default();
+    let status = res.status();
+    let body = res.text().await.unwrap_or_default();
     parse_new_session_response(status, &body)
-}
-
-/// Proxy: store an API key for a provider.
-#[tauri::command]
-pub(crate) async fn agent_auth_apikey(
-    webview: WebviewWindow,
-    pane_id: String,
-    client: tauri::State<'_, reqwest::Client>,
-    provider: String,
-    key: String,
-) -> Result<serde_json::Value, String> {
-    let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
-    let res = client
-        .post(format!("{}/auth/apikey", sidecar_base(port)))
-        .header("x-gg-session", &gg_sid)
-        .json(&serde_json::json!({ "provider": provider, "key": key }))
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>()
-        .await
-        .map_err(|e| e.to_string())
 }
 
 /// Proxy: begin an OAuth login. Progress streams back via `agent-event`
@@ -890,9 +874,7 @@ pub(crate) async fn agent_auth_oauth_start(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>()
-        .await
-        .map_err(|e| e.to_string())
+    sidecar_json(res).await
 }
 
 /// Proxy: submit a pasted OAuth code to an in-flight login.
@@ -912,9 +894,7 @@ pub(crate) async fn agent_auth_oauth_code(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>()
-        .await
-        .map_err(|e| e.to_string())
+    sidecar_json(res).await
 }
 
 /// Proxy: answer an MCP server's mid-tool-call request for user input.
@@ -942,9 +922,7 @@ pub(crate) async fn agent_mcp_elicit(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>()
-        .await
-        .map_err(|e| e.to_string())
+    sidecar_json(res).await
 }
 
 pub(crate) fn parse_ask_user_response(
@@ -992,28 +970,6 @@ pub(crate) async fn agent_ask_user(
     ask_user_response(res).await
 }
 
-/// Proxy: disconnect a provider (clear its stored credentials).
-#[tauri::command]
-pub(crate) async fn agent_auth_logout(
-    webview: WebviewWindow,
-    pane_id: String,
-    client: tauri::State<'_, reqwest::Client>,
-    provider: String,
-) -> Result<serde_json::Value, String> {
-    let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
-    let res = client
-        .post(format!("{}/auth/logout", sidecar_base(port)))
-        .header("x-gg-session", &gg_sid)
-        .json(&serde_json::json!({ "provider": provider }))
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>()
-        .await
-        .map_err(|e| e.to_string())
-}
-
 /// Proxy: cancel one pending queued message by id. Returns
 /// `{ cancelled, queued }`. A queued prompt waits until its own run starts and
 /// can be cancelled until then; `cancelled: false` means that run already
@@ -1035,9 +991,7 @@ pub(crate) async fn agent_cancel_queued(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>()
-        .await
-        .map_err(|e| e.to_string())
+    sidecar_json(res).await
 }
 
 /// Proxy: stop a background task by id. Returns `{ message }`.
@@ -1057,9 +1011,7 @@ pub(crate) async fn agent_kill_task(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>()
-        .await
-        .map_err(|e| e.to_string())
+    sidecar_json(res).await
 }
 
 /// Proxy: import a Claude Code / Codex / Cursor transcript into a resumable
@@ -1081,9 +1033,7 @@ pub(crate) async fn agent_import_transcript(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>()
-        .await
-        .map_err(|e| e.to_string())
+    sidecar_json(res).await
 }
 
 /// Proxy: app-wide radio state — `{ stations, current, volume }`.
@@ -1102,9 +1052,7 @@ pub(crate) async fn agent_radio_state(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>()
-        .await
-        .map_err(|e| e.to_string())
+    sidecar_json(res).await
 }
 
 /// Proxy: play a station by id, or stop with `station = "off"`. Returns
@@ -1488,9 +1436,7 @@ pub(crate) async fn agent_commands(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>()
-        .await
-        .map_err(|e| e.to_string())
+    sidecar_json(res).await
 }
 
 /// Proxy: list models available to the logged-in providers.
@@ -1508,9 +1454,7 @@ pub(crate) async fn agent_models(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>()
-        .await
-        .map_err(|e| e.to_string())
+    sidecar_json(res).await
 }
 
 /// Proxy: switch the active model. Returns the new provider/model + thinking state.
@@ -1530,9 +1474,7 @@ pub(crate) async fn agent_switch_model(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>()
-        .await
-        .map_err(|e| e.to_string())
+    sidecar_json(res).await
 }
 
 /// Proxy: select GPT-6 Astra's OpenAI Codex context profile.
@@ -1664,51 +1606,7 @@ pub(crate) async fn agent_cycle_thinking(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>()
-        .await
-        .map_err(|e| e.to_string())
-}
-
-/// Proxy: read gg-app settings (e.g. the projects root folder).
-#[tauri::command]
-pub(crate) async fn agent_settings(
-    webview: WebviewWindow,
-    pane_id: String,
-    client: tauri::State<'_, reqwest::Client>,
-) -> Result<serde_json::Value, String> {
-    let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
-    let res = client
-        .get(format!("{}/settings", sidecar_base(port)))
-        .header("x-gg-session", &gg_sid)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>()
-        .await
-        .map_err(|e| e.to_string())
-}
-
-/// Proxy: save gg-app settings.
-#[tauri::command]
-pub(crate) async fn agent_save_settings(
-    webview: WebviewWindow,
-    pane_id: String,
-    client: tauri::State<'_, reqwest::Client>,
-    projects_root: String,
-) -> Result<serde_json::Value, String> {
-    let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
-    let res = client
-        .post(format!("{}/settings", sidecar_base(port)))
-        .header("x-gg-session", &gg_sid)
-        .json(&serde_json::json!({ "projectsRoot": projects_root }))
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>()
-        .await
-        .map_err(|e| e.to_string())
+    sidecar_json(res).await
 }
 
 #[tauri::command]
@@ -3113,5 +3011,28 @@ mod tests {
         assert!(!dir.join("source-copy-partial.jsonl").exists());
         assert!(!dir.join(".source-copy-partial.tmp").exists());
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn sidecar_error_prefers_message_then_error_then_status() {
+        let both = serde_json::json!({ "message": "m", "error": "e" });
+        assert_eq!(
+            sidecar_error_message(reqwest::StatusCode::CONFLICT, Some(&both)),
+            "m"
+        );
+        let err = serde_json::json!({ "error": "a login is already in progress" });
+        assert_eq!(
+            sidecar_error_message(reqwest::StatusCode::CONFLICT, Some(&err)),
+            "a login is already in progress"
+        );
+        let other = serde_json::json!({ "ok": false });
+        assert_eq!(
+            sidecar_error_message(reqwest::StatusCode::BAD_REQUEST, Some(&other)),
+            "Bad Request"
+        );
+        assert_eq!(
+            sidecar_error_message(reqwest::StatusCode::INTERNAL_SERVER_ERROR, None),
+            "Internal Server Error"
+        );
     }
 }

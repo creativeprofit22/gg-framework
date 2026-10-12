@@ -19,13 +19,16 @@ export function AttachmentBar({
   attachments,
   onRemove,
   onOpenImage,
+  sendCount = 0,
 }: {
   attachments: PendingAttachment[];
   onRemove: (id: number) => void;
   /** Open an image chip's preview (a data URL) in the default image viewer. */
   onOpenImage: (previewUrl: string) => void;
+  /** Composer sends so far. A change drops chips the send cleared without an exit (see usePresenceList). */
+  sendCount?: number;
 }): React.ReactElement | null {
-  const shown = usePresenceList(attachments, keyOf, EXIT_MS);
+  const shown = usePresenceList(attachments, keyOf, EXIT_MS, sendCount);
   const empty = shown.length === 0;
   const barLeaving = !empty && shown.every((p) => p.leaving);
   const barRef = useRef<HTMLDivElement>(null);

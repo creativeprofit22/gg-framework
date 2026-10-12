@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentSession } from "../core/agent-session.js";
 import {
+  addSharedRoots,
   classifyResolvedTurn,
   recoverTimedOutTurn,
   resolveTurnTimeLimit,
@@ -10,6 +11,23 @@ type RecoverySession = Pick<AgentSession, "prompt" | "setSignal">;
 
 afterEach(() => {
   vi.useRealTimers();
+});
+
+describe("addSharedRoots", () => {
+  it("adds every shared root, skipping ones already covered or gone", async () => {
+    // GG Goals' workers reach all of a goal's attached folders; one that has
+    // since been removed must not stop the worker from starting.
+    const addDirectory = vi.fn(async (dir: string) =>
+      dir === "/goal/site"
+        ? { ok: true as const, root: dir }
+        : dir === "/goal/inside"
+          ? { ok: false as const, error: `Already in the workspace: ${dir}` }
+          : { ok: false as const, error: `Not found: ${dir}` },
+    );
+    const added = await addSharedRoots({ addDirectory }, ["/goal/site", "/goal/inside", "/gone"]);
+    expect(added).toEqual(["/goal/site"]);
+    expect(addDirectory).toHaveBeenCalledTimes(3);
+  });
 });
 
 describe("classifyResolvedTurn", () => {

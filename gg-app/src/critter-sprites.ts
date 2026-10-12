@@ -521,7 +521,7 @@ export const CRITTERS: readonly CritterDef[] = [
 ];
 
 /** Frame rows: the base grid with the second walk frame's changed rows swapped in. */
-function frameRows(critter: CritterDef, frame: 0 | 1): readonly string[] {
+export function frameRows(critter: CritterDef, frame: 0 | 1): readonly string[] {
   if (frame === 0) return critter.rows;
   return critter.rows.map((row, i) => critter.alt[i] ?? row);
 }

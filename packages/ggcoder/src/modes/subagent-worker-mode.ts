@@ -1,6 +1,7 @@
 import { createInterface } from "node:readline";
 import type { Provider, ThinkingLevel } from "@kenkaiiii/gg-ai";
 import { AgentSession } from "../core/agent-session.js";
+import { log } from "../core/logger.js";
 import { isModelUnavailableError } from "../core/model-unavailable.js";
 import { isUnattendedWorker } from "../core/provider-execution-policy.js";
 import {
@@ -106,11 +107,37 @@ export function classifyResolvedTurn(turn: {
   return { status: "completed" };
 }
 
+/**
+ * Add the parent's shared roots to a child's workspace (see
+ * SubagentWorkerInitialize.additionalRoots). A root that's gone or already
+ * covered is skipped, never fatal: the child still has its own folder.
+ * Returns the roots added.
+ */
+export async function addSharedRoots(
+  session: Pick<AgentSession, "addDirectory">,
+  roots: readonly string[],
+): Promise<string[]> {
+  const added: string[] = [];
+  for (const root of roots) {
+    const result = await session.addDirectory(root);
+    if (result.ok) added.push(result.root);
+    else if (!result.error.startsWith("Already in the workspace")) {
+      log("WARN", "subagent-worker", "shared workspace root unavailable", { error: result.error });
+    }
+  }
+  return added;
+}
+
 export interface SubagentWorkerInitialize {
   provider: Provider;
   model: string;
   fallbackModel?: string;
   cwd: string;
+  /**
+   * More folders the child may read and change besides its cwd (the
+   * parent's shared workspace roots, see SubAgentManager.shareWorkspaceRoots).
+   */
+  additionalRoots?: string[];
   baseUrl?: string;
   /** Replaces the whole system prompt. */
   systemPrompt?: string;
@@ -252,6 +279,7 @@ export async function runSubagentWorkerMode(): Promise<void> {
       fallbackModel: _fallbackModel,
       childSessionPath,
       turnTimeoutMs: _turnTimeoutMs,
+      additionalRoots = [],
       ...sessionOptions
     } = options;
     const next = new AgentSession({
@@ -267,6 +295,8 @@ export async function runSubagentWorkerMode(): Promise<void> {
     });
     wireEvents(next);
     await next.initialize();
+    // Before the first turn, so the prompt names every root from the start.
+    await addSharedRoots(next, additionalRoots);
     return next;
   };
 

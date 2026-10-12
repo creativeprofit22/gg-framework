@@ -14,6 +14,7 @@ import { ShimmerText } from "./ShimmerText";
 import { ContextMeter } from "./ContextMeter";
 import { GgFace } from "./GgFace";
 import { KenFace } from "./KenFace";
+import { CritterIcon } from "./CritterIcon";
 import { ModelSelect } from "./ModelSelect";
 import type { Schedules } from "./useSchedules";
 
@@ -59,6 +60,7 @@ export function AppFooter({
   modelsFailed,
   onSelectModel,
   onSelectKenModel,
+  onSelectCritterModel,
 }: {
   hydrated: boolean;
   workspaceMode: WorkspaceMode;
@@ -77,7 +79,10 @@ export function AppFooter({
   modelsFailed: boolean;
   onSelectModel: (modelId: string) => void;
   onSelectKenModel: (modelId: string | null) => void;
+  /** A Goal window: pin the workers' model, or null to follow GG Goals. */
+  onSelectCritterModel?: (modelId: string | null) => void;
 }): React.ReactElement {
+  const goal = state?.goal ?? null;
   return (
     <div
       className={`footer${workspaceMode !== "code" ? " footer-chat" : ""}`}
@@ -172,38 +177,67 @@ export function AppFooter({
                 onSelect={onSelectModel}
                 disabled={running}
                 loadFailed={modelsFailed}
-                title={`Switch ${workspaceMode === "chat" ? "GG" : workspaceProductName(workspaceMode)}'s model`}
+                title={`Switch ${workspaceMode === "chat" ? "GG" : workspaceProductName(workspaceMode, Boolean(state?.goal))}'s model`}
               />
             </span>
-            {workspaceMode === "code" && (
+            {goal && onSelectCritterModel ? (
               <>
                 <FooterSep />
                 <span className="model-anchor">
-                  <span className="model-label" style={{ color: theme.ken }}>
-                    <KenFace mood="chat" />
-                    Ken
+                  <span className="model-label" style={{ color: theme.critter }}>
+                    <CritterIcon />
+                    Critters
                   </span>
                   <ModelSelect
                     models={models}
-                    currentModel={state?.kenModel ?? state?.model ?? ""}
-                    onSelect={(id) => onSelectKenModel(id)}
-                    color={theme.ken}
-                    // Ken's pin retargets BOTH his sessions (chat + the
-                    // autopilot reviewer), so it has to stay locked while
-                    // either is mid-turn — same rule the GG picker follows,
-                    // and the sidecar now answers 409 to match.
-                    disabled={running || kenRunning || autopilotReviewing}
+                    currentModel={goal.critterModel ?? state?.model ?? ""}
+                    onSelect={(id) => onSelectCritterModel(id)}
+                    color={theme.critter}
+                    // Applies to the next worker GG Goals starts; running
+                    // workers keep theirs, so it never needs locking.
                     loadFailed={modelsFailed}
                     title={
-                      state?.kenModelOverride
-                        ? "Ken is pinned to his own model — click to change"
-                        : "Ken follows GG Coder's model — click to pin one"
+                      goal.critterModel
+                        ? "Critters are pinned to their own model. Click to change"
+                        : "Critters follow GG Goals' model. Click to pin one"
                     }
-                    onSelectFollow={() => onSelectKenModel(null)}
-                    followActive={!state?.kenModelOverride}
+                    onSelectFollow={() => onSelectCritterModel(null)}
+                    followActive={!goal.critterModel}
+                    followLabel="GG Goals"
                   />
                 </span>
               </>
+            ) : (
+              workspaceMode === "code" && (
+                <>
+                  <FooterSep />
+                  <span className="model-anchor">
+                    <span className="model-label" style={{ color: theme.ken }}>
+                      <KenFace mood="chat" />
+                      Ken
+                    </span>
+                    <ModelSelect
+                      models={models}
+                      currentModel={state?.kenModel ?? state?.model ?? ""}
+                      onSelect={(id) => onSelectKenModel(id)}
+                      color={theme.ken}
+                      // Ken's pin retargets BOTH his sessions (chat + the
+                      // autopilot reviewer), so it has to stay locked while
+                      // either is mid-turn — same rule the GG picker follows,
+                      // and the sidecar now answers 409 to match.
+                      disabled={running || kenRunning || autopilotReviewing}
+                      loadFailed={modelsFailed}
+                      title={
+                        state?.kenModelOverride
+                          ? "Ken is pinned to his own model — click to change"
+                          : "Ken follows GG Coder's model — click to pin one"
+                      }
+                      onSelectFollow={() => onSelectKenModel(null)}
+                      followActive={!state?.kenModelOverride}
+                    />
+                  </span>
+                </>
+              )
             )}
           </span>
         </>

@@ -26,7 +26,7 @@ import { useRandomBiome } from "./use-random-biome";
  * once the first prompt is sent (the parent stops rendering it).
  */
 
-export type WakeMode = "code" | "chat" | "motion";
+export type WakeMode = "code" | "chat" | "motion" | "goals";
 
 /**
  * Five sets per mode, so a new session doesn't always open the same way. Each
@@ -62,6 +62,27 @@ export const WAKE_LINES = {
     ["*taps the mic*\u2026", "The stage is set.", "What are we bringing to life?"],
     ["Ooh, showtime?", "Cameras are rolling.", "What should we make move?"],
     ["Hi!", "Got a page, a PDF, or a doodle?", "Let\u2019s make it move."],
+  ],
+  // GG Goals speaks first on a new goal, so these show while it reads the
+  // brief and the context, before its first words arrive.
+  goals: [
+    [
+      "*unrolls the map*\u2026",
+      "GG Goals is reading your goal.",
+      "Back in a moment with questions.",
+    ],
+    [
+      "Oh, a big one!",
+      "GG Goals is looking through your context.",
+      "I\u2019ll check in before we start.",
+    ],
+    [
+      "*sharpens pencil*\u2026",
+      "GG Goals is sizing up the goal.",
+      "Let\u2019s make sure we agree first.",
+    ],
+    ["Hi!", "GG Goals is getting the lay of the land.", "Questions incoming."],
+    ["*opens notebook*\u2026", "GG Goals is taking notes.", "We\u2019ll plan it together."],
   ],
 } as const satisfies Record<WakeMode, readonly (readonly string[])[]>;
 
@@ -295,15 +316,18 @@ function WakeWeather({ biome }: { biome: Biome }): React.ReactElement | null {
 export function WakeScreen({
   chat = false,
   motion = false,
+  goals = false,
   random = Math.random,
 }: {
   chat?: boolean;
   motion?: boolean;
+  /** A Goal window, where GG Goals is the agent. */
+  goals?: boolean;
   /** Injected for tests; defaults to Math.random. */
   random?: () => number;
 }): React.ReactElement {
   const reduced = prefersReducedMotion();
-  const mode: WakeMode = motion ? "motion" : chat ? "chat" : "code";
+  const mode: WakeMode = goals ? "goals" : motion ? "motion" : chat ? "chat" : "code";
   const [biome] = useRandomBiome(random);
   // One critter and one set of lines per screen, picked once.
   const [critter] = useState(() => pick(CRITTERS, random));

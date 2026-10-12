@@ -2297,7 +2297,7 @@ if (selectedProbe !== undefined) {
         return result;
       });
       const [data] = await written;
-      const sentinel = /echo "(__GG_PSH_[^"]+__)\$\?"/.exec(data.toString())?.[1];
+      const sentinel = /echo "(__GG_PSH_[^"]+__)\$__gg_psh_rc"/.exec(data.toString())?.[1];
       expect(sentinel).toBeTruthy();
       await vi.advanceTimersByTimeAsync(1_800_001);
       expect(settled).toBe(false);
@@ -2361,7 +2361,7 @@ if (selectedProbe !== undefined) {
     const updates: Array<{ text: string; totalBytes: number }> = [];
 
     stdin.once("data", (data: Buffer) => {
-      const sentinel = /echo "(__GG_PSH_[^"]+__)\$\?"/.exec(data.toString("utf8"))?.[1];
+      const sentinel = /echo "(__GG_PSH_[^"]+__)\$__gg_psh_rc"/.exec(data.toString("utf8"))?.[1];
       if (!sentinel) throw new Error("Expected persistent-shell sentinel");
       const splitAt = Math.floor(sentinel.length / 2);
       stdout.write(Buffer.from(`visible\n${sentinel.slice(0, splitAt)}`));

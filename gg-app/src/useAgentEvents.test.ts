@@ -34,6 +34,11 @@ import { createLiveTextStore } from "./live-text";
 import type { Item } from "./App";
 import type { AgentState, PendingPlanReview, SidecarEvent } from "./agent";
 import type { LiveToolEntry } from "./LiveToolPanel";
+import { collectFloorAgents, type CritterGroup } from "./CritterFloor";
+import { collectWorldAgents, goalViewFor } from "./goal-world-agents";
+import { buildFarm } from "./goal-farm-map";
+import { createFarmWorld, stepFarm, syncFarm } from "./goal-farm-sim";
+import { EMPTY_TALLY, floorPhase, tallyGoal } from "./goal-progress";
 
 it.each(["completed", "failed", "aborted"] as const)(
   "keeps host recommendations separate from tool results and drafts after %s (mocked native IPC)",
@@ -619,6 +624,24 @@ describe("useAgentEvents", () => {
     );
     expect(result.current.autopilotReviewing).toBe(false);
   });
+  it("reports how each run ended, with its turns and tokens, for the goal finish card", () => {
+    const { hook, deps } = setup();
+    const onRunEnd = vi.fn<NonNullable<AgentEventsDeps["onRunEnd"]>>();
+    deps.onRunEnd = onRunEnd;
+    hook.rerender();
+    act(() => hook.result.current.handleEvent(ev("run_start", {})));
+    act(() => hook.result.current.handleEvent(ev("turn_end", { usage: { outputTokens: 300 } })));
+    act(() => hook.result.current.handleEvent(ev("turn_end", { usage: { outputTokens: 200 } })));
+    act(() => hook.result.current.handleEvent(ev("run_end", {})));
+    expect(onRunEnd).toHaveBeenLastCalledWith(
+      expect.objectContaining({ turns: 2, outputTokens: 500, outcome: "done" }),
+    );
+    act(() => hook.result.current.handleEvent(ev("run_start", {})));
+    act(() => hook.result.current.handleEvent(ev("run_end", { cancelled: true })));
+    expect(onRunEnd).toHaveBeenLastCalledWith(
+      expect.objectContaining({ turns: 0, outcome: "cancelled" }),
+    );
+  });
 
   beforeEach(() => vi.clearAllMocks());
 
@@ -839,6 +862,51 @@ describe("useAgentEvents", () => {
     );
     act(() => hook.result.current.handleEvent(ev("turn_end", { usage: { inputTokens: 999_999 } })));
     expect(getContextTokens()).toBe(136_000);
+  });
+
+  describe("run-end sounds", () => {
+    const sounds = (): unknown[] => vi.mocked(playSound).mock.calls.map(([s]) => s);
+
+    it("plays done for a clean run", () => {
+      const { hook } = setup();
+      act(() => hook.result.current.handleEvent(ev("run_start", {})));
+      act(() => hook.result.current.handleEvent(ev("run_end", { failed: false })));
+      expect(sounds()).toEqual(["done"]);
+    });
+
+    it("plays error, not done, when the agent errored but the run settled", () => {
+      // The loop yields an error frame and returns, so run_end says failed:false.
+      const { hook } = setup();
+      act(() => hook.result.current.handleEvent(ev("run_start", {})));
+      act(() => hook.result.current.handleEvent(ev("error", { headline: "Provider error" })));
+      act(() => hook.result.current.handleEvent(ev("run_end", { failed: false })));
+      expect(sounds()).toEqual(["error"]);
+      // The next clean run is "done" again.
+      act(() => hook.result.current.handleEvent(ev("run_start", {})));
+      act(() => hook.result.current.handleEvent(ev("run_end", { failed: false })));
+      expect(sounds()).toEqual(["error", "done"]);
+    });
+
+    it("plays error for a failed run", () => {
+      const { hook } = setup();
+      act(() => hook.result.current.handleEvent(ev("run_start", {})));
+      act(() => hook.result.current.handleEvent(ev("run_end", { failed: true })));
+      expect(sounds()).toEqual(["error"]);
+    });
+
+    it("stays silent on a cancel, even after an error frame", () => {
+      const { hook } = setup();
+      act(() => hook.result.current.handleEvent(ev("run_start", {})));
+      act(() => hook.result.current.handleEvent(ev("error", { headline: "Aborted" })));
+      act(() => hook.result.current.handleEvent(ev("run_end", { cancelled: true })));
+      expect(sounds()).toEqual([]);
+    });
+
+    it("sounds an error that lands outside any run at once", () => {
+      const { hook } = setup();
+      act(() => hook.result.current.handleEvent(ev("error", { headline: "Compaction failed" })));
+      expect(sounds()).toEqual(["error"]);
+    });
   });
 
   describe("queued pill lifecycle", () => {
@@ -2724,6 +2792,135 @@ describe("useAgentEvents", () => {
     expect(groups[1]?.kind === "subagent_group" ? groups[1].agents : []).toMatchObject([
       { toolCallId: "new-agent", status: "starting" },
     ]);
+  });
+});
+
+describe("goal start to workers on the farm", () => {
+  it("opens Workers when the goal starts, and walks each spawned worker to its work", async () => {
+    // The whole chain after "Start the goal now", from the sidecar's events:
+    // goal_state flips the window to Workers (the chat stays one switch
+    // away), and every worker GG Goals spawns becomes a critter at the
+    // station for the tool it's using.
+    const goal = { id: "g-1", name: "Ship it", needsKickoff: false, phase: "briefing" as const };
+    const { hook, getItems, getState } = setup(() => false, { goal });
+    expect(goalViewFor(getState()?.goal, null).view).toBeNull();
+
+    act(() => hook.result.current.handleEvent(ev("goal_state", { id: "g-1", phase: "active" })));
+    expect(goalViewFor(getState()?.goal, null)).toEqual({ activeGoalId: "g-1", view: "workers" });
+    expect(goalViewFor(getState()?.goal, "g-1").view).toBe("chat");
+    // Another goal's event changes nothing.
+    act(() =>
+      hook.result.current.handleEvent(ev("goal_state", { id: "other", phase: "briefing" })),
+    );
+    expect(getState()?.goal?.phase).toBe("active");
+    // Pausing and resuming show on the goal.
+    act(() =>
+      hook.result.current.handleEvent(
+        ev("goal_state", { id: "g-1", phase: "active", paused: true }),
+      ),
+    );
+    expect(getState()?.goal?.paused).toBe(true);
+    act(() =>
+      hook.result.current.handleEvent(
+        ev("goal_state", { id: "g-1", phase: "active", paused: false }),
+      ),
+    );
+    expect(getState()?.goal?.paused).toBe(false);
+
+    const worker = (id: string, name: string, activity: string) => ({
+      agent_id: id,
+      task_name: name,
+      state: "running",
+      started_at: 1,
+      updated_at: 2,
+      elapsed_ms: 10,
+      turn_count: 1,
+      tool_use_count: 1,
+      token_usage: { input: 0, output: 0 },
+      // The worker's current tool, as SubAgentManager reports it.
+      current_activity: activity,
+    });
+    act(() => {
+      hook.result.current.handleEvent(
+        ev("subagent_state", worker("w-read", "Map the code", "read: src/auth.ts")),
+      );
+      hook.result.current.handleEvent(
+        ev("subagent_state", worker("w-edit", "Fix login", "edit: src/login.ts")),
+      );
+      hook.result.current.handleEvent(
+        ev("subagent_state", worker("w-run", "Run tests", "bash: pnpm test")),
+      );
+    });
+    await flushSubagents();
+
+    const groups = getItems().filter(
+      (item): item is Extract<Item, { kind: "subagent_group" }> & CritterGroup =>
+        item.kind === "subagent_group",
+    );
+    const workers = collectFloorAgents(groups);
+    expect(workers.map((w) => w.activity)).toEqual([
+      "read: src/auth.ts",
+      "edit: src/login.ts",
+      "bash: pnpm test",
+    ]);
+
+    const agents = collectWorldAgents({
+      running: true,
+      liveTools: [],
+      waitingOnUser: false,
+      workers,
+    });
+    expect(agents.slice(1).map((a) => [a.kind, a.status])).toEqual([
+      ["read", "working"],
+      ["edit", "working"],
+      ["run", "working"],
+    ]);
+    const world = createFarmWorld(buildFarm(), () => 0.5);
+    for (let t = 0; t <= 40_000; t += 100) {
+      syncFarm(world, agents, t);
+      stepFarm(world, t);
+    }
+    const stations = workers.map((w) => world.actors.get(w.key)?.station);
+    expect(stations).toEqual(["bookcase", "workbench", "machine"]);
+
+    // One finishes ("completed": its task is done, kept for a follow-up). The
+    // same events that drive the open Workers view drop it at once: it walks
+    // off the farm and the header counts one fewer working, one done.
+    act(() => {
+      hook.result.current.handleEvent(
+        ev("subagent_state", {
+          ...worker("w-read", "Map the code", "read: src/auth.ts"),
+          state: "completed",
+        }),
+      );
+    });
+    await flushSubagents();
+    const after = collectFloorAgents(
+      getItems().filter(
+        (item): item is Extract<Item, { kind: "subagent_group" }> & CritterGroup =>
+          item.kind === "subagent_group",
+      ),
+    );
+    const tally = tallyGoal(
+      tallyGoal(
+        EMPTY_TALLY,
+        workers.map((w) => ({ key: w.key, phase: floorPhase(w.status) })),
+      ),
+      after.map((w) => ({ key: w.key, phase: floorPhase(w.status) })),
+    );
+    expect([tally.working, tally.done]).toEqual([2, 1]);
+    const next = collectWorldAgents({
+      running: true,
+      liveTools: [],
+      waitingOnUser: false,
+      workers: after,
+    });
+    for (let t = 40_100; t <= 80_000; t += 100) {
+      syncFarm(world, next, t);
+      stepFarm(world, t);
+    }
+    expect(world.actors.has(workers[0]?.key ?? "")).toBe(false);
+    expect(world.actors.get(workers[1]?.key ?? "")?.state).toBe("working");
   });
 });
 

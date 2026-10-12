@@ -207,11 +207,10 @@
   border-color: transparent;
   box-shadow: var(--liquid-rim);
 }
-/* ── Update banner and home update pill: the progress-bar blue ──
+/* ── Home update pill: the progress-bar blue ──
    Same flux gradient as the usage meter and the download bars, with light
-   ink. The installing fill is a lighter wash of the same blue, and the dot
-   and badge turn white to read on it. */
-.update-banner,
+   ink. The installing fill is a lighter wash of the same blue. (The footer's
+   update banner has its own critter-meadow look in App.css.) */
 .home-update {
   background: var(--flux-fill);
   background-size: 200% 100%;
@@ -221,27 +220,6 @@
     inset 0 1px 0 rgb(255 255 255 / 0.35),
     inset 0 -1px 2px rgb(0 20 90 / 0.3);
 }
-.update-banner .badge {
-  background: rgb(255 255 255 / 0.18);
-  border-color: rgb(255 255 255 / 0.35);
-  color: #fff;
-}
-.update-banner-dot {
-  background: #fff;
-  animation-name: glass-update-pulse;
-}
-@keyframes glass-update-pulse {
-  0% {
-    box-shadow: 0 0 0 0 rgb(255 255 255 / 0.55);
-  }
-  70% {
-    box-shadow: 0 0 0 7px transparent;
-  }
-  100% {
-    box-shadow: 0 0 0 0 transparent;
-  }
-}
-.update-banner-fill,
 .home-update-fill {
   background: linear-gradient(90deg, rgb(255 255 255 / 0.28), rgb(255 255 255 / 0.4));
   box-shadow: 1px 0 0 rgb(255 255 255 / 0.5);
@@ -730,6 +708,7 @@
 .scorecard-bar span,
 .hf-progress-fill {
   position: relative;
+  height: 100%;
   overflow: hidden;
   border-radius: inherit;
   background: var(--flux-fill);
@@ -1040,11 +1019,6 @@
   .title-usage-fill::before,
   .hf-progress-fill::after {
     display: none;
-    animation: none;
-  }
-  /* The update dot re-sets its animation-name above, after App.css's reduced
-     rule; drop it here so the pulse never runs. */
-  .update-banner-dot {
     animation: none;
   }
 }

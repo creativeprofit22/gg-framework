@@ -19,7 +19,7 @@ import {
   renderTerrain,
 } from "./critter-terrain";
 
-const MODES = ["code", "chat", "motion"] as const satisfies readonly WakeMode[];
+const MODES = ["code", "chat", "motion", "goals"] as const satisfies readonly WakeMode[];
 
 /** A random source that always returns `value` (0 ≤ value < 1). */
 const fixed = (value: number) => (): number => value;
@@ -105,7 +105,12 @@ describe("WakeScreen", () => {
 
   it.each(MODES)("%s: types a line set into the bubble and rests on its invitation", (mode) => {
     const { container } = render(
-      <WakeScreen chat={mode === "chat"} motion={mode === "motion"} random={fixed(0.5)} />,
+      <WakeScreen
+        chat={mode === "chat"}
+        motion={mode === "motion"}
+        goals={mode === "goals"}
+        random={fixed(0.5)}
+      />,
     );
     const invitations: string[] = WAKE_LINES[mode].map((set) => set[set.length - 1] ?? "");
     typeToRest(container);

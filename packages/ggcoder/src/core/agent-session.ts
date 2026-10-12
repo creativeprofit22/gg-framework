@@ -172,7 +172,12 @@ import { REVIEW_REJECTED_BEFORE_START } from "../tools/bash.js";
 import { buildProcessCompletionFollowUp } from "./process-gate.js";
 import { PLAN_SUBMISSION_NUDGE, shouldNudgePlanSubmission } from "./plan-submission-gate.js";
 import { canonicalProjectKey } from "../project-notes-repository.js";
-import { buildSubAgentCompletionFollowUp, type SubAgentManager } from "./subagent-manager.js";
+import {
+  buildSubAgentCompletionFollowUp,
+  type ChildModelPick,
+  type SubAgentManager,
+  type SubAgentSnapshot,
+} from "./subagent-manager.js";
 import { applyAsyncSubagentPolicy } from "./subagent-policy.js";
 import {
   resolveResponsesLite,
@@ -232,7 +237,7 @@ import { extractPlanSteps, findCompletedMarkers } from "../utils/plan-steps.js";
 import { readFileSync } from "node:fs";
 import { clampThinkingForPlanMode } from "./thinking-level.js";
 import { pruneStaleToolResults } from "./compaction/tool-result-pruner.js";
-import { discoverAgents } from "./agents.js";
+import { discoverAgents, type AgentDefinition } from "./agents.js";
 import { enhancePrompt, type EnhanceResult } from "../utils/prompt-enhancer.js";
 import { detectLanguages, detectProjectStack, type LanguageId } from "./language-detector.js";
 import {
@@ -254,7 +259,7 @@ import {
   type SemanticCallDigest,
   type SemanticLoopVerdict,
 } from "./semantic-loop-check.js";
-import { buildEnvDeltaMessage } from "./env-delta.js";
+import { buildEnvDeltaMessage, buildLanguageUpdateMessage } from "./env-delta.js";
 import { wrapSteeringText, buildNotificationSteeringText, STEERING_PREFIX } from "./steering.js";
 import { AgentNotificationQueue } from "./agent-notifications.js";
 import {
@@ -419,6 +424,45 @@ export interface AgentSessionOptions {
   onExitPlan?: (planPath: string, content: string) => Promise<ToolExecuteResult>;
   /** Captures exact Git state when a bounded verification command settles. */
   captureVerificationWorkspace?: () => Promise<NotesWorkspaceSnapshotV1>;
+  /**
+   * Built-in tools to keep in the core set instead of the deferred
+   * tool_search catalog: for a specialist whose job is a deferred tool (GG
+   * Goals orchestrates with spawn_agent and friends). Fixed for the session.
+   */
+  coreTools?: readonly string[];
+  /**
+   * Default provider/model for the workers this session spawns, when their
+   * agent names no model of its own. Read at spawn time.
+   */
+  getChildModel?: () => ChildModelPick | undefined;
+  /**
+   * Wrap each built-in tool once, at registration. Must keep the tool's name,
+   * description and parameters (only `execute` may change), so the tool block
+   * stays prompt-cache stable. Used by GG Goals to gate its own editing.
+   */
+  wrapTool?: (tool: AgentTool) => AgentTool;
+  /**
+   * Built-in tools this session never has, removed at registration (before
+   * tiering) and left out of the system prompt's Tools section. Unlike
+   * `allowedTools`, the rest of the tool set and its tiering are untouched.
+   * Fixed for the session, so the cached tool block never changes. Used by
+   * GG Goals, which never edits or runs anything itself.
+   */
+  withoutTools?: readonly string[];
+  /**
+   * A fixed team of sub-agents, replacing agent discovery (project, global
+   * and bundled): the only agents spawn_agent and subagent can start. Used by
+   * GG Goals, whose workers follow their own rules (goals-agent/goal-team.ts).
+   */
+  subAgents?: readonly AgentDefinition[];
+  /**
+   * Start every spawned child with this session's extra workspace roots too
+   * (less the folder it works in), so it can read and change all of them.
+   * GG Goals' workers work across all of a goal's attached folders.
+   */
+  shareRootsWithSubAgents?: boolean;
+  /** The sub-agent a spawned child is when the spawn names none (one of `subAgents`). */
+  defaultSubAgent?: string;
   /**
    * If provided, the session's tool set is filtered to ONLY these tool names
    * after `createTools()` runs, and the system prompt's Tools section lists only
@@ -846,6 +890,9 @@ export class AgentSession {
    * for no benefit.
    */
   private activeLanguages = new Set<LanguageId>();
+  /** Languages the model has already been given guidance for, via the system
+   *  prompt or an appended language update. */
+  private announcedLanguages = new Set<LanguageId>();
   /** Shared with the tool layer so plan-mode restrictions read live state. */
   private planModeRef = { current: false };
   /** Corpus code retrieved this session; plans and Roadmap drafts must cite it. */
@@ -973,7 +1020,10 @@ export class AgentSession {
     this.sessionManager = new SessionManager(this.opts.sessionRootDir ?? paths.sessionsDir);
 
     const projectCustomization = this.opts.projectCustomization !== false;
-    if (projectCustomization) {
+    // A sub-agent worker never creates them: the session that owns the
+    // project does. GG Goals' workers work in the user's attached folders,
+    // which mustn't gain empty .gg folders as a side effect.
+    if (projectCustomization && !this.opts.subagentWorker) {
       // Ensure project-local .gg directories exist.
       const localGGDir = path.join(this.cwd, ".gg");
       await fs.mkdir(path.join(localGGDir, "skills"), { recursive: true });
@@ -993,14 +1043,16 @@ export class AgentSession {
 
     // Discover agents and create tools (with sub-agent support). Chat sessions
     // can retain bundled workers without loading project/global customization.
-    const agents = projectCustomization
-      ? await discoverAgents({
-          globalAgentsDir: paths.agentsDir,
-          projectDir: this.cwd,
-        })
-      : this.opts.globalSubagents
-        ? await discoverAgents({ globalAgentsDir: paths.agentsDir })
-        : [];
+    const agents = this.opts.subAgents
+      ? [...this.opts.subAgents]
+      : projectCustomization
+        ? await discoverAgents({
+            globalAgentsDir: paths.agentsDir,
+            projectDir: this.cwd,
+          })
+        : this.opts.globalSubagents
+          ? await discoverAgents({ globalAgentsDir: paths.agentsDir })
+          : [];
     const {
       tools: createdBuiltInTools,
       processManager,
@@ -1061,6 +1113,8 @@ export class AgentSession {
             this.isPersistentToolCapabilityAllowed(name) && !this.unavailableToolNames.has(name),
         ),
       agents,
+      shareWorkspaceRoots: this.opts.shareRootsWithSubAgents,
+      defaultSubAgent: this.opts.defaultSubAgent,
       skills: this.skills,
       contextLimits: this.contextLimits,
       provider: this.provider,
@@ -1109,6 +1163,7 @@ export class AgentSession {
       getBaseUrl: () => this.baseUrl,
       getCacheKey: () => this.getPromptCacheKey(),
       getMaxPerModel: () => this.settingsManager.get("subagentMaxPerModel"),
+      getChildModel: this.opts.getChildModel,
       // A persistent child is already the single allowed fan-out level. Blocking
       // `subagent` here created a timeout sandwich: the nested call could consume
       // the child's entire 10-minute turn budget, discarding all nested results.
@@ -1127,12 +1182,20 @@ export class AgentSession {
     });
     // Both delegation tools carry the agent roster; when both survive the
     // allow-list, `subagent` points at `spawn_agent`'s copy instead.
-    const builtInTools =
+    const rosterBuiltInTools =
       createdBuiltInTools.some((t) => t.name === "spawn_agent") && this.isToolAllowed("spawn_agent")
         ? createdBuiltInTools.map((t) =>
             t.name === "subagent" ? { ...t, description: subAgentDescription(agents, true) } : t,
           )
         : createdBuiltInTools;
+    // Built-ins a host never wants (GG Goals never edits or runs anything
+    // itself) are dropped before tiering; a host may also wrap built-ins (same
+    // names and schemas, so the cached tool block is unchanged).
+    const without = new Set(this.opts.withoutTools ?? []);
+    const wrap = this.opts.wrapTool;
+    const builtInTools = rosterBuiltInTools
+      .filter((tool) => !without.has(tool.name))
+      .map((tool) => (wrap ? wrap(tool) : tool));
     const additionalTools = [...(this.opts.additionalTools ?? [])];
     // Keep the internal tool eager, but subject to the same live capability guards.
     if (isInternalDiagnosticsEnabled()) {
@@ -1153,9 +1216,18 @@ export class AgentSession {
       const tierableBuiltIns = builtInTools.filter((tool) => !additionalToolNames.has(tool.name));
       // Wrap before partitioning so a deferred trigger (spawn_agent) still
       // promotes its follow-ups once the catalog loads it.
-      const { core, deferred } = partitionToolsByTier(
+      const partition = partitionToolsByTier(
         tierableBuiltIns.map((tool) => this.withWaitAgentPromotion(tool)),
       );
+      // A session can keep chosen built-ins in its core set (GG Goals
+      // orchestrates, so its agent tools are always at hand). Fixed for the
+      // session, so the cached tool block stays byte-stable.
+      const keep = new Set(this.opts.coreTools ?? []);
+      const deferred = partition.deferred.filter((tool) => !keep.has(tool.name));
+      const core = [
+        ...partition.core,
+        ...partition.deferred.filter((tool) => keep.has(tool.name)),
+      ];
       this.registerTools([...core, ...additionalTools]);
       if (deferred.length > 0) {
         this.deferredBuiltinToolNames = deferred.map((tool) => tool.name);
@@ -1196,6 +1268,9 @@ export class AgentSession {
       }
     }
 
+    // Detect languages before the first render so the opening prompt already
+    // carries their packs and only a genuinely new language needs an update.
+    this.refreshActiveLanguages();
     const basePrompt = await this.buildBasePrompt(false, undefined);
     this.baseSystemPrompt = basePrompt;
     this.messages = [{ role: "system", content: this.withSystemPromptTail(basePrompt) }];
@@ -2391,6 +2466,7 @@ ${content}
     await this.ensureActivePhaseSessionMetadata();
     const userMessage: Message = { role: "user", content, provenance };
     this.contextProfileLocked = true;
+    await this.announceNewLanguages();
     this.messages.push(userMessage);
     const meta = normalizePromptMeta(options.meta);
     if (meta) this.promptHints.set(userMessage, meta);
@@ -2462,6 +2538,7 @@ ${content}
     // Push user message
     const userMessage: Message = { role: "user", content, provenance };
     this.contextProfileLocked = true;
+    await this.announceNewLanguages();
     this.messages.push(userMessage);
     // Daemon startup must not release its lease on a best-effort append failure.
     const meta = normalizePromptMeta(options.meta);
@@ -2507,6 +2584,7 @@ ${content}
       provenance: { source: "human", kind: "prompt", visibility: "transcript" },
     };
     this.contextProfileLocked = true;
+    await this.announceNewLanguages();
     this.messages.push(userMessage);
     const meta = normalizePromptMeta(options.meta);
     if (meta) this.promptHints.set(userMessage, meta);
@@ -4720,6 +4798,9 @@ ${content}
     this.autopilotMarkers = [];
     this.appMarkers = [];
     this.turnMetrics = [];
+    // Detect languages before the first render so the opening prompt already
+    // carries their packs and only a genuinely new language needs an update.
+    this.refreshActiveLanguages();
     const basePrompt = await this.buildBasePrompt(false, undefined);
     this.baseSystemPrompt = basePrompt;
     this.messages = [{ role: "system", content: this.withSystemPromptTail(basePrompt) }];
@@ -5129,6 +5210,21 @@ ${content}
       .splice(0)
       .map((m) => m.text)
       .join("\n\n");
+  }
+
+  /**
+   * Tell the agent a new fact at its next turn, as a short hidden message
+   * appended after the cached prompt (the same channel as a finished worker),
+   * so a mid-session change reaches it without re-rendering the prompt. A
+   * later note with the same id replaces one not yet delivered.
+   */
+  notify(id: string, text: string): void {
+    this.notifications.enqueue("goal", id, text, { terminal: true });
+  }
+
+  /** This session's sub-agents (workers), newest-state, including ones restored after a restart. */
+  listSubAgents(): SubAgentSnapshot[] {
+    return this.subAgentManager?.list() ?? [];
   }
 
   /** Snapshot of background processes (bash run_in_background), newest-state. */
@@ -5704,6 +5800,8 @@ ${content}
     if (this.customSystemPrompt) return this.customSystemPrompt;
     const toolNames = this.tools.map((tool) => tool.name);
     const deferredToolNames = this.deferredToolNamesForPrompt(toolNames);
+    // Whatever is rendered now is what the model has been told.
+    this.announcedLanguages = new Set(this.activeLanguages);
     if (this.agentPrompt !== undefined) {
       return buildSubAgentSystemPrompt(this.agentPrompt, {
         cwd: this.cwd,
@@ -5713,6 +5811,7 @@ ${content}
         role: this.opts.agentRole,
         environment: this.recordRenderedEnvironment(),
         contextLimits: this.contextLimits,
+        ...(this.languagesApply() ? { activeLanguages: this.activeLanguages } : {}),
       });
     }
     return buildSystemPrompt(
@@ -5737,24 +5836,69 @@ ${content}
   }
 
   /**
-   * Add newly detected project languages. Returns true when the set grew and
-   * the standard prompt therefore needs a rebuild. Custom and sub-agent
-   * prompts never render packs, so detection is skipped for them.
-   */
-  /**
    * Bring the system prompt to the exact state the next provider request will
    * send. Shared by real runs and {@link prewarm} so both see one prefix.
+   *
+   * Languages are re-detected at each task boundary. Before the first reply
+   * nothing is cached worth keeping, so a new language simply rebuilds the
+   * prompt. After that the prompt is a cached prefix and is left alone: the
+   * new language is announced by {@link announceNewLanguages} instead.
    */
   private async prepareSystemPromptForRequest(): Promise<void> {
-    // Languages are re-detected at each task boundary so a project scaffolded
-    // during the previous turn gets its packs; the prompt is rebuilt only when
-    // the set grows, keeping the cached prefix stable otherwise.
-    if (this.refreshActiveLanguages()) await this.rebuildSystemPromptInPlace();
+    if (this.refreshActiveLanguages() && !this.hasReply()) {
+      await this.rebuildSystemPromptInPlace();
+    }
     this.refreshSystemPromptTail();
   }
 
+  private hasReply(): boolean {
+    return this.messages.some((m) => m.role === "assistant");
+  }
+
+  /**
+   * Give the model style packs for languages that appeared after its prompt
+   * was cached (e.g. the previous task scaffolded a TypeScript project), as a
+   * hidden message appended to the history rather than a prompt re-render that
+   * would throw away the whole cache. Runs just before a new user message is
+   * added, so the user's request stays the last thing the model reads and the
+   * update is saved in order with the rest of the conversation.
+   */
+  private async announceNewLanguages(): Promise<void> {
+    if (!this.hasReply()) return; // the next request rebuilds the prompt instead
+    this.refreshActiveLanguages();
+    const fresh = new Set(
+      [...this.activeLanguages].filter((id) => !this.announcedLanguages.has(id)),
+    );
+    if (fresh.size === 0) return;
+    for (const id of fresh) this.announcedLanguages.add(id);
+    const update = buildLanguageUpdateMessage(fresh, this.cwd);
+    if (!update) return;
+    this.messages.push(update);
+    await this.persistMessage(update);
+    this.lastPersistedIndex = this.messages.length;
+    log("INFO", "language", "Appended style packs for new languages", {
+      added: [...fresh].join(","),
+    });
+  }
+
+  /**
+   * Whether this session renders language packs: the standard prompt, and a
+   * code-writing child (a sub-agent prompt with project context). A verbatim
+   * custom prompt never does, nor do user-facing specialist agents (Motion,
+   * goals) or recon children without project context.
+   */
+  private languagesApply(): boolean {
+    if (this.customSystemPrompt) return false;
+    if (this.agentPrompt === undefined) return true;
+    return (
+      (this.opts.agentRole ?? "subagent") === "subagent" &&
+      (this.opts.agentContext ?? "project") === "project"
+    );
+  }
+
+  /** Add newly detected project languages. Returns true when the set grew. */
   private refreshActiveLanguages(): boolean {
-    if (this.customSystemPrompt || this.agentPrompt !== undefined) return false;
+    if (!this.languagesApply()) return false;
     let grew = false;
     try {
       for (const id of detectLanguages(this.cwd)) {

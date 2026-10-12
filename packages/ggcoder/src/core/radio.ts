@@ -9,9 +9,8 @@ import { killProcessTreeAsync } from "../utils/process.js";
 import { log } from "./logger.js";
 
 /**
- * Internet radio — stream a free station while you work. Ported from gg-boss's
- * radio so the gg-app windows offer the same curated, royalty-free, no-API-key
- * streams (SomaFM started in 2000, Radio Paradise in 2006).
+ * Internet radio — stream a free station while you work. The gg-app windows
+ * offer curated, royalty-free, no-API-key streams (SomaFM started in 2000, Radio Paradise in 2006).
  *
  * Playback uses module-level singletons (`currentChild` / `currentStationId`),
  * so in the shared gg-app daemon — where every window's session lives in ONE

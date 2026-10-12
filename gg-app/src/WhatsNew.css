@@ -10,7 +10,7 @@
   position: absolute;
   top: var(--space-8);
   right: var(--space-8);
-  z-index: 20;
+  z-index: var(--z-float);
 }
 .wn-scroll {
   flex: 1 1 auto;

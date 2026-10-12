@@ -57,6 +57,13 @@ pub(crate) struct Daemon {
     pub(crate) process_identity: Mutex<Option<DaemonProcessIdentity>>,
     /// Proof that the immediately preceding daemon was reaped before respawn.
     pub(crate) predecessor_proof: Mutex<Option<DaemonPredecessorProof>>,
+    /// Why the daemon is down for good (spawn failure or crash circuit breaker).
+    /// Session starts fail fast with this instead of waiting for a port that
+    /// will never arrive; `retry_window_session` clears it and respawns.
+    pub(crate) failure: Mutex<Option<String>>,
+    /// The latest `GG_APP_FATAL` reason. A single crash is retried silently;
+    /// this only surfaces if the crash loop exhausts its respawn budget.
+    pub(crate) last_fatal: Mutex<Option<String>>,
     /// Per-launch bearer token required as `x-gg-token` on every daemon request.
     pub(crate) token: String,
     /// Kill-on-close job holding the current daemon and every descendant.
@@ -100,6 +107,8 @@ pub(crate) struct PaneSession {
     pub(crate) cwd: Option<PathBuf>,
     pub(crate) session_path: Option<String>,
     pub(crate) generation: u64,
+    /// Why the current generation's session start failed. `sidecar_port`
+    /// reports it so the webview shows the real cause instead of timing out.
     pub(crate) startup_error: Option<String>,
 }
 
@@ -318,12 +327,27 @@ pub(crate) fn complete_pane_disposal(
     dispose_pane_target(registry, owner_label, pane_id, false, Some(generation)).map(|_| ())
 }
 
+#[cfg(test)]
 pub(crate) fn bind_pane_session(
     registry: &mut PaneRegistry,
     owner_label: &str,
     pane_id: &str,
     generation: u64,
     session_id: String,
+) -> bool {
+    bind_pane_session_with_path(registry, owner_label, pane_id, generation, session_id, None)
+}
+
+/// Bind a pane's session and record the conversation file the daemon opened, so
+/// a daemon respawn reopens it instead of starting fresh (a new session has no
+/// path until the daemon reports one).
+pub(crate) fn bind_pane_session_with_path(
+    registry: &mut PaneRegistry,
+    owner_label: &str,
+    pane_id: &str,
+    generation: u64,
+    session_id: String,
+    opened_path: Option<String>,
 ) -> bool {
     let Some(pane) = registry
         .get_mut(owner_label)
@@ -336,6 +360,9 @@ pub(crate) fn bind_pane_session(
     }
     pane.session_id = Some(session_id);
     pane.startup_error = None;
+    if opened_path.is_some() {
+        pane.session_path = opened_path;
+    }
     true
 }
 

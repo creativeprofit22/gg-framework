@@ -168,7 +168,7 @@ export function HfPullModal({ onClose }: Props): React.ReactElement {
           )}
 
           {!searching && results && results.length === 0 && !searchError && (
-            <div className="hf-empty" style={{ color: theme.textDim }}>
+            <div className="hf-empty" style={{ color: theme.textMuted }}>
               No GGUF models matched. Try a shorter search.
             </div>
           )}

@@ -288,8 +288,8 @@ export function createReadTool(
             : "Use bash";
         return `[Line ${lineNo} is too long to show (${bytes} bytes). ${next} (e.g. cut -c1-2000) to inspect it.]`;
       }
-      // Record exactly which lines the model is shown: a full-file write is only
-      // allowed once it has seen every line (see assertFullySeen).
+      // Record exactly which lines the model is shown: a full-file write reports
+      // any lines it removes that the model has not seen (see unseenLines).
       recordRead(readFiles, resolved, raw, stat.mtimeMs, [
         startLine + 1,
         startLine + result.keptLines,

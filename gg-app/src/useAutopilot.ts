@@ -4,6 +4,7 @@ import type { SidecarEvent } from "./agent";
 import { resolveRunEndOutcome } from "@kenkaiiii/gg-core/desktop-session-ux";
 import type { Item } from "./App";
 import { readChatError } from "./chat-error";
+import { playSound } from "./sounds";
 
 /**
  * Autopilot Ken (auto-reviewer) event handling, extracted from App.tsx and
@@ -112,6 +113,9 @@ export function useAutopilot(opts: {
           return false;
         case "autopilot_error": {
           setAutopilotReviewing(false);
+          // The build run already ended (and sounded); this is the cycle
+          // stopping, so it gets the error cue of its own.
+          playSound("error");
           setItems((prev) => [
             ...prev,
             { kind: "error", id: nextId(), ...readChatError(d, "autopilot_error") },

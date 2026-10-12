@@ -8,7 +8,7 @@ import type { Provider } from "@kenkaiiii/gg-ai";
 
 // Resolve the package version by walking up from this module to the nearest
 // package.json. A bare `require("../../package.json")` breaks when this module
-// is re-bundled into a sibling package (e.g. gg-boss), where the relative path
+// is re-bundled into a sibling package, where the relative path
 // no longer points at ggcoder's manifest — so it crashes the CLI. Walking up
 // from import.meta.url always finds a valid manifest and never throws.
 function resolveCliVersion(): string {

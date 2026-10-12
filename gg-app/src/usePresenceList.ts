@@ -55,22 +55,32 @@ export function pinSize(el: HTMLElement | null): void {
  * removed item can play its exit animation before it unmounts (the same idea
  * QueuedBar and Toaster use, generalised to a keyed list). Items are dropped
  * `exitMs` after they leave — keep that in step with the CSS exit duration.
+ *
+ * Changing `flush` drops every leaving item in that same render, with no exit.
+ * Composer strips pass the send count: a send's own layout transaction
+ * (chat-layout-motion.ts) moves the composer and transcript, so a strip still
+ * folding after that commit would resize the transcript under it, cancel it,
+ * and push the chat up before pulling it back down.
  */
 export function usePresenceList<T>(
   items: readonly T[],
   keyOf: (item: T) => string,
   exitMs: number,
+  flush = 0,
 ): readonly Presence<T>[] {
   // Derived during render (not in an effect) so a removed item is never
   // missing for a frame and a new one appears in the same commit it was added.
   const [prevItems, setPrevItems] = useState(items);
+  const [prevFlush, setPrevFlush] = useState(flush);
   const [rendered, setRendered] = useState<readonly Presence<T>[]>(() =>
     items.map((item) => ({ item, key: keyOf(item), leaving: false })),
   );
   let current = rendered;
-  if (items !== prevItems) {
+  if (items !== prevItems || flush !== prevFlush) {
     current = merge(rendered, items, keyOf);
+    if (flush !== prevFlush) current = current.filter((r) => !r.leaving);
     setPrevItems(items);
+    setPrevFlush(flush);
     setRendered(current);
   }
 

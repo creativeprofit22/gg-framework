@@ -3,7 +3,7 @@ import type { RefObject } from "react";
 import { flushSync } from "react-dom";
 import type { createChatLayoutMotion } from "./chat-layout-motion";
 import { firstOpenAskId } from "./ask-user";
-import { pinAfterScroll, pinAfterWheel } from "./transcript-pin";
+import { isHiddenScroller, pinAfterScroll, pinAfterWheel } from "./transcript-pin";
 import { earlierStartId, windowStartIndex } from "./transcript-window";
 import { dissolveInAbove, teleport } from "./transcript-motion";
 import type { Item } from "./transcript-item";
@@ -124,6 +124,7 @@ export function useTranscriptScroll({
   const onTranscriptScroll = useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
+    if (isHiddenScroller(el)) return;
     if (el.scrollTop !== lastScrollTopRef.current) chatLayout.cancel();
     stickToBottomRef.current = pinAfterScroll(
       stickToBottomRef.current,

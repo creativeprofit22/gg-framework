@@ -20,10 +20,14 @@ describe("Ken prompt block", () => {
   it("offers the prompt again when the direct send fails", async () => {
     sendPrompt.mockRejectedValueOnce(new Error("daemon not ready"));
     render(<Markdown>{PROMPT}</Markdown>);
-    fireEvent.click(screen.getByRole("button", { name: new RegExp(`send to ${PRODUCT_DISPLAY_NAME}`, "i") }));
+    fireEvent.click(
+      screen.getByRole("button", { name: new RegExp(`send to ${PRODUCT_DISPLAY_NAME}`, "i") }),
+    );
     await waitFor(() => expect(toast).toHaveBeenCalledWith(expect.any(String), "error"));
     expect(
-      screen.getByRole<HTMLButtonElement>("button", { name: new RegExp(`send to ${PRODUCT_DISPLAY_NAME}`, "i") }).disabled,
+      screen.getByRole<HTMLButtonElement>("button", {
+        name: new RegExp(`send to ${PRODUCT_DISPLAY_NAME}`, "i"),
+      }).disabled,
     ).toBe(false);
   });
 
@@ -34,7 +38,9 @@ describe("Ken prompt block", () => {
         <Markdown>{PROMPT}</Markdown>
       </PromptSendProvider>,
     );
-    fireEvent.click(screen.getByRole("button", { name: new RegExp(`send to ${PRODUCT_DISPLAY_NAME}`, "i") }));
+    fireEvent.click(
+      screen.getByRole("button", { name: new RegExp(`send to ${PRODUCT_DISPLAY_NAME}`, "i") }),
+    );
     await waitFor(() => expect(onSend).toHaveBeenCalledWith("Add a retry to the upload"));
     expect(screen.getByRole<HTMLButtonElement>("button", { name: /sent/i }).disabled).toBe(true);
   });
@@ -46,10 +52,14 @@ describe("Ken prompt block", () => {
         <Markdown>{PROMPT}</Markdown>
       </PromptSendProvider>,
     );
-    fireEvent.click(screen.getByRole("button", { name: new RegExp(`send to ${PRODUCT_DISPLAY_NAME}`, "i") }));
+    fireEvent.click(
+      screen.getByRole("button", { name: new RegExp(`send to ${PRODUCT_DISPLAY_NAME}`, "i") }),
+    );
     await waitFor(() =>
       expect(
-        screen.getByRole<HTMLButtonElement>("button", { name: new RegExp(`send to ${PRODUCT_DISPLAY_NAME}`, "i") }).disabled,
+        screen.getByRole<HTMLButtonElement>("button", {
+          name: new RegExp(`send to ${PRODUCT_DISPLAY_NAME}`, "i"),
+        }).disabled,
       ).toBe(false),
     );
   });

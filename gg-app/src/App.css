@@ -6195,7 +6195,7 @@ select {
   height: 30px;
   padding: 0 var(--space-6);
   border: 1.5px solid #b8933f;
-  border-radius: 6px;
+  border-radius: var(--radius-control);
   background: linear-gradient(#4a3419, #1c130a);
   color: #fff8ec;
   font:
@@ -6343,7 +6343,7 @@ select {
   height: 30px;
   padding: 0 var(--space-5);
   border: 1.5px solid #8a643c;
-  border-radius: 6px;
+  border-radius: var(--radius-control);
   background: transparent;
   color: var(--ken-ink);
   font:

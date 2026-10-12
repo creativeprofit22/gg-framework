@@ -25,15 +25,15 @@ npm i @kenkaiiii/gg-core
 
 ## What's inside
 
-| Area | Main exports |
-|---|---|
-| Model registry | `getModel`, `getAllModels`, `getModelsForProvider`, `getDefaultModel`, `getContextWindow` |
-| Thinking levels | `getSupportedThinkingLevels`, `getMaxThinkingLevel`, `getDefaultThinkingLevel` |
-| Auth storage | `AuthStorage` (reads and writes `~/.gg/auth.json`, refreshes OAuth tokens) |
-| OAuth | Anthropic, OpenAI, Gemini, Kimi and xAI login flows |
-| Local models | `discoverLocalModels` (Ollama, LM Studio, llama.cpp, vLLM, custom endpoints) |
-| Paths | `getAppPaths` (every file under `~/.gg/`) |
-| Other | Logger, file lock, usage limits, Telegram, voice transcription, auto-update |
+| Area            | Main exports                                                                              |
+| --------------- | ----------------------------------------------------------------------------------------- |
+| Model registry  | `getModel`, `getAllModels`, `getModelsForProvider`, `getDefaultModel`, `getContextWindow` |
+| Thinking levels | `getSupportedThinkingLevels`, `getMaxThinkingLevel`, `getDefaultThinkingLevel`            |
+| Auth storage    | `AuthStorage` (reads and writes `~/.gg/auth.json`, refreshes OAuth tokens)                |
+| OAuth           | Anthropic, OpenAI, Gemini, Kimi and xAI login flows                                       |
+| Local models    | `discoverLocalModels` (Ollama, LM Studio, llama.cpp, vLLM, custom endpoints)              |
+| Paths           | `getAppPaths` (every file under `~/.gg/`)                                                 |
+| Other           | Logger, file lock, usage limits, Telegram, voice transcription, auto-update               |
 
 Two lighter subpath entries skip the rest of the package:
 

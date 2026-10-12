@@ -168,7 +168,10 @@ export async function withRealSidecar<T>(
       let output = "";
       child!.stdout?.on("data", (chunk: Buffer) => {
         output = (output + chunk.toString()).slice(-4096);
-        const match = /GG_APP_LISTENING (\d+)/.exec(output);
+        // The line is "GG_APP_LISTENING <port> <token>"; require the space
+        // after the port so a chunk split mid-number can't yield a partial
+        // (and possibly fetch-blocked) port.
+        const match = /GG_APP_LISTENING (\d+) /.exec(output);
         if (match) {
           clearTimeout(timer);
           resolve(Number(match[1]));

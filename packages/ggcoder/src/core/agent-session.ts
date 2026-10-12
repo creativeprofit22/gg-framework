@@ -1224,10 +1224,7 @@ export class AgentSession {
       // session, so the cached tool block stays byte-stable.
       const keep = new Set(this.opts.coreTools ?? []);
       const deferred = partition.deferred.filter((tool) => !keep.has(tool.name));
-      const core = [
-        ...partition.core,
-        ...partition.deferred.filter((tool) => keep.has(tool.name)),
-      ];
+      const core = [...partition.core, ...partition.deferred.filter((tool) => keep.has(tool.name))];
       this.registerTools([...core, ...additionalTools]);
       if (deferred.length > 0) {
         this.deferredBuiltinToolNames = deferred.map((tool) => tool.name);

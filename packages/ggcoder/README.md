@@ -67,21 +67,21 @@ You can still add your own MCPs in `~/.gg/mcp.json` or `.gg/mcp.json`. But start
 
 Switch mid-conversation with `/model`. Not locked to anyone.
 
-| Provider          | Models                                                                                      | Auth             |
-| ----------------- | ------------------------------------------------------------------------------------------- | ---------------- |
-| **Anthropic**     | Claude Fable 5.1, Opus 5.5, Sonnet 5.5, Haiku 5.5                                           | OAuth            |
-| **OpenAI**        | GPT-6 Astra, GPT-6.1 Sol, GPT-6 Luna                                                        | OAuth            |
-| **Gemini**        | Gemini 3.1 Pro (Preview), 3.8 Flash, 3.7 Flash, 3.5 Flash, 3.5 Flash Lite, 3.1 Flash Lite   | OAuth            |
-| **xAI (Grok)**    | Grok 4.7                                                                                    | OAuth or API key |
-| **Moonshot**      | Kimi K3, K2.8 Preview (Kimi sign-in), K2.7 Code, K2.7 Code HighSpeed                        | OAuth or API key |
-| **Z.AI (GLM)**    | GLM-5.3, GLM-5.3-Flash                                                                      | API key          |
-| **MiniMax**       | MiniMax M3                                                                                  | API key          |
-| **Xiaomi (MiMo)** | MiMo-V2.6-Pro, MiMo-V2.6-Flash, MiMo-V2.6-Pro-UltraSpeed                                    | API key          |
-| **DeepSeek**      | DeepSeek V4 Pro, V4.1 Flash                                                                 | API key          |
-| **Sakana (Fugu)** | Fugu, Fugu Max, Fugu Ultra                                                                  | API key          |
-| **OpenRouter**    | Qwen3.8 Max                                                                                 | API key          |
-| **Hugging Face**  | Kimi K2.7 Code, DeepSeek V4.1 Flash, GPT-OSS 120B (Inference Providers router)              | API key          |
-| **Local**         | Any model on an OpenAI-compatible server: Ollama, LM Studio, llama.cpp, vLLM                | None             |
+| Provider          | Models                                                                                    | Auth             |
+| ----------------- | ----------------------------------------------------------------------------------------- | ---------------- |
+| **Anthropic**     | Claude Fable 5.1, Opus 5.5, Sonnet 5.5, Haiku 5.5                                         | OAuth            |
+| **OpenAI**        | GPT-6 Astra, GPT-6.1 Sol, GPT-6 Luna                                                      | OAuth            |
+| **Gemini**        | Gemini 3.1 Pro (Preview), 3.8 Flash, 3.7 Flash, 3.5 Flash, 3.5 Flash Lite, 3.1 Flash Lite | OAuth            |
+| **xAI (Grok)**    | Grok 4.7                                                                                  | OAuth or API key |
+| **Moonshot**      | Kimi K3, K2.8 Preview (Kimi sign-in), K2.7 Code, K2.7 Code HighSpeed                      | OAuth or API key |
+| **Z.AI (GLM)**    | GLM-5.3, GLM-5.3-Flash                                                                    | API key          |
+| **MiniMax**       | MiniMax M3                                                                                | API key          |
+| **Xiaomi (MiMo)** | MiMo-V2.6-Pro, MiMo-V2.6-Flash, MiMo-V2.6-Pro-UltraSpeed                                  | API key          |
+| **DeepSeek**      | DeepSeek V4 Pro, V4.1 Flash                                                               | API key          |
+| **Sakana (Fugu)** | Fugu, Fugu Max, Fugu Ultra                                                                | API key          |
+| **OpenRouter**    | Qwen3.8 Max                                                                               | API key          |
+| **Hugging Face**  | Kimi K2.7 Code, DeepSeek V4.1 Flash, GPT-OSS 120B (Inference Providers router)            | API key          |
+| **Local**         | Any model on an OpenAI-compatible server: Ollama, LM Studio, llama.cpp, vLLM              | None             |
 
 Every hosted model above except GLM-5.3, DeepSeek V4 Pro, and GPT-OSS 120B accepts images.
 

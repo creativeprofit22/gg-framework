@@ -114,9 +114,7 @@ function request(
 }
 
 /** Open a window's SSE stream and collect the events it receives. */
-function openEventStream(
-  session: string,
-): Promise<{
+function openEventStream(session: string): Promise<{
   types: string[];
   events: { type: string; data: Record<string, unknown> }[];
   frames: { type: string; data?: Record<string, unknown> }[];

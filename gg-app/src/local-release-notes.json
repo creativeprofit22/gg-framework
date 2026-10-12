@@ -1,31 +1,24 @@
 {
   "schemaVersion": 1,
-  "date": "2026-10-09",
-  "label": "Upstream 0.86.0, with /commit, leaner Claude runs and Project Health",
+  "date": "2026-10-12",
+  "label": "Upstream 0.87.1, with Goals in beta and safer settings",
   "sections": [
     {
-      "title": "Upstream 0.82.2 to 0.86.0: in your app",
+      "title": "Upstream 0.86.0 to 0.87.1: in your app",
       "items": [
-        "Meet `Project Health`, a score from `0` to `100` in your workspace header. It checks your project for oversized files, messy hygiene, missing safety nets and leaked secrets, lists the worst offenders, and `Review` hands any of them to the agent to sort out.",
-        "Split panes stop doubling up on background work. Panes on the same project now share `one` set of git and GitHub checks instead of each running their own, so three panes on one repo do a third of the polling they used to.",
-        "What's New moved into the new campfire scene, where pixel critters gather round the fire and each update is a story in its light. The `Local Fork` and `Decisions` tabs live right inside it, next to upstream's own notes.",
-        "Popovers got a glow-up. `Background tasks` and `Schedules` open in a glassy panel with tiny critters showing what each job is up to, and each task now has a `Stop` button. The model picker closes with the same smooth motion and still opens clear of a narrow footer.",
-        "Links in chat open straight in your default app, `mailto:` and `tel:` included. If a link can't open, you get a notice saying so instead of a click that does nothing.",
-        "Ask the new `Don't embarrass me` checklist to look at your project the way a seasoned developer would on day one, and any result your code has moved past is marked `Code changed since` so you never trust a stale verdict."
+        "Say hello to `Goals`, now in beta. Tap `Goals` on the home screen, then `New goal`, name it, describe the outcome you want and attach any folders it should know about. GG Goals agrees the plan with you up front, then does the work itself or sends a little team of critter workers off to build, scout and check while you watch them on a cozy farm. Every stretch of work ends with an end-of-level card showing the time, workers, turns and tokens it took, plus one tap to `Read summary in Chat`.",
+        "Goals open where you picked them. In a split window, choosing a goal opens it in the pane that showed the picker instead of taking over your first pane, and a goal window stays a goal, name and all, after it reconnects.",
+        "Changing your projects folder in Settings no longer wipes everything else. Your saved models, `Autopilot` picks, hidden projects and local endpoints all stay exactly where you left them, and two windows saving at the same moment can no longer leave your settings file broken.",
+        "A run that fails now plays the error cue instead of the happy done sound, so you can tell what happened without looking.",
+        "Questions wait for you. A question the agent asks still shows up after you reload the window, and stopping a run leaves it open for you to answer.",
+        "Your Local Fork still never checks for or downloads updates on its own, so upstream's new update parade stays switched off here."
       ]
     },
     {
-      "title": "Upstream 0.82.2 to 0.86.0: in your agent",
+      "title": "Upstream 0.86.0 to 0.87.1: in your agent",
       "items": [
-        "Meet the built-in `/commit`, in every project. One command runs your checks and tests, has a reviewer look over the change, then commits it, and pushes when your branch already tracks a remote. Because the commit is now where work gets proven, plain replies stop showing an `Unverified` badge just because no checks ran yet.",
-        "Autopilot asks for proof before Ken reviews. If a run changed code without checking it, the agent runs its checks once first. Work that still isn't proven after that comes back to you with the reason, so Ken never signs off on untested changes.",
-        "Checks count even with harmless commands around them. A test run next to something like `cat` or `git diff --stat` now counts as a real check, while anything that could hide a failure or write files still doesn't.",
-        "Claude runs reuse more and break fewer edits. Every copy of a project now shares one cached set of instructions, busy tool loops use a short-lived cache while your own messages hold the long one, and Claude gets a simpler edit tool about a `quarter` the size of the old one.",
-        "Fewer runs die on a bad network day. When a provider hiccups with a Cloudflare `520` to `524` error, the agent now retries instead of stopping your task cold.",
-        "Every request travels far lighter. The agent now uses upstream's trimmed instructions and small starter toolset, keeps only the Local Fork rules that add something upstream lacks, and loads rarely used tools the moment it reaches for them. Each request sends about `21,000` fewer characters.",
-        "Meet `Claude Haiku 5.5`. It replaces Haiku 4.5 with a `1M` token memory and room for `128K` tokens of output, and `Kimi K2.7 Code HighSpeed` joins Moonshot.",
-        "You can watch Claude think again. Newer Claude models show their reasoning as readable summaries, and `Codex` thoughts arrive in tidy separate sections instead of one long wall of text.",
-        "A restarted shell picks up where it left off. If the agent's shell has to restart after a stall, it comes back in the same folder with the same environment instead of starting from scratch."
+        "Rewriting files is smoother. When the agent needs to replace a file it just does it instead of stalling, and it backs up any lines it hadn't looked at yet so nothing you care about quietly disappears.",
+        "Switch languages mid-chat and the agent keeps up. The moment a new language shows up in your project, it picks up the right coding style, and its helper agents get the same guidance, all without throwing away the conversation's cache."
       ]
     }
   ]

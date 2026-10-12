@@ -11,10 +11,9 @@ describe("TUI request output-token caps", () => {
   });
 
   it("recomputes and clamps the cap when the live model changes", () => {
-    expect([
-      resolveModelMaxTokens("gpt-6-astra"),
-      resolveModelMaxTokens("gemini-3-flash"),
-    ]).toEqual([128_000, 65_536]);
+    expect([resolveModelMaxTokens("gpt-6-astra"), resolveModelMaxTokens("gemini-3-flash")]).toEqual(
+      [128_000, 65_536],
+    );
     expect(resolveModelMaxTokens("gpt-6-astra", 100_000)).toBe(100_000);
     expect(resolveModelMaxTokens("gemini-3-flash", 100_000)).toBe(65_536);
   });

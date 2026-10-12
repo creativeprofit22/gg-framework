@@ -15,8 +15,12 @@ describe("chat error details exit", () => {
   it("measures the fold including padding and uses distinct sharp opacity exits", () => {
     expect(noticeSource).toContain("useAnimatedHeight(detailsRef, expanded, error)");
     expect(ruleBody(noticeStyles, ".chat-error-details")).toContain("overflow: hidden;");
-    expect(ruleBody(noticeStyles, ".chat-error-details-body")).toContain("padding-top: var(--space-4)");
-    expect(ruleBody(noticeStyles, ".chat-error-details.leaving .chat-error-details-body")).toContain("details-out var(--dur-row)");
+    expect(ruleBody(noticeStyles, ".chat-error-details-body")).toContain(
+      "padding-top: var(--space-4)",
+    );
+    expect(
+      ruleBody(noticeStyles, ".chat-error-details.leaving .chat-error-details-body"),
+    ).toContain("details-out var(--dur-row)");
     expect(noticeStyles).not.toMatch(/reverse|blur\(/);
   });
 

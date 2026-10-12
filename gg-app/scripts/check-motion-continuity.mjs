@@ -869,9 +869,16 @@ try {
               assert.equal(exit.exits, 1, `Dialog ${method} retains a visual exit`);
             }
           }
-          await page.locator(".app").evaluate(el => { el.scrollTop = 0; });
+          await page.locator(".app").evaluate((el) => {
+            el.scrollTop = 0;
+          });
           await page.waitForTimeout(350);
-          assert(await page.locator(".chat-error-copy").evaluate(el => el.getBoundingClientRect().width > 200), "Fixture uses the real error-notice grid, including a valid critter");
+          assert(
+            await page
+              .locator(".chat-error-copy")
+              .evaluate((el) => el.getBoundingClientRect().width > 200),
+            "Fixture uses the real error-notice grid, including a valid critter",
+          );
           await page.screenshot({ path: path.join(evidence, `${name}-${width}-components.png`) });
           await contentChecks(page, traces);
           await fallbackChecks(page, url, traces);

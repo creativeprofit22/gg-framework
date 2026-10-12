@@ -85,6 +85,9 @@ async function createAzureSession(options: { signal?: AbortSignal } = {}) {
 
 describe("AgentSession Azure Responses tool round trip", () => {
   it("declares, executes, submits, and follows an Azure function call with final text", async () => {
+    // `read` is a core tool, declared on the first request. (`ls` became an
+    // on-demand tool in the tool tiers and only appears after tool_search.)
+    await fs.writeFile(path.join(project, "notes.txt"), "azure round trip\n", "utf-8");
     const requestBodies: Record<string, unknown>[] = [];
     const fetchMock = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
       requestBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
@@ -93,25 +96,25 @@ describe("AgentSession Azure Responses tool round trip", () => {
           {
             type: "response.output_item.added",
             output_index: 0,
-            item: { type: "function_call", id: "fc_1", call_id: "call_1", name: "ls" },
+            item: { type: "function_call", id: "fc_1", call_id: "call_1", name: "read" },
           },
           {
             type: "response.function_call_arguments.delta",
             output_index: 0,
             item_id: "fc_1",
-            delta: '{"path":',
+            delta: '{"file_path":',
           },
           {
             type: "response.function_call_arguments.delta",
             output_index: 0,
             item_id: "fc_1",
-            delta: '"."}',
+            delta: '"notes.txt"}',
           },
           {
             type: "response.function_call_arguments.done",
             output_index: 0,
             item_id: "fc_1",
-            arguments: '{"path":"."}',
+            arguments: '{"file_path":"notes.txt"}',
           },
           {
             type: "response.output_item.done",
@@ -120,8 +123,8 @@ describe("AgentSession Azure Responses tool round trip", () => {
               type: "function_call",
               id: "fc_1",
               call_id: "call_1",
-              name: "ls",
-              arguments: '{"path":"."}',
+              name: "read",
+              arguments: '{"file_path":"notes.txt"}',
             },
           },
           {
@@ -167,10 +170,11 @@ describe("AgentSession Azure Responses tool round trip", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(requestBodies.map((body) => body.model)).toEqual(["test-deployment", "test-deployment"]);
     expect(requestBodies[0]?.tools).toEqual(
-      expect.arrayContaining([expect.objectContaining({ type: "function", name: "ls" })]),
+      expect.arrayContaining([expect.objectContaining({ type: "function", name: "read" })]),
     );
     expect(JSON.stringify(requestBodies[0]?.input)).toContain("List this project");
     expect(toolResults).toHaveLength(1);
+    expect(toolResults[0]).toContain("azure round trip");
 
     const secondInput = requestBodies[1]?.input as Record<string, unknown>[];
     expect(secondInput).toEqual(
@@ -179,8 +183,8 @@ describe("AgentSession Azure Responses tool round trip", () => {
           type: "function_call",
           id: "fc_1",
           call_id: "call_1",
-          name: "ls",
-          arguments: '{"path":"."}',
+          name: "read",
+          arguments: '{"file_path":"notes.txt"}',
         }),
         expect.objectContaining({
           type: "function_call_output",

@@ -498,7 +498,9 @@ describe("buildSystemPrompt", () => {
     for (const toolNames of [["steroids"], ["read", "bash"]]) {
       for (const planMode of [false, true]) {
         const prompt = await buildSystemPrompt(cwd, undefined, planMode, undefined, toolNames);
-        expect(prompt).toContain("Research only an unresolved API, design choice, or risk: local/installed source first");
+        expect(prompt).toContain(
+          "Research only an unresolved API, design choice, or risk: local/installed source first",
+        );
         expect(prompt).not.toContain("HARD RULE for nontrivial work");
         expect(prompt).not.toContain("BEFORE drafting");
         expect(prompt).not.toContain("Tip: install Agent Steroids");

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { localWireModelId, stream } from "./stream.js";
 import { GGAIError } from "./errors.js";
 import { providerRegistry } from "./provider-registry.js";
+import { continuesTurn } from "./utils/turn-continuation.js";
 import type { StreamOptions, ToolResultMessage } from "./types.js";
 
 describe("localWireModelId", () => {
@@ -116,6 +117,42 @@ describe("provider wire boundary", () => {
         },
       ]);
       expect(message.content[0]!.imageResult?.images).toHaveLength(2);
+    } finally {
+      providerRegistry.unregister("wire-capture");
+    }
+  });
+
+  it("marks a runtime notice as continuing the turn, invisibly on the wire", () => {
+    let captured: StreamOptions | undefined;
+    const sentinel = new Error("captured");
+    providerRegistry.register("wire-capture", {
+      stream: (options) => {
+        captured = options;
+        throw sentinel;
+      },
+    });
+    const meta = (kind: "notification" | "steering") => ({
+      source: "runtime" as const,
+      kind,
+      visibility: "hidden" as const,
+    });
+
+    try {
+      expect(() =>
+        stream({
+          provider: "wire-capture" as StreamOptions["provider"],
+          model: "test",
+          messages: [
+            { role: "user", content: "notice", provenance: meta("notification") },
+            { role: "user", content: "steer", provenance: meta("steering") },
+          ],
+        }),
+      ).toThrow(sentinel);
+      const [notice, steer] = captured?.messages ?? [];
+      if (!notice || !steer) throw new Error("messages not captured");
+      expect(continuesTurn(notice)).toBe(true);
+      expect(continuesTurn(steer)).toBe(false);
+      expect(JSON.stringify(notice)).toBe('{"role":"user","content":"notice"}');
     } finally {
       providerRegistry.unregister("wire-capture");
     }

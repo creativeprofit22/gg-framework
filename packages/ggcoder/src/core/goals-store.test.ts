@@ -264,6 +264,10 @@ describe("goals store", () => {
     expect(brief).toContain('coordinating the goal "Brief"');
     expect(brief).toContain("Ship it");
     expect(brief).toContain("(none attached yet)");
+    // goals-vs-coder bench: a bare `npm test` ran in the goal folder (no
+    // package.json) and left a failed check the passing `cd … &&` rerun
+    // could not clear, so the brief says where commands start.
+    expect(brief).toContain("Your own commands start in the goal folder, not in an attached one");
     expect(goalKickoffPrompt(created.value.record)).toContain("Brief");
   });
 

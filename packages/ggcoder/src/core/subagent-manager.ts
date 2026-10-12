@@ -584,7 +584,14 @@ export class SubAgentManager {
     worker.acceptance = undefined;
     worker.error = undefined;
     worker.collected = false;
-    await this.request(worker, "followup", { task, checks });
+    // Roots are fixed at initialize, so a folder attached since (a goal's new
+    // context) would stay out of reach of this worker's write tool. Send the
+    // current ones; the worker adds any it doesn't have yet.
+    await this.request(worker, "followup", {
+      task,
+      checks,
+      additionalRoots: this.sharedRoots(worker.cwd ?? this.options.cwd),
+    });
     worker.state = "running";
     worker.updated_at = Date.now();
     this.publish(worker);

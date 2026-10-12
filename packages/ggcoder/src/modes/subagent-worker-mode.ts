@@ -1,3 +1,4 @@
+import path from "node:path";
 import { createInterface } from "node:readline";
 import type { Provider, ThinkingLevel } from "@kenkaiiii/gg-ai";
 import { AgentSession } from "../core/agent-session.js";
@@ -128,6 +129,12 @@ export async function addSharedRoots(
   return added;
 }
 
+/** Absolute folder paths from a parent frame; anything else is dropped. */
+export function parseRootList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((root): root is string => typeof root === "string" && path.isAbsolute(root));
+}
+
 export interface SubagentWorkerInitialize {
   provider: Provider;
   model: string;
@@ -166,7 +173,14 @@ type WorkerCommand =
   | { request_id: string; command: "initialize"; options: SubagentWorkerInitialize }
   | { request_id: string; command: "start"; task: string; checks?: unknown }
   | { request_id: string; command: "queue_message"; message: string }
-  | { request_id: string; command: "followup"; task: string; checks?: unknown }
+  | {
+      request_id: string;
+      command: "followup";
+      task: string;
+      checks?: unknown;
+      /** The parent's shared roots now; any added since initialize join first. */
+      additionalRoots?: unknown;
+    }
   | { request_id: string; command: "interrupt" }
   | { request_id: string; command: "shutdown" };
 
@@ -467,6 +481,9 @@ export async function runSubagentWorkerMode(): Promise<void> {
         case "followup":
           if (!session) throw new Error("Worker is not initialized");
           if (state === "running") throw new Error("Worker already has an active turn");
+          if (command.command === "followup") {
+            await addSharedRoots(session, parseRootList(command.additionalRoots));
+          }
           acknowledge(command.request_id, { status: "running" });
           runTurn(command.task, parseAcceptanceChecks(command.checks));
           return;

@@ -19,6 +19,7 @@ import type {
 import { normalizeRootForAnthropic, resolveToolSchema } from "../utils/zod-to-json-schema.js";
 import { makeStrictToolSchema, UnsupportedStrictSchemaError } from "../utils/strict-tool-schema.js";
 import { DEFAULT_REASONING_FIELD } from "./reasoning-field.js";
+import { opensTurn } from "../utils/turn-continuation.js";
 
 // ── Shared helpers ─────────────────────────────────────────
 
@@ -800,11 +801,13 @@ export function toAnthropicMessages(
   const droppedToolCallIds = new Set<string>();
 
   // Thinking is preserved across the ACTIVE trajectory: every assistant turn
-  // after the last real user message (tool results are role "tool", not "user",
-  // so this is simply the last role==="user" index). Earlier, settled turns have
-  // thinking stripped to keep history robust against signature invalidation.
+  // after the last real user message (tool results are role "tool", not "user").
+  // Earlier, settled turns have thinking stripped to keep history robust against
+  // signature invalidation. A runtime notice (role "user", marked by stream())
+  // continues the turn: counting it as a boundary stripped the run's reasoning
+  // mid-run and rewrote the whole cached prefix on every worker/background update.
   const trajectoryStartIdx = messages.reduce(
-    (last, m, i) => (m.role === "user" ? i : last),
+    (last, m, i) => (opensTurn(m) ? i : last),
     -1 as number,
   );
 
@@ -826,7 +829,8 @@ export function toAnthropicMessages(
       } else if (!msg.content.some((p) => !(p.type === "text" && p.text === ""))) {
         continue;
       }
-      userTurnIdx.push(out.length);
+      // A notice is not a turn opener for the 1-h cache anchors either.
+      if (opensTurn(msg)) userTurnIdx.push(out.length);
       out.push({
         role: "user",
         content:

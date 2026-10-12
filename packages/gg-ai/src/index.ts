@@ -120,6 +120,7 @@ export {
   toOpenAIMessages,
 } from "./providers/transform.js";
 export type { ToolCallNameRule } from "./providers/transform.js";
+export { continuesTurn, opensTurn } from "./utils/turn-continuation.js";
 
 // Codex model family served with the Responses-Lite request shape
 export { usesResponsesLite } from "./providers/openai-codex-request.js";

@@ -1,5 +1,11 @@
 # @kenkaiiii/gg-ai
 
+## 5.79.2
+
+### Patch Changes
+
+- Runtime notices (a worker finished, a background process exited, post-edit diagnostics) no longer count as a new user turn for Anthropic. Before, each notice stripped the run's reasoning mid-run and rewrote the whole cached prefix; now the notice continues the current turn and the cache stays intact.
+
 ## 5.79.1
 
 ## 5.79.0

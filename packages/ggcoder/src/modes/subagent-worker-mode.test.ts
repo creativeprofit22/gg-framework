@@ -3,6 +3,7 @@ import type { AgentSession } from "../core/agent-session.js";
 import {
   addSharedRoots,
   classifyResolvedTurn,
+  parseRootList,
   recoverTimedOutTurn,
   resolveTurnTimeLimit,
 } from "./subagent-worker-mode.js";
@@ -27,6 +28,15 @@ describe("addSharedRoots", () => {
     const added = await addSharedRoots({ addDirectory }, ["/goal/site", "/goal/inside", "/gone"]);
     expect(added).toEqual(["/goal/site"]);
     expect(addDirectory).toHaveBeenCalledTimes(3);
+  });
+});
+
+describe("parseRootList", () => {
+  it("keeps only absolute folder paths from a parent frame", () => {
+    const absolute = process.platform === "win32" ? "C:\\goal\\site" : "/goal/site";
+    expect(parseRootList([absolute, "relative/dir", 42, null])).toEqual([absolute]);
+    expect(parseRootList(undefined)).toEqual([]);
+    expect(parseRootList("/goal/site")).toEqual([]);
   });
 });
 

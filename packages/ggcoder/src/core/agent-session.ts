@@ -236,7 +236,7 @@ import {
 import { extractPlanSteps, findCompletedMarkers } from "../utils/plan-steps.js";
 import { readFileSync } from "node:fs";
 import { clampThinkingForPlanMode } from "./thinking-level.js";
-import { pruneStaleToolResults } from "./compaction/tool-result-pruner.js";
+import { pruneStaleToolResults, shouldPruneToolResults } from "./compaction/tool-result-pruner.js";
 import { discoverAgents, type AgentDefinition } from "./agents.js";
 import { enhancePrompt, type EnhanceResult } from "../utils/prompt-enhancer.js";
 import { detectLanguages, detectProjectStack, type LanguageId } from "./language-detector.js";
@@ -3707,37 +3707,6 @@ ${content}
           if (!force) {
             if (!this.settingsManager.get("autoCompact")) return messages;
 
-            // Cheap stale-tool-output pruning before the expensive LLM
-            // compaction check. In-place mutation preserves anchors; drop the
-            // retained usage afterwards since it counted the pruned content.
-            const pruneResult = pruneStaleToolResults(messages);
-            if (pruneResult.pruned) {
-              this.cacheDiagnostics.noteEdit("tool_prune", pruneResult.freedTokens);
-              this.providerContext = null;
-              log("INFO", "compaction", "Pruned stale tool outputs", {
-                prunedResults: String(pruneResult.prunedResults),
-                compactedToolCalls: String(pruneResult.compactedToolCalls),
-                freedTokens: String(pruneResult.freedTokens),
-              });
-            }
-
-            if (Date.now() < this.compactionRetryAfter) return messages;
-
-            // The turn's own usage also counted the pruned content — after a
-            // prune, fall back to estimating the (now smaller) history so the
-            // freed tokens actually defer the LLM compaction.
-            let usage = pruneResult.pruned ? undefined : transformOpts.usage;
-            let pendingMessages = transformOpts.pendingMessages;
-            if (!usage && this.providerContext) {
-              const anchorIndex = messages.lastIndexOf(this.providerContext.anchor);
-              if (anchorIndex >= 0) {
-                usage = this.providerContext.usage;
-                pendingMessages = messages.slice(anchorIndex + 1);
-              } else {
-                this.providerContext = null;
-              }
-            }
-
             const contextWindow = getContextWindow(this.model, {
               provider: this.provider,
               accountId,
@@ -3751,10 +3720,48 @@ ${content}
               accountId,
               approvedPlanPath: this.approvedPlanPath,
             });
-            const activeTokens = calculateActiveContextTokens(messages, {
-              usage,
-              pendingMessages,
-            });
+            // Provider usage when there is some, else an estimate of the history.
+            const measureActiveTokens = (): number => {
+              let usage = transformOpts.usage;
+              let pendingMessages = transformOpts.pendingMessages;
+              if (!usage && this.providerContext) {
+                const anchorIndex = messages.lastIndexOf(this.providerContext.anchor);
+                if (anchorIndex >= 0) {
+                  usage = this.providerContext.usage;
+                  pendingMessages = messages.slice(anchorIndex + 1);
+                } else {
+                  this.providerContext = null;
+                }
+              }
+              return calculateActiveContextTokens(messages, { usage, pendingMessages });
+            };
+            let activeTokens = measureActiveTokens();
+
+            // Cheap stale-tool-output pruning before the expensive LLM
+            // compaction check, once the context is big enough for the freed
+            // tokens to be worth a cache rewrite. In-place mutation preserves
+            // anchors; drop the retained usage afterwards since it counted the
+            // pruned content.
+            if (shouldPruneToolResults(activeTokens, policy.targetTokens)) {
+              const pruneResult = pruneStaleToolResults(messages);
+              if (pruneResult.pruned) {
+                this.cacheDiagnostics.noteEdit("tool_prune", pruneResult.freedTokens);
+                this.providerContext = null;
+                log("INFO", "compaction", "Pruned stale tool outputs", {
+                  prunedResults: String(pruneResult.prunedResults),
+                  compactedToolCalls: String(pruneResult.compactedToolCalls),
+                  freedTokens: String(pruneResult.freedTokens),
+                });
+                // The turn's own usage also counted the pruned content — estimate
+                // the (now smaller) history so the freed tokens actually defer
+                // the LLM compaction.
+                activeTokens = calculateActiveContextTokens(messages, {
+                  pendingMessages: transformOpts.pendingMessages,
+                });
+              }
+            }
+
+            if (Date.now() < this.compactionRetryAfter) return messages;
             // An approved plan runs as ONE run, so step boundaries are only
             // visible here, between model steps — not after the run ends.
             const planStep = this.observePlanStepProgress(messages, contextWindow, activeTokens);
@@ -5736,7 +5743,7 @@ ${content}
       return relative.startsWith("..") || path.isAbsolute(relative);
     });
     this.additionalRoots.push(resolved);
-    await this.rebuildSystemPromptInPlace();
+    await this.refreshPromptForRoots();
     return { ok: true, root: resolved };
   }
 
@@ -5751,8 +5758,19 @@ ${content}
     }
 
     this.additionalRoots.splice(index, 1);
-    await this.rebuildSystemPromptInPlace();
+    await this.refreshPromptForRoots();
     return { ok: true, root: resolved };
+  }
+
+  /**
+   * Name a root change in the prompt only while there is no conversation yet.
+   * Mid-conversation the env-delta note tells the model instead: the roots sit
+   * in the Environment section, and rewriting it would invalidate every cached
+   * message after it (a goal attaching a folder re-sent ~75k tokens).
+   */
+  private async refreshPromptForRoots(): Promise<void> {
+    if (this.messages.some((message) => message.role !== "system")) return;
+    await this.rebuildSystemPromptInPlace();
   }
 
   /**

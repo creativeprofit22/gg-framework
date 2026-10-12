@@ -22,6 +22,14 @@ export interface ChangelogEntry {
 /** Newest first. Prepended by the `/release` flow. */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.87.2",
+    date: "2026-10-12",
+    items: [
+      "Long sessions just got a lot cheaper and snappier. Adding or removing a folder mid-chat used to re-send around `75k` tokens, and now it costs almost nothing. When a worker finishes or a background task wraps up, the agent keeps its train of thought and your cache instead of starting over. It also waits until your context is half full before tidying up old tool output, so you stop paying for cleanups that cost more than they saved.",
+      "`Goals` workers now see every folder you attach, even ones you add after the goal has started. A worker picking up a `followup_task` can edit those files properly instead of working around them, so the job lands cleaner.",
+    ],
+  },
+  {
     version: "0.87.1",
     date: "2026-10-12",
     items: [

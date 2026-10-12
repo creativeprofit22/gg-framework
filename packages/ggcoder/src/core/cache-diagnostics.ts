@@ -1,5 +1,11 @@
 import { createHash } from "node:crypto";
-import type { CacheRetention, Message, PreparedContext, Usage } from "@kenkaiiii/gg-ai";
+import {
+  opensTurn,
+  type CacheRetention,
+  type Message,
+  type PreparedContext,
+  type Usage,
+} from "@kenkaiiii/gg-ai";
 import { resolveCacheTtl, type CacheTouch } from "./cache-expiry.js";
 
 /** Digests never leave this instance. Canonical object keys avoid spurious edits on resume. */
@@ -184,7 +190,7 @@ export class CacheDiagnostics {
     if (settingsChanged) firstEdit = -1;
     let lastUser = -1;
     context.messages.forEach((message, index) => {
-      if (message.role === "user") lastUser = index;
+      if (opensTurn(message)) lastUser = index;
     });
     let thinkingPrefixRiskBlocks = 0;
     let settledThinkingBlocks = 0;

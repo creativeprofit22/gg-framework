@@ -166,6 +166,27 @@ describe("SubAgentManager", () => {
     expect((await optionsOf(false)).additionalRoots).toBeUndefined();
   });
 
+  it("sends a follow-up the roots attached since the child started", async () => {
+    // Live goal: a website folder attached mid-goal stayed blocked for the
+    // resumed worker's write tool, so it edited through the shell instead.
+    const home = await tempDir();
+    const site = await tempDir();
+    const web = await tempDir();
+    const roots = [site];
+    const instance = manager({ cwd: home, workspaceRoots: roots, shareWorkspaceRoots: true });
+    const requestSpy = vi.spyOn(
+      instance as unknown as { request: (...args: unknown[]) => Promise<unknown> },
+      "request",
+    );
+    const child = await instance.spawn("w", "fast", "fake", { cwd: site });
+    await instance.wait([child.agent_id], "all", 1_000);
+
+    roots.push(web);
+    await instance.followup(child.agent_id, "fast");
+    const call = requestSpy.mock.calls.find(([, command]) => command === "followup");
+    expect(call?.[2]).toMatchObject({ additionalRoots: [path.resolve(web)] });
+  });
+
   it("starts a child that names no agent as the default agent, when there is one", async () => {
     // Live run: GG Goals left out `agent` and the worker ran with GG Coder's
     // generic prompt instead of its team's rules.

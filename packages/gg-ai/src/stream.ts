@@ -20,6 +20,7 @@ import {
 } from "./providers/transform.js";
 import { sanitizeMessagesForWire } from "./utils/well-formed.js";
 import { observePreparedContext } from "./utils/context-observation.js";
+import { markContinuesTurn } from "./utils/turn-continuation.js";
 
 /** OpenAI's documented cap: an embeddings `input` array may hold at most 2048 entries. */
 const OPENAI_EMBED_BATCH_SIZE = 2048;
@@ -374,13 +375,19 @@ function stripMessageProvenance(messages: Message[]): Message[] {
       message.role === "tool" && message.content.some((result) => result.imageResult !== undefined);
     if (!message.provenance && !hasImageResult) continue;
     stripped ??= messages.slice();
-    const { provenance: _provenance, ...wireMessage } = message;
+    const { provenance, ...wireMessage } = message;
     if (wireMessage.role === "tool" && hasImageResult) {
       wireMessage.content = wireMessage.content.map(
         ({ imageResult: _imageResult, ...result }) => result,
       );
     }
-    stripped[index] = wireMessage as Message;
+    // A runtime notice continues the current turn; keep that one fact (as a
+    // wire-safe marker) so the Anthropic encoder doesn't treat it as a new turn
+    // and strip the run's reasoning, which rewrote the whole cached prefix.
+    stripped[index] =
+      provenance?.kind === "notification" && message.role === "user"
+        ? markContinuesTurn(wireMessage as Message)
+        : (wireMessage as Message);
   }
   return stripped ?? messages;
 }

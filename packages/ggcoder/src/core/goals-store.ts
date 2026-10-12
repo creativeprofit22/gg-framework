@@ -453,6 +453,7 @@ export function renderGoalPrompt(
     context,
     "",
     `Goal folder (shared notes and artifacts for this goal): ${dir}`,
+    "Your own commands start in the goal folder, not in an attached one: run a project's checks from its folder (`cd <attached folder> && npm test`).",
     "",
     ...(record.instructions
       ? [

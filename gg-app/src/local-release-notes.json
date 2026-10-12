@@ -1,13 +1,14 @@
 {
   "schemaVersion": 1,
   "date": "2026-10-12",
-  "label": "Upstream 0.87.1, with Goals in beta and safer settings",
+  "label": "Upstream 0.87.2, with Goals in beta and safer settings",
   "sections": [
     {
-      "title": "Upstream 0.86.0 to 0.87.1: in your app",
+      "title": "Upstream 0.86.0 to 0.87.2: in your app",
       "items": [
         "Say hello to `Goals`, now in beta. Tap `Goals` on the home screen, then `New goal`, name it, describe the outcome you want and attach any folders it should know about. GG Goals agrees the plan with you up front, then does the work itself or sends a little team of critter workers off to build, scout and check while you watch them on a cozy farm. Every stretch of work ends with an end-of-level card showing the time, workers, turns and tokens it took, plus one tap to `Read summary in Chat`.",
         "Goals open where you picked them. In a split window, choosing a goal opens it in the pane that showed the picker instead of taking over your first pane, and a goal window stays a goal, name and all, after it reconnects.",
+        "Goal workers see every folder you attach, even ones you add after the goal has started. A worker picking up a `followup_task` can now edit those files properly instead of working around them.",
         "Changing your projects folder in Settings no longer wipes everything else. Your saved models, `Autopilot` picks, hidden projects and local endpoints all stay exactly where you left them, and two windows saving at the same moment can no longer leave your settings file broken.",
         "A run that fails now plays the error cue instead of the happy done sound, so you can tell what happened without looking.",
         "Questions wait for you. A question the agent asks still shows up after you reload the window, and stopping a run leaves it open for you to answer.",
@@ -15,8 +16,9 @@
       ]
     },
     {
-      "title": "Upstream 0.86.0 to 0.87.1: in your agent",
+      "title": "Upstream 0.86.0 to 0.87.2: in your agent",
       "items": [
+        "Long sessions stay cheaper. Adding or removing a folder mid-chat no longer re-sends the whole conversation, and when a worker finishes or a background task wraps up, the agent keeps its train of thought and your cache instead of starting over. It also waits until your context is half full before tidying up old tool output, so cleanups stop costing more than they save.",
         "Rewriting files is smoother. When the agent needs to replace a file it just does it instead of stalling, and it backs up any lines it hadn't looked at yet so nothing you care about quietly disappears.",
         "Switch languages mid-chat and the agent keeps up. The moment a new language shows up in your project, it picks up the right coding style, and its helper agents get the same guidance, all without throwing away the conversation's cache."
       ]

@@ -39,9 +39,9 @@ describe("resolveResumeSessionPath", () => {
       calls += 1;
       if (calls < 3) throw errno("ENOENT");
     });
-    expect(
-      await resolveResumeSessionPath("s.jsonl", { access, sleep: noSleep, attempts: 4 }),
-    ).toBe("s.jsonl");
+    expect(await resolveResumeSessionPath("s.jsonl", { access, sleep: noSleep, attempts: 4 })).toBe(
+      "s.jsonl",
+    );
   });
 
   it("resumes a file that is locked or pending replacement", async () => {

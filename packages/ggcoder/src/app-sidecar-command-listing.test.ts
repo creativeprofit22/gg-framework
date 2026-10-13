@@ -133,6 +133,25 @@ describe("setup-first desktop discovery", () => {
     }
   });
 
+  it("lists the user's own global /commit instead of the built-in, exactly once", async () => {
+    const globalDir = path.join(root, "home", ".gg", "commands");
+    await fs.mkdir(globalDir, { recursive: true });
+    await fs.writeFile(
+      path.join(globalDir, "commit.md"),
+      "---\nname: commit\ndescription: Atomic commits\n---\nGroup into atomic commits.",
+    );
+    const commits = (await appSidecarCodeCommandsResponse(cwd)).commands.filter(
+      (item) => item.name === "commit",
+    );
+    expect(commits).toEqual([
+      expect.objectContaining({
+        description: "Atomic commits",
+        source: "custom",
+        origin: "global-custom",
+      }),
+    ]);
+  });
+
   it("re-reads command creation and removal without restarting discovery", async () => {
     expect(
       (await appSidecarCodeCommandsResponse(cwd)).commands.some((item) => item.name === "fresh"),

@@ -252,6 +252,37 @@ describe("slash-command restore", () => {
     await session.dispose();
   }, 20_000);
 
+  it("runs the user's own global commit.md instead of the built-in /commit, but keeps other built-ins", async () => {
+    const { AgentSession } = await import("./agent-session.js");
+    const globalDir = path.join(tmpHome, ".gg", "commands");
+    await fs.mkdir(globalDir, { recursive: true });
+    await fs.writeFile(
+      path.join(globalDir, "commit.md"),
+      "---\nname: commit\ndescription: Atomic commits\n---\nGroup changes into ATOMIC COMMITS.",
+      "utf-8",
+    );
+    // A same-named custom file does not take over a non-overridable built-in.
+    await fs.writeFile(path.join(globalDir, "init.md"), "CUSTOM INIT BODY", "utf-8");
+    const session = new AgentSession({
+      provider: "anthropic",
+      model: "claude-test",
+      cwd: tmpProject,
+      systemPrompt: "sys",
+    });
+    await session.initialize();
+    try {
+      await session.prompt("/commit");
+      await session.prompt("/init");
+      const users = session.getMessages().filter((m) => m.role === "user");
+      const commitBody = users[0]!.content as string;
+      expect(commitBody).toContain("Group changes into ATOMIC COMMITS.");
+      expect(commitBody).not.toContain("Fast review gate");
+      expect(users[1]!.content as string).not.toContain("CUSTOM INIT BODY");
+    } finally {
+      await session.dispose();
+    }
+  }, 20_000);
+
   it("accepts approved focus while rejecting invalid focus, references and attachments", async () => {
     const { AgentSession } = await import("./agent-session.js");
     const session = new AgentSession({

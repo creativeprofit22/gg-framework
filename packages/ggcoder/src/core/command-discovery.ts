@@ -12,7 +12,11 @@ import {
   type CustomCommand,
 } from "./custom-commands.js";
 import { log } from "./logger.js";
-import { PROMPT_COMMANDS, type PromptCommand } from "./prompt-commands.js";
+import {
+  CUSTOM_OVERRIDABLE_PROMPT_COMMANDS,
+  PROMPT_COMMANDS,
+  type PromptCommand,
+} from "./prompt-commands.js";
 import { programmaticCommandReferenceV1Schema } from "./programmatic/contracts.js";
 import {
   assessProgrammaticSetup,
@@ -129,7 +133,13 @@ export async function discoverCommands(
     if (options.workspaceCaseInsensitive)
       for (const name of [item.name, ...item.aliases]) workspaceClaims.add(name.toLowerCase());
   }
+  const catalog = await loadCustomCommandCatalog(cwd);
+  // A user's own command replaces an overridable built-in (e.g. /commit), so
+  // the listing names the recipe that actually runs (see agent-session).
+  const customNames = new Set(catalog.commands.map((custom) => custom.name));
   for (const prompt of PROMPT_COMMANDS) {
+    if (CUSTOM_OVERRIDABLE_PROMPT_COMMANDS.has(prompt.name) && customNames.has(prompt.name))
+      continue;
     add({
       prompt,
       listing: {
@@ -145,7 +155,6 @@ export async function discoverCommands(
   }
   // The selection/approval helper is reserved even in hosts that do not advertise it.
   claimed.add("programmatic-run");
-  const catalog = await loadCustomCommandCatalog(cwd);
   const problems: SlashCommandProblem[] = [...catalog.problems];
   for (const custom of catalog.commands) {
     if (!custom.name.length || custom.name.length > SLASH_COMMAND_NAME_MAX_LENGTH) {

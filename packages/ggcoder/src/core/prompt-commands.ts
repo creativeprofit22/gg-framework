@@ -234,9 +234,10 @@ ${CLAUDE_MD_RESTART_NOTICE}`,
   },
   {
     // The verification point for every project: replies leave checks to the
-    // commit, which is the one real end of a piece of work. A project's own
-    // `.gg/commands/commit.md` (from /setup-commit) is shadowed by this name,
-    // so step 1 defers to it.
+    // commit, which is the one real end of a piece of work. A user's own
+    // `commit.md` (project `.gg/commands/` or global `~/.gg/commands/`)
+    // replaces this built-in outright; see CUSTOM_OVERRIDABLE_PROMPT_COMMANDS.
+    // Step 1 still defers to a project file for hosts that predate that.
     name: "commit",
     aliases: [],
     description: "Run checks, review, commit with AI message, and push if tracking a remote",
@@ -618,6 +619,14 @@ If strong candidates had no ecosystem match, list them at the bottom:
 After presenting the list, ask which (if any) to install. Install nothing without explicit confirmation. Once confirmed, hand off to find-skills to perform the actual install.`,
   },
 ];
+
+/**
+ * Built-ins a user's own custom command of the same name replaces (project
+ * or global). Every other built-in keeps its name, as before. `/commit` is a
+ * personal workflow: a hand-tuned recipe, such as atomic grouped commits,
+ * must not be silently shadowed by the generic single-commit built-in.
+ */
+export const CUSTOM_OVERRIDABLE_PROMPT_COMMANDS: ReadonlySet<string> = new Set(["commit"]);
 
 /** Look up a prompt command by name or alias and render session-aware instructions. */
 export function getPromptCommand(

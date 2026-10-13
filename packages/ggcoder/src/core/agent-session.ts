@@ -45,7 +45,7 @@ import {
   createBuiltinCommands,
   type SlashCommandContext,
 } from "./slash-commands.js";
-import { getPromptCommand } from "./prompt-commands.js";
+import { CUSTOM_OVERRIDABLE_PROMPT_COMMANDS, getPromptCommand } from "./prompt-commands.js";
 import { appendCommandArguments, loadCustomCommands } from "./custom-commands.js";
 import { workflowQueuePolicyError } from "./workflow-busy-policy.js";
 import {
@@ -1911,11 +1911,13 @@ export class AgentSession {
           this.tools.some((tool) => tool.name === toolName),
         )
       : undefined;
-    const customCmds = coderCommands && !builtinPromptCmd ? await loadCustomCommands(this.cwd) : [];
-    const customPromptCmd = !builtinPromptCmd
-      ? customCmds.find((c) => c.name === parsed.name)
-      : undefined;
-    const promptText = builtinPromptCmd?.prompt ?? customPromptCmd?.prompt;
+    // Custom commands fill names no built-in claims, and replace the few
+    // built-ins a user's own recipe may override (e.g. their own /commit).
+    const customCanReplace =
+      !builtinPromptCmd || CUSTOM_OVERRIDABLE_PROMPT_COMMANDS.has(builtinPromptCmd.name);
+    const customCmds = coderCommands && customCanReplace ? await loadCustomCommands(this.cwd) : [];
+    const customPromptCmd = customCmds.find((c) => c.name === parsed.name);
+    const promptText = customPromptCmd?.prompt ?? builtinPromptCmd?.prompt;
     const inputPolicyError = this.promptInputPolicyError(content);
     if (inputPolicyError) return { kind: "command", result: inputPolicyError };
     // No template body — a registry/action command that runs and returns text

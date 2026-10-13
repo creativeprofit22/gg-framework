@@ -15,7 +15,8 @@
       "title": "Upstream 0.87.3 and 0.88.0: in your agent",
       "items": [
         "Claude `Opus 5.5`, `Sonnet 5.5` and `Haiku 5.5` now start fresh chats at `medium` effort, the same default Anthropic uses, so answers come faster and cost less. Any level you've already picked stays exactly as you set it.",
-        "`Goals` workers now build from real code instead of memory. With `Steroids` installed, builders and checkers can look up how real open-source projects actually use a library before they write a line, so the work lands right the first time."
+        "`Goals` workers now build from real code instead of memory. With `Steroids` installed, builders and checkers can look up how real open-source projects actually use a library before they write a line, so the work lands right the first time.",
+        "Searching your project is faster and more complete. Big searches now share the work across your computer's cores, skip folders your project ignores like build output and caches, and look through up to 100,000 files instead of quietly stopping at 10,000, so even huge projects get every match."
       ]
     }
   ]

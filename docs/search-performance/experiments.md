@@ -149,3 +149,136 @@ launches than H1/H2.
 - **Raw results:** `.gg/verification/search-bench-baseline-cold-2026-10-11.zip`
   (sha256 `70891722d2f3a005eb46618d6dc42dfef38281cbd7324fc82ea54abafb01c271`),
   containing both cold sessions and the combined report.
+
+## 2. Bundled ripgrep with `--json` parsing (2026-10-12)
+
+- **Idea and expected gain:** ship a pinned ripgrep 15.2.0 (bundled → PATH →
+  in-process), read its `--json` events, report complete/partial status and
+  kill the child on cancel or deadline. Expected: walk-bound queries (Q1, Q4,
+  Q8, Q10) stop pinning the 5 s deadline, so H2 and H1 improve; H3 measures
+  the in-process engine and should not move.
+- **Commit / worktree:** `89ccdd188b92c4ad51777281de3269ceef07e989` (local
+  branch `search/ripgrep-json`, not pushed) at
+  `E:/Projects/gg-search-bench/worktrees/rg-json`: clean, dist newer than src,
+  `grep.js` sha256 prefix `ffe3b85f8d8c`, vendored `rg.exe` 15.2.0
+  `x86_64-pc-windows-msvc` sha256 `14231169855e…6680` (matches its staging
+  manifest). Baseline `df1a353` as in entry 1, re-measured in the same
+  sessions.
+- **Spec version:** 1. Frozen tree hash `3cc2dcdda597…`.
+- **Harness changes (adapter only):** the worker unwraps the new
+  `{ content, details }` result and classifies only the text, by the same
+  notice rules as before; it records the tool's own engine/status next to the
+  spy's attribution and flags any status/notice disagreement. Provenance now
+  refuses a version whose bundled-rg lookup has nothing staged, or whose
+  staged binary no longer matches its manifest hash. The baseline still
+  returns text, so its measurements are unaffected.
+- **Sessions / launches / cold method:** `rgjson-quick-1` (quick, 4 launches),
+  `rgjson-quick-2` (quick, 4 launches, target order reversed) and
+  `rgjson-full-1` (full, 2 launches): 12 launches per version for headline
+  cells, 2 for exploratory cells. All warm, same boot. Node v22.20.0, High
+  performance, AC, SysMain stopped, Windows Search running, Defender
+  real-time on, not admin, free RAM 11.6–14.4 GB, rg not on PATH (the
+  candidate used only its bundled copy).
+
+### Headlines (warm, 12 launches, 3 sessions)
+
+| ID              | Baseline | rg-json  | Ratio (higher = better) [95% CI] | Rule outcome |
+| --------------- | -------- | -------- | -------------------------------- | ------------ |
+| H1 calls/s @100 | 19.68    | 16.60    | **0.844** [0.824, 0.865]         | worse        |
+| H2 p99 @16      | 5 011 ms | 1 573 ms | **3.186** [3.040, 3.554]         | ≥ 1.30, CI>1 |
+| H3 Q2 p50 @1    | 45.7 ms  | 47.6 ms  | 0.960 [0.914, 1.005]             | no change    |
+| H4 cold p50     | –        | –        | no data                          | not measured |
+
+A/A checks (launch parity split) contain 1.0 for every headline of both
+versions.
+
+- **Correctness:** 60 730 checked candidate outputs, 0 failures; 18 924
+  complete calls matched the uncapped oracle exactly (baseline: 2 682, because
+  most of its walk-bound calls were cut off). Tool status agreed with the
+  output notices on every call.
+- **Errors:** 20 candidate errors in 74 790 calls, all `This operation was
+aborted` from the cancel cell, where the candidate now throws on abort
+  instead of returning a partial answer (intended). 0 errors in every other
+  cell. Baseline: 0 in 67 956.
+- **Deadline hits:** overall 22.0 % (candidate) vs 34.0 % (baseline). At 16
+  concurrent agent-mix calls 0.00 % vs 6.41 %; at 100, **42.6 % vs 40.0 %**.
+
+### Verdict
+
+- **Reverted** by the pre-registered rule. H2 alone clears the 1.30 bar, but
+  H1 regresses (0.84×, CI entirely below 1.0) and the reliability gate fails:
+  the rule compares the candidate's overall error rate (0.027 %) with the
+  baseline's 95 % CI, whose upper bound with 0 errors is about 0.005 %. All 20
+  errors are deliberate cancellations; the rule as written counts them, and
+  it is applied as written. H4 was not measured (no cold session), so it
+  cannot rescue or sink the result.
+- Consequence for this record: "Current best" and `bench/baseline/search.json`
+  stay on `df1a353`.
+- **Final (2026-10-12): no rerun.** The deadline-overrun fix below came after
+  this benchmark (candidate `89ccdd18` vs baseline `df1a353`). It targets Q7,
+  which is not in H1's agent mix (Q1–Q5), so it cannot rescue H1. The verdict
+  stays **reverted**.
+- rg-json is not merged into `custom/local-customizations`. Branch
+  `search/ripgrep-json` stays local and is not pushed.
+
+### Main observations (exploratory)
+
+- **Per-query @16 (rg vs baseline p50):** Q1 rare literal 1.20 s vs 5.03 s
+  (deadline 100 % → 0 %), Q4 include filter 0.69 s vs 5.04 s, Q8
+  match-nothing 1.15 s vs 5.03 s. Q10 many small files still hits the
+  deadline (98 %). Common-literal Q2 is **slower** with rg (2.83 s vs 0.62 s),
+  Q3 1.52 s vs 0.96 s: these used to stop early at the result cap, while exact
+  path-ordered top-N via rg must read every match.
+- **Q7 match-everything is pathological via rg:** p50 4.7 s at concurrency 1
+  vs 36 ms in-process, and p99 **26.6 s at 16 — far past the 5 s deadline.**
+  Profiling found the cause in this commit's runner, not in rg: (1) each match
+  event's `submatches` array holds one object per matched character, so `.`
+  over minified lines produces multi-megabyte JSON lines; (2) readline
+  re-scans a pending line on every chunk, which is quadratic for such lines;
+  together they blocked the event loop for 5–18 s, deadline timer included.
+  See "Post-benchmark fix" below.
+- **Concurrency ladder (agent mix, deadline on, UV 4), calls/s at
+  1 / 4 / 16 / 32 / 64 / 100:** rg 13.9 / 12.3 / 12.3 / 11.7 / 12.1 / 16.6;
+  baseline 17.5 / 3.8 / 3.4 / 6.4 / 12.6 / 19.7. rg holds ~12 calls/s with 0 %
+  deadline hits up to 32; past 64 it saturates the 12-thread CPU (each rg uses
+  all cores) and p99 overshoots the deadline (6.7 s at 100).
+- **UV 16** made no material difference for rg (deadline-on @100: 17.0 vs
+  16.6 calls/s). **Deadline off** @16: rg p99 1.33 s vs baseline 5.65 s.
+- **Open loop:** knee moved from 4 to **16 arrivals/s**, but above the knee rg
+  latencies grew without bound (p99 28 s at the knee step, 48 s max), worse
+  than the baseline's deadline-capped tail.
+- **Cancel (abort at ~50 ms):** settle time after abort, from call latency
+  minus abort time: Q6 67–103 ms (baseline 4.96–5.24 s), Q2 via rg 3–5 ms.
+  0 rg processes alive 100 ms after abort and 1 s after return in every run.
+  The harness's own `returnAfterAbortMs` waits 100 ms before awaiting the
+  call, so it has a 100 ms floor and is not used here.
+- **Soak** (16 concurrent, 10 min, 2 launches): 0 deadline hits (baseline
+  39.9 %), p99 4.1 s vs 5.1 s, RSS +1.3 and +7.0 MB/min (baseline +3.5 and
+  +3.7), handles flat. 0 rg left after any run.
+- **rg CLI ceiling:** not available. The cell runs `rg` from PATH, which this
+  machine lacks; it does not use the bundled copy.
+
+### Post-benchmark fix (not measured by the rule)
+
+Found by this run and fixed in the working tree after `89ccdd18`: the runner
+now splits rg output with a linear byte-level splitter that drops each match
+event's `submatches` bytes as they stream in, skips formatting for matches
+that cannot make the top-N, and stops parsing once the search is stopped.
+Regression tests in `packages/ggcoder/src/tools/grep.test.ts`. An ad-hoc probe
+on the frozen tree (not a harness session, exploratory only), Q7 `.` with the
+5 s deadline: 1 call 7.7 s → 1.6 s; 16 concurrent calls 18.1 s → 5.6 s, with
+the longest event-loop block 18.0 s → 1.6 s. This change is not committed and
+has no harness measurement. It is not rerun (see Verdict), so no verdict
+covers it.
+
+### Limits
+
+- No cold sessions: H4 has no data for either version this time (needs a
+  reboot window or RAMMap as admin). Recorded as not measured, not estimated.
+- Exploratory cells have 2 launches each; their CIs are wide.
+- macOS (Apple Silicon) packaging is unverified here; only the Windows bundle
+  was built and smoke-tested.
+- **Raw results:** `.gg/verification/search-bench-rg-json-2026-10-12.zip`
+  (sha256 `3880d1bfd2883cfef4b7657ba089c492eeceab40311d9da43cfcd78e830cbc3e`),
+  containing the three sessions and `rgjson-combined` (`report.md`,
+  `report.json`, SVGs).

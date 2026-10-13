@@ -166,6 +166,43 @@ describe("GoalWorld", () => {
     expect(screen.getByRole("alert").textContent).toContain("Which one?");
   });
 
+  it("shows Ken's status, and steps it aside while a sign is up so only one thing shows", () => {
+    const status = {
+      key: "tool:1",
+      tone: "work",
+      icon: "read",
+      face: "focused",
+      headline: "Reading search.ts",
+      detail: "In server/rag",
+      mark: null,
+      opens: false,
+      thinking: false,
+      timed: true,
+    } as const;
+    const props = {
+      goalId: "g",
+      running: true,
+      liveTools: [],
+      waitingOnUser: false,
+      workers: [],
+      kenStatus: status,
+    };
+    const { container, rerender } = render(<GoalWorld {...props} />);
+    const pill = container.querySelector(".ken-status");
+    expect(pill?.textContent).toContain("Reading search.ts");
+    expect(pill?.hasAttribute("data-away")).toBe(false);
+    // It's decoration: the live summary says the same for screen readers.
+    expect(pill?.getAttribute("aria-hidden")).toBe("true");
+    expect(container.querySelector(".goal-world-summary")?.textContent).toContain(
+      "Reading search.ts",
+    );
+    // A question goes up: the status steps aside rather than sharing the screen.
+    rerender(<GoalWorld {...props} waitingOnUser ask={{ question: "Which one?" }} />);
+    expect(container.querySelector(".ken-status")?.hasAttribute("data-away")).toBe(true);
+    rerender(<GoalWorld {...props} ask={null} />);
+    expect(container.querySelector(".ken-status")?.hasAttribute("data-away")).toBe(false);
+  });
+
   it("lists the farm's things as buttons, so they can be poked from the keyboard", () => {
     render(
       <GoalWorld goalId="g" running={false} liveTools={[]} waitingOnUser={false} workers={[]} />,

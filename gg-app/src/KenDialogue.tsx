@@ -19,9 +19,17 @@ interface Props {
   readonly said: KenSaid | null;
   /** The workers, to say when one finishes or fails. */
   readonly workers: readonly FloorAgent[];
-  /** Keep quiet (the farm's question sign is up). */
+  /**
+   * Keep quiet: a sign is up over the farm (a question, or the finish card).
+   * A line already under way stops where it is, so the sign never shares the
+   * screen with him; it isn't said again.
+   */
   readonly paused: boolean;
+  /** Don't start a new line for now (the user is reading Ken's status). */
+  readonly held?: boolean;
   readonly reducedMotion: boolean;
+  /** Told when the box comes up and when it has gone again. */
+  readonly onShownChange?: (shown: boolean) => void;
 }
 
 // Entrance and exit lengths; they match the CSS (App.css, .ken-dialogue):
@@ -50,7 +58,14 @@ type Phase = "hidden" | "entering" | "talking" | "leaving";
  * stay in the chat. Lines already true when the farm opens aren't said:
  * every time the view is shown it starts from what's new.
  */
-export function KenDialogue({ said, workers, paused, reducedMotion }: Props): React.ReactElement {
+export function KenDialogue({
+  said,
+  workers,
+  paused,
+  held = false,
+  reducedMotion,
+  onShownChange,
+}: Props): React.ReactElement {
   const queueRef = useRef<TalkQueue>(EMPTY_QUEUE);
   const statusRef = useRef<Map<string, FloorAgent["status"]>>(new Map());
   const [line, setLine] = useState<KenLine | null>(null);
@@ -111,7 +126,7 @@ export function KenDialogue({ said, workers, paused, reducedMotion }: Props): Re
 
   // Something to say? Only while the box is down and nothing else is up.
   useEffect(() => {
-    if (phase !== "hidden" || paused) return;
+    if (phase !== "hidden" || paused || held) return;
     const check = (): void => {
       const { line: next, queue } = nextLine(queueRef.current, Date.now(), false);
       queueRef.current = queue;
@@ -123,7 +138,22 @@ export function KenDialogue({ said, workers, paused, reducedMotion }: Props): Re
     check();
     const id = window.setInterval(check, TICK_MS);
     return () => window.clearInterval(id);
-  }, [phase, paused, reducedMotion]);
+  }, [phase, paused, held, reducedMotion]);
+
+  // A sign went up while he was talking: he stops and goes.
+  useEffect(() => {
+    if (paused && (phase === "entering" || phase === "talking")) setPhase("leaving");
+  }, [paused, phase]);
+
+  // Up from the moment he starts coming in until he has fully gone.
+  const shownNow = phase !== "hidden";
+  const onShownChangeRef = useRef(onShownChange);
+  useEffect(() => {
+    onShownChangeRef.current = onShownChange;
+  }, [onShownChange]);
+  useEffect(() => {
+    onShownChangeRef.current?.(shownNow);
+  }, [shownNow]);
 
   // The phases: in, type out and hold, out.
   useEffect(() => {

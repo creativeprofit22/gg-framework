@@ -50,6 +50,7 @@ import { drawText, GLYPH_H, textWidth, wrapText } from "./goal-world-font";
 import { SURFACE, type Farm } from "./goal-farm-map";
 import { ARRIVE_MS, LEAVE_MS, type Actor, type FarmWorld } from "./goal-farm-sim";
 import { tripPose, type Spot } from "./goal-farm-travel";
+import type { KenMark } from "./goal-ken-status";
 import { roamPose, type Roamer, type RoamPose } from "./goal-farm-roam";
 
 type Ctx = CanvasRenderingContext2D;
@@ -399,6 +400,74 @@ function drawBubble(ctx: Ctx, text: string, cx: number, top: number, mapWidth: n
   });
 }
 
+/** Ken's thought marks: 5×7 glyphs drawn in his little thought bubble. */
+const MARK_GLYPHS: Readonly<
+  Record<Exclude<KenMark, "thinking">, ReadonlyArray<readonly [number, number, readonly string[]]>>
+> = {
+  question: [[7, 3, [".###.", "#...#", "....#", "...#.", "..#..", ".....", "..#.."]]],
+  problem: [[8, 3, ["##", "##", "##", "##", "..", "##"]]],
+  waiting: [[6, 3, ["#####", "#...#", ".#.#.", "..#..", ".#.#.", "#...#", "#####"]]],
+  asleep: [
+    [4, 5, ["###", "..#", ".#.", "#..", "###"]],
+    [10, 3, ["###", "..#", ".#.", "#..", "###"]],
+  ],
+};
+const MARK_W = 18;
+const MARK_H = 15;
+
+function inMarkBubble(x: number, y: number): boolean {
+  if (x < 1 || x > 16 || y < 1 || y > 11) return false;
+  return !((x === 1 || x === 16) && (y === 1 || y === 11));
+}
+function inMarkTail(x: number, y: number): boolean {
+  return (y === 12 && (x === 3 || x === 4)) || (y === 13 && x === 3);
+}
+
+/**
+ * Ken's thought bubble: a small rounded bubble up and to the right of his
+ * crown, its tail pointing down at him, holding what he's at (dots while he
+ * thinks, an hourglass while he waits, ? for a question, ! for a problem, Zz
+ * while paused). The dots take turns lighting up; with `still`, they rest.
+ */
+function drawKenMark(
+  ctx: Ctx,
+  mark: KenMark,
+  px: number,
+  top: number,
+  mapWidth: number,
+  now: number,
+  still: boolean,
+): void {
+  const x0 = Math.min(mapWidth - MARK_W - 1, Math.max(1, Math.round(px)));
+  const y0 = Math.max(1, Math.round(top) - 5 - 13);
+  const fill = (x: number, y: number): boolean => inMarkBubble(x, y) || inMarkTail(x, y);
+  for (let y = 0; y < MARK_H; y++) {
+    for (let x = 0; x < MARK_W; x++) {
+      if (fill(x, y)) ctx.fillStyle = "#fff8ec";
+      else if (fill(x - 1, y) || fill(x + 1, y) || fill(x, y - 1) || fill(x, y + 1)) {
+        ctx.fillStyle = "#2a1406";
+      } else continue;
+      ctx.fillRect(x0 + x, y0 + y, 1, 1);
+    }
+  }
+  if (mark === "thinking") {
+    const lit = still ? -1 : Math.floor(now / 420) % 3;
+    for (let i = 0; i < 3; i++) {
+      ctx.fillStyle = i === lit || still ? "#2a1406" : "#c9b79a";
+      ctx.fillRect(x0 + 4 + i * 4, y0 + 6, 2, 2);
+    }
+    return;
+  }
+  ctx.fillStyle = "#2a1406";
+  for (const [gx, gy, rows] of MARK_GLYPHS[mark]) {
+    rows.forEach((row, dy) => {
+      for (let dx = 0; dx < row.length; dx++) {
+        if (row[dx] === "#") ctx.fillRect(x0 + gx + dx, y0 + gy + dy, 1, 1);
+      }
+    });
+  }
+}
+
 // ── The critters ──────────────────────────────────────────────
 
 interface Placed {
@@ -459,6 +528,7 @@ function actorItems(
   lanterns: FarmLamp[],
   bodies: LitBody[],
   play: FarmPlay | null,
+  ambientNow: number,
 ): void {
   const def = critterDef(actor.critterId);
   const poked = reactionOn(play, `actor:${actor.key}`, now);
@@ -589,6 +659,10 @@ function actorItems(
       } else if (actor.bubble && actor.bubble.until > now) {
         const { text } = actor.bubble;
         late.push(() => drawBubble(ctx, text, px, top - (actor.coordinator ? 4 : 0), width));
+      } else if (actor.mark && !actor.trip) {
+        // Nothing being said: Ken's thought mark, once he's where he's going.
+        const { mark } = actor;
+        late.push(() => drawKenMark(ctx, mark, px, top, width, now, ambientNow === 0));
       }
     },
   });
@@ -990,7 +1064,7 @@ export function drawFarm(
   const lanterns: FarmLamp[] = [];
   const bodies: LitBody[] = [];
   for (const actor of world.actors.values()) {
-    actorItems(ctx, world, actor, now, items, late, night, lanterns, bodies, play);
+    actorItems(ctx, world, actor, now, items, late, night, lanterns, bodies, play, ambientNow);
   }
   // A prop standing in front of someone (its base lower on the map than
   // their feet) is redrawn over them, so they pass behind it. The same for

@@ -57,7 +57,7 @@ export function KeepAwakeButton(): React.ReactElement {
         onClick={() => void toggle()}
       >
         <CoffeeIcon size={16} aria-hidden="true" />
-        Keep computer awake while the agent works
+        Keep awake
       </button>
       <Badge color={checked ? theme.success : theme.textMuted}>{checked ? "On" : "Off"}</Badge>
     </>

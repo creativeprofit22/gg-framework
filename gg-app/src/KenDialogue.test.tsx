@@ -84,4 +84,33 @@ describe("KenDialogue", () => {
     fireEvent.click(screen.getByRole("button", { name: /Dismiss/ }));
     expect(phase(container)).toBe("leaving");
   });
+
+  it("stops mid-line when a sign goes up, and says so to the farm", () => {
+    const onShownChange = vi.fn();
+    const props = { workers: [], reducedMotion: true, onShownChange } as const;
+    const { container, rerender } = render(<KenDialogue said={null} paused={false} {...props} />);
+    rerender(<KenDialogue said={said(4, "Halfway through.")} paused={false} {...props} />);
+    wait(1000);
+    expect(phase(container)).toBe("talking");
+    expect(onShownChange).toHaveBeenLastCalledWith(true);
+    rerender(<KenDialogue said={said(4, "Halfway through.")} paused {...props} />);
+    wait(500);
+    expect(phase(container)).toBe("hidden");
+    expect(onShownChange).toHaveBeenLastCalledWith(false);
+    // The line isn't said again once the sign comes down.
+    rerender(<KenDialogue said={said(4, "Halfway through.")} paused={false} {...props} />);
+    wait(2000);
+    expect(phase(container)).toBe("hidden");
+  });
+
+  it("holds a new line while the status is being read, then says it", () => {
+    const props = { workers: [], paused: false, reducedMotion: true } as const;
+    const { container, rerender } = render(<KenDialogue said={null} held {...props} />);
+    rerender(<KenDialogue said={said(5, "Tests pass.")} held {...props} />);
+    wait(2000);
+    expect(phase(container)).toBe("hidden");
+    rerender(<KenDialogue said={said(5, "Tests pass.")} held={false} {...props} />);
+    wait(1000);
+    expect(phase(container)).toBe("talking");
+  });
 });

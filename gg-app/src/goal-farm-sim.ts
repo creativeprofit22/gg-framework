@@ -8,6 +8,7 @@
 
 import { pickFarmCritter } from "./goal-farm-critters";
 import { pickWorkLine } from "./goal-farm-lines";
+import type { KenMark } from "./goal-ken-status";
 import type { WorkKind, WorldAgent } from "./goal-world-agents";
 import { STATION_FOR, type StationKind } from "./goal-world-stations";
 import type { Farm } from "./goal-farm-map";
@@ -50,6 +51,8 @@ export interface Actor {
   wantAt: number;
   leaving: "done" | "error" | null;
   bubble: Bubble | null;
+  /** GG Goals only: the thought mark over its head, when nothing is being said. */
+  mark: KenMark | null;
   reply: { readonly text: string; readonly at: number } | null;
   /** The last thing it said about its work, and when (so it never repeats itself or chatters). */
   lastLine: string | null;
@@ -225,6 +228,7 @@ function spawn(world: FarmWorld, agent: WorldAgent, now: number): Actor {
     wantAt: now,
     leaving: null,
     bubble: null,
+    mark: null,
     reply: null,
     lastLine: null,
     lastLineAt: -Infinity,
@@ -277,6 +281,7 @@ export function syncFarm(world: FarmWorld, agents: readonly WorldAgent[], now: n
     }
     actor.name = agent.name;
     actor.detail = agent.detail;
+    actor.mark = agent.mark ?? null;
     const want = agent.status === "working" ? agent.kind : null;
     if (want !== actor.want) {
       actor.want = want;

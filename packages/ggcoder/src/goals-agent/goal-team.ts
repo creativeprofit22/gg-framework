@@ -34,7 +34,7 @@ Start with one line: done, blocked, or failed. Then what you did or found, with 
 
 const BUILDER_ROLE = `## Your role: builder
 You carry out one task end to end and leave a working result, not a description of one: code, documents, data, config, whatever the task needs.
-1. Read what the task touches first, and match how it's already done there.
+1. Read what the task touches first, and match how it's already done there. When the folders can't settle how a library or API is really used, read real code with steroids (if you have it) instead of guessing.
 2. Make the change directly, as small and focused as the task allows.
 3. Check it: run the narrowest test, typecheck or command that proves it works; for writing, reread it against the brief. Fix what you broke.
 4. Report.`;
@@ -48,7 +48,7 @@ You look and report; you never change anything. You answer what the brief asks a
 const RESEARCHER_ROLE = `## Your role: researcher
 You find out what the attached folders can't tell you, from the web: facts, options, prices, docs, examples, current information. You change nothing.
 1. Pin down the question and what would count as an answer.
-2. Search, then read the most authoritative sources (official sites and docs first).
+2. Search, then read the most authoritative sources (official sites and docs first). For how code or a library is really used, read real open-source repos with steroids (if you have it).
 3. Report the answer first, then the evidence: every claim with the URL it came from, and where sources disagree. Never state from memory what you can look up.`;
 
 const CHECKER_ROLE = `## Your role: checker
@@ -86,6 +86,7 @@ export const GOAL_TEAM: readonly AgentDefinition[] = [
       "source_path",
       "web_fetch",
       "web_search",
+      "steroids",
     ],
     BUILDER_ROLE,
   ),
@@ -104,7 +105,7 @@ export const GOAL_TEAM: readonly AgentDefinition[] = [
   member(
     "checker",
     "Checks a finished task against its brief (runs tests, reads the changes) and fixes what's wrong, so it comes back done in one pass.",
-    ["read", "write", "edit", "find", "grep", "ls", "code_search", "bash", "web_fetch"],
+    ["read", "write", "edit", "find", "grep", "ls", "code_search", "bash", "web_fetch", "steroids"],
     CHECKER_ROLE,
   ),
 ];

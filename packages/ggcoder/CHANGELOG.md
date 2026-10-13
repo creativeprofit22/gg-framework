@@ -1,5 +1,23 @@
 # @kenkaiiii/ggcoder
 
+## 5.79.4
+
+### Patch Changes
+
+- Updated dependencies
+  - @kenkaiiii/gg-core@5.79.4
+  - @kenkaiiii/gg-ai@5.79.4
+  - @kenkaiiii/gg-agent@5.79.4
+
+## 5.79.3
+
+### Patch Changes
+
+- Report the Steroids corpus size on disk, and give GG Goals' builder and checker workers the `steroids` tool with guidance to use it
+  - @kenkaiiii/gg-ai@5.79.3
+  - @kenkaiiii/gg-agent@5.79.3
+  - @kenkaiiii/gg-core@5.79.3
+
 ## 5.79.2
 
 ### Patch Changes

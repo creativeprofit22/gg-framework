@@ -26,6 +26,19 @@ function fmt(n: number): string {
   return n >= 1000 ? `${Math.round(n / 1000)}k` : String(n);
 }
 
+/** "v0.3.2 · 514 repos · 605k files · 2.0 GB on disk": what's indexed and what it costs on disk. */
+function corpusSummary(status: SteroidsStatus): string {
+  return [
+    `v${status.version}`,
+    `${status.repos} repos`,
+    `${fmt(status.documents ?? 0)} files`,
+    // The CLI prints "2.0GB"; space the unit like the rest of the app.
+    status.diskSize && `${status.diskSize.replace(/^([\d.]+)\s*/, "$1 ")} on disk`,
+  ]
+    .filter(Boolean)
+    .join(" \u00b7 ");
+}
+
 /**
  * Agent Steroids — a local corpus of real repos the agent reads before it
  * writes. Shows the install/corpus state and installs the `steroids` binary
@@ -85,7 +98,8 @@ export function SteroidsModal({ status, onStatus, onClose }: Props): React.React
           <ListSkeleton rows={1} />
         ) : (
           <div className="mcp-list">
-            <div className="mcp-item">
+            {/* A status line, not a list entry: flush with the card's text, no hover. */}
+            <div className="mcp-item steroids-status">
               <span className="mcp-dot" style={{ color: tone.color }}>
                 {tone.icon}
               </span>
@@ -94,7 +108,7 @@ export function SteroidsModal({ status, onStatus, onClose }: Props): React.React
               </span>
               {status.connected ? (
                 <span className="mcp-meta" style={{ color: theme.textDim }}>
-                  {`v${status.version} · ${status.repos} repos · ${fmt(status.documents ?? 0)} files`}
+                  {corpusSummary(status)}
                 </span>
               ) : !status.installed ? (
                 <button

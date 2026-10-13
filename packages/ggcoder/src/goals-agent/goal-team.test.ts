@@ -39,6 +39,15 @@ describe("GG Goals' team", () => {
     expect(byName("checker").systemPrompt).toMatch(/run the checks again until they pass/);
   });
 
+  it("gives the workers that build, check or research real-repo code via steroids", () => {
+    for (const name of ["builder", "researcher", "checker"]) {
+      expect(byName(name).tools).toContain("steroids");
+    }
+    for (const name of ["builder", "researcher"]) {
+      expect(byName(name).systemPrompt).toMatch(/with steroids \(if you have it\)/);
+    }
+  });
+
   it("works in place for the user to review: never branches, commits or pushes", () => {
     // GG Coder's `worker` branches and commits; parallel goal workers sharing
     // one checkout would fight over it and hide their changes.

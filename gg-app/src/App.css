@@ -5149,6 +5149,18 @@ select {
   font-size: var(--fs-sm);
   line-height: 1.4;
 }
+/* Steroids' status line uses the list row's anatomy, but it is one fact, not
+   a pickable entry: it lines up with the card's title and text and has no
+   hover. */
+.mcp-item.steroids-status {
+  padding-inline: 0;
+}
+.mcp-item.steroids-status:hover {
+  background: none;
+}
+.steroids-status .mcp-meta {
+  font-variant-numeric: tabular-nums;
+}
 .mcp-delete {
   flex: 0 0 auto;
   background: transparent;
@@ -6387,7 +6399,7 @@ select {
    settles. Out, quicker: Ken sinks, then the box drops away. ENTER_MS /
    EXIT_MS in KenDialogue.tsx match these timings. */
 /* Ken's storybook art, shared by his dialogue box and his question sign. */
-:is(.ken-dialogue, .goal-ask, .goal-finish) {
+:is(.ken-dialogue, .goal-ask, .goal-finish, .ken-status) {
   --ken-ink: #4a3520;
   --ken-frame: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='48' height='48' viewBox='0 0 48 48'%3E%3Cpolygon points='12,0 36,0 48,12 48,36 36,48 12,48 0,36 0,12' fill='%238a643c'/%3E%3Cpolygon points='12.62,1.5 35.38,1.5 46.5,12.62 46.5,35.38 35.38,46.5 12.62,46.5 1.5,35.38 1.5,12.62' fill='%23fff7e6'/%3E%3Cpolygon points='13.45,3.5 34.55,3.5 44.5,13.45 44.5,34.55 34.55,44.5 13.45,44.5 3.5,34.55 3.5,13.45' fill='%23c9a477'/%3E%3Cpolygon points='13.86,4.5 34.14,4.5 43.5,13.86 43.5,34.14 34.14,43.5 13.86,43.5 4.5,34.14 4.5,13.86' fill='%23f6e5c8'/%3E%3C/svg%3E");
   --ken-plate: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='36' viewBox='0 0 120 36'%3E%3Cdefs%3E%3ClinearGradient id='p' x1='0' y1='0' x2='0' y2='1'%3E%3Cstop offset='0' stop-color='%234a3419'/%3E%3Cstop offset='1' stop-color='%231c130a'/%3E%3C/linearGradient%3E%3ClinearGradient id='g' x1='0' y1='0' x2='0' y2='1'%3E%3Cstop offset='0' stop-color='%23f8e594'/%3E%3Cstop offset='.55' stop-color='%23c99f3e'/%3E%3Cstop offset='1' stop-color='%238a6420'/%3E%3C/linearGradient%3E%3C/defs%3E%3Cpolygon points='22,4 98,4 108,18 98,32 22,32 12,18' fill='url(%23p)' stroke='%23b8933f' stroke-width='1.5'/%3E%3Cpolygon points='2,18 15,6 28,18 15,30' fill='url(%23g)' stroke='%234a3108' stroke-width='1.2'/%3E%3Ccircle cx='15' cy='18' r='4.4' fill='%239a7426' stroke='%234a3108' stroke-width='1'/%3E%3Ccircle cx='13.8' cy='16.8' r='1.6' fill='%23fff6c8'/%3E%3Cpolygon points='92,18 105,6 118,18 105,30' fill='url(%23g)' stroke='%234a3108' stroke-width='1.2'/%3E%3Ccircle cx='105' cy='18' r='4.4' fill='%239a7426' stroke='%234a3108' stroke-width='1'/%3E%3Ccircle cx='103.8' cy='16.8' r='1.6' fill='%23fff6c8'/%3E%3C/svg%3E");
@@ -6564,8 +6576,409 @@ select {
     opacity: 1;
   }
 }
+/* ── What Ken is doing (KenStatus.tsx) ──────────────────────────────────
+   Bottom right of the Workers view: a pill in Ken's storybook style, his
+   face in a medallion with the kind of work as a badge, one line, and how
+   long he's been at it. It grows on hover to show one more line, and steps
+   aside (a dissolve) while Ken talks or a sign is up: one thing at a time.
+   The tone inks are art on the parchment (all 5:1 or better on #f6e5c8).
+   His frame can't follow a round end, so its rings are a border and inset
+   shadows in the frame's own colours. */
+.ken-status {
+  --status-ink: #1d6b62;
+  position: absolute;
+  right: var(--space-8);
+  bottom: var(--space-8);
+  z-index: 2;
+  display: flex;
+  justify-content: flex-end;
+  max-width: calc(100% - 2 * var(--space-8));
+  pointer-events: none;
+  transition:
+    opacity 220ms var(--ease-out),
+    filter 220ms var(--ease-out),
+    transform 260ms var(--ease-out);
+}
+.ken-status[data-tone="ask"] {
+  --status-ink: #7a5300;
+}
+.ken-status[data-tone="error"] {
+  --status-ink: #a3271d;
+}
+.ken-status[data-tone="done"] {
+  --status-ink: #2b6e3a;
+}
+.ken-status:is([data-tone="paused"], [data-tone="idle"]) {
+  --status-ink: #6b5238;
+}
+.ken-status[data-away] {
+  opacity: 0;
+  filter: blur(3px);
+  transform: translateY(6px);
+  transition:
+    opacity 160ms var(--ease-in),
+    filter 160ms var(--ease-in),
+    transform 180ms var(--ease-in);
+}
+.ken-status-card {
+  --frame: inset 0 0 0 2px #fff7e6, inset 0 0 0 3px #c9a477;
+  position: relative;
+  overflow: hidden;
+  max-width: min(320px, 100%);
+  /* 5px keeps the medallion's ring clear of the frame's inner ring. */
+  padding: 5px var(--space-8) 5px 5px;
+  border: 1.5px solid #8a643c;
+  /* Half the closed height (a full pill), and a radius it can ease from to
+     the open card's corners; 9999px would snap. */
+  border-radius: var(--radius-input);
+  background: #f6e5c8;
+  box-shadow: var(--frame);
+  filter: drop-shadow(0 4px 10px rgb(0 0 0 / 0.35));
+  color: var(--ken-ink);
+  font:
+    14px/1.3 "Young Serif",
+    Georgia,
+    serif;
+  pointer-events: auto;
+  cursor: default;
+}
+.ken-status[data-away] .ken-status-card {
+  pointer-events: none;
+}
+.ken-status[data-open] .ken-status-card {
+  width: 312px;
+  border-radius: var(--radius-bubble);
+}
+/* Closing keeps the open layout until the end; the corners round back as it shrinks. */
+.ken-status[data-collapsing] .ken-status-card {
+  border-radius: var(--radius-input);
+}
+/* Size changes are driven from KenStatus (MORPH_MS there): width, height and
+   corners ease together on one curve. */
+.ken-status-card.is-sizing {
+  transition:
+    width 400ms var(--ease-expo),
+    height 400ms var(--ease-expo),
+    border-radius 400ms var(--ease-expo);
+}
+.ken-status-head {
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr);
+  column-gap: var(--space-4);
+  align-items: start;
+}
+/* His face at one CSS pixel per art pixel, centred (the head is 26 of the
+   circle's 32px), the brass ring just outside so all of it is his. */
+.ken-status-face {
+  grid-area: 1 / 1;
+  display: block;
+  width: 32px;
+  height: 32px;
+  overflow: hidden;
+  border-radius: 50%;
+  background: #ead3ad;
+  box-shadow: 0 0 0 1.5px #c9a477;
+}
+.ken-status-face canvas {
+  display: block;
+  width: 36px;
+  height: 44px;
+  margin-top: var(--space-1);
+  image-rendering: pixelated;
+}
+.ken-status-face.is-hopping canvas {
+  animation: ken-status-hop 380ms var(--ease-pop);
+}
+@keyframes ken-status-hop {
+  35% {
+    transform: translateY(-3px);
+  }
+}
+/* The kind of work, pinned to the medallion's lower right. */
+.ken-status-badge {
+  position: relative;
+  z-index: 1;
+  grid-area: 1 / 1;
+  align-self: start;
+  justify-self: end;
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  margin: var(--space-10) -6px 0 0;
+  border-radius: 50%;
+  background: var(--status-ink);
+  color: #fff8e8;
+  box-shadow: 0 0 0 1.5px #f6e5c8;
+  transition: background-color 420ms var(--ease-in-out);
+}
+.ken-status-badge-icon {
+  display: grid;
+  animation: ken-status-icon-in 440ms var(--ease-pop) 60ms both;
+}
+@keyframes ken-status-icon-in {
+  from {
+    opacity: 0;
+    transform: scale(0.4) rotate(-25deg);
+  }
+}
+/* Each kind of work has its own small motion. */
+.ken-status-badge::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+}
+.ken-status[data-icon="think"] .ken-status-badge::after {
+  animation: ken-status-breathe var(--dur-breathe) var(--ease-in-out) infinite;
+}
+@keyframes ken-status-breathe {
+  50% {
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--status-ink) 30%, transparent);
+  }
+}
+.ken-status[data-icon="edit"] .ken-status-badge svg {
+  transform-origin: 20% 80%;
+  animation: ken-status-scribble 0.9s var(--ease-in-out) infinite;
+}
+@keyframes ken-status-scribble {
+  30% {
+    transform: translate(-0.5px, 0) rotate(-9deg);
+  }
+  70% {
+    transform: translate(0.5px, -0.5px) rotate(6deg);
+  }
+}
+.ken-status[data-icon="search"] .ken-status-badge svg {
+  animation: ken-status-scan 1.6s var(--ease-in-out) infinite;
+}
+@keyframes ken-status-scan {
+  25% {
+    transform: translate(1px, -0.5px);
+  }
+  50% {
+    transform: translate(0, -1px);
+  }
+  75% {
+    transform: translate(-1px, -0.5px);
+  }
+}
+.ken-status[data-icon="wait"] .ken-status-badge svg {
+  animation: ken-status-turn 2.6s var(--ease-in-out) infinite;
+}
+@keyframes ken-status-turn {
+  0%,
+  70% {
+    transform: rotate(0);
+  }
+  88%,
+  100% {
+    transform: rotate(180deg);
+  }
+}
+/* The text, which dissolves out and back in between moments. */
+.ken-status-main {
+  grid-area: 1 / 2;
+  min-width: 0;
+  transition:
+    opacity 200ms var(--ease-out),
+    filter 200ms var(--ease-out);
+}
+.ken-status[data-fading] .ken-status-main {
+  opacity: 0;
+  filter: blur(2px);
+  transition:
+    opacity 90ms var(--ease-in),
+    filter 90ms var(--ease-in);
+}
+.ken-status[data-open] .ken-status-main {
+  padding-bottom: var(--space-2);
+}
+.ken-status-top {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-width: 0;
+  min-height: 32px;
+}
+.ken-status-headline {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ken-status-time {
+  flex: none;
+  margin-left: auto;
+  padding-left: var(--space-4);
+  font-family: var(--sans);
+  font-size: var(--fs-sm);
+  line-height: 1.3;
+  font-variant-numeric: tabular-nums;
+  color: #6b5238;
+}
+/* Three dots after "Thinking", one lit at a time. */
+.ken-status-dots {
+  display: inline-flex;
+  flex: none;
+  gap: var(--space-1);
+  margin-left: -2px;
+  color: var(--status-ink);
+}
+.ken-status-dots i {
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.3;
+  animation: ken-status-dot 1.2s var(--ease-in-out) infinite;
+}
+.ken-status-dots i:nth-child(2) {
+  animation-delay: 0.2s;
+}
+.ken-status-dots i:nth-child(3) {
+  animation-delay: 0.4s;
+}
+@keyframes ken-status-dot {
+  30% {
+    opacity: 1;
+    transform: translateY(-1px);
+  }
+  60%,
+  100% {
+    opacity: 0.3;
+    transform: none;
+  }
+}
+/* The extra lines: laid out only when shown, so the pill's size is exact. */
+.ken-status-row {
+  display: none;
+}
+.ken-status[data-open] .ken-status-detail-row {
+  display: block;
+  animation: ken-status-row-in 240ms var(--ease-out) 60ms both;
+}
+.ken-status[data-collapsing] .ken-status-detail-row {
+  animation: ken-status-row-out 160ms var(--ease-in) forwards;
+}
+.ken-status[data-slow] .ken-status-note-row {
+  display: block;
+  animation: ken-status-row-in 240ms var(--ease-out) 60ms both;
+}
+@keyframes ken-status-row-in {
+  from {
+    opacity: 0;
+  }
+}
+@keyframes ken-status-row-out {
+  to {
+    opacity: 0;
+  }
+}
+.ken-status-detail {
+  display: -webkit-box;
+  margin: var(--space-1) 0 0;
+  overflow: hidden;
+  font-size: var(--fs-base);
+  line-height: 1.35;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow-wrap: anywhere;
+}
+.ken-status-note {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: var(--space-3) 0 0;
+  font-size: var(--fs-xs);
+  line-height: 1.3;
+  color: #6b5238;
+}
+.ken-status-note svg {
+  flex: none;
+}
+/* A thin sweep along the bottom edge while a command or the critters run. */
+.ken-status-bar {
+  position: absolute;
+  left: 20px;
+  right: 20px;
+  bottom: 3px;
+  height: 2px;
+  overflow: hidden;
+  opacity: 0;
+  transition: opacity 260ms var(--ease-out);
+  pointer-events: none;
+}
+.ken-status-bar::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -40%;
+  width: 40%;
+  background: linear-gradient(90deg, transparent, var(--status-ink), transparent);
+  animation: ken-status-sweep 1.3s var(--ease-in-out) infinite;
+}
+.ken-status[data-bar="run"] .ken-status-bar {
+  opacity: 1;
+}
+.ken-status[data-bar="wait"] .ken-status-bar {
+  opacity: 0.55;
+}
+.ken-status[data-bar="wait"] .ken-status-bar::before {
+  animation-duration: 2.8s;
+}
+@keyframes ken-status-sweep {
+  to {
+    left: 100%;
+  }
+}
+/* Less motion: changes still happen, as short fades; nothing loops or moves. */
+@media (prefers-reduced-motion: reduce) {
+  .ken-status,
+  .ken-status[data-away] {
+    transform: none;
+    filter: none;
+    transition: opacity 120ms linear;
+  }
+  .ken-status-main,
+  .ken-status[data-fading] .ken-status-main {
+    filter: none;
+    transition: none;
+  }
+  .ken-status-card.is-sizing,
+  .ken-status-badge {
+    transition: none;
+  }
+  .ken-status-face.is-hopping canvas,
+  .ken-status-badge-icon,
+  .ken-status-badge::after,
+  .ken-status-badge svg,
+  .ken-status-dots i,
+  .ken-status-row,
+  .ken-status[data-open] .ken-status-detail-row,
+  .ken-status[data-slow] .ken-status-note-row {
+    animation: none !important;
+  }
+  .ken-status-dots i {
+    opacity: 0.8;
+  }
+  .ken-status-bar::before {
+    left: 0;
+    width: 100%;
+    opacity: 0.5;
+    animation: none;
+  }
+}
 /* High contrast drops the frame art: a plain system outline instead. */
 @media (forced-colors: active) {
+  .ken-status-card {
+    border: 2px solid CanvasText;
+    background: Canvas;
+    color: CanvasText;
+  }
   .goal-ask-board,
   .ken-dialogue-box {
     border-image: none;

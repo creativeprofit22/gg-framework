@@ -1,5 +1,18 @@
 # @kenkaiiii/gg-core
 
+## 5.79.4
+
+### Patch Changes
+
+- Claude Opus, Sonnet and Haiku 5.5 now start new sessions at medium effort (matching Anthropic's API and Claude Code) instead of the max ceiling; saved thinking levels are unchanged.
+  - @kenkaiiii/gg-ai@5.79.4
+
+## 5.79.3
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.79.3
+
 ## 5.79.2
 
 ### Patch Changes

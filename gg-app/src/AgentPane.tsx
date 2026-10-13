@@ -137,6 +137,7 @@ import {
   type GoalTally,
 } from "./goal-progress";
 import { latestKenLine } from "./goal-ken-talk";
+import { kenStatusOf, lastRunOf } from "./goal-ken-status";
 import type { Item as GoalTranscriptItem } from "./transcript-item";
 import {
   FINISH_SETTLE_MS,
@@ -3774,6 +3775,27 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     if (goalFinish && (running || goalView === "chat")) setGoalFinish(null);
   }, [goalFinish, running, goalView]);
   const shownGoalFinish = goalFinish?.goalId === activeGoalId ? goalFinish : null;
+  // What Ken is doing right now, for the Workers view's status pill and the
+  // thought mark over his head (see goal-ken-status).
+  const goalPaused = state?.goal?.paused === true;
+  const goalLastRun = useMemo(
+    () => (activeGoalId ? lastRunOf(goalRuns, activeGoalId, goalItems) : null),
+    [activeGoalId, goalRuns, goalItems],
+  );
+  const kenStatus = useMemo(
+    () =>
+      activeGoalId
+        ? kenStatusOf({
+            running,
+            paused: goalPaused,
+            waitingOnUser: goalWaitingOnUser,
+            liveTools: liveToolFeed,
+            workers: goalWorkers,
+            lastRun: goalLastRun,
+          })
+        : null,
+    [activeGoalId, running, goalPaused, goalWaitingOnUser, liveToolFeed, goalWorkers, goalLastRun],
+  );
   const tallySource = `${activeGoalId ?? ""}:${transcriptEpoch}`;
   const tallyInput = useMemo(
     () => [
@@ -5636,6 +5658,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
               onShowChat={() => setGoalChatFor(activeGoalId)}
               finish={shownGoalFinish}
               onCloseFinish={() => setGoalFinish(null)}
+              kenStatus={kenStatus}
             />
           </Suspense>
         </Activity>

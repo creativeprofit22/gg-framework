@@ -15,6 +15,8 @@ import { GoalFinishCard } from "./GoalFinishCard";
 import type { GoalFinish } from "./goal-finish";
 import type { KenSaid } from "./goal-ken-talk";
 import { KenDialogue } from "./KenDialogue";
+import { KenStatus } from "./KenStatus";
+import type { KenStatus as KenStatusValue } from "./goal-ken-status";
 import { collectWorldAgents, type WorldAgent } from "./goal-world-agents";
 import { FARM_CORE, buildFarm } from "./goal-farm-map";
 import {
@@ -156,6 +158,11 @@ interface Props {
   finish?: GoalFinish | null;
   /** Take the finish card down. */
   onCloseFinish?: () => void;
+  /**
+   * What Ken is doing right now (see goal-ken-status): the status pill
+   * bottom right, and the thought mark over his head on the farm.
+   */
+  kenStatus?: KenStatusValue | null;
 }
 
 /** How long a change of light, weather or ground cover takes to fade in. */
@@ -184,6 +191,7 @@ export function GoalWorld({
   kenSaid = null,
   finish = null,
   onCloseFinish,
+  kenStatus = null,
 }: Props): React.ReactElement {
   const stageRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -230,16 +238,28 @@ export function GoalWorld({
   // Each goal keeps its own countryside, so returning to it feels like coming home.
   const seed = useMemo(() => hashKey(`goal-farm:${goalId}`) % 9973, [goalId]);
 
-  const agents = useMemo(
-    () => collectWorldAgents({ running, liveTools, waitingOnUser, workers }),
-    [running, liveTools, waitingOnUser, workers],
-  );
+  const kenMark = kenStatus?.mark ?? null;
+  const kenDetail = kenStatus?.headline ?? null;
+  const agents = useMemo(() => {
+    const all = collectWorldAgents({ running, liveTools, waitingOnUser, workers });
+    // Ken's own words for what he's doing, and his thought mark: GG Goals
+    // stands on the farm even between runs (paused, or done), so it's always there.
+    return all.map((agent) =>
+      agent.coordinator ? { ...agent, detail: kenDetail ?? agent.detail, mark: kenMark } : agent,
+    );
+  }, [running, liveTools, waitingOnUser, workers, kenMark, kenDetail]);
   const summary = useMemo(() => describeWorld(agents), [agents]);
   const shownAsk = ask && {
     question: ask.question,
     more: ask.more ?? 0,
     onAnswer: () => onShowChat?.(),
   };
+  // One thing at a time over the farm: a sign (the question, or the finish
+  // card) beats everything, Ken talking beats the status, and Ken holds his
+  // next line while the user is reading the status.
+  const signUp = Boolean(shownAsk) || Boolean(finish);
+  const [kenTalking, setKenTalking] = useState(false);
+  const [statusHovered, setStatusHovered] = useState(false);
   // The header's height, so the notice hangs just below it.
   const [headHeight, setHeadHeight] = useState(0);
 
@@ -650,9 +670,19 @@ export function GoalWorld({
       <KenDialogue
         said={kenSaid}
         workers={workers}
-        paused={Boolean(shownAsk || finish)}
+        paused={signUp}
+        held={statusHovered}
         reducedMotion={reduced}
+        onShownChange={setKenTalking}
       />
+      {kenStatus && (
+        <KenStatus
+          status={kenStatus}
+          away={signUp || kenTalking}
+          reducedMotion={reduced}
+          onHoverChange={setStatusHovered}
+        />
+      )}
       <p className="sr-only goal-world-summary" aria-live="polite">
         {summary}
       </p>

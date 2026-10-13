@@ -4,6 +4,7 @@
 // groups. Pure, so the world view and its tests share one mapping.
 
 import type { FloorAgent } from "./critter-floor";
+import type { KenMark } from "./goal-ken-status";
 import { toolKindOf } from "./critter-tool-kind";
 import type { LiveToolEntry } from "./LiveToolPanel";
 
@@ -36,6 +37,8 @@ export interface WorldAgent {
   readonly kind: WorkKind | null;
   /** The same in words, for the roster and screen readers. */
   readonly detail: string;
+  /** GG Goals only: the thought mark over its head (see goal-ken-status). */
+  readonly mark?: KenMark | null;
 }
 
 export const COORDINATOR_KEY = "gg-goals";
@@ -116,9 +119,9 @@ export function describeTool(name: string, args: Readonly<Record<string, unknown
     case "ask":
       return "Asking you a question";
     case "delegate":
-      return "Bringing in help";
+      return "Bringing in critters";
     case "wait":
-      return "Waiting on the team";
+      return "Waiting on critters";
     case "think":
       return "Planning";
   }

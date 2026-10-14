@@ -1,10 +1,10 @@
 {
   "schemaVersion": 1,
   "date": "2026-10-14",
-  "label": "Upstream 0.91.0, with the Deck and your favorite buttons up top",
+  "label": "Upstream 0.91.1, with the Deck and your favorite buttons up top",
   "sections": [
     {
-      "title": "Upstream 0.89.0 to 0.91.0: in your app",
+      "title": "Upstream 0.89.0 to 0.91.1: in your app",
       "items": [
         "Meet the `Deck`, the new home for everything at the bottom of your window. Your model, usage, background tasks, checklist and radio now open right where you type instead of floating over your chat, so your conversation gets a lot more room to breathe.",
         "`New`, `Notes` and `Tasks` stay pinned at the top of every window, one click each, so you never dig through a menu to start fresh or check your list. `Tasks` shows how many are waiting, and on a narrow window the buttons shrink to icons instead of disappearing.",
@@ -15,7 +15,7 @@
       ]
     },
     {
-      "title": "Upstream 0.89.0 to 0.91.0: in your agent",
+      "title": "Upstream 0.89.0 to 0.91.1: in your agent",
       "items": [
         "Attach a repo to a goal, or add a folder with `/add-dir`, and its own slash commands come right along in the `/` menu, running exactly like your project's own.",
         "A goal that's already running in another window or on your phone is never started a second time, so you won't end up with two Kens working the same goal.",

@@ -156,7 +156,7 @@ describe("What's New feeds", () => {
 
   it("keeps the latest Local Fork release notes identical to the source contract", () => {
     expect(LOCAL_CHANGELOG[0]).toEqual({
-      id: "local-2026-10-14-upstream-0910-deck-and-pinned-actions",
+      id: "local-2026-10-14-upstream-0911-deck-and-pinned-actions",
       label: localReleaseNotes.label,
       date: localReleaseNotes.date,
       items: localReleaseNotes.sections.flatMap(({ items }) => items),

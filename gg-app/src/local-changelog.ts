@@ -53,10 +53,23 @@ export const CURRENT_LOCAL_RELEASE_NOTES = requireCurrentReleaseNotes(releaseNot
 /** Newest first. Maintained only by the Local Fork release flow. */
 export const LOCAL_CHANGELOG: LocalChangelogEntry[] = [
   {
-    id: "local-2026-10-13-upstream-0880-ken-status-and-medium-claude",
+    id: "local-2026-10-14-upstream-0910-deck-and-pinned-actions",
     label: CURRENT_LOCAL_RELEASE_NOTES.label,
     date: CURRENT_LOCAL_RELEASE_NOTES.date,
     items: CURRENT_LOCAL_RELEASE_NOTES.sections.flatMap(({ items }) => items),
+  },
+  {
+    id: "local-2026-10-13-upstream-0880-ken-status-and-medium-claude",
+    label: "Upstream 0.88.0, with Ken's status pill and smarter Goals workers",
+    date: "2026-10-13",
+    items: [
+      "You'll never wonder whether `Goals` is still working again. A little storybook pill in the corner of the farm now tells you exactly what Ken is doing, like `Reading search.ts`, with a live timer so even a long think clearly reads as progress. Hover it for one more detail. Ken also pops a thought bubble over his head while he thinks, waits on a command or needs you, and the pill politely steps aside while he's talking or a question card is up, so the farm never gets cluttered.",
+      "The `Steroids` page now shows how much disk your code library takes, like `2.0 GB on disk`, right next to your repos and files, and the row lines up cleanly with everything around it.",
+      "The power switch in Settings now simply reads `Keep awake`. Your project folder still saves only when you choose `Save folder`, so a half-typed path never replaces the folder you're using.",
+      "Claude `Opus 5.5`, `Sonnet 5.5` and `Haiku 5.5` now start fresh chats at `medium` effort, the same default Anthropic uses, so answers come faster and cost less. Any level you've already picked stays exactly as you set it.",
+      "`Goals` workers now build from real code instead of memory. With `Steroids` installed, builders and checkers can look up how real open-source projects actually use a library before they write a line, so the work lands right the first time.",
+      "Searching your project is faster and more complete. Big searches now share the work across your computer's cores, skip folders your project ignores like build output and caches, and look through up to 100,000 files instead of quietly stopping at 10,000, so even huge projects get every match.",
+    ],
   },
   {
     id: "local-2026-10-12-upstream-0872-goals-and-safer-settings",

@@ -10,15 +10,19 @@
   gap: var(--space-8);
 }
 
-/* ── The maker ── */
-.about-maker {
+/* ── The maker ──
+   `.settings-card.about-maker`, not `.about-maker`: the card class (App.css)
+   lays cards out as a column, and the production bundle puts App.css after
+   this sheet, so a single class lost and the release showed the box stretched
+   over everything. Two classes win in any load order. */
+.settings-card.about-maker {
   display: grid;
   grid-template-columns: minmax(0, 460px) minmax(0, 1fr);
   align-items: center;
   gap: var(--space-10) var(--space-12);
 }
 @media (max-width: 759px) {
-  .about-maker {
+  .settings-card.about-maker {
     grid-template-columns: minmax(0, 1fr);
   }
 }
@@ -90,14 +94,16 @@
   gap: var(--space-5);
   margin-top: var(--space-4);
 }
-/* Links drawn as the app's buttons; they open in the browser. */
-.about-cta {
+/* Links drawn as the app's buttons; they open in the browser. Two classes,
+   so they beat .btn's own line-height in any load order. */
+.btn.about-cta {
   text-decoration: none;
   line-height: 1.2;
 }
 
 /* ── The ship log ── */
-.about-log-title {
+/* Two classes, so it beats .settings-section-title (App.css) in any order. */
+.settings-section-title.about-log-title {
   font-size: var(--fs-3xl);
   font-variant-numeric: tabular-nums;
 }

@@ -1,4 +1,4 @@
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it, vi } from "vitest";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -94,23 +94,33 @@ describe("createGrepTool", () => {
     const names = Array.from({ length: 40 }, (_, i) => `f${String(i).padStart(2, "0")}.txt`);
     for (const name of names) await fs.writeFile(path.join(tmpDir, name), "needle\n");
 
+    // The grep's clock moves only when a file is read, so the budget always
+    // runs out during the first wave of reads. With a real 300ms budget, the
+    // setup before the scan (loading the glob library, listing the files)
+    // sometimes used it all up on a loaded CI runner, and nothing was searched.
+    let now = Date.now();
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
     const slowOps: ToolOperations = {
       ...localOperations,
       stat: async (p) => {
         const stat = await localOperations.stat(p);
-        if (stat.isFile()) await new Promise((resolve) => setTimeout(resolve, 400));
+        if (stat.isFile()) now += 400;
         return stat;
       },
     };
 
-    const result = await createGrepTool(tmpDir, slowOps, { deadlineMs: 300 }).execute(
-      { pattern: "needle", include: "*.txt", max_results: 100 },
-      context(),
-    );
+    try {
+      const result = await createGrepTool(tmpDir, slowOps, { deadlineMs: 300 }).execute(
+        { pattern: "needle", include: "*.txt", max_results: 100 },
+        context(),
+      );
 
-    expect(result).toContain("f00.txt:1:needle");
-    expect(result).not.toContain("f39.txt:1:needle");
-    expect(result).toContain("Stopped after 0.3s");
+      expect(result).toContain("f00.txt:1:needle");
+      expect(result).not.toContain("f39.txt:1:needle");
+      expect(result).toContain("Stopped after 0.3s");
+    } finally {
+      clock.mockRestore();
+    }
   });
 
   it("reports the deadline notice when nothing matched", async () => {

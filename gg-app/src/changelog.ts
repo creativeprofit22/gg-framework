@@ -22,6 +22,14 @@ export interface ChangelogEntry {
 /** Newest first. Prepended by the `/release` flow. */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.91.1",
+    date: "2026-10-14",
+    items: [
+      "The `About` tab now looks the way I built it. Little Ken sits beside his intro instead of stretching across the whole page, with your buttons right next to him.",
+      "The `CI` status in your Git panel finally matches everything around it. It is the same size as `Open on GitHub` and lines up neatly beside it.",
+    ],
+  },
+  {
     version: "0.91.0",
     date: "2026-10-14",
     items: [

@@ -158,3 +158,36 @@ describe("What's new window", () => {
     expect(css).toMatch(/:root\[data-theme="light"\] \.whatsnew-window \{[^}]*--wn-ember:/);
   });
 });
+
+// Guard: the production bundle loads AboutPage.css before App.css, so a
+// single-class About rule lost to the shared class it sits beside (the maker
+// card stacked into one column in the release, though dev looked right). Every
+// About rule that restyles a shared class's element names both classes, so it
+// wins in any load order.
+describe("About page layout", () => {
+  const css = SHEETS["./AboutPage.css"] ?? "";
+
+  it.each([
+    [".settings-card.about-maker", ".about-maker"],
+    [".btn.about-cta", ".about-cta"],
+    [".settings-section-title.about-log-title", ".about-log-title"],
+    [".about-ken.ken-dialogue", ".about-ken"],
+  ])("styles %s with both classes", (both, alone) => {
+    expect(css).toContain(`${both} {`);
+    expect(css).not.toMatch(new RegExp(`(?:^|\\n)\\s*${alone.replace(/\./g, "\\.")} \\{`));
+  });
+});
+
+// Guard: the CI indicator inherits its font (it was drawn for the title bar),
+// so in the Git panel's tab row it rendered at the page's 16px beside 11.5px
+// keys. The row gives it the keys' type.
+describe("Git panel CI indicator", () => {
+  it("takes the row's key type instead of inheriting the page's", () => {
+    const css = SHEETS["./Deck.css"] ?? "";
+    const rule = css.match(/\n\.git-tabs \.chat-head-ci \{([^}]*)\}/)?.[1] ?? "";
+    const keySm = css.match(/\n\.key-sm \{([^}]*)\}/)?.[1] ?? "";
+    const size = (body: string): string | undefined => body.match(/font-size:\s*([^;]+);/)?.[1];
+    expect(size(rule)).toBeDefined();
+    expect(size(rule)).toBe(size(keySm));
+  });
+});

@@ -1518,6 +1518,19 @@
 .git-tabs [aria-selected="true"] .tab-n {
   color: var(--text-secondary);
 }
+/* The CI indicator was drawn for the title bar, whose text set its size: its
+   link inherits its font. Here it would inherit the page's 16px, so it takes
+   the row's keys' type instead and sits level with Open on GitHub. Its leading
+   divider split title-bar segments; in this row it divides nothing. */
+.git-tabs .chat-head-ci {
+  align-items: center;
+  font-family: var(--sans);
+  font-size: 11.5px;
+  font-weight: 500;
+}
+.git-tabs .chat-head-ci > .chat-head-sep {
+  display: none;
+}
 .git-panel .git-list {
   list-style: none;
   margin: calc(-1 * var(--space-3)) calc(-1 * var(--space-4));

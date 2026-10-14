@@ -12,7 +12,6 @@ import { SubAgentFeed } from "./SubAgentFeed";
 import { CompactionNotice } from "./CompactionNotice";
 import { PlanModeLogo } from "./PlanModeLogo";
 import { PlanDecisionNotice } from "./PlanDecisionNotice";
-import { KenFace } from "./KenFace";
 import { AskBand } from "./AskBand";
 import { Markdown } from "./Markdown";
 import { Skeleton } from "./Skeleton";
@@ -54,7 +53,6 @@ function allClearCopy(seed: string | undefined, fallbackId: number): string {
 }
 
 // BLACK_CIRCLE — ⏺ on mac (matches the TUI figure).
-const DOT = "\u23FA";
 
 /**
  * A GG Coder reply. While it streams, its text comes from the live-text store
@@ -93,9 +91,6 @@ function AssistantReply({
           </div>
         ) : (
           <div key={i} className="assistant-msg">
-            <span className="assistant-dot" style={{ color: theme.primary }}>
-              {DOT}
-            </span>
             <div className="assistant-text">
               <StreamingMarkdown text={seg.text} streaming={streaming} onGrow={onGrow} />
             </div>
@@ -125,10 +120,7 @@ function KenReply({
 }): React.ReactElement {
   const { text, streaming } = useLiveText(id, stored);
   return (
-    <div className="assistant-msg ken-msg">
-      <span className="assistant-dot ken-face-slot">
-        <KenFace mood="chat" talking={talking} />
-      </span>
+    <div className="assistant-msg ken-msg" data-talking={talking || undefined}>
       <div className="assistant-text">
         <StreamingMarkdown text={text} streaming={streaming} onGrow={onGrow} />
       </div>
@@ -150,7 +142,6 @@ export const TranscriptRow = memo(function TranscriptRow({
   consumeEntrance,
   kenTalking = false,
   errorActive = false,
-  errorCritterId,
   errorModelPicker,
   onContentGrow,
   onAskAnswer,
@@ -164,7 +155,6 @@ export const TranscriptRow = memo(function TranscriptRow({
   /** This is the Ken reply currently streaming in, so his face talks. */
   kenTalking?: boolean;
   errorActive?: boolean;
-  errorCritterId?: string | undefined;
   errorModelPicker?: React.ReactNode;
   onContentGrow?: () => void;
   onAskAnswer?: (itemId: number, promptId: string, delta: AskAnswerDelta) => void;
@@ -189,7 +179,6 @@ export const TranscriptRow = memo(function TranscriptRow({
       item={item}
       kenTalking={kenTalking}
       errorActive={errorActive}
-      errorCritterId={errorCritterId}
       errorModelPicker={errorModelPicker}
       onContentGrow={onContentGrow}
       onAskAnswer={onAskAnswer}
@@ -209,7 +198,6 @@ function TranscriptRowBody({
   item,
   kenTalking = false,
   errorActive = false,
-  errorCritterId,
   errorModelPicker,
   onContentGrow,
   onAskAnswer,
@@ -219,7 +207,6 @@ function TranscriptRowBody({
   /** This is the Ken reply currently streaming in, so his face talks. */
   kenTalking?: boolean;
   errorActive?: boolean;
-  errorCritterId?: string | undefined;
   errorModelPicker?: React.ReactNode;
   onContentGrow?: () => void;
   /** Record answers for an `ask_user` band (App settles the tool call). */
@@ -332,9 +319,6 @@ function TranscriptRowBody({
       };
       return (
         <div className="assistant-msg ken-msg">
-          <span className="assistant-dot ken-face-slot">
-            <KenFace mood="chat" />
-          </span>
           <div className="assistant-text">
             <Markdown>{copy[item.phase]}</Markdown>
           </div>
@@ -351,7 +335,6 @@ function TranscriptRowBody({
       return (
         <ChatErrorNotice
           error={item}
-          critterId={errorCritterId ?? "cat"}
           active={errorActive}
           modelPicker={errorModelPicker}
           onContentGrow={onContentGrow}
@@ -435,9 +418,6 @@ function TranscriptRowBody({
     case "task":
       return (
         <div className="line task-row">
-          <span className="task-row-glyph" style={{ color: theme.primary }}>
-            {"\u25B8 "}
-          </span>
           <span style={{ color: theme.textMuted }}>{"Task: "}</span>
           <span style={{ color: theme.text, fontWeight: 600 }}>{item.title}</span>
         </div>

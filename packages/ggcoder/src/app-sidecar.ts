@@ -72,6 +72,10 @@ import {
 } from "@kenkaiiii/gg-core/desktop-session-ux";
 import { RunClaim } from "./core/run-claim.js";
 import {
+  IMPLEMENT_PLAN_PROMPT as SHARED_IMPLEMENT_PLAN_PROMPT,
+  PLAN_SUBMITTED_FOR_REVIEW,
+} from "./core/plan-handoff.js";
+import {
   createChatAgent,
   parseChatAgentId,
   switchChatAgent,
@@ -196,6 +200,14 @@ import { type GitHubCI } from "./utils/github-ci.js";
 import type { ProjectHealthScan } from "./core/project-health-scan.js";
 import { scoreProjectHealth, type ProjectHealth } from "./core/project-health-score.js";
 import { createRepoPolls, type RepoPolls } from "./app-sidecar/repo-polls.js";
+import { resolveThinkingRequest } from "./app-sidecar/thinking-request.js";
+import { KEN_ALLOWED_MCP_SERVERS, lastAssistantText } from "./app-sidecar/ken-context.js";
+import {
+  prepareAttachments,
+  type AppAttachment,
+} from "./app-sidecar/attachments.js";
+import { getGitHubRepoSlug } from "./utils/github.js";
+import { getGitOverview } from "./utils/git-overview.js";
 
 let daemonRepoPolls: RepoPolls | undefined;
 /** One set of repo pollers per daemon process, shared by every logical session. */
@@ -205,14 +217,12 @@ function getDaemonRepoPolls(): RepoPolls {
 import { extractPlanSteps } from "./utils/plan-steps.js";
 import {
   clampThinkingLevel,
-  getNextThinkingLevel,
   getSupportedThinkingLevels,
   isThinkingLevelSupported,
   resolveInitialThinkingLevel,
 } from "./core/thinking-level.js";
 import { PROMPT_COMMANDS } from "./core/prompt-commands.js";
 import { AppSidecarProgrammaticChat, bindProgrammaticAssessmentEvents, programmaticChatIdentity } from "./app-sidecar-programmatic-chat.js";
-import { loadCustomCommands } from "./core/custom-commands.js";
 import {
   handleAppSidecarProgrammaticExecution,
   isProgrammaticCodeMode,
@@ -290,8 +300,6 @@ import { enrichProcessPath } from "./core/shell-path.js";
 import {
   downscaleForPreview,
   IMAGE_MEDIA_TYPES,
-  shrinkToFit,
-  validateVisionImage,
 } from "./utils/image.js";
 import { readFileBounded } from "./tools/operations.js";
 import { startServeMode, type ServeController } from "./modes/serve-mode.js";
@@ -530,72 +538,7 @@ interface HistoryEntryForWire {
   }>;
 }
 
-// ── Chat attachments (images / videos / files dropped into the input) ──────
-// The webview sends base64 payloads; we persist each under .gg/uploads/ so the
-// agent's tools can open files, then hand media to the model as native blocks.
-interface AppAttachment {
-  kind: "image" | "video" | "file";
-  name: string;
-  mediaType: string;
-  /** base64 (no data: prefix). */
-  data: string;
-}
-
-interface PreparedAttachment extends AppAttachment {
-  path?: string;
-}
-
-async function prepareAttachments(
-  cwd: string,
-  attachments: AppAttachment[],
-): Promise<PreparedAttachment[]> {
-  const dir = path.join(cwd, ".gg", "uploads");
-  await fs.mkdir(dir, { recursive: true }).catch(() => {});
-  const out: PreparedAttachment[] = [];
-  for (const a of attachments) {
-    // Sanitize the filename and prefix with a short timestamp to avoid clobber.
-    const safe = a.name.replace(/[^\w.-]+/g, "_").slice(-80) || "file";
-    const fileName = `${Date.now().toString(36)}-${safe}`;
-    const filePath = path.join(dir, fileName);
-    const buf = Buffer.from(a.data, "base64");
-    // Validate and cap image attachments before they become native image content
-    // blocks. Anthropic applies a 2000 px per-dimension cap once conversation
-    // history contains more than 20 images, so every attachment must be safe for
-    // later turns too. Keep the original on disk, but send the resized bytes.
-    // Corrupt or unsupported images become plain files so they cannot reject the
-    // entire provider request.
-    let prepared: PreparedAttachment = { ...a };
-    if (a.kind === "image") {
-      try {
-        const resized = await shrinkToFit(buf, a.mediaType);
-        const validatedType = await validateVisionImage(resized.buffer);
-        prepared = validatedType
-          ? {
-              ...a,
-              mediaType: validatedType,
-              data: resized.buffer.toString("base64"),
-            }
-          : { ...a, kind: "file" };
-      } catch {
-        prepared = { ...a, kind: "file" };
-      }
-    }
-    try {
-      await fs.writeFile(filePath, buf);
-      await fs.access(filePath, fs.constants.R_OK);
-      out.push({ ...prepared, path: filePath });
-    } catch {
-      // Only validated images retain usable inline bytes. Videos use the read tool.
-      if (prepared.kind !== "image") {
-        throw new Error(
-          `Could not save attachment "${safe}" for reading. Nothing was sent; retry after checking the project upload folder.`,
-        );
-      }
-      out.push({ ...prepared });
-    }
-  }
-  return out;
-}
+// Chat attachments live in app-sidecar/attachments.ts (shared with ACP mode).
 
 /** Shown inline in the Tasks modal when a confirmed delete could not be saved. */
 const TASK_DELETE_FAILED_MESSAGE =
@@ -1319,24 +1262,7 @@ async function main(): Promise<void> {
   parentWatch.unref?.();
 }
 
-/** MCP servers Ken is allowed to use. kencode-search lets him look into real
- *  public repos / verify against actual code instead of assuming — core to how
- *  he's meant to work. Read-only research; no other MCP server is connected. */
-const KEN_ALLOWED_MCP_SERVERS = ["kencode-search"];
-
-/** Extract the plain text of the most recent assistant message (Ken's reply).
- *  Strips tool-call / image blocks, returning just the prose Ken streamed. */
-function lastAssistantText(messages: ReturnType<AgentSession["getMessages"]>): string {
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const m = messages[i];
-    if (m.role !== "assistant") continue;
-    if (typeof m.content === "string") return m.content;
-    return m.content
-      .map((c) => (c.type === "text" && "text" in c && typeof c.text === "string" ? c.text : ""))
-      .join("");
-  }
-  return "";
-}
+// Ken's MCP allow-list and reply extraction live in app-sidecar/ken-context.ts (shared with ACP mode).
 
 /**
  * Assemble Ken's context digest for one `@Ken` question: git/env + the build
@@ -1903,7 +1829,7 @@ async function createSession(
           content: checkpoint.content,
           contentHash: checkpoint.contentHash,
         });
-        return "Plan submitted for user review. Wait for the user to approve, reject, or dismiss it before implementing.";
+        return PLAN_SUBMITTED_FOR_REVIEW;
       },
       ...createAppSidecarCodingRoadmapSessionOptions(
         [askUserTool, ...roadmapToolHost.createSessionTools("coding", () => created)],
@@ -2941,12 +2867,12 @@ async function createSession(
     return null;
   }
 
-  // Workflow (prompt-template) commands: built-in + the project's custom
-  // `.gg/commands/*.md`. Used to gate autopilot off command turns and to label
+  // Workflow (prompt-template) commands: built-in + the custom
+  // `.gg/commands/*.md` of every workspace root (a goal's attached repos too). Used to gate autopilot off command turns and to label
   // expanded templates in Ken's digests. Loaded fresh so a newly added custom
   // command is picked up without a restart (mirrors GET /commands).
   async function loadWorkflowCommandSpecs(): Promise<WorkflowCommandSpec[]> {
-    const custom = await loadCustomCommands(cwd).catch(() => []);
+    const custom = await session.loadCustomCommands().catch(() => []);
     return [
       ...PROMPT_COMMANDS.map((c) => ({ name: c.name, aliases: c.aliases, prompt: c.prompt })),
       ...custom.map((c) => ({ name: c.name, aliases: [] as string[], prompt: c.prompt })),
@@ -3701,9 +3627,9 @@ async function createSession(
     }
   }
 
-  // Keep this base prompt aligned with the webview's manual Accept copy.
-  const IMPLEMENT_PLAN_PROMPT =
-    "The plan has been approved. Implement it now, following each step in order.";
+  // The SAME string the webview sends on a manual Accept; shared so auto- and
+  // manual approval produce identical implementation turns.
+  const IMPLEMENT_PLAN_PROMPT = SHARED_IMPLEMENT_PLAN_PROMPT;
 
   async function startRoadmapPhase(
     phaseId: string,
@@ -5015,7 +4941,7 @@ async function createSession(
       // paths. Older results fall back to their model-visible ImageContent;
       // only unambiguous, existing single-image paths regain an open action.
       void (async () => {
-        const commandCandidates = [...PROMPT_COMMANDS, ...(await loadCustomCommands(cwd))];
+        const commandCandidates = [...PROMPT_COMMANDS, ...(await session.loadCustomCommands())];
         const messages = session.getMessages();
 
         // An Ideal hook is injected immediately after the assistant's candidate
@@ -5400,7 +5326,7 @@ async function createSession(
         json(res, 200, { commands: [] });
         return;
       }
-      void appSidecarCodeCommandsResponse(cwd).then((response) => json(res, 200, response));
+      void appSidecarCodeCommandsResponse(cwd, session.getAdditionalRoots()).then((response) => json(res, 200, response));
       return;
     }
 
@@ -5999,6 +5925,24 @@ async function createSession(
       return;
     }
 
+    // The Git panel: open issues and PRs on the project's GitHub repo, and the
+    // working tree's changed files with line counts (see utils/git-overview).
+    if (method === "GET" && url === "/git/overview") {
+      const controller = new AbortController();
+      res.once("close", () => controller.abort());
+      void (async () => {
+        try {
+          const slug = await getGitHubRepoSlug(cwd);
+          const overview = await getGitOverview(cwd, slug, controller.signal);
+          if (!res.destroyed) json(res, 200, overview);
+        } catch (error) {
+          log("WARN", "app-sidecar", "git overview failed", { error: String(error) });
+          if (!res.destroyed) json(res, 500, { error: "Could not read this project's git status" });
+        }
+      })();
+      return;
+    }
+
     // ── Radio (app-wide) ──────────────────────────────────────
     // Radio is now APP-WIDE: all windows share one daemon process, and the
     // player lives in `core/radio.ts` module-level singletons (one stream for
@@ -6482,16 +6426,24 @@ async function createSession(
 
     if (method === "POST" && url === "/thinking") {
       // The in-flight request already carries its reasoning config, so a
-      // mid-run cycle cannot affect the turn the user is watching — it just
+      // mid-run change cannot affect the turn the user is watching — it just
       // persists a level the footer then reports for a run that never used it.
       // Locked like POST /model; the footer button is disabled to match.
+      // An empty body cycles; {"level": ...} jumps straight to one (model panel).
+      void readBody(req, res).then((raw) => {
+      if (raw === null) return;
       if (running) {
         json(res, 409, { error: "cannot change reasoning level while running" });
         return;
       }
       const st = session.getState();
       const previous = session.getThinkingLevel();
-      const next = getNextThinkingLevel(st.provider, st.model, previous);
+      const resolved = resolveThinkingRequest(st.provider, st.model, previous, raw);
+      if (!resolved.ok) {
+        json(res, 400, { error: resolved.error });
+        return;
+      }
+      const next = resolved.level;
       const releaseOperation = reloadCoordinator.tryAcquireOperationMutation();
       if (!releaseOperation) {
         json(res, 409, { error: "configuration refresh in progress" });
@@ -6524,6 +6476,7 @@ async function createSession(
           releaseOperation();
         }
       })();
+      });
       return;
     }
 

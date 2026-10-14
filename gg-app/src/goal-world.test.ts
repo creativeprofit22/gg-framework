@@ -1451,12 +1451,14 @@ describe("goal farm things in use", () => {
     if (!laptop) throw new Error("no laptop");
 
     const play = createPlay();
-    playUses(play, things, inUse, 1000);
+    const started = playUses(play, things, inUse, 1000);
     const first = reactionOn(play, laptop.id, 1000);
     expect(first?.action).toBe("wake");
     expect(first?.use).toBe(true);
+    // What started is reported (for its sound).
+    expect(started).toContain(first);
     // Still playing: called again (each frame), nothing restarts or stacks.
-    playUses(play, things, inUse, 1500);
+    expect(playUses(play, things, inUse, 1500)).toEqual([]);
     expect(play.reactions.filter((r) => r.target === laptop.id)).toEqual([first]);
     // Finished, still in use: the next one starts then.
     const after = (first?.until ?? 0) + 1;

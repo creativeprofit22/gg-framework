@@ -4,6 +4,7 @@ import { theme } from "./theme";
 import { Badge } from "./Badge";
 import { getKeepAwake, setKeepAwake } from "./agent";
 import { toast } from "./toast";
+import { useSettingsPageReady } from "./settings-ready";
 
 /**
  * Settings switch for keeping the computer from idle-sleeping while the agent
@@ -14,6 +15,9 @@ export function KeepAwakeButton(): React.ReactElement {
   // null until the sidecar answers; the setting defaults to on.
   const [on, setOn] = useState<boolean | null>(null);
   const [busy, setBusy] = useState(false);
+  const [read, setRead] = useState(false);
+  // The switch is disabled (and assumes On) until the sidecar answers.
+  useSettingsPageReady(read);
 
   useEffect(() => {
     let cancelled = false;
@@ -21,7 +25,10 @@ export function KeepAwakeButton(): React.ReactElement {
       .then((enabled) => {
         if (!cancelled) setOn(enabled);
       })
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => {
+        if (!cancelled) setRead(true);
+      });
     return () => {
       cancelled = true;
     };

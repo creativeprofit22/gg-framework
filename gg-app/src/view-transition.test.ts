@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { withViewTransition } from "./view-transition";
+import { showScreen, withViewTransition } from "./view-transition";
 
 type StartViewTransition = (update: () => void) => {
   ready: Promise<void>;
@@ -81,5 +81,17 @@ describe("withViewTransition", () => {
     expect(start).toHaveBeenCalledOnce();
     expect(update).toHaveBeenCalledOnce();
     await expect(skipped).rejects.toThrow("skipped");
+  });
+});
+
+describe("showScreen", () => {
+  it("switches screens without a View Transition (WebKit draws its snapshot with magenta lines)", () => {
+    const start = vi.fn<StartViewTransition>();
+    stubStart(start);
+    stubReducedMotion(false);
+    const update = vi.fn();
+    showScreen(update);
+    expect(update).toHaveBeenCalledOnce();
+    expect(start).not.toHaveBeenCalled();
   });
 });

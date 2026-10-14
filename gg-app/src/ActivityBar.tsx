@@ -4,8 +4,6 @@ import { ThinkingOrb } from "./ActivityOrb";
 import { theme } from "./theme";
 import { ShimmerText } from "./ShimmerText";
 import { outcomePhrase } from "./activity-copy";
-import { GgFace } from "./GgFace";
-import type { GgFaceMood } from "./gg-face";
 import { useMotionLevel } from "./window-motion";
 
 // Braille rotation spinner — the native language of CLI coding tools (ora,
@@ -215,21 +213,6 @@ function withoutStatePrefix(label: string, state: PlainState): string {
   return rest.charAt(0).toUpperCase() + rest.slice(1);
 }
 
-/**
- * GG Coder's face for a settled status. Picked from the same tone as the text,
- * so the face's glow always matches the words beside it: green → happy, red →
- * shocked, amber → sad when stopped, curious when it needs you, worried
- * otherwise (unverified, cut short, reconnecting), and ready when idle.
- */
-export function ggMoodFor(activity: TaskActivity | undefined, tone: string): GgFaceMood {
-  if (tone === theme.success) return "happy";
-  if (tone === theme.error) return "shocked";
-  if (tone !== theme.warning) return "ready";
-  if (activity?.phase === "stopped") return "sad";
-  if (activity?.phase === "attention") return "curious";
-  return "worried";
-}
-
 /** The existing animated row now represents a whole task, including Ken's review. */
 export function ActivityBar({
   running,
@@ -324,17 +307,17 @@ export function ActivityBar({
             aria-atomic="true"
             title={activity?.detail || undefined}
           >
-            {active ? (
+            {/* Only work in progress gets a lead: the orb's motion. A settled
+                status is its words alone, coloured by outcome. */}
+            {active && (
               <ThinkingOrb
                 state="listening"
                 size={20}
-                theme="dark"
+                theme="auto"
                 paused={motion !== "full"}
                 aria-hidden="true"
                 style={{ flexShrink: 0 }}
               />
-            ) : (
-              <GgFace mood={ggMoodFor(activity, tone)} size={21} />
             )}
             <span className="statusrow-state" style={{ color: bareIdle ? theme.textMuted : tone }}>
               {state}
@@ -379,10 +362,20 @@ export function ActivityBar({
           )}
         </div>
         {active && planTotal > 0 && planDone < planTotal && (
-          <span className="plan-steps-running dissolve-in">
+          // One bar and a count, whatever the plan's length: twenty steps
+          // must not mean twenty blocks.
+          <span
+            className="plan-steps-running dissolve-in"
+            title={`Plan: step ${planDone + 1} of ${planTotal}`}
+          >
             <span className="plan-steps-badge">
-              <span style={{ color: theme.textMuted }}>Plan</span>{" "}
-              <span style={{ color: theme.textMuted }}>
+              <span className="plan-steps-word">Plan</span>
+              <span
+                className="plan-steps-bar"
+                aria-hidden="true"
+                style={{ "--p": Math.round((planDone / planTotal) * 100) } as React.CSSProperties}
+              />
+              <span className="plan-steps-count">
                 {planDone}/{planTotal}
               </span>
             </span>

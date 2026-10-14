@@ -31,3 +31,15 @@ describe("chat error details exit", () => {
     expect(exitMs).toBe(dissolveMs);
   });
 });
+
+describe("chat error layout", () => {
+  it("stays one column: nothing is placed in a column the grid no longer has", () => {
+    // The notice was 28px art + text; the art is gone. A leftover
+    // `grid-column: 2 / …` puts the details beside the copy, squeezing the
+    // copy into a sliver.
+    expect(ruleBody(noticeStyles, ".chat-error-notice")).toContain(
+      "grid-template-columns: minmax(0, 1fr);",
+    );
+    expect(noticeStyles).not.toMatch(/grid-column:\s*[2-9]/);
+  });
+});

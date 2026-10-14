@@ -6,6 +6,7 @@ import type { AgentSessionOptions } from "../core/agent-session.js";
 import {
   GOAL_START_OPTION,
   createGoal,
+  goalsRoot,
   goalKickoffPrompt,
   goalNeedsKickoff,
 } from "../core/goals-store.js";
@@ -24,6 +25,8 @@ import {
   GREET_FIRST_ERROR,
 } from "./goals-agent.js";
 import { GOAL_TEAM } from "./goal-team.js";
+import { goalRunLive } from "../core/goal-run-marker.js";
+import type { SubAgentSnapshot } from "../core/subagent-manager.js";
 
 function optionsOf(agent: unknown): AgentSessionOptions {
   return (agent as { opts: AgentSessionOptions }).opts;
@@ -372,5 +375,55 @@ describe("GG Goals agent", () => {
     // Live run: a brief raised "at least 1,200 words" to "aim for 1,800-2,500" and
     // turned "state incentives" into a 50-state table, then paid a fix round to fill it.
     expect(GOALS_SYSTEM_PROMPT).toMatch(/never raise a target or widen the scope in a brief/);
+  });
+});
+
+describe("GG Goals run marker", () => {
+  let tmp: string;
+
+  beforeEach(async () => {
+    tmp = await fs.mkdtemp(path.join(os.tmpdir(), "gg-goals-marker-"));
+  });
+
+  afterEach(async () => {
+    await fs.rm(tmp, { recursive: true, force: true });
+  });
+
+  const worker = (state: SubAgentSnapshot["state"]) =>
+    ({ agent_id: "w1", state }) as unknown as SubAgentSnapshot;
+
+  it("marks the goal as worked on while its loop runs or a worker is live", async () => {
+    const created = await createGoal(goalsRoot(tmp), { name: "Perf", goal: "Fast" }, new Date());
+    if (!created.ok) throw new Error(created.error);
+    const g = created.value;
+    const seen: boolean[] = [];
+    const session = createGoalsAgentSession({
+      provider: "anthropic",
+      model: "claude-opus-5-5",
+      cwd: g.dir,
+      goal: g,
+      transient: true,
+      onRunActive: (active) => seen.push(active),
+    });
+    const onRunActive = optionsOf(session).onRunActive!;
+
+    expect(goalRunLive(g.dir)).toBe(false);
+    onRunActive(true);
+    expect(goalRunLive(g.dir)).toBe(true);
+    // A caller's own listener still hears it.
+    expect(seen).toEqual([true]);
+
+    // The turn ends waiting on a worker: still being worked on.
+    session.eventBus.emit("subagent_state", worker("running"));
+    onRunActive(false);
+    expect(goalRunLive(g.dir)).toBe(true);
+    session.eventBus.emit("subagent_state", worker("completed"));
+    expect(goalRunLive(g.dir)).toBe(false);
+
+    // Disposed mid-run: teardown lets go even though no "closed" arrives.
+    onRunActive(true);
+    session.eventBus.emit("subagent_state", worker("running"));
+    await session.dispose();
+    expect(goalRunLive(g.dir)).toBe(false);
   });
 });

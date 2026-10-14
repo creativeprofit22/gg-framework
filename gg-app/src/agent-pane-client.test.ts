@@ -28,6 +28,7 @@ import {
   isRoadmapPhaseDraftChangeEvent,
   PlanMutationError,
   sendPrompt,
+  serveStatusFrom,
   setAutopilot,
 } from "./agent";
 
@@ -925,5 +926,22 @@ describe("pane agent client", () => {
     });
     await vi.waitFor(() => expect(onEvent).toHaveBeenCalledTimes(1));
     expect(onEvent).toHaveBeenCalledWith({ type: "delta", data: 2 });
+  });
+});
+
+describe("serve status replies", () => {
+  // A daemon or fixture that omits a flag must not forward `undefined` into
+  // set_remote_active, whose `active` boolean is required.
+  it("counts only an explicit true", () => {
+    expect(serveStatusFrom({ running: true, configured: true })).toEqual({
+      running: true,
+      configured: true,
+    });
+    expect(serveStatusFrom({ error: "not found" })).toEqual({ running: false, configured: false });
+    expect(serveStatusFrom({ running: "yes", configured: 1 })).toEqual({
+      running: false,
+      configured: false,
+    });
+    expect(serveStatusFrom(null)).toEqual({ running: false, configured: false });
   });
 });

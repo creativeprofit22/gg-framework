@@ -1,12 +1,6 @@
 import { theme } from "./theme";
 import { buildToolLineParts, toneColor } from "./tool-format";
 
-// BLACK_CIRCLE — ⏺, matching the TUI status figure.
-const DOT = "\u23FA";
-
-/** Max rows shown at once — older entries roll off the top (mirrors TUI). */
-export const LIVE_TOOL_PANEL_ROWS = 3;
-
 /** A single tool action in the pinned feed — mirrors ggcoder's LiveToolEntry. */
 export interface LiveToolEntry {
   toolCallId: string;
@@ -28,60 +22,53 @@ interface Props {
 }
 
 /**
- * Pinned, in-place panel of recent tool actions — a rolling window of the last
- * few calls shown directly above the activity bar. Mirrors the TUI
- * LiveToolPanel: tools (running AND done) live ONLY here, never in the
- * scrollback transcript. Each row is a status dot + bold tone-colored verb +
- * plain detail + dim inline summary. Done rows recolor the dot (green / red).
+ * The agent's current tool, as one floating line centred just above the
+ * deck: what GG is doing right now, and nothing older. It changes in place as
+ * each call starts and finishes (the wording fades across), and leaves when
+ * the run ends. The status line below keeps the run's overall state; this is
+ * the step. A failed call says so in words ("Ran tsc · 1 error").
  */
 export function LiveToolPanel({ entries }: Props): React.ReactElement | null {
-  if (entries.length === 0) return null;
-  const visible = entries.slice(-LIVE_TOOL_PANEL_ROWS);
-
+  // The newest running call, else the newest one to finish.
+  const entry =
+    [...entries].reverse().find((e) => e.status === "running") ?? entries[entries.length - 1];
+  if (!entry) return null;
+  const done = entry.status === "done";
+  const parts = buildToolLineParts(entry.name, entry.args, {
+    done,
+    isError: entry.isError,
+    result: entry.result,
+    details: entry.details,
+    displayName: entry.displayName,
+  });
+  // Colour alone doesn't reach screen readers; name the step's state in words.
+  const statusLabel = done ? (entry.isError ? "Failed" : "Completed") : "Running";
   return (
-    <div className="livetoolpanel">
-      {visible.map((entry) => {
-        const done = entry.status === "done";
-        const parts = buildToolLineParts(entry.name, entry.args, {
-          done,
-          isError: entry.isError,
-          result: entry.result,
-          details: entry.details,
-          displayName: entry.displayName,
-        });
-        const dotColor = done ? (entry.isError ? theme.error : theme.success) : theme.primary;
-        const statusLabel = done ? (entry.isError ? "Failed" : "Completed") : "Running";
-        return (
-          <div className="tool-row" key={entry.toolCallId}>
+    <div className="livetoolpanel" role="status" aria-live="polite">
+      <div
+        className="tool-pill"
+        data-state={entry.isError ? "error" : done ? "done" : "running"}
+        title={parts.map((p) => p.text).join("")}
+      >
+        <span className="visually-hidden">{statusLabel}: </span>
+        <span className="tool-line">
+          {parts.map((p, i) => (
+            // Keyed on the wording so a status flip ("Delegating" to
+            // "Delegated") fades in rather than switching. Blur-free: this is
+            // one truncated line (see .fade-swap).
             <span
-              className={`tool-dot${done ? "" : " blink"}`}
-              style={{ color: dotColor }}
-              title={statusLabel}
-              aria-hidden="true"
+              key={`${i}:${p.text}`}
+              className="fade-swap"
+              style={{
+                color: p.dim ? theme.textDim : p.tone ? toneColor(p.tone) : theme.text,
+                fontWeight: p.bold ? 600 : 400,
+              }}
             >
-              {DOT}
+              {p.text}
             </span>
-            <span className="visually-hidden">{statusLabel}: </span>
-            <span className="tool-line">
-              {parts.map((p, i) => (
-                // Keyed on the wording so a status flip ("Delegating" to
-                // "Delegated") fades in rather than switching. Blur-free: this
-                // is one truncated line (see .fade-swap).
-                <span
-                  key={`${i}:${p.text}`}
-                  className="fade-swap"
-                  style={{
-                    color: p.dim ? theme.textDim : p.tone ? toneColor(p.tone) : theme.text,
-                    fontWeight: p.bold ? 600 : 400,
-                  }}
-                >
-                  {p.text}
-                </span>
-              ))}
-            </span>
-          </div>
-        );
-      })}
+          ))}
+        </span>
+      </div>
     </div>
   );
 }

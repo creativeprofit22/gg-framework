@@ -4,7 +4,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { FloatingSurface } from "./FloatingSurface";
 import { Dropdown } from "./Dropdown";
 import { ModelSelect } from "./ModelSelect";
-import { BackgroundTasksButton } from "./BackgroundTasksButton";
 import { RunningSchedulesButton } from "./RunningSchedulesButton";
 
 vi.mock("./agent", () => ({
@@ -123,7 +122,7 @@ describe("floating surface snapshots", () => {
     expect(transition.start).not.toHaveBeenCalled();
   });
 
-  it.each(["dropdown", "model", "tasks", "schedules"])(
+  it.each(["dropdown", "model", "schedules"])(
     "captures %s when its owner removes the available data",
     async (kind) => {
       const transition = installTransition();
@@ -146,16 +145,6 @@ describe("floating surface snapshots", () => {
               currentModel="one"
               models={available ? [{ id: "one", name: "One", provider: "openai" }] : []}
               onSelect={change}
-            />
-          );
-        if (kind === "tasks")
-          return (
-            <BackgroundTasksButton
-              tasks={
-                available
-                  ? [{ id: "one", pid: 0, command: "Fictional", startedAt: 0, exitCode: null }]
-                  : []
-              }
             />
           );
         return (

@@ -51,6 +51,9 @@ export function parseAppearance(raw: string | null): Appearance {
 
 export function applyAppearance(root: HTMLElement, appearance: Readonly<Appearance>): void {
   for (const field of fields) root.setAttribute(`data-appearance-${field}`, appearance[field]);
+  // One theme setting: upstream tokens and Deck.css key off data-theme, the
+  // Fork glass layer off data-appearance-theme. Both follow this preference.
+  root.setAttribute("data-theme", appearance.theme);
   root.style.colorScheme = appearance.theme;
   root.style.setProperty("--reading-prose-size", `${appearance.size}px`);
 }

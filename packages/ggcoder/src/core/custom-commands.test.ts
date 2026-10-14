@@ -9,7 +9,7 @@ vi.mock("../config.js", () => ({
   getAppPaths: () => ({ agentDir: mockedPaths.agentDir }),
 }));
 
-import { loadCustomCommands } from "./custom-commands.js";
+import { loadCustomCommands, mergeCustomCommandCatalogs } from "./custom-commands.js";
 
 const temporaryDirs: string[] = [];
 
@@ -125,6 +125,30 @@ describe("loadCustomCommands", () => {
 
     await expect(loadCustomCommands(cwd)).resolves.toEqual([
       expect.objectContaining({ name: "research", scope: "project", prompt: "Project body." }),
+    ]);
+  });
+});
+
+describe("mergeCustomCommandCatalogs", () => {
+  const command = (name: string, filePath: string) => ({
+    name,
+    description: name,
+    prompt: name,
+    filePath,
+    scope: "project" as const,
+  });
+
+  it("keeps the project's command and adds an added root's new names", () => {
+    const merged = mergeCustomCommandCatalogs([
+      { commands: [command("ship", "/project/ship.md")], problems: [] },
+      {
+        commands: [command("ship", "/repo/ship.md"), command("deploy", "/repo/deploy.md")],
+        problems: [{ file: "broken.md", scope: "project", reason: "unreadable" }],
+      },
+    ]);
+    expect(merged.commands.map((c) => c.filePath)).toEqual(["/project/ship.md", "/repo/deploy.md"]);
+    expect(merged.problems).toEqual([
+      { file: "broken.md", scope: "project", reason: "unreadable" },
     ]);
   });
 });

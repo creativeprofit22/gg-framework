@@ -16,16 +16,18 @@ function shortWindowLabel(window: SubscriptionUsageWindow): string {
   return window.label.replace(/-hour$/i, "h").replace(/\s+/g, "");
 }
 
-export function TitleUsageMeter({ currentProvider }: { currentProvider: string }) {
+/**
+ * The current provider's subscription usage (5-hour and weekly windows), kept
+ * fresh while the window has focus. Null when the provider has no quota to
+ * show, isn't connected, or the last fetch failed with nothing to fall back on.
+ */
+export function useSubscriptionUsage(currentProvider: string): {
+  snapshot: SubscriptionUsageProviderSnapshot | null;
+  now: number;
+} {
   const [snapshot, setSnapshot] = useState<SubscriptionUsageProviderSnapshot | null>(null);
-  const [selection, setSelection] = useState<{
-    provider: string;
-    kind: "current" | "weekly";
-  }>({ provider: currentProvider, kind: "current" });
   const [now, setNow] = useState(() => Date.now());
-  const windowKind = selection.provider === currentProvider ? selection.kind : "current";
 
-  // Never carry one provider's numbers over to another — clear on switch.
   useEffect(() => {
     setSnapshot((previous) => (previous?.provider === currentProvider ? previous : null));
   }, [currentProvider]);
@@ -38,24 +40,15 @@ export function TitleUsageMeter({ currentProvider }: { currentProvider: string }
         const response = await getSubscriptionUsage(currentProvider);
         if (disposed) return;
         setNow(Date.now());
-        // A transient failure (these quota endpoints hand out 429s freely) comes
-        // back as a connected-but-empty snapshot. Dropping it into state would
-        // unmount the meter for the whole backoff window and pop it back in on
-        // the next success — so keep the last usable snapshot instead.
+        // Keep the last good snapshot when a refresh comes back unusable while
+        // still connected; a disconnect clears it.
         const usable = response.connected && !response.error && response.windows.length > 0;
         if (usable || !response.connected) setSnapshot(response);
       } catch {
-        // The title strip is ambient status, not an error surface. Keep it quiet
-        // when the provider's private usage endpoint is temporarily unavailable.
+        // Transient: keep what we had.
       }
     };
     void refresh();
-    // A newly-active Anthropic window can gain reset timestamps a few seconds
-    // after its utilization appears. Poll lightly and refresh immediately when
-    // the app regains focus so the countdown fills in without a manual reload.
-    // Background windows skip the poll (focus refreshes them on return): with
-    // several windows open, each one waking every 10s kept the daemon fetching
-    // the provider's quota endpoint all day while nobody was looking.
     const refreshTimer = window.setInterval(() => {
       if (document.hasFocus()) void refresh();
     }, 10_000);
@@ -69,14 +62,23 @@ export function TitleUsageMeter({ currentProvider }: { currentProvider: string }
     };
   }, [currentProvider]);
 
-  if (
-    !supportedProvider(currentProvider) ||
-    snapshot?.provider !== currentProvider ||
-    !snapshot.connected ||
-    snapshot.error
-  ) {
-    return null;
-  }
+  const usable =
+    supportedProvider(currentProvider) &&
+    snapshot?.provider === currentProvider &&
+    snapshot.connected &&
+    !snapshot.error;
+  return { snapshot: usable ? snapshot : null, now };
+}
+
+export function TitleUsageMeter({ currentProvider }: { currentProvider: string }) {
+  const { snapshot, now } = useSubscriptionUsage(currentProvider);
+  const [selection, setSelection] = useState<{
+    provider: string;
+    kind: "current" | "weekly";
+  }>({ provider: currentProvider, kind: "current" });
+  const windowKind = selection.provider === currentProvider ? selection.kind : "current";
+
+  if (!snapshot) return null;
 
   const selectedWindow =
     snapshot.windows.find((window) => window.kind === windowKind) ?? snapshot.windows[0];

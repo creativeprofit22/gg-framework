@@ -528,8 +528,8 @@ export async function runCrossPaneProjectIsolationSmoke({ identity, localLinks =
     await waitFor("isolated A and B panes", () =>
       client.evaluate(`(() => {
         const normalize = (value) => value.replaceAll("\\\\", "/").toLowerCase();
-        const a = normalize(document.querySelector("#workspace-pane-primary .chat-head-cwd")?.title ?? "");
-        const b = normalize(document.querySelector("#workspace-pane-pane-b .chat-head-cwd")?.title ?? "");
+        const a = normalize(document.querySelector("#workspace-pane-primary .chat-head")?.dataset.cwd ?? "");
+        const b = normalize(document.querySelector("#workspace-pane-pane-b .chat-head")?.dataset.cwd ?? "");
         return a.startsWith(${JSON.stringify(canonicalPath(projectA))}) && b.startsWith(${JSON.stringify(canonicalPath(projectB))});
       })()`),
     );
@@ -621,8 +621,8 @@ export async function runCrossPaneProjectIsolationSmoke({ identity, localLinks =
     await waitFor("isolated displayed cwd", () =>
       client.evaluate(`(() => {
         const normalize = (value) => value.replaceAll("\\\\", "/").toLowerCase();
-        const a = normalize(document.querySelector("#workspace-pane-primary .chat-head-cwd")?.title ?? "");
-        const c = normalize(document.querySelector("#workspace-pane-pane-b .chat-head-cwd")?.title ?? "");
+        const a = normalize(document.querySelector("#workspace-pane-primary .chat-head")?.dataset.cwd ?? "");
+        const c = normalize(document.querySelector("#workspace-pane-pane-b .chat-head")?.dataset.cwd ?? "");
         return a.startsWith(${JSON.stringify(canonicalPath(projectA))}) && c.startsWith(${JSON.stringify(canonicalPath(projectC))});
       })()`),
     );

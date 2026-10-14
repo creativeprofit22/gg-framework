@@ -1,6 +1,19 @@
 import { flushSync } from "react-dom";
 
 /**
+ * Switch between whole screens (home, a list, a workspace): instantly, with
+ * no View Transition. A screen crossfade snapshots the entire page, and
+ * WebKit (the app's webview) paints that snapshot with horizontal magenta
+ * lines near the top for a frame or two. Confirmed in the app: with the
+ * crossfade off the lines never appear. The incoming screen still fades in
+ * through its own entrance (the lists' and the workspace's dissolve), so the
+ * change doesn't pop.
+ */
+export function showScreen(update: () => void): void {
+  update();
+}
+
+/**
  * Run a UI update inside a View Transition so the old state can animate out
  * (see the "Exits" block in App.css) while the new state is already live.
  *

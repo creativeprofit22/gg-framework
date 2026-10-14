@@ -259,7 +259,10 @@ describe("progress-aware call timeout", () => {
 
   it("enforces maxTotalTimeout even while progress keeps arriving", async () => {
     const m = manager();
-    const tools = await connect(m, server({ timeout: 400, maxTotalTimeout: 800 }));
+    // The per-call timeout sits well above the 100 ms progress interval, so a
+    // stalled CI runner can't let it fire first; only the total cap can end
+    // the call. (At 400 ms, a ~300 ms stall on macOS CI timed it out instead.)
+    const tools = await connect(m, server({ timeout: 1_000, maxTotalTimeout: 1_500 }));
     const started = Date.now();
     await expect(call(tools, "progress", { ms: 5_000, every: 100 })).rejects.toThrow(
       /Maximum total timeout exceeded/,

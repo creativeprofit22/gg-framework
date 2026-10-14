@@ -176,6 +176,45 @@ describe("SettingsTabBar", () => {
     },
   );
 
+  it("springs the labels with the pill and never slides the tabs", () => {
+    const calls: { el: Element; frames: Keyframe[] }[] = [];
+    Object.defineProperty(Element.prototype, "animate", {
+      configurable: true,
+      writable: true,
+      value: vi.fn(),
+    });
+    vi.spyOn(Element.prototype, "animate").mockImplementation(function (this: Element, frames) {
+      calls.push({ el: this, frames: frames as Keyframe[] });
+      return { cancel: vi.fn(), onfinish: null, oncancel: null } as unknown as Animation;
+    });
+    render(<Harness />);
+    const pill = document.querySelector<HTMLElement>(".settings-tabs-pill");
+    if (!pill) throw new Error("Missing pill");
+    pill.getBoundingClientRect = () => new DOMRect(12, 6, 90, 42);
+    // Only the selected tab's label has width, as in the real layout.
+    const labels = new Map<string, HTMLElement>();
+    for (const tab of screen.getAllByRole("tab")) {
+      const label = tab.querySelector<HTMLElement>(".settings-tab-label");
+      if (!label) throw new Error("Missing label");
+      labels.set(tab.getAttribute("aria-label") ?? "", label);
+      Object.defineProperty(label, "offsetWidth", {
+        get: () => (tab.getAttribute("aria-selected") === "true" ? 60 : 0),
+      });
+    }
+
+    fireEvent.click(screen.getByRole("tab", { name: "Steroids" }));
+
+    const framesOf = (el: Element | undefined): Keyframe[] | undefined =>
+      calls.find((c) => c.el === el)?.frames;
+    expect(framesOf(pill)).toBeDefined();
+    // The old label folds shut while the new one opens, on the same spring.
+    expect(framesOf(labels.get("General"))?.map((f) => f.width)).toEqual(["60px", "0px"]);
+    expect(framesOf(labels.get("Steroids"))?.map((f) => f.width)).toEqual(["0px", "60px"]);
+    // No tab is ever translated in from where it was.
+    const tabs = calls.filter((c) => c.el.getAttribute("role") === "tab");
+    expect(tabs.every((c) => c.frames.every((f) => f.transform === undefined))).toBe(true);
+  });
+
   it("marks a tab that needs attention", () => {
     render(<Harness />);
 

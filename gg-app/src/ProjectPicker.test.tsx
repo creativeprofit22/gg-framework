@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { open as openFolderDialog } from "@tauri-apps/plugin-dialog";
 import {
@@ -86,6 +86,10 @@ async function renderSessionList(sessions: RecentSession[]): Promise<void> {
   await screen.findByText(sessions[0]!.preview);
 }
 
+// Pickers keep their last list per window (useCachedList); each test starts
+// from a first visit.
+beforeEach(() => sessionStorage.clear());
+
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
@@ -131,7 +135,9 @@ describe("ProjectPicker discovery", () => {
     );
 
     expect(await screen.findByText(NATIVE_SESSION.preview)).toBeTruthy();
-    expect(listSessionsMock).toHaveBeenCalledWith(windowsProject.path);
+    // The deep-link placeholder swaps for the discovered project, whose own path lists sessions.
+    await waitFor(() => expect(listSessionsMock).toHaveBeenCalledWith(windowsProject.path));
+    expect(screen.queryByText("Choose a project")).toBeNull();
   });
 
   it("shows a retryable error when project listing fails", async () => {
@@ -329,9 +335,12 @@ describe("ProjectPicker session list", () => {
     // The foreign row is labelled; the native one carries no source tag.
     const badge = screen.getByText("Claude Code");
     expect(badge.className).toContain("picker-source-tag");
-    // Theme token, not raw hex, so Light can swap in readable ink.
-    expect(badge.style.color).toBe("var(--source-claude-code)");
-    expect(badge.getAttribute("style")).not.toMatch(/#[0-9a-f]{3,8}\b/i);
+    // Upstream's badge carries source colour on a decorative dot. Theme token,
+    // not raw hex, so Light can swap in readable ink.
+    const dot = badge.querySelector<HTMLElement>(".badge-dot");
+    expect(dot?.getAttribute("aria-hidden")).toBe("true");
+    expect(dot?.style.background).toBe("var(--source-claude-code)");
+    expect(badge.outerHTML).not.toMatch(/#[0-9a-f]{3,8}\b/i);
 
     const foreignRow = screen.getByText(FOREIGN_SESSION.preview).closest("button");
     expect(foreignRow?.textContent).toContain("Claude Code");
@@ -589,5 +598,39 @@ describe("describeOpenFailure", () => {
     ],
   ])("maps %j", (message, summary, detail) => {
     expect(describeOpenFailure(message)).toEqual({ summary, detail });
+  });
+});
+
+describe("ProjectPicker returning from a session", () => {
+  it("opens straight on the project's sessions, never flashing the project list", async () => {
+    getSettingsMock.mockResolvedValue({ projectsRoot: "/Users/dev", configured: true });
+    // Discovery hasn't answered yet: the first paint is all there is.
+    waitForReadyMock.mockReturnValue(new Promise(() => {}));
+    render(
+      <ProjectPicker
+        onChosen={vi.fn()}
+        bindProject={bindProjectMock}
+        initialProjectPath={PROJECT.path}
+      />,
+    );
+    expect(screen.getByText("ui-test")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "+ New session" })).toBeTruthy();
+    expect(screen.queryByText("Choose a project")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Open project directly" })).toBeNull();
+  });
+
+  it("falls back to the project list when the path isn't a known project", async () => {
+    getSettingsMock.mockResolvedValue({ projectsRoot: "/Users/dev", configured: true });
+    waitForReadyMock.mockResolvedValue();
+    listProjectsMock.mockResolvedValue([OTHER_PROJECT]);
+    render(
+      <ProjectPicker
+        onChosen={vi.fn()}
+        bindProject={bindProjectMock}
+        initialProjectPath="/Users/dev/gone"
+      />,
+    );
+    expect(await screen.findByText("Choose a project")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Open project directly" })).toBeTruthy();
   });
 });

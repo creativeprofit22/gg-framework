@@ -2,7 +2,6 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { Dispatch, RefObject, SetStateAction } from "react";
 import { getChecklist, subscribe } from "./agent";
 import type { ChecklistLoad, ChecklistNotice } from "./ChecklistScreen";
-import { withViewTransition } from "./view-transition";
 
 /** Checklist view data: load state, the in-flight run, and refresh-on-run_end. Extracted from App.tsx. */
 export function useChecklist({
@@ -52,11 +51,9 @@ export function useChecklist({
     [],
   );
   const openChecklist = useCallback(() => {
-    withViewTransition(() => {
-      setShowChecklist(true);
-      setChecklistLoad({ kind: "loading" });
-      void refreshChecklist();
-    });
+    setShowChecklist(true);
+    setChecklistLoad({ kind: "loading" });
+    void refreshChecklist();
   }, [refreshChecklist, setShowChecklist]);
   useEffect(() => {
     if (!showChecklist && checklistWasOpen.current)

@@ -103,7 +103,6 @@ export function QueuedBar({ messages, onCancel }: Props): React.ReactElement | n
       style={{ borderColor: theme.border, color: theme.textMuted }}
     >
       <div className="queued-bar-row">
-        <span className="queued-dot" style={{ background: theme.secondary }} />
         {single ? (
           <>
             <span className="queued-bar-text" title={single.text}>

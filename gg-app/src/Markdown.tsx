@@ -47,6 +47,7 @@ import {
 } from "./collapse";
 import { marked } from "marked";
 import { rehypeAnimateWords } from "./rehype-animate-words";
+import { rehypeArrows } from "./rehype-arrows";
 import { useAnimatedHeight } from "./animated-height";
 import "highlight.js/styles/github-dark.css";
 
@@ -148,6 +149,26 @@ function tableBodyRowCount(node: ExtraProps["node"]): number {
     }
   }
   return rows;
+}
+
+/**
+ * A numbered list. Replies show top-level steps as rows numbered by a CSS
+ * counter; a list GG continues after a code block arrives as `start="4"`, so
+ * the counter starts where the list does instead of restarting at 1.
+ */
+function StepList({
+  start,
+  children,
+}: {
+  start?: number;
+  children?: React.ReactNode;
+}): React.ReactElement {
+  const first = typeof start === "number" && Number.isFinite(start) ? start : 1;
+  return (
+    <ol start={first === 1 ? undefined : first} style={{ counterReset: `step ${first - 1}` }}>
+      {children}
+    </ol>
+  );
 }
 
 /**
@@ -1003,17 +1024,19 @@ function promptSourceFence(raw: string): { body: string; end: number } | null {
   return null;
 }
 
-const ANIMATED_PLUGINS = [rehypeHighlight, rehypeAnimateWords];
+const ANIMATED_PLUGINS = [rehypeHighlight, rehypeArrows, rehypeAnimateWords];
 /**
  * How long a block keeps its word spans after a newer block starts below it.
  * Covers the reveal catching up plus the word fade (`--dur-row`, 220ms), so the
  * last words of a finished paragraph finish fading instead of snapping solid.
  */
 const WORD_FADE_HOLD_MS = 450;
-const PLUGINS = [rehypeHighlight];
+const PLUGINS = [rehypeHighlight, rehypeArrows];
 const COMPONENTS = {
   a: ExternalLink,
+  ol: StepList,
   pre: PreBlock,
+  // Fork: MarkdownTable is upstream's scroll wrapper plus /steroids folding.
   table: MarkdownTable,
   tbody: MarkdownTableBody,
   td: TableCell,

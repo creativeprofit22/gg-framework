@@ -34,8 +34,14 @@ export const DESKTOP_COMMAND_DISCOVERY_OPTIONS = {
   reservedCommandIdentities: CLIENT_RESERVED_SLASH_COMMAND_IDENTITIES,
 } satisfies CommandDiscoveryOptions;
 
-export async function appSidecarCodeCommandsResponse(cwd: string): Promise<SlashCommandsResponse> {
-  const discovery = await discoverCommands(cwd, DESKTOP_COMMAND_DISCOVERY_OPTIONS);
+export async function appSidecarCodeCommandsResponse(
+  cwd: string,
+  additionalRoots: readonly string[] = [],
+): Promise<SlashCommandsResponse> {
+  const discovery = await discoverCommands(cwd, {
+    ...DESKTOP_COMMAND_DISCOVERY_OPTIONS,
+    additionalRoots,
+  });
   const problems = discovery.problems ?? [];
   return {
     commands: discovery.entries.map((entry) => entry.listing),

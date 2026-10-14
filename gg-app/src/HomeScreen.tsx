@@ -12,6 +12,7 @@ import { error as logError } from "@tauri-apps/plugin-log";
 import { AsciiLogo } from "./AsciiLogo";
 import { HomeScenery, withScenery } from "./HomeScenery";
 import { HomeCritters } from "./HomeCritters";
+import { HomeUpdateButton } from "./HomeUpdateButton";
 import { useHomeBackgroundEnabled } from "./home-background";
 import { groundFilter, lightAt } from "./scene-light";
 import { useLocalHour } from "./use-local-hour";
@@ -22,13 +23,9 @@ import {
   getSettings,
   authStatus,
   openWhatsNewWindow,
-  getProgress,
   setRemoteActive,
   getServeStatus,
-  type ProgressSnapshot,
 } from "./agent";
-import { RankBadge } from "./RankBadge";
-import { ScorecardModal } from "./ScorecardModal";
 import { useAppUpdate } from "./update";
 import { ConfirmModal } from "./ConfirmModal";
 import { LocalUpdateSummaryOption } from "./LocalUpdateSummaryOption";
@@ -60,8 +57,8 @@ interface Props {
    * folder). A counter, not a boolean, so repeats always re-fire.
    */
   refreshSignal?: number;
+  /** Pane-bound sidecar readiness, for the best-effort serve-status sync. */
   waitForAgentReady?: () => Promise<unknown>;
-  loadProgress?: () => Promise<ProgressSnapshot | null>;
 }
 
 /**
@@ -77,28 +74,25 @@ export function HomeScreen({
   onSettings,
   refreshSignal = 0,
   waitForAgentReady = waitForReady,
-  loadProgress = getProgress,
 }: Props): React.ReactElement {
   const [folderSet, setFolderSet] = useState(false);
   const [providerCount, setProviderCount] = useState(0);
   const [version, setVersion] = useState<string | null>(null);
   const [showLocalUpdateConfirm, setShowLocalUpdateConfirm] = useState(false);
   const [summarizeDecisions, setSummarizeDecisions] = useState(false);
-  const [progress, setProgress] = useState<ProgressSnapshot | null>(null);
-  const [showScorecard, setShowScorecard] = useState(false);
   const [unreadWhatsNew, setUnreadWhatsNew] = useState<WhatsNewFeedId[]>([]);
+  // The version row stays hidden until the version is read, so What's new
+  // never shifts sideways when the number arrives.
+  const [versionRead, setVersionRead] = useState(false);
   const appUpdate = useAppUpdate();
   const goalsNoteId = useId();
 
   useEffect(() => {
     void getVersion()
       .then(setVersion)
-      .catch(() => {});
-    void waitForAgentReady()
-      .then(() => loadProgress())
-      .then(setProgress)
-      .catch(() => {});
-  }, [loadProgress, waitForAgentReady]);
+      .catch(() => {})
+      .finally(() => setVersionRead(true));
+  }, []);
 
   async function refresh(): Promise<void> {
     // Settings + auth are read NATIVELY (Rust) — do them first, WITHOUT waiting on
@@ -112,7 +106,7 @@ export function HomeScreen({
     setProviderCount(providers.filter((p) => p.connected).length);
     // Keep the macOS tray's Remote label in step with the sidecar (it may have
     // respawned). Best-effort, and never blocks the native reads above.
-    void waitForReady()
+    void waitForAgentReady()
       .then(() => getServeStatus())
       .then((serve) => void setRemoteActive(serve.running))
       .catch(() => {});
@@ -179,10 +173,13 @@ export function HomeScreen({
     }
   }
 
-  const showUpdate =
-    appUpdate.phase === "available" ||
-    appUpdate.phase === "installing" ||
-    (appUpdate.localPatched && (appUpdate.phase === "completed" || appUpdate.phase === "error"));
+  // The Local Fork's patched-installer flow; upstream's update key covers the rest.
+  const localUpdateShown =
+    appUpdate.localPatched &&
+    (appUpdate.phase === "available" ||
+      appUpdate.phase === "installing" ||
+      appUpdate.phase === "completed" ||
+      appUpdate.phase === "error");
   const localUpdateStatus =
     appUpdate.localPatched &&
     (appUpdate.phase === "installing" ||
@@ -208,13 +205,16 @@ export function HomeScreen({
   return (
     <div className="home" data-tauri-drag-region style={sceneStyle}>
       {backgroundOn && <HomeScenery hour={hour} />}
-      {/* Above the banner: your rank and What's new. */}
-      <div className="home-version-row">
-        <RankBadge
-          snapshot={progress}
-          onClick={() => setShowScorecard(true)}
-          className="home-rank-badge"
-        />
+      {/* Above the banner: the running version, and what's new in it. */}
+      <div className={`home-version-row${versionRead ? "" : " is-pending"}`}>
+        {version && (
+          <>
+            <span className="home-version">{`v${version}`}</span>
+            <span className="home-version-sep" aria-hidden="true">
+              {"\u00b7"}
+            </span>
+          </>
+        )}
         <button
           className="home-whatsnew"
           type="button"
@@ -267,7 +267,7 @@ export function HomeScreen({
           <CodeIcon size={18} weight="bold" aria-hidden="true" />
           Code
         </button>
-        {/* Goals is new, so its button says so underneath. */}
+        {/* Goals is new, so a Beta pill sits on its top border. */}
         <div className="home-action-slot">
           <button
             type="button"
@@ -279,8 +279,8 @@ export function HomeScreen({
             <TargetIcon size={18} weight="bold" aria-hidden="true" />
             Goals
           </button>
-          <span id={goalsNoteId} className="home-action-note">
-            In beta
+          <span id={goalsNoteId} className="home-action-beta">
+            Beta
           </span>
         </div>
         <button
@@ -311,16 +311,15 @@ export function HomeScreen({
       >
         <GearSixIcon size={20} weight="bold" aria-hidden="true" />
       </button>
-      {/* Along the bottom edge: every critter, out playing. The byline sits just
-        above their lane. */}
+      {/* Along the bottom edge: every critter, out playing. */}
       <HomeCritters biome={biome} />
-      {/* Bottom centre: the Local Fork byline (upstream's author links are not shown). */}
-      <div className="home-byline home-links">Built for shipping real projects fast</div>
-      {/* Top centre: the version, or the update button when one is ready. */}
+      {/* Top centre: the update button, only while an update is out. The Local
+        Fork's patched-installer flow keeps its own confirm-and-status pill. */}
       <div className="home-version-corner">
-        {showUpdate ? (
+        {localUpdateShown ? (
           <button
-            className={`home-update${appUpdate.phase === "installing" ? " home-update-progress" : ""}`}
+            type="button"
+            className="home-local-update"
             disabled={appUpdate.phase === "installing" || appUpdate.phase === "completed"}
             title={
               localUpdateStatus
@@ -336,51 +335,24 @@ export function HomeScreen({
               }
             }}
           >
-            {appUpdate.phase === "installing" && !appUpdate.localPatched && (
-              <span className="home-update-fill" style={{ width: `${appUpdate.progress ?? 0}%` }} />
-            )}
             <DownloadSimpleIcon size={14} weight="bold" aria-hidden="true" />
-            {localUpdateStatus ? (
+            <span className="home-update-status">
+              {localUpdateStatus
+                ? (appUpdate.statusMessage ?? appUpdate.installLabel)
+                : appUpdate.installLabel}
+            </span>
+            {/* Outside the clamped text so a long error never hides it. */}
+            {appUpdate.phase === "error" && (
               <>
-                <span className="home-update-status">
-                  {appUpdate.statusMessage ?? appUpdate.installLabel}
-                </span>
-                {/* Outside the clamped text so a long error never hides it. */}
-                {appUpdate.phase === "error" && (
-                  <>
-                    {" "}
-                    <span className="home-update-retry">{"— Retry"}</span>
-                  </>
-                )}
+                {" "}
+                <span className="home-update-retry">{"— Retry"}</span>
               </>
-            ) : (
-              /* Both labels occupy the same grid cell; the inactive one is
-                visibility:hidden, so the pill is ALWAYS sized to the wider of
-                the two and never resizes when the install starts or the
-                percentage climbs. */
-              <span className="home-update-swap">
-                <span
-                  className={appUpdate.phase === "installing" ? "home-update-hidden" : undefined}
-                >
-                  {appUpdate.installLabel}
-                </span>
-                <span
-                  className={appUpdate.phase === "installing" ? undefined : "home-update-hidden"}
-                >
-                  {"Installing\u2026"}
-                  <span className="home-update-pct">{`${appUpdate.progress ?? 0}%`}</span>
-                </span>
-              </span>
             )}
           </button>
         ) : (
-          version && <span className="home-version">{`v${version}`}</span>
+          <HomeUpdateButton appUpdate={appUpdate} current={version} />
         )}
       </div>
-
-      {showScorecard && progress && (
-        <ScorecardModal snapshot={progress} onClose={() => setShowScorecard(false)} />
-      )}
     </div>
   );
 }

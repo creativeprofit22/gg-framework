@@ -46,7 +46,7 @@ describe("CacheExpiryNotice", () => {
     expect(screen.getByRole("status", { name: "Prompt cache expired" })).toBeTruthy();
     expect(screen.getByText(TEXT)).toBeTruthy();
     expect(screen.getByRole("button", { name: "Compact first" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Send anyway" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Dismiss" })).toBeTruthy();
   });
 
   it("stays hidden while running, when warm, below threshold, or without status", () => {
@@ -134,12 +134,12 @@ describe("CacheExpiryNotice", () => {
     expect(screen.getByText(TEXT)).toBeTruthy();
   });
 
-  it("'Send anyway' dismisses once per expiry per chat", () => {
+  it("'Dismiss' hides it once per expiry per chat", () => {
     vi.useFakeTimers();
     const { rerender, unmount } = render(
       <CacheExpiryNotice expiry={status()} running={false} onCompact={vi.fn()} />,
     );
-    fireEvent.click(screen.getByRole("button", { name: "Send anyway" }));
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
     expectExitThenGone();
     // Same expiry: a new /state snapshot or a remount keeps it dismissed.
     rerender(<CacheExpiryNotice expiry={status()} running={false} onCompact={vi.fn()} />);

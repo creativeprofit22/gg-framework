@@ -3,7 +3,7 @@ import { createPortal } from "react-dom";
 import { XIcon } from "@phosphor-icons/react";
 import { theme } from "./theme";
 import { withViewTransition } from "./view-transition";
-import { ModalEmbedProvider, useModalEmbedState } from "./modal-embed";
+import { ModalEmbedProvider, useEmbedHostNamed, useModalEmbedState } from "./modal-embed";
 
 // Nested confirmations can unmount with their parent on project switches.
 // Reference counts restore the original state regardless of cleanup order.
@@ -81,6 +81,16 @@ export function Modal(props: ModalProps): React.ReactElement {
  */
 function ModalSection({ title, children, className }: ModalProps): React.ReactElement {
   const titleId = useId();
+  const hostNamed = useEmbedHostNamed();
+  if (hostNamed) {
+    // The host region (a Deck tool panel) already carries this name; a second
+    // same-named region inside it would be announced twice.
+    return (
+      <div className={className ? `settings-panel ${className}` : "settings-panel"}>
+        <ModalEmbedProvider state="panel">{children}</ModalEmbedProvider>
+      </div>
+    );
+  }
   return (
     <section
       className={className ? `settings-panel ${className}` : "settings-panel"}

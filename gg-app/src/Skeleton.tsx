@@ -35,23 +35,6 @@ export function Skeleton({
 }
 
 /**
- * Footer placeholder shown until the session has hydrated. The empty left
- * cluster preserves alignment for transient task/plan status; project context
- * now lives in the title bar.
- */
-export function FooterSkeleton(): React.ReactElement {
-  return (
-    <>
-      <span className="footer-left footer-reveal" />
-      <span className="footer-right footer-reveal">
-        <Skeleton width={84} />
-        <Skeleton width={56} />
-      </span>
-    </>
-  );
-}
-
-/**
  * A few staggered message-shaped rows shown while an existing session's
  * transcript is being fetched. Crossfades out to the real history.
  */

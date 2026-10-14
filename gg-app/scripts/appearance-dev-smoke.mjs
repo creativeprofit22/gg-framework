@@ -143,7 +143,9 @@ export async function runAppearanceSmoke(options = {}) {
             await verifyBackground("light", 1);
           }
           await wait(client, `document.querySelectorAll('.action-metal.metal-fx-root').length > 0 && [...document.querySelectorAll('.action-metal.metal-fx-root')].every(e=>e.dataset.theme===${JSON.stringify(theme)})`, "native shader theme");
-          assert.equal(await client.evaluate("getComputedStyle(document.querySelector('[role=dialog]')).color"), theme === "light" ? "rgb(32, 32, 42)" : "rgb(242, 243, 247)");
+          // Light keeps the Local Fork's liquid-glass palette (#20202a text);
+          // dark follows upstream 0.91's retuned text token (#e8ebef).
+          assert.equal(await client.evaluate("getComputedStyle(document.querySelector('[role=dialog]')).color"), theme === "light" ? "rgb(32, 32, 42)" : "rgb(232, 235, 239)");
           for (const viewport of [{width:1280,height:800},{width:390,height:844}]) {
             await client.send("Emulation.setDeviceMetricsOverride", {...viewport, deviceScaleFactor:1, mobile:false});
             await client.evaluate("document.querySelector('.appearance-settings').scrollIntoView({block:'start'});new Promise(done=>requestAnimationFrame(()=>requestAnimationFrame(done)))");
@@ -155,6 +157,18 @@ export async function runAppearanceSmoke(options = {}) {
           evidence.checks.push(`${theme}: saved normal Settings, document-root portal inheritance, native theme and OS background paint, desktop/narrow modal reflow`);
         }
         await client.send("Emulation.setDeviceMetricsOverride", {width:1280,height:800,deviceScaleFactor:1,mobile:false});
+        // Back from the 390px pass: a narrow pane's composer re-measures its
+        // height a moment after the resize. Anchor only once every pane's
+        // header, dock and conversation have held their size, so the drift
+        // below measures the reading settings alone.
+        const paneSizes = "[...document.querySelectorAll('[data-pane-id]')].map(h=>[h.querySelector('.chat-head')?.offsetHeight,h.querySelector('.dock')?.offsetHeight,h.querySelector('.transcript')?.clientHeight].join('/')).join(' ')";
+        for (let previous = "", stable = 0, polls = 0; stable < 3; polls++) {
+          assert.ok(polls < 50, "Pane layout never settled after restoring the desktop viewport");
+          await client.evaluate("new Promise(r=>setTimeout(r,100))");
+          const sizes = await client.evaluate(paneSizes);
+          stable = sizes === previous ? stable + 1 : 0;
+          previous = sizes;
+        }
         await client.evaluate(`(() => {
           window.__appearanceAnchors = [...document.querySelectorAll('[data-pane-id]')].map(host => {
             const scroll=host.querySelector('.transcript'); const paragraph=host.querySelector('.ken-msg p');
@@ -165,7 +179,7 @@ export async function runAppearanceSmoke(options = {}) {
             for(let index=0;index<node.length;index++) {
               const range=document.createRange();range.setStart(node,index);range.setEnd(node,index+1);
               const box=range.getBoundingClientRect();
-              if(box.width && box.bottom>top) return {scroll,range,top:box.top-top};
+              if(box.width && box.bottom>top) return {scroll,range,top:box.top-top,before:{scrollTop:scroll.scrollTop,scrollHeight:scroll.scrollHeight,clientHeight:scroll.clientHeight,head:host.querySelector('.chat-head')?.offsetHeight,dock:host.querySelector('.dock')?.offsetHeight,status:host.querySelector('.deck-status')?.textContent?.slice(0,40),width:host.offsetWidth}};
             }
             throw new Error('No visible reading anchor');
           }); return true;
@@ -173,7 +187,8 @@ export async function runAppearanceSmoke(options = {}) {
         await client.evaluate("(() => { for(const select of [...document.querySelectorAll('.appearance-control select')].slice(1)){select.selectedIndex=1;select.dispatchEvent(new Event('change',{bubbles:true}));}return true })()");
         await client.evaluate("new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(()=>r(true))))");
         const drifts = await client.evaluate("window.__appearanceAnchors.map(({scroll,range,top})=>Math.abs(range.getBoundingClientRect().top-scroll.getBoundingClientRect().top-scroll.clientTop-top))");
-        assert.ok(drifts.every(drift=>drift<=1), `Reading changes moved anchored text: ${drifts.join(', ')}`);
+        const anchorScroll = drifts.every(drift=>drift<=1) ? [] : await client.evaluate("window.__appearanceAnchors.map(({scroll,before},i)=>{const host=document.querySelectorAll('[data-pane-id]')[i];return {before,after:{scrollTop:scroll.scrollTop,scrollHeight:scroll.scrollHeight,clientHeight:scroll.clientHeight,head:host.querySelector('.chat-head')?.offsetHeight,dock:host.querySelector('.dock')?.offsetHeight,status:host.querySelector('.deck-status')?.textContent?.slice(0,40)}}})");
+        assert.ok(drifts.every(drift=>drift<=1), `Reading changes moved anchored text: ${drifts.join(', ')} ${JSON.stringify(anchorScroll)}`);
         evidence.checks.push("Reading preference changes preserve the visible glyph in each transcript within one CSS pixel");
         await client.send("Input.dispatchKeyEvent", {type:"keyDown",key:"Escape",code:"Escape",windowsVirtualKeyCode:27});
         await client.send("Input.dispatchKeyEvent", {type:"keyUp",key:"Escape",code:"Escape",windowsVirtualKeyCode:27});

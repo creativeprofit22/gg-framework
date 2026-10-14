@@ -647,32 +647,51 @@ describe("authoritative progress celebrations", () => {
 
 describe("Qwen Cloud thinking labels", () => {
   it.each([
-    ["qwen-cloud", "qwen-cloud/qwen3.7-max", "high", "Thinking on"],
-    ["qwen-cloud", "qwen-cloud/qwen3.7-max", null, "Thinking off"],
-    ["qwen-cloud", "qwen-cloud/glm-5.3", null, "Thinking high"],
-    ["qwen-cloud", "qwen-cloud/glm-5.3", "max", "Thinking max"],
-    ["azure", "azure:gpt-test", "high", "Thinking high"],
-  ] as const)("renders %s %s %s as %s", async (provider, model, thinkingLevel, label) => {
-    const pane = client("thinking-pane", 1);
-    vi.mocked(pane.getState).mockResolvedValue({
-      ...agentState(model),
-      provider,
-      model,
-      thinkingLevel,
-      supportedThinkingLevels: ["high", "max"],
-    });
-    vi.mocked(pane.cycleThinking).mockResolvedValue({
-      thinkingLevel: "high",
-      supportedThinkingLevels: ["high", "max"],
-    });
-    render(<AgentPane client={pane} />);
-    fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
-    const button = await screen.findByRole("button", { name: label });
-    expect(button.title).toBe("Cycle reasoning level");
-    fireEvent.click(button);
-    await waitFor(() => expect(pane.cycleThinking).toHaveBeenCalledOnce());
-  });
+    ["qwen-cloud", "qwen-cloud/qwen3.7-max", "high", "Thinking on", "Thinking off", null],
+    ["qwen-cloud", "qwen-cloud/qwen3.7-max", null, "Thinking off", "Thinking on", "high"],
+    ["qwen-cloud", "qwen-cloud/glm-5.3", null, "Thinking high", "Thinking max", "max"],
+    ["qwen-cloud", "qwen-cloud/glm-5.3", "max", "Thinking max", "Thinking high", "high"],
+    // Non-Qwen providers use the Deck's standard level names.
+    ["azure", "azure:gpt-test", "high", "Thinking High", "Thinking Max", "max"],
+  ] as const)(
+    "renders %s %s %s as %s",
+    async (provider, model, thinkingLevel, label, next, sent) => {
+      const pane = client("thinking-pane", 1);
+      vi.mocked(pane.getState).mockResolvedValue({
+        ...agentState(model),
+        provider,
+        model,
+        thinkingLevel,
+        supportedThinkingLevels: ["high", "max"],
+      });
+      vi.mocked(pane.cycleThinking).mockResolvedValue({
+        thinkingLevel: "high",
+        supportedThinkingLevels: ["high", "max"],
+      });
+      render(<AgentPane client={pane} />);
+      fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
+      // Upstream's Deck thinking radio group supersedes the old cycle button;
+      // Qwen Cloud keeps its provider wording there.
+      fireEvent.click(await screen.findByRole("button", { name: /^Model / }));
+      const group = await screen.findByRole("radiogroup", { name: "Thinking" });
+      const current = within(group).getByRole("radio", { name: label });
+      expect(current.getAttribute("aria-checked")).toBe("true");
+      expect(
+        within(group)
+          .getAllByRole("radio")
+          .filter((radio) => radio.getAttribute("aria-checked") === "true"),
+      ).toEqual([current]);
+      fireEvent.click(within(group).getByRole("radio", { name: next }));
+      await waitFor(() =>
+        // Pane-scoped: the thinking change goes to this pane's own session.
+        expect(nativeMocks.invoke).toHaveBeenCalledWith("agent_set_thinking", {
+          paneId: "thinking-pane",
+          level: sent,
+        }),
+      );
+    },
+  );
 });
 
 async function renderKenPromptPane(
@@ -884,7 +903,7 @@ describe("pane-local opening (mocked native transport)", () => {
         const text = container?.textContent ?? "";
         return {
           connected: container?.isConnected ?? false,
-          modelButton: !!container?.querySelector(".footer .model-button"),
+          modelButton: !!container?.querySelector(".dock .model-key"),
           sendDisabled:
             container?.querySelector<HTMLButtonElement>('button[aria-label="Send message"]')
               ?.disabled ?? null,
@@ -1038,7 +1057,10 @@ describe("pane-local opening (mocked native transport)", () => {
       otherContainer = otherView.container;
       end("independent-render");
       begin("independent-ready");
-      expect(otherView.container.querySelector(".footer .model-button")).not.toBeNull();
+      // Ready: the dock's connecting status (old footer branch) is gone and the
+      // Deck model key is present.
+      expect(otherView.container.querySelector(".dock .dock-status")).toBeNull();
+      expect(otherView.container.querySelector(".dock .model-key")).not.toBeNull();
       end("independent-ready");
       begin("independent-input");
       const otherInput = within(otherView.container).getByRole("textbox");
@@ -1468,7 +1490,9 @@ describe("enhancement composer outcomes (mocked native transport)", () => {
     // after history replay and setHydrated (which gates enhancement). Do not type
     // a readiness probe: that would start/stop the placeholder timers under test.
     // Finish this real-clock wait before any test starts its animation clock.
-    await waitFor(() => expect(document.querySelector(".footer .footer-left")).not.toBeNull());
+    // The Deck port dropped the footer; its readyRef branch is now the dock's
+    // connecting status, which unmounts once the pane is ready.
+    await waitFor(() => expect(document.querySelector(".dock .dock-status")).toBeNull());
     expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe("");
     expect(pane.enhancePrompt).not.toHaveBeenCalled();
     expect(pane.sendPrompt).not.toHaveBeenCalled();
@@ -1811,8 +1835,38 @@ describe("preferredRoadmapPhaseSession", () => {
 async function openTasksModal(pane: PaneAgentClient): Promise<void> {
   vi.mocked(pane.getState).mockResolvedValue(agentState("azure:gpt-test"));
   render(<AgentPane client={pane} target={target} />);
-  fireEvent.click(await screen.findByRole("button", { name: "Tasks (1)" }));
-  await screen.findByRole("dialog", { name: "Tasks" });
+  fireEvent.click(await screen.findByRole("button", { name: "Tasks, 1 pending" }));
+  await findTasksPanel();
+}
+
+/**
+ * Tasks opens as the deck's "Tasks" region. The embedded Tasks list must not
+ * announce a second, nested "Tasks" region inside it.
+ */
+async function findTasksPanel(): Promise<HTMLElement> {
+  const regions = await screen.findAllByRole("region", { name: "Tasks" });
+  expect(regions).toHaveLength(1);
+  const [panel] = regions;
+  if (!panel?.classList.contains("deck-panel-host")) throw new Error("missing Tasks deck panel");
+  return panel;
+}
+
+/** Autopilot moved into the ⋯ More deck panel; open it and return the switch. */
+async function openAutopilotToggle(): Promise<HTMLElement> {
+  fireEvent.click(await screen.findByRole("button", { name: "More" }));
+  return screen.findByRole("switch", { name: "Autopilot" });
+}
+
+/** Astra context/Fast controls live in each pane's ⋯ More deck menu; open them all. */
+async function openMoreMenus(count = 1): Promise<void> {
+  await waitFor(() =>
+    expect(screen.getAllByRole("button", { name: "More" }).length).toBeGreaterThanOrEqual(count),
+  );
+  for (const more of screen.getAllByRole("button", { name: "More" })) fireEvent.click(more);
+}
+
+function expectAutopilotChecked(toggle: HTMLElement, checked: boolean): void {
+  expect(toggle.getAttribute("aria-checked")).toBe(String(checked));
 }
 
 describe("empty session starting points", () => {
@@ -1911,11 +1965,11 @@ describe("empty session starting points", () => {
     render(<AgentPane client={pane} target={target} />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Tasks" }));
-    const dialog = await screen.findByRole("dialog", { name: "Tasks" });
+    const dialog = await findTasksPanel();
     expect(await within(dialog).findByText("No tasks yet")).toBeTruthy();
     fireEvent.click(within(dialog).getByRole("button", { name: "Draft a task request" }));
 
-    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Tasks" })).toBeNull());
+    await waitFor(() => expect(screen.queryAllByRole("region", { name: "Tasks" })).toHaveLength(0));
     const input = screen.getByRole("textbox") as HTMLTextAreaElement;
     expect(input.value).toBe("Break this work into project tasks I can run later: ");
     await waitFor(() => expect(document.activeElement).toBe(input));
@@ -1934,10 +1988,10 @@ describe("empty session starting points", () => {
     const input = screen.getByRole("textbox") as HTMLTextAreaElement;
     fireEvent.change(input, { target: { value: "add login" } });
     fireEvent.click(tasksButton);
-    const dialog = await screen.findByRole("dialog", { name: "Tasks" });
+    const dialog = await findTasksPanel();
     fireEvent.click(await within(dialog).findByRole("button", { name: "Draft a task request" }));
 
-    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Tasks" })).toBeNull());
+    await waitFor(() => expect(screen.queryAllByRole("region", { name: "Tasks" })).toHaveLength(0));
     expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe(
       "Break this work into project tasks I can run later: add login",
     );
@@ -1954,7 +2008,7 @@ describe("empty session starting points", () => {
     render(<AgentPane client={pane} target={target} />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Tasks" }));
-    const dialog = await screen.findByRole("dialog", { name: "Tasks" });
+    const dialog = await findTasksPanel();
     expect(
       await within(dialog).findByRole("heading", { name: /Couldn.t load tasks/u }),
     ).toBeTruthy();
@@ -2010,6 +2064,11 @@ describe("command refresh ordering (mocked native transport)", () => {
       },
     ];
     vi.mocked(pane.listCommands).mockResolvedValue(rows);
+    // The 0.91 title bar shows the commit key only for a dirty tree.
+    vi.mocked(pane.getState).mockResolvedValue({
+      ...agentState("azure:gpt-test"),
+      gitDirtyFileCount: 2,
+    });
     render(<AgentPane client={pane} target={target} />);
     await screen.findByTitle("Run /commit");
     vi.mocked(pane.listCommands).mockResolvedValueOnce(null);
@@ -2042,21 +2101,28 @@ describe("command refresh ordering (mocked native transport)", () => {
         input: { text: "optional", references: "optional", attachments: "optional" },
       },
     ]);
+    vi.mocked(pane.getState).mockResolvedValue({
+      ...agentState("azure:gpt-test"),
+      gitDirtyFileCount: 2,
+    });
     const { container } = render(<AgentPane client={pane} target={target} />);
 
+    // Upstream 0.91 title bar: New is the only primary pin; commit is a
+    // secondary key showing the dirty count; Tasks is a plain pin.
     const commit = await screen.findByTitle("Run /commit");
-    const header = container.querySelector(".chat-head");
-    if (!header) throw new Error("missing chat header");
-    const primaries = header.querySelectorAll(".btn-primary");
+    const primaries = container.querySelectorAll(".title-pin-primary");
     expect(primaries).toHaveLength(1);
-    expect(primaries[0]?.textContent).toBe("+ New");
-    expect(header.querySelector(".btn-success")).toBeNull();
-    expect(commit.classList).toContain("btn-ghost");
-    expect(commit.classList).not.toContain("btn-quiet");
-    expect(screen.getByTitle("View and run this project's tasks").classList).toContain("btn-quiet");
-    // The layout control is a native select or a menu button by platform;
-    // either way its visible icon button is quiet.
-    expect(header.querySelector(".winlayout .btn-quiet")).not.toBeNull();
+    expect(primaries[0]?.textContent).toBe("New");
+    expect(commit.classList).toContain("commit-key");
+    expect(commit.classList).not.toContain("title-pin-primary");
+    expect(commit.getAttribute("aria-label")).toBe("Commit 2 files");
+    const tasks = screen.getByTitle("View and run this project's tasks");
+    expect(tasks.classList).toContain("title-pin");
+    expect(tasks.classList).not.toContain("title-pin-primary");
+    // Arrange (the layout control) moved into the quiet ⋯ More menu.
+    fireEvent.click(screen.getByRole("button", { name: "More" }));
+    const more = await screen.findByRole("group", { name: "More" });
+    expect(within(more).getByText("Arrange")).toBeTruthy();
   });
 });
 
@@ -2475,6 +2541,8 @@ describe("AgentPane question acknowledgement", () => {
         ...agentState("azure:gpt-test"),
         running: source === "typed",
         runState: source === "typed" ? "running" : "idle",
+        // The 0.91 title bar shows the commit key only with dirty files.
+        gitDirtyFileCount: 1,
       });
       vi.mocked(pane.listCommands).mockResolvedValue([
         {
@@ -2642,7 +2710,10 @@ describe("AgentPane question acknowledgement", () => {
     vi.mocked(pane.getState).mockResolvedValue(agentState("azure:gpt-test"));
     const { container } = render(<AgentPane client={pane} target={target} />);
     // Exercise live expiry after initial hydration, not merely listener setup.
-    await waitFor(() => expect(container.querySelector(".footer .model-button")).not.toBeNull());
+    // 0.91 Deck: the hydrated model shows on the title bar's model key.
+    await waitFor(() =>
+      expect(container.querySelector(".model-key")?.textContent).toContain("gpt-test"),
+    );
     act(() => {
       emit("ask_user", { id: "ask-1", questions: [question] });
       emit("ask_user", {
@@ -2679,15 +2750,17 @@ describe("AgentPane Autopilot confirmation", () => {
         <Toaster />
       </>,
     );
-    const toggle = await screen.findByRole("checkbox", { name: "Autopilot" });
+    const toggle = await openAutopilotToggle();
     await waitFor(() => expect(toggle).toMatchObject({ disabled: false }));
     fireEvent.click(toggle);
-    expect(toggle).toMatchObject({ checked: false, disabled: true });
+    expectAutopilotChecked(toggle, false);
+    expect(toggle).toMatchObject({ disabled: true });
     expect(container.querySelector(".ken-power-overlay")).toBeNull();
     fireEvent.click(toggle);
     expect(pane.setAutopilot).toHaveBeenCalledTimes(1);
     await act(async () => reject(new Error("configuration refresh in progress")));
-    expect(toggle).toMatchObject({ checked: false, disabled: false });
+    expectAutopilotChecked(toggle, false);
+    expect(toggle).toMatchObject({ disabled: false });
     expect(container.querySelector(".ken-power-overlay")).toBeNull();
     expect(nativeMocks.toast).toHaveBeenCalledWith(
       expect.stringContaining("configuration refresh in progress"),
@@ -2705,7 +2778,10 @@ describe("AgentPane Autopilot confirmation", () => {
     act(() => realToast.dismissToast(nativeMocks.toast.mock.results[0].value));
     vi.mocked(pane.setAutopilot).mockResolvedValueOnce(true);
     fireEvent.click(toggle);
-    await waitFor(() => expect(toggle).toMatchObject({ checked: true, disabled: false }));
+    await waitFor(() => {
+      expectAutopilotChecked(toggle, true);
+      expect(toggle).toMatchObject({ disabled: false });
+    });
     expect(container.querySelector(".ken-power-banner-on")).not.toBeNull();
   });
 
@@ -2720,19 +2796,19 @@ describe("AgentPane Autopilot confirmation", () => {
         <Toaster />
       </>,
     );
-    const toggle = await screen.findByRole("checkbox", { name: "Autopilot" });
+    const toggle = await openAutopilotToggle();
     await waitFor(() => expect(toggle).toMatchObject({ disabled: false }));
     fireEvent.click(toggle);
     await waitFor(() => expect(container.querySelector(".ken-power-banner-off")).not.toBeNull());
     expect(pane.setAutopilot).toHaveBeenCalledWith(true);
-    expect(toggle).toMatchObject({ checked: false });
+    expectAutopilotChecked(toggle, false);
     expect(container.querySelector(".ken-power-banner-on")).toBeNull();
     act(() => emit?.({ type: "autopilot", data: { autopilot: true } }));
-    expect(toggle).toMatchObject({ checked: true });
+    expectAutopilotChecked(toggle, true);
     act(() => emit?.({ type: "autopilot", data: { autopilot: "false" } }));
-    expect(toggle).toMatchObject({ checked: true });
+    expectAutopilotChecked(toggle, true);
     act(() => emit?.({ type: "autopilot", data: { autopilot: false } }));
-    expect(toggle).toMatchObject({ checked: false });
+    expectAutopilotChecked(toggle, false);
   });
 
   it.each(["resolve", "reject"])(
@@ -2751,7 +2827,7 @@ describe("AgentPane Autopilot confirmation", () => {
       const view = render(
         <AgentPane client={pane} target={target} generation={1} workspaceOwnsSessionLifecycle />,
       );
-      const toggle = await screen.findByRole("checkbox", { name: "Autopilot" });
+      const toggle = await openAutopilotToggle();
       await waitFor(() => expect(toggle).toMatchObject({ disabled: false }));
       fireEvent.click(toggle);
       view.rerender(
@@ -2766,7 +2842,7 @@ describe("AgentPane Autopilot confirmation", () => {
         if (outcome === "resolve") resolve(true);
         else reject(new Error("old failure"));
       });
-      expect(toggle).toMatchObject({ checked: false });
+      expectAutopilotChecked(toggle, false);
       expect(view.container.querySelector(".ken-power-overlay")).toBeNull();
       expect(nativeMocks.toast).not.toHaveBeenCalled();
     },
@@ -2787,7 +2863,9 @@ describe("AgentPane task request failures", () => {
       fireEvent.click(
         screen.getByRole("button", { name: all ? "Run all (1)" : `Run: ${projectTask.title}` }),
       );
-      await waitFor(() => expect(screen.queryByRole("dialog", { name: "Tasks" })).toBeNull());
+      await waitFor(() =>
+        expect(screen.queryAllByRole("region", { name: "Tasks" })).toHaveLength(0),
+      );
       act(() => {
         emit?.({ type: "tasks_run_done", data: {} });
         emit?.({
@@ -2807,8 +2885,8 @@ describe("AgentPane task request failures", () => {
           "Open Tasks and retry the unfinished task. If it fails again, report the problem.",
         ),
       ).toBeTruthy();
-      fireEvent.click(screen.getByRole("button", { name: "Tasks (1)" }));
-      await screen.findByRole("dialog", { name: "Tasks" });
+      fireEvent.click(screen.getByRole("button", { name: "Tasks, 1 pending" }));
+      await findTasksPanel();
       const retry = screen.getByRole("button", { name: `Run: ${projectTask.title}` });
       expect(retry).toMatchObject({ disabled: false });
       fireEvent.click(retry);
@@ -2843,12 +2921,12 @@ describe("AgentPane task request failures", () => {
     });
     vi.mocked(pane.getState).mockResolvedValue(agentState("azure:gpt-test"));
     render(<AgentPane client={pane} target={target} />);
-    const tasksButton = await screen.findByRole("button", { name: "Tasks (1)" });
+    const tasksButton = await screen.findByRole("button", { name: "Tasks, 1 pending" });
 
     rejectRefresh = true;
     fireEvent.click(tasksButton);
 
-    await screen.findByRole("dialog", { name: "Tasks" });
+    await findTasksPanel();
     expect(screen.getByText(projectTask.title)).toBeTruthy();
     await waitFor(() =>
       expect(nativeMocks.toast).toHaveBeenCalledWith("task list unavailable", "error"),
@@ -2867,7 +2945,9 @@ describe("AgentPane task request failures", () => {
       expect(nativeMocks.toast).toHaveBeenCalledWith("task cannot start", "error"),
     );
     expect(screen.getByText(projectTask.title)).toBeTruthy();
-    expect(screen.getByRole("dialog", { name: "Tasks" })).toBeTruthy();
+    expect(screen.getAllByRole("region", { name: "Tasks" })[0]?.classList).toContain(
+      "deck-panel-host",
+    );
   });
 
   it("keeps the modal and tasks visible when run-all is rejected", async () => {
@@ -2882,7 +2962,9 @@ describe("AgentPane task request failures", () => {
       expect(nativeMocks.toast).toHaveBeenCalledWith("task batch cannot start", "error"),
     );
     expect(screen.getByText(projectTask.title)).toBeTruthy();
-    expect(screen.getByRole("dialog", { name: "Tasks" })).toBeTruthy();
+    expect(screen.getAllByRole("region", { name: "Tasks" })[0]?.classList).toContain(
+      "deck-panel-host",
+    );
   });
 
   it("keeps the current tasks visible when delete is rejected", async () => {
@@ -3073,6 +3155,7 @@ describe("AgentPane lifecycle", () => {
           canChange === false ? { canChange: false, reason } : undefined,
       } as unknown as AgentState);
       render(<AgentPane client={pane} target={target} workspaceOwnsSessionLifecycle />);
+      await openMoreMenus();
       const selector = (await screen.findByRole("combobox", {
         name: "OpenAI Codex context profile",
       })) as HTMLSelectElement;
@@ -3103,6 +3186,7 @@ describe("AgentPane lifecycle", () => {
     const mounted = render(
       <AgentPane client={oauthPane} target={target} workspaceOwnsSessionLifecycle />,
     );
+    await openMoreMenus();
     expect(
       await screen.findByRole("combobox", { name: "OpenAI Codex context profile" }),
     ).toBeDefined();
@@ -3123,6 +3207,7 @@ describe("AgentPane lifecycle", () => {
     });
     render(<AgentPane client={apiKeyPane} target={target} workspaceOwnsSessionLifecycle />);
     await screen.findAllByText("gpt-6-astra");
+    await openMoreMenus();
     expect(screen.queryByRole("combobox", { name: "OpenAI Codex context profile" })).toBeNull();
     expect(screen.queryByRole("switch", { name: /Fast (on|off) · 2.5× credits/ })).toBeNull();
   });
@@ -3155,6 +3240,7 @@ describe("AgentPane lifecycle", () => {
         <AgentPane client={right} target={target} workspaceOwnsSessionLifecycle />
       </>,
     );
+    await openMoreMenus(2);
     const selectors = await screen.findAllByRole("combobox", {
       name: "OpenAI Codex context profile",
     });
@@ -3195,9 +3281,11 @@ describe("AgentPane lifecycle", () => {
     await act(async () => {
       render(<AgentPane client={pane} target={target} workspaceOwnsSessionLifecycle />);
     });
+    // 0.91 Deck: Ken's picker is the second target key inside the model panel.
+    fireEvent.click(await screen.findByRole("button", { name: /^Model .*\. Change$/ }));
     const picker = await screen.findByTitle(/is pinned to a separate model/);
     fireEvent.click(picker);
-    fireEvent.click(await screen.findByRole("menuitemradio", { name: /Missing/ }));
+    fireEvent.click(await screen.findByRole("option", { name: /Missing/ }));
     await waitFor(() => expect(nativeMocks.toast).toHaveBeenCalledWith(message, "error"));
     expect(pane.switchKenModel).toHaveBeenCalledExactlyOnceWith("missing");
     expect(nativeMocks.kenStateRef?.current).toMatchObject(prior);
@@ -3219,6 +3307,7 @@ describe("AgentPane lifecycle", () => {
       render(<AgentPane client={pane} target={target} workspaceOwnsSessionLifecycle />);
     });
 
+    fireEvent.click(await screen.findByRole("button", { name: /^Model .*\. Change$/ }));
     const ken = await screen.findByTitle(/is pinned to a separate model/);
     const gg = screen.getByTitle("Switch Supah Coder's model");
     const describedText = (el: HTMLElement): string =>
@@ -3243,6 +3332,7 @@ describe("AgentPane lifecycle", () => {
       running: true,
     });
     render(<AgentPane client={pane} target={target} workspaceOwnsSessionLifecycle />);
+    await openMoreMenus();
     expect(
       (await screen.findByRole("combobox", {
         name: "OpenAI Codex context profile",
@@ -3261,6 +3351,7 @@ describe("AgentPane lifecycle", () => {
       contextWindow: 272_000,
     });
     render(<AgentPane client={pane} target={target} workspaceOwnsSessionLifecycle />);
+    await openMoreMenus();
     const selector = await screen.findByRole("combobox", {
       name: "OpenAI Codex context profile",
     });
@@ -3295,6 +3386,7 @@ describe("AgentPane lifecycle", () => {
         <AgentPane client={pane} target={target} workspaceOwnsSessionLifecycle />
       </>,
     );
+    await openMoreMenus();
     const selector = await screen.findByRole("combobox", {
       name: "OpenAI Codex context profile",
     });
@@ -3330,6 +3422,7 @@ describe("AgentPane lifecycle", () => {
     const mutation = deferred<{ openAICodexFast: boolean }>();
     vi.mocked(pane.setOpenAICodexFast).mockReturnValueOnce(mutation.promise);
     render(<AgentPane client={pane} target={target} workspaceOwnsSessionLifecycle />);
+    await openMoreMenus();
     const fast = await screen.findByRole("switch", { name: /Fast (on|off) · 2.5× credits/ });
     const selector = screen.getByRole("combobox", { name: "OpenAI Codex context profile" });
 
@@ -3367,6 +3460,8 @@ describe("AgentPane lifecycle", () => {
     }>();
     vi.mocked(pane.setOpenAICodexContextProfile).mockReturnValue(mutation.promise);
     render(<AgentPane client={pane} target={target} workspaceOwnsSessionLifecycle />);
+    // 0.91 Deck: the Astra controls live in the More menu.
+    await openMoreMenus();
     const selector = await screen.findByRole("combobox", {
       name: "OpenAI Codex context profile",
     });
@@ -3396,6 +3491,8 @@ describe("AgentPane lifecycle", () => {
       new Error("Compact or start a new session first."),
     );
     render(<AgentPane client={pane} target={target} workspaceOwnsSessionLifecycle />);
+    // 0.91 Deck: the Astra controls live in the More menu.
+    await openMoreMenus();
     const selector = await screen.findByRole("combobox", {
       name: "OpenAI Codex context profile",
     });
@@ -3418,7 +3515,9 @@ describe("AgentPane lifecycle", () => {
     );
     const home = document.querySelector('[data-testid="home-screen"]');
     expect(home?.getAttribute("data-has-pane-ready")).toBe("true");
-    expect(home?.getAttribute("data-has-pane-progress")).toBe("true");
+    // Upstream 0.91 tidied Home: the rank badge moved into the Deck, so Home
+    // no longer loads progress at all.
+    expect(home?.getAttribute("data-has-pane-progress")).toBe("false");
     expect(pane.create).not.toHaveBeenCalled();
   });
 
@@ -3458,13 +3557,16 @@ describe("AgentPane lifecycle", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
     fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
+    // 0.91 Deck: the build identity lives in the title bar's More menu.
+    fireEvent.click(await screen.findByRole("button", { name: "More" }));
     expect((await screen.findByText("◆ Supah Coder Local Fork · abc1234")).className).toBe(
-      "footer-custom-build",
+      "key footer-custom-build",
     );
-    // Footer dividers are decoration; screen readers must not announce the glyph.
-    const seps = document.querySelectorAll(".footer-sep");
-    expect(seps.length).toBeGreaterThan(0);
-    for (const sep of seps) expect(sep.getAttribute("aria-hidden")).toBe("true");
+    // The 0.91 shell has no footer dividers; any decorative divider that
+    // remains must still stay silent for screen readers.
+    for (const sep of document.querySelectorAll(".footer-sep")) {
+      expect(sep.getAttribute("aria-hidden")).toBe("true");
+    }
   });
 
   it("presents the compatible general chat agent as Brainstorm", async () => {
@@ -3561,19 +3663,18 @@ describe("AgentPane lifecycle", () => {
     const view = render(<AgentPane client={pane} />);
     fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
     fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
-    const modelButton = await screen.findByTitle("Switch Supah Coder's model");
+    // 0.91 Deck: the model key opens the model panel's listbox.
+    const modelButton = await screen.findByRole("button", { name: /^Model .*\. Change$/ });
     await waitFor(() => expect((modelButton as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(modelButton);
-    expect(screen.getByRole("menu", { name: "Switch Supah Coder's model" })).toBeTruthy();
+    expect(await screen.findByRole("listbox", { name: "GG's model" })).toBeTruthy();
 
     await act(async () => {
       nativeMocks.modelsChanged?.();
       await Promise.resolve();
     });
 
-    await waitFor(() =>
-      expect(screen.queryByRole("menu", { name: "Switch Supah Coder's model" })).toBeNull(),
-    );
+    await waitFor(() => expect(screen.queryByRole("listbox", { name: "GG's model" })).toBeNull());
     view.unmount();
     await waitFor(() => expect(nativeMocks.modelsUnlisten).toHaveBeenCalledOnce());
   });
@@ -3588,7 +3689,8 @@ describe("AgentPane lifecycle", () => {
     render(<AgentPane client={pane} onGenerationChange={onGenerationChange} />);
     fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
     fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
-    const modelButton = await screen.findByTitle("Switch Supah Coder's model");
+    // 0.91 Deck: the title bar's model key names the current model.
+    const modelButton = await screen.findByRole("button", { name: /^Model .*\. Change$/ });
     await waitFor(() => expect(modelButton.textContent).toContain("Azure old"));
     onGenerationChange.mockClear();
     vi.mocked(pane.waitForReady).mockResolvedValue({
@@ -3608,7 +3710,9 @@ describe("AgentPane lifecycle", () => {
     });
 
     await waitFor(() => expect(onGenerationChange).toHaveBeenCalledWith(2));
-    expect(screen.getByTitle("Switch Supah Coder's model").textContent).toContain("Azure new");
+    expect(screen.getByRole("button", { name: /^Model .*\. Change$/ }).textContent).toContain(
+      "Azure new",
+    );
   });
 
   it("separate pane clients create and subscribe independently", async () => {
@@ -3968,6 +4072,8 @@ describe("AgentPane lifecycle", () => {
       vi.mocked(pane.getState).mockResolvedValue({
         ...agentState("azure:gpt-test"),
         running: source === "queued",
+        // The 0.91 title bar shows the commit key only with dirty files.
+        gitDirtyFileCount: 1,
       });
       vi.mocked(pane.listCommands).mockResolvedValue([
         {
@@ -6280,6 +6386,8 @@ describe("AgentPane lifecycle", () => {
         ...agentState("azure:gpt-test"),
         running,
         runState: running ? "running" : "idle",
+        // The 0.91 title bar shows the commit key only with dirty files.
+        gitDirtyFileCount: 1,
       });
       vi.mocked(pane.listCommands).mockResolvedValue([
         {
@@ -6305,8 +6413,7 @@ describe("AgentPane lifecycle", () => {
       await waitFor(() => expect(input.disabled).toBe(false));
       if (source === "ken")
         fireEvent.click(await screen.findByRole("button", { name: "Continue here" }));
-      else if (source === "toolbar")
-        fireEvent.click(await screen.findByRole("button", { name: "/commit" }));
+      else if (source === "toolbar") fireEvent.click(await screen.findByTitle("Run /commit"));
       else {
         fireEvent.change(input, { target: { value: "Old typed prompt" } });
         fireEvent.keyDown(input, { key: "Enter" });
@@ -6577,10 +6684,15 @@ describe("AgentPane lifecycle", () => {
         input: { text: "optional", references: "optional", attachments: "optional" },
       },
     ]);
+    // The 0.91 title bar shows the commit key only with dirty files.
+    vi.mocked(pane.getState).mockResolvedValue({
+      ...agentState("azure:gpt-test"),
+      gitDirtyFileCount: 1,
+    });
     const submission = deferred<AgentModule.PromptSubmissionResult>();
     vi.mocked(pane.sendPrompt).mockReturnValueOnce(submission.promise);
     const { container } = render(<AgentPane client={pane} target={target} />);
-    fireEvent.click(await screen.findByRole("button", { name: "/commit" }));
+    fireEvent.click(await screen.findByTitle("Run /commit"));
     await waitFor(() => expect(pane.sendPrompt).toHaveBeenCalledOnce());
     act(() => {
       emit("queued", { count: 1, messages: [{ id: "q1", text: "/commit" }] });
@@ -6623,7 +6735,7 @@ describe("AgentPane lifecycle", () => {
       await renderKenPromptPane(pane, false, prompt);
       const input = screen.getByRole("textbox") as HTMLTextAreaElement;
       fireEvent.change(input, { target: { value: "unsent draft" } });
-      fireEvent.click(screen.getByRole("button", { name: "New session" }));
+      fireEvent.click(kenNewSession());
       expect((await screen.findByRole("alert")).textContent).toContain(error);
       expect(screen.getByRole("alert").textContent).toContain("8000");
       expect(screen.queryByRole("dialog")).toBeNull();
@@ -6645,7 +6757,7 @@ describe("AgentPane lifecycle", () => {
       emitContinuation(pane, request),
     );
     await renderKenPromptPane(pane, false, prompt);
-    fireEvent.click(screen.getByRole("button", { name: "New session" }));
+    fireEvent.click(kenNewSession());
     expect(screen.getByLabelText("Selected continuation prompt").textContent).toBe(prompt);
     expect(pane.prepareContinuationHandoff).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "Continue" }));
@@ -6661,7 +6773,7 @@ describe("AgentPane lifecycle", () => {
     await renderKenPromptPane(pane);
     const input = screen.getByRole("textbox") as HTMLTextAreaElement;
     fireEvent.change(input, { target: { value: "unsent draft" } });
-    fireEvent.click(screen.getByRole("button", { name: "New session" }));
+    fireEvent.click(kenNewSession());
     expect(screen.getByLabelText("Selected continuation prompt").textContent).toBe(KEN_PROMPT);
     expect(screen.queryByLabelText("Destination context mode")).toBeNull();
     expect(pane.prepareContinuationHandoff).not.toHaveBeenCalled();
@@ -6731,7 +6843,7 @@ describe("AgentPane lifecycle", () => {
         openAICodexContextProfile: sourceProfile,
         openAICodexContextProfileEligibility: { canChange: false, reason: "Started" },
       });
-      fireEvent.click(screen.getByRole("button", { name: "New session" }));
+      fireEvent.click(kenNewSession());
       expect(pane.prepareContinuationHandoff).not.toHaveBeenCalled();
       const selector = screen.getByLabelText("Destination context mode") as HTMLSelectElement;
       expect(selector.value).toBe(sourceProfile);
@@ -6769,7 +6881,7 @@ describe("AgentPane lifecycle", () => {
       false,
       `First instruction\n\`\`\`\n\n\`\`\`prompt\n${selected}`,
     );
-    fireEvent.click(screen.getAllByRole("button", { name: "New session" })[1]);
+    fireEvent.click(kenNewSession(1));
     act(() =>
       paneEvents(pane)({
         type: "ken_text",
@@ -6791,7 +6903,7 @@ describe("AgentPane lifecycle", () => {
       throw new Error("lost ack");
     });
     await renderKenPromptPane(pane);
-    fireEvent.click(screen.getByRole("button", { name: "New session" }));
+    fireEvent.click(kenNewSession());
     fireEvent.click(screen.getByRole("button", { name: "Continue" }));
     const retry = await screen.findByRole("button", { name: "Check outcome" });
     expect(document.querySelectorAll(".user-ken-sent")).toHaveLength(1);
@@ -6832,7 +6944,7 @@ describe("AgentPane lifecycle", () => {
         accountId: "account-1",
         openAICodexContextProfile: "experimental",
       });
-      fireEvent.click(screen.getByRole("button", { name: "New session" }));
+      fireEvent.click(kenNewSession());
       fireEvent.click(screen.getByRole("button", { name: "Continue" }));
       await waitFor(() =>
         expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe(
@@ -6862,7 +6974,7 @@ describe("AgentPane lifecycle", () => {
       message.startsWith("HTTP") ? message : new Error(message),
     );
     await renderKenPromptPane(pane);
-    fireEvent.click(screen.getByRole("button", { name: "New session" }));
+    fireEvent.click(kenNewSession());
     fireEvent.click(screen.getByRole("button", { name: "Continue" }));
     expect((await screen.findByRole("alert")).textContent).toContain(
       "No reset or submission was requested",
@@ -6885,7 +6997,7 @@ describe("AgentPane lifecycle", () => {
       within(screen.getByRole("dialog")).getAllByRole("button", { name: "Close" })[0],
     );
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
-    fireEvent.click(screen.getByRole("button", { name: "New session" }));
+    fireEvent.click(kenNewSession());
     expect(screen.getByRole("button", { name: "Continue" })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
@@ -6898,7 +7010,7 @@ describe("AgentPane lifecycle", () => {
     vi.mocked(pane.commitContinuation).mockReturnValueOnce(receipt.promise);
     await renderKenPromptPane(pane);
     vi.mocked(pane.waitForReady).mockClear();
-    fireEvent.click(screen.getByRole("button", { name: "New session" }));
+    fireEvent.click(kenNewSession());
     fireEvent.click(screen.getByRole("button", { name: "Continue" }));
     await waitFor(() => expect(pane.commitContinuation).toHaveBeenCalledOnce());
     const request = vi.mocked(pane.commitContinuation).mock.calls[0][0];
@@ -6972,7 +7084,7 @@ describe("AgentPane lifecycle", () => {
       accountId: "account-1",
       openAICodexContextProfile: "experimental",
     });
-    fireEvent.click(screen.getByRole("button", { name: "New session" }));
+    fireEvent.click(kenNewSession());
     fireEvent.click(screen.getByRole("button", { name: "Continue" }));
     await waitFor(() =>
       expect(screen.getByRole("dialog").textContent).toContain(
@@ -6998,7 +7110,7 @@ describe("AgentPane lifecycle", () => {
       };
     });
     await renderKenPromptPane(pane);
-    fireEvent.click(screen.getByRole("button", { name: "New session" }));
+    fireEvent.click(kenNewSession());
     fireEvent.click(screen.getByRole("button", { name: "Continue" }));
     await waitFor(() =>
       expect(screen.getByRole("dialog").textContent).toContain(
@@ -7017,7 +7129,7 @@ describe("AgentPane lifecycle", () => {
       return receipt;
     });
     await renderKenPromptPane(pane);
-    fireEvent.click(screen.getByRole("button", { name: "New session" }));
+    fireEvent.click(kenNewSession());
     fireEvent.click(screen.getByRole("button", { name: "Continue" }));
     await waitFor(() =>
       expect(screen.getByRole("dialog").textContent).toContain(
@@ -7035,7 +7147,7 @@ describe("AgentPane lifecycle", () => {
       emitContinuation(pane, request, false),
     );
     await renderKenPromptPane(pane);
-    fireEvent.click(screen.getByRole("button", { name: "New session" }));
+    fireEvent.click(kenNewSession());
     fireEvent.click(screen.getByRole("button", { name: "Continue" }));
     await waitFor(() =>
       expect(screen.getByRole("dialog").textContent).toContain("transcript event was not observed"),
@@ -7425,7 +7537,7 @@ describe("AgentPane lifecycle", () => {
       await vi.advanceTimersByTimeAsync(16_001);
     });
     fireEvent.click(continueHere);
-    fireEvent.click(screen.getByRole("button", { name: "New session" }));
+    fireEvent.click(kenNewSession());
     fireEvent.click(screen.getByRole("button", { name: "Ken, next?" }));
     await act(async () => {
       await vi.advanceTimersByTimeAsync(1);
@@ -7467,7 +7579,7 @@ describe("AgentPane lifecycle", () => {
     const pane = client("pane-ken-autopilot", 1);
     await renderKenPromptPane(pane);
     const handleEvent = paneEvents(pane);
-    const fresh = screen.getByRole("button", { name: "New session" });
+    const fresh = kenNewSession();
     const toolbar = screen.getByTitle("Start a new session for this project");
 
     act(() => handleEvent?.({ type: "autopilot_review_start", data: {} }));
@@ -7812,3 +7924,14 @@ describe("command palette (Ctrl/Cmd+K)", () => {
     }
   });
 });
+
+/** The title bar also exposes "New session"; Ken prompt cards are queried within their own block. */
+function kenNewSession(index = 0): HTMLElement {
+  const buttons = Array.from(document.querySelectorAll<HTMLElement>(".ken-prompt-block")).flatMap(
+    (block) => within(block).queryAllByRole("button", { name: "New session" }),
+  );
+  const button = buttons[index];
+  if (button === undefined)
+    throw new Error(`Ken prompt card New session button ${index} not found`);
+  return button;
+}

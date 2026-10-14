@@ -5,7 +5,20 @@
    `[data-mode="hype"]` is the one-time post-update show; `calm` is the home
    screen's button. */
 
-/* ── Shared frame ── */
+/* ── Shared frame ──
+   Under the night scene the window is an app page: the page base (--bg), the
+   app's cards for the stories, and theme ink, so it reads like Settings in
+   either theme. The scene above is art and stays dark in both. */
+.whatsnew-window {
+  /* The story numbers, in the fire's colour: ember orange on dark, a deep
+     amber that holds 5.3:1 on the light theme's cards. */
+  --wn-ember: #ffb35c;
+  background: var(--bg);
+  color: var(--text);
+}
+:root[data-theme="light"] .whatsnew-window {
+  --wn-ember: #9a4a00;
+}
 .wn-close {
   position: absolute;
   top: var(--space-8);
@@ -115,9 +128,15 @@
   animation: wn-window-out 160ms var(--ease-in) both;
 }
 
-/* ── History: the archive is always calm ── */
+/* ── History: the archive is always calm ──
+   No cards, but the same left edge as the stories' contents: each release is
+   inset by a card's padding, so the versions line up with the story numbers
+   and the text above. The title's rule runs the full width. */
 .wn-history {
   margin-top: 32px;
+}
+.wn-history-release {
+  padding-inline: var(--space-9);
 }
 .wn-history-title {
   display: flex;
@@ -337,6 +356,13 @@
   top: calc(var(--log) + var(--space-6));
   right: calc(var(--log) + var(--space-6));
 }
+/* The × sits on the night sky, which stays dark in the light theme too, so it
+   keeps the night palette (as Home's controls do, see Deck.css). */
+:root[data-theme="light"] .wn-close {
+  --text: var(--night-text);
+  --text-dim: var(--night-text-dim);
+  --ink-rgb: var(--night-ink-rgb);
+}
 .wn-camp-fire {
   position: absolute;
   z-index: 4;
@@ -432,21 +458,22 @@
   flex-direction: column;
   gap: var(--space-6);
 }
+/* Each story is one of the app's cards (as on the Settings pages). */
 .wn-camp-story {
   display: grid;
   grid-template-columns: 34px minmax(0, 1fr);
   gap: var(--space-6);
   padding: var(--space-8) var(--space-9) var(--space-9);
+  border: 1px solid var(--border);
   border-radius: var(--radius-card);
-  background: rgb(255 255 255 / 0.035);
-  box-shadow: inset 0 0 0 1px var(--border-strong);
+  background: var(--surface-1);
 }
 .wn-camp-num {
   font-family: var(--mono);
   font-size: var(--fs-2xl);
   font-weight: 700;
   line-height: 1.2;
-  color: #ffb35c;
+  color: var(--wn-ember);
 }
 
 /* ── Shared keyframes ── */

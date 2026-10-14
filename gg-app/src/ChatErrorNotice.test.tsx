@@ -9,15 +9,12 @@ beforeEach(() => {
 });
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { ChatErrorNotice } from "./ChatErrorNotice";
-import { ERROR_CRITTER_BLINKS, assignErrorCritters } from "./ErrorCritter";
-import { CRITTERS } from "./critter-sprites";
 import {
   activeChatErrorId,
   chatErrorCopy,
   chatErrorTone,
   readChatError,
   type ChatErrorData,
-  type ChatErrorItem,
 } from "./chat-error";
 
 afterEach(() => {
@@ -33,71 +30,10 @@ const limit: ChatErrorData = {
   scope: "error",
 };
 
-describe("error critters", () => {
-  it.each(CRITTERS.map((c) => [c.id, c] as const))(
-    "%s: closes its eyes over its eyes",
-    (_id, c) => {
-      const blink = ERROR_CRITTER_BLINKS[c.id];
-      if (!blink) throw new Error(`no blink for ${c.id}`);
-      expect(c.palette[blink.lid]).toBeTruthy();
-      for (const [x, y, width, height] of blink.eyes) {
-        const cells = c.rows.slice(y, y + height).flatMap((row) => [...row.slice(x, x + width)]);
-        expect(cells).toHaveLength(width * height);
-        expect(cells).not.toContain(".");
-        expect(cells.some((cell) => "WKCY".includes(cell))).toBe(true);
-      }
-    },
-  );
-
-  // The same error repeated, as in a retry loop: identical copy, distinct times.
-  const errors = (count: number, firstId: number): ChatErrorItem[] =>
-    Array.from({ length: count }, (_, i) => ({
-      ...limit,
-      kind: "error",
-      id: firstId + i * 2,
-      occurredAt: 1_800_000_000_000 + i * 60_000,
-    }));
-  const picks = (items: readonly { id: number; kind: string }[]): string[] => {
-    const assigned = assignErrorCritters(items);
-    return items.flatMap((item) => assigned.get(item.id) ?? []);
-  };
-
-  it("never repeats a critter within four errors in a row", () => {
-    const ids = picks(errors(40, 1));
-    expect(ids).toHaveLength(40);
-    ids.forEach((id, i) => expect(ids.slice(Math.max(0, i - 3), i)).not.toContain(id));
-    expect(new Set(ids).size).toBeGreaterThan(8);
-  });
-
-  it("keeps each error's critter after reopening, when the row ids change", () => {
-    const live = errors(6, 1);
-    const reopened = errors(6, 500).map((error) => ({ ...error, historical: true }));
-    const withOtherRows = reopened.flatMap((error) => [{ kind: "user", id: error.id - 1 }, error]);
-    expect(picks(withOtherRows)).toEqual(picks(live));
-  });
-
-  it("keeps earlier errors' critters when a new error arrives", () => {
-    const all = errors(5, 1);
-    expect(picks(all).slice(0, 4)).toEqual(picks(all.slice(0, 4)));
-  });
-
-  it("renders the assigned critter", () => {
-    const { container } = render(<ChatErrorNotice critterId="crab" error={limit} active />);
-    expect(container.querySelector(".chat-error-critter")?.getAttribute("data-critter")).toBe(
-      "crab",
-    );
-  });
-});
-
 describe("compact chat errors", () => {
   it("shows two concise lines in amber, with details hidden and one model action", () => {
     const { container } = render(
-      <ChatErrorNotice
-        critterId="cat"
-        error={limit}
-        active
-        modelPicker={<button>Switch provider</button>}
-      />,
+      <ChatErrorNotice error={limit} active modelPicker={<button>Switch provider</button>} />,
     );
     expect(screen.getByText(limit.headline ?? "")).toBeTruthy();
     expect(container.querySelector(".chat-error-warning")).not.toBeNull();
@@ -117,7 +53,7 @@ describe("compact chat errors", () => {
     vi.useFakeTimers();
     const onContentGrow = vi.fn();
     const { container, unmount } = render(
-      <ChatErrorNotice critterId="cat" error={limit} active onContentGrow={onContentGrow} />,
+      <ChatErrorNotice error={limit} active onContentGrow={onContentGrow} />,
     );
     const toggle = screen.getByRole("button", { name: "Show error details" });
     const details = container.querySelector<HTMLElement>(".chat-error-details");
@@ -141,7 +77,7 @@ describe("compact chat errors", () => {
 
   it("closes immediately without WAAPI", () => {
     Reflect.deleteProperty(Element.prototype, "animate");
-    const { container } = render(<ChatErrorNotice critterId="cat" error={limit} active />);
+    const { container } = render(<ChatErrorNotice error={limit} active />);
     fireEvent.click(screen.getByRole("button", { name: "Show error details" }));
     fireEvent.click(screen.getByRole("button", { name: "Hide error details" }));
     expect(container.querySelector<HTMLElement>(".chat-error-details")?.hidden).toBe(true);
@@ -149,7 +85,7 @@ describe("compact chat errors", () => {
 
   it("can reopen details during their exit without a stale timer hiding them", () => {
     vi.useFakeTimers();
-    const { container } = render(<ChatErrorNotice critterId="cat" error={limit} active />);
+    const { container } = render(<ChatErrorNotice error={limit} active />);
     const toggle = screen.getByRole("button", { name: "Show error details" });
     fireEvent.click(toggle);
     fireEvent.click(toggle);
@@ -166,7 +102,6 @@ describe("compact chat errors", () => {
   it("renders failures red and never executes diagnostic markup", () => {
     const { container } = render(
       <ChatErrorNotice
-        critterId="cat"
         error={{
           reason: "provider",
           headline: "Request failed",
@@ -181,21 +116,9 @@ describe("compact chat errors", () => {
     expect(screen.getByText(/<script>/)).toBeTruthy();
   });
 
-  it("pauses animation without adding a control to the two-line row", () => {
-    const { container } = render(<ChatErrorNotice critterId="cat" error={limit} active />);
-    expect(container.querySelector(".chat-error-blink.is-animated")).not.toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "Show error details" }));
-    fireEvent.click(screen.getByRole("button", { name: "Pause critter animation" }));
-    expect(container.querySelector(".chat-error-blink.is-animated")).toBeNull();
-    expect(
-      screen.getByRole("button", { name: "Resume critter animation" }).getAttribute("aria-pressed"),
-    ).toBe("true");
-  });
-
   it("keeps restored errors muted and still, without active actions or stale reset advice", () => {
     const { container } = render(
       <ChatErrorNotice
-        critterId="cat"
         error={{ ...limit, historical: true }}
         active={false}
         modelPicker={<button>Switch provider</button>}
@@ -214,7 +137,7 @@ describe("compact chat errors", () => {
     vi.useFakeTimers();
     vi.setSystemTime(1_800_000_000_000);
     const { unmount } = render(
-      <ChatErrorNotice critterId="cat" error={{ ...limit, resetsAt: 1_800_000_001 }} active />,
+      <ChatErrorNotice error={{ ...limit, resetsAt: 1_800_000_001 }} active />,
     );
     act(() => {
       vi.advanceTimersByTime(1_002);

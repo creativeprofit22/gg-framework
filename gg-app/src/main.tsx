@@ -8,6 +8,7 @@ import { TooltipLayer } from "./TooltipLayer";
 import { WhatsNewModal } from "./WhatsNewModal";
 import { Toaster } from "./Toaster";
 import { tagPlatform } from "./platform";
+import { installColorScheme } from "./color-scheme";
 import { parseMode } from "./whatsnew-content";
 import { installMotionAttribute } from "./window-motion";
 import { appearance } from "./appearance";
@@ -50,6 +51,10 @@ tagPlatform();
 // <html data-motion> drives every CSS loop's play state (App.css), so set it
 // before the first paint: a window restored in the background starts still.
 installMotionAttribute();
+
+// <html data-theme> picks the light or dark token set (App.css); set it before
+// the first paint so a light window never flashes dark.
+installColorScheme();
 
 // React render/effect failures land in the shared log file like window errors do.
 function captureReactError(culprit: string, error: unknown, componentStack?: string): void {

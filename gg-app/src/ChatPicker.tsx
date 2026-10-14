@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useId, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useId, useState } from "react";
 import { theme } from "./theme";
 import {
   arrangeAllWindows,
@@ -15,10 +15,9 @@ import { motionWorkspacePath } from "./motion-workspace";
 import { Badge } from "./Badge";
 import { BackButton } from "./BackButton";
 import { ListSkeleton } from "./Skeleton";
+import { useCachedList } from "./useCachedList";
 import { RadioButton } from "./RadioButton";
 import { WindowLayoutButton } from "./WindowLayoutButton";
-import { MetalButton } from "./MetalButton";
-import { useWindowFocused } from "./useWindowFocused";
 import { describeActionFailure, describeOpenFailure, type FailureCopy } from "./open-failure";
 import { PickerError } from "./PickerError";
 
@@ -73,19 +72,48 @@ export function ChatPicker({
   showWindowControls = true,
 }: Props): React.ReactElement {
   const copy = COPY[mode];
-  const windowFocused = useWindowFocused();
   const [projectsRoot, setProjectsRoot] = useState("");
-  const [sessions, setSessions] = useState<RecentSession[]>([]);
-  const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<FailureCopy | null>(null);
   // `retry` is data, not a closure, so Retry runs this render's `busy` guard.
   const [selectionError, setSelectionError] = useState<
     (FailureCopy & { retry: RecentSession | null }) | null
   >(null);
   const selectionErrorId = useId();
-  // Only the latest load may write state; an older one finishing late is dropped.
-  const loadSeq = useRef(0);
+  // Where this mode's sessions live, from Settings. Read on its own (not as
+  // part of the list load) so a kept list shown at once can still be opened.
+  // A failed read throws; only a real empty root is "not configured".
+  const rootFor = useCallback(async (): Promise<string> => {
+    const settings = await readSettings();
+    const projects = settings.projectsRoot.trim();
+    if (!projects) throw new Error(copy.noRoot);
+    return mode === "motion" ? motionWorkspacePath(projects) : projects;
+  }, [copy, mode, readSettings]);
+  useEffect(() => {
+    let cancelled = false;
+    void rootFor()
+      .then((root) => {
+        if (!cancelled) setProjectsRoot(root);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [rootFor]);
+  // Shown at once on a return visit, refreshed quietly (see useCachedList).
+  const sessionList = useCachedList<RecentSession>(`sessions:${mode}`, async (signal) => {
+    const root = await rootFor();
+    if (!signal.cancelled) setProjectsRoot(root);
+    await waitForCatalogReady();
+    return discoverSessions(root, mode === "motion" ? "motion" : "all");
+  });
+  const { items: sessions, loading } = sessionList;
+  // A missing folder is actionable as written; other failures get plain words + Details.
+  const error: FailureCopy | null =
+    sessionList.error === null
+      ? null
+      : sessionList.error === copy.noRoot
+        ? { summary: copy.noRoot, detail: null }
+        : describeActionFailure(copy.loadAction, sessionList.error);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent): void => {
@@ -102,41 +130,6 @@ export function ChatPicker({
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, []);
-
-  /** Load (or reload after a failure) the session list under the projects root. */
-  const load = useCallback(async (): Promise<void> => {
-    const seq = ++loadSeq.current;
-    const current = (): boolean => seq === loadSeq.current;
-    setLoading(true);
-    setError(null);
-    try {
-      // A failed read throws into the catch below; only a real empty root is "not configured".
-      const settings = await readSettings();
-      const projects = settings.projectsRoot.trim();
-      if (!projects) {
-        // Actionable as written: say what to do rather than "try again".
-        if (current()) setError({ summary: copy.noRoot, detail: null });
-        return;
-      }
-      const root = mode === "motion" ? motionWorkspacePath(projects) : projects;
-      if (current()) setProjectsRoot(root);
-      await waitForCatalogReady();
-      const recent = await discoverSessions(root, mode === "motion" ? "motion" : "all");
-      if (current()) setSessions(recent);
-    } catch (reason: unknown) {
-      if (current()) setError(describeActionFailure(copy.loadAction, reason));
-    } finally {
-      if (current()) setLoading(false);
-    }
-  }, [copy, mode, readSettings, discoverSessions, waitForCatalogReady]);
-
-  useEffect(() => {
-    void load();
-    return () => {
-      // Invalidate the in-flight load on unmount or dependency change.
-      loadSeq.current += 1;
-    };
-  }, [load]);
 
   function choose(session?: RecentSession): void {
     if (busy || !projectsRoot) return;
@@ -177,14 +170,14 @@ export function ChatPicker({
           <span className="picker-title">{copy.title}</span>
           {!loading && !error && <Badge>{sessions.length}</Badge>}
           <span className="picker-head-actions" data-tauri-drag-region>
-            <MetalButton
-              windowFocused={windowFocused}
+            <button
+              type="button"
               className="btn btn-primary btn-sm"
               disabled={busy || loading || !projectsRoot}
               onClick={() => choose()}
             >
               {copy.newLabel}
-            </MetalButton>
+            </button>
           </span>
         </div>
         {showWindowControls && (
@@ -203,20 +196,15 @@ export function ChatPicker({
             summary={error.summary}
             detail={error.detail}
             retryDisabled={busy}
-            onRetry={() => void load()}
+            onRetry={sessionList.reload}
           />
         )}
         {!loading && !error && sessions.length === 0 && (
           <div className="picker-empty">
             <span style={{ color: theme.textMuted }}>{copy.empty}</span>
-            <MetalButton
-              windowFocused={windowFocused}
-              className="btn btn-primary btn-sm"
-              disabled={busy}
-              onClick={() => choose()}
-            >
+            <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => choose()}>
               {copy.newLabel}
-            </MetalButton>
+            </button>
           </div>
         )}
         {!loading && !error && sessions.length > 0 && (

@@ -1,110 +1,135 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { WorkspaceHeaderActions, type GoalView } from "./WorkspaceHeaderActions";
+import { DeckMenu, TitleBarActions, type GoalView } from "./WorkspaceHeaderActions";
 import { EMPTY_TALLY, tallyGoal, type GoalTally } from "./goal-progress";
+import type { WorkspaceMode } from "./agent";
 
-vi.mock("./RadioButton", () => ({ RadioButton: () => <button>Radio</button> }));
-vi.mock("./WindowLayoutButton", () => ({ WindowLayoutButton: () => <button>Windows</button> }));
-vi.mock("./RankBadge", () => ({ RankBadge: () => null }));
-vi.mock("./AutopilotToggle", () => ({ AutopilotToggle: () => <button>Autopilot</button> }));
+vi.mock("./WindowLayoutButton", () => ({ WindowLayoutButton: () => <button>Arrange</button> }));
 
-function renderActions(
-  isGoal: boolean,
-  needsGitInit = false,
-  goalView: GoalView | null = null,
-  onGoalViewChange = vi.fn(),
-  goalNeedsAnswer = false,
-  goalTally: GoalTally | null = null,
-  goal: {
-    state?: "running" | "paused" | "stopped";
+function renderTitleBar(
+  opts: {
+    isGoal?: boolean;
+    dirtyCount?: number;
+    needsGitInit?: boolean;
+    commitCommand?: string | null;
+    running?: boolean;
+    goalView?: GoalView | null;
+    onGoalViewChange?: (view: GoalView) => void;
+    goalNeedsAnswer?: boolean;
+    goalTally?: GoalTally | null;
+    goalState?: "running" | "paused" | "stopped";
     onPause?: (paused: boolean) => void;
-    onSettings?: () => void;
+    onCommit?: () => void;
   } = {},
 ): void {
   render(
-    <WorkspaceHeaderActions
+    <TitleBarActions
       workspaceMode="code"
-      isGoal={isGoal}
-      goalView={goalView}
-      onGoalViewChange={onGoalViewChange}
-      goalNeedsAnswer={goalNeedsAnswer}
-      goalTally={goalTally}
-      goalState={goal.state}
-      onGoalPauseChange={goal.onPause}
-      onOpenGoalSettings={goal.onSettings}
-      progress={null}
-      rankCelebrateNonce={null}
+      isGoal={opts.isGoal ?? false}
+      goalView={opts.goalView ?? null}
+      onGoalViewChange={opts.onGoalViewChange ?? vi.fn()}
+      goalNeedsAnswer={opts.goalNeedsAnswer ?? false}
+      goalTally={opts.goalTally ?? null}
+      goalState={opts.goalState}
+      onGoalPauseChange={opts.onPause}
       xpChips={[]}
-      onOpenScorecard={vi.fn()}
-      windowFocused
+      running={opts.running ?? false}
+      dirtyCount={opts.dirtyCount ?? 0}
+      needsGitInit={opts.needsGitInit ?? false}
+      onInitGit={vi.fn()}
+      commitCommand={opts.commitCommand === undefined ? "commit" : opts.commitCommand}
+      hasCommit
+      onCommit={opts.onCommit ?? vi.fn()}
+    />,
+  );
+}
+
+function renderMenu(workspaceMode: WorkspaceMode, isGoal = false): void {
+  render(
+    <DeckMenu
+      workspaceMode={workspaceMode}
+      isGoal={isGoal}
       running={false}
       autopilot={false}
       autopilotReviewing={false}
       onAutopilotChange={vi.fn()}
-      onNewSession={vi.fn()}
-      onOpenNotes={vi.fn()}
       onOpenMemories={vi.fn()}
-      projectTasks={[]}
-      onOpenTasks={vi.fn()}
       showChecklist={false}
       onOpenChecklist={vi.fn()}
+      onOpenRadio={vi.fn()}
+      onOpenGoalSettings={isGoal ? vi.fn() : undefined}
       onArrange={vi.fn()}
-      needsGitInit={needsGitInit}
-      onInitGit={vi.fn()}
-      commitCommand="commit"
-      hasCommit
-      onCommit={vi.fn()}
+      onBack={vi.fn()}
+      backLabel="Back"
     />,
   );
 }
 
 afterEach(cleanup);
 
-describe("WorkspaceHeaderActions", () => {
-  it("keeps only Radio, Windows and commit in a Goal window", () => {
-    // A goal folder is not a git repo; commit still shows, Initialize Git never does.
-    renderActions(true, true);
-    expect(screen.getAllByRole("button").map((b) => b.textContent)).toEqual([
-      "Radio",
-      "Windows",
-      "/commit",
-    ]);
+describe("TitleBarActions", () => {
+  it("puts the uncommitted count inside the Commit key", () => {
+    const onCommit = vi.fn();
+    renderTitleBar({ dirtyCount: 17, onCommit });
+    const commit = screen.getByRole("button", { name: "Commit 17 files" });
+    expect(commit.textContent).toBe("Commit17");
+    fireEvent.click(commit);
+    expect(onCommit).toHaveBeenCalledOnce();
+  });
+
+  it("says Clean instead of offering a commit with nothing to commit", () => {
+    renderTitleBar({ dirtyCount: 0 });
+    expect(screen.queryByRole("button", { name: /Commit/ })).toBeNull();
+    expect(screen.getByText("Clean")).toBeDefined();
+  });
+
+  it("can't commit while the agent is working", () => {
+    renderTitleBar({ dirtyCount: 2, running: true });
+    expect(screen.getByRole("button", { name: "Commit 2 files" }).hasAttribute("disabled")).toBe(
+      true,
+    );
+  });
+
+  it("offers Initialize Git in a folder that isn't a repository", () => {
+    renderTitleBar({ needsGitInit: true });
+    expect(screen.getByRole("button", { name: "Initialize Git" })).toBeDefined();
+  });
+
+  it("has no view switch before the goal starts", () => {
+    renderTitleBar({ isGoal: true });
+    expect(screen.queryByRole("group", { name: "Goal view" })).toBeNull();
   });
 
   it("switches a started goal between Chat and Workers", () => {
-    const change = vi.fn();
-    renderActions(true, false, "workers", change);
-    const group = screen.getByRole("group", { name: "Goal view" });
-    expect(group.textContent).toBe("ChatWorkers");
-    expect(screen.getByRole("button", { name: "Workers" }).getAttribute("aria-pressed")).toBe(
-      "true",
-    );
-    fireEvent.click(screen.getByRole("button", { name: "Chat" }));
-    expect(change).toHaveBeenLastCalledWith("chat");
+    const onGoalViewChange = vi.fn();
+    renderTitleBar({ isGoal: true, goalView: "chat", onGoalViewChange });
+    const workers = screen.getByRole("button", { name: "Workers" });
+    expect(screen.getByRole("button", { name: "Chat" }).getAttribute("aria-pressed")).toBe("true");
+    fireEvent.click(workers);
+    expect(onGoalViewChange).toHaveBeenCalledWith("workers");
   });
 
   it("flags Chat while a question waits there, but not when Chat is open", () => {
-    renderActions(true, false, "workers", vi.fn(), true);
-    const chat = screen.getByRole("button", { name: "Chat, a question is waiting for you" });
-    expect(chat.getAttribute("data-attention")).toBe("true");
+    renderTitleBar({ isGoal: true, goalView: "workers", goalNeedsAnswer: true });
+    expect(
+      screen.getByRole("button", { name: "Chat, a question is waiting for you" }),
+    ).toBeDefined();
     cleanup();
-    renderActions(true, false, "chat", vi.fn(), true);
-    expect(screen.getByRole("button", { name: "Chat" }).getAttribute("data-attention")).toBeNull();
+    renderTitleBar({ isGoal: true, goalView: "chat", goalNeedsAnswer: true });
+    expect(screen.getByRole("button", { name: "Chat" }).dataset.attention).toBeUndefined();
   });
 
-  it("shows how many workers are working, and the tasks done and failed, right of the level", () => {
+  it("shows how many workers are working, and the tasks done and failed", () => {
     const tally = tallyGoal(EMPTY_TALLY, [
       { key: "a", phase: "working" },
       { key: "b", phase: "working" },
       { key: "c", phase: "done" },
     ]);
-    renderActions(true, false, "workers", vi.fn(), false, tally);
-    const status = screen.getByRole("status", { name: "2 working · 1 done" });
-    expect(status.textContent).toBe("2 working1 done");
-    // On the left with the level badge, not among the right-hand actions.
-    expect(status.closest(".picker-head-actions")).toBeNull();
-    expect(status.previousElementSibling?.className).toBe("rank-badge-wrap");
+    renderTitleBar({ isGoal: true, goalView: "workers", goalTally: tally });
+    expect(screen.getByRole("status", { name: "2 working · 1 done" }).textContent).toBe(
+      "2 working1 done",
+    );
     cleanup();
     // Failed tasks only show once there are any.
     const failed = tallyGoal(tally, [
@@ -112,50 +137,106 @@ describe("WorkspaceHeaderActions", () => {
       { key: "b", phase: "done" },
       { key: "c", phase: "done" },
     ]);
-    renderActions(true, false, "chat", vi.fn(), false, failed);
+    renderTitleBar({ isGoal: true, goalView: "chat", goalTally: failed });
     expect(screen.getByRole("status", { name: "0 working · 2 done · 1 failed" })).toBeTruthy();
   });
 
-  it("pauses and resumes a started goal, and opens its settings", () => {
+  it("pauses a running goal and resumes a paused one", () => {
     const onPause = vi.fn();
-    const onSettings = vi.fn();
-    renderActions(true, false, "workers", vi.fn(), false, null, {
-      state: "running",
-      onPause,
-      onSettings,
-    });
+    renderTitleBar({ isGoal: true, goalView: "chat", goalState: "running", onPause });
     fireEvent.click(screen.getByRole("button", { name: "Pause the goal" }));
     expect(onPause).toHaveBeenCalledWith(true);
-    fireEvent.click(screen.getByRole("button", { name: "Goal settings" }));
-    expect(onSettings).toHaveBeenCalledOnce();
     cleanup();
-
-    renderActions(true, false, "workers", vi.fn(), false, null, { state: "paused", onPause });
-    const resume = screen.getByRole("button", { name: "Resume the goal" });
-    expect(resume.getAttribute("aria-pressed")).toBe("true");
-    fireEvent.click(resume);
-    expect(onPause).toHaveBeenLastCalledWith(false);
-    cleanup();
-
-    // Finished, stopped or cut off: never a Pause for a goal doing nothing.
-    renderActions(true, false, "workers", vi.fn(), false, null, { state: "stopped", onPause });
-    expect(screen.queryByRole("button", { name: "Pause the goal" })).toBeNull();
-    const carryOn = screen.getByRole("button", { name: "Not running. Carry the goal on" });
-    expect(carryOn.getAttribute("aria-pressed")).toBe("false");
-    fireEvent.click(carryOn);
+    renderTitleBar({ isGoal: true, goalView: "chat", goalState: "paused", onPause });
+    fireEvent.click(screen.getByRole("button", { name: "Resume the goal" }));
     expect(onPause).toHaveBeenLastCalledWith(false);
   });
+});
 
-  it("has no view switch before the goal starts", () => {
-    renderActions(true);
-    expect(screen.queryByRole("group", { name: "Goal view" })).toBeNull();
-  });
-
-  it("still shows the full project toolset in a code window", () => {
-    renderActions(false);
+describe("DeckMenu", () => {
+  it("holds the full project toolset in a code window", () => {
+    renderMenu("code");
     const labels = screen.getAllByRole("button").map((b) => b.textContent);
-    for (const label of ["Autopilot", "New", "Notes", "Tasks", "Checklist", "/commit"]) {
+    for (const label of ["Checklist", "Radio", "Arrange", "Projects"]) {
       expect(labels).toContain(label);
     }
+    expect(screen.getByRole("switch", { name: "Autopilot" }).getAttribute("aria-checked")).toBe(
+      "false",
+    );
+    // Pinned in the title bar instead (Local Fork): never duplicated here.
+    for (const pinned of [/new session/i, /^notes/i, /^tasks/i]) {
+      expect(screen.queryByRole("button", { name: pinned })).toBeNull();
+    }
+  });
+
+  it("offers Brain in a chat window, and no project tools", () => {
+    renderMenu("chat");
+    expect(screen.getByRole("button", { name: "Brain" })).toBeDefined();
+    expect(screen.queryByRole("button", { name: "New chat" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Checklist" })).toBeNull();
+    expect(screen.queryByRole("switch", { name: "Autopilot" })).toBeNull();
+  });
+
+  it("keeps a Goal window to its settings, radio, layout and the way back", () => {
+    renderMenu("code", true);
+    const labels = screen.getAllByRole("button").map((b) => b.textContent);
+    expect(labels).toEqual(["Goal settings", "Radio", "Arrange", "All goals"]);
+  });
+});
+
+describe("TitleBarActions pinned Local Fork actions", () => {
+  const tasks = [
+    { id: "a", title: "One", prompt: "", status: "pending" as const, createdAt: "" },
+    { id: "b", title: "Two", prompt: "", status: "done" as const, createdAt: "" },
+  ];
+  function renderPinned(workspaceMode: WorkspaceMode, isGoal = false) {
+    const onNewSession = vi.fn();
+    const onOpenTasks = vi.fn();
+    const { container } = render(
+      <TitleBarActions
+        workspaceMode={workspaceMode}
+        isGoal={isGoal}
+        xpChips={[]}
+        running={false}
+        dirtyCount={0}
+        needsGitInit={false}
+        onInitGit={vi.fn()}
+        commitCommand={null}
+        hasCommit={false}
+        onCommit={vi.fn()}
+        onNewSession={onNewSession}
+        notes={<button>Notes</button>}
+        projectTasks={workspaceMode === "code" ? tasks : undefined}
+        onOpenTasks={workspaceMode === "code" ? onOpenTasks : undefined}
+      />,
+    );
+    return { container, onNewSession, onOpenTasks };
+  }
+
+  it("renders New session, Notes and Tasks (with its count) in the title bar, one click each", () => {
+    const { container, onNewSession, onOpenTasks } = renderPinned("code");
+    const pins = container.querySelector(".title-pins");
+    expect(pins).not.toBeNull();
+    const newSession = screen.getByRole("button", { name: "New session" });
+    const notes = screen.getByRole("button", { name: "Notes" });
+    const taskKey = screen.getByRole("button", { name: "Tasks, 1 pending" });
+    for (const el of [newSession, notes, taskKey]) expect(pins?.contains(el)).toBe(true);
+    expect(taskKey.textContent).toBe("Tasks1");
+    fireEvent.click(newSession);
+    fireEvent.click(taskKey);
+    expect(onNewSession).toHaveBeenCalledTimes(1);
+    expect(onOpenTasks).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["chat", "motion"] as const)("keeps New in the %s title bar", (mode) => {
+    renderPinned(mode);
+    expect(
+      screen.getByRole("button", { name: mode === "chat" ? "New chat" : "New session" }),
+    ).toBeDefined();
+  });
+
+  it("does not offer New session in a Goal window", () => {
+    renderPinned("code", true);
+    expect(screen.queryByRole("button", { name: "New session" })).toBeNull();
   });
 });

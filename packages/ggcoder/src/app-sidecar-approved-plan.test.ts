@@ -7,6 +7,7 @@ import type { NotesDocumentV3 } from "@kenkaiiii/gg-core/project-notes";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ProjectNotesRepository } from "./project-notes-repository.js";
 import { createApprovedPlan } from "./roadmap-phase-execution.js";
+import { IMPLEMENT_PLAN_PROMPT as SHARED_IMPLEMENT_PLAN_PROMPT } from "./core/plan-handoff.js";
 import {
   AppSidecarPlanHandoff,
   type ApprovedPlanConsumptionIdentity,
@@ -113,6 +114,8 @@ describe("approved phase implementation message", () => {
         async (_prompt: string, _generation: number) => {},
       );
       const launchImplementation = await sidecarImplementationLaunch({
+        // app-sidecar.ts aliases the shared prompt from core/plan-handoff.
+        SHARED_IMPLEMENT_PLAN_PROMPT,
         cwd,
         durableRoadmapExecution: true,
         notesRepository: repository,

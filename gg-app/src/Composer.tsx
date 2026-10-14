@@ -10,7 +10,6 @@ import {
   type SlashCommand,
   type WorkspaceMode,
 } from "./agent";
-import { ActionMetal } from "./ActionMetal";
 import { AttachmentBar } from "./AttachmentBar";
 import type { PendingAttachment } from "./attachments";
 import { CacheExpiryNotice } from "./CacheExpiryNotice";
@@ -42,7 +41,6 @@ export interface ComposerProps {
   autopilotReviewing: boolean;
   cancelling: boolean;
   sendDisabled: boolean;
-  windowFocused: boolean;
   input: string;
   setInput: Dispatch<SetStateAction<string>>;
   caret: number;
@@ -110,7 +108,6 @@ export function Composer({
   autopilotReviewing,
   cancelling,
   sendDisabled,
-  windowFocused,
   input,
   setInput,
   caret,
@@ -352,11 +349,23 @@ export function Composer({
           never moves. It stays on the text's line while the draft fits one
           line, and drops below with the field once the text wraps. */}
         <div className="inputactions-trailing">
+          {/* Enhance sits beside send, in the row, once there's a draft to
+            improve: no floating pill over the box's edge. */}
+          {!enhanceAnim && (
+            <button
+              type="button"
+              className={`key key-sm enhance-key${enhancing ? " enhancing" : ""}`}
+              data-visible={enhanceHintVisible || undefined}
+              title="Rewrite your prompt with clearer wording and the right terms"
+              disabled={enhancing || !enhanceHintVisible}
+              aria-hidden={!enhanceHintVisible}
+              tabIndex={enhanceHintVisible ? undefined : -1}
+              onClick={() => void runEnhance()}
+            >
+              {enhancing ? "Enhancing\u2026" : "Enhance"}
+            </button>
+          )}
           <WorkingBeam active={running} size="sm" />
-          <ActionMetal
-            active={!running && !cancelling && !sendDisabled}
-            windowFocused={windowFocused}
-          />
           <button
             className="icon-circle icon-circle-primary"
             title={running ? "Stop the run" : attachmentsLoading ? "Loading attachments…" : "Send"}
@@ -370,30 +379,6 @@ export function Composer({
           </button>
         </div>
       </div>
-      {!enhanceAnim && (
-        // Pill pinned to the center of the input box (.inputwrap) top border,
-        // overlapping it. Decoupled from text flow, so it never overlaps text,
-        // drifts, or shifts the caret/height; centered (not in a corner) to
-        // stay clear of the status row's "esc to cancel". Always mounted (so it
-        // can transition both ways); the `visible` class fades/slides it in
-        // when there's text and out when there isn't.
-        <div className={`enhance-pill-host${enhanceHintVisible ? " visible" : ""}`}>
-          <ActionMetal
-            active={enhanceHintVisible && !enhancing}
-            windowFocused={windowFocused}
-            variant="button"
-          />
-          <button
-            className={`enhance-pill${enhancing ? " enhancing" : ""}`}
-            title="Enhance prompt — clearer wording + correct terms"
-            disabled={enhancing || !enhanceHintVisible}
-            aria-hidden={!enhanceHintVisible}
-            onClick={() => void runEnhance()}
-          >
-            {enhancing ? "Enhancing…" : "Enhance?"}
-          </button>
-        </div>
-      )}
     </div>
   );
 }

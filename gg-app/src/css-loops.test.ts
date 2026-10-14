@@ -120,3 +120,41 @@ describe("looping CSS animations", () => {
     ]);
   });
 });
+
+// Guard: Home's update key is disabled while it installs, and a dimming
+// :disabled rule once faded it so the progress was hard to see. No rule for
+// either update key itself (as opposed to its effects) may lower its opacity.
+describe("update keys", () => {
+  it.each([
+    ["./HomeUpdateButton.css", /\.(?:home-update|lvl-face|lvl-base)\b/],
+    ["./UpdateBanner.css", /\.(?:update-banner|ub-row|ub-key)/],
+  ])("%s never fades, including while it installs or is pressed", (sheet, names) => {
+    const css = SHEETS[sheet] ?? "";
+    const rules = (css.match(/[^{}]*\{[^}]*\}/g) ?? []).filter((rule) =>
+      names.test(rule.slice(0, rule.indexOf("{"))),
+    );
+    expect(rules.length).toBeGreaterThan(3);
+    for (const rule of rules) expect(rule).not.toMatch(/\bopacity:\s*0?\.\d/);
+  });
+});
+
+// Guard: the What's new window's body once sat on a fixed grey with see-through
+// white cards and a fixed orange, so in the light theme the cards vanished
+// and the story numbers read at 1.65:1. Its page, cards and numbers follow the
+// theme now.
+describe("What's new window", () => {
+  const css = SHEETS["./WhatsNew.css"] ?? "";
+  const rule = (selector: string): string =>
+    css.match(new RegExp(`(?:^|\\n)${selector.replace(/[.*]/g, "\\$&")} \\{([^}]*)\\}`))?.[1] ?? "";
+
+  it("sits on the app's page and cards", () => {
+    expect(rule(".whatsnew-window")).toContain("background: var(--bg)");
+    expect(rule(".wn-camp-story")).toContain("background: var(--surface-1)");
+    expect(rule(".wn-camp-story")).toContain("border: 1px solid var(--border)");
+  });
+
+  it("gives the story numbers a colour for each theme", () => {
+    expect(rule(".wn-camp-num")).toContain("color: var(--wn-ember)");
+    expect(css).toMatch(/:root\[data-theme="light"\] \.whatsnew-window \{[^}]*--wn-ember:/);
+  });
+});

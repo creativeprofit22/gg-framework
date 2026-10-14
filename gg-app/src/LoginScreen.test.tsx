@@ -280,6 +280,6 @@ describe("LoginScreen cross-window auth", () => {
     // minimal mock doesn't define. The tiles themselves are what need pinning.
     expect(screen.getByText("Ollama")).toBeTruthy();
     expect(screen.queryByText("Local models")).toBeNull();
-    expect(screen.getByTitle("Hugging Face — download models to Ollama")).toBeTruthy();
+    expect(screen.getByTitle("Hugging Face: download models to Ollama")).toBeTruthy();
   });
 });

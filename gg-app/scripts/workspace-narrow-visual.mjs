@@ -76,6 +76,12 @@ async function elementMetrics(page, selectors) {
 
 // Geometry alone misses overlays, opacity and clipping that never changes document width.
 async function assertControlReachable(control, label) {
+  // A dismissing modal's view transition (~160ms, unchanged since before
+  // upstream 0.91) overlays the whole page and takes every hit test. Measure
+  // the settled layout: nobody can click through that fade either.
+  await control.page().waitForFunction(() => !document.activeViewTransition, null, {
+    timeout: 3_000,
+  });
   await control.scrollIntoViewIfNeeded({ timeout: 3_000 });
   // Center the target instead of leaving it fractionally outside an edge after
   // Chromium rounds nested scroll offsets. The containment gate remains exact.
@@ -116,8 +122,36 @@ async function assertControlReachable(control, label) {
     // Sample inside rounded button corners; rectangular containment is checked above.
     for (const x of [0.2, 0.5, 0.8].map((fraction) => rect.left + rect.width * fraction)) {
       for (const y of [0.2, 0.5, 0.8].map((fraction) => rect.top + rect.height * fraction)) {
-        if (!element.contains(document.elementFromPoint(x, y)))
-          failures.push(`occluded at ${x},${y}`);
+        const hit = document.elementFromPoint(x, y);
+        if (!element.contains(hit)) {
+          // Name the target's own hit-testing blockers too: an inert or
+          // pointer-events:none ancestor makes the point fall through to <html>.
+          const blockers = [];
+          for (let node = element; node; node = node.parentElement) {
+            const style = getComputedStyle(node);
+            const reasons = [
+              node.inert && "inert",
+              style.pointerEvents === "none" && "pointer-events:none",
+              style.clipPath !== "none" && `clip-path:${style.clipPath}`,
+              style.maskImage !== "none" && "mask",
+              style.contentVisibility !== "visible" &&
+                `content-visibility:${style.contentVisibility}`,
+            ].filter(Boolean);
+            if (reasons.length > 0)
+              blockers.push(
+                `${node.tagName}.${String(node.className).slice(0, 40)}[${reasons.join(",")}]`,
+              );
+          }
+          const stack = document
+            .elementsFromPoint(x, y)
+            .slice(0, 4)
+            .map((node) => `${node.tagName}.${String(node.className).slice(0, 40)}`);
+          failures.push(
+            `occluded at ${x},${y} by ${hit?.tagName}.${hit?.className}` +
+              (blockers.length > 0 ? ` (target blocked by ${blockers.join(" < ")})` : "") +
+              ` [stack: ${stack.join(" > ")}]`,
+          );
+        }
       }
     }
     return failures;
@@ -168,6 +202,7 @@ async function verifyPromptControls(page, width, mode, screenshot, outputDir, sc
       }
     }
   };
+  await closeMore(page);
   await verify(`${mode} document width`, async () => {
     assert.equal(
       await page.evaluate(
@@ -296,6 +331,7 @@ async function verifyPromptControls(page, width, mode, screenshot, outputDir, sc
     }
   }
   await verify("Fast", async () => {
+    await ensureMoreOpen(page);
     const fast = page.locator(".astra-fast-toggle");
     for (const key of ["Space", "Enter"]) {
       await assertControlReachable(fast, `${mode} Fast`);
@@ -313,6 +349,34 @@ async function verifyPromptControls(page, width, mode, screenshot, outputDir, sc
     screenshots.push(output);
   }
   return { width, mode, failures };
+}
+
+// Upstream 0.91 moved the Astra context selector, Fast switch, build identity and
+// context meter out of the removed footer into the deck's "⋯ More" panel. Open it
+// (idempotently) before any assertion that needs those controls.
+async function ensureMoreOpen(page, scope = page) {
+  const panel = scope.locator('.deck-pad[aria-label="More"]');
+  if (await panel.count()) return panel;
+  const more = scope.locator('.deck button[aria-label="More"]').first();
+  await more.click();
+  // An unfocused split pane may spend the first click on pane focus.
+  if (!(await panel.count())) {
+    await page.waitForTimeout(200);
+    if (!(await panel.count())) await more.click();
+  }
+  await panel.waitFor({ timeout: 5_000 });
+  return panel;
+}
+
+// The More panel overlays the transcript; close it before checking transcript
+// controls so it cannot occlude them.
+async function closeMore(page) {
+  const close = page.locator('.deck-panel-host button[aria-label="Close More"]');
+  if (await close.count()) {
+    // Setup step only (not a reachability claim); works even under CSS zoom.
+    await close.first().evaluate((element) => element.click());
+    await page.locator('.deck-pad[aria-label="More"]').waitFor({ state: "detached" });
+  }
 }
 
 async function applyAstraScenario(page, scenario) {
@@ -340,6 +404,7 @@ async function applyAstraScenario(page, scenario) {
 }
 
 async function verifyContextSelectorFocus(page, pane = page) {
+  await ensureMoreOpen(page, pane);
   const selector = pane.getByRole("combobox", { name: "OpenAI Codex context profile" });
   await page.evaluate(() => {
     const invoke = window.__TAURI_INTERNALS__.invoke;
@@ -373,6 +438,14 @@ async function verifyContextSelectorFocus(page, pane = page) {
   assert.equal(await selector.inputValue(), "experimental");
   await selector.click();
   await page.keyboard.press("Escape");
+  // In headless Chromium this Escape can reach the deck (no OS popup consumes
+  // it) and close the More panel that now hosts the selector. Focus retention
+  // was already proven above; reopen and refocus so the round-trip back to
+  // "stable" is still exercised by keyboard.
+  if (!(await pane.locator('.deck-pad[aria-label="More"]').count())) {
+    await ensureMoreOpen(page, pane);
+    await selector.focus();
+  }
   await page.keyboard.press("ArrowUp");
   await page.keyboard.press("Enter");
   assert.equal(await selector.inputValue(), "stable");
@@ -488,7 +561,7 @@ export async function runWorkspaceNarrowVisualFixture({
     });
     const page = await context.newPage();
     await page.goto(fixtureUrl, { waitUntil: "domcontentloaded" });
-    await page.waitForSelector(".chat-head-nav");
+    await page.waitForSelector(".chat-head .title-pins");
     await page.waitForTimeout(1_000);
 
     const focusFailures = [];
@@ -509,6 +582,7 @@ export async function runWorkspaceNarrowVisualFixture({
           .locator(`[data-pane-id="${initiallyFocused ? "primary" : "secondary"}"].pane-focused`)
           .waitFor({ timeout: 5_000 });
         const pane = focusPage.locator('[data-pane-id="primary"].workspace-pane-slot');
+        await ensureMoreOpen(focusPage, pane);
         await pane
           .getByRole("combobox", { name: "OpenAI Codex context profile" })
           .waitFor({ timeout: 5_000 });
@@ -525,6 +599,7 @@ export async function runWorkspaceNarrowVisualFixture({
     const screenshots = [];
     for (const [index, scenario] of astraVisualScenarios.entries()) {
       await applyAstraScenario(page, scenario);
+      await ensureMoreOpen(page);
       await assertAstraVisualState(page, scenario);
       const metrics = await elementMetrics(page, {
         viewport: "html",
@@ -532,10 +607,15 @@ export async function runWorkspaceNarrowVisualFixture({
         pane: ".workspace-pane-slot",
         agentPane: ".agent-pane",
         header: ".chat-head",
-        headerNav: ".chat-head-nav",
-        headerActions: ".chat-head-nav .picker-head-actions",
-        footer: ".footer",
-        footerControls: ".footer-right",
+        // Old two-row header (.chat-head-nav → .picker-head-actions) is now a
+        // single title bar whose trailing pins group holds the actions.
+        headerActions: ".chat-head .title-pins",
+        // Old .footer → .footer-right is now the bottom dock → deck.
+        dock: ".dock",
+        deck: ".dock .deck",
+        deckKeys: ".dock .deck .deck-rail",
+        // Astra controls + context meter now live in the More panel.
+        morePanel: '.deck-pad[aria-label="More"]',
         astraControls: ".astra-control-group",
         contextSelector: 'select[aria-label="OpenAI Codex context profile"]',
         fastSwitch: '.astra-fast-toggle[role="switch"]',
@@ -547,17 +627,41 @@ export async function runWorkspaceNarrowVisualFixture({
       assertContained(metrics, "workspace", "pane");
       assertContained(metrics, "pane", "agentPane");
       assertContained(metrics, "pane", "header");
-      assertContained(metrics, "header", "headerNav");
-      assertContained(metrics, "headerNav", "headerActions");
-      assertContained(metrics, "pane", "footer");
-      assertContained(metrics, "footer", "footerControls");
-      assertContained(metrics, "footerControls", "contextMeter");
+      assertContained(metrics, "header", "headerActions");
+      assertContained(metrics, "pane", "dock");
+      assertContained(metrics, "dock", "deck");
+      assertContained(metrics, "deck", "deckKeys");
+      assertContained(metrics, "deck", "morePanel");
+      assertContained(metrics, "morePanel", "contextMeter");
       if (scenario.controls !== "hidden") {
-        assertContained(metrics, "footerControls", "astraControls");
+        assertContained(metrics, "morePanel", "astraControls");
         assertContained(metrics, "astraControls", "contextSelector");
         assertContained(metrics, "astraControls", "fastSwitch");
       }
       scenarioShells[scenario.name] = metrics;
+      // The pinned New session / Notes / Tasks keys must stay visible and
+      // reachable at 320px (labels may collapse to icons).
+      for (const [label, pin] of [
+        ["New session", page.locator('.title-pins button[aria-label="New session"]')],
+        ["Notes", page.locator('.title-pins button[aria-label*="notes" i]')],
+        ["Tasks", page.locator('.title-pins button[aria-label^="Tasks"]')],
+      ]) {
+        assert.equal(await pin.count(), 1, `${label} pin missing`);
+        assert.equal(await pin.isVisible(), true, `${label} pin hidden at 320px`);
+        // A running agent legitimately disables New session; the "disabled"
+        // scenario simulates a run, so full reachability is checked elsewhere.
+        if (scenario.controls !== "disabled")
+          await assertControlReachable(pin, `320px ${label} pin`);
+        else
+          assertContained(
+            await elementMetrics(page, {
+              header: ".chat-head",
+              pin: `.title-pins button[aria-label${label === "Tasks" ? '^="Tasks"' : label === "Notes" ? '*="notes" i' : '="New session"'}]`,
+            }),
+            "header",
+            "pin",
+          );
+      }
 
       if (screenshot) {
         const name = index === 0 ? "workspace-shell-320.png" : `workspace-${scenario.name}-320.png`;
@@ -600,6 +704,7 @@ export async function runWorkspaceNarrowVisualFixture({
         .filter((entry) => entry.controls === "enabled")
         .slice(0, 2)) {
         await applyAstraScenario(page, scenario);
+        await ensureMoreOpen(page);
         await assertAstraVisualState(page, scenario);
         await page.locator(".astra-fast-toggle").hover();
         if (screenshot) {
@@ -608,6 +713,7 @@ export async function runWorkspaceNarrowVisualFixture({
           screenshots.push(output);
         }
       }
+      await ensureMoreOpen(page);
       const fast = page.locator(".astra-fast-toggle");
       await fast.focus();
       await page.keyboard.press("Space");
@@ -630,6 +736,7 @@ export async function runWorkspaceNarrowVisualFixture({
           document.querySelector('.gg-tooltip[role="tooltip"]')?.textContent === expected,
         "Fast mode is on. Uses 2.5× credits. Click to turn off.",
       );
+      await closeMore(page);
       const blocks = page.locator(".ken-prompt-block");
       const copies = blocks.locator(".ken-prompt-copy");
       assert.equal(await copies.count(), 2);
@@ -691,6 +798,8 @@ export async function runWorkspaceNarrowVisualFixture({
       });
       await copies.last().click();
       await page.getByRole("alert").filter({ hasText: "Could not copy prompt" }).waitFor();
+      // .astra-fast-toggle now lives in the More panel; open it for the contrast sample.
+      await ensureMoreOpen(page);
       const contrast = await page.evaluate(() => {
         const rgb = (value) =>
           value
@@ -735,6 +844,7 @@ export async function runWorkspaceNarrowVisualFixture({
           JSON.stringify(sample),
         );
       accessibilityEvidence.push({ width, contrast });
+      await closeMore(page);
       if (screenshot) {
         const output = resolve(outputDir, `prompt-copy-failure-${width}.png`);
         await page.screenshot({ path: output });
@@ -805,7 +915,8 @@ export async function runWorkspaceNarrowVisualFixture({
     }
     await page.setViewportSize({ width: 320, height: 700 });
     const shell = scenarioShells[astraVisualScenarios[0].name];
-    await page.click('.picker-head-actions button[aria-label*="notes" i]');
+    await closeMore(page);
+    await page.click('.title-pins button[aria-label*="notes" i]');
     await page.waitForSelector(".notes-tabs-scroll");
     await page.waitForTimeout(300);
     const notes = await elementMetrics(page, {

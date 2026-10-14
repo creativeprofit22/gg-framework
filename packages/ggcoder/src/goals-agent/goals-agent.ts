@@ -9,6 +9,7 @@ import {
 import { collectProjectContext } from "../system-prompt.js";
 import { getModel } from "../core/model-registry.js";
 import type { ChildModelPick } from "../core/subagent-manager.js";
+import { holdGoalRun } from "../core/goal-run-marker.js";
 import { GOAL_TEAM } from "./goal-team.js";
 
 /**
@@ -263,8 +264,30 @@ function goalAskUser(
  * the goal folder, so the goal list and goal deletion find them there.
  */
 export function createGoalsAgentSession(options: GoalsAgentOptions): AgentSession {
-  const { goal, extras, additionalTools = [], isActive = () => false, ...sessionOptions } = options;
+  const {
+    goal,
+    extras,
+    additionalTools = [],
+    isActive = () => false,
+    onRunActive,
+    ...sessionOptions
+  } = options;
   let spokeThisSession = false;
+  // The goal is being worked on while GG Goals' own loop runs or any worker
+  // is still live (a turn can end waiting on its team). Other processes read
+  // that from the marker, so a goal this one is running never shows there as
+  // interrupted, and is never resumed twice.
+  let looping = false;
+  const liveWorkers = new Set<string>();
+  let release: (() => void) | null = null;
+  const syncRunMarker = (): void => {
+    const working = looping || liveWorkers.size > 0;
+    if (working && !release) release = holdGoalRun(goal.dir);
+    else if (!working && release) {
+      release();
+      release = null;
+    }
+  };
   // `getMessages()` is the conversation as of the last finished run, so text
   // streamed in the current run is tracked live alongside it.
   const hasSpoken = (): boolean => spokeThisSession || hasAssistantText(session.getMessages());
@@ -280,6 +303,11 @@ export function createGoalsAgentSession(options: GoalsAgentOptions): AgentSessio
     // as workspace roots and read on demand.
     agentContext: "none",
     promptCacheKeyPrefix: "gggoals",
+    onRunActive: (active) => {
+      looping = active;
+      syncRunMarker();
+      onRunActive?.(active);
+    },
     // Orchestrating is the job: bringing in workers, steering them and
     // waiting on them must not need a tool_search first.
     coreTools: GOALS_CORE_TOOLS,
@@ -306,5 +334,22 @@ export function createGoalsAgentSession(options: GoalsAgentOptions): AgentSessio
   session.eventBus.on("text_delta", ({ text }) => {
     if (text.trim()) spokeThisSession = true;
   });
+  session.eventBus.on("subagent_state", (worker) => {
+    if (worker.state === "starting" || worker.state === "running") liveWorkers.add(worker.agent_id);
+    else liveWorkers.delete(worker.agent_id);
+    syncRunMarker();
+  });
+  // Teardown drops every bus listener, so a worker's last "closed" may never
+  // arrive: a disposed session lets go of the goal however it ended.
+  const dispose = session.dispose.bind(session);
+  session.dispose = async () => {
+    try {
+      await dispose();
+    } finally {
+      looping = false;
+      liveWorkers.clear();
+      syncRunMarker();
+    }
+  };
   return session;
 }

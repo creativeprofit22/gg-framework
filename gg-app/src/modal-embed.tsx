@@ -33,8 +33,29 @@ export function ModalEmbedProvider({
  * section's title stays as its accessible name but is not drawn: the page's
  * header already names it.
  */
-export function EmbeddedModal({ children }: { children: React.ReactNode }): React.ReactElement {
-  return <ModalEmbedProvider state="embed">{children}</ModalEmbedProvider>;
+export function EmbeddedModal({
+  children,
+  hostNamed = false,
+}: {
+  children: React.ReactNode;
+  /**
+   * The host already names this content as a region (a Deck tool panel), so
+   * the section must not announce the same name again as a nested region.
+   */
+  hostNamed?: boolean;
+}): React.ReactElement {
+  return (
+    <EmbedHostNamedContext.Provider value={hostNamed}>
+      <ModalEmbedProvider state="embed">{children}</ModalEmbedProvider>
+    </EmbedHostNamedContext.Provider>
+  );
+}
+
+const EmbedHostNamedContext = createContext(false);
+
+/** Whether the embedding host already supplies the section's accessible name. */
+export function useEmbedHostNamed(): boolean {
+  return useContext(EmbedHostNamedContext);
 }
 
 export function useModalEmbedState(): ModalEmbedState {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { milestoneFor } from "./ScorecardModal";
+import { milestoneFor, nextRank } from "./Scorecard";
 
 describe("milestoneFor (decade ladder)", () => {
   it("brackets a value between round 1/2/5 milestones", () => {
@@ -49,5 +49,25 @@ describe("milestoneFor (streak ladder)", () => {
   it("continues in whole years past the fixed ladder", () => {
     expect(milestoneFor(1095, STREAK)).toMatchObject({ prev: 1095, next: 1460 });
     expect(milestoneFor(1500, STREAK)).toMatchObject({ prev: 1460, next: 1825 });
+  });
+});
+
+describe("nextRank", () => {
+  const rung = (level: number, name: string) => ({
+    level,
+    name,
+    tier: 1,
+    tierName: "T",
+    effectId: "plain",
+    xpRequired: 0,
+  });
+  const ladder = [rung(91, "Supernova"), rung(101, "Blazecore"), rung(111, "Jetstream")];
+
+  it("names the next differently-named rank above the current level", () => {
+    expect(nextRank({ level: 92, rankName: "Supernova", ladder })?.name).toBe("Blazecore");
+  });
+
+  it("is null at the top of the ladder", () => {
+    expect(nextRank({ level: 115, rankName: "Jetstream", ladder })).toBeNull();
   });
 });

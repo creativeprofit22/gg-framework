@@ -22,6 +22,50 @@ export interface ChangelogEntry {
 /** Newest first. Prepended by the `/release` flow. */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.91.0",
+    date: "2026-10-14",
+    items: [
+      "Updates now arrive like a level up in an arcade. A pixel `Update` key pops up on your home screen and along the bottom of your window, turns into an XP bar with the little builder running across it while it downloads, and bursts into pixels at `100%`. I also fixed the old button going see-through when you pressed it.",
+      "Say hi in the new `About` tab at the end of Settings. Little Ken introduces himself, and a calendar shows every desktop release so far, one square per day. Point at any day to see what changed, and find me on `Skool` and YouTube right there.",
+      "Settings feels a whole lot smoother. The tabs glide over in one easy motion instead of hopping around, and every page opens fully loaded, so you never catch it flickering half-ready first.",
+      "The `What's new` window now matches your theme. Its stories sit on the same cards as the rest of the app, so everything reads clearly in both `Light` and `Dark`.",
+      "Home got a tidy up. `Goals` wears a little Beta tag, and your version number now sits right beside What's new.",
+    ],
+  },
+  {
+    version: "0.90.1",
+    date: "2026-10-14",
+    items: [
+      "Tables and code finally get room to breathe. `Tables`, `code blocks` and Ken's prompt blocks now stretch across the whole chat, so columns stop squishing and long lines stop wrapping into a mess, while your reading text stays at a comfy width.",
+    ],
+  },
+  {
+    version: "0.90.0",
+    date: "2026-10-14",
+    items: [
+      "Meet the `Deck`, a brand new home for everything at the bottom of your window. Your model, usage, background tasks, radio, notes and checklist now open right where you type instead of floating over your chat, so even a tiny window keeps the whole conversation in view. And whatever you were typing stays safe while you look around.",
+      "Your project's Git story now lives one tap away. The new `Git` panel shows every changed file with its line counts, plus your open pull requests and issues on GitHub, and opens the repo in a single click.",
+      "Picking a model is now instant and fun. Type something like `opus55` or `kimi code` and the right one pops up from the whole list, and you can jump straight to any thinking level with a simple row of dots instead of clicking through them one by one.",
+      "GG Coder now comes in `Light` and `Dark`, or `Auto` to follow your Mac or PC. Flip it once and every open window switches with you, all wearing a crisp new font.",
+      "Everything just feels smoother. Your project, chat and goal lists show up instantly on every return visit, numbered steps keep counting right past code blocks, typed arrows turn into real ones, and a goal running on your phone never gets started twice on your desktop.",
+    ],
+  },
+  {
+    version: "0.89.0",
+    date: "2026-10-13",
+    items: [
+      "The `Goals` farm finally has a voice. Every single thing you poke now makes its own cozy sound, timed right to its animation: the bamboo spout clacks, the well echoes your hello back, the hen bawks and lays an egg, and each tree hides a different songbird. That's `80` hand-tuned little sounds, soft enough to play all day, and the critters at work tap and saw now and then too. Your sound toggle mutes them along with everything else.",
+      "Attach a repo to a goal and its own slash commands come right along. Every `.gg/commands` file in the repos you add shows up in the `/` menu and runs exactly like your project's own, and the same goes for folders you add with `/add-dir`.",
+    ],
+  },
+  {
+    version: "0.88.1",
+    date: "2026-10-13",
+    items: [
+      "Searching your code is now blazing fast, even in giant projects. I spread every search across your CPU cores and skip ignored folders like `node_modules` without even looking inside. I also raised the limit to `100k` files, so nothing hides past the first `10k` anymore and huge repos and `Goals` folders get searched end to end.",
+    ],
+  },
+  {
     version: "0.88.0",
     date: "2026-10-13",
     items: [

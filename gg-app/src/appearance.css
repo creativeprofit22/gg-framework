@@ -105,10 +105,6 @@
 :root[data-appearance-theme="light"] .title-usage-fill {
   box-shadow: none;
 }
-/* Off-white provider marks (#f4f6f8) are drawn for Dark; invert them to near-ink on Light tiles. */
-:root[data-appearance-theme="light"] .login-logo.is-monochrome {
-  filter: invert(0.88);
-}
 /* Home ink sits over the Light dot field: a light halo instead of Dark's black one. */
 :root[data-appearance-theme="light"]
   :is(.home-version-row, .home-tagline, .home-action-note, .home-links, .home-version-corner) {

@@ -19,6 +19,7 @@ import { AppearanceSettings } from "./AppearanceSettings";
 import { HomeBackgroundButton } from "./HomeBackgroundButton";
 import { KeepAwakeButton } from "./KeepAwakeButton";
 import { SettingsSection } from "./settings-section";
+import { useSettingsPageReady } from "./settings-ready";
 
 // One sentence per section, shown as the card description on the Settings page
 // and as the hint under the label in the dialog, so the two cannot drift.
@@ -60,6 +61,10 @@ export function SettingsModal({ onClose, onSaved }: Props): React.ReactElement {
   const folderErrorId = useId();
   const folderPendingId = useId();
   const folderInputRef = useRef<HTMLInputElement>(null);
+  const [settingsRead, setSettingsRead] = useState(false);
+  // On the Settings page, wait for the folder and the Permissions card so the
+  // page doesn't paint without them and then shift.
+  useSettingsPageReady(settingsRead && permissions !== null);
 
   useEffect(() => {
     let active = true;
@@ -79,6 +84,10 @@ export function SettingsModal({ onClose, onSaved }: Props): React.ReactElement {
       })
       .catch(() => {
         if (active) setLoadError(true);
+      })
+      // Settings page: paint once the folder read settles (see settings-ready).
+      .finally(() => {
+        if (active) setSettingsRead(true);
       });
     return () => {
       active = false;
@@ -147,9 +156,10 @@ export function SettingsModal({ onClose, onSaved }: Props): React.ReactElement {
   // "Settings".
   return (
     <Modal title={embedded ? "General" : "Settings"} onClose={onClose} className="settings-modal">
-      {/* Columns only on the Settings screen; in the dialog they are
-          transparent (see .settings-cols in App.css). */}
-      <div className="settings-cols">
+      {/* On the Settings screen: a grid of equal cards, two side by side
+          where there's room (see .settings-grid in Deck.css). In the dialog
+          the wrapper is transparent and the cards stack. */}
+      <div className="settings-cols settings-grid">
         <div className="settings-col">
           {permissions?.applicable && (
             <SettingsSection title="Permissions" description="Full Disk Access for Supah Coder.">

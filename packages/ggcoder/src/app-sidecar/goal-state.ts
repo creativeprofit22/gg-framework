@@ -1,4 +1,5 @@
 import { goalNeedsKickoff, goalPhase, goalWasInterrupted } from "../core/goals-store.js";
+import { goalRunningElsewhere } from "../core/goal-run-marker.js";
 import { goalCritterPick } from "../goals-agent/goals-agent.js";
 import type { SessionRouteContext } from "./route-context.js";
 
@@ -21,11 +22,11 @@ export function goalStatePayload(ctx: Pick<SessionRouteContext, "goal" | "sessio
     phase: goalPhase(goal.record),
     paused: Boolean(goal.record.pausedAt),
     // Started, not paused, and cut off mid-work: the app asks it to carry on.
-    needsResume: goalWasInterrupted(
-      goal.record,
-      ctx.session.getMessages(),
-      ctx.session.listSubAgents(),
-    ),
+    // Not while another process is running it: resuming would start a
+    // second coordinator on the same goal.
+    needsResume:
+      goalWasInterrupted(goal.record, ctx.session.getMessages(), ctx.session.listSubAgents()) &&
+      !goalRunningElsewhere(goal.dir),
     instructions: goal.record.instructions ?? "",
     context: goal.record.context,
     // The workers' pinned model; null: they follow GG Goals' model.

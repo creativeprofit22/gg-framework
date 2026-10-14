@@ -5,7 +5,6 @@ import { error as logError } from "@tauri-apps/plugin-log";
 import { XIcon } from "@phosphor-icons/react";
 import { createSafeTauriUnlisten, type SafeTauriUnlisten } from "./tauri-listener";
 import { appBuildInfo } from "./build-info";
-import { theme } from "./theme";
 import { Badge } from "./Badge";
 import { recentChangelog } from "./changelog";
 import { revealWhatsNewWindow, type VerifiedDecisionRecord } from "./agent";
@@ -396,12 +395,7 @@ export function WhatsNewWindow({
   ) : undefined;
 
   return (
-    <div
-      className={`whatsnew-window feed-${selectedFeedId}`}
-      data-mode={mode}
-      data-phase={phase}
-      style={{ background: theme.surface2 }}
-    >
+    <div className={`whatsnew-window feed-${selectedFeedId}`} data-mode={mode} data-phase={phase}>
       <WhatsNewCampfire
         latest={latest}
         earlier={earlier}

@@ -4,6 +4,7 @@ import { Modal } from "./Modal";
 import { ModalDismissButton, useModalEmbedState } from "./modal-embed";
 import { SettingsSection } from "./settings-section";
 import { SettingsHeaderAction } from "./settings-header";
+import { useSettingsPageReady } from "./settings-ready";
 import { waitForReady, getTelegramStatus, openUrl, saveTelegramConfig } from "./agent";
 import { toast } from "./toast";
 
@@ -26,6 +27,9 @@ export function TelegramSettingsModal({ onClose, onSaved }: Props): React.ReactE
   const [tokenPreview, setTokenPreview] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [loaded, setLoaded] = useState(false);
+  // In Settings, wait for the saved bot so its fields don't fill in after paint.
+  useSettingsPageReady(loaded);
 
   useEffect(() => {
     void waitForReady()
@@ -36,7 +40,8 @@ export function TelegramSettingsModal({ onClose, onSaved }: Props): React.ReactE
           if (s.tokenPreview) setTokenPreview(s.tokenPreview);
         }
       })
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => setLoaded(true));
   }, []);
 
   const canSave = (botToken.trim().length > 0 || tokenPreview !== null) && userId.trim().length > 0;

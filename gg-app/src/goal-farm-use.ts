@@ -8,7 +8,13 @@
 
 import type { FarmWorld } from "./goal-farm-sim";
 import type { Farm, Thing } from "./goal-farm-map";
-import { startUse, reactionOn, type FarmPlay, type ThingKind } from "./goal-farm-interact";
+import {
+  startUse,
+  reactionOn,
+  type FarmPlay,
+  type Reaction,
+  type ThingKind,
+} from "./goal-farm-interact";
 import type { StationKind } from "./goal-world-stations";
 
 /** What each station's thing does while it's in use, in the order it cycles through. */
@@ -68,14 +74,15 @@ export function stationsInUse(world: FarmWorld): ReadonlySet<StationKind> {
 /**
  * Start the next use on every thing in use that isn't already playing
  * something (a use or a poke). Sorted by station, so the same farm plays the
- * same way.
+ * same way. Returns the uses started (for their sounds).
  */
 export function playUses(
   play: FarmPlay,
   things: ReadonlyMap<StationKind, Thing>,
   inUse: ReadonlySet<StationKind>,
   now: number,
-): void {
+): readonly Reaction[] {
+  const started: Reaction[] = [];
   for (const station of [...inUse].sort()) {
     const t = things.get(station);
     if (!t || reactionOn(play, t.id, now)) continue;
@@ -85,13 +92,16 @@ export function playUses(
     const { actions } = STATION_USES[station];
     const action = actions[turn % actions.length];
     if (!action) continue;
-    startUse(
-      play,
-      { target: t.id, kind: t.kind, x: t.x + t.buf.width / 2, y: t.base },
-      action,
-      now,
+    started.push(
+      startUse(
+        play,
+        { target: t.id, kind: t.kind, x: t.x + t.buf.width / 2, y: t.base },
+        action,
+        now,
+      ),
     );
   }
+  return started;
 }
 
 /**

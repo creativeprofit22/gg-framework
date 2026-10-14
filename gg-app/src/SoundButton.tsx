@@ -26,7 +26,7 @@ export function SoundButton(): React.ReactElement {
     <button
       type="button"
       className="modal-btn toggle-btn"
-      title={on ? "Sound effects on — click to mute" : "Sound effects muted — click to enable"}
+      title={on ? "Sound effects on. Click to mute" : "Sound effects muted. Click to turn on"}
       aria-pressed={on}
       onClick={toggle}
     >

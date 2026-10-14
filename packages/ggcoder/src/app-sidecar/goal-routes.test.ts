@@ -6,6 +6,7 @@ import type http from "node:http";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createGoal, goalsRoot, markGoalStarted, readGoal } from "../core/goals-store.js";
 import { RunClaim } from "../core/run-claim.js";
+import { goalRunMarkerPath } from "../core/goal-run-marker.js";
 import { goalListStatus, handleGoalRoutes } from "./goal-routes.js";
 import type { SessionRouteContext } from "./route-context.js";
 
@@ -201,6 +202,30 @@ describe("goal kickoff route", () => {
     done.ctx.goal = { dir: done.dir, record: (await readGoal(done.dir))! };
     expect(await call(done.ctx, "/goal/resume")).toEqual({ status: 200, body: { resumed: false } });
     expect(done.prompt).not.toHaveBeenCalled();
+  });
+
+  it("never resumes a goal another process is running", async () => {
+    // Cut off as far as this window can tell (its last message is a tool
+    // call), but the phone's `ggcoder acp` is working on it right now.
+    const busy = await goalContext([
+      { role: "assistant", content: [{ type: "tool_call", id: "c1", name: "bash", args: {} }] },
+    ]);
+    await markGoalStarted(busy.dir, new Date());
+    busy.ctx.goal = { dir: busy.dir, record: (await readGoal(busy.dir))! };
+    const at = new Date().toISOString();
+    await fs.mkdir(path.dirname(goalRunMarkerPath(busy.dir)), { recursive: true });
+    await fs.writeFile(
+      goalRunMarkerPath(busy.dir),
+      JSON.stringify({
+        version: 1,
+        pid: process.ppid,
+        token: "acp",
+        startedAt: at,
+        heartbeatAt: at,
+      }),
+    );
+    expect(await call(busy.ctx, "/goal/resume")).toEqual({ status: 200, body: { resumed: false } });
+    expect(busy.prompt).not.toHaveBeenCalled();
   });
 
   it("tells the goal list where each goal stands: briefing, running, paused or idle", async () => {

@@ -19,6 +19,14 @@ async function verifyWorkspace(context) {
   try {
     await verifyWorkspaceChecks(context);
   } catch (error) {
+    // Caught before the shared launcher wraps it with developer logs: our own
+    // checks carry only a fixed message and measured geometry, so keep which
+    // one failed.
+    if (
+      error instanceof assert.AssertionError ||
+      (error instanceof Error && error.message.startsWith("Native pane-swap check timed out"))
+    )
+      evidence.assertion = error.message.slice(0, 600);
     try {
       const image = await context.client.send("Page.captureScreenshot", { format: "png" });
       await writeFile(resolve(out, "native-failure.png"), Buffer.from(image.data, "base64"));
@@ -175,6 +183,7 @@ async function verifyCenters({ client, projects, readAudit, key }) {
         exchanged(original, await geometry(), middle, side);
         await settle();
         const reverse = await control(selector(side, direction));
+        record.reverse = reverse;
         assert.ok(reverse.hit && Math.abs(reverse.x - point.x) <= 1 && Math.abs(reverse.y - point.y) <= 1, "Incoming center action must retain pointer position");
         await client.send("Input.dispatchMouseEvent", { type: "mousePressed", x: point.x, y: point.y, button: "left", buttons: 1, clickCount: 1 });
         await client.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: point.x, y: point.y, button: "left", buttons: 0, clickCount: 1 });

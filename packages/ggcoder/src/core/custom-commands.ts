@@ -193,3 +193,40 @@ export async function loadCustomCommandCatalog(cwd: string): Promise<CustomComma
 export async function loadCustomCommands(cwd: string): Promise<CustomCommand[]> {
   return (await loadCustomCommandCatalog(cwd)).commands;
 }
+
+/**
+ * Custom commands from every workspace root: the project first, then each
+ * folder added to it (`/add-dir`, a goal's attached repos). A name already
+ * taken by an earlier root is skipped, so the project's own command wins.
+ */
+export async function loadWorkspaceCustomCommands(
+  roots: readonly string[],
+): Promise<CustomCommand[]> {
+  return (await loadWorkspaceCustomCommandCatalog(roots)).commands;
+}
+
+/** {@link loadWorkspaceCustomCommands} plus every root's per-file problems. */
+export async function loadWorkspaceCustomCommandCatalog(
+  roots: readonly string[],
+): Promise<CustomCommandCatalog> {
+  return mergeCustomCommandCatalogs(
+    await Promise.all(roots.map((root) => loadCustomCommandCatalog(root))),
+  );
+}
+
+/** Merge per-root catalogs in root order: the first root to claim a name wins. */
+export function mergeCustomCommandCatalogs(
+  catalogs: readonly CustomCommandCatalog[],
+): CustomCommandCatalog {
+  const seen = new Set<string>();
+  const commands: CustomCommand[] = [];
+  for (const command of catalogs.flatMap((catalog) => catalog.commands)) {
+    if (seen.has(command.name)) continue;
+    seen.add(command.name);
+    commands.push(command);
+  }
+  return {
+    commands,
+    problems: boundCommandProblems(catalogs.flatMap((catalog) => catalog.problems)),
+  };
+}

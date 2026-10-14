@@ -364,7 +364,7 @@ export function poke(play: FarmPlay, p: Poke, now: number, seed: number): string
 /**
  * A thing playing `action` because a critter is using it: a reaction like a
  * poke's, but it changes nothing else (no turn taken, no freeze) and says
- * nothing. The seed comes from the clock, so the same frame plays the same.
+ * nothing. Returns the reaction started. The seed comes from the clock, so the same frame plays the same.
  */
 export function startUse(
   play: FarmPlay,
@@ -376,8 +376,8 @@ export function startUse(
   },
   action: string,
   now: number,
-): void {
-  play.reactions.push({
+): Reaction {
+  const reaction: Reaction = {
     target: thing.target,
     kind: thing.kind,
     action,
@@ -388,7 +388,9 @@ export function startUse(
     from: null,
     seed: Math.floor(now) % 9973,
     use: true,
-  });
+  };
+  play.reactions.push(reaction);
+  return reaction;
 }
 
 function critterLine(name: string, action: string): string {

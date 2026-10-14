@@ -4,7 +4,6 @@ import {
   continuationInstructionError,
   isPendingAskSnapshot,
 } from "@kenkaiiii/gg-core/desktop-session-ux";
-import { getQwenCloudThinkingLabel } from "@kenkaiiii/gg-core/qwen-cloud-token-plan";
 import {
   Activity,
   createElement,
@@ -29,13 +28,13 @@ import { open, save } from "@tauri-apps/plugin-dialog";
 import { theme } from "./theme";
 import { WorkingBeam } from "./WorkingBeam";
 import { ChatErrorNotice } from "./ChatErrorNotice";
-import { withViewTransition } from "./view-transition";
+import { showScreen } from "./view-transition";
+import { nextDockHeight } from "./dock-height";
+import { finishEntrances } from "./finish-entrances";
 import { parseProjectHealth } from "./project-health";
-import { assignErrorCritters } from "./ErrorCritter";
 import { activeChatErrorId, readChatError, type ChatErrorItem } from "./chat-error";
 import { usePaneSwapViewState, type RegisterPaneSwapViewState } from "./usePaneSwapViewState";
 import { ActionMetal } from "./ActionMetal";
-import { MetalButton } from "./MetalButton";
 import {
   isValidProgrammaticFocus,
   PROGRAMMATIC_FOCUS_GUIDANCE,
@@ -112,6 +111,7 @@ import {
   kickoffGoal,
   pauseGoal,
   resumeGoal,
+  setCritterModel,
 } from "./agent";
 import { createSafeTauriUnlisten, type SafeTauriUnlisten } from "./tauri-listener";
 import { ActivityBar } from "./ActivityBar";
@@ -159,7 +159,6 @@ import { ModelSelect } from "./ModelSelect";
 import { SlashMenu } from "./SlashMenu";
 import { QueuedBar } from "./QueuedBar";
 import { ScheduleHint } from "./ScheduleHint";
-import { RunningSchedulesButton } from "./RunningSchedulesButton";
 import {
   describeSchedule,
   isScheduleDraft,
@@ -169,9 +168,6 @@ import {
 import { useSchedules } from "./useSchedules";
 import { FileMentionMenu } from "./FileMentionMenu";
 import { ReferencedFiles, appendReferencedFiles, parseReferencedFiles } from "./ReferencedFiles";
-import { ContextMeter } from "./ContextMeter";
-import { BackgroundTasksButton } from "./BackgroundTasksButton";
-import { isBackgroundTaskRunning } from "./background-task-status";
 import { TasksModal, type TasksLoadState } from "./TasksModal";
 import { ChecklistScreen, type ChecklistLoad, type ChecklistNotice } from "./ChecklistScreen";
 import { ProjectNotes, type ProjectNotesPromptActions } from "./ProjectNotes";
@@ -193,17 +189,14 @@ import { InitGitModal } from "./InitGitModal";
 import { PlanModeLogo } from "./PlanModeLogo";
 import { KenPowerBanner } from "./KenPowerBanner";
 import { KenFace } from "./KenFace";
-import { ExportChatButton } from "./ExportChatButton";
 import { PlanReviewModal } from "./PlanReviewModal";
 import { ReviewDock, type ReviewDockItem } from "./ReviewDock";
 import { McpElicitModal } from "./McpElicitModal";
 import { WindowLayoutButton } from "./WindowLayoutButton";
-import { RadioButton } from "./RadioButton";
 import { ProjectPicker } from "./ProjectPicker";
 import { ChatPicker } from "./ChatPicker";
 import { BackButton } from "./BackButton";
 import { Badge } from "./Badge";
-import { AutopilotToggle } from "./AutopilotToggle";
 import { HomeScreen } from "./HomeScreen";
 // Lazy: Goals is an opt-in surface; keep its picker out of the startup bundle.
 const GoalPicker = lazy(() =>
@@ -213,11 +206,15 @@ import { SettingsModal } from "./LazySettingsModal";
 import { initialEntryView, type EntryView } from "./app-entry-view";
 import { submitDisposition, withoutSupersedingMessage } from "./submit-disposition";
 import { Toaster } from "./Toaster";
-import { Confetti } from "./Confetti";
 import { RankBadge } from "./RankBadge";
-import { ScorecardModal } from "./ScorecardModal";
-import { TitleUsageMeter } from "./TitleUsageMeter";
+import { Confetti } from "./Confetti";
+import { ScorecardPanel } from "./Scorecard";
+import { ProjectHealthPanel } from "./ProjectHealthBadge";
 import { WorkspaceHeader } from "./WorkspaceHeader";
+import { DeckMenu, TitleBarActions } from "./WorkspaceHeaderActions";
+import { Deck, type DeckPanelId } from "./Deck";
+import { ContextMeter } from "./ContextMeter";
+import "./Deck.css";
 import { formatWorkspaceTitle } from "./workspace-title";
 import { useProgress } from "./useProgress";
 import { SettingsScreen, type SettingsTabId } from "./SettingsScreen";
@@ -360,6 +357,12 @@ function notesPromptActionResult(
 
 // Mentor-handle patterns, built from brand.ts so renames stay in sync.
 // Case-insensitive with a word boundary so `@kennedy.ts` still picks files.
+function ggModelRole(mode: WorkspaceMode): string {
+  return mode === "chat"
+    ? "GG's model — answers your messages"
+    : `${workspaceProductName(mode)}'s model — does the work`;
+}
+const KEN_MODEL_ROLE = `${MENTOR_DISPLAY_NAME}'s model — reviews ${PRODUCT_DISPLAY_NAME}'s work and answers ${MENTOR_HANDLE}`;
 const MENTOR_HANDLE_PREFIX_RE = new RegExp(`^@${MENTOR_HANDLE_ALTERNATION}\\b`, "i");
 // Overlay split: leading whitespace, then the literal handle token.
 const MENTOR_HANDLE_OVERLAY_RE = new RegExp(`^(\\s*)(@${MENTOR_HANDLE_ALTERNATION})`, "i");
@@ -554,30 +557,6 @@ export interface TranscriptImage {
 let idSeq = 0;
 const nextId = (): number => ++idSeq;
 
-// Vertical divider between footer segments (mirrors the TUI's ` \u2502 ` in
-// border color). Rendered between adjacent groups, never leading/trailing.
-// Pure decoration: hidden from assistive tech so it isn't read as a glyph.
-/** Footer model-picker roles, announced with each picker and shown as the
- *  label's tooltip. Code and Motion name the work model with the same product
- *  name as the picker's accessible name (`workspaceProductName`), so a screen
- *  reader hears one name per model; the visible "GG" label is unchanged. Ken is
- *  the read-only mentor: he answers @Ken and reviews the work model's output in
- *  Autopilot (ggcoder app-sidecar mentor prompt). */
-function ggModelRole(mode: WorkspaceMode): string {
-  return mode === "chat"
-    ? "GG's model — answers your messages"
-    : `${workspaceProductName(mode)}'s model — does the work`;
-}
-const KEN_MODEL_ROLE = `${MENTOR_DISPLAY_NAME}'s model — reviews ${PRODUCT_DISPLAY_NAME}'s work and answers ${MENTOR_HANDLE}`;
-
-function FooterSep(): React.ReactElement {
-  return (
-    <span className="footer-sep" style={{ color: theme.border }} aria-hidden="true">
-      {"\u2502"}
-    </span>
-  );
-}
-
 // BLACK_CIRCLE — ⏺ on mac (matches the TUI figure).
 const DOT = "\u23FA";
 
@@ -619,18 +598,6 @@ export function noInputSlashSubmissionError(
   )
     return PROGRAMMATIC_FOCUS_GUIDANCE;
   return null;
-}
-
-// Thinking-tier color, mirroring the ggcoder TUI footer's getThinkingColor:
-// warmer/more saturated as the tier rises; xhigh/max are "max power" hot pink.
-const MAX_POWER_COLOR = "#db2777";
-const MAX_POWER_SHIMMER = "#f472b6";
-function thinkingColor(level: string | null | undefined): string {
-  if (!level) return theme.textDim;
-  if (level === "low") return theme.textMuted;
-  if (level === "medium") return theme.accent;
-  if (level === "high") return theme.warning;
-  return MAX_POWER_COLOR; // xhigh / max
 }
 
 function hasDraggedFiles(dataTransfer: DataTransfer | null): boolean {
@@ -766,7 +733,6 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     setAutopilot,
     cancel,
     newSession,
-    cycleThinking,
     listModels,
     switchModel,
     setOpenAICodexContextProfile,
@@ -890,7 +856,6 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   // Ken's face talks on the reply he is streaming right now: the last row,
   // while his run is live. Only that row's props change, so memo holds.
   const currentErrorId = useMemo(() => activeChatErrorId(items), [items]);
-  const errorCritters = useMemo(() => assignErrorCritters(items), [items]);
   const lastItem = items[items.length - 1];
   const talkingKenId = kenRunning && lastItem?.kind === "ken" ? lastItem.id : null;
   // Autopilot Ken (auto-reviewer): consumes the `autopilot_*` event family into
@@ -898,11 +863,12 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   // shared setItems/nextId pattern as useKenMentor.
   const { autopilotReviewing, handleAutopilotEvent } = useAutopilot({ setItems, nextId });
   const { snapshot: progress, levelUp, levelUpNonce, levelUpOrigin } = useProgress(client);
-  const [showScorecard, setShowScorecard] = useState(false);
-  const [rankCelebrateNonce, setRankCelebrateNonce] = useState<string | null>(null);
   const [xpChips, setXpChips] = useState<Array<{ id: string; label: string }>>([]);
   const lastProgressXpRef = useRef<number | null>(null);
   const [confettiNonce, setConfettiNonce] = useState<string | null>(null);
+  // Local Fork: the level-up badge flourish survives the one-row title bar —
+  // it appears in the title bar only while a level/rank celebration plays.
+  const [rankCelebrateNonce, setRankCelebrateNonce] = useState<string | null>(null);
   const [input, setInput] = useState("");
   const [placeholderIndex, setPlaceholderIndex] = useState(0);
   const [displayPlaceholder, setDisplayPlaceholder] = useState(DEFAULT_INPUT_PLACEHOLDER);
@@ -1008,8 +974,6 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   const lastKeystrokeAtRef = useRef(0);
   const [hasFinishedRun, setHasFinishedRun] = useState(false);
   // Footer model pickers: hidden role descriptions announced with each control.
-  const ggModelRoleId = useId();
-  const kenModelRoleId = useId();
   const glowSeed = `${windowLabel}:${props.paneId}`;
   const glowStyle = useMemo(() => glowVars(glowPlacement(glowSeed)), [glowSeed]);
   const glowState = glowStateFor(running, hasFinishedRun);
@@ -1072,7 +1036,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   // Hydration could not reach the agent: shown in place of the dead-end status
   // line, with a way to try again.
   const [connectError, setConnectError] = useState<string | null>(null);
-  const [modelCatalogRefreshNonce, setModelCatalogRefreshNonce] = useState(0);
+  const [, setModelCatalogRefreshNonce] = useState(0);
   const [commands, setCommands] = useState<SlashCommand[]>([]);
   // Command files that could not be listed, shown by the Ctrl/Cmd+K palette.
   // Always written together with `commands` from one guarded catalog response.
@@ -1194,9 +1158,24 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     setProjectTasksState(next);
     setTasksLoad("idle");
   }, []);
-  const [showTasks, setShowTasks] = useState(false);
-  // Checklist is a workspace view; the mounted chat keeps its draft and history.
-  const [showChecklist, setShowChecklist] = useState(false);
+  // What has taken the message box's place in the deck, if anything (upstream
+  // 0.91): Tasks, Checklist, Brain, Scorecard, Goal settings, Git, Model…
+  const [deckPanel, setDeckPanel] = useState<DeckPanelId | null>(null);
+  const showTasks = deckPanel === "todo";
+  // The checklist is a deck tool like Tasks: open while the deck shows it.
+  const showChecklist = deckPanel === "checklist";
+  const setShowChecklist = useCallback((next: SetStateAction<boolean>) => {
+    setDeckPanel((open) => {
+      const isOpen = open === "checklist";
+      const want = typeof next === "function" ? next(isOpen) : next;
+      if (want) return "checklist";
+      return isOpen ? null : open;
+    });
+  }, []);
+  const closeDeckPanel = useCallback(
+    (id: DeckPanelId) => setDeckPanel((open) => (open === id ? null : open)),
+    [],
+  );
   const [checklistLoad, setChecklistLoad] = useState<ChecklistLoad>({ kind: "loading" });
   const [checklistRunId, setChecklistRunId] = useState<string | null>(null);
   const [checklistNotice, setChecklistNotice] = useState<ChecklistNotice | null>(null);
@@ -1207,7 +1186,6 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   } | null>(null);
   const checklistFetchRef = useRef(0);
   const checklistWasOpen = useRef(false);
-  const [showMemories, setShowMemories] = useState(false);
   // Every window chooses a code or chat workspace before connecting. Mode stays
   // separate from picker visibility so restore and reopened pickers are explicit.
   const [needsProject, setNeedsProject] = useState(true);
@@ -1232,27 +1210,6 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   const [confirmNewSession, setConfirmNewSession] = useState(false);
   const [showLocalUpdateConfirm, setShowLocalUpdateConfirm] = useState(false);
   const [summarizeDecisions, setSummarizeDecisions] = useState(false);
-  // Hide/show the nav button row (the bar + centered title always stay).
-  // Persisted across reloads.
-  const [navHidden, setNavHidden] = useState(() => {
-    try {
-      return localStorage.getItem("gg-nav-hidden") === "1";
-    } catch {
-      return false;
-    }
-  });
-  const setNavHiddenPersisted = useCallback((hidden: boolean) => {
-    try {
-      localStorage.setItem("gg-nav-hidden", hidden ? "1" : "0");
-    } catch {
-      /* ignore */
-    }
-    setNavHidden(hidden);
-  }, []);
-  const toggleNav = useCallback(
-    () => setNavHiddenPersisted(!navHidden),
-    [navHidden, setNavHiddenPersisted],
-  );
   // Hide/show the live tool panel (the rolling feed above the activity bar).
   // Mirrors navHidden: persisted across reloads, and auto-enabled when windows
   // are tiled (tight space) so freshly opened windows boot with it collapsed.
@@ -1471,10 +1428,20 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   // reveal fully-formed in one pass instead of popping in piecemeal (cwd, git,
   // thinking, model each arriving separately would reflow the bar mid-load).
   const [hydrated, setHydrated] = useState(false);
+  // Roots added or removed mid-session bring their own slash commands. This
+  // pane's refresh is pane-scoped and generation-guarded (refreshCommands).
+  const rootsKey = (state?.additionalRoots ?? []).join("\n");
+  const rootsSeenRef = useRef(rootsKey);
+  useEffect(() => {
+    if (!hydrated || rootsSeenRef.current === rootsKey) return;
+    rootsSeenRef.current = rootsKey;
+    void refreshCommands();
+  }, [hydrated, rootsKey, refreshCommands]);
   // Rows at or after this id arrived live (after hydration) and may play an entrance.
   const [liveFromId, setLiveFromId] = useState(Number.POSITIVE_INFINITY);
   const entrances = useMemo(() => createEntranceLifetime(liveFromId), [liveFromId]);
-  const chatView = useMemo(() => ({ visible: !showChecklist }), [showChecklist]);
+  // The chat never leaves the screen for the checklist any more (deck panel).
+  const chatView = useMemo(() => ({ visible: true }), []);
   // Children consume before playback. This parent effect also settles messages
   // received while Activity is hidden, when their own effects cannot run.
   useLayoutEffect(() => {
@@ -1568,6 +1535,39 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   const maybeScrollToBottom = useCallback(() => {
     if (stickToBottomRef.current) scrollToBottom();
   }, [scrollToBottom]);
+
+  // The dock (everything below the conversation) floats over the transcript's
+  // bottom edge; its height goes to the frame as --dock-h so a pinned chat keeps
+  // the newest message clear of it. A callback ref: the dock unmounts whenever a
+  // picker takes over the pane and must be observed afresh when it returns.
+  const transcriptFrameRef = useRef<HTMLDivElement>(null);
+  const dockElRef = useRef<HTMLDivElement | null>(null);
+  const dockRoRef = useRef<ResizeObserver | null>(null);
+  const dockRef = useCallback(
+    (dock: HTMLDivElement | null) => {
+      dockRoRef.current?.disconnect();
+      dockRoRef.current = null;
+      dockElRef.current = dock;
+      if (!dock) return;
+      const apply = (): void => {
+        const frame = transcriptFrameRef.current;
+        if (!frame) return;
+        const height = nextDockHeight(
+          dock.getBoundingClientRect().height,
+          frame.style.getPropertyValue("--dock-h"),
+        );
+        if (height === null) return;
+        frame.style.setProperty("--dock-h", height);
+        maybeScrollToBottom();
+      };
+      apply();
+      if (typeof ResizeObserver === "undefined") return;
+      const observer = new ResizeObserver(apply);
+      observer.observe(dock);
+      dockRoRef.current = observer;
+    },
+    [maybeScrollToBottom],
+  );
 
   // Track the user's scroll intent by direction, not distance: while a reply
   // streams, every commit re-pins, so any "near the bottom" allowance snapped a
@@ -2874,6 +2874,8 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     let unlisten: SafeTauriUnlisten | undefined;
     void onModelsChanged(() => {
       setModelCatalogRefreshNonce((nonce) => nonce + 1);
+      // A refreshed catalog invalidates an open picker, even when it compares equal.
+      setDeckPanel((panel) => (panel === "model" ? null : panel));
       void (async () => {
         try {
           await waitForReady();
@@ -2907,10 +2909,10 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     if (!needsProject) void hydrate();
   }, [needsProject, hydrate, hydrateNonce]);
 
-  // Open the Tasks modal, refreshing the list from the sidecar first so it
+  // Open Tasks in the deck, refreshing the list from the sidecar first so it
   // reflects any tasks the agent just added.
   const openTasks = useCallback(() => {
-    setShowTasks(true);
+    setDeckPanel("todo");
     setTasksLoad("loading");
     void listTasks()
       .then(setProjectTasks)
@@ -2949,12 +2951,10 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     [getChecklist],
   );
   const openChecklist = useCallback(() => {
-    withViewTransition(() => {
-      setShowChecklist(true);
-      setChecklistLoad({ kind: "loading" });
-      void refreshChecklist();
-    });
-  }, [refreshChecklist]);
+    setShowChecklist(true);
+    setChecklistLoad({ kind: "loading" });
+    void refreshChecklist();
+  }, [refreshChecklist, setShowChecklist]);
   useEffect(() => {
     if (!showChecklist && checklistWasOpen.current)
       inputRef.current?.focus({ preventScroll: true });
@@ -2992,13 +2992,13 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     (id: string): Promise<void> =>
       runTask(id)
         .then(() => {
-          setShowTasks(false);
+          closeDeckPanel("todo");
         })
         .catch((error: unknown) => {
           toast(taskErrorMessage(error), "error");
           throw error;
         }),
-    [runTask],
+    [runTask, closeDeckPanel],
   );
 
   // Run every pending task sequentially (a fresh session each), in order.
@@ -3006,13 +3006,13 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     (): Promise<void> =>
       runAllTasks()
         .then(() => {
-          setShowTasks(false);
+          closeDeckPanel("todo");
         })
         .catch((error: unknown) => {
           toast(taskErrorMessage(error), "error");
           throw error;
         }),
-    [runAllTasks],
+    [runAllTasks, closeDeckPanel],
   );
 
   const handleDeleteTask = useCallback(
@@ -3029,6 +3029,19 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   // Pin Ken to a model (or null → clear the pin, follow GG Coder). The
   // sidecar's ken_model_change broadcast updates state; the .then is just a
   // faster local echo of the same payload.
+  // A Goal pane's second model: the one GG Goals' workers ("critters") run on.
+  function onSelectCritterModel(modelId: string | null): void {
+    const current = state?.goal?.critterModel ?? null;
+    if (modelId === current) return;
+    void setCritterModel(modelId, paneId)
+      .then((res) => {
+        setState((s) =>
+          s?.goal ? { ...s, goal: { ...s.goal, critterModel: res.critterModel } } : s,
+        );
+      })
+      .catch((e: unknown) => toast(e instanceof Error ? e.message : String(e), "error"));
+  }
+
   function onSelectKenModel(modelId: string | null): void {
     if (state && modelId !== null && state.kenModelOverride && modelId === state.kenModel) return;
     if (state && modelId === null && !state.kenModelOverride) return;
@@ -3215,9 +3228,6 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   // Never open while `@Ken` is active — that token addresses Ken, not a file.
   const mentionOpen = mention !== null && fileMatches.length > 0 && !kenActive;
   const clampedFileIndex = fileMatches.length > 0 ? fileIndex % fileMatches.length : 0;
-  // Footer background-tasks indicator only shows while something is actually
-  // running (exited tasks shouldn't keep the bar item around).
-  const runningTaskCount = tasks.filter(isBackgroundTaskRunning).length;
 
   // True when `text` is a known workflow command invocation (first token).
   function isWorkflowCommand(text: string): boolean {
@@ -3497,7 +3507,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   // run it leaves the composer draft alone and returns to the chat.
   function reviewProjectHealth(prompt: string, label: string): boolean {
     if (!submitText(prompt, label, { keepInput: true })) return false;
-    if (showChecklist) withViewTransition(() => setShowChecklist(false));
+    setDeckPanel(null);
     return true;
   }
 
@@ -3585,7 +3595,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
         onError: failed,
       })
     ) {
-      withViewTransition(() => setShowChecklist(false));
+      setShowChecklist(false);
     } else {
       failed();
     }
@@ -3651,7 +3661,6 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
 
   // ── Goal world ── (ported from upstream App.tsx; goal calls are pane-scoped)
   const [goalChatFor, setGoalChatFor] = useState<string | null>(null);
-  const [showGoalSettings, setShowGoalSettings] = useState(false);
   const setGoalPaused = useCallback(
     (paused: boolean) => {
       const act = paused
@@ -3694,6 +3703,9 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     }
     const saved = chatScrollOnHideRef.current;
     chatScrollOnHideRef.current = null;
+    // Shown again, not opened: every entrance inside lands at its end at once
+    // (see finish-entrances.ts), so the deck and its notices don't replay.
+    if (saved) finishEntrances([transcriptFrameRef.current, dockElRef.current]);
     const el = scrollRef.current;
     if (!saved || !el) return;
     stickToBottomRef.current = saved.pinned;
@@ -5178,7 +5190,6 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
             }}
             refreshSignal={homeRefreshSignal}
             waitForAgentReady={catalogClient.waitForReady}
-            loadProgress={catalogClient.getProgress}
           />
         ) : entryView === "settings" ? (
           <SettingsScreen
@@ -5367,6 +5378,35 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     </button>
   ) : null;
 
+  const backLabel =
+    workspaceMode === "chat"
+      ? "Back to chats"
+      : workspaceMode === "motion"
+        ? "Back to motion sessions"
+        : "Back to this project's sessions";
+  const goBack = (): void => {
+    const back = (): void => {
+      setDeckPanel(null);
+      setShowPicker(true);
+    };
+    // A Goal's farm sits under a frosted header WebKit leaves out of its
+    // snapshots; leave it without a crossfade, as the Fork always has.
+    if (state?.goal) back();
+    else showScreen(back);
+  };
+  const closeDeckThen =
+    (run: () => void): (() => void) =>
+    () => {
+      setDeckPanel(null);
+      run();
+    };
+  // Context-window usage for the deck's model key: 0 (hidden) until there is
+  // both a window size and a real token reading from a completed turn.
+  const contextPct =
+    state?.contextWindow && contextTokens > 0
+      ? Math.min(100, Math.round((contextTokens / state.contextWindow) * 100))
+      : 0;
+
   const content = (
     <div
       className={`app agent-pane${props.focused !== false ? " pane-focused" : ""}${isFileDragOver ? " app-file-dragover" : ""}${windowFocused && props.windowFocused !== false ? " window-focused" : ""}${workspaceMode === "code" && showChecklist ? " checklist-open" : ""}${goalWorldOpen && !showChecklist ? " goal-world-open" : ""}`}
@@ -5389,261 +5429,108 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
         gitDirtyFileCount={state?.gitDirtyFileCount}
         gitHubIssues={state?.gitHubIssues}
         gitHubPRs={state?.gitHubPRs}
-        gitHubRepoUrl={state?.gitHubRepoUrl}
-        gitHubCI={state?.gitHubCI}
         additionalRoots={state?.additionalRoots}
-        navHidden={navHidden}
-        projectHealth={projectHealth}
-        onReviewHealth={reviewProjectHealth}
-        onToggleNav={() => withViewTransition(toggleNav)}
+        subtitle={
+          workspaceMode === "chat"
+            ? state?.chatAgent === "therapist"
+              ? "Therapist"
+              : state?.chatAgent === "research"
+                ? "Research"
+                : "Brainstorm"
+            : workspaceMode === "motion"
+              ? "Motion Agent"
+              : null
+        }
         paneChromeSlotRef={props.paneChromeSlotRef}
-        leading={
-          <BackButton
-            label={
-              showChecklist
-                ? "Back to chat"
-                : workspaceMode === "chat"
-                  ? "Back to chats"
-                  : workspaceMode === "motion"
-                    ? "Back to motion sessions"
-                    : "Back to this project's sessions"
-            }
-            onClick={() =>
-              showChecklist
-                ? withViewTransition(() => setShowChecklist(false))
-                : setShowPicker(true)
-            }
-          />
-        }
-        stripExtras={
+        leading={<BackButton label={backLabel} onClick={goBack} />}
+        trailing={
           <>
-            <TitleUsageMeter currentProvider={state?.provider ?? ""} />
-            {windowTotal > 1 && windowIndex !== null && (
-              <span
-                className={`window-index${isThisFocused ? "" : " dim"}`}
-                data-tauri-drag-region
-                title={`Window ${windowIndex} of ${windowTotal} · ⌘\` to cycle`}
-              >
-                {windowIndex}/{windowTotal}
-              </span>
-            )}
-          </>
-        }
-      >
-        <div className="rank-badge-wrap">
-          <RankBadge
-            snapshot={progress}
-            celebrateNonce={rankCelebrateNonce}
-            onClick={() => setShowScorecard(true)}
-          />
-          <div className="rank-xp-chip-layer" aria-hidden="true">
-            {xpChips.map((chip) => (
-              <span className="rank-xp-chip" key={chip.id}>
-                {chip.label}
-              </span>
-            ))}
-          </div>
-        </div>
-        {workspaceMode !== "code" ? (
-          <span className="picker-head-actions">
             {roadmapDraftTrigger}
-            <MetalButton
-              windowFocused={
-                windowFocused && props.windowFocused !== false && props.focused !== false
+            {rankCelebrateNonce && (
+              <div className="rank-badge-wrap">
+                <RankBadge
+                  snapshot={progress}
+                  celebrateNonce={rankCelebrateNonce}
+                  onClick={() => setDeckPanel("scorecard")}
+                />
+              </div>
+            )}
+            <TitleBarActions
+              workspaceMode={workspaceMode}
+              isGoal={Boolean(state?.goal)}
+              goalView={goalView}
+              onGoalViewChange={(view) => setGoalChatFor(view === "chat" ? activeGoalId : null)}
+              goalNeedsAnswer={goalWaitingOnUser}
+              goalTally={goalTally}
+              goalState={
+                state?.goal?.paused
+                  ? "paused"
+                  : running || (goalTally?.working ?? 0) > 0
+                    ? "running"
+                    : "stopped"
               }
-              className="btn btn-primary btn-sm"
-              disabled={running || autopilotReviewing || newSessionBusy}
-              title={workspaceMode === "motion" ? "Start a new video session" : "Start a new chat"}
-              onClick={() => setConfirmNewSession(true)}
-            >
-              {"+ New"}
-            </MetalButton>
-            {workspaceMode === "chat" && (
-              <button
-                className="btn btn-sm btn-ghost btn-quiet"
-                title="View and curate chat memories and Jiwa"
-                onClick={() => setShowMemories(true)}
-              >
-                Brain
-              </button>
-            )}
-            <RadioButton />
-            <WindowLayoutButton />
-          </span>
-        ) : (
-          <>
-            {state?.goal && (
-              <span className="picker-head-actions goal-head-actions">
-                {goalView !== null && (
-                  <button
-                    type="button"
-                    className="btn btn-sm btn-ghost"
-                    aria-pressed={goalView === "workers"}
-                    title={goalView === "workers" ? "Show the chat" : "Show the workers"}
-                    onClick={() => setGoalChatFor(goalView === "workers" ? activeGoalId : null)}
-                  >
-                    {goalView === "workers"
-                      ? goalWaitingOnUser
-                        ? "Chat •"
-                        : "Chat"
-                      : goalTally && goalTally.working > 0
-                        ? `Workers (${goalTally.working})`
-                        : "Workers"}
-                  </button>
-                )}
-                {state.goal.phase === "active" && (
-                  <button
-                    type="button"
-                    className="btn btn-sm btn-ghost"
-                    onClick={() => setGoalPaused(!state.goal?.paused)}
-                  >
-                    {state.goal.paused ? "Resume" : "Pause"}
-                  </button>
-                )}
-                <button
-                  type="button"
-                  className="btn btn-sm btn-ghost btn-quiet"
-                  title="Goal settings"
-                  onClick={() => setShowGoalSettings(true)}
-                >
-                  Settings
-                </button>
-              </span>
-            )}
-            <span className="picker-head-actions">
-              <AutopilotToggle
-                checked={state?.autopilot ?? false}
-                disabled={
-                  running ||
-                  autopilotReviewing ||
-                  newSessionBusy ||
-                  !state ||
-                  !!autopilotPending?.()
-                }
-                onChange={(next) => void handleAutopilotChange(next)}
-              />
-              <MetalButton
-                windowFocused={
-                  windowFocused && props.windowFocused !== false && props.focused !== false
-                }
-                className="btn btn-primary btn-sm"
-                disabled={running || autopilotReviewing || newSessionBusy}
-                title="Start a new session for this project"
-                onClick={() => setConfirmNewSession(true)}
-              >
-                {"+ New"}
-              </MetalButton>
-              <ProjectNotes
-                ref={projectNotesActionsRef}
-                cwd={state?.cwd ?? null}
-                client={client}
-                onStartPhase={startRoadmapPhase}
-                onStartNextPhase={async (checkpointId, nextPhaseId) => {
-                  if (blockUnconfirmedSession()) {
-                    return {
-                      status: "failed",
-                      code: "session-busy",
-                      operationId: null,
-                      message: AMBIGUOUS_NEW_SESSION_MESSAGE,
-                    };
-                  }
-                  return client.startNextPhase(checkpointId, nextPhaseId);
-                }}
-                commands={commands}
-                onRunCommand={(invocation) => submitText(invocation)}
-                onCancelPhase={(phaseId) => client.cancelPhaseRun(phaseId)}
-                onResumePhase={resumeRoadmapPhase}
-                phaseStartUnavailableReason={
-                  state?.mode === "code" ? null : "Roadmap phases can only start in coding mode."
-                }
-                phaseActionDisabled={
-                  running || autopilotReviewing || newSessionBusy || planReview !== null
-                }
-                paneFocused={props.focused !== false}
-                windowFocused={windowFocused && props.windowFocused !== false}
-              />
-              {roadmapDraftTrigger}
-              <button
-                className="btn btn-sm btn-ghost btn-quiet"
-                title="View and run this project's tasks"
-                onClick={openTasks}
-              >
-                {projectTasks.some((t) => t.status !== "done")
-                  ? `Tasks (${projectTasks.filter((t) => t.status !== "done").length})`
-                  : "Tasks"}
-              </button>
-              <button
-                className="btn btn-sm btn-ghost"
-                title="Check this project's health: tests, CI, security, design and more"
-                onClick={openChecklist}
-                aria-pressed={showChecklist}
-              >
-                Checklist
-              </button>
-              <RadioButton />
-              <WindowLayoutButton
-                onArrange={() => {
-                  setNavHiddenPersisted(true);
-                  setToolsHiddenPersisted(true);
-                }}
-              />
-              {needsGitInit ? (
-                <button
-                  className="btn btn-sm btn-ghost"
-                  disabled={running}
-                  title="Initialize git + create a GitHub repository"
-                  onClick={() => setShowInitGit(true)}
-                >
-                  {"Initialize Git"}
-                </button>
-              ) : (
-                // Secondary in both states: + New is the header's one primary
-                // (style pack §5 Action tiers); readiness lives in the title.
-                commitCommand && (
-                  <button
-                    type="button"
-                    className="btn btn-sm btn-ghost"
-                    disabled={running || planReview !== null}
-                    title={
-                      planReview !== null
-                        ? "Approve or dismiss the pending plan first"
-                        : hasCommit
-                          ? "Run /commit"
-                          : "Generate a /commit command"
-                    }
-                    onClick={() =>
-                      submitText(
-                        `/${commitCommand}`,
-                        hasCommit ? "Committing\u2026" : "Setting up commits\u2026",
-                      )
-                    }
-                  >
-                    {`/${commitCommand}`}
-                  </button>
+              onGoalPauseChange={state?.goal?.phase === "active" ? setGoalPaused : undefined}
+              xpChips={xpChips}
+              running={running || planReview !== null}
+              dirtyCount={state?.gitDirtyFileCount ?? 0}
+              needsGitInit={needsGitInit}
+              onInitGit={() => setShowInitGit(true)}
+              commitCommand={commitCommand}
+              hasCommit={hasCommit}
+              onCommit={() =>
+                submitText(
+                  `/${commitCommand}`,
+                  hasCommit ? "Committing\u2026" : "Setting up commits\u2026",
                 )
-              )}
-            </span>
+              }
+              onNewSession={() => setConfirmNewSession(true)}
+              newSessionDisabled={running || autopilotReviewing || newSessionBusy}
+              notes={
+                workspaceMode === "code" && !state?.goal ? (
+                  <ProjectNotes
+                    ref={projectNotesActionsRef}
+                    cwd={state?.cwd ?? null}
+                    client={client}
+                    onStartPhase={startRoadmapPhase}
+                    onStartNextPhase={async (checkpointId, nextPhaseId) => {
+                      if (blockUnconfirmedSession()) {
+                        return {
+                          status: "failed",
+                          code: "session-busy",
+                          operationId: null,
+                          message: AMBIGUOUS_NEW_SESSION_MESSAGE,
+                        };
+                      }
+                      return client.startNextPhase(checkpointId, nextPhaseId);
+                    }}
+                    commands={commands}
+                    onRunCommand={(invocation) => submitText(invocation)}
+                    onCancelPhase={(phaseId) => client.cancelPhaseRun(phaseId)}
+                    onResumePhase={resumeRoadmapPhase}
+                    phaseStartUnavailableReason={
+                      state?.mode === "code"
+                        ? null
+                        : "Roadmap phases can only start in coding mode."
+                    }
+                    phaseActionDisabled={
+                      running || autopilotReviewing || newSessionBusy || planReview !== null
+                    }
+                    paneFocused={props.focused !== false}
+                    windowFocused={windowFocused && props.windowFocused !== false}
+                  />
+                ) : undefined
+              }
+              projectTasks={projectTasks}
+              onOpenTasks={workspaceMode === "code" && !state?.goal ? openTasks : undefined}
+              tasksOpen={showTasks}
+            />
           </>
-        )}
-      </WorkspaceHeader>
-
-      {workspaceMode === "code" && showChecklist && (
-        <ChecklistScreen
-          load={checklistLoad}
-          running={running || checklistRunId !== null}
-          activeId={checklistRunId}
-          notice={checklistNotice}
-          onRun={handleRunChecklistItem}
-          onRetry={() => {
-            setChecklistLoad({ kind: "loading" });
-            void refreshChecklist();
-          }}
-        />
-      )}
+        }
+      />
 
       {/* Kept alive while hidden (Chat view), so switching back doesn't rebuild the farm. */}
       {activeGoalId && (
-        <Activity mode={goalWorldOpen && !showChecklist ? "visible" : "hidden"}>
+        <Activity mode={goalWorldOpen ? "visible" : "hidden"}>
           <Suspense fallback={null}>
             <GoalWorld
               key={activeGoalId}
@@ -5666,7 +5553,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
 
       {/* React owns chat visibility rather than a stylesheet override. Activity
           keeps the draft and transcript state, and suspends hidden child effects. */}
-      <Activity mode={showChecklist || goalWorldOpen ? "hidden" : "visible"}>
+      <Activity mode={goalWorldOpen ? "hidden" : "visible"}>
         {/* Non-scrolling frame the same size as the chat viewport. The banner
           lives HERE, not inside `.transcript` — `.transcript` scrolls, and an
           absolutely positioned child of a scrolling container is pinned to the
@@ -5675,7 +5562,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
           screen. Anchoring to this non-scrolling sibling keeps it pinned to
           what the user is actually looking at, at any scroll position. */}
         <div className={`conversation-stack${reviewItems.length ? " has-reviews" : ""}`}>
-          <div className="transcript-frame">
+          <div ref={transcriptFrameRef} className="transcript-frame">
             {workspaceMode === "code" && kenPowerBanner && (
               <KenPowerBanner mode={kenPowerBanner} onDone={() => setKenPowerBanner(null)} />
             )}
@@ -5723,7 +5610,6 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
                           consumeEntrance: entrances.consume,
                           kenTalking: it.id === talkingKenId,
                           errorActive: it.id === currentErrorId,
-                          errorCritterId: errorCritters.get(it.id),
                           errorModelPicker:
                             it.kind === "error" && it.id === currentErrorId ? (
                               <ModelSelect
@@ -5786,13 +5672,6 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
                 </>
               )}
             </div>
-            {items.length > 0 && (
-              <ExportChatButton
-                visible={exporting}
-                busy={exporting}
-                onExport={() => void exportTranscript()}
-              />
-            )}
           </div>
 
           <ReviewDock
@@ -5804,608 +5683,677 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
           />
         </div>
 
-        {/* Sub-agents walk on top of the pinned region as critters; the lane
-          opens (pushing the chat up) only while one is out. */}
-        <CritterFloor groups={critterGroups} />
-        <div ref={liveRegionRef} className="liveregion">
-          {/* Starting points sit just above the activity bar, only for an empty,
-            loaded, ready conversation. They fill the composer (never send) and
-            hide as soon as the user types or attaches something. */}
-          {showStarters &&
-            (workspaceMode === "motion" ? (
-              <MotionStarters onPick={fillComposer} />
-            ) : (
-              <ComposerStarters
-                starters={workspaceMode === "chat" ? CHAT_STARTERS : CODE_STARTERS}
-                label="Ways to start"
-                onPick={fillComposer}
-              />
-            ))}
-          {workspaceMode === "code" && kenRunning && (
-            <KenActivityBar
-              runStartTs={kenRunStartTs}
-              tokens={kenTokens}
-              isThinking={kenIsThinking}
-              thinkingStartTs={kenThinkingStartTs}
-              thinkingAccumMs={kenThinkingAccumMs}
-              onCancel={() => cancelCurrentKen()}
-            />
-          )}
-          {!toolsHidden && <LiveToolPanel entries={liveToolFeed} />}
-          {/* Automatic review stays in this pane's task row; manual @Ken keeps its own bar. */}
-          {(workspaceMode !== "code" || running || autopilotReviewing || !kenRunning) && (
-            <ActivityBar
-              runStartedAt={runStartedAt}
-              running={running}
-              activity={activity}
-              cancelling={cancelling}
-              tokens={tokens}
-              doneStatus={doneStatus}
-              isThinking={isThinking}
-              thinkingStartTs={thinkingStartTs}
-              thinkingAccumMs={thinkingAccumMs}
-              planTotal={workspaceMode !== "code" ? 0 : planTotal}
-              planDone={workspaceMode !== "code" ? 0 : Math.min(planDone.size, planTotal)}
-              onCancel={requestCancel}
-              toolsHidden={toolsHidden}
-              hasToolFeed={liveToolFeed.length > 0}
-              onToggleTools={toggleTools}
-            />
-          )}
-        </div>
-
-        <div
-          className={`inputwrap${isFileDragOver ? " dragover" : ""}${
-            scheduleInvalid ? " schedule-invalid" : ""
-          }`}
-        >
-          <WorkingBeam active={running || kenRunning || autopilotReviewing} />
-          {scheduleDraft ? (
-            <ScheduleHint input={input} caret={caret} onPickInterval={fillScheduleInterval} />
-          ) : (
-            slashOpen && (
-              <SlashMenu
-                commands={slashMatches}
-                activeIndex={clampedSlashIndex}
-                onSelect={pickSlashCommand}
-                onHover={setSlashIndex}
-              />
-            )
-          )}
-          {paletteOpen && (
-            <CommandPalette
-              commands={collectionCommands}
-              problems={paletteProblems}
-              onClose={() => setPaletteOpen(false)}
-              onInsert={(cmd) => {
-                setPaletteOpen(false);
-                pickSlashCommand(cmd);
-              }}
-              onSend={(cmd) => {
-                setPaletteOpen(false);
-                submitText(`/${cmd.name}`);
-              }}
-            />
-          )}
-          {mentionOpen && !noReferenceSlashCommand && (
-            <FileMentionMenu
-              files={fileMatches}
-              activeIndex={clampedFileIndex}
-              isRecent={mention?.query === ""}
-              onSelect={pickMentionFile}
-              onHover={setFileIndex}
-            />
-          )}
-          <AttachmentBar
-            attachments={attachments}
-            onRemove={removeAttachment}
-            onOpenImage={(src) => void openImageDataUrl(src)}
-          />
-          <ReferencedFiles paths={mentionedPaths} onRemove={removeMentionChip} />
-          <QueuedBar messages={visibleQueuedMessages} onCancel={handleCancelQueued} />
-          <div className="inputrow">
-            <input
-              ref={fileInputRef}
-              type="file"
-              multiple
-              accept="image/*,video/*"
-              disabled={planReview !== null || noAttachmentSlashCommand !== null}
-              style={{ display: "none" }}
-              onChange={(event) => {
-                if (event.target.files) void addFiles(event.target.files);
-                event.target.value = "";
-              }}
-            />
-            <button
-              className="icon-circle"
-              aria-label="Attach files"
-              title={
-                noAttachmentSlashCommand
-                  ? `/${noAttachmentSlashCommand.name} does not accept attachments`
-                  : planReview !== null
-                    ? "Resolve the pending plan first"
-                    : "Attach files"
-              }
-              disabled={planReview !== null || noAttachmentSlashCommand !== null}
-              onClick={() => fileInputRef.current?.click()}
-            >
-              <PaperclipIcon size={15} />
-            </button>
-            <div className="input-stack">
-              {enhanceAnim && (
-                <EnhanceDissolve
-                  oldText={enhanceAnim.oldText}
-                  newText={enhanceAnim.newText}
-                  onDone={onEnhanceAnimDone}
-                />
-              )}
-              {/* `@Ken` active: a textarea can't color just one token, so we mirror
-                the input in an aligned overlay where the leading `@Ken` shimmers
-                in Ken's color. The textarea text below is made transparent (caret
-                stays visible) so only this styled copy shows. Metrics match
-                `.input` 1:1 so wrapping/caret line up. */}
-              {kenActive && kenInputParts && (
-                <div className="ken-input-highlight" aria-hidden="true">
-                  {kenInputParts.lead}
-                  <ShimmerText base={theme.ken}>{kenInputParts.token}</ShimmerText>
-                  {kenInputParts.rest}
-                </div>
-              )}
-              <textarea
-                ref={attachInput}
-                className={`input${enhanceAnim ? " input-anim" : ""}${kenActive ? " input-ken" : ""}`}
-                rows={1}
-                // No-input commands stay keyboard-submittable while preventing edits.
-                readOnly={enhanceAnim !== null || noInputSlashCommand !== null}
-                disabled={planReview !== null}
-                title={
-                  noInputSlashCommand
-                    ? `Send /${noInputSlashCommand.name} as-is; it accepts no added input`
-                    : undefined
-                }
-                value={input}
-                placeholder={
-                  planReview !== null
-                    ? "Approve or dismiss the pending plan to continue…"
-                    : workspaceMode === "chat"
-                      ? "Ask anything…"
-                      : workspaceMode === "motion"
-                        ? "Describe a video, paste a link, or drop a PDF…"
-                        : displayPlaceholder
-                }
-                onPaste={(event) => {
-                  if (noInputSlashCommandRef.current) {
-                    event.preventDefault();
-                    return;
-                  }
-                  const files = Array.from(event.clipboardData.files);
-                  if (files.length === 0) return;
-                  event.preventDefault();
-                  if (!noAttachmentSlashCommandRef.current) void addFiles(files);
-                }}
-                onChange={(event) => {
-                  if (noInputSlashCommandRef.current) return;
-                  const now = Date.now();
-                  if (!running && now - lastKeystrokeAtRef.current > 4 * 60_000) {
-                    void client.prewarmCache();
-                  }
-                  lastKeystrokeAtRef.current = now;
-                  setInput(event.target.value);
-                  setSlashIndex(0);
-                  setCaret(event.target.selectionStart ?? event.target.value.length);
-                  // Typing exits history-recall mode so ↑/↓ start fresh next time.
-                  if (historyIndex !== null) setHistoryIndex(null);
-                  // Drop the enhancement the instant the text diverges from it, so
-                  // the highlighted preview/bubble never misalign with edited text.
-                  if (enhancement && event.target.value !== enhancement.plain) setEnhancement(null);
-                  updateMention(
-                    event.target.value,
-                    event.target.selectionStart ?? event.target.value.length,
-                  );
-                }}
-                onClick={(e) => {
-                  const el = e.currentTarget;
-                  setCaret(el.selectionStart ?? el.value.length);
-                  updateMention(el.value, el.selectionStart ?? el.value.length);
-                }}
-                onKeyUp={(e) => {
-                  const el = e.currentTarget;
-                  setCaret(el.selectionStart ?? el.value.length);
-                  if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
-                    updateMention(el.value, el.selectionStart ?? el.value.length);
-                  }
-                }}
-                onKeyDown={(e) => {
-                  // While the dissolve→decode animation plays the input is locked;
-                  // swallow keys so Enter can't submit the un-enhanced draft.
-                  if (enhanceAnim) {
-                    e.preventDefault();
-                    return;
-                  }
-                  if (mentionOpen && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
-                    e.preventDefault();
-                    const delta = e.key === "ArrowDown" ? 1 : -1;
-                    setFileIndex((i) => (i + delta + fileMatches.length) % fileMatches.length);
-                  } else if (
-                    mentionOpen &&
-                    (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey))
-                  ) {
-                    e.preventDefault();
-                    const file = fileMatches[clampedFileIndex];
-                    if (file) pickMentionFile(file);
-                  } else if (mentionOpen && e.key === "Escape") {
-                    e.preventDefault();
-                    setMention(null);
-                  } else if (slashOpen && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
-                    e.preventDefault();
-                    const delta = e.key === "ArrowDown" ? 1 : -1;
-                    setSlashIndex((i) => (i + delta + slashMatches.length) % slashMatches.length);
-                  } else if (slashOpen && (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey))) {
-                    e.preventDefault();
-                    const cmd = slashMatches[clampedSlashIndex];
-                    if (cmd) pickSlashCommand(cmd);
-                  } else if (e.key === "ArrowUp" || e.key === "ArrowDown") {
-                    // Menus are closed here (handled above), so arrows recall sent
-                    // prompts shell-style — unless the caret is mid-text in a
-                    // multi-line draft, where navigateHistory declines and the
-                    // cursor moves normally.
-                    if (navigateHistory(e.key === "ArrowUp" ? -1 : 1, e.currentTarget)) {
-                      e.preventDefault();
-                    }
-                  } else if (e.key === "Enter" && !e.shiftKey) {
-                    // Enter sends; Shift+Enter inserts a newline (textarea default).
-                    e.preventDefault();
-                    submit();
-                  } else if (e.key === "Escape") {
-                    // Cancel the build if it's running; otherwise cancel Ken so the
-                    // "esc to cancel" on his bar actually works.
-                    if (slashOpen) setInput("");
-                    else if (running && !cancelling) requestCancel();
-                    else if (kenRunning) cancelCurrentKen();
-                  }
-                }}
-                autoFocus
-              />
-            </div>
-            {workspaceMode === "code" && (
-              <button
-                type="button"
-                className="btn btn-ghost btn-sm"
-                aria-expanded={programmaticOpen}
-                disabled={!hydrated || programmatic.generation !== programmaticGeneration}
-                onClick={() => setProgrammaticOpen((value) => !value)}
-              >
-                Opportunities
-              </button>
-            )}
-            {workspaceMode === "code" && (
-              <button
-                type="button"
-                className="ken-next-pill"
-                title={
-                  planReview !== null
-                    ? "Resolve the pending plan first"
-                    : kenRunning
-                      ? "Ken is already running"
-                      : "Ask Ken what to do next"
-                }
-                disabled={kenRunning || planReview !== null}
-                onClick={() => sendToKen("next?", `${MENTOR_HANDLE} next?`, true)}
-              >
-                Ken, next?
-              </button>
-            )}
-            <div className="inputactions-trailing">
-              <WorkingBeam active={running} size="sm" />
-              <ActionMetal
-                active={
-                  !running &&
-                  !cancelling &&
-                  readyRef.current &&
-                  planReview === null &&
-                  (!!input.trim() || attachments.length > 0 || mentionedPaths.length > 0)
-                }
-                windowFocused={
-                  windowFocused && props.windowFocused !== false && props.focused !== false
-                }
-              />
-              <button
-                type="button"
-                className={`icon-circle icon-circle-primary composer-send-icon${running ? " is-stop" : ""}`}
-                aria-label={running ? "Stop response" : "Send message"}
-                title={
-                  running
-                    ? cancelling
-                      ? "Stopping…"
-                      : "Stop response"
-                    : attachmentsLoading
-                      ? "Loading attachments…"
-                      : "Send message"
-                }
-                disabled={
-                  running
-                    ? cancelling
-                    : !readyRef.current ||
-                      planReview !== null ||
-                      attachmentsLoading ||
-                      (!input.trim() && attachments.length === 0 && mentionedPaths.length === 0)
-                }
-                onClick={running ? requestCancel : submit}
-              >
-                {running ? <SquareIcon size={12} weight="fill" /> : <ArrowUpIcon size={16} />}
-              </button>
-            </div>
-          </div>
-          {!enhanceAnim && (
-            // Pill pinned to the center of the input box (.inputwrap) top border,
-            // overlapping it. Decoupled from text flow, so it never overlaps text,
-            // drifts, or shifts the caret/height; centered (not in a corner) to
-            // stay clear of the status row's "esc to cancel". Always mounted (so it
-            // can transition both ways); the `visible` class fades/slides it in
-            // when there's text and out when there isn't.
-            <div className={`enhance-pill-host${enhanceHintVisible ? " visible" : ""}`}>
-              <ActionMetal
-                active={
-                  enhanceHintVisible && !enhancing && !enhanceOverLimit && planReview === null
-                }
-                windowFocused={
-                  windowFocused && props.windowFocused !== false && props.focused !== false
-                }
-                variant="button"
-              />
-              <button
-                className={`enhance-pill${enhancing ? " enhancing" : ""}`}
-                title={
-                  enhanceOverLimit
-                    ? enhanceLimitReason
-                    : "Enhance prompt — clearer wording + correct terms"
-                }
-                aria-describedby={
-                  enhanceOverLimit && enhanceHintVisible ? enhanceLimitReasonId : undefined
-                }
-                disabled={
-                  planReview !== null || enhancing || !enhanceHintVisible || enhanceOverLimit
-                }
-                aria-hidden={!enhanceHintVisible}
-                onClick={() => void runEnhance()}
-              >
-                {enhancing ? "Enhancing…" : "Enhance?"}
-              </button>
-            </div>
-          )}
-        </div>
-
-        {enhanceOverLimit && enhanceHintVisible && (
-          <p id={enhanceLimitReasonId} role="status" style={{ color: theme.textDim }}>
-            {enhanceLimitReason}
-          </p>
-        )}
-
-        <div
-          className={`footer${workspaceMode !== "code" ? " footer-chat" : ""}`}
-          style={{ color: theme.footerText }}
-        >
-          {!readyRef.current ? (
-            <span role="status" style={{ color: theme.textDim }}>
+        {/* The dock: everything below the conversation, floating over its
+          bottom edge (the transcript reserves its height as --dock-h). */}
+        <div ref={dockRef} className="dock">
+          {/* Until history replay applies (readyRef, the submission gate), say
+            so — the removed footer used to carry this connecting status. */}
+          {!readyRef.current && (
+            <span className="dock-status" role="status" style={{ color: theme.textDim }}>
               {status}
             </span>
-          ) : (
-            <>
-              {workspaceMode === "motion" ? (
-                <span className="footer-left footer-reveal" style={{ color: theme.textDim }}>
-                  Motion Agent
-                </span>
-              ) : workspaceMode === "chat" ? (
-                <span className="footer-left footer-reveal" style={{ color: theme.textDim }}>
-                  {state?.chatAgent === "therapist"
-                    ? "Therapist Agent"
-                    : state?.chatAgent === "research"
-                      ? "Research Agent"
-                      : "Brainstorm"}
-                </span>
-              ) : (
-                <span className="footer-left footer-reveal">
-                  {BUILD_IDENTITY && (
-                    <span className="footer-custom-build">{`◆ ${BUILD_IDENTITY}`}</span>
-                  )}
-                  {runningTaskCount > 0 && (
-                    <>
-                      {BUILD_IDENTITY && <FooterSep />}
-                      <BackgroundTasksButton tasks={tasks} />
-                    </>
-                  )}
-                  {schedules.length > 0 && (
-                    <>
-                      {(BUILD_IDENTITY || runningTaskCount > 0) && <FooterSep />}
-                      <RunningSchedulesButton schedules={schedules} onStop={stopSchedule} />
-                    </>
-                  )}
-                  {state?.planMode && (
-                    <>
-                      {(BUILD_IDENTITY || runningTaskCount > 0 || schedules.length > 0) && (
-                        <FooterSep />
-                      )}
-                      <span className="footer-plan">
-                        <ShimmerText base={theme.secondary} bright="#ddd6fe">
-                          {"\u25C6 plan mode"}
-                        </ShimmerText>
-                      </span>
-                    </>
-                  )}
-                </span>
-              )}
-              <span className="footer-right footer-reveal">
-                {showContextProfileSelector && (
-                  <>
-                    <span className="astra-control-group" aria-busy={astraControlsBusy}>
-                      <label
-                        className="model-picker"
-                        style={{ color: theme.secondary }}
-                        title={
-                          contextProfileLockReason ??
-                          "OpenAI Codex context window: stable 272K or experimental 872K"
-                        }
-                      >
-                        <span className="model-select-text">
-                          Context {state.openAICodexContextProfile}
-                        </span>
-                        <select
-                          aria-label="OpenAI Codex context profile"
-                          className="model-select"
-                          value={state.openAICodexContextProfile}
-                          title={contextProfileLockReason}
-                          aria-describedby={
-                            contextProfileLockReason ? contextProfileDescriptionId : undefined
-                          }
-                          disabled={
-                            running ||
-                            autopilotReviewing ||
-                            astraControlsBusy ||
-                            !contextProfileEligibility.canChange
-                          }
-                          onChange={(event) =>
-                            onSelectContextProfile(event.target.value, event.currentTarget)
-                          }
-                        >
-                          <option value="stable">Stable · 272K</option>
-                          <option value="experimental">Experimental · 872K</option>
-                        </select>
-                      </label>
-                      {contextProfileLockReason && (
-                        <span id={contextProfileDescriptionId} hidden>
-                          {contextProfileLockReason}
-                        </span>
-                      )}
-                      <button
-                        aria-label={`Fast ${state.openAICodexFast ? "on" : "off"} · 2.5× credits`}
-                        title={
-                          state.openAICodexFast
-                            ? "Fast mode is on. Uses 2.5× credits. Click to turn off."
-                            : "Fast mode is off. Turn on to use Fast mode at 2.5× credits."
-                        }
-                        aria-checked={state.openAICodexFast}
-                        className={`thinking-toggle astra-fast-toggle${state.openAICodexFast ? " active" : ""}`}
-                        disabled={running || autopilotReviewing || astraControlsBusy}
-                        onClick={onToggleOpenAICodexFast}
-                        role="switch"
-                        type="button"
-                      >
-                        Fast {state.openAICodexFast ? "on" : "off"} · 2.5× credits
-                      </button>
-                    </span>
-                    <FooterSep />
-                  </>
-                )}
-                {state && state.contextWindow > 0 && (
-                  <>
-                    <ContextMeter used={contextTokens} window={state.contextWindow} />
-                    <FooterSep />
-                  </>
-                )}
-                {(state?.supportedThinkingLevels?.length ?? 0) > 0 &&
-                  (() => {
-                    const level = state?.thinkingLevel ?? null;
-                    const label =
-                      state?.provider === "qwen-cloud"
-                        ? getQwenCloudThinkingLabel(
-                            state.model,
-                            level as Parameters<typeof getQwenCloudThinkingLabel>[1],
-                          )
-                        : level
-                          ? `Thinking ${level}`
-                          : "Thinking off";
-                    const maxPower = level === "xhigh" || level === "max";
-                    return (
-                      <>
-                        <button
-                          className="thinking-toggle"
-                          style={{
-                            color: thinkingColor(level),
-                            fontWeight: level === "high" ? 600 : 400,
-                          }}
-                          title="Cycle reasoning level"
-                          onClick={() => void cycleThinking()}
-                        >
-                          {maxPower ? (
-                            <ShimmerText base={MAX_POWER_COLOR} bright={MAX_POWER_SHIMMER}>
-                              {label}
-                            </ShimmerText>
-                          ) : (
-                            label
-                          )}
-                        </button>
-                        <FooterSep />
-                      </>
-                    );
-                  })()}
-                <span className="model-anchor">
-                  <span
-                    className="model-label"
-                    style={{ color: theme.text }}
-                    title={ggModelRole(workspaceMode)}
-                    aria-hidden="true"
-                  >
-                    GG
-                    {workspaceMode === "code" && <span className="model-role">{" · builds"}</span>}
-                  </span>
-                  <span id={ggModelRoleId} className="sr-only">
-                    {ggModelRole(workspaceMode)}
-                  </span>
-                  <ModelSelect
-                    key={`gg-models-${modelCatalogRefreshNonce}`}
-                    describedBy={ggModelRoleId}
-                    models={models}
-                    currentModel={state?.model ?? ""}
-                    onSelect={onSelectModel}
-                    disabled={running}
-                    loadFailed={modelsFailed}
-                    refreshNonce={modelCatalogRefreshNonce}
-                    title={
-                      workspaceMode === "chat"
-                        ? "Switch GG's model"
-                        : `Switch ${workspaceProductName(workspaceMode)}'s model`
-                    }
-                  />
-                </span>
-                {workspaceMode === "code" && (
-                  <>
-                    <FooterSep />
-                    <span className="model-anchor">
-                      <span
-                        className="model-label"
-                        style={{ color: theme.ken }}
-                        title={KEN_MODEL_ROLE}
-                        aria-hidden="true"
-                      >
-                        {MENTOR_DISPLAY_NAME}
-                        <span className="model-role">{" · reviews"}</span>
-                      </span>
-                      <span id={kenModelRoleId} className="sr-only">
-                        {KEN_MODEL_ROLE}
-                      </span>
-                      <ModelSelect
-                        key={`ken-models-${modelCatalogRefreshNonce}`}
-                        describedBy={kenModelRoleId}
-                        models={models}
-                        currentModel={state?.kenModel ?? state?.model ?? ""}
-                        onSelect={(id) => onSelectKenModel(id)}
-                        color={theme.ken}
-                        refreshNonce={modelCatalogRefreshNonce}
-                        loadFailed={modelsFailed}
-                        title={
-                          state?.kenModelOverride
-                            ? `${MENTOR_DISPLAY_NAME} is pinned to a separate model — click to change`
-                            : `${MENTOR_DISPLAY_NAME} follows ${PRODUCT_DISPLAY_NAME}'s model — click to pin one`
-                        }
-                        onSelectFollow={() => onSelectKenModel(null)}
-                        followActive={!state?.kenModelOverride}
-                      />
-                    </span>
-                  </>
-                )}
-              </span>
-            </>
           )}
+          {/* Sub-agents walk on top of the pinned region as critters. */}
+          <CritterFloor groups={critterGroups} />
+          <div ref={liveRegionRef} className="liveregion">
+            {/* Starting points sit just above the activity bar, only for an empty,
+              loaded, ready conversation. They fill the composer (never send) and
+              hide as soon as the user types or attaches something. */}
+            {showStarters &&
+              (workspaceMode === "motion" ? (
+                <MotionStarters onPick={fillComposer} />
+              ) : (
+                <ComposerStarters
+                  starters={workspaceMode === "chat" ? CHAT_STARTERS : CODE_STARTERS}
+                  label="Ways to start"
+                  onPick={fillComposer}
+                />
+              ))}
+            {!toolsHidden && <LiveToolPanel entries={liveToolFeed} />}
+          </div>
+
+          <Deck
+            state={state}
+            hydrated={hydrated}
+            showGit={workspaceMode === "code"}
+            panel={deckPanel}
+            onPanelChange={setDeckPanel}
+            running={running}
+            contextPct={contextPct}
+            models={models}
+            modelsFailed={modelsFailed}
+            onSelectModel={onSelectModel}
+            second={
+              state?.goal
+                ? {
+                    name: "Critters",
+                    followLabel: "GG Goals",
+                    model: state.goal.critterModel ?? state.model,
+                    following: !state.goal.critterModel,
+                    disabled: false,
+                    onSelect: onSelectCritterModel,
+                  }
+                : workspaceMode === "code" && state
+                  ? {
+                      name: MENTOR_DISPLAY_NAME,
+                      followLabel: PRODUCT_DISPLAY_NAME,
+                      model: state.kenModel ?? state.model,
+                      following: !state.kenModelOverride,
+                      disabled: running || kenRunning || autopilotReviewing,
+                      onSelect: onSelectKenModel,
+                      title: state.kenModelOverride
+                        ? `${MENTOR_DISPLAY_NAME} is pinned to a separate model — click to change`
+                        : `${MENTOR_DISPLAY_NAME} follows ${PRODUCT_DISPLAY_NAME}'s model — click to pin one`,
+                      role: KEN_MODEL_ROLE,
+                      primaryTitle: `Switch ${workspaceProductName(workspaceMode)}'s model`,
+                      primaryRole: ggModelRole(workspaceMode),
+                    }
+                  : null
+            }
+            tasks={tasks}
+            schedules={schedules}
+            onStopSchedule={stopSchedule}
+            projectHealth={projectHealth}
+            onReviewHealth={reviewProjectHealth}
+            tools={{
+              todo:
+                workspaceMode === "code" && !state?.goal
+                  ? {
+                      title: "Tasks",
+                      meta: `${projectTasks.filter((t) => t.status !== "done").length} pending`,
+                      body: (
+                        <TasksModal
+                          tasks={projectTasks}
+                          loadState={tasksLoad}
+                          onRetryLoad={openTasks}
+                          running={running || autopilotReviewing || newSessionBusy}
+                          onRun={handleRunTask}
+                          onRunAll={handleRunAllTasks}
+                          onDelete={handleDeleteTask}
+                          onClose={() => closeDeckPanel("todo")}
+                          onDraftTasks={() => {
+                            // Draft only: close the list and hand the user an editable
+                            // request. Unsent text is kept as the work to break down.
+                            closeDeckPanel("todo");
+                            const existing = input.trim();
+                            fillComposer(
+                              existing ? `${TASKS_DRAFT_PROMPT}${existing}` : TASKS_DRAFT_PROMPT,
+                            );
+                          }}
+                        />
+                      ),
+                    }
+                  : undefined,
+              checklist:
+                workspaceMode === "code" && !state?.goal
+                  ? {
+                      title: "Checklist",
+                      meta:
+                        checklistLoad.kind === "ready"
+                          ? `${checklistLoad.snapshot.items.filter((i) => i.status === "passed").length} of ${checklistLoad.snapshot.items.length} passing`
+                          : undefined,
+                      body: (
+                        <ChecklistScreen
+                          load={checklistLoad}
+                          running={running || checklistRunId !== null}
+                          activeId={checklistRunId}
+                          notice={checklistNotice}
+                          onRun={handleRunChecklistItem}
+                          onRetry={() => {
+                            setChecklistLoad({ kind: "loading" });
+                            void refreshChecklist();
+                          }}
+                        />
+                      ),
+                    }
+                  : undefined,
+              health:
+                workspaceMode === "code" && !state?.goal
+                  ? {
+                      title: "Project Health",
+                      body: (
+                        <ProjectHealthPanel
+                          health={projectHealth}
+                          onReview={reviewProjectHealth}
+                          onDone={() => closeDeckPanel("health")}
+                        />
+                      ),
+                    }
+                  : undefined,
+              goal: state?.goal
+                ? {
+                    title: "Goal settings",
+                    body: (
+                      <GoalSettingsModal
+                        context={state.goal.context ?? []}
+                        instructions={state.goal.instructions ?? ""}
+                        busy={running}
+                        onClose={() => closeDeckPanel("goal")}
+                        onSaved={(next) => {
+                          setState((s) => (s?.goal ? { ...s, goal: { ...s.goal, ...next } } : s));
+                          // Newly attached repos bring their own slash commands.
+                          void refreshCommands();
+                        }}
+                      />
+                    ),
+                  }
+                : undefined,
+              scorecard: progress
+                ? { title: "Scorecard", body: <ScorecardPanel snapshot={progress} /> }
+                : undefined,
+              brain:
+                workspaceMode === "chat"
+                  ? {
+                      title: "Brain",
+                      body: <MemoryModal onClose={() => closeDeckPanel("brain")} />,
+                    }
+                  : undefined,
+            }}
+            progress={progress}
+            usageExtras={
+              windowTotal > 1 &&
+              windowIndex !== null && (
+                <span
+                  className={`deck-pm${isThisFocused ? "" : " dim"}`}
+                  title={`Window ${windowIndex} of ${windowTotal} · ⌘\` to cycle`}
+                >
+                  Window {windowIndex} of {windowTotal}
+                </span>
+              )
+            }
+            menu={
+              <DeckMenu
+                workspaceMode={workspaceMode}
+                isGoal={Boolean(state?.goal)}
+                running={running}
+                autopilot={state?.autopilot ?? false}
+                autopilotReviewing={autopilotReviewing}
+                autopilotDisabled={newSessionBusy || !state || !!autopilotPending?.()}
+                onAutopilotChange={(next) => void handleAutopilotChange(next)}
+                onOpenMemories={() => setDeckPanel("brain")}
+                showChecklist={showChecklist}
+                onOpenChecklist={openChecklist}
+                hasHealth={projectHealth !== null}
+                onOpenHealth={() => setDeckPanel("health")}
+                onOpenRadio={() => setDeckPanel("radio")}
+                onOpenGoalSettings={state?.goal ? () => setDeckPanel("goal") : undefined}
+                canExport={items.length > 0}
+                exporting={exporting}
+                onExport={closeDeckThen(() => void exportTranscript())}
+                onArrange={() => setToolsHiddenPersisted(true)}
+                onBack={closeDeckThen(goBack)}
+                backLabel={backLabel}
+                extras={
+                  <>
+                    {BUILD_IDENTITY && (
+                      <span className="key footer-custom-build" title="Local build">
+                        {`\u25C6 ${BUILD_IDENTITY}`}
+                      </span>
+                    )}
+                    <WindowLayoutButton />
+                    {showContextProfileSelector && (
+                      <>
+                        <span className="astra-control-group" aria-busy={astraControlsBusy}>
+                          <label
+                            className="model-picker"
+                            style={{ color: theme.secondary }}
+                            title={
+                              contextProfileLockReason ??
+                              "OpenAI Codex context window: stable 272K or experimental 872K"
+                            }
+                          >
+                            <span className="model-select-text">
+                              Context {state.openAICodexContextProfile}
+                            </span>
+                            <select
+                              aria-label="OpenAI Codex context profile"
+                              className="model-select"
+                              value={state.openAICodexContextProfile}
+                              title={contextProfileLockReason}
+                              aria-describedby={
+                                contextProfileLockReason ? contextProfileDescriptionId : undefined
+                              }
+                              disabled={
+                                running ||
+                                autopilotReviewing ||
+                                astraControlsBusy ||
+                                !contextProfileEligibility.canChange
+                              }
+                              onChange={(event) =>
+                                onSelectContextProfile(event.target.value, event.currentTarget)
+                              }
+                            >
+                              <option value="stable">Stable · 272K</option>
+                              <option value="experimental">Experimental · 872K</option>
+                            </select>
+                          </label>
+                          {contextProfileLockReason && (
+                            <span id={contextProfileDescriptionId} hidden>
+                              {contextProfileLockReason}
+                            </span>
+                          )}
+                          <button
+                            aria-label={`Fast ${state.openAICodexFast ? "on" : "off"} · 2.5× credits`}
+                            title={
+                              state.openAICodexFast
+                                ? "Fast mode is on. Uses 2.5× credits. Click to turn off."
+                                : "Fast mode is off. Turn on to use Fast mode at 2.5× credits."
+                            }
+                            aria-checked={state.openAICodexFast}
+                            className={`thinking-toggle astra-fast-toggle${state.openAICodexFast ? " active" : ""}`}
+                            disabled={running || autopilotReviewing || astraControlsBusy}
+                            onClick={onToggleOpenAICodexFast}
+                            role="switch"
+                            type="button"
+                          >
+                            Fast {state.openAICodexFast ? "on" : "off"} · 2.5× credits
+                          </button>
+                        </span>
+                      </>
+                    )}
+                    {/* Shown for every provider with a known window, as the old footer did. */}
+                    {state && state.contextWindow > 0 && (
+                      <ContextMeter used={contextTokens} window={state.contextWindow} />
+                    )}
+                  </>
+                }
+              />
+            }
+            status={
+              <>
+                {state?.planMode && workspaceMode === "code" && (
+                  <span className="footer-plan">
+                    <ShimmerText base={theme.secondary} bright="#ddd6fe">
+                      {"\u25C6 plan mode"}
+                    </ShimmerText>
+                  </span>
+                )}
+                {/* Automatic review stays in this pane's task row; manual @Ken keeps its own bar. */}
+                {workspaceMode === "code" && kenRunning && !running && !autopilotReviewing ? (
+                  <KenActivityBar
+                    runStartTs={kenRunStartTs}
+                    tokens={kenTokens}
+                    isThinking={kenIsThinking}
+                    thinkingStartTs={kenThinkingStartTs}
+                    thinkingAccumMs={kenThinkingAccumMs}
+                    onCancel={() => cancelCurrentKen()}
+                  />
+                ) : (
+                  <ActivityBar
+                    runStartedAt={runStartedAt}
+                    running={running}
+                    activity={activity}
+                    cancelling={cancelling}
+                    tokens={tokens}
+                    doneStatus={doneStatus}
+                    isThinking={isThinking}
+                    thinkingStartTs={thinkingStartTs}
+                    thinkingAccumMs={thinkingAccumMs}
+                    planTotal={workspaceMode !== "code" ? 0 : planTotal}
+                    planDone={workspaceMode !== "code" ? 0 : Math.min(planDone.size, planTotal)}
+                    onCancel={requestCancel}
+                    toolsHidden={toolsHidden}
+                    hasToolFeed={liveToolFeed.length > 0}
+                    onToggleTools={toggleTools}
+                  />
+                )}
+              </>
+            }
+            composer={
+              <>
+                <div
+                  className={`inputwrap${isFileDragOver ? " dragover" : ""}${
+                    scheduleInvalid ? " schedule-invalid" : ""
+                  }`}
+                >
+                  <WorkingBeam active={running || kenRunning || autopilotReviewing} />
+                  {scheduleDraft ? (
+                    <ScheduleHint
+                      input={input}
+                      caret={caret}
+                      onPickInterval={fillScheduleInterval}
+                    />
+                  ) : (
+                    slashOpen && (
+                      <SlashMenu
+                        commands={slashMatches}
+                        activeIndex={clampedSlashIndex}
+                        onSelect={pickSlashCommand}
+                        onHover={setSlashIndex}
+                      />
+                    )
+                  )}
+                  {paletteOpen && (
+                    <CommandPalette
+                      commands={collectionCommands}
+                      problems={paletteProblems}
+                      onClose={() => setPaletteOpen(false)}
+                      onInsert={(cmd) => {
+                        setPaletteOpen(false);
+                        pickSlashCommand(cmd);
+                      }}
+                      onSend={(cmd) => {
+                        setPaletteOpen(false);
+                        submitText(`/${cmd.name}`);
+                      }}
+                    />
+                  )}
+                  {mentionOpen && !noReferenceSlashCommand && (
+                    <FileMentionMenu
+                      files={fileMatches}
+                      activeIndex={clampedFileIndex}
+                      isRecent={mention?.query === ""}
+                      onSelect={pickMentionFile}
+                      onHover={setFileIndex}
+                    />
+                  )}
+                  <AttachmentBar
+                    attachments={attachments}
+                    onRemove={removeAttachment}
+                    onOpenImage={(src) => void openImageDataUrl(src)}
+                  />
+                  <ReferencedFiles paths={mentionedPaths} onRemove={removeMentionChip} />
+                  <QueuedBar messages={visibleQueuedMessages} onCancel={handleCancelQueued} />
+                  <div className="inputrow">
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      multiple
+                      accept="image/*,video/*"
+                      disabled={planReview !== null || noAttachmentSlashCommand !== null}
+                      style={{ display: "none" }}
+                      onChange={(event) => {
+                        if (event.target.files) void addFiles(event.target.files);
+                        event.target.value = "";
+                      }}
+                    />
+                    <button
+                      className="icon-circle"
+                      aria-label="Attach files"
+                      title={
+                        noAttachmentSlashCommand
+                          ? `/${noAttachmentSlashCommand.name} does not accept attachments`
+                          : planReview !== null
+                            ? "Resolve the pending plan first"
+                            : "Attach files"
+                      }
+                      disabled={planReview !== null || noAttachmentSlashCommand !== null}
+                      onClick={() => fileInputRef.current?.click()}
+                    >
+                      <PaperclipIcon size={15} />
+                    </button>
+                    <div className="input-stack">
+                      {enhanceAnim && (
+                        <EnhanceDissolve
+                          oldText={enhanceAnim.oldText}
+                          newText={enhanceAnim.newText}
+                          onDone={onEnhanceAnimDone}
+                        />
+                      )}
+                      {/* `@Ken` active: a textarea can't color just one token, so we mirror
+                      the input in an aligned overlay where the leading `@Ken` shimmers
+                      in Ken's color. The textarea text below is made transparent (caret
+                      stays visible) so only this styled copy shows. Metrics match
+                      `.input` 1:1 so wrapping/caret line up. */}
+                      {kenActive && kenInputParts && (
+                        <div className="ken-input-highlight" aria-hidden="true">
+                          {kenInputParts.lead}
+                          <ShimmerText base={theme.ken}>{kenInputParts.token}</ShimmerText>
+                          {kenInputParts.rest}
+                        </div>
+                      )}
+                      <textarea
+                        ref={attachInput}
+                        className={`input${enhanceAnim ? " input-anim" : ""}${kenActive ? " input-ken" : ""}`}
+                        rows={1}
+                        // No-input commands stay keyboard-submittable while preventing edits.
+                        readOnly={enhanceAnim !== null || noInputSlashCommand !== null}
+                        disabled={planReview !== null}
+                        title={
+                          noInputSlashCommand
+                            ? `Send /${noInputSlashCommand.name} as-is; it accepts no added input`
+                            : undefined
+                        }
+                        value={input}
+                        placeholder={
+                          planReview !== null
+                            ? "Approve or dismiss the pending plan to continue…"
+                            : workspaceMode === "chat"
+                              ? "Ask anything…"
+                              : workspaceMode === "motion"
+                                ? "Describe a video, paste a link, or drop a PDF…"
+                                : displayPlaceholder
+                        }
+                        onPaste={(event) => {
+                          if (noInputSlashCommandRef.current) {
+                            event.preventDefault();
+                            return;
+                          }
+                          const files = Array.from(event.clipboardData.files);
+                          if (files.length === 0) return;
+                          event.preventDefault();
+                          if (!noAttachmentSlashCommandRef.current) void addFiles(files);
+                        }}
+                        onChange={(event) => {
+                          if (noInputSlashCommandRef.current) return;
+                          const now = Date.now();
+                          if (!running && now - lastKeystrokeAtRef.current > 4 * 60_000) {
+                            void client.prewarmCache();
+                          }
+                          lastKeystrokeAtRef.current = now;
+                          setInput(event.target.value);
+                          setSlashIndex(0);
+                          setCaret(event.target.selectionStart ?? event.target.value.length);
+                          // Typing exits history-recall mode so ↑/↓ start fresh next time.
+                          if (historyIndex !== null) setHistoryIndex(null);
+                          // Drop the enhancement the instant the text diverges from it, so
+                          // the highlighted preview/bubble never misalign with edited text.
+                          if (enhancement && event.target.value !== enhancement.plain)
+                            setEnhancement(null);
+                          updateMention(
+                            event.target.value,
+                            event.target.selectionStart ?? event.target.value.length,
+                          );
+                        }}
+                        onClick={(e) => {
+                          const el = e.currentTarget;
+                          setCaret(el.selectionStart ?? el.value.length);
+                          updateMention(el.value, el.selectionStart ?? el.value.length);
+                        }}
+                        onKeyUp={(e) => {
+                          const el = e.currentTarget;
+                          setCaret(el.selectionStart ?? el.value.length);
+                          if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+                            updateMention(el.value, el.selectionStart ?? el.value.length);
+                          }
+                        }}
+                        onKeyDown={(e) => {
+                          // While the dissolve→decode animation plays the input is locked;
+                          // swallow keys so Enter can't submit the un-enhanced draft.
+                          if (enhanceAnim) {
+                            e.preventDefault();
+                            return;
+                          }
+                          if (mentionOpen && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
+                            e.preventDefault();
+                            const delta = e.key === "ArrowDown" ? 1 : -1;
+                            setFileIndex(
+                              (i) => (i + delta + fileMatches.length) % fileMatches.length,
+                            );
+                          } else if (
+                            mentionOpen &&
+                            (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey))
+                          ) {
+                            e.preventDefault();
+                            const file = fileMatches[clampedFileIndex];
+                            if (file) pickMentionFile(file);
+                          } else if (mentionOpen && e.key === "Escape") {
+                            e.preventDefault();
+                            setMention(null);
+                          } else if (slashOpen && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
+                            e.preventDefault();
+                            const delta = e.key === "ArrowDown" ? 1 : -1;
+                            setSlashIndex(
+                              (i) => (i + delta + slashMatches.length) % slashMatches.length,
+                            );
+                          } else if (
+                            slashOpen &&
+                            (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey))
+                          ) {
+                            e.preventDefault();
+                            const cmd = slashMatches[clampedSlashIndex];
+                            if (cmd) pickSlashCommand(cmd);
+                          } else if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+                            // Menus are closed here (handled above), so arrows recall sent
+                            // prompts shell-style — unless the caret is mid-text in a
+                            // multi-line draft, where navigateHistory declines and the
+                            // cursor moves normally.
+                            if (navigateHistory(e.key === "ArrowUp" ? -1 : 1, e.currentTarget)) {
+                              e.preventDefault();
+                            }
+                          } else if (e.key === "Enter" && !e.shiftKey) {
+                            // Enter sends; Shift+Enter inserts a newline (textarea default).
+                            e.preventDefault();
+                            submit();
+                          } else if (e.key === "Escape") {
+                            // Cancel the build if it's running; otherwise cancel Ken so the
+                            // "esc to cancel" on his bar actually works.
+                            if (slashOpen) setInput("");
+                            else if (running && !cancelling) requestCancel();
+                            else if (kenRunning) cancelCurrentKen();
+                          }
+                        }}
+                        autoFocus
+                      />
+                    </div>
+                    {workspaceMode === "code" && (
+                      <button
+                        type="button"
+                        className="btn btn-ghost btn-sm"
+                        aria-expanded={programmaticOpen}
+                        disabled={!hydrated || programmatic.generation !== programmaticGeneration}
+                        onClick={() => setProgrammaticOpen((value) => !value)}
+                      >
+                        Opportunities
+                      </button>
+                    )}
+                    {workspaceMode === "code" && (
+                      <button
+                        type="button"
+                        className="ken-next-pill"
+                        title={
+                          planReview !== null
+                            ? "Resolve the pending plan first"
+                            : kenRunning
+                              ? "Ken is already running"
+                              : "Ask Ken what to do next"
+                        }
+                        disabled={kenRunning || planReview !== null}
+                        onClick={() => sendToKen("next?", `${MENTOR_HANDLE} next?`, true)}
+                      >
+                        Ken, next?
+                      </button>
+                    )}
+                    <div className="inputactions-trailing">
+                      <WorkingBeam active={running} size="sm" />
+                      <ActionMetal
+                        active={
+                          !running &&
+                          !cancelling &&
+                          readyRef.current &&
+                          planReview === null &&
+                          (!!input.trim() || attachments.length > 0 || mentionedPaths.length > 0)
+                        }
+                        windowFocused={
+                          windowFocused && props.windowFocused !== false && props.focused !== false
+                        }
+                      />
+                      <button
+                        type="button"
+                        className={`icon-circle icon-circle-primary composer-send-icon${running ? " is-stop" : ""}`}
+                        aria-label={running ? "Stop response" : "Send message"}
+                        title={
+                          running
+                            ? cancelling
+                              ? "Stopping…"
+                              : "Stop response"
+                            : attachmentsLoading
+                              ? "Loading attachments…"
+                              : "Send message"
+                        }
+                        disabled={
+                          running
+                            ? cancelling
+                            : !readyRef.current ||
+                              planReview !== null ||
+                              attachmentsLoading ||
+                              (!input.trim() &&
+                                attachments.length === 0 &&
+                                mentionedPaths.length === 0)
+                        }
+                        onClick={running ? requestCancel : submit}
+                      >
+                        {running ? (
+                          <SquareIcon size={12} weight="fill" />
+                        ) : (
+                          <ArrowUpIcon size={16} />
+                        )}
+                      </button>
+                    </div>
+                  </div>
+                  {!enhanceAnim && (
+                    // Pill pinned to the center of the input box (.inputwrap) top border,
+                    // overlapping it. Decoupled from text flow, so it never overlaps text,
+                    // drifts, or shifts the caret/height; centered (not in a corner) to
+                    // stay clear of the status row's "esc to cancel". Always mounted (so it
+                    // can transition both ways); the `visible` class fades/slides it in
+                    // when there's text and out when there isn't.
+                    <div className={`enhance-pill-host${enhanceHintVisible ? " visible" : ""}`}>
+                      <ActionMetal
+                        active={
+                          enhanceHintVisible &&
+                          !enhancing &&
+                          !enhanceOverLimit &&
+                          planReview === null
+                        }
+                        windowFocused={
+                          windowFocused && props.windowFocused !== false && props.focused !== false
+                        }
+                        variant="button"
+                      />
+                      <button
+                        className={`enhance-pill${enhancing ? " enhancing" : ""}`}
+                        title={
+                          enhanceOverLimit
+                            ? enhanceLimitReason
+                            : "Enhance prompt — clearer wording + correct terms"
+                        }
+                        aria-describedby={
+                          enhanceOverLimit && enhanceHintVisible ? enhanceLimitReasonId : undefined
+                        }
+                        disabled={
+                          planReview !== null ||
+                          enhancing ||
+                          !enhanceHintVisible ||
+                          enhanceOverLimit
+                        }
+                        aria-hidden={!enhanceHintVisible}
+                        onClick={() => void runEnhance()}
+                      >
+                        {enhancing ? "Enhancing…" : "Enhance?"}
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                {enhanceOverLimit && enhanceHintVisible && (
+                  <p id={enhanceLimitReasonId} role="status" style={{ color: theme.textDim }}>
+                    {enhanceLimitReason}
+                  </p>
+                )}
+              </>
+            }
+          />
         </div>
 
         {appUpdate.phase === "available" && !appUpdate.localPatched && (
@@ -6562,17 +6510,6 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
         />
       )}
 
-      {showGoalSettings && state?.goal && (
-        <GoalSettingsModal
-          context={state.goal.context ?? []}
-          instructions={state.goal.instructions ?? ""}
-          busy={running}
-          onClose={() => setShowGoalSettings(false)}
-          onSaved={(next) =>
-            setState((s) => (s?.goal ? { ...s, goal: { ...s.goal, ...next } } : s))
-          }
-        />
-      )}
       {confirmNewSession && (
         <ConfirmModal
           title={workspaceMode === "chat" ? "New Chat" : "New Session"}
@@ -6607,39 +6544,10 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
           workspace mode, and its tool call stays blocked until we answer. */}
       <McpElicitModal />
 
-      {workspaceMode === "chat" && showMemories && (
-        <MemoryModal onClose={() => setShowMemories(false)} />
-      )}
-
-      {showScorecard && progress && (
-        <ScorecardModal snapshot={progress} onClose={() => setShowScorecard(false)} />
-      )}
-
       {/* Settings reached from the menu-bar tray. Rendered in every view branch
           (Home, picker, workspace) because the tray targets a WINDOW and can't
           know which of the three it is showing. */}
       {showTraySettings && <SettingsModal onClose={closeTraySettings} />}
-
-      {workspaceMode === "code" && showTasks && (
-        <TasksModal
-          tasks={projectTasks}
-          loadState={tasksLoad}
-          onRetryLoad={openTasks}
-          running={running || autopilotReviewing || newSessionBusy}
-          onRun={handleRunTask}
-          onRunAll={handleRunAllTasks}
-          onDelete={handleDeleteTask}
-          onClose={() => setShowTasks(false)}
-          onDraftTasks={() => {
-            // Draft only: close the list and hand the user an editable request.
-            // No task is created or run until they send it themselves.
-            // Unsent text is kept as the work to break down, never overwritten.
-            setShowTasks(false);
-            const existing = input.trim();
-            fillComposer(existing ? `${TASKS_DRAFT_PROMPT}${existing}` : TASKS_DRAFT_PROMPT);
-          }}
-        />
-      )}
     </div>
   );
   return <PaneIdProvider value={paneId}>{content}</PaneIdProvider>;
@@ -6771,7 +6679,6 @@ const TranscriptRowBody = memo(function TranscriptRowBody({
   item,
   kenTalking = false,
   errorActive = false,
-  errorCritterId,
   errorModelPicker,
   onImageLoad,
   onAskAnswer,
@@ -6781,7 +6688,6 @@ const TranscriptRowBody = memo(function TranscriptRowBody({
   /** This is the Ken reply currently streaming in, so his face talks. */
   kenTalking?: boolean;
   errorActive?: boolean;
-  errorCritterId?: string | undefined;
   errorModelPicker?: React.ReactNode;
   onImageLoad?: () => void;
   onAskAnswer?: (
@@ -6936,7 +6842,6 @@ const TranscriptRowBody = memo(function TranscriptRowBody({
         <div data-swap-row={item.id}>
           <ChatErrorNotice
             error={item}
-            critterId={errorCritterId ?? "cat"}
             active={errorActive}
             modelPicker={errorModelPicker}
             onContentGrow={onImageLoad}

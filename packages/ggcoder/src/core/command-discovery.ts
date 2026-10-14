@@ -9,6 +9,7 @@ import {
   boundCommandProblems,
   commandProblem,
   loadCustomCommandCatalog,
+  mergeCustomCommandCatalogs,
   type CustomCommand,
 } from "./custom-commands.js";
 import { log } from "./logger.js";
@@ -86,6 +87,8 @@ export interface CommandDiscoveryOptions {
   registryActions?: readonly SlashCommandListing[];
   getRegistryActions?: () => readonly SlashCommandListing[];
   readReadiness?: () => Promise<ProgrammaticReadiness>;
+  /** Folders added to the workspace (`/add-dir`, a goal's repos); their custom commands fill names the project leaves free. */
+  additionalRoots?: readonly string[];
 }
 
 export interface DiscoveredCommand {
@@ -133,7 +136,10 @@ export async function discoverCommands(
     if (options.workspaceCaseInsensitive)
       for (const name of [item.name, ...item.aliases]) workspaceClaims.add(name.toLowerCase());
   }
-  const catalog = await loadCustomCommandCatalog(cwd);
+  const roots = [cwd, ...(options.additionalRoots ?? [])];
+  const catalog = mergeCustomCommandCatalogs(
+    await Promise.all(roots.map((root) => loadCustomCommandCatalog(root))),
+  );
   // A user's own command replaces an overridable built-in (e.g. /commit), so
   // the listing names the recipe that actually runs (see agent-session).
   const customNames = new Set(catalog.commands.map((custom) => custom.name));

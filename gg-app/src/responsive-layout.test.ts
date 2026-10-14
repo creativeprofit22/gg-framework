@@ -31,15 +31,22 @@ describe("narrow-window layout contracts", () => {
     // Every `.markdown table { … }` width, in cascade order (App.css, then the
     // glass theme layered on top). Regression: glass.css once set
     // `width: max-content`, overriding the fluid width on every wide table.
+    // glass.css is Light-only, so its rules carry the zero-specificity
+    // `:where(:root[data-appearance-theme="light"])` scope prefix.
     const declared: string[] = [];
+    let glassRules = 0;
     for (const css of [appCss, glassCss]) {
-      for (const rule of css.matchAll(/^\.markdown table\s*\{([^}]*)\}/gm)) {
+      for (const rule of css.matchAll(
+        /^(?::where\(:root\[data-appearance-theme="light"\]\)\s+)?\.markdown table\s*\{([^}]*)\}/gm,
+      )) {
+        if (css === glassCss) glassRules += 1;
         for (const decl of (rule[1] ?? "").matchAll(/(?:^|;|\*\/)\s*width\s*:\s*([^;]+);/g)) {
           declared.push((decl[1] ?? "").trim());
         }
       }
     }
     expect(declared.length).toBeGreaterThan(0);
+    expect(glassRules).toBeGreaterThan(0);
     expect(declared.at(-1)).toBe("100%");
     expect(declared).not.toContain("max-content");
   });

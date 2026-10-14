@@ -46,7 +46,11 @@ import {
   type SlashCommandContext,
 } from "./slash-commands.js";
 import { CUSTOM_OVERRIDABLE_PROMPT_COMMANDS, getPromptCommand } from "./prompt-commands.js";
-import { appendCommandArguments, loadCustomCommands } from "./custom-commands.js";
+import {
+  appendCommandArguments,
+  loadWorkspaceCustomCommands,
+  type CustomCommand,
+} from "./custom-commands.js";
 import { workflowQueuePolicyError } from "./workflow-busy-policy.js";
 import {
   createProgrammaticReadinessReader,
@@ -382,6 +386,14 @@ export interface AgentSessionOptions {
    * resumable identity.
    */
   transient?: boolean;
+  /**
+   * Told when an agent loop starts (true) and when the outermost one ends
+   * (false), however it ended. Nested loops (a template prompt inside a run)
+   * don't repeat it. GG Goals uses it to tell other processes the goal is
+   * being worked on (`core/goal-run-marker.ts`). A throwing listener is
+   * ignored: it must never fail or wedge a run.
+   */
+  onRunActive?: (active: boolean) => void;
   /**
    * If true, `initialize()` returns WITHOUT waiting for MCP servers to connect —
    * the connection runs in the background and tools are appended when ready.
@@ -1344,13 +1356,13 @@ export class AgentSession {
       const helpCmd = this.slashCommands.get("help");
       if (helpCmd) {
         const registry = this.slashCommands;
-        const cwd = this.cwd;
         helpCmd.execute = async () => {
-          const discovery = await discoverCommands(cwd, {
+          const discovery = await discoverCommands(this.cwd, {
             workspaceActions: this.opts.workspaceCommands,
             workspaceCaseInsensitive: this.opts.workspaceCommandCaseInsensitive,
             registryActions: registryCommandListings(registry.getAll()),
             readReadiness: this.readProgrammaticReadiness,
+            additionalRoots: this.additionalRoots,
           });
           const lines = discovery.entries.map(
             ({ listing: c }) =>
@@ -1915,7 +1927,7 @@ export class AgentSession {
     // built-ins a user's own recipe may override (e.g. their own /commit).
     const customCanReplace =
       !builtinPromptCmd || CUSTOM_OVERRIDABLE_PROMPT_COMMANDS.has(builtinPromptCmd.name);
-    const customCmds = coderCommands && customCanReplace ? await loadCustomCommands(this.cwd) : [];
+    const customCmds = coderCommands && customCanReplace ? await this.loadCustomCommands() : [];
     const customPromptCmd = customCmds.find((c) => c.name === parsed.name);
     const promptText = customPromptCmd?.prompt ?? builtinPromptCmd?.prompt;
     const inputPolicyError = this.promptInputPolicyError(content);
@@ -3425,11 +3437,24 @@ ${content}
   private async runLoop(options: PromptRunOptions = {}): Promise<void> {
     this.prewarmController?.abort();
     this.runLoopDepth++;
+    if (this.runLoopDepth === 1) this.notifyRunActive(true);
     try {
       await this.runLoopInner(options);
     } finally {
       this.runLoopDepth--;
       this.lastRealRequestAt = Date.now();
+      if (this.runLoopDepth === 0) this.notifyRunActive(false);
+    }
+  }
+
+  /** `opts.onRunActive`, never allowed to throw into the run. */
+  private notifyRunActive(active: boolean): void {
+    try {
+      this.opts.onRunActive?.(active);
+    } catch (err) {
+      log("WARN", "session", "onRunActive listener threw", {
+        message: err instanceof Error ? err.message : String(err),
+      });
     }
   }
 
@@ -5711,6 +5736,15 @@ ${content}
   /** Extra workspace roots added with `/add-dir`, in the order added. */
   getAdditionalRoots(): string[] {
     return [...this.additionalRoots];
+  }
+
+  /**
+   * The custom `.gg/commands` slash commands this session can run: the
+   * project's, then those of every added root (a goal's attached repos too).
+   * Read fresh, so a new command file is picked up without a restart.
+   */
+  loadCustomCommands(): Promise<CustomCommand[]> {
+    return loadWorkspaceCustomCommands([this.cwd, ...this.additionalRoots]);
   }
 
   /**

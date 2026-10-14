@@ -78,7 +78,7 @@ export function RunningSchedulesButton({ schedules, onStop }: Props): React.Reac
             ref={anchorRef}
             className="bgtasks-button"
             style={{ color: theme.secondary, borderColor: theme.border }}
-            title="Active schedules — run only while this window is open"
+            title="Active schedules. They run only while this window is open"
             aria-expanded={open}
             aria-controls={open ? popoverId : undefined}
             data-open={open || undefined}

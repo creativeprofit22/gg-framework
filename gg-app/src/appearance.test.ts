@@ -4,6 +4,7 @@ import {
   APPEARANCE_MAX_BYTES,
   APPEARANCE_STORAGE_KEY as key,
   DEFAULT_APPEARANCE,
+  applyAppearance,
   createAppearanceOwner,
   parseAppearance,
 } from "./appearance";
@@ -194,5 +195,17 @@ describe("appearance preferences", () => {
     expect(a.getSnapshot().preferences).toEqual(DEFAULT_APPEARANCE);
     expect(read).not.toHaveBeenCalled();
     expect(write).not.toHaveBeenCalled();
+  });
+});
+
+describe("one theme setting", () => {
+  it("light appearance sets both data-appearance-theme (glass) and upstream data-theme", () => {
+    const root = document.createElement("html");
+    applyAppearance(root, { ...DEFAULT_APPEARANCE, theme: "light" });
+    expect(root.getAttribute("data-appearance-theme")).toBe("light");
+    expect(root.getAttribute("data-theme")).toBe("light");
+    applyAppearance(root, { ...DEFAULT_APPEARANCE, theme: "dark" });
+    expect(root.getAttribute("data-appearance-theme")).toBe("dark");
+    expect(root.getAttribute("data-theme")).toBe("dark");
   });
 });

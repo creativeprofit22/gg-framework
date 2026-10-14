@@ -2195,6 +2195,45 @@ export async function cycleThinking(): Promise<ThinkingState | null> {
   }
 }
 
+/**
+ * Set the reasoning level directly (null turns thinking off). Throws with the
+ * sidecar's message when the run is busy or the model doesn't support it.
+ */
+export async function setThinkingLevel(
+  paneId: string,
+  level: string | null,
+): Promise<ThinkingState> {
+  // Pane-scoped: in a split window each pane is its own daemon session.
+  return invoke<ThinkingState>("agent_set_thinking", { paneId, level });
+}
+
+export interface GitHubItem {
+  number: number;
+  title: string;
+  url: string;
+  author: string;
+  updatedAt: string;
+  draft?: boolean;
+}
+export interface ChangedFile {
+  path: string;
+  added: number | null;
+  removed: number | null;
+  status: "M" | "A" | "D" | "R";
+}
+export interface GitOverview {
+  /** null when GitHub couldn't be asked (no gh, not signed in, not GitHub). */
+  issues: GitHubItem[] | null;
+  pulls: GitHubItem[] | null;
+  changes: ChangedFile[];
+}
+
+/** The Git panel's issues, pull requests and changed files for this project. */
+export async function getGitOverview(): Promise<GitOverview> {
+  await waitForReady();
+  return invoke<GitOverview>("agent_git_overview");
+}
+
 /** List workflow (prompt-template) slash commands the agent can run. */
 export async function listCommands(): Promise<SlashCommand[] | null> {
   try {
@@ -3084,10 +3123,18 @@ export interface ServeStatus {
   configured: boolean;
 }
 
+/** The daemon's /serve reply, validated: only an explicit `true` counts, so a
+ *  daemon or fixture that omits a flag reads as "not running" instead of
+ *  forwarding `undefined` into native commands that require a boolean. */
+export function serveStatusFrom(raw: unknown): ServeStatus {
+  const reply = typeof raw === "object" && raw !== null ? (raw as Record<string, unknown>) : {};
+  return { running: reply.running === true, configured: reply.configured === true };
+}
+
 /** Read whether the Telegram serve loop is running + whether it's configured. */
 export async function getServeStatus(): Promise<ServeStatus> {
   try {
-    return await invoke<ServeStatus>("agent_serve_status", { paneId: "primary" });
+    return serveStatusFrom(await invoke<unknown>("agent_serve_status", { paneId: "primary" }));
   } catch (e) {
     await logError(`agent_serve_status failed: ${String(e)}`);
     return { running: false, configured: false };
@@ -4073,7 +4120,7 @@ export function createPaneAgentClient(paneId: string): PaneAgentClient {
     },
     async getServeStatus() {
       try {
-        return await call("agent_serve_status");
+        return serveStatusFrom(await call<unknown>("agent_serve_status"));
       } catch {
         return { running: false, configured: false };
       }

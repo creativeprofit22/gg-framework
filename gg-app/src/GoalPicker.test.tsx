@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { createGoal, deleteGoal, listGoals, waitForReady, type GoalSummary } from "./agent";
@@ -47,6 +47,10 @@ function renderPicker(goals: GoalSummary[]): { onChosen: ReturnType<typeof vi.fn
   render(<GoalPicker openGoal={selectProjectMock} onChosen={onChosen} onClose={vi.fn()} />);
   return { onChosen };
 }
+
+// Pickers keep their last list per window (useCachedList); each test starts
+// from a first visit.
+beforeEach(() => sessionStorage.clear());
 
 afterEach(() => {
   cleanup();
@@ -142,10 +146,23 @@ describe("GoalPicker", () => {
     expect(screen.getAllByRole("button", { name: "+ New goal" }).length).toBeGreaterThan(0);
     cleanup();
 
+    // A failed first visit (nothing kept) says so and offers a retry.
+    sessionStorage.clear();
     vi.mocked(waitForReady).mockResolvedValue();
     listGoalsMock.mockRejectedValueOnce(new Error("down"));
     render(<GoalPicker openGoal={selectProjectMock} onChosen={vi.fn()} />);
     expect(await screen.findByText("Couldn't load your goals.")).toBeDefined();
+  });
+
+  it("shows the goals it last had at once on a return visit, even if the refresh fails", async () => {
+    renderPicker([GOAL]);
+    expect(await screen.findByText("API latency")).toBeDefined();
+    cleanup();
+
+    listGoalsMock.mockReturnValueOnce(new Promise(() => {}));
+    render(<GoalPicker openGoal={selectProjectMock} onChosen={vi.fn()} />);
+    // No skeleton: the kept list is on screen while the refresh runs.
+    expect(screen.getByText("API latency")).toBeDefined();
   });
 
   it("creates a goal with its context and opens it", async () => {

@@ -1,5 +1,38 @@
 # @kenkaiiii/ggcoder
 
+## 5.81.0
+
+### Minor Changes
+
+- Add a `/git/overview` sidecar route (changed files with line counts plus open GitHub issues and PRs), let `POST /thinking` set a specific level or turn thinking off, and mark live goal runs across processes so the app and `ggcoder acp` never resume a goal the other is running.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.81.0
+- @kenkaiiii/gg-agent@5.81.0
+- @kenkaiiii/gg-core@5.81.0
+
+## 5.80.1
+
+### Patch Changes
+
+- Load custom slash commands from every workspace root, so a goal's attached repos and folders added with `/add-dir` bring their own `.gg/commands`.
+  - @kenkaiiii/gg-ai@5.80.1
+  - @kenkaiiii/gg-agent@5.80.1
+  - @kenkaiiii/gg-core@5.80.1
+
+## 5.80.0
+
+### Minor Changes
+
+- Add GG Goals, Autopilot Ken and the desktop's session extras to `ggcoder acp`. ACP clients can now list, create, update, pause and delete goals and follow their workers (`_gg/goals/*`, `_gg/goal/*`, `_gg/goal_state`). They can also turn autopilot on and follow its review cycle (`_gg/autopilot/set`, `_gg/autopilot_state`, `_gg/autopilot_event`), steer a run mid-turn through a prompt queue (`_gg/queue`), read the checklist, answer the agent's questions (`_gg/ask_user`) and follow plan review (`_gg/plan_state`). Goal list rows now come from one summary shared with the desktop sidecar. The in-process grep now scans large trees on worker threads, rejects files with a byte prefilter, skips gitignored directories during the walk instead of after it, and raises its file cap from 10k to 100k, so it no longer hides matches beyond the first 10k files.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.80.0
+- @kenkaiiii/gg-agent@5.80.0
+- @kenkaiiii/gg-core@5.80.0
+
 ## 5.79.4
 
 ### Patch Changes

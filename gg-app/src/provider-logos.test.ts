@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { PROVIDER_LOGOS, isMonochromeProviderLogo } from "./provider-logos";
+import { PROVIDER_LOGOS, providerLogoIsMono } from "./provider-logos";
 
 const svgSources = import.meta.glob<string>("./assets/providers/*.svg", {
   query: "?raw",
@@ -18,12 +18,12 @@ describe("provider logos on Light", () => {
     (provider) => {
       const svg = svgFor(provider);
       if (svg === undefined) {
-        expect(isMonochromeProviderLogo(provider)).toBe(false);
+        expect(providerLogoIsMono(provider)).toBe(false);
         return;
       }
       const fills = [...svg.matchAll(/fill="([^"]+)"/g)].map((match) => match[1]?.toLowerCase());
       const offWhiteOnly = fills.length > 0 && fills.every((fill) => fill === "#f4f6f8");
-      expect(isMonochromeProviderLogo(provider)).toBe(offWhiteOnly);
+      expect(providerLogoIsMono(provider)).toBe(offWhiteOnly);
     },
   );
 });

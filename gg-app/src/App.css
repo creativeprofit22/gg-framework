@@ -2,21 +2,40 @@
    property is just a string: swapping it re-rasterises the gradient instantly,
    which is why the idle -> working -> done changes snapped. Declaring the type
    makes it a real animatable colour. */
+@font-face {
+  font-family: "Sora";
+  src: url("./assets/fonts/sora/sora-latin.woff2") format("woff2");
+  font-weight: 100 800;
+  font-display: block;
+}
+
+/* A step's line height in px, resolved where it's set (see the reply steps). */
+@property --step-line {
+  syntax: "<length>";
+  inherits: true;
+  initial-value: 0px;
+}
+
 @property --glow-live {
   syntax: "<color>";
   inherits: true;
-  initial-value: #5560d8;
+  initial-value: #3a4fb8;
 }
 
-:root {
-  /* Surfaces — near-black, separated by lightness alone. Borders are alpha
-     white rather than opaque greys, so nothing reads as a drawn box. */
-  --bg: #0a0a0c;
-  --surface-1: #141519;
-  --surface-2: #1c1e23;
-  --surface-3: #24262c;
+:root,
+:root[data-theme="dark"] {
+  /* Alloy. Brushed graphite surfaces separated by lightness, keys raised off
+     them, and one cobalt accent. Every colour has a light twin below; nothing
+     outside these two blocks names a raw colour for chrome. */
+  --bg: #15171a;
+  --surface-1: #1f2226;
+  --surface-2: #2a2e33;
+  --surface-3: #33383e;
   --border: rgba(255, 255, 255, 0.07);
-  --border-strong: rgba(255, 255, 255, 0.13);
+  --border-strong: rgba(255, 255, 255, 0.16);
+  /* The ink overlays are drawn in (hover washes, hairlines): white on dark,
+     deep navy on light. Used as `rgb(var(--ink-rgb) / <alpha>)`. */
+  --ink-rgb: 255 255 255;
 
   /* Meter — a filled track with a draggable thumb (Radio volume). Themes
      override these together so track, fill and thumb stay legible. */
@@ -31,42 +50,42 @@
   --meter-thumb-shadow: 0 0 0 2px rgba(5, 117, 230, 0.4), 0 2px 7px rgba(0, 0, 0, 0.65);
   --meter-thumb-shadow-active: 0 0 0 3px rgba(5, 117, 230, 0.5), 0 2px 9px rgba(0, 0, 0, 0.72);
 
-  /* Text — one ink at four levels. */
-  --text: #f2f3f7;
-  --text-secondary: #c8c9d2;
-  --text-muted: #9a9ba5;
-  /* Lowest ink that still reads: 5.48:1 on --bg, 5.05:1 on --surface-1,
-     4.62:1 on --surface-2 (modals, toasts). On --surface-3 (dropdowns) it
-     falls short: use --text-muted there. */
-  --text-dim: #858691;
+  /* Text — one ink at four levels. --text-dim is the floor: 4.87:1 on
+     --surface-2; on --surface-3 use --text-muted. */
+  --text: #e8ebef;
+  --text-secondary: #c2c7ce;
+  --text-muted: #a1a8b1;
+  --text-dim: #949ba5;
 
-  /* Accent — periwinkle, bright enough to carry near-black text on a fill.
-     That luminance is the whole trick: a dark fill cannot hold a dark label,
-     a luminous one can. `--on-primary` is that label colour. */
-  --primary: #b0b6ff;
-  --primary-hi: #c2c7ff;
-  --on-primary: #0c0e26;
+  /* Accent — cobalt, light enough to carry the dark --on-primary label on a
+     fill (8.1:1) and to read as text on every surface. */
+  --primary: #8fa3ff;
+  --primary-hi: #a9b8ff;
+  --on-primary: #050a2e;
+  /* Filled accent controls (send, Commit, the home buttons): the same
+     periwinkle and dark ink in both themes, so a primary button looks the
+     same in light and dark. --primary itself darkens in light mode, for
+     accent text and icons on light surfaces. */
+  --primary-fill: #8fa3ff;
+  --primary-fill-hi: #a9b8ff;
+  --on-primary-fill: #050a2e;
 
-  /* Semantics. Each is luminous for the same reason, and each carries its own
-     label colour so a filled control never guesses. Colour is spent only on
-     meaning: shipping, a warning, a failure. */
-  --success: #7fe89a;
+  --success: #7fdc95;
   --on-success: #04180b;
-  --warning: #f0cf63;
+  --warning: #f0c75e;
   --on-warning: #1c1405;
-  --error: #ff6b60;
+  --error: #ff7d70;
   /* Between warning and error: "improving, not there yet" (Project Health). */
   --caution: #ff9f5c;
   --on-error: #240704;
-  --secondary: #b0b6ff;
+  --secondary: #8fa3ff;
   --info: #62e8d8;
 
-  /* Ambient glow — a wide, soft wash of the accent behind the whole window.
-     Most of the richness lives here; the surfaces stay nearly colourless.
-     `--glow-dark` is the Dark theme's glow, kept theme-independent (no theme
-     redefines it) so dark islands in other themes can reference it. Keep the
-     @property --glow-live initial-value literal above in step with it. */
-  --glow-dark: #5560d8;
+  /* Ambient glow behind the window. Alloy keeps it faint: the material, not a
+     wash, carries the look. `--glow-dark` is the Dark theme's glow, kept
+     theme-independent so dark islands in other themes can reference it. Keep
+     the @property --glow-live initial-value literal above in step with it. */
+  --glow-dark: #3a4fb8;
   --glow: var(--glow-dark);
 
   /* Ambient backgrounds — Home dither, wake-screen code rain and the window
@@ -80,29 +99,95 @@
   /* Shared strength cap for decorative ambient layers drawn over content. */
   --ambient-decor-opacity: 0.32;
 
-  /* Reference app (grok-bot-recon): the user's own text is the SAME ink as
-     everything else, and the bubble is that ink at low opacity rather than a
-     separate hue. Colour carries contrast, not identity. */
   --user-text: var(--text);
-  --user-bg: color-mix(in srgb, var(--text) 12%, transparent);
+  --user-bg: var(--surface-2);
+  /* Code blocks: a panel sunk below the message surface. */
+  --code-bg: #0e1013;
 
-  /* Ken Kai (mentor agent) — single source of truth with theme.ken in
-     theme.ts; both MUST match or the inline-styled @Ken input drifts from the
-     CSS-styled chat bubbles. Marks every Ken element. */
+  /* Ken Kai (mentor agent) — must match theme.ken in theme.ts. */
   --ken: #62e8d8;
-
-  /* Critters — pink, single source of truth with theme.critter in theme.ts.
-     Marks a busy critter row (sub-agents at work, compaction in progress) so
-     it reads apart from periwinkle hooks and the green "done" state.
-     ~9.5:1 on --bg. */
+  /* Critters — pink; must match theme.critter in theme.ts. */
   --critter: #ff8fd0;
 
-  /* Agent Steroids — red sibling of the brand tint. Marks the Steroids
-     button, the "Roided!" stamp and the modal status dot. */
   --steroids: #ff4d5e;
   --steroids-deep: #c8283a;
   --steroids-glow: rgba(255, 77, 94, 0.45);
 
+  /* Keys: the raised controls of the deck and title bar. A lit top edge, a
+     dark lip below, and a recessed well for the value a key reads out. */
+  --key: #2c3035;
+  --key-hi: rgba(255, 255, 255, 0.09);
+  --key-edge: #0b0c0e;
+  --key-shadow: rgba(0, 0, 0, 0.6);
+  --well: #23272c;
+  --well-shadow: rgba(0, 0, 0, 0.55);
+  --led-off: #3a3f46;
+  --deck-shadow: 0 1px 0 rgba(0, 0, 0, 0.6), 0 14px 30px -16px rgba(0, 0, 0, 0.9);
+  --mark: rgba(143, 163, 255, 0.28);
+
+  /* Elevation: neutral black so depth never tints a surface. */
+  --shadow-sm: 0 2px 6px rgba(0, 0, 0, 0.45);
+  --shadow-md: 0 8px 28px rgba(0, 0, 0, 0.45);
+  --shadow-lg: 0 16px 44px -12px rgba(0, 0, 0, 0.7);
+}
+
+:root[data-theme="light"] {
+  --bg: #dde1e6;
+  --surface-1: #eaedf0;
+  --surface-2: #f5f7f9;
+  --surface-3: #ffffff;
+  --border: rgba(10, 20, 40, 0.1);
+  --border-strong: rgba(10, 20, 40, 0.2);
+  --ink-rgb: 10 20 40;
+
+  --text: #14171b;
+  --text-secondary: #333a42;
+  --text-muted: #4f5761;
+  --text-dim: #59616b;
+
+  --primary: #2848d8;
+  --primary-hi: #3a5af0;
+  --on-primary: #ffffff;
+  /* A light theme's links and accent text: the dark cobalt. */
+  --link: #2848d8;
+
+  --success: #1a6c33;
+  --on-success: #ffffff;
+  --warning: #855400;
+  --on-warning: #ffffff;
+  --error: #b8241a;
+  --caution: #9c4700;
+  --on-error: #ffffff;
+  --secondary: #2848d8;
+  --info: #0b6b62;
+
+  --glow: #8ea2e6;
+
+  --ken: #0b6b74;
+  --critter: #a8256f;
+
+  --code-bg: #e6e9ed;
+
+  --steroids: #c8283a;
+  --steroids-deep: #9e1c2c;
+  --steroids-glow: rgba(200, 40, 58, 0.3);
+
+  --key: #f5f7f9;
+  --key-hi: #ffffff;
+  --key-edge: #aeb5be;
+  --key-shadow: rgba(30, 45, 70, 0.22);
+  --well: #dfe3e8;
+  --well-shadow: rgba(30, 45, 70, 0.28);
+  --led-off: #bfc6cf;
+  --deck-shadow: 0 1px 0 rgba(10, 20, 40, 0.08), 0 14px 28px -16px rgba(30, 45, 70, 0.45);
+  --mark: rgba(40, 72, 216, 0.16);
+
+  --shadow-sm: 0 2px 6px rgba(30, 45, 70, 0.18);
+  --shadow-md: 0 8px 28px rgba(30, 45, 70, 0.2);
+  --shadow-lg: 0 16px 44px -12px rgba(30, 45, 70, 0.35);
+}
+
+:root {
   /* Shape system — generous and soft, matching the reference: pills for
      controls, heavy rounding on cards, no hairline boxes. */
   --radius-sm: 4px;
@@ -113,16 +198,10 @@
   --radius-card: 14px;
   --radius-pill: 9999px;
 
-  /* Elevation: three steps, all neutral black so depth never tints a surface.
-     sm  controls sitting on a surface (slider tracks, meters)
-     md  menus, dropdowns, tooltips: anything anchored to a trigger
-     lg  free-floating layers: modals, toasts, overlays */
-  --shadow-sm: 0 2px 6px rgba(0, 0, 0, 0.45);
-  --shadow-md: 0 8px 28px rgba(0, 0, 0, 0.45);
-  --shadow-lg: 0 16px 44px -12px rgba(0, 0, 0, 0.7);
   /* raised: solid cards resting on a panel (Notes phase cards and detail):
      a tight contact shadow plus a short, inset-spread lift. Light and the
-     accessibility fallback live in appearance.css and below. */
+     accessibility fallback live in appearance.css and below. (sm/md/lg live
+     in the per-theme token blocks above.) */
   --shadow-raised: 0 1px 2px rgb(0 0 0 / 0.36), 0 6px 16px -8px rgb(0 0 0 / 0.55);
 
   /* Motion. Every transition and entrance/exit draws its curve and length from
@@ -253,7 +332,12 @@
 
   /* System UI stacks, matching the reference app: SF Pro on macOS, Segoe on
      Windows. Text renders in the same face the OS uses everywhere else. */
-  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", ui-sans-serif, sans-serif;
+  /* Sora everywhere. Monospace survives only where text must align in columns
+     (ASCII art, multi-line code blocks). Tabular figures keep counts, clocks
+     and percentages from jittering as they change. */
+  --sans: "Sora", -apple-system, BlinkMacSystemFont, "Segoe UI", ui-sans-serif, sans-serif;
+  /* Fixed-width only where characters must line up as a picture: ASCII
+     banners and pixel faces. Code, paths and commands are set in Sora. */
   --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Monaco, Consolas, monospace;
   /* Type scale. Every font-size on a step uses these; odd one-off sizes
      (10px, 13.5px, display sizes) and relative/computed sizes stay literal.
@@ -263,6 +347,14 @@
   --fs-base: 13px;
   --fs-md: 14px;
   --fs-lg: 15px;
+  /* Conversation text (replies and your messages): a touch larger than UI
+     text, for long reading, and growing with the window (15.5px up to about
+     1100px wide, 17px at 1550, 18px from 1850). Bigger windows get bigger
+     text rather than longer lines, so a line holds the same ~72 characters. */
+  --fs-read: clamp(15.5px, 11.8px + 0.335vw, 18px);
+  /* A reply step's number well. */
+  --step-well: 28px;
+  --step-well-h: 22px;
   --fs-xl: 16px;
   --fs-2xl: 18px;
   --fs-3xl: 20px;
@@ -295,6 +387,19 @@
   /* Shared horizontal rail: transcript, composer, header and footer all align
      to this inset, so nothing steps in or out down the right edge. */
   --rail: var(--space-8);
+  /* The conversation column: the transcript and the deck share it, centred.
+     It scales with the window: 60% of it, never narrower than 44em of the
+     reading text nor wider than 52em (about 940px at full screen). Below
+     ~720px it is the whole window, less the rails. */
+  --column: clamp(calc(var(--fs-read) * 44), 60vw, calc(var(--fs-read) * 52));
+  /* Each side's gutter: the rail on a small window, half the leftover width on
+     a wide one, so the column centres without wrapping the scroller. */
+  --gutter: max(var(--rail), (100% - var(--column)) / 2);
+  /* The conversation reaches a little past the message box on each side
+     (about two characters), so the box reads as sitting inside it. Where the
+     window has no room to spare, both share the rail. */
+  --column-bleed: calc(var(--fs-read) * 2);
+  --gutter-chat: max(var(--rail), var(--gutter) - var(--column-bleed));
   /* Width of the transcript's scrollbar, subtracted from its right padding so
      the scrolling column still aligns with the fixed surfaces above/below. */
   --scrollbar: 8px;
@@ -312,9 +417,10 @@
   --radius-input: 22px;
 
   /* Critter speech bubble — the white bubble critters talk in, and the ink
-     drawn on it (text and the typing cursor). */
+     drawn on it (text and the typing cursor). Fixed dark ink: --bg is light
+     in the light theme, which left the words white on white. */
   --speech-bg: #ffffff;
-  --on-speech: var(--bg);
+  --on-speech: #15171a;
 
   /* Shimmer highlight — the default moving bright spot of ShimmerText, a step
      brighter than --text so the sweep reads. */
@@ -344,6 +450,35 @@
   /* Update download progress fill. */
   --fx-update-fill-from: #8ff5c6;
   --fx-update-fill-to: #a7f3e9;
+}
+
+:root {
+  /* The dark palette by name, for night scenes (Home's forest, a Goal's
+     farm) that stay dark in the light theme: see the end of Deck.css. Same
+     values as the dark theme above. */
+  --night-bg: #15171a;
+  --night-surface-1: #1f2226;
+  --night-surface-2: #2a2e33;
+  --night-surface-3: #33383e;
+  --night-border: rgba(255, 255, 255, 0.07);
+  --night-border-strong: rgba(255, 255, 255, 0.16);
+  --night-ink-rgb: 255 255 255;
+  --night-text: #e8ebef;
+  --night-text-secondary: #c2c7ce;
+  --night-text-muted: #a1a8b1;
+  --night-text-dim: #949ba5;
+  --night-primary: #8fa3ff;
+  --night-primary-hi: #a9b8ff;
+  --night-on-primary: #050a2e;
+  --night-success: #7fdc95;
+  --night-warning: #f0c75e;
+  --night-error: #ff7d70;
+  --night-key: #2c3035;
+  --night-key-hi: rgba(255, 255, 255, 0.09);
+  --night-key-edge: #0b0c0e;
+  --night-key-shadow: rgba(0, 0, 0, 0.6);
+  --night-well: #23272c;
+  --night-well-shadow: rgba(0, 0, 0, 0.55);
 }
 
 /* In-thread opportunity review shares the transcript rail and button system. */
@@ -474,18 +609,22 @@
 }
 
 /* ── Button system (shared) ───────────────────────────────────────────────
-   .btn is the base; pair with .btn-primary (glossy violet pill), .btn-ghost
-   (glossy neutral pill), or .btn-success (glossy green pill). Pill-shaped, with
-   a vertical light→dark gradient, white inner top-highlight, and soft drop
-   shadow. Hover brightens the whole pill — no movement, no color swap. */
+   .btn is the base; pair with .btn-primary (cobalt key), .btn-ghost (alloy
+   key) or .btn-success (ship-green key). Alloy keys: a lit top edge and a dark
+   lip below, so a control reads as raised off the surface it sits on. Hover
+   changes the fill only — no movement. */
 .btn {
   position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: var(--space-4);
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: var(--radius-pill);
+  border: 0;
+  border-radius: var(--radius-button);
+  box-shadow:
+    inset 0 1px 0 var(--key-hi),
+    0 1px 0 var(--key-edge),
+    0 2px 4px -2px var(--key-shadow);
   font-family: var(--sans);
   font-size: var(--fs-base);
   font-weight: 600;
@@ -575,38 +714,16 @@
   pointer-events: none;
 }
 
-/* Keep each button's existing fill/ink beneath a non-interactive metal rim. */
-.metal-button {
-  position: relative;
-  display: inline-grid;
-  vertical-align: middle;
-  isolation: isolate;
-}
-.metal-button > .action-metal.metal-fx-root {
-  background: transparent;
-  color: inherit;
-}
-.metal-button > .action-metal .metal-fx-inner {
-  display: none;
-}
-.metal-button > .action-metal.metal-fx-root::before {
-  background-image: radial-gradient(ellipse at 50% 40%, rgb(255 255 255 / 12%), transparent 70%);
-  box-shadow:
-    inset 0 1px 0 rgb(255 255 255 / 45%),
-    inset 0 0 8px rgb(255 255 255 / 15%);
-}
-
 /* Primary — a flat, luminous periwinkle pill carrying near-black text. The
    fill is bright enough to hold a dark label, which is what makes it read as
    the one thing on screen to act on. */
 .btn-primary {
-  background: var(--primary);
-  color: var(--on-primary);
+  background: var(--primary-fill);
+  color: var(--on-primary-fill);
   border-color: transparent;
-  box-shadow: none;
 }
 .btn-primary:hover:not(:disabled) {
-  background: var(--primary-hi);
+  background: var(--primary-fill-hi);
   filter: none;
 }
 
@@ -616,7 +733,6 @@
   background: var(--success);
   color: var(--on-success);
   border-color: transparent;
-  box-shadow: none;
 }
 .btn-success:hover:not(:disabled) {
   filter: brightness(1.06);
@@ -624,10 +740,9 @@
 
 /* Ghost — neutral surface, no border, no sheen. Separation is lightness. */
 .btn-ghost {
-  background: var(--surface-2);
+  background: var(--key);
   color: var(--text-secondary);
   border-color: transparent;
-  box-shadow: none;
 }
 .btn-ghost:hover:not(:disabled) {
   background: var(--surface-3);
@@ -647,12 +762,12 @@
   font-size: var(--fs-lg);
   padding: 13px var(--space-11);
 }
-/* Icon-only — perfect circle, fixed square size, no rectangular padding. */
+/* Icon-only — a square key, fixed size, no rectangular padding. */
 .btn-icon {
   width: 28px;
   height: 28px;
   padding: 0;
-  border-radius: var(--radius-pill);
+  border-radius: var(--radius-button);
   flex: 0 0 auto;
 }
 /* Nav icon buttons (Radio, Windows, …) hold an icon SVG. Animating the
@@ -779,32 +894,26 @@
    nothing shifts; `backwards`, so no filter is left on anything at rest.
    Plays once per mount (window open or reload), never on re-renders. */
 .app > .chat-head > .chat-head-strip,
-.app > .chat-head > .chat-head-nav,
 .app > .transcript-frame,
-.app > .liveregion,
-.app > .inputwrap,
-.app > .footer {
+.app > .dock > .liveregion,
+.app > .dock > .deck {
   animation: dissolve-in var(--dur-dissolve) var(--ease-out) backwards;
 }
 .app > .picker > .picker-head,
 .app > .picker > .picker-list {
   animation: dissolve-in var(--dur-dissolve) var(--ease-out) backwards;
 }
-.app > .chat-head > .chat-head-nav,
 .app > .picker > .picker-list {
   animation-delay: 40ms;
 }
 .app > .transcript-frame {
   animation-delay: 80ms;
 }
-.app > .liveregion {
+.app > .dock > .liveregion {
   animation-delay: 120ms;
 }
-.app > .inputwrap {
+.app > .dock > .deck {
   animation-delay: 150ms;
-}
-.app > .footer {
-  animation-delay: 180ms;
 }
 /* Title-bar segments that arrive after load (project name, health, branch,
    counts, CI, usage meter) resolve in where they land instead of popping.
@@ -825,11 +934,9 @@
 }
 @media (prefers-reduced-motion: reduce) {
   .app > .chat-head > .chat-head-strip,
-  .app > .chat-head > .chat-head-nav,
   .app > .transcript-frame,
-  .app > .liveregion,
-  .app > .inputwrap,
-  .app > .footer,
+  .app > .dock > .liveregion,
+  .app > .dock > .deck,
   .app > .picker > .picker-head,
   .app > .picker > .picker-list {
     animation-name: fade-in;
@@ -1147,7 +1254,7 @@ select {
   width: 7px;
   height: 7px;
   border-radius: var(--radius-pill);
-  background: var(--primary);
+  background: var(--primary-fill);
   box-shadow: 0 0 10px rgb(77 157 255 / 45%);
   animation: appRestoringPulse 1.2s ease-in-out infinite;
   animation-play-state: var(--loop-play-state, running);
@@ -1285,7 +1392,6 @@ select {
 .home > .home-tagline,
 .home > .home-actions,
 .home > .home-settings,
-.home > .home-links,
 .home > .home-version-corner {
   animation: reveal-up 460ms var(--ease-out) both;
 }
@@ -1302,7 +1408,6 @@ select {
   animation-delay: 340ms;
 }
 .home > .home-settings,
-.home > .home-links,
 .home > .home-version-corner {
   animation-delay: 460ms;
 }
@@ -1311,7 +1416,6 @@ select {
   .home > .home-tagline,
   .home > .home-actions,
   .home > .home-settings,
-  .home > .home-links,
   .home > .home-version-corner {
     animation: none;
   }
@@ -1319,11 +1423,10 @@ select {
     animation: none;
   }
 }
-/* Edges: the version or update button top-centre, Settings top-right, the
-   critters and their terrain along the bottom, and your links (centre) just
-   above their lane. The critter lane sits on the window's bottom edge with its terrain
-   inside (.critter-lane.with-terrain), so the ground rises out of the edge
-   just like it does in chat. --home-critter-floor is the ground's depth, the
+/* Edges: the version or update button top-centre, Settings top-right, and the
+   critters and their terrain along the bottom. The critter lane sits on the
+   window's bottom edge with its terrain inside (.critter-lane.with-terrain),
+   so the ground rises out of the edge just like it does in chat. --home-critter-floor is the ground's depth, the
    height the critters' feet stand at; --home-above-critters clears the
    lane's full open height (sprite + headroom for bubbles, see
    .critter-lane.open), so nothing they show runs into the byline. */
@@ -1664,7 +1767,10 @@ select {
   color: var(--text-secondary);
 }
 .home-link {
-  color: #fff;
+  /* Links read as links: the accent, never plain white (which vanished on
+     the light theme's cards). On Home's night scene the scene's own palette
+     makes it the light periwinkle. */
+  color: var(--primary);
   /* The underline is always drawn but clear at rest, so hover fades it in and
      out (as .markdown a does); switching the line on would snap. */
   text-decoration: underline;
@@ -1696,31 +1802,29 @@ select {
   padding: 0 var(--space-11);
   font-size: var(--fs-lg);
 }
-/* A pill with a caption hung under it (Goals' "In beta"). The
-   caption is out of flow, so the pills stay level and the home column
-   keeps its centring. */
+/* A pill with a tag pinned to the middle of its top border (Goals' "Beta").
+   The tag is out of flow, so the pills stay level and the home column keeps
+   its centring; clicks fall through it to the button. */
 .home-action-slot {
   position: relative;
   display: flex;
 }
-.home-action-note {
+.home-action-beta {
   position: absolute;
-  top: 100%;
-  /* Centred on the pill with `translate` (not transform, which the entry
-     animation owns), so an over-long caption stays centred instead of spilling
-     right, and the backing hugs the text. */
+  top: 0;
   left: 50%;
-  translate: -50% 0;
-  margin-top: var(--space-3);
-  padding: var(--space-1) var(--space-4);
+  z-index: 1;
+  transform: translate(-50%, -50%);
+  padding: var(--space-1) var(--space-3);
   border-radius: var(--radius-pill);
-  background: var(--home-ink-backing);
+  /* Deep red in both themes; white ink was asked for and clears 5:1 on it. */
+  background: var(--steroids-deep);
+  color: #ffffff;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  line-height: 1.2;
   white-space: nowrap;
-  font-size: var(--fs-base);
-  line-height: 1.3;
-  /* Full-strength ink like the tagline and byline: dimmer text got lost over
-     bright stretches of the waves. Size keeps it secondary. */
-  color: var(--text);
+  pointer-events: none;
 }
 .home-settings {
   position: absolute;
@@ -1847,6 +1951,15 @@ select {
 .settings-page.is-switching {
   animation: settings-page-dissolve var(--dur-dissolve) var(--ease-out) both;
 }
+/* A page still on its first load (settings-ready.tsx) stays hidden, along with
+   the header items it puts up, and its entrance waits: lifting the hold
+   restarts the animation, so the page arrives once, already loaded. */
+.settings-screen.is-waiting :is(.settings-page, .settings-head-status, .settings-head-actions) {
+  visibility: hidden;
+}
+.settings-screen.is-waiting .settings-page {
+  animation: none;
+}
 @media (prefers-reduced-motion: reduce) {
   .settings-page.is-entering,
   .settings-page.is-switching {
@@ -1952,7 +2065,6 @@ select {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 7px;
   height: 42px;
   padding: 0 11px;
   border: 0;
@@ -1977,7 +2089,7 @@ select {
   }
 }
 .settings-tab:hover:not(.is-active) {
-  background: rgba(255, 255, 255, 0.06);
+  background: rgb(var(--ink-rgb) / 0.06);
   color: var(--text);
 }
 .settings-tab.is-active {
@@ -1989,16 +2101,25 @@ select {
   display: flex;
   flex-shrink: 0;
 }
-/* Only the selected tab shows its label. `display: none` keeps the others
-   out of layout; every tab carries an aria-label, so each is still announced
-   by name. */
+/* Only the selected tab shows its label. The others fold to zero width (the
+   7px gap from the icon lives inside the text, so it folds too), which lets
+   SettingsTabBar spring a label's width open and shut; every tab carries an
+   aria-label, so each is still announced by name. */
 .settings-tab-label {
-  display: none;
-  line-height: 1.2;
-  white-space: nowrap;
+  display: block;
+  width: 0;
+  overflow: hidden;
+  opacity: 0;
 }
 .settings-tab.is-active .settings-tab-label {
-  display: inline;
+  width: auto;
+  opacity: 1;
+}
+.settings-tab-label-text {
+  display: block;
+  padding-left: 7px;
+  line-height: 1.2;
+  white-space: nowrap;
 }
 /* Steroids not connected yet. */
 .settings-tab-alert {
@@ -2055,7 +2176,7 @@ select {
   justify-content: center;
   gap: var(--space-5);
   background: var(--gloss-neutral);
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  border: 1px solid rgb(var(--ink-rgb) / 0.12);
   border-radius: var(--radius-card);
   box-shadow: var(--gloss-shadow-neutral);
   font-family: var(--sans);
@@ -2166,9 +2287,9 @@ select {
   overflow-y: auto;
 }
 .login-method-card {
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  border: 1px solid rgb(var(--ink-rgb) / 0.1);
   border-radius: var(--radius-card);
-  background: rgba(255, 255, 255, 0.03);
+  background: rgb(var(--ink-rgb) / 0.03);
   padding: var(--space-6) var(--space-7);
 }
 .login-method-card-head {
@@ -2731,7 +2852,7 @@ select {
   transition: background-color var(--t-out);
 }
 .pop-item:hover {
-  background: rgb(255 255 255 / 0.05);
+  background: rgb(var(--ink-rgb) / 0.05);
   transition-duration: var(--dur-press);
 }
 .pop-item + .pop-item {
@@ -2791,7 +2912,7 @@ select {
   color: var(--text);
 }
 .pop-item-main.is-code {
-  font-family: var(--mono);
+  font-family: var(--sans);
   font-size: var(--fs-sm);
 }
 .pop-item-meta {
@@ -2835,7 +2956,7 @@ select {
   transition-duration: var(--dur-press);
 }
 .pop-item-action:active {
-  background: rgb(255 255 255 / 0.06);
+  background: rgb(var(--ink-rgb) / 0.06);
 }
 @media (prefers-reduced-motion: reduce) {
   .pop-panel {
@@ -2993,7 +3114,7 @@ select {
     background-color var(--t-out);
 }
 .health-category-fix:hover {
-  background: rgb(255 255 255 / 0.06);
+  background: rgb(var(--ink-rgb) / 0.06);
   color: var(--text);
   transition-duration: var(--dur-press);
 }
@@ -3041,7 +3162,7 @@ select {
   color: var(--text-secondary);
 }
 .health-finding-main.is-path {
-  font-family: var(--mono);
+  font-family: var(--sans);
   font-size: var(--fs-xs);
 }
 .health-finding-meta {
@@ -3640,8 +3761,9 @@ select {
     transform: translateY(var(--exit-y, 4px)) scale(0.97);
   }
 }
-/* Screen changes (home, picker, workspace) use the root crossfade.
-   Local menu exits explicitly exclude the root above. */
+/* The root crossfade a dialog's dismissal plays under its own exit. Screen
+   changes don't crossfade (showScreen in view-transition.ts: WebKit drew the
+   page snapshot with magenta lines). Local menu exits exclude the root above. */
 ::view-transition-group(root),
 ::view-transition-old(root),
 ::view-transition-new(root) {
@@ -3739,8 +3861,8 @@ select {
     color var(--t-fast);
 }
 .modal-close:hover {
-  background: rgba(255, 255, 255, 0.06);
-  border-color: rgba(255, 255, 255, 0.1);
+  background: rgb(var(--ink-rgb) / 0.06);
+  border-color: rgb(var(--ink-rgb) / 0.1);
   color: var(--text);
 }
 .modal-label {
@@ -3756,22 +3878,33 @@ select {
 }
 .modal-input {
   width: 100%;
-  /* Transparent at rest so the field stays borderless, but the 1px is always
-     reserved: focus only recolours it, so nothing shifts. Padding is 1px less
-     than the old borderless value to keep the same outer size. */
-  border: 1px solid transparent;
+  /* An Alloy well: sunk into whatever surface holds it, with a visible edge,
+     so a field reads as somewhere to type even before it's focused. Focus
+     recolours the same 1px edge, so nothing shifts. */
+  border: 1px solid var(--border-strong);
   outline: none;
-  border-radius: var(--radius-card);
+  border-radius: var(--radius-button);
+  background: var(--well);
+  box-shadow: inset 0 1px 1.5px var(--well-shadow);
+  color: var(--text);
   font-family: var(--sans);
   font-size: var(--fs-md);
   line-height: 1.3;
   padding: var(--space-5) var(--space-6);
-  transition: border-color var(--t-fast);
+  transition:
+    border-color var(--t-fast),
+    box-shadow var(--t-fast);
+}
+.modal-input::placeholder {
+  color: var(--text-dim);
 }
 /* Text fields show focus on click too: that is where typing will land. Same
    treatment as an open .dropdown-trigger. */
 .modal-input:focus {
   border-color: var(--primary);
+  box-shadow:
+    inset 0 1px 1.5px var(--well-shadow),
+    0 0 0 3px color-mix(in srgb, var(--primary) 22%, transparent);
 }
 /* Touch: 44px fields; 16px text stops mobile browsers zooming on focus (same
    as .picker-search). */
@@ -4335,7 +4468,7 @@ select {
 /* Hover and keyboard both land on `.active`, so the pointer and the arrow keys
    can never highlight two different rows at once. */
 .dropdown-option.active {
-  background: rgba(255, 255, 255, 0.07);
+  background: rgb(var(--ink-rgb) / 0.07);
 }
 .dropdown-option[aria-selected="true"] {
   color: var(--primary);
@@ -4460,25 +4593,29 @@ select {
   transform: scale(1.08);
   box-shadow: var(--meter-thumb-shadow-active);
 }
-/* Modal actions are glossy pills: neutral by default, .primary = violet. */
+/* Modal actions are Alloy keys: neutral by default, .primary = cobalt. */
 .modal-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: var(--space-3);
-  background: var(--gloss-neutral);
+  background: var(--key);
   color: var(--text-secondary);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-pill);
-  box-shadow: var(--gloss-shadow-neutral);
+  border: 0;
+  border-radius: var(--radius-button);
+  box-shadow:
+    inset 0 1px 0 var(--key-hi),
+    0 1px 0 var(--key-edge),
+    0 2px 4px -2px var(--key-shadow);
   font-family: var(--sans);
   font-size: var(--fs-base);
   font-weight: 600;
+  line-height: 1.25;
   padding: var(--space-4) var(--space-8);
   cursor: pointer;
   transition:
-    filter var(--t-fast),
-    box-shadow var(--t-fast);
+    background-color var(--t-fast),
+    color var(--t-fast);
 }
 /* Touch: every modal action reaches the 44px floor; desktop keeps its pill. */
 @media (pointer: coarse) {
@@ -4487,18 +4624,16 @@ select {
   }
 }
 .modal-btn:hover:not(:disabled) {
-  filter: brightness(1.18);
+  background: var(--surface-3);
   color: var(--text);
 }
 .modal-btn.primary {
-  background: var(--primary);
-  color: var(--on-primary);
-  border-color: transparent;
-  box-shadow: none;
+  background: var(--primary-fill);
+  color: var(--on-primary-fill);
 }
 .modal-btn.primary:hover:not(:disabled) {
-  background: var(--primary-hi);
-  color: var(--on-primary);
+  background: var(--primary-fill-hi);
+  color: var(--on-primary-fill);
 }
 .modal-btn:disabled {
   cursor: default;
@@ -5078,6 +5213,22 @@ select {
   margin-top: var(--space-6);
   overflow: hidden;
 }
+.hf-progress-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--fx-volume-from), var(--fx-volume-to));
+  transition: width 0.45s var(--ease-out);
+}
+@media (prefers-reduced-motion: reduce) {
+  .hf-progress-fill {
+    transition: none;
+  }
+}
+@media (forced-colors: active) {
+  .hf-progress-fill {
+    background: Highlight;
+  }
+}
 .hf-progress-line {
   margin-top: var(--space-3);
   font-size: var(--fs-xs);
@@ -5420,7 +5571,7 @@ select {
 .badge {
   display: inline-flex;
   align-items: center;
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  border: 1px solid rgb(var(--ink-rgb) / 0.12);
   border-radius: var(--radius-pill);
   /* Cap band measured 0.94px HIGH; half the correction sits on top. */
   padding: 0.5px var(--space-4) 1.5px;
@@ -6510,6 +6661,7 @@ select {
 .ken-dialogue-more[data-on] {
   opacity: 1;
   animation: ken-more-bob 900ms steps(2, jump-none) infinite;
+  animation-play-state: var(--loop-play-state, running);
 }
 @keyframes ken-more-bob {
   50% {
@@ -6732,6 +6884,7 @@ select {
 }
 .ken-status[data-icon="think"] .ken-status-badge::after {
   animation: ken-status-breathe var(--dur-breathe) var(--ease-in-out) infinite;
+  animation-play-state: var(--loop-play-state, running);
 }
 @keyframes ken-status-breathe {
   50% {
@@ -6741,6 +6894,7 @@ select {
 .ken-status[data-icon="edit"] .ken-status-badge svg {
   transform-origin: 20% 80%;
   animation: ken-status-scribble 0.9s var(--ease-in-out) infinite;
+  animation-play-state: var(--loop-play-state, running);
 }
 @keyframes ken-status-scribble {
   30% {
@@ -6752,6 +6906,7 @@ select {
 }
 .ken-status[data-icon="search"] .ken-status-badge svg {
   animation: ken-status-scan 1.6s var(--ease-in-out) infinite;
+  animation-play-state: var(--loop-play-state, running);
 }
 @keyframes ken-status-scan {
   25% {
@@ -6766,6 +6921,7 @@ select {
 }
 .ken-status[data-icon="wait"] .ken-status-badge svg {
   animation: ken-status-turn 2.6s var(--ease-in-out) infinite;
+  animation-play-state: var(--loop-play-state, running);
 }
 @keyframes ken-status-turn {
   0%,
@@ -6833,6 +6989,7 @@ select {
   background: currentColor;
   opacity: 0.3;
   animation: ken-status-dot 1.2s var(--ease-in-out) infinite;
+  animation-play-state: var(--loop-play-state, running);
 }
 .ken-status-dots i:nth-child(2) {
   animation-delay: 0.2s;
@@ -6920,6 +7077,7 @@ select {
   width: 40%;
   background: linear-gradient(90deg, transparent, var(--status-ink), transparent);
   animation: ken-status-sweep 1.3s var(--ease-in-out) infinite;
+  animation-play-state: var(--loop-play-state, running);
 }
 .ken-status[data-bar="run"] .ken-status-bar {
   opacity: 1;
@@ -7006,7 +7164,6 @@ select {
    transition (delayed on the way out, instant on the way in) so a hidden
    control is fully inert rather than an invisible click target. Each one
    slides in from its own edge via `--float-x` / `--float-y`. */
-.export-chat,
 .transcript-new-pill,
 .transcript-to-bottom {
   position: absolute;
@@ -7014,17 +7171,20 @@ select {
   display: inline-flex;
   align-items: center;
   gap: var(--space-3);
-  /* 4 + 15 (12px × 1.25) + 4 + 2 border: 25px tall. */
-  padding: var(--space-2) 11px;
-  /* A lighter fill than the cards around it: --surface-2 sat at 1.19:1 on the
-     window background and the controls vanished into it. 30% toward --text
-     gives 3:1 against --bg with --text still 5.85:1 on top. */
-  --float-fill: color-mix(in srgb, var(--text) 30%, var(--surface-2));
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-pill);
+  /* An Alloy key, floating: the key face and edge, plus a drop shadow so it
+     reads over the conversation. 28px tall, like the deck's keys. */
+  height: 28px;
+  padding: 0 var(--space-5);
+  --float-fill: var(--key);
+  border: 0;
+  border-radius: var(--radius-button);
   background: var(--float-fill);
   color: var(--text);
-  box-shadow: var(--shadow-sm);
+  box-shadow:
+    inset 0 1px 0 var(--key-hi),
+    0 1px 0 var(--key-edge),
+    var(--shadow-md);
+  font-weight: 500;
   font-family: var(--sans);
   font-size: var(--fs-sm);
   line-height: 1.25;
@@ -7043,13 +7203,9 @@ select {
     box-shadow var(--t-fast),
     visibility 0s linear var(--dur-enter);
 }
-.export-chat {
-  top: 12px;
-  right: 16px;
-  --float-y: -6px;
-}
 .transcript-new-pill {
-  bottom: 12px;
+  /* Above the dock, which floats over the frame's bottom edge. */
+  bottom: calc(var(--dock-h, 0px) + 12px);
   left: 50%;
   --float-x: -50%;
 }
@@ -7058,17 +7214,18 @@ select {
    stays the pill's own light ink (amber text on the light fill measured under
    3:1); the arrow and a warm rim carry the colour. */
 .transcript-ask-pill {
-  border-color: color-mix(in srgb, var(--warning) 55%, transparent);
+  color: var(--warning);
+  font-weight: 600;
 }
 .transcript-ask-pill svg {
   color: var(--warning);
 }
 .transcript-to-bottom {
   right: 16px;
-  bottom: 12px;
-  /* Round, at the pill's height. */
-  width: 25px;
-  height: 25px;
+  bottom: calc(var(--dock-h, 0px) + 12px);
+  /* Square key, at the pill's height. */
+  width: 28px;
+  height: 28px;
   padding: 0;
   justify-content: center;
 }
@@ -7076,7 +7233,6 @@ select {
 .transcript-new-marker {
   height: 0;
 }
-.export-chat.visible,
 .transcript-new-pill.visible,
 .transcript-to-bottom.visible {
   opacity: 1;
@@ -7092,21 +7248,12 @@ select {
     box-shadow var(--t-fast),
     visibility 0s;
 }
-.export-chat.visible:hover,
 .transcript-new-pill.visible:hover,
 .transcript-to-bottom.visible:hover {
-  background: color-mix(in srgb, var(--float-fill) 86%, var(--primary));
-}
-/* "Exporting…" is a status line, so it keeps full-strength text (a dimmer
-   grey fell under 4.5:1 on the lighter fill) and just stops reacting. */
-.export-chat:disabled,
-.export-chat:disabled:hover {
-  cursor: default;
-  background: var(--float-fill);
+  background: var(--surface-3);
 }
 @media (prefers-reduced-motion: reduce) {
   /* No travel; the fade and the hover colours stay. */
-  .export-chat,
   .transcript-new-pill,
   .transcript-to-bottom {
     --float-y: 0;
@@ -7118,7 +7265,6 @@ select {
       box-shadow var(--t-fast),
       visibility 0s linear var(--dur-enter);
   }
-  .export-chat.visible,
   .transcript-new-pill.visible,
   .transcript-to-bottom.visible {
     transition:
@@ -7144,7 +7290,11 @@ select {
      the gutter always (no shift when it appears) and subtract it back, so the
      content edge lands on the rail whether or not the transcript scrolls. */
   scrollbar-gutter: stable;
-  padding: var(--space-2) calc(var(--rail) - var(--scrollbar)) var(--space-8) var(--rail);
+  /* Centred column, a touch wider than the deck's: the gutters grow past the
+     rail on wide windows. The scrollbar stays at the window edge; only the
+     content moves in. */
+  padding: var(--space-2) calc(var(--gutter-chat) - var(--scrollbar)) var(--space-8)
+    var(--gutter-chat);
   white-space: pre-wrap;
   word-break: break-word;
   /* Fades out under the Ken power banner (see `.ken-power-overlay`). */
@@ -7473,17 +7623,20 @@ select {
 
 /* ── User message chip (the TUI's UserMessage bubble; fill is --user-bg) ── */
 .user-msg {
-  /* Hug the text, but never span the whole pane: cap at a readable measure
-     that scales down on narrow windows. Wraps once it would overflow the cap. */
+  /* Hug the text, but never span the whole pane: the same reading measure as
+     a reply (about 72 characters), narrower on small windows. */
   width: fit-content;
-  max-width: min(620px, 78%);
+  max-width: min(36em, 82%);
   /* Push the bubble to the right edge (user on right, assistant on left). */
   background: var(--user-bg);
   color: var(--user-text);
   border-radius: var(--radius-bubble);
-  padding: var(--space-4) var(--space-6);
-  margin: var(--space-4) 0 var(--space-4) auto;
-  font-size: var(--fs-lg);
+  padding: var(--space-5) var(--space-7);
+  /* Each message starts a new turn: a clear gap above it (margins collapse
+     with the reply before), a smaller one before GG's answer. */
+  margin: calc(var(--space-12) + var(--space-5)) 0 var(--space-8) auto;
+  font-size: var(--fs-read);
+  line-height: 1.55;
   white-space: pre-wrap;
   word-break: break-word;
   /* Reserved, invisible border. The queued state only recolors it, so leaving
@@ -7519,9 +7672,8 @@ select {
    opacity at an arbitrary point in the cycle (measured 0.43–0.62), so the
    promote keyframe's hard start at 0.5 jumped by up to 0.12 in one frame — a
    snap at exactly the moment this animation exists to smooth. A static 0.5 hands
-   the promote a continuous start. It also matches the composer strip, where only
-   `.queued-dot` breathes, and composites a 14px label instead of the whole
-   bubble on every frame for as long as the message sits in the queue. ── */
+   the promote a continuous start, and composites a 14px label instead of the
+   whole bubble on every frame for as long as the message sits in the queue. ── */
 .user-msg.queued {
   position: relative;
   opacity: 0.5;
@@ -7670,28 +7822,29 @@ select {
   font-family: var(--sans);
 }
 
-/* ── Assistant message: blue dot + text ── */
+/* ── Assistant message: the text alone, no lead marker ── */
 .assistant-msg {
   display: flex;
-  gap: var(--space-3);
   padding: var(--space-2) 0;
   align-items: flex-start;
 }
-.assistant-dot {
-  flex: 0 0 auto;
-  line-height: 1.55;
-  /* Same fixed gutter the activity bar's status icon uses, so the assistant dot
-     and the done/idle status icon share one left column. */
-  width: 16px;
-  text-align: left;
-}
+/* Replies, set for easy reading (the "Steps" treatment): about 72 characters
+   a line (most of the column; your messages take the right side), generous
+   line height, a clear gap between paragraphs, and numbered steps as rows.
+   Every paragraph is plain body text in full ink at a regular weight: one
+   reply is often several short messages between tool calls, so "make the
+   first paragraph bigger" made every line look bold.
+   The reply itself spans the whole conversation column so a table can use all
+   of it (like the ask_user band); the reading measure is applied per block
+   below instead. */
 .assistant-text {
   flex: 1 1 auto;
   min-width: 0;
   color: var(--text);
+  font-weight: 400;
   word-break: break-word;
-  /* Match the user message / input size so both sides read uniformly. */
-  font-size: var(--fs-lg);
+  font-size: var(--fs-read);
+  line-height: 1.7;
 }
 
 /* ── Markdown rendering (assistant blocks) ── */
@@ -7801,12 +7954,13 @@ select {
    the dark canvas (a plain dark fill blends in). Accent-tinted text reads as
    "code" at a glance without shouting. */
 .markdown :not(pre) > code {
-  font-family: var(--mono);
-  font-size: 0.88em;
-  /* Zero hue: the mono face already says "code", so the chip does not need a
-     colour to say it again. */
+  font-family: var(--sans);
+  font-size: 0.92em;
+  font-weight: 500;
+  /* Zero hue: the chip already says "code", so it does not need a colour to
+     say it again. */
   color: var(--text);
-  background: rgba(255, 255, 255, 0.08);
+  background: rgb(var(--ink-rgb) / 0.08);
   border: 0;
   border-radius: var(--radius-sm);
   padding: 0.08em 0.4em;
@@ -7826,7 +7980,8 @@ select {
   border: 1px solid var(--border);
   border-radius: var(--radius-card);
   color: var(--text-secondary);
-  font-size: 0.88em;
+  font-family: var(--sans);
+  font-size: 0.92em;
   line-height: 1.55;
   /* Wrap long lines instead of overflowing to a single clipped row. pre-wrap
      keeps the code's own newlines/indentation; overflow-wrap breaks runs wider
@@ -7890,8 +8045,8 @@ select {
   background: var(--surface-2);
 }
 /* Ken Kai (mentor agent). Whole paragraphs of cyan were tiring to read, so the
-   prose stays in normal ink and Ken is marked by what frames it instead: the
-   teal dot, a thin teal rule down the reply, and teal headings / bold / links
+   prose stays in normal ink and Ken is marked by what frames it instead: a
+   thin teal rule down the reply, and teal headings / bold / links
    as accents. Still unmistakably Ken at a glance, without the colour wall.
    The runnable-prompt block keeps its own styling below. */
 .ken-msg .assistant-text {
@@ -8467,7 +8622,11 @@ select {
 .markdown .md-table-collapsible .md-table-scroll {
   margin-bottom: 0;
 }
+/* Full width of whatever holds it (the whole conversation column in a reply).
+   A table's width is a floor, not a cap, so one wider than this still grows
+   and the frame above scrolls it. */
 .markdown table {
+  width: 100%;
   border-collapse: collapse;
   width: 100%;
 }
@@ -8532,32 +8691,84 @@ select {
 .tool-entry {
   min-width: 0;
 }
+/* ── Reading: replies (see .assistant-text) ── */
+/* The first message in a conversation needs no turn gap above it. */
+.transcript > .user-msg:first-child {
+  margin-top: var(--space-4);
+}
+/* Prose and lists keep the ~72-character reading measure. Tables, code blocks
+   and Ken's prompt blocks are data, not lines of reading, so they take the
+   full conversation column (long code lines wrap far less). */
+.assistant-text .markdown > :not(.md-table-scroll, .code-block, .ken-prompt-block) {
+  max-width: 36em;
+}
+/* A clear gap between paragraphs, lists and code: one blank line's worth. */
+.assistant-text .markdown > * + * {
+  margin-top: 1em;
+}
+.assistant-text .markdown strong {
+  color: var(--text);
+}
+.assistant-text .markdown :not(pre) > code {
+  font-size: 0.9em;
+  padding: 0.1em 0.42em;
+}
+.assistant-text .markdown pre {
+  padding: var(--space-6) var(--space-7);
+  font-size: 0.88em;
+  line-height: 1.6;
+}
+.assistant-text .markdown > ul {
+  padding-left: 1.3em;
+}
+.assistant-text .markdown > ul > li + li {
+  margin-top: 0.5em;
+}
+/* Numbered steps become rows: the number in a well on the left, the text
+   flowing beside it, a dashed rule between, so a reader can't lose their
+   place mid-instruction. The counter starts at the list's own start number
+   (see StepList in Markdown.tsx). */
+.assistant-text .markdown > ol {
+  list-style: none;
+  padding: 0;
+  border-top: 1px dashed var(--border-strong);
+}
+.assistant-text .markdown > ol > li {
+  --step-line: 1.7em;
+  counter-increment: step;
+  position: relative;
+  margin: 0;
+  padding: var(--space-5) 0 var(--space-5) calc(var(--step-well) + var(--space-7));
+  border-bottom: 1px dashed var(--border-strong);
+  color: var(--text);
+}
+/* The well centres on the step's first line. --step-line is a registered
+   length, so it resolves at the item's font size before the smaller number
+   inherits it. */
+.assistant-text .markdown > ol > li::before {
+  content: counter(step);
+  position: absolute;
+  left: 0;
+  top: calc(var(--space-5) + (var(--step-line) - var(--step-well-h)) / 2);
+  width: var(--step-well);
+  height: var(--step-well-h);
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius-sm);
+  background: var(--well);
+  box-shadow: inset 0 1px 1.5px var(--well-shadow);
+  font-size: var(--fs-xs);
+  font-weight: 650;
+  line-height: 1;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Tool rows (styled verb/detail/summary, no lead marker) ── */
 .tool-row {
   display: flex;
-  gap: var(--space-3);
   padding: 1px 0;
   align-items: center;
-}
-.tool-dot {
-  flex: 0 0 auto;
-  /* Running → done recolours (purple → green/red) instead of flipping. */
-  transition: color var(--t-out);
-}
-/* New tool calls slide in from the left edge of the pinned panel. Rows are
-   keyed by call id, so a row finishing never replays this. */
-@keyframes tool-in {
-  from {
-    opacity: 0;
-    transform: translateX(-6px);
-  }
-}
-.livetoolpanel .tool-row {
-  animation: tool-in var(--dur-enter) var(--ease-out) backwards;
-}
-@media (prefers-reduced-motion: reduce) {
-  .livetoolpanel .tool-row {
-    animation-name: fade-in;
-  }
 }
 .tool-line {
   flex: 1 1 auto;
@@ -8824,12 +9035,8 @@ select {
 }
 @media (prefers-reduced-motion: reduce) {
   .blink,
-  .queued-dot,
   .subagents-critter-working {
     animation: none;
-  }
-  .queued-dot {
-    opacity: 0.52;
   }
 }
 
@@ -9950,12 +10157,35 @@ select {
   }
 }
 
+/* The current tool: one floating key-shaped pill, centred over the deck. Its
+   words fade across as calls change (.fade-swap); the pill itself only
+   appears once per run and stays put. */
 .livetoolpanel {
-  padding: var(--space-4) var(--rail) var(--space-2);
   display: flex;
-  flex-direction: column;
-  /* Top border to frame the panel, matching the activity bar below it. */
-  border-top: 1px solid var(--border);
+  justify-content: center;
+  /* Clear space above as well as below: under the critters' terrain the pill
+     sat right against the ground. */
+  padding: var(--space-4) var(--gutter) var(--space-4);
+  pointer-events: none;
+}
+.tool-pill {
+  display: inline-flex;
+  align-items: center;
+  max-width: min(100%, 36em);
+  height: 30px;
+  padding: 0 var(--space-6);
+  border-radius: var(--radius-button);
+  background: var(--surface-1);
+  box-shadow:
+    inset 0 1px 0 var(--key-hi),
+    0 1px 0 var(--key-edge),
+    var(--shadow-sm);
+  font-size: var(--fs-sm);
+  pointer-events: auto;
+  animation: fade-in var(--dur-pop-in) var(--ease-out) backwards;
+}
+.tool-pill .tool-line {
+  flex: 1 1 auto;
 }
 
 /* ── Plan step completion row (✓ from [DONE:n] markers): blue circle + tick,
@@ -9976,8 +10206,8 @@ select {
   width: 18px;
   height: 18px;
   border-radius: var(--radius-pill);
-  background: var(--primary);
-  color: var(--on-primary);
+  background: var(--primary-fill);
+  color: var(--on-primary-fill);
   font-size: var(--fs-xs);
   font-weight: 700;
   line-height: 1;
@@ -10225,6 +10455,7 @@ select {
   );
   transform: translate(-50%, -50%) rotate(0turn);
   animation: working-beam-spin 1.96s linear infinite;
+  animation-play-state: var(--loop-play-state, running);
   will-change: transform;
 }
 @keyframes working-beam-spin {
@@ -10366,39 +10597,18 @@ select {
 /* Send is the one filled control in the composer, so it reads as the primary
    action whether it is sending or stopping the run. */
 .icon-circle-primary {
-  color: var(--on-primary);
-  background: var(--primary);
+  color: var(--on-primary-fill);
+  background: var(--primary-fill);
   box-shadow: none;
 }
 .icon-circle-primary:hover:not(:disabled) {
-  color: var(--on-primary);
-  background: var(--primary-hi);
+  color: var(--on-primary-fill);
+  background: var(--primary-fill-hi);
 }
 .icon-circle:disabled {
   cursor: not-allowed;
   opacity: 0.4;
 }
-/* Decorative rim only; the original button remains the hit target and fallback. */
-.inputactions-trailing > .action-metal,
-.enhance-pill-host > .action-metal,
-.metal-button > .action-metal {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  pointer-events: none;
-}
-.action-metal-surface {
-  border-radius: var(--radius-pill);
-}
-.inputactions-trailing:has(> .action-metal.metal-fx-root) > .icon-circle-primary,
-.enhance-pill-host:has(> .action-metal.metal-fx-root) > .enhance-pill {
-  position: relative;
-  z-index: 1;
-  background: transparent;
-  color: var(--text);
-}
-
 /* Chat-input stack: the textarea plus (transiently) the enhance animation layer.
    Highlights for enhanced terms are NOT drawn over the input — an overlay can't
    reliably track a native textarea's text metrics. They live in the sent bubble
@@ -10623,83 +10833,6 @@ select {
    tail) — brand periwinkle, mirroring the Matrix decode head. */
 .enh-diss-lead {
   color: #c4b5fd;
-}
-
-/* "Enhance" pill — pinned to the center of the input box's top border,
-   overlapping it. Absolutely positioned against .inputwrap (position: relative),
-   so it's fully decoupled from the textarea's text flow: it can't overlap text,
-   drift with wrapping, shift the caret, or jump the box height. Nudged up by
-   ~half its height so it straddles the top border like a tab. */
-.enhance-pill-host {
-  position: absolute;
-  top: -11px;
-  /* Centered on the top border (not top-right) so it stays clear of the status
-     row's "esc to cancel" button, which sits in the right corner just above. */
-  left: 50%;
-  z-index: 4;
-  display: inline-flex;
-  /* Hidden resting state. Always mounted so it can animate BOTH ways: the
-     `.visible` class fades + slides it in; removing it fades + slides it out.
-     pointer-events off while hidden so it can't be clicked mid-fade.
-     translateX(-50%) keeps it centered through the transform transition. */
-  opacity: 0;
-  transform: translate(-50%, -4px) scale(0.96);
-  pointer-events: none;
-  transition:
-    opacity var(--t-fast),
-    transform var(--t-fast);
-}
-.enhance-pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  /* Cap band measured 2.10px HIGH; half the correction sits on top. */
-  padding: 0.95px var(--space-5) 3.05px;
-  /* Plain fallback when Metal is inactive or WebGL is unavailable. */
-  background: var(--primary);
-  border: 1px solid transparent;
-  box-shadow: none;
-  border-radius: var(--radius-pill);
-  color: var(--on-primary);
-  font-family: var(--sans);
-  font-size: var(--fs-sm);
-  font-weight: 600;
-  cursor: pointer;
-}
-.enhance-pill-host.visible {
-  opacity: 1;
-  transform: translate(-50%, 0) scale(1);
-  pointer-events: auto;
-}
-.enhance-pill:hover:not(:disabled) {
-  filter: brightness(1.08);
-}
-.enhance-pill:disabled {
-  cursor: default;
-}
-/* Pulse only while visible — scoped so the animation can't override the hidden
-   state's opacity:0 and flash a hidden pill. */
-.enhance-pill-host.visible .enhance-pill.enhancing {
-  animation: enhance-pulse 1s ease-in-out infinite;
-  animation-play-state: var(--loop-play-state, running);
-}
-@keyframes enhance-pulse {
-  0%,
-  100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.5;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .enhance-pill-host {
-    transition: none;
-  }
-  .enhance-pill-host.visible .enhance-pill.enhancing {
-    animation: none;
-  }
 }
 
 /* A corrected technical term — highlighted, with a teaching tooltip on hover.
@@ -11816,12 +11949,20 @@ select {
   align-items: center;
   min-width: 0;
 }
+/* Above the banner: the running version, then a "What's new" button for
+   what changed in it. Hidden until the version is read, so the row never
+   shifts sideways when the number arrives. */
 .home-version-row {
   align-self: center;
   display: inline-flex;
   align-items: center;
-  gap: var(--space-5);
+  gap: var(--space-4);
 }
+.home-version-row.is-pending {
+  visibility: hidden;
+}
+/* The version is a label, not a control: same size as What's new, lighter
+   weight and ink. */
 .home-version {
   /* Backing over the dot field; negative margins grow it outward so the text
      (and the update button that replaces it) keep their position. */
@@ -11832,8 +11973,12 @@ select {
   font-family: var(--sans);
   font-size: var(--fs-md);
   font-weight: 500;
-  color: var(--text);
-  letter-spacing: 0.02em;
+  line-height: 1.3;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+.home-version-sep {
+  color: var(--text-secondary);
 }
 /* Small text button to the right of the version that re-opens the What's-new
    window. Borderless + muted so it reads as a quiet secondary link, not a CTA. */
@@ -11866,7 +12011,7 @@ select {
   }
 }
 .home-whatsnew:hover {
-  color: #fff;
+  color: var(--primary);
   text-decoration-color: currentColor;
 }
 .home-whatsnew:focus-visible {
@@ -13059,7 +13204,7 @@ select {
   width: 7px;
   height: 7px;
   border-radius: 1.5px;
-  background: var(--primary);
+  background: var(--primary-fill);
   transform: translate(-50%, -50%) rotate(45deg);
 }
 .rank-level {
@@ -13382,148 +13527,6 @@ select {
   75% {
     color: #ff9ede;
   }
-}
-
-/* ── Rank scorecard — RPG character card: rank header, big level number +
-   XP meter, then colored stat bars. Flat, no boxes-in-boxes. ── */
-.scorecard-modal {
-  width: min(380px, 90vw);
-}
-.scorecard {
-  display: flex;
-  flex-direction: column;
-  padding: 0 var(--space-1) var(--space-1);
-  text-align: left;
-}
-.scorecard-modal .modal-head {
-  margin-bottom: var(--space-1);
-}
-.scorecard-rank {
-  font-size: var(--fs-4xl);
-  font-weight: 800;
-  letter-spacing: -0.04em;
-  line-height: 1.15;
-}
-.scorecard-tier {
-  color: var(--text-muted);
-  font-size: var(--fs-sm);
-  font-weight: 600;
-  letter-spacing: 0.02em;
-}
-.scorecard-level {
-  display: flex;
-  align-items: stretch;
-  gap: var(--space-7);
-  margin-top: var(--space-9);
-}
-.scorecard-level-num {
-  color: var(--text);
-  font-size: 40px;
-  font-weight: 800;
-  letter-spacing: -0.04em;
-  /* Digits have no descenders — trim the font box's below-baseline space so
-     the stretched meter's bar sits flush with the number's visual bottom. */
-  line-height: 0.76;
-  font-variant-numeric: tabular-nums;
-}
-.scorecard-level-meter {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  justify-content: space-between;
-}
-.scorecard-level-row {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  color: var(--text);
-  font-size: var(--fs-base);
-  font-weight: 700;
-}
-.scorecard-level-row span:last-child {
-  color: var(--text-muted);
-  font-family: var(--sans);
-  font-size: var(--fs-xs);
-  font-weight: 500;
-}
-.scorecard-bar {
-  height: 7px;
-  border-radius: var(--radius-pill);
-  background: rgba(0, 0, 0, 0.38);
-  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.4);
-  overflow: hidden;
-}
-.scorecard-bar span {
-  display: block;
-  height: 100%;
-  border-radius: inherit;
-  background: var(--primary);
-}
-.scorecard-divider {
-  height: 1px;
-  margin: var(--space-8) 0 var(--space-7);
-  background: var(--border);
-}
-.scorecard-stats {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-5);
-}
-.scorecard-stat {
-  display: grid;
-  grid-template-columns: 92px minmax(0, 1fr) auto;
-  align-items: center;
-  gap: var(--space-6);
-}
-.scorecard-stat-label {
-  color: var(--text-muted);
-  font-size: var(--fs-sm);
-  font-weight: 500;
-}
-.scorecard-stat-bar {
-  height: 6px;
-  border-radius: var(--radius-pill);
-  background: rgba(0, 0, 0, 0.38);
-  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.4);
-  overflow: hidden;
-}
-.scorecard-stat-bar span {
-  display: block;
-  height: 100%;
-  border-radius: inherit;
-  background: var(--text-dim);
-}
-.scorecard-stat b {
-  min-width: 44px;
-  color: var(--text);
-  font-size: var(--fs-sm);
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-  text-align: right;
-}
-/* The milestone the bar is filling toward — present but never louder than the count. */
-.scorecard-stat-goal {
-  margin-left: var(--space-2);
-  color: var(--text-dim);
-  font-size: var(--fs-xs);
-  font-style: normal;
-  font-weight: 500;
-}
-.scorecard-footer {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  margin-top: var(--space-8);
-  font-size: var(--fs-xs);
-}
-.scorecard-footer span {
-  color: var(--text-dim);
-}
-.scorecard-footer b {
-  color: var(--text-muted);
-  font-weight: 500;
-  font-variant-numeric: tabular-nums;
 }
 
 /* Compact subscription quota in the title strip. The track is the primary
@@ -14089,14 +14092,6 @@ select {
   align-items: center;
   gap: var(--space-4);
   min-width: 0;
-}
-.queued-dot {
-  flex: 0 0 auto;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  animation: ggqueuedpulse 2s ease-in-out infinite;
-  animation-play-state: var(--loop-play-state, running);
 }
 .queued-bar-text {
   flex: 1 1 auto;
@@ -14719,6 +14714,31 @@ select {
   right: auto;
   width: 25px;
   height: 25px;
+}
+/* Split panes: every pane holds room for the keys a focused pane adds
+   (rearrange, copy, split right, split down) beside its swap and close keys,
+   so focusing a pane never changes whether the header wraps. Right-aligned,
+   the swap and close targets then sit in the same place focused or not, and a
+   swapped-in pane's target lands under the pointer that swapped it. The
+   200px tier below gives these keys their own lines instead. */
+@container conversation-pane (min-width: 201px) {
+  .chat-head-pane-chrome:has(.pane-swap-button, .workspace-pane-close) {
+    --pane-key: 25px;
+    justify-content: flex-end;
+    min-width: calc(7 * var(--pane-key) + 6 * 3px);
+  }
+  @media (hover: none), (pointer: coarse) {
+    .chat-head-pane-chrome:has(.pane-swap-button, .workspace-pane-close) {
+      --pane-key: 44px;
+    }
+  }
+  /* The primary pane has no Close: hold its slot, so a pane swapped into the
+     middle keeps its swap keys exactly where the outgoing pane's were. */
+  .chat-head-pane-chrome:has(.pane-swap-button):not(:has(.workspace-pane-close))::after {
+    content: "";
+    flex: none;
+    width: var(--pane-key);
+  }
 }
 /* Narrow panes: keep the project's counts readable beside the pane controls.
    The usage meter keeps its window label and bar; its tooltip and accessible
@@ -17819,16 +17839,10 @@ select {
    signal (only the chosen/primary action is tinted). The band itself is a plain
    surface block with a neutral keyline — it must not glow blue at the reader. */
 .ask-band {
-  /* Shrink-wrapped, not full-bleed: a two-word confirm and a three-row choice
-     should not occupy the same width. `fit-content` sizes to the longest
-     question or option, and `max-width: 100%` stops a long one overflowing the
-     transcript column. */
-  width: fit-content;
-  /* It belongs to the reply above it, so it starts on the reply's text column
-     (the 16px dot gutter + 6px gap of .assistant-msg), like a table or code
-     block does, instead of poking out to the dot. */
-  margin: var(--space-4) 0 var(--space-3) var(--space-11);
-  max-width: calc(100% - 22px);
+  /* The whole conversation column, left to right: a question is the turn's
+     focus, and the full width keeps every option on one line. */
+  width: auto;
+  margin: var(--space-4) 0 var(--space-3);
   padding: var(--space-7) var(--space-8);
   /* A step above the transcript, plus a hairline: at --surface-1 the band was
      the same value as the canvas behind it and simply dissolved into it. */
@@ -17996,12 +18010,12 @@ select {
    inherited from `.btn-primary`) because the rule above is the more specific
    selector and would otherwise leave near-black label text on the dark row. */
 .ask-options .btn.btn-primary {
-  background: var(--primary);
-  color: var(--on-primary);
+  background: var(--primary-fill);
+  color: var(--on-primary-fill);
   border-color: transparent;
 }
 .ask-options .btn.btn-primary:hover:not(:disabled) {
-  background: var(--primary-hi);
+  background: var(--primary-fill-hi);
   border-color: transparent;
 }
 /* The lead slot (keycap or checkbox) and the badge sit on the label's FIRST
@@ -18054,7 +18068,7 @@ select {
    to ~1.6:1 on it. Both the hint and the accelerator index switch to the fill's
    own near-black ink, softened rather than lightened. */
 .btn-primary .ask-row-hint {
-  color: color-mix(in srgb, var(--on-primary) 78%, var(--primary));
+  color: color-mix(in srgb, var(--on-primary-fill) 78%, var(--primary));
 }
 /* Accelerator index, drawn as a keycap so it reads as "press this key" rather
    than a list number. Hairline only: a hint, never competing with the label. */
@@ -18071,8 +18085,8 @@ select {
   color: var(--text-muted);
 }
 .btn-primary .ask-num {
-  border-color: color-mix(in srgb, var(--on-primary) 30%, transparent);
-  color: color-mix(in srgb, var(--on-primary) 70%, var(--primary));
+  border-color: color-mix(in srgb, var(--on-primary-fill) 30%, transparent);
+  color: color-mix(in srgb, var(--on-primary-fill) 70%, var(--primary));
 }
 /* Keeps the slot (10+ options, a typed answer) so labels stay aligned, with no
    keycap drawn. After the selected rule above, which would otherwise outline
@@ -18090,8 +18104,8 @@ select {
   border-radius: 5px;
 }
 .btn-primary .ask-box {
-  border-color: var(--on-primary);
-  background: var(--on-primary);
+  border-color: var(--on-primary-fill);
+  background: var(--on-primary-fill);
   color: var(--primary);
 }
 /* The keyboard hint under an open band: how to answer without the mouse. */

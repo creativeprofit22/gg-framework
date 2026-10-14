@@ -3,7 +3,7 @@ import { save } from "@tauri-apps/plugin-dialog";
 import { exportTranscriptName, saveTranscript } from "./agent";
 import { toast } from "./toast";
 
-/** Transcript export to Markdown (activity-bar download button). Extracted from App.tsx. */
+/** Transcript export to Markdown (the deck's ⋯ keypad). Extracted from App.tsx. */
 export function useTranscriptExport() {
   // Transcript export (the download button in the activity bar). The chosen
   // folder is remembered so the second export lands where the first one did —
@@ -13,7 +13,6 @@ export function useTranscriptExport() {
   // The export pill only exists while the pointer is over the chat area. Kept
   // true while a save is in flight so the button doesn't vanish mid-click when
   // the native dialog steals the pointer and fires mouseleave.
-  const [chatHovered, setChatHovered] = useState(false);
   const exportTranscript = useCallback(async () => {
     setExporting(true);
     try {
@@ -44,5 +43,5 @@ export function useTranscriptExport() {
       setExporting(false);
     }
   }, []);
-  return { exporting, chatHovered, setChatHovered, exportTranscript };
+  return { exporting, exportTranscript };
 }

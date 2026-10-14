@@ -1,14 +1,22 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, renderHook, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-// agent.ts binds to the Tauri window at import; the button only needs killTask.
-vi.mock("./agent", () => ({ killTask: vi.fn(async () => ({ ok: true })) }));
+// agent.ts binds to the Tauri window at import; the tasks panel only needs killTask.
+vi.mock("./agent", () => ({
+  killTask: vi.fn(async () => ({ ok: true })),
+  getGitOverview: vi.fn(),
+  openUrl: vi.fn(),
+  getRadioState: vi.fn(),
+  setRadio: vi.fn(),
+  setRadioVolume: vi.fn(),
+}));
 vi.mock("./toast", () => ({ toast: vi.fn() }));
 
-import { killTask, type BackgroundTask } from "./agent";
+import { getRadioState, killTask, type BackgroundTask } from "./agent";
+import { useRadio } from "./useRadio";
 import { toast } from "./toast";
-import { BackgroundTasksButton } from "./BackgroundTasksButton";
+import { TasksPanel } from "./Deck";
 import { formatBackgroundTaskStatus, isBackgroundTaskRunning } from "./background-task-status";
 
 function task(over: Partial<BackgroundTask> = {}): BackgroundTask {
@@ -16,7 +24,7 @@ function task(over: Partial<BackgroundTask> = {}): BackgroundTask {
     id: "t1",
     pid: 101,
     command: "pnpm dev",
-    startedAt: 1,
+    startedAt: Date.now(),
     exitCode: null,
     isRunning: true,
     signal: null,
@@ -28,8 +36,10 @@ function task(over: Partial<BackgroundTask> = {}): BackgroundTask {
 
 afterEach(cleanup);
 
-describe("BackgroundTasksButton", () => {
-  it("counts only daemon-live tasks and offers kill only for them", () => {
+// Moved from the Fork's BackgroundTasksButton suite: the Deck's tasks panel
+// replaced that footer popover, so its daemon-liveness rules live here now.
+describe("Deck TasksPanel", () => {
+  it("counts only daemon-live tasks and offers Stop only for them", () => {
     const tasks = [
       task({ id: "run", command: "running cmd", pid: 11 }),
       task({ id: "ok", command: "exited cmd", isRunning: false, exitCode: 0, completedAt: 2 }),
@@ -50,28 +60,24 @@ describe("BackgroundTasksButton", () => {
         stopReason: "inactive",
         completedAt: 2,
       }),
+      task({ id: "bad", command: "failed cmd", isRunning: false, exitCode: 2, completedAt: 2 }),
     ];
-    render(<BackgroundTasksButton tasks={tasks} />);
+    render(<TasksPanel tasks={tasks} onEmpty={vi.fn()} onClose={vi.fn()} />);
 
-    const button = screen.getByRole("button", { name: /background task/ });
-    expect(button.textContent).toContain("1 background task");
-    expect(button.textContent).not.toContain("tasks");
-
-    fireEvent.click(button);
-    expect(screen.getByText("pid 11")).toBeTruthy();
-    expect(screen.getByText("exit 0")).toBeTruthy();
+    expect(screen.getByText("1 running \u00b7 4 finished")).toBeTruthy();
+    expect(screen.getByText("Finished")).toBeTruthy();
     expect(screen.getByText("signal SIGTERM")).toBeTruthy();
     expect(screen.getByText("stopped: no output")).toBeTruthy();
-    // Upstream redesign labels the per-task control "Stop <command>".
+    expect(screen.getByText("Exit 2")).toBeTruthy();
     expect(screen.getAllByRole("button", { name: /^Stop / })).toHaveLength(1);
     expect(screen.getByRole("button", { name: "Stop running cmd" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Stop all" })).toBeNull();
   });
 
   it("says so when stopping a task fails", async () => {
     vi.mocked(killTask).mockResolvedValueOnce({ ok: false, error: "process not found" });
-    render(<BackgroundTasksButton tasks={[task()]} />);
+    render(<TasksPanel tasks={[task()]} onEmpty={vi.fn()} onClose={vi.fn()} />);
 
-    fireEvent.click(screen.getByRole("button", { name: /background task/ }));
     fireEvent.click(screen.getByRole("button", { name: /^Stop / }));
 
     await waitFor(() =>
@@ -93,5 +99,18 @@ describe("background task status", () => {
     const legacy: BackgroundTask = { id: "l", pid: 5, command: "x", startedAt: 1, exitCode: null };
     expect(isBackgroundTaskRunning(legacy)).toBe(true);
     expect(isBackgroundTaskRunning({ ...legacy, exitCode: 1 })).toBe(false);
+  });
+});
+
+describe("deck radio", () => {
+  it("survives a failed station read without an unhandled rejection", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.mocked(getRadioState).mockRejectedValueOnce(new Error("sidecar restarting"));
+    const { result } = renderHook(() => useRadio());
+    await waitFor(() =>
+      expect(warn).toHaveBeenCalledWith("radio state read failed", expect.any(Error)),
+    );
+    expect(result.current.stations).toEqual([]);
+    warn.mockRestore();
   });
 });

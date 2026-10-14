@@ -3,50 +3,13 @@
   position: relative;
   display: flex;
   flex-direction: column;
-  flex: 1 1 0;
-  min-height: 0;
   min-width: 0;
-  overflow: hidden;
-  background: var(--bg);
   color: var(--text);
 }
 /* Reuse Settings' scroll rail and bottom padding so the final check clears the
    same floating tab capsule, even in a short window. */
 .checklist-scroll {
   min-height: 0;
-}
-/* Use the existing snapshot transition helper: navigation commits immediately,
-   and only its image dissolves. No timer or invisible interactive exit layer. */
-.checklist-screen {
-  view-transition-name: gg-checklist;
-}
-@keyframes checklist-dissolve-out {
-  to {
-    opacity: 0;
-    filter: blur(6px);
-  }
-}
-::view-transition-group(gg-checklist) {
-  animation-duration: var(--dur-dissolve);
-}
-::view-transition-new(gg-checklist) {
-  animation: dissolve-in var(--dur-dissolve) var(--ease-out) both;
-}
-::view-transition-old(gg-checklist) {
-  animation: checklist-dissolve-out var(--dur-dissolve) var(--ease-in) both;
-}
-@supports not (view-transition-name: gg-checklist) {
-  .checklist-screen {
-    animation: dissolve-in var(--dur-dissolve) var(--ease-out) backwards;
-  }
-}
-@media (prefers-reduced-motion: reduce) {
-  .checklist-screen,
-  ::view-transition-group(gg-checklist),
-  ::view-transition-new(gg-checklist),
-  ::view-transition-old(gg-checklist) {
-    animation: none;
-  }
 }
 .checklist-accessible-title {
   position: absolute;
@@ -210,4 +173,40 @@
   .checklist-screen .checklist-section {
     padding-inline: var(--space-7);
   }
+}
+
+/* In the deck: the view tabs sit inline at the top, not floating over the
+   page, and the deck's tool body does the scrolling. */
+/* The tab bar sticks flush to the top of the scroll area: it starts at the
+   very top (pulled up over the body's padding) and sticks at that same point,
+   on a full-width backing of the panel's own surface, so nothing scrolling
+   underneath ever shows above or beside it. */
+.tool-body .checklist-screen .settings-tab-dock {
+  position: sticky;
+  top: calc(-1 * var(--tool-pad-top));
+  z-index: 2;
+  justify-content: flex-start;
+  margin: calc(-1 * var(--tool-pad-top)) calc(-1 * var(--tool-pad-x)) var(--space-4);
+  padding: var(--space-3) var(--tool-pad-x);
+  background: var(--surface-1);
+  box-shadow: 0 1px 0 var(--border);
+  pointer-events: auto;
+}
+.tool-body .checklist-screen .settings-tabs {
+  /* 34px around 26px tabs: a 4px gap, so the well's corner is 8 + 4. */
+  --seg-inset: var(--space-2);
+  height: 34px;
+  max-width: 100%;
+  box-shadow: inset 0 1px 2px var(--well-shadow);
+}
+.tool-body .checklist-screen .settings-tab {
+  height: 26px;
+}
+.tool-body .checklist-scroll {
+  overflow: visible;
+  padding: 0;
+}
+.tool-body .checklist-page {
+  padding: 0;
+  max-width: none;
 }

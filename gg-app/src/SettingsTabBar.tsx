@@ -7,8 +7,11 @@ import { viewportScale } from "./motion-geometry";
  * settings tab bar (segmented-tabs.ts, itself Glance's SettingsTabBar):
  * icon-only tabs, with the selected tab widening to show its label under one
  * pill. Hover only lightens a tab. Selecting one (click, or arrow keys) springs
- * the pill across, glides the tabs its label pushed aside, and unfurls the new
- * label out of its icon (sharp opacity entrance).
+ * the whole capsule at once: the old label folds into its icon while the new
+ * one unfurls out of its own, and the pill travels between them. Labels and
+ * pill share one spring, so the capsule's width, the tabs' places and the pill
+ * stay in step the whole way (snapping the layout and springing only the pill
+ * made every tab hop while the pill caught up).
  */
 
 export interface SettingsTab<Id extends string> {
@@ -37,10 +40,20 @@ interface Box {
   height: number;
 }
 
-/** Where everything sat on screen just before a selection change. */
+/** Where everything sat just before a selection change (mid-spring included). */
 interface Before {
+  bar: DOMRect;
   pill: DOMRect | null;
-  tabs: Map<string, DOMRect>;
+  /** Per tab id: its label's width and opacity, and the tab's side padding. */
+  tabs: Map<string, { label: number; opacity: string; padLeft: string; padRight: string }>;
+}
+
+function tabButtons(bar: HTMLElement): HTMLElement[] {
+  return Array.from(bar.querySelectorAll<HTMLElement>(":scope > [data-tab-id]"));
+}
+
+function labelOf(tab: HTMLElement): HTMLElement | null {
+  return tab.querySelector<HTMLElement>(".settings-tab-label");
 }
 
 function readMotion(): { easing: string; durationMs: number; reduced: boolean } {
@@ -56,10 +69,6 @@ function readMotion(): { easing: string; durationMs: number; reduced: boolean } 
       (typeof window.matchMedia === "function" &&
         window.matchMedia("(prefers-reduced-motion: reduce)").matches),
   };
-}
-
-function tabButtons(bar: HTMLElement): HTMLElement[] {
-  return Array.from(bar.querySelectorAll<HTMLElement>(":scope > [data-tab-id]"));
 }
 
 function boxOf(tab: HTMLElement): Box {
@@ -109,22 +118,40 @@ export function SettingsTabBar<Id extends string>({
   const beforeRef = useRef<Before | null>(null);
   const animationsRef = useRef(new Set<Animation>());
   const placementRef = useRef("");
+  // Re-checks the pill once the spring ends (set by the layout effect below).
+  const settledRef = useRef<(() => void) | null>(null);
 
   function select(id: Id): void {
     const bar = barRef.current;
     if (id === selected || !bar) return;
     const pill = pillRef.current;
     beforeRef.current = {
+      bar: bar.getBoundingClientRect(),
       pill: pill?.classList.contains("is-placed") ? pill.getBoundingClientRect() : null,
       tabs: new Map(
-        tabButtons(bar).map((el) => [el.dataset["tabId"] ?? "", el.getBoundingClientRect()]),
+        tabButtons(bar).map((el) => {
+          const style = getComputedStyle(el);
+          const label = labelOf(el);
+          return [
+            el.dataset["tabId"] ?? "",
+            {
+              label: label?.offsetWidth ?? 0,
+              opacity: label ? getComputedStyle(label).opacity : "0",
+              padLeft: style.paddingLeft,
+              padRight: style.paddingRight,
+            },
+          ];
+        }),
       ),
     };
     onSelect(id);
   }
 
   // Selection changed: put the pill on the new tab and, unless motion is
-  // reduced, spring everything from where it was on screen a moment ago.
+  // reduced, spring the labels, paddings and pill from where they were a
+  // moment ago. Every moving length interpolates on the same curve, so each
+  // tab's place (a sum of them) does too, and the pill lands on its tab at
+  // every frame, not just at the end.
   useLayoutEffect(() => {
     const bar = barRef.current;
     const pill = pillRef.current;
@@ -134,7 +161,6 @@ export function SettingsTabBar<Id extends string>({
     const before = beforeRef.current;
     beforeRef.current = null;
 
-    const all = tabButtons(bar);
     cancelOwned(animationsRef.current);
     const to = boxOf(target);
     paint(pill, to);
@@ -144,12 +170,7 @@ export function SettingsTabBar<Id extends string>({
     const motion = readMotion();
     if (!before || motion.reduced) return;
     const spring = { duration: motion.durationMs, easing: motion.easing };
-    const barRect = bar.getBoundingClientRect();
-    const scale = viewportScale(bar, barRect);
-    const moves = all.map((el) => {
-      const old = before.tabs.get(el.dataset["tabId"] ?? "");
-      return { el, dx: old ? (old.left - el.getBoundingClientRect().left) / scale : 0 };
-    });
+    const scale = viewportScale(bar, bar.getBoundingClientRect());
     const animate = (el: Element, frames: Keyframe[]): void => {
       const animation = el.animate(frames, spring);
       const owned = animationsRef.current;
@@ -158,19 +179,48 @@ export function SettingsTabBar<Id extends string>({
         owned.delete(animation);
         animation.onfinish = null;
         animation.oncancel = null;
+        // A font or layout change that landed mid-spring is picked up now.
+        if (owned.size === 0) settledRef.current?.();
       };
       animation.onfinish = release;
       animation.oncancel = release;
     };
-    for (const { el, dx } of moves) {
-      if (Math.abs(dx) > 0.5)
-        animate(el, [{ transform: `translateX(${dx}px)` }, { transform: "none" }]);
+    let targetOpened = false;
+    for (const el of tabButtons(bar)) {
+      const old = before.tabs.get(el.dataset["tabId"] ?? "");
+      if (!old) continue;
+      const style = getComputedStyle(el);
+      if (old.padLeft !== style.paddingLeft || old.padRight !== style.paddingRight) {
+        animate(el, [
+          { paddingLeft: old.padLeft, paddingRight: old.padRight },
+          { paddingLeft: style.paddingLeft, paddingRight: style.paddingRight },
+        ]);
+      }
+      const label = labelOf(el);
+      if (!label) continue;
+      const width = label.offsetWidth;
+      if (Math.abs(old.label - width) < 0.5) continue;
+      if (el === target) {
+        targetOpened = true;
+        animate(label, [
+          { width: `${old.label}px`, opacity: 0 },
+          { width: `${width}px`, opacity: 1 },
+        ]);
+      } else {
+        // Folding back into its icon, fading as it goes.
+        animate(label, [
+          { width: `${old.label}px`, opacity: old.opacity || 1 },
+          { width: `${width}px`, opacity: 0 },
+        ]);
+      }
     }
 
     if (before.pill) {
+      // In the bar's own coordinates as it was then: the labels restart from
+      // their old widths, so at the first frame the bar is back where it was.
       const from: Box = {
-        x: (before.pill.left - barRect.left) / scale - bar.clientLeft,
-        y: (before.pill.top - barRect.top) / scale - bar.clientTop,
+        x: (before.pill.left - before.bar.left) / scale - bar.clientLeft,
+        y: (before.pill.top - before.bar.top) / scale - bar.clientTop,
         width: before.pill.width / scale,
         height: before.pill.height / scale,
       };
@@ -188,8 +238,10 @@ export function SettingsTabBar<Id extends string>({
       ]);
     }
 
-    const label = target.querySelector(".settings-tab-label");
-    if (label) animate(label, [{ opacity: 0 }, { opacity: 1 }]);
+    // The new label fades in even when it has no width to spring (first
+    // layout, or a measurement-free environment).
+    const label = labelOf(target);
+    if (label && !targetOpened) animate(label, [{ opacity: 0 }, { opacity: 1 }]);
   }, [selected]);
 
   // Layout changes that are not a selection (fonts landing, a window resize)
@@ -216,7 +268,15 @@ export function SettingsTabBar<Id extends string>({
     void document.fonts?.ready.then(() => {
       if (alive) place();
     });
-    const observer = typeof ResizeObserver === "function" ? new ResizeObserver(place) : null;
+    // The spring itself resizes the bar every frame, so the bar's own resize
+    // observer waits for it to finish; outside changes (window, zoom) still
+    // cut in at once.
+    const placeWhenSettled = (): void => {
+      if (owned.size === 0) place();
+    };
+    settledRef.current = placeWhenSettled;
+    const observer =
+      typeof ResizeObserver === "function" ? new ResizeObserver(placeWhenSettled) : null;
     observer?.observe(bar);
     // CSS zoom can leave local ResizeObserver sizes unchanged. ZoomController
     // writes the root style; window resize covers repositioning of the dock.
@@ -228,6 +288,7 @@ export function SettingsTabBar<Id extends string>({
     window.addEventListener("resize", place);
     return () => {
       alive = false;
+      settledRef.current = null;
       observer?.disconnect();
       zoomObserver.disconnect();
       window.removeEventListener("resize", place);
@@ -278,7 +339,9 @@ export function SettingsTabBar<Id extends string>({
                 <TabIcon size={19} weight={active ? "fill" : "regular"} aria-hidden="true" />
                 {tab.alert && <span className="settings-tab-alert" aria-hidden="true" />}
               </span>
-              <span className="settings-tab-label">{tab.label}</span>
+              <span className="settings-tab-label">
+                <span className="settings-tab-label-text">{tab.label}</span>
+              </span>
             </button>
           );
         })}

@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import {
   listSessions,
@@ -38,6 +38,10 @@ const session: RecentSession = {
   chatAgent: "therapist",
 };
 
+// Pickers keep their last list per window (useCachedList); each test starts
+// from a first visit.
+beforeEach(() => sessionStorage.clear());
+
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
@@ -55,7 +59,9 @@ describe("ChatPicker", () => {
     const buttons = screen.getAllByRole<HTMLButtonElement>("button", { name: "+ New chat" });
     expect(buttons).toHaveLength(2);
     for (const button of buttons) {
-      expect(button.parentElement?.classList.contains("metal-button")).toBe(true);
+      // Upstream retired the metal wrapper; the control stays a plain native button.
+      expect(button.tagName).toBe("BUTTON");
+      expect(button.parentElement?.classList.contains("metal-button")).toBe(false);
       expect(button.disabled).toBe(false);
     }
     expect(screen.queryByRole("button", { name: "Radio" })).toBeNull();
@@ -317,9 +323,12 @@ describe("ChatPicker", () => {
   });
 
   it("reports a failed settings read as a load failure, not a missing folder, and retries it", async () => {
-    readSettingsMock
-      .mockRejectedValueOnce(new Error("settings unreadable"))
-      .mockResolvedValueOnce({ projectsRoot: "/workspaces", configured: true });
+    // Settings stay unreadable until Retry (the picker reads them for its root and its list).
+    let settingsReadable = false;
+    readSettingsMock.mockImplementation(async () => {
+      if (!settingsReadable) throw new Error("settings unreadable");
+      return { projectsRoot: "/workspaces", configured: true };
+    });
     waitForReadyMock.mockResolvedValue();
     listSessionsMock.mockResolvedValue([session]);
 
@@ -335,10 +344,12 @@ describe("ChatPicker", () => {
     ).toBeNull();
     expect(waitForReadyMock).not.toHaveBeenCalled();
 
+    const readsBeforeRetry = readSettingsMock.mock.calls.length;
+    settingsReadable = true;
     fireEvent.click(within(alert).getByRole("button", { name: "Retry" }));
 
     expect(await screen.findByText("Plan my week")).toBeDefined();
-    expect(readSettingsMock).toHaveBeenCalledTimes(2);
+    expect(readSettingsMock.mock.calls.length).toBeGreaterThan(readsBeforeRetry);
     expect(screen.queryByRole("alert")).toBeNull();
   });
 });

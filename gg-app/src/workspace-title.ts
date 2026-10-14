@@ -16,10 +16,10 @@ export function formatWorkspaceTitle(
   const segments = [directory];
   if (additionalRoots.length > 0)
     segments.push(`+${pluralize(additionalRoots.length, "root", "roots")}`);
-  if (gitBranch) segments.push(`⎇ ${gitBranch}`);
+  if (gitBranch) segments.push(gitBranch);
   if (gitDirtyFileCount > 0) segments.push(`${gitDirtyFileCount} uncommitted`);
   if (gitHubIssues !== null && gitHubIssues > 0)
     segments.push(pluralize(gitHubIssues, "issue", "issues"));
   if (gitHubPRs !== null && gitHubPRs > 0) segments.push(pluralize(gitHubPRs, "PR", "PRs"));
-  return segments.join(" │ ");
+  return segments.join(" · ");
 }

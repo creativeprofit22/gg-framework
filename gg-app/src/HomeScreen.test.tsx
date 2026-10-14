@@ -31,8 +31,6 @@ vi.mock("./update", () => ({ useAppUpdate: vi.fn() }));
 vi.mock("./AsciiLogo", () => ({ AsciiLogo: () => null }));
 vi.mock("./HomeScenery", () => ({ HomeScenery: () => null, withScenery: (b: unknown) => b }));
 vi.mock("./HomeCritters", () => ({ HomeCritters: () => null }));
-vi.mock("./RankBadge", () => ({ RankBadge: () => null }));
-vi.mock("./ScorecardModal", () => ({ ScorecardModal: () => null }));
 vi.mock("./toast", () => ({ toast: vi.fn() }));
 
 function updateInfo(overrides: Partial<UpdateInfo>): UpdateInfo {
@@ -67,7 +65,6 @@ async function renderHome(): Promise<void> {
         onMotion={onMotion}
         onSettings={onSettings}
         waitForAgentReady={agentMocks.waitForReady}
-        loadProgress={agentMocks.getProgress}
       />,
     );
   });
@@ -102,7 +99,8 @@ describe("HomeScreen local-patched update outcomes", () => {
       name: "Patched installer built",
     });
     expect(outcome.disabled).toBe(true);
-    expect(screen.queryByText("v1.2.3")).toBeNull();
+    // Upstream 0.91: the version lives beside What's new, never in the update corner.
+    expect(document.querySelector(".home-version-corner")?.textContent).not.toContain("v1.2.3");
     expect(screen.getByRole("button", { name: "What's new" })).toBeTruthy();
   });
 
@@ -164,7 +162,10 @@ describe("HomeScreen local-patched update outcomes", () => {
     );
 
     await renderHome();
-    fireEvent.click(screen.getByText("Update to 2.0.0").closest("button")!);
+    // Non-patched updates use upstream's update key, named for screen readers.
+    fireEvent.click(
+      screen.getByRole("button", { name: "Update to 2.0.0. Installs and restarts the app." }),
+    );
 
     expect(install).toHaveBeenCalledOnce();
     expect(screen.queryByText("Merge and build patched update?")).toBeNull();
@@ -306,17 +307,31 @@ describe("HomeScreen workspace actions", () => {
     expect(onGoals).toHaveBeenCalledOnce();
   });
 
-  it("says under the Goals button that Goals is in beta", async () => {
+  it("shows the running version beside What's new, not in the update corner", async () => {
     vi.mocked(useAppUpdate).mockReturnValue(updateInfo({ phase: "idle" }));
     await renderHome();
 
-    const note = await screen.findByText("In beta");
+    const version = await screen.findByText("v1.2.3");
+    const row = version.closest(".home-version-row");
+    expect(row?.classList.contains("is-pending")).toBe(false);
+    expect(row?.querySelector("button")?.textContent).toBe("What's new");
+    // With no update out, the top corner stays empty.
+    expect(document.querySelector(".home-version-corner")?.childElementCount).toBe(0);
+  });
+
+  it("tags the Goals button as Beta and leaves the byline to Settings", async () => {
+    vi.mocked(useAppUpdate).mockReturnValue(updateInfo({ phase: "idle" }));
+    await renderHome();
+
+    const note = await screen.findByText("Beta");
     expect(note.id).not.toBe("");
     // Screen readers hear it with the Goals button, and only with that one.
     expect(screen.getByRole("button", { name: "Goals" }).getAttribute("aria-describedby")).toBe(
       note.id,
     );
-    expect(screen.queryByText("Still in process")).toBeNull();
+    expect(screen.queryByText("In beta")).toBeNull();
+    expect(screen.queryByText(/By Ken Kai/)).toBeNull();
+    expect(screen.queryByRole("link", { name: "Skool" })).toBeNull();
     for (const name of ["Motion", "Code", "Chat"]) {
       expect(screen.getByRole("button", { name }).hasAttribute("aria-describedby")).toBe(false);
     }

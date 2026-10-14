@@ -1,11 +1,21 @@
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 // Guards the design-token scales in App.css `:root`. A px literal that equals a
 // token step must use the token, so the scale stays the single source. Odd
 // one-off values (5px, 13.5px, 30px…) are allowed on purpose: the migration
 // to tokens was pixel-identical, not a redesign.
-const FILES = ["App.css", "glass.css", "ChecklistScreen.css", "ChatErrorNotice.css"];
+const FILES = [
+  "App.css",
+  "Deck.css",
+  "ChecklistScreen.css",
+  "ChatErrorNotice.css",
+  "AboutPage.css",
+  "HomeUpdateButton.css",
+  "UpdateBanner.css",
+  "UpdateKeyParts.css",
+  "WhatsNew.css",
+];
 const sheets = FILES.map((name) => ({
   name,
   css: readFileSync(new URL(`../src/${name}`, import.meta.url), "utf8")
@@ -36,10 +46,9 @@ const SPACING_PROP =
 function declarations() {
   const out = [];
   for (const { name, css } of sheets) {
-    const rootStart = name === "App.css" ? css.indexOf(":root") : -1;
-    const rootEnd = rootStart >= 0 ? css.indexOf("}", rootStart) : -1;
+    const blocks = definitionBlocks(css);
     for (const m of css.matchAll(/(?:^|[\s;{])([a-z-]+)\s*:\s*([^;{}]+?)\s*(?=[;}])/g)) {
-      if (m.index >= rootStart && m.index < rootEnd) continue;
+      if (blocks.some(([start, end]) => m.index >= start && m.index < end)) continue;
       const line = css.slice(0, m.index).split("\n").length + (m[0].startsWith("\n") ? 1 : 0);
       out.push({ where: `${name}:${line}`, prop: m[1], value: m[2] });
     }
@@ -66,23 +75,38 @@ function topLevelWords(value) {
 
 const decls = declarations();
 
-/** [start, end) ranges of every `:root { … }` and `@property … { … }` block. */
+/**
+ * [start, end) ranges of every `:root { … }` and `@property … { … }` block,
+ * including the theme-scoped ones (`:root[data-theme="light"] { … }`).
+ */
 function definitionBlocks(css) {
   const ranges = [];
-  for (const m of css.matchAll(/:root\s*\{|@property\s+--[\w-]+\s*\{/g)) {
+  const root = String.raw`:root(?:\[[^\]]*\])?`;
+  const opener = new RegExp(
+    String.raw`${root}(?:\s*,\s*${root})*\s*\{|@property\s+--[\w-]+\s*\{`,
+    "g",
+  );
+  for (const m of css.matchAll(opener)) {
     ranges.push([m.index, css.indexOf("}", m.index) + 1]);
   }
   return ranges;
 }
 const lineOf = (css, index) => css.slice(0, index).split("\n").length;
 
-// Every token defined in a `:root` block of App.css or glass.css (both always
-// load), with its raw value; later blocks override earlier ones by name.
+// Every token defined in a `:root` block of App.css, with its raw value; later
+// blocks override earlier ones by name. The light theme's block only re-points
+// tokens the base defines, so it is skipped: its white `--surface-3` must not
+// make every white ink-on-fill literal look like a neutral surface.
 const definedTokens = new Map();
-for (const { name, css } of sheets.filter((s) => s.name === "App.css" || s.name === "glass.css")) {
+for (const { name, css } of sheets.filter((s) => s.name === "App.css")) {
   for (const [start, end] of definitionBlocks(css)) {
     const block = css.slice(start, end);
-    if (!block.startsWith(":root")) continue;
+    // Only the always-on blocks define a token everywhere: the base `:root`
+    // (also matched as `:root[data-theme="dark"]`). Conditional blocks —
+    // `:root[data-motion="off"]`, and the light theme, which only re-points
+    // tokens the base defines (its white `--surface-3` must not make every
+    // white ink-on-fill literal look like a neutral surface) — are skipped.
+    if (!/^:root(?:\s*,\s*:root\[data-theme="dark"\])?\s*\{/.test(block)) continue;
     for (const m of block.matchAll(/(--[\w-]+)\s*:\s*([^;}]+)[;}]/g)) {
       definedTokens.set(m[1], { value: m[2].trim(), file: name });
     }
@@ -178,5 +202,27 @@ describe("design tokens", () => {
       }
     }
     expect(offenders).toEqual([]);
+  });
+});
+
+describe("progress fills", () => {
+  // A fill's width comes from inline style, but its colour lives only in CSS:
+  // a fill class without a background rule renders an invisible bar.
+  it("gives every *-fill class used by a component a background", () => {
+    const srcDir = new URL("../src/", import.meta.url);
+    const fillClasses = new Set();
+    for (const file of readdirSync(srcDir, { recursive: true })) {
+      if (!String(file).endsWith(".tsx") || String(file).endsWith(".test.tsx")) continue;
+      const source = readFileSync(new URL(String(file), srcDir), "utf8");
+      for (const m of source.matchAll(/className="([a-z0-9-]+-fill)"/g)) fillClasses.add(m[1]);
+    }
+    expect(fillClasses.has("hf-progress-fill")).toBe(true);
+    const missing = [...fillClasses].sort().filter((cls) => {
+      const rule = new RegExp(`\\.${cls}\\s*\\{([^}]*)\\}`, "g");
+      return !sheets.some(({ css }) =>
+        [...css.matchAll(rule)].some((m) => /(?:^|[\s;])background(?:-color)?\s*:/.test(m[1])),
+      );
+    });
+    expect(missing).toEqual([]);
   });
 });

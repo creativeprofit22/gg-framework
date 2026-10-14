@@ -74,7 +74,24 @@ jobs:
           case "$RUNNER_OS" in
             Linux) sudo apt-get install -y --no-install-recommends ripgrep ;;
             macOS) HOMEBREW_NO_AUTO_UPDATE=1 brew install ripgrep ;;
-            Windows) choco install ripgrep -y --no-progress ;;
+            Windows)
+              # The Chocolatey community feed intermittently 504s, and choco
+              # can exit 0 after installing nothing ("installed 0/0"), so
+              # retry until `rg` actually exists; fail if every attempt fails.
+              for attempt in 1 2 3 4; do
+                choco install ripgrep -y --no-progress || true
+                if command -v rg >/dev/null 2>&1; then
+                  break
+                fi
+                if [ "$attempt" -eq 4 ]; then
+                  echo "choco install ripgrep failed after $attempt attempts" >&2
+                  exit 1
+                fi
+                delay=$((attempt * 30))
+                echo "choco install ripgrep failed (attempt $attempt); retrying in ${delay}s" >&2
+                sleep "$delay"
+              done
+              ;;
           esac
           rg --version
 

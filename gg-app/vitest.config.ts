@@ -26,5 +26,9 @@ export default defineConfig({
     // and shadows jsdom's. Tests use jsdom's (or stub it), so turn Node's off.
     // The flag exists since Node 22.4, CI's floor.
     execArgv: ["--no-experimental-webstorage"],
+    // Vitest hands every CSS import back empty unless it's included here. The
+    // stylesheet guards (css-loops.test.ts) read sheets as `?raw` text, so let
+    // just those through; component CSS stays empty, as jsdom tests expect.
+    css: { include: [/\.css\?raw$/] },
   },
 });

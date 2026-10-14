@@ -240,3 +240,80 @@ export function ProjectHealthBadge({
     </>
   );
 }
+
+/**
+ * Project Health as a deck tool (⋯ → Project Health): the same breakdown the
+ * title-bar popover had, laid out like the deck's other panels. A one-line
+ * summary (score, bar, tier), the categories with their findings, and Review
+ * all. `onReview` returns false when the prompt couldn't be sent.
+ */
+export function ProjectHealthPanel({
+  health,
+  onReview,
+  onDone,
+}: {
+  health: ProjectHealth | null;
+  onReview?: (prompt: string, label: string) => boolean;
+  /** Called once a review was handed to the agent, to close the panel. */
+  onDone: () => void;
+}): React.ReactElement {
+  const [sendFailed, setSendFailed] = useState(false);
+  if (!health) {
+    return <p className="deck-note">Scanning the project&hellip;</p>;
+  }
+  const tier = projectHealthTier(health.score);
+  const review = onReview
+    ? (prompt: string, label: string): void => {
+        if (onReview(prompt, label)) onDone();
+        else setSendFailed(true);
+      }
+    : undefined;
+  return (
+    <div className="health-panel">
+      <div className="meter health-summary" data-tier={tier}>
+        <span className="meter-k">Score</span>
+        <span
+          className="cbar wide"
+          role="meter"
+          aria-label="Project health"
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={health.score}
+          aria-valuetext={`${health.score}%, ${PROJECT_HEALTH_TIER_LABELS[tier]}`}
+          style={{ "--p": health.score } as React.CSSProperties}
+        />
+        <span className="meter-v">{health.score}%</span>
+        <span className="meter-d">{PROJECT_HEALTH_TIER_LABELS[tier]}</span>
+      </div>
+      {health.cappedBy && (
+        <p className="deck-note">{`Held at ${health.score}%: ${health.cappedBy}.`}</p>
+      )}
+      <ul className="pop-list health-list">
+        {health.categories.map((category, index) => (
+          <CategoryRow key={category.id} category={category} index={index} onReview={review} />
+        ))}
+      </ul>
+      <div className="health-foot">
+        <span className="deck-pm" role={sendFailed ? "alert" : undefined}>
+          {sendFailed
+            ? "Agent not ready. Try again."
+            : health.truncated
+              ? "Partly scanned (large project)"
+              : "Rescans every 2 min"}
+        </span>
+        <span className="deck-spacer" />
+        {review && health.fixPrompt && (
+          <button
+            type="button"
+            className="key key-sm primary"
+            onClick={() => {
+              if (health.fixPrompt) review(health.fixPrompt, "Reviewing project health");
+            }}
+          >
+            Review all
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}

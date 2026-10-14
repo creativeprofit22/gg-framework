@@ -1,7 +1,5 @@
 import type http from "node:http";
-import { promises as fs } from "node:fs";
 import path from "node:path";
-import type { MessageProvenance } from "@kenkaiiii/gg-ai";
 import {
   createGoal,
   deleteGoal,
@@ -19,7 +17,13 @@ import {
   markGoalKickoff,
   type GoalRecord,
 } from "../core/goals-store.js";
-import { formatRelativeTime } from "../core/project-discovery.js";
+import { goalRunningElsewhere } from "../core/goal-run-marker.js";
+import {
+  GOAL_RUNTIME_PROVENANCE,
+  goalListStatus,
+  summarizeGoal,
+  type GoalSummary,
+} from "../core/goal-summary.js";
 import { getModel } from "../core/model-registry.js";
 import { goalCritterPick } from "../goals-agent/goals-agent.js";
 import { SessionManager } from "../core/session-manager.js";
@@ -27,127 +31,24 @@ import { log } from "../core/logger.js";
 import { readBody, json } from "./http.js";
 import type { SessionRouteContext } from "./route-context.js";
 
-/** The kickoff instruction is runtime-authored and never shown as a user bubble. */
-const KICKOFF_PROVENANCE: MessageProvenance = {
-  source: "runtime",
-  kind: "automation",
-  visibility: "hidden",
-};
+const KICKOFF_PROVENANCE = GOAL_RUNTIME_PROVENANCE;
 
-/** One row of the app's goal list. */
-export interface GoalSummary {
-  id: string;
-  name: string;
-  goal: string;
-  context: GoalRecord["context"];
-  path: string;
-  createdAt: string;
-  lastActiveMs: number;
-  lastActiveDisplay: string;
-  /** Newest non-empty session to resume; null opens a fresh coordinator session. */
-  latestSessionPath: string | null;
-  /**
-   * Where the goal stands, for the goal list: briefing (not started yet),
-   * running (working right now), paused (by the user), or idle (started,
-   * not working: done, or waiting to be opened again).
-   */
-  status: "briefing" | "running" | "paused" | "interrupted" | "idle";
-}
+export { goalListStatus, type GoalSummary };
 
-/** How much of a session file's end is read to find its last message. */
-const TAIL_BYTES = 64 * 1024;
-
-/**
- * The last few messages of a session file (role and content), read from its
- * end only, never thawing or rewriting it. Empty when it can't be read
- * (archived, gone): the goal then just isn't marked interrupted.
- */
-async function lastMessages(file: string): Promise<Array<{ role: string; content?: unknown }>> {
-  let text: string;
-  try {
-    const handle = await fs.open(file, "r");
-    try {
-      const { size } = await handle.stat();
-      const start = Math.max(0, size - TAIL_BYTES);
-      const buf = Buffer.alloc(size - start);
-      await handle.read(buf, 0, buf.length, start);
-      text = buf.toString("utf-8");
-    } finally {
-      await handle.close();
-    }
-  } catch {
-    return [];
-  }
-  const out: Array<{ role: string; content?: unknown }> = [];
-  for (const line of text.split("\n")) {
-    if (!line.startsWith("{")) continue;
-    try {
-      const entry = JSON.parse(line) as {
-        type?: string;
-        message?: { role?: string; content?: unknown };
-      };
-      if (entry.type === "message" && entry.message?.role) {
-        out.push({ role: entry.message.role, content: entry.message.content });
-      }
-    } catch {
-      // A line cut at the start of the read window.
-    }
-  }
-  return out;
-}
-
-/** A goal's status for the list (see GoalSummary.status). */
-export function goalListStatus(
-  record: GoalRecord,
-  busy: boolean,
-  cutOff = false,
-): GoalSummary["status"] {
-  if (record.pausedAt) return "paused";
-  if (busy) return "running";
-  if (cutOff) return "interrupted";
-  return record.startedAt ? "idle" : "briefing";
-}
-
+/** The sidecar's row: the shared summary without the ACP-only session id. */
 async function summarize(
   sessions: SessionManager,
   dir: string,
   record: GoalRecord,
   busy = false,
 ): Promise<GoalSummary> {
-  const list = await sessions.list(dir).catch(() => []);
-  const withMessages = list.filter((s) => s.messageCount > 0);
-  let lastActiveMs = Date.parse(record.createdAt) || 0;
-  let latestSessionPath: string | null = null;
-  let latestMs = -1;
-  for (const s of withMessages) {
-    const ms = Date.parse(s.lastActivity) || 0;
-    if (ms > latestMs) {
-      latestMs = ms;
-      latestSessionPath = s.path;
-    }
-    if (ms > lastActiveMs) lastActiveMs = ms;
-  }
-  return {
-    id: record.id,
-    name: record.name,
-    goal: record.goal,
-    context: record.context,
-    path: dir,
-    createdAt: record.createdAt,
-    lastActiveMs,
-    lastActiveDisplay: formatRelativeTime(lastActiveMs),
-    latestSessionPath,
-    status: goalListStatus(
-      record,
-      busy,
-      // Not working, but its last turn never finished: the app closed, or it
-      // was stopped, mid-work. Workers aren't known here, only the session.
-      !busy &&
-        Boolean(record.startedAt) &&
-        latestSessionPath !== null &&
-        goalWasInterrupted(record, await lastMessages(latestSessionPath), []),
-    ),
-  };
+  const { latestSessionId: _latestSessionId, ...summary } = await summarizeGoal(
+    sessions,
+    dir,
+    record,
+    busy,
+  );
+  return summary;
 }
 
 /** Goal list, create, and the coordinator's automatic first reply. */
@@ -436,9 +337,12 @@ export function handleGoalRoutes(
       if (wasPaused) {
         ctx.broadcast("goal_state", { id: record.id, phase: goalPhase(record), paused: false });
       }
+      // Never resume a goal another process is running (the phone, through
+      // `ggcoder acp`): that would start a second coordinator on it.
       const cutOff =
-        wasPaused ||
-        goalWasInterrupted(record, ctx.session.getMessages(), ctx.session.listSubAgents());
+        !goalRunningElsewhere(goal.dir) &&
+        (wasPaused ||
+          goalWasInterrupted(record, ctx.session.getMessages(), ctx.session.listSubAgents()));
       if (!cutOff) {
         json(res, 200, { resumed: false });
         return;

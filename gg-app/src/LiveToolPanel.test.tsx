@@ -2,7 +2,6 @@
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 import { LiveToolPanel, type LiveToolEntry } from "./LiveToolPanel";
-import { theme } from "./theme";
 
 afterEach(cleanup);
 
@@ -70,31 +69,36 @@ describe("LiveToolPanel completion status", () => {
         ]}
       />,
     );
-    expect(screen.getByTitle("Failed")).toBeTruthy();
-    expect(screen.getByText("Failed:")).toBeTruthy();
-    expect(screen.queryByTitle("Completed")).toBeNull();
+    const pill = document.querySelector<HTMLElement>(".tool-pill");
+    expect(pill?.dataset.state).toBe("error");
+    expect(screen.getByText("Failed:").classList.contains("visually-hidden")).toBe(true);
+    expect(screen.queryByText("Completed:")).toBeNull();
     expect(screen.getByText(`· ${preview}`)).toBeTruthy();
+    expect(screen.getByRole("status").textContent).toContain(preview);
   });
 
   it("shows success, thrown failure, and MCP isError failure with accessible status text", () => {
+    // Upstream's pill shows only the current step, so each outcome is rendered on its own.
+    const expected = [
+      ["fixture / success", "done", "Completed:"],
+      ["fixture / thrown", "error", "Failed:"],
+      ["fixture / reported", "error", "Failed:"],
+    ] as const;
+    for (const [index, entry] of entries.entries()) {
+      const [label, state, spoken] = expected[index] ?? ["", "", ""];
+      const { unmount } = render(<LiveToolPanel entries={[entry]} />);
+      const pill = document.querySelector<HTMLElement>(".tool-pill");
+      expect(pill?.dataset.state).toBe(state);
+      expect(screen.getByText(spoken).classList.contains("visually-hidden")).toBe(true);
+      expect(screen.getByText(label)).toBeTruthy();
+      unmount();
+    }
+  });
+
+  it("shows only the newest finished step when none is running", () => {
     render(<LiveToolPanel entries={entries} />);
-
-    const completedDot = screen.getByTitle("Completed");
-    const failedDots = screen.getAllByTitle("Failed");
-    const expectedSuccess = document.createElement("span");
-    expectedSuccess.style.color = theme.success;
-    const expectedError = document.createElement("span");
-    expectedError.style.color = theme.error;
-    expect(completedDot.style.color).toBe(expectedSuccess.style.color);
-    expect(failedDots).toHaveLength(2);
-    expect(failedDots.every((dot) => dot.style.color === expectedError.style.color)).toBe(true);
-
-    expect(screen.getByText("Completed:").classList.contains("visually-hidden")).toBe(true);
-    const failedText = screen.getAllByText("Failed:");
-    expect(failedText).toHaveLength(2);
-    expect(failedText.every((text) => text.classList.contains("visually-hidden"))).toBe(true);
-    expect(screen.getByText("fixture / success")).toBeTruthy();
-    expect(screen.getByText("fixture / thrown")).toBeTruthy();
     expect(screen.getByText("fixture / reported")).toBeTruthy();
+    expect(screen.queryByText("fixture / success")).toBeNull();
+    expect(screen.getByText("Failed:")).toBeTruthy();
   });
 });

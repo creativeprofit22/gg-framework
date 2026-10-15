@@ -45,6 +45,9 @@ it("emits an exact cancellation ID only for success and preserves the consumed d
         cancelled: false,
       });
       expect((await stream.waitFor("queued", before + 1)).data).not.toHaveProperty("cancelledId");
+      // q2 is not Ken-sent, so it waits out the held run and then runs on its
+      // own. Read history only after that run ends, or it races q2's persistence.
+      await stream.waitFor("run_end", 2);
       const reopened = await open(saved.path);
       const history = await (await request("/history", reopened)).json();
       expect(

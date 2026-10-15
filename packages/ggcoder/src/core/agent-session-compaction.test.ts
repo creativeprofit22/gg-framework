@@ -47,6 +47,13 @@ vi.mock("./mcp/index.js", async () => {
   };
 });
 
+// Load the session module (and its mocks, hoisted above) while the file is
+// collected. Its first load takes ~8 s and far longer on a busy machine; done
+// inside a test, that one-off cost lands on whichever test runs first and
+// times it out. Every `await import("./agent-session.js")` below is then a
+// cache hit, so each test's timeout measures only its own behavior.
+import "./agent-session.js";
+
 let restoreHome: (() => void) | undefined;
 let tmpHome: string;
 let tmpProject: string;

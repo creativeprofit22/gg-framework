@@ -1,19 +1,21 @@
 {
   "schemaVersion": 1,
-  "date": "2026-10-14",
-  "label": "Reviews above the Deck, and session lists that keep up",
+  "date": "2026-10-15",
+  "label": "Upstream 0.91.2, and Fast is now a model you pick",
   "sections": [
     {
-      "title": "Reviews you can always reach",
+      "title": "Fast, right in the model picker",
       "items": [
-        "Plan approvals and Roadmap drafts are back where you can see them. When the `Deck` arrived, a review waiting for you could slip underneath it, leaving your message box locked with nothing to click. `Plan approval required` and `Roadmap draft` now sit right above the `Deck`, so `Approve`, `Feedback` and `Create phase` are always in reach, and an open review takes half the window so your conversation stays in view. Update progress and `Retry Roadmap review` stay on top too."
+        "Fast is now a model you choose, the same way you pick any other. Sign in with ChatGPT and you'll find `GPT-6 Astra Fast`, `GPT-6.1 Sol Fast` and `GPT-6 Luna Fast`, or sign in with Claude for `Claude Opus 5.5 Fast`. Same models, answering quicker. Fast GPT models use up your plan's limits faster, and `Claude Opus 5.5 Fast` runs on Claude usage credits instead of your plan. If those credits are off, you'll get a clear note on how to turn them on rather than a confusing limit error.",
+        "The old `Fast on · 2.5× credits` switch under `More` is gone, because `GPT-6 Astra Fast` does exactly the same thing and now sits with the rest of your models. Chats where you'd switched it on reopen on `GPT-6 Astra Fast` by themselves, keeping the `Stable` or `Experimental` context you picked. Pick `GPT-6 Astra` again any time to go back to normal speed."
       ]
     },
     {
-      "title": "Session lists that keep up",
+      "title": "Upstream 0.91.2",
       "items": [
-        "Your newest sessions show up again when you go back to a project. Coming back from a session could ask for the list before the app was ready, and when that failed it quietly kept showing an older copy without anything you'd done since. It now waits until it's ready and tries again if a refresh fails. If it still can't refresh, you'll see `Couldn't refresh this list, so it may be out of date` with `Retry`, instead of an old list passed off as current.",
-        "Projects and sessions load faster, too. The app now remembers what each saved session contains and only re-reads the ones that changed, so going back to the same list is close to instant instead of taking a second or more."
+        "Zoom in or out with `Ctrl +` and `Ctrl -` all you like. Your chat now stays right where it belongs, with the newest message sitting neatly above the message box instead of sliding underneath it. Resizing the window or a split pane keeps your chat on its newest line too.",
+        "`esc` closes the panel under your message box, wherever you clicked. Your agent keeps right on working while you do it, and one more `esc` stops it whenever you want. With panes side by side, it closes only the panel in the pane you're working in, so the others stay just as you left them. `Usage` and `Model` now get the same tidy header and close button as everything else.",
+        "`Goal settings` now uses the whole panel. No more odd empty strip down the side, and the context box hugs what you've added instead of sitting there as a big empty slab."
       ]
     }
   ]

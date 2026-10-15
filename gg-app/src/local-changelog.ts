@@ -53,10 +53,20 @@ export const CURRENT_LOCAL_RELEASE_NOTES = requireCurrentReleaseNotes(releaseNot
 /** Newest first. Maintained only by the Local Fork release flow. */
 export const LOCAL_CHANGELOG: LocalChangelogEntry[] = [
   {
-    id: "local-2026-10-14-reviews-above-the-deck",
+    id: "local-2026-10-15-upstream-0912-fast-models",
     label: CURRENT_LOCAL_RELEASE_NOTES.label,
     date: CURRENT_LOCAL_RELEASE_NOTES.date,
     items: CURRENT_LOCAL_RELEASE_NOTES.sections.flatMap(({ items }) => items),
+  },
+  {
+    id: "local-2026-10-14-reviews-above-the-deck",
+    label: "Reviews above the Deck, and session lists that keep up",
+    date: "2026-10-14",
+    items: [
+      "Plan approvals and Roadmap drafts are back where you can see them. When the `Deck` arrived, a review waiting for you could slip underneath it, leaving your message box locked with nothing to click. `Plan approval required` and `Roadmap draft` now sit right above the `Deck`, so `Approve`, `Feedback` and `Create phase` are always in reach, and an open review takes half the window so your conversation stays in view. Update progress and `Retry Roadmap review` stay on top too.",
+      "Your newest sessions show up again when you go back to a project. Coming back from a session could ask for the list before the app was ready, and when that failed it quietly kept showing an older copy without anything you'd done since. It now waits until it's ready and tries again if a refresh fails. If it still can't refresh, you'll see `Couldn't refresh this list, so it may be out of date` with `Retry`, instead of an old list passed off as current.",
+      "Projects and sessions load faster, too. The app now remembers what each saved session contains and only re-reads the ones that changed, so going back to the same list is close to instant instead of taking a second or more.",
+    ],
   },
   {
     id: "local-2026-10-14-upstream-0911-deck-and-pinned-actions",

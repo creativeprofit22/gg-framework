@@ -332,10 +332,40 @@ async function verifyPromptControls(page, width, mode, screenshot, outputDir, sc
   }
   await verify("Context profile", async () => {
     await ensureMoreOpen(page);
+    // The native select is a transparent overlay (`.model-select`, opacity 0)
+    // over its visible face, so check what users see plus keyboard focus.
+    const face = page.locator(".astra-control-group .model-picker .model-select-text");
     const selector = page.locator(
       '.astra-control-group select[aria-label="OpenAI Codex context profile"]',
     );
-    await assertControlReachable(selector, `${mode} context profile`);
+    await face.scrollIntoViewIfNeeded({ timeout: 3_000 });
+    await selector.focus();
+    const problems = await page.evaluate(() => {
+      const failures = [];
+      const visible = document.querySelector(
+        ".astra-control-group .model-picker .model-select-text",
+      );
+      const select = document.querySelector(
+        '.astra-control-group select[aria-label="OpenAI Codex context profile"]',
+      );
+      const rect = visible?.getBoundingClientRect();
+      if (!visible?.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }))
+        failures.push("face not visible");
+      if (!rect || rect.width <= 0 || rect.height <= 0) failures.push("empty face");
+      else if (
+        rect.left < 0 ||
+        rect.top < 0 ||
+        rect.right > innerWidth ||
+        rect.bottom > innerHeight
+      )
+        failures.push(
+          `face clipped: ${JSON.stringify(rect.toJSON())}, ${innerWidth}×${innerHeight}`,
+        );
+      if (document.activeElement !== select) failures.push("select not focusable");
+      if (select?.matches(":disabled")) failures.push("disabled");
+      return failures;
+    });
+    assert.deepEqual(problems, [], `${mode} context profile`);
   });
   if (screenshot) {
     const output = resolve(outputDir, `prompt-${mode}-context-${width}.png`);
@@ -778,7 +808,7 @@ export async function runWorkspaceNarrowVisualFixture({
           ".ken-prompt-copy",
           ".ken-prompt-error",
           ".ken-prompt-success",
-          '.astra-control-group select[aria-label="OpenAI Codex context profile"]',
+          ".astra-control-group .model-select-text",
         ].map((selector) => {
           const element = document.querySelector(selector);
           const foreground = getComputedStyle(element).color;

@@ -15,17 +15,29 @@ vi.mock("../../config.js", async () => {
     getAppPaths: () => ({
       ...actual.getAppPaths(),
       mcpFile: path.join(process.env.GG_TEST_HOME!, ".gg", "mcp.json"),
+      settingsFile: path.join(
+        process.env.GG_TEST_HOME!,
+        ".gg",
+        "identities",
+        "com.ggcoder.local-fork",
+        "settings.json",
+      ),
     }),
   };
 });
 
+vi.mock("../logger.js", () => ({ log: vi.fn() }));
+
 import { getAllMcpServers, getMCPServers } from "./defaults.js";
+import { getAppPaths } from "../../config.js";
+import { log } from "../logger.js";
 import { addServer } from "./store.js";
 
 beforeEach(async () => {
   tmpHome = await fs.mkdtemp(path.join(os.tmpdir(), "gg-mcpdef-home-"));
   tmpProject = await fs.mkdtemp(path.join(os.tmpdir(), "gg-mcpdef-proj-"));
   process.env.GG_TEST_HOME = tmpHome;
+  vi.mocked(log).mockClear();
   await fs.mkdir(path.join(tmpHome, ".gg"), { recursive: true });
 });
 
@@ -76,5 +88,65 @@ describe("getAllMcpServers project-scope trust gate", () => {
     const kept = servers.filter((s) => s.name === provided.name);
     expect(kept).toHaveLength(1);
     expect(kept[0]!.command).toBe(provided.command);
+  });
+});
+
+describe("getAllMcpServers untrusted project-scope warning", () => {
+  const mcpWarnings = () =>
+    vi.mocked(log).mock.calls.filter(([level, cat]) => level === "WARN" && cat === "mcp");
+
+  it("warns once per session naming skipped servers, cwd and the settings file in use", async () => {
+    await addServer(
+      {
+        name: "discord-mcp",
+        command: "node",
+        args: ["server.js"],
+        env: { DISCORD_TOKEN: "fixture-env-value-7731" },
+      },
+      "project",
+      tmpProject,
+    );
+    await addServer({ name: "user-server", url: "https://example.com/mcp" }, "global", tmpProject);
+    const reported = new Set<string>();
+
+    const servers = await getAllMcpServers("anthropic", undefined, tmpProject, {
+      allowProjectScope: false,
+      reportedProjectSkips: reported,
+    });
+    // Reconnect within the same session must not repeat the warning.
+    await getAllMcpServers("anthropic", undefined, tmpProject, { reportedProjectSkips: reported });
+
+    // Trust semantics unchanged: nothing from project scope is returned to connect.
+    expect(servers.map((s) => s.name)).toEqual(["user-server"]);
+    const warnings = mcpWarnings();
+    expect(warnings).toHaveLength(1);
+    const message = String(warnings[0]![2]);
+    expect(message).toContain("[discord-mcp]");
+    expect(message).toContain(tmpProject);
+    expect(message).toContain(getAppPaths().settingsFile);
+    expect(getAppPaths().settingsFile).toContain(path.join("identities", "com.ggcoder.local-fork"));
+    expect(JSON.stringify(warnings)).not.toContain("fixture-env-value-7731");
+    expect(JSON.stringify(warnings)).not.toContain("DISCORD_TOKEN");
+  });
+
+  it("does not warn when the project is trusted", async () => {
+    await addServer(
+      { name: "discord-mcp", command: "node", args: ["server.js"] },
+      "project",
+      tmpProject,
+    );
+
+    const servers = await getAllMcpServers("anthropic", undefined, tmpProject, {
+      allowProjectScope: true,
+      reportedProjectSkips: new Set(),
+    });
+
+    expect(servers.map((s) => s.name)).toContain("discord-mcp");
+    expect(mcpWarnings()).toHaveLength(0);
+  });
+
+  it("does not warn when the project declares no servers", async () => {
+    await getAllMcpServers("anthropic", undefined, tmpProject);
+    expect(mcpWarnings()).toHaveLength(0);
   });
 });

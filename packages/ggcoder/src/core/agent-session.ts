@@ -873,6 +873,10 @@ export class AgentSession {
   /** Exact MCP source identity claimed by each provider alias, cached or live. */
   private mcpToolIdentities = new Map<string, McpToolIdentity>();
   private readonly mcpCatalogCache = new McpCatalogCache();
+  /** Untrusted project-scope MCP skips already warned about, so reconnects don't repeat it. */
+  private readonly reportedProjectMcpSkips = new Set<string>();
+  /** Servers whose latest connect attempt on the current MCP manager failed. */
+  private readonly failedMcpServers = new Map<string, { requiresAuth: boolean }>();
   private provider: Provider;
   private model: string;
   private openAICodexContextProfile: OpenAICodexContextProfile = "stable";
@@ -1418,6 +1422,86 @@ export class AgentSession {
     return reload;
   }
 
+  /**
+   * Give servers that failed to connect (e.g. a startup timeout) one fresh
+   * attempt without touching servers that are connected. Queued on the same
+   * tail as `reloadMcpServers`, so it never overlaps an MCP panel reload; a
+   * GLM switch replaces the manager, which the generation check catches.
+   */
+  retryFailedMcpServers(): Promise<void> {
+    const retry = this.mcpReloadTail.then(
+      () => this.retryFailedMcpServersNow(),
+      () => this.retryFailedMcpServersNow(),
+    );
+    this.mcpReloadTail = retry.catch(() => {});
+    return retry;
+  }
+
+  private async retryFailedMcpServersNow(): Promise<void> {
+    const manager = this.mcpManager;
+    if (!manager) return;
+    // A login-required server fails again until the user signs in; the login
+    // flow reconnects it.
+    const failedNames = [...this.failedMcpServers]
+      .filter(([, failure]) => !failure.requiresAuth)
+      .map(([name]) => name)
+      .sort();
+    if (failedNames.length === 0) return;
+    const generation = this.mcpConnectionGeneration;
+    try {
+      // Re-resolve so trust, enabled and allow-list rules apply exactly as on a
+      // full connect. A failed server that is no longer allowed is forgotten,
+      // never started.
+      const resolved = await this.resolveMcpServers(generation, manager);
+      if (!resolved) return;
+      // Only session-owned servers are retried. Daemon-pooled servers (just the
+      // deprecated kencode-search) never report outcomes here.
+      const pool = this.opts.sharedMcpPool;
+      const byName = new Map(
+        resolved.filter((server) => !pool?.canShare(server)).map((server) => [server.name, server]),
+      );
+      const servers: MCPServerConfig[] = [];
+      for (const name of failedNames) {
+        const server = byName.get(name);
+        if (server) servers.push(server);
+        else this.failedMcpServers.delete(name);
+      }
+      if (servers.length === 0) return;
+
+      const results = await manager.connectAllDetailed(servers);
+      if (!this.isCurrentMcpConnection(generation, manager)) {
+        await manager.dispose();
+        return;
+      }
+      const tools = results.flatMap((result) => (result.ok ? result.tools : []));
+      const mcpTools = this.opts.allowedTools
+        ? tools.filter((tool) => this.isToolAllowed(tool.name, getMcpToolIdentity(tool)))
+        : tools;
+      this.addMcpTools(mcpTools);
+      for (const result of [...results].sort((a, b) => a.name.localeCompare(b.name))) {
+        // Name, tool count and the formatted connect error only: never config,
+        // env or headers.
+        log(
+          "INFO",
+          "mcp",
+          `Retried MCP server "${result.name}" on new session`,
+          result.ok
+            ? { result: "connected", tools: String(result.tools.length) }
+            : { result: "failed", error: result.error ?? "connection failed" },
+        );
+      }
+      if (mcpTools.length > 0 && this.messages.length > 0) {
+        await this.rebuildSystemPromptInPlace();
+      }
+    } catch (err) {
+      if (!this.isCurrentMcpConnection(generation, manager)) {
+        await manager.dispose();
+        return;
+      }
+      log("WARN", "mcp", `MCP retry failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
   private async reloadMcpServersNow(): Promise<void> {
     const staleProviderNames = new Set(this.mcpToolIdentities.keys());
     this.unregisterTools(
@@ -1451,43 +1535,78 @@ export class AgentSession {
    * startup). Tools are pushed onto the live array the agent loop reads each
    * turn, so background-connected servers become available on the next prompt.
    */
+  /**
+   * Resolve the servers this session may connect: provider defaults plus
+   * configured servers, with the project-trust gate, allow-list and enabled
+   * filters applied. Every connect path goes through here, so a retry can never
+   * start a server a full connect would skip. Returns undefined when the
+   * connection generation went stale while resolving.
+   */
+  private async resolveMcpServers(
+    generation: number,
+    manager: MCPClientManager,
+  ): Promise<MCPServerConfig[] | undefined> {
+    if (this.mcpBlockedByAllowList()) return [];
+    const mcpWhitelist = this.opts.allowedMcpServers;
+    let apiKey: string | undefined;
+    if (this.provider === "glm") {
+      try {
+        const glmCreds = await this.authStorage.resolveCredentials("glm");
+        apiKey = glmCreds.accessToken;
+      } catch {
+        // GLM not configured — skip Z.AI MCP servers
+      }
+      if (!this.isCurrentMcpConnection(generation, manager)) return undefined;
+    }
+    let servers = await getAllMcpServers(this.provider, apiKey, this.cwd, {
+      allowProjectScope: this.settingsManager.isProjectTrusted(this.cwd),
+      reportedProjectSkips: this.reportedProjectMcpSkips,
+    });
+    if (!this.isCurrentMcpConnection(generation, manager)) return undefined;
+    // Whitelisted allow-listed session: connect ONLY the named servers, never
+    // the user's full configured set (which could include mutating tools). The
+    // whitelist only restricts in allow-list mode (the documented contract) so
+    // a normal session is never affected by a stray allowedMcpServers.
+    if (this.opts.allowedTools && mcpWhitelist) {
+      servers = servers.filter((s) => mcpWhitelist.includes(s.name));
+    }
+    // Disabled servers must neither acquire shared leases nor publish cached
+    // tools. Keep their cache metadata intact so re-enabling can reuse it.
+    return servers.filter((server) => server.enabled !== false);
+  }
+
+  /**
+   * Allow-listed (read-only advisory) sessions enforce a fixed tool set by
+   * name. An MCP server is only connected when its name is explicitly
+   * whitelisted via `allowedMcpServers`. With no whitelist, skip MCP entirely —
+   * dynamic `mcp__server__tool` names could never match a fixed allow-list, and
+   * connecting would waste resources spawning stdio servers.
+   */
+  private mcpBlockedByAllowList(): boolean {
+    const mcpWhitelist = this.opts.allowedMcpServers;
+    return this.opts.allowedTools !== undefined && (!mcpWhitelist || mcpWhitelist.length === 0);
+  }
+
+  private recordMcpConnectOutcome(outcome: {
+    name: string;
+    ok: boolean;
+    requiresAuth?: boolean;
+  }): void {
+    if (outcome.ok) this.failedMcpServers.delete(outcome.name);
+    else this.failedMcpServers.set(outcome.name, { requiresAuth: outcome.requiresAuth === true });
+  }
+
   private async connectMcpServers(): Promise<void> {
     const manager = this.mcpManager;
     if (!manager) return;
     const generation = this.mcpConnectionGeneration;
+    // Outcomes belong to one manager; a fresh connect starts a fresh record.
+    this.failedMcpServers.clear();
+    if (this.mcpBlockedByAllowList()) return;
     const acquiredLeases = new Set<SharedMcpClientLease>();
-    // Allow-listed (read-only advisory) sessions enforce a fixed tool set by
-    // name. An MCP server is only connected when its name is explicitly
-    // whitelisted via `allowedMcpServers`. With no whitelist, skip
-    // MCP entirely — dynamic `mcp__server__tool` names could never match a fixed
-    // allow-list, and connecting would waste resources spawning stdio servers.
-    const mcpWhitelist = this.opts.allowedMcpServers;
-    if (this.opts.allowedTools && (!mcpWhitelist || mcpWhitelist.length === 0)) return;
     try {
-      let apiKey: string | undefined;
-      if (this.provider === "glm") {
-        try {
-          const glmCreds = await this.authStorage.resolveCredentials("glm");
-          apiKey = glmCreds.accessToken;
-        } catch {
-          // GLM not configured — skip Z.AI MCP servers
-        }
-        if (!this.isCurrentMcpConnection(generation, manager)) return;
-      }
-      let servers = await getAllMcpServers(this.provider, apiKey, this.cwd, {
-        allowProjectScope: this.settingsManager.isProjectTrusted(this.cwd),
-      });
-      if (!this.isCurrentMcpConnection(generation, manager)) return;
-      // Whitelisted allow-listed session: connect ONLY the named servers, never
-      // the user's full configured set (which could include mutating tools). The
-      // whitelist only restricts in allow-list mode (the documented contract) so
-      // a normal session is never affected by a stray allowedMcpServers.
-      if (this.opts.allowedTools && mcpWhitelist) {
-        servers = servers.filter((s) => mcpWhitelist.includes(s.name));
-      }
-      // Disabled servers must neither acquire shared leases nor publish cached
-      // tools. Keep their cache metadata intact so re-enabling can reuse it.
-      servers = servers.filter((server) => server.enabled !== false);
+      const servers = await this.resolveMcpServers(generation, manager);
+      if (!servers) return;
       const pool = this.opts.sharedMcpPool;
       const sharedServers = pool ? servers.filter((server) => pool.canShare(server)) : [];
       const privateServers = pool ? servers.filter((server) => !pool.canShare(server)) : servers;
@@ -4795,6 +4914,12 @@ ${content}
     } finally {
       finish?.();
     }
+    // A fresh session is the natural moment to recover servers that failed at
+    // startup. Background-connect hosts (the desktop daemon) never block the
+    // reset on a slow server; the CLI waits so the first prompt sees the tools.
+    // The retry logs its own failures; it must never fail a completed reset.
+    const retry = this.retryFailedMcpServers().catch(() => {});
+    if (!this.opts.backgroundMcpConnect) await retry;
   }
 
   private async resetSession(preserveConversation: boolean): Promise<void> {
@@ -6786,6 +6911,10 @@ ${content}
       onServerStateChange: (change) => {
         if (manager !== this.mcpManager) return;
         this.applyMcpServerState(change);
+      },
+      onConnectResult: (result) => {
+        if (manager !== this.mcpManager) return;
+        this.recordMcpConnectOutcome(result);
       },
     });
     return manager;

@@ -6,6 +6,8 @@ import { z } from "zod";
 import type { AgentEvent, AgentTool, ToolContext } from "@kenkaiiii/gg-agent";
 import type * as GgAgentModule from "@kenkaiiii/gg-agent";
 import type * as McpModule from "./mcp/index.js";
+import type * as LoggerModule from "./logger.js";
+import type { MCPServerConfig } from "./mcp/types.js";
 import { useFakeHome } from "../test-support/fake-home.js";
 import type { DeferredToolCatalog } from "./mcp/deferred-catalog.js";
 import type { CachedTool } from "./mcp/catalog-cache.js";
@@ -36,6 +38,11 @@ vi.mock("./mcp/index.js", async () => {
       };
     }),
   };
+});
+
+vi.mock("./logger.js", async () => {
+  const actual = await vi.importActual<typeof LoggerModule>("./logger.js");
+  return { ...actual, log: vi.fn() };
 });
 
 type SessionHarness = {
@@ -533,4 +540,98 @@ describe("AgentSession MCP identity boundary", () => {
     expect(internals.isToolAllowed(blockedIdentity.providerName, blockedIdentity)).toBe(false);
     expect(internals.isToolAllowed("mcp__unsafe server__fabricated")).toBe(false);
   });
+});
+
+describe("AgentSession MCP retry on new session", () => {
+  it("retries only failed servers on newSession and keeps untrusted project servers skipped", async () => {
+    const { getAllMcpServers, MCPClientManager } = await import("./mcp/index.js");
+    const { log } = await import("./logger.js");
+    const actual = await vi.importActual<typeof McpModule>("./mcp/index.js");
+    // Real config resolution: two user servers in the fake home and one
+    // repo-declared server in a project that is NOT trusted.
+    await fs.writeFile(
+      path.join(tempHome, ".gg", "mcp.json"),
+      JSON.stringify({
+        mcpServers: { flaky: { command: "flaky-server" }, steady: { command: "steady-server" } },
+      }),
+      "utf-8",
+    );
+    await fs.mkdir(path.join(tempProject, ".gg"), { recursive: true });
+    await fs.writeFile(
+      path.join(tempProject, ".gg", "mcp.json"),
+      JSON.stringify({
+        mcpServers: { "repo-server": { command: "repo-server", env: { REPO_KEY: "env-7731" } } },
+      }),
+      "utf-8",
+    );
+    vi.mocked(getAllMcpServers).mockImplementation(actual.getAllMcpServers);
+
+    // Real manager settlement and outcome reporting; only transport creation is
+    // replaced so the fixture never launches a process.
+    const flakyIdentity = createMcpToolIdentity("flaky", "ping");
+    const steadyIdentity = createMcpToolIdentity("steady", "status");
+    const attempts: string[] = [];
+    let flakyFails = true;
+    const connectTransport = vi.fn(async (config: MCPServerConfig) => {
+      attempts.push(config.name);
+      if (config.name === "flaky" && flakyFails) {
+        throw new Error("Timed out waiting for the server to respond.");
+      }
+      return [mcpTool(config.name === "flaky" ? flakyIdentity : steadyIdentity)];
+    });
+    vi.mocked(MCPClientManager).mockImplementationOnce(function FixtureManager(
+      options?: ConstructorParameters<typeof actual.MCPClientManager>[0],
+    ) {
+      const manager = new actual.MCPClientManager(options);
+      const transport = manager as unknown as {
+        connectServer: typeof connectTransport;
+        connectShared: typeof connectTransport;
+      };
+      vi.spyOn(transport, "connectServer").mockImplementation(connectTransport);
+      vi.spyOn(transport, "connectShared").mockImplementation(connectTransport);
+      return manager;
+    });
+
+    const session = await createSession({ mcpEnabled: true, backgroundMcpConnect: false });
+    try {
+      const internals = harness(session);
+      expect([...attempts].sort()).toEqual(["flaky", "steady"]);
+      expect(internals.liveMcpTools.has(flakyIdentity.providerName)).toBe(false);
+      const steadyTool = internals.liveMcpTools.get(steadyIdentity.providerName);
+      expect(steadyTool).toBeDefined();
+
+      flakyFails = false;
+      vi.mocked(log).mockClear();
+      await session.newSession();
+
+      // The failed server reconnected and registered its tools; the connected
+      // server kept its original connection; the untrusted repo server never started.
+      expect([...attempts].sort()).toEqual(["flaky", "flaky", "steady"]);
+      expect(internals.liveMcpTools.has(flakyIdentity.providerName)).toBe(true);
+      expect(internals.liveMcpTools.get(steadyIdentity.providerName)).toBe(steadyTool);
+      expect(attempts).not.toContain("repo-server");
+      const retryLogs = vi
+        .mocked(log)
+        .mock.calls.filter(
+          ([, category, message]) =>
+            category === "mcp" && String(message).startsWith("Retried MCP server"),
+        );
+      expect(retryLogs).toEqual([
+        [
+          "INFO",
+          "mcp",
+          'Retried MCP server "flaky" on new session',
+          { result: "connected", tools: "1" },
+        ],
+      ]);
+      expect(JSON.stringify(vi.mocked(log).mock.calls)).not.toContain("env-7731");
+
+      // Nothing failed any more, so a later new session reconnects nothing.
+      await session.newSession();
+      expect(attempts.filter((name) => name === "flaky")).toHaveLength(2);
+    } finally {
+      await session.dispose();
+      vi.mocked(getAllMcpServers).mockResolvedValue([]);
+    }
+  }, 20_000);
 });

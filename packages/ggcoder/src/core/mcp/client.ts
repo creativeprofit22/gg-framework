@@ -182,6 +182,18 @@ export interface MCPClientManagerOptions {
   onServerStateChange?: (change: MCPServerStateChange) => void;
   /** Override `MCP_DEFAULT_IDLE_TIMEOUT_MS`; 0 disables idle shutdown. */
   idleTimeoutMs?: number;
+  /** Called once per server each time a `connectAllDetailed` attempt settles,
+   * so an owner can tell which servers failed and retry only those. */
+  onConnectResult?: (result: MCPConnectOutcome) => void;
+}
+
+/** A settled connect attempt without its tools. */
+export type MCPConnectOutcome = Omit<MCPConnectResult, "tools">;
+
+interface ConnectionSlot {
+  promise: Promise<ConnectionOutcome>;
+  settled: boolean;
+  settle: (outcome: ConnectionOutcome) => void;
 }
 
 export class MCPClientManager {
@@ -190,10 +202,7 @@ export class MCPClientManager {
    * Per-server connection settlement, so a caller holding a cached-only tool
    * can wait for the live client instead of failing or hanging forever.
    */
-  private connections = new Map<
-    string,
-    { promise: Promise<ConnectionOutcome>; settle: (outcome: ConnectionOutcome) => void }
-  >();
+  private connections = new Map<string, ConnectionSlot>();
 
   /**
    * In-flight session rebuilds, keyed by server name. N tool calls to the same
@@ -239,6 +248,7 @@ export class MCPClientManager {
    */
   private readonly onServerClosed?: (name: string) => void;
   private readonly onServerStateChange?: (change: MCPServerStateChange) => void;
+  private readonly onConnectResult?: (result: MCPConnectOutcome) => void;
 
   /** Set while `dispose` runs, so our own teardown is not reported as a death. */
   private disposing = false;
@@ -273,6 +283,7 @@ export class MCPClientManager {
     this.pool = opts.sharedPool ?? sharedMcpPool;
     this.onServerClosed = opts.onServerClosed;
     this.onServerStateChange = opts.onServerStateChange;
+    this.onConnectResult = opts.onConnectResult;
     this.idleTimeoutMs = opts.idleTimeoutMs ?? MCP_DEFAULT_IDLE_TIMEOUT_MS;
   }
 
@@ -527,17 +538,21 @@ export class MCPClientManager {
   }
 
   /** Get-or-create the settlement record for one server name. */
-  private connectionSlot(name: string): {
-    promise: Promise<ConnectionOutcome>;
-    settle: (outcome: ConnectionOutcome) => void;
-  } {
+  private connectionSlot(name: string): ConnectionSlot {
     const existing = this.connections.get(name);
     if (existing) return existing;
-    let settle!: (outcome: ConnectionOutcome) => void;
-    const promise = new Promise<ConnectionOutcome>((resolve) => {
-      settle = resolve;
+    let resolve!: (outcome: ConnectionOutcome) => void;
+    const promise = new Promise<ConnectionOutcome>((r) => {
+      resolve = r;
     });
-    const slot = { promise, settle };
+    const slot: ConnectionSlot = {
+      promise,
+      settled: false,
+      settle: (outcome) => {
+        slot.settled = true;
+        resolve(outcome);
+      },
+    };
     this.connections.set(name, slot);
     return slot;
   }
@@ -591,7 +606,12 @@ export class MCPClientManager {
     // Claim a settlement slot for every server up front, so a `whenConnected`
     // caller that arrives before a slow server's turn still waits on the right
     // promise instead of creating a second one.
-    for (const config of enabled) this.connectionSlot(config.name);
+    for (const config of enabled) {
+      // A settled slot belongs to an earlier attempt. A retry gets a fresh one
+      // so waiters see the new outcome rather than the old failure.
+      if (this.connections.get(config.name)?.settled) this.connections.delete(config.name);
+      this.connectionSlot(config.name);
+    }
 
     const settled = await Promise.allSettled(
       enabled.map((c) => (isShareableServer(c) ? this.connectShared(c) : this.connectServer(c))),
@@ -613,6 +633,8 @@ export class MCPClientManager {
       this.connectionSlot(result.name).settle(
         result.ok ? { ok: true } : { ok: false, error: result.error ?? "connection failed" },
       );
+      const { tools: _tools, ...outcome } = result;
+      this.onConnectResult?.(outcome);
     }
 
     const connected = results.filter((r) => r.ok).length;

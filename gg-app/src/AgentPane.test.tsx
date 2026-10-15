@@ -1705,6 +1705,53 @@ describe("enhancement composer outcomes (mocked native transport)", () => {
     expect(screen.getByText("Debounce")).toBeTruthy();
   });
 
+  it("keeps corrected terms highlighted after the enhanced draft is edited", async () => {
+    vi.stubGlobal("matchMedia", () => ({
+      matches: true,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    }));
+    const pane = client("enhance-edited", 1);
+    const term: AgentModule.PromptSegment = {
+      kind: "term",
+      text: "Debounce",
+      original: "Make search wait",
+      note: "Delay until typing pauses",
+    };
+    const segments: AgentModule.PromptSegment[] = [
+      term,
+      { kind: "text", text: " search by 300 ms after typing in SearchBox.tsx" },
+    ];
+    vi.mocked(pane.enhancePrompt).mockResolvedValue({ enhanced, segments });
+    await renderHydratedComposer(pane);
+    const input = screen.getByRole("textbox") as HTMLTextAreaElement;
+    fireEvent.change(input, { target: { value: draft } });
+    fireEvent.click(screen.getByRole("button", { name: "Enhance?" }));
+    await waitFor(() => expect(input.value).toBe(enhanced));
+    // Edit before the term, then add text after it (with trailing whitespace).
+    fireEvent.change(input, { target: { value: `Please ${enhanced}` } });
+    fireEvent.change(input, { target: { value: `Please ${enhanced} and keep it cancellable  ` } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    const sent = `Please ${enhanced} and keep it cancellable`;
+    await waitFor(() =>
+      expect(pane.sendPrompt).toHaveBeenCalledWith(sent, [], {
+        enhancements: [
+          { kind: "text", text: "Please " },
+          term,
+          {
+            kind: "text",
+            text: " search by 300 ms after typing in SearchBox.tsx and keep it cancellable",
+          },
+        ],
+      }),
+    );
+    const bubble = document.querySelector(".user-msg .enh-term");
+    expect(bubble?.textContent).toBe("Debounce");
+    expect(bubble?.getAttribute("title")).toBe(
+      "you said: \u201cMake search wait\u201d\nDelay until typing pauses",
+    );
+  });
+
   it.each(["steering", "stranded"] as const)(
     "renders exact queued highlights and Ken labels after %s consumption and disk reopen",
     async (mode) => {

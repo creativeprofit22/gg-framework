@@ -256,7 +256,12 @@ import {
   type AskAnswerDelta,
 } from "./ask-user";
 import { glowPlacement, glowStateFor, glowVars } from "./window-glow";
-import { EnhancedSegments } from "./PromptEnhancement";
+import {
+  type DraftEnhancement,
+  EnhancedSegments,
+  followDraftEdit,
+  rebaseSegments,
+} from "./PromptEnhancement";
 import { EnhanceDissolve } from "./EnhanceDissolve";
 import { toast } from "./toast";
 import { fileToPending, toWire, attachmentToPending, type PendingAttachment } from "./attachments";
@@ -929,13 +934,11 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   const [isFileDragOver, setIsFileDragOver] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   // The most recent prompt-enhancement result. `plain` is the text now in the
-  // textarea; `segments` drive the inline highlight overlay + the sent bubble.
-  // It's dropped the moment the textarea diverges from `plain` so highlights
-  // never misalign. `enhancing` shows the pulse on the Enhance pill mid-call.
-  const [enhancement, setEnhancement] = useState<{
-    plain: string;
-    segments: PromptSegment[];
-  } | null>(null);
+  // textarea; `segments` drive the highlighted terms in the sent bubble. Edits
+  // re-anchor the segments onto the new text (followDraftEdit), keeping every
+  // corrected term the edit didn't touch. `enhancing` shows the pulse on the
+  // Enhance pill mid-call.
+  const [enhancement, setEnhancement] = useState<DraftEnhancement | null>(null);
   const [enhancing, setEnhancing] = useState(false);
   // The floating "Enhance" pill is shown only after the user pauses typing for
   // ~1s (and hidden again on the next keystroke / send / empty input).
@@ -1645,11 +1648,13 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   const insertDroppedFolderPaths = useCallback((paths: string[]): void => {
     if (paths.length === 0 || noInputSlashCommandRef.current) return;
     const text = paths.join(" ");
-    setInput((prev) => {
+    const append = (prev: string): string => {
       if (!prev.trim()) return text;
       return `${prev}${/\s$/.test(prev) ? "" : " "}${text}`;
-    });
-    setEnhancement(null);
+    };
+    const previous = composerRef.current.input;
+    setInput(append);
+    setEnhancement((current) => followDraftEdit(current, previous, append(previous)));
     requestAnimationFrame(() => inputRef.current?.focus());
   }, []);
 
@@ -3396,6 +3401,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     const tail = input.slice(caret);
     const next = head + tail;
     setInput(next);
+    setEnhancement((current) => followDraftEdit(current, input, next));
     setMentionedPaths((prev) => (prev.includes(file.path) ? prev : [...prev, file.path]));
     setMention(null);
     setFileMatches([]);
@@ -4428,7 +4434,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   // sent bubble), and park the caret at the end.
   function applyEnhanceResult(r: { enhanced: string; segments: PromptSegment[] }): void {
     setInput(r.enhanced);
-    setEnhancement({ plain: r.enhanced, segments: r.segments });
+    setEnhancement({ enhanced: r.enhanced, plain: r.enhanced, segments: r.segments });
     requestAnimationFrame(() => {
       const el = inputRef.current;
       if (el) {
@@ -4501,7 +4507,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     pendingEnhanceRef.current = null;
     if (r?.isCurrent()) {
       setInput(r.enhanced);
-      setEnhancement({ plain: r.enhanced, segments: r.segments });
+      setEnhancement({ enhanced: r.enhanced, plain: r.enhanced, segments: r.segments });
     }
     requestAnimationFrame(() => {
       setEnhanceAnim(null);
@@ -4528,7 +4534,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     // and would happily mangle the `| 15m` argument tail into something the
     // parser rejects.
     if (scheduleDraft) return setEnhanceHintVisible(false);
-    if (enhancement && enhancement.plain === input) return setEnhanceHintVisible(false);
+    if (enhancement && enhancement.enhanced === input) return setEnhanceHintVisible(false);
     setEnhanceHintVisible(true);
   }, [input, enhancing, hydrated, slashOpen, mentionOpen, scheduleDraft, enhancement]);
 
@@ -4691,10 +4697,12 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     // knows which paths to read; they aren't shown in the user's bubble text.
     const prompt =
       mentionedPaths.length > 0 ? appendReferencedFiles(trimmed, mentionedPaths) : trimmed;
-    // Carry the enhancer's highlighted segments into the sent bubble ONLY when
-    // the message is the unedited enhanced text (the bubble shows `trimmed`).
+    // Carry the enhancer's highlighted segments (re-anchored through any edits)
+    // into the sent bubble, aligned to the trimmed text the bubble shows.
     const sentEnhancements =
-      enhancement && enhancement.plain === trimmed ? enhancement.segments : undefined;
+      enhancement && enhancement.plain === input
+        ? (rebaseSegments(enhancement.segments, input, trimmed) ?? undefined)
+        : undefined;
     // While a run is in flight, the message is QUEUED as steering (the sidecar
     // injects it mid-loop). Attachments queue too — they're persisted and ride
     // the same native-block path when the queue drains. Queued rows render
@@ -6142,10 +6150,10 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
                           setCaret(event.target.selectionStart ?? event.target.value.length);
                           // Typing exits history-recall mode so ↑/↓ start fresh next time.
                           if (historyIndex !== null) setHistoryIndex(null);
-                          // Drop the enhancement the instant the text diverges from it, so
-                          // the highlighted preview/bubble never misalign with edited text.
+                          // Re-anchor the corrected terms onto the edited text so their
+                          // highlights survive edits; terms the edit touched are dropped.
                           if (enhancement && event.target.value !== enhancement.plain)
-                            setEnhancement(null);
+                            setEnhancement(followDraftEdit(enhancement, input, event.target.value));
                           updateMention(
                             event.target.value,
                             event.target.selectionStart ?? event.target.value.length,

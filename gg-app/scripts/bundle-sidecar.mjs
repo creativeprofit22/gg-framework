@@ -23,6 +23,7 @@ import {
   rmSync,
   statSync,
 } from "node:fs";
+import { copyFile } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -514,17 +515,12 @@ export function selectedOptionalDependencies(
 }
 
 /**
- * Copy a package and its (optional) dependency tree into the flat output
- * node_modules, dereferencing pnpm symlinks. First version of a name wins
- * (npm-style hoist); the smoke test validates the result loads.
+ * Resolve a package and its (optional) dependency tree into ordered copy jobs
+ * for the flat output node_modules. First version of a name wins (npm-style
+ * hoist); the smoke test validates the result loads. Nothing is written.
  */
-export function copyPackage(
-  name,
-  fromRequire,
-  fromDir,
-  copied,
-  { destination = nodeModulesOut, platform = process.platform, arch = process.arch } = {},
-) {
+function planPackageCopy(name, fromRequire, fromDir, copied, jobs, options) {
+  const { destination, platform, arch } = options;
   if (copied.has(name)) return;
   const linkedRoot = packageRoot(name, fromRequire, fromDir);
   if (!linkedRoot) {
@@ -544,14 +540,109 @@ export function copyPackage(
   ];
 
   copied.add(name);
-  const dest = join(destination, ...name.split("/"));
-  mkdirSync(dirname(dest), { recursive: true });
-  cpSync(root, dest, { recursive: true, dereference: true });
+  jobs.push({ source: root, dest: join(destination, ...name.split("/")) });
 
   const childRequire = createRequire(join(root, "package.json"));
-  for (const dep of deps) {
-    copyPackage(dep, childRequire, root, copied, { destination, platform, arch });
+  for (const dep of deps) planPackageCopy(dep, childRequire, root, copied, jobs, options);
+}
+
+/**
+ * Copy a package and its (optional) dependency tree into the flat output
+ * node_modules, dereferencing pnpm symlinks, one tree at a time.
+ */
+export function copyPackage(
+  name,
+  fromRequire,
+  fromDir,
+  copied,
+  { destination = nodeModulesOut, platform = process.platform, arch = process.arch } = {},
+) {
+  const jobs = [];
+  planPackageCopy(name, fromRequire, fromDir, copied, jobs, { destination, platform, arch });
+  for (const { source, dest } of jobs) {
+    mkdirSync(dirname(dest), { recursive: true });
+    cpSync(source, dest, { recursive: true, dereference: true });
   }
+}
+
+/**
+ * List the directories and files `cpSync(source, dest, { recursive: true,
+ * dereference: true })` would create: symbolic links (and junctions) are
+ * followed and materialized as real entries. A link back into its own
+ * ancestry would recurse forever, so it fails the build instead.
+ */
+function dereferencedTree(source, dest, directories, files, ancestry = new Set()) {
+  const real = realpathSync(source);
+  if (ancestry.has(real)) throw new Error(`symbolic link cycle while copying ${source}`);
+  ancestry.add(real);
+  directories.push(dest);
+  for (const name of readdirSync(source).sort()) {
+    const from = join(source, name);
+    const to = join(dest, name);
+    const stat = statSync(from);
+    if (stat.isDirectory()) dereferencedTree(from, to, directories, files, ancestry);
+    else if (stat.isFile()) files.push({ from, to });
+    else throw new Error(`unexpected non-file entry while copying: ${from}`);
+  }
+  ancestry.delete(real);
+}
+
+/**
+ * Same result as calling copyPackage for each name in order, but the files
+ * are copied concurrently. Creating a file is dominated by per-file latency
+ * on Windows (≈23 ms each under real-time scanning, measured), not bytes, so
+ * a small bounded pool overlaps that wait; 8 workers measured ~3× faster
+ * than sequential cpSync on the real packages.
+ */
+export async function copyPackagesConcurrently(
+  names,
+  fromRequire,
+  fromDir,
+  copied,
+  {
+    destination = nodeModulesOut,
+    platform = process.platform,
+    arch = process.arch,
+    concurrency = 8,
+  } = {},
+) {
+  const jobs = [];
+  for (const name of names) {
+    planPackageCopy(name, fromRequire, fromDir, copied, jobs, { destination, platform, arch });
+  }
+  const directories = [];
+  const files = [];
+  for (const { source, dest } of jobs) dereferencedTree(source, dest, directories, files);
+
+  // Distinct hoisted names never share a destination file; if one ever did,
+  // the copy order would decide the shipped bytes, so refuse instead.
+  const targets = new Set();
+  for (const { to } of files) {
+    if (targets.has(to)) throw new Error(`two packages would write the same file: ${to}`);
+    targets.add(to);
+  }
+  for (const directory of [...new Set(directories)].sort()) {
+    mkdirSync(directory, { recursive: true });
+  }
+
+  let next = 0;
+  let failed = false;
+  const worker = async () => {
+    while (!failed && next < files.length) {
+      const { from, to } = files[next++];
+      try {
+        await copyFile(from, to);
+      } catch (error) {
+        failed = true;
+        throw error;
+      }
+    }
+  };
+  const workers = Math.max(1, Math.min(concurrency, files.length));
+  const results = await Promise.allSettled(Array.from({ length: workers }, worker));
+  const rejection = results.find((result) => result.status === "rejected");
+  if (rejection) throw rejection.reason;
+  return { packages: jobs.length, files: files.length };
 }
 
 /**
@@ -1081,11 +1172,17 @@ async function main() {
 
       const copied = new Set();
       const ggcoderRoot = join(repoRoot, "packages", "ggcoder");
-      for (const name of EXTERNAL) {
-        copyPackage(name, ggcoderRequire, ggcoderRoot, copied, {
-          destination: stagedNodeModulesOut,
-        });
-      }
+      const copyStartedAt = Date.now();
+      const copiedFiles = await copyPackagesConcurrently(
+        EXTERNAL,
+        ggcoderRequire,
+        ggcoderRoot,
+        copied,
+        { destination: stagedNodeModulesOut },
+      );
+      console.log(
+        `copied ${copiedFiles.files} files from ${copiedFiles.packages} packages in ${((Date.now() - copyStartedAt) / 1000).toFixed(1)}s`,
+      );
       pruneForeignNativePayloads(stagedOutDir);
       const before = inventory(stagedOutDir);
       pruneSourceMaps(stagedOutDir);

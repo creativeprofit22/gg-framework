@@ -5736,7 +5736,7 @@ select {
    scrollable content, not what's currently on screen — a full-height overlay
    on a scrolled-down existing session would render far above the visible
    messages). `.transcript` itself just fills this frame and scrolls. */
-.agent-pane:has(.has-reviews) {
+.agent-pane:has(> .dock > .review-dock) {
   container: review-pane / size;
 }
 /* Bound wrapped chrome too, so short panes retain chat, reviews and input. */
@@ -5777,8 +5777,15 @@ select {
   overflow: hidden;
   container-type: size;
 }
-.conversation-stack.has-reviews {
-  min-height: 180px;
+/* Pending reviews ride the floating dock (Deck.css `.app > .dock`), directly
+   above the live region and deck. The dock paints over the conversation, so a
+   review placed beside it is hidden underneath; the transcript already
+   reserves the dock's whole height (--dock-h), reviews included. The dock is
+   capped below the title bar so an expanded review shrinks (its reader
+   scrolls) instead of pushing the deck or itself off screen. `cqh` resolves
+   against the pane (review-pane above). */
+.app > .dock:has(> .review-dock) {
+  max-height: calc(100% - 48px);
 }
 .review-dock {
   --review-reading-width: 768px;
@@ -5792,21 +5799,32 @@ select {
 }
 .review-dock.is-expanded {
   /* Bound the shell, not its header. Only the inner reading region scrolls. */
-  flex: 0 0 min(max(67cqh, 200px), max(0px, calc(100cqh - 24px)));
+  /* Half the pane keeps the conversation it decides on in view; maximize
+     takes the rest. */
+  flex: 0 1 min(max(50cqh, 200px), 100cqh);
   min-height: 0;
   overflow: hidden;
 }
-.conversation-stack:has(.review-dock.is-expanded) > .transcript-frame {
-  min-height: 24px;
-}
-.conversation-stack:has(.review-dock.is-maximized) > .transcript-frame {
-  flex: 0 0 0;
-  min-height: 0;
-  height: 0;
+/* Maximized: the review takes everything between the title bar and the deck;
+   the output it covers is hidden so it can't take focus. */
+.agent-pane:has(> .dock > .review-dock.is-maximized) .transcript-frame {
   visibility: hidden;
 }
 .review-dock.is-maximized {
-  flex: 1 1 0;
+  flex: 1 1 100cqh;
+}
+/* Roadmap refresh failure: same surface as the review dock it recovers. */
+.roadmap-draft-refresh-error {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4) var(--space-6);
+  padding: var(--space-3) var(--space-10);
+  border-top: 1px solid var(--border-strong);
+  background: var(--surface-1);
+  color: var(--text);
+  font-size: var(--fs-sm);
 }
 .review-reading-rail,
 .review-dock-header {

@@ -75,7 +75,7 @@ async function elementMetrics(page, selectors) {
 }
 
 // Geometry alone misses overlays, opacity and clipping that never changes document width.
-async function assertControlReachable(control, label) {
+export async function assertControlReachable(control, label) {
   // A dismissing modal's view transition (~160ms, unchanged since before
   // upstream 0.91) overlays the whole page and takes every hit test. Measure
   // the settled layout: nobody can click through that fade either.

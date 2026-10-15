@@ -199,7 +199,9 @@ export async function measureReviewDockIsolation(client, { capture = async () =>
           if (chat.scrollTop !== chatScrolled) throw new Error('Dock changed chat scroll');
           if (Math.abs(before.top-after.top) > 1 || Math.abs(before.bottom-after.bottom) > 1) throw new Error('Chat moved dock');
           const input = rect(composer), transcript = rect(chat), paneRect = rect(pane);
-          if (transcript.bottom > after.top + 1 || after.bottom > input.top + 1) throw new Error('Review overlaps chat or composer');
+          // Since upstream 0.91 the review rides the floating dock over the transcript; it must sit above the composer and be the topmost element (not painted under the dock).
+          const hit = document.elementFromPoint(after.left + after.width / 2, after.top + 24);
+          if (after.bottom > input.top + 1 || !dock.contains(hit)) throw new Error('Review overlaps composer or is covered: ' + (hit && hit.className));
           if (input.bottom > innerHeight + 1 || input.height <= 0 || after.height <= 0) throw new Error('Composer or review unavailable ' + JSON.stringify({ size: ${JSON.stringify(size.name)}, input, dock: after, pane: paneRect, viewport: innerHeight, stack: rect(pane.querySelector('.conversation-stack')), tools: rect(pane.querySelector('.liveregion')) }));
           if (chatScrolled <= chatBefore || dockScrolled <= 0) throw new Error('Fixture did not exercise both scrollers');
           if (panes[1]?.querySelector('.review-dock')) throw new Error('Review leaked into sibling pane');
@@ -216,9 +218,9 @@ export async function measureReviewDockIsolation(client, { capture = async () =>
         const maximized = await client.evaluate(`(() => {
           const dock = document.querySelector('.review-dock');
           const bounds = dock.getBoundingClientRect();
-          const stack = dock.closest('.conversation-stack').getBoundingClientRect();
+          const stack = dock.closest('.dock').getBoundingClientRect();
           const input = document.querySelector('.inputwrap').getBoundingClientRect();
-          if (Math.abs(bounds.top - stack.top) > 1 || Math.abs(bounds.bottom - stack.bottom) > 1) throw new Error('Expanded review does not fill output area');
+          if (Math.abs(bounds.top - stack.top) > 1 || bounds.bottom > input.top + 1) throw new Error('Expanded review does not fill output area');
           if (Math.abs(input.top - ${measured.composer.top}) > 1 || Math.abs(input.bottom - ${measured.composer.bottom}) > 1) throw new Error('Expanded review moved composer');
           if (getComputedStyle(document.querySelector('.transcript-frame')).visibility !== 'hidden') throw new Error('Hidden output remains focusable');
           return { height: bounds.height, outputHeight: stack.height };

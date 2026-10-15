@@ -5561,7 +5561,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
           existing session scrolled down it rendered far above what's on
           screen. Anchoring to this non-scrolling sibling keeps it pinned to
           what the user is actually looking at, at any scroll position. */}
-        <div className={`conversation-stack${reviewItems.length ? " has-reviews" : ""}`}>
+        <div className="conversation-stack">
           <div ref={transcriptFrameRef} className="transcript-frame">
             {workspaceMode === "code" && kenPowerBanner && (
               <KenPowerBanner mode={kenPowerBanner} onDone={() => setKenPowerBanner(null)} />
@@ -5673,18 +5673,15 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
               )}
             </div>
           </div>
-
-          <ReviewDock
-            items={reviewItems}
-            expanded={expandedReview}
-            onExpandedChange={setExpandedReview}
-            onLayoutChange={maybeScrollToBottom}
-            fallbackFocus={() => inputRef.current?.focus()}
-          />
         </div>
 
         {/* The dock: everything below the conversation, floating over its
-          bottom edge (the transcript reserves its height as --dock-h). */}
+          bottom edge (the transcript reserves its height as --dock-h).
+          Anything that must stay visible above the conversation — pending
+          reviews, their recovery notice, update banners — lives INSIDE it:
+          the dock paints over its siblings, so a sibling placed after or
+          beside it is hidden underneath (scripts/check-dock-layering.mjs
+          fails the build on that). */}
         <div ref={dockRef} className="dock">
           {/* Until history replay applies (readyRef, the submission gate), say
             so — the removed footer used to carry this connecting status. */}
@@ -5692,6 +5689,21 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
             <span className="dock-status" role="status" style={{ color: theme.textDim }}>
               {status}
             </span>
+          )}
+          <ReviewDock
+            items={reviewItems}
+            expanded={expandedReview}
+            onExpandedChange={setExpandedReview}
+            onLayoutChange={maybeScrollToBottom}
+            fallbackFocus={() => inputRef.current?.focus()}
+          />
+          {roadmapDraftRefreshError && (
+            <div role="status" className="roadmap-draft-refresh-error">
+              {roadmapDraftRefreshError}
+              <button type="button" className="btn btn-ghost" onClick={refreshRoadmapDraft}>
+                Retry Roadmap review
+              </button>
+            </div>
           )}
           {/* Sub-agents walk on top of the pinned region as critters. */}
           <CritterFloor groups={critterGroups} />
@@ -6354,48 +6366,53 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
               </>
             }
           />
-        </div>
 
-        {appUpdate.phase === "available" && !appUpdate.localPatched && (
-          <button
-            className="update-banner"
-            title={appUpdate.installTitle}
-            onClick={() => {
-              if (shouldConfirmLocalUpdate(appUpdate.localPatched, appUpdate.phase)) {
-                setSummarizeDecisions(false);
-                setShowLocalUpdateConfirm(true);
-              } else {
-                void appUpdate.install();
-              }
-            }}
-          >
-            <span className="update-banner-dot" />
-            {appUpdate.localPatched
-              ? `${appUpdate.installLabel} — click to review the protected source update`
-              : `${MENTOR_DISPLAY_NAME} just updated ${PRODUCT_DISPLAY_NAME}!`}
-            {!appUpdate.localPatched && <Badge>Install</Badge>}
-          </button>
-        )}
-        {appUpdate.phase === "installing" && !appUpdate.localPatched && (
-          <div
-            className="update-banner update-banner-busy update-banner-progress"
-            role="progressbar"
-            aria-valuenow={appUpdate.progress ?? 0}
-            aria-valuemin={0}
-            aria-valuemax={100}
-            aria-label="Downloading update"
-          >
-            <span className="update-banner-fill" style={{ width: `${appUpdate.progress ?? 0}%` }} />
-            <span className="update-banner-pct">{`${appUpdate.progress ?? 0}%`}</span>
-          </div>
-        )}
-        {appUpdate.localPatched &&
-          ["installing", "completed", "error"].includes(appUpdate.phase) && (
-            <div className="update-banner update-banner-busy" title={appUpdate.installTitle}>
+          {/* Update banners ride the bottom of the dock, as upstream's
+            UpdateBanner does, so the floating dock never covers them. */}
+          {appUpdate.phase === "available" && !appUpdate.localPatched && (
+            <button
+              className="update-banner"
+              title={appUpdate.installTitle}
+              onClick={() => {
+                if (shouldConfirmLocalUpdate(appUpdate.localPatched, appUpdate.phase)) {
+                  setSummarizeDecisions(false);
+                  setShowLocalUpdateConfirm(true);
+                } else {
+                  void appUpdate.install();
+                }
+              }}
+            >
               <span className="update-banner-dot" />
-              {appUpdate.statusMessage ?? appUpdate.installLabel}
+              {appUpdate.localPatched
+                ? `${appUpdate.installLabel} — click to review the protected source update`
+                : `${MENTOR_DISPLAY_NAME} just updated ${PRODUCT_DISPLAY_NAME}!`}
+              {!appUpdate.localPatched && <Badge>Install</Badge>}
+            </button>
+          )}
+          {appUpdate.phase === "installing" && !appUpdate.localPatched && (
+            <div
+              className="update-banner update-banner-busy update-banner-progress"
+              role="progressbar"
+              aria-valuenow={appUpdate.progress ?? 0}
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-label="Downloading update"
+            >
+              <span
+                className="update-banner-fill"
+                style={{ width: `${appUpdate.progress ?? 0}%` }}
+              />
+              <span className="update-banner-pct">{`${appUpdate.progress ?? 0}%`}</span>
             </div>
           )}
+          {appUpdate.localPatched &&
+            ["installing", "completed", "error"].includes(appUpdate.phase) && (
+              <div className="update-banner update-banner-busy" title={appUpdate.installTitle}>
+                <span className="update-banner-dot" />
+                {appUpdate.statusMessage ?? appUpdate.installLabel}
+              </div>
+            )}
+        </div>
       </Activity>
 
       {workspaceMode === "code" && showInitGit && (
@@ -6525,14 +6542,6 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
         />
       )}
 
-      {roadmapDraftRefreshError && (
-        <div role="status" className="roadmap-draft-refresh-error">
-          {roadmapDraftRefreshError}
-          <button type="button" className="btn btn-ghost" onClick={refreshRoadmapDraft}>
-            Retry Roadmap review
-          </button>
-        </div>
-      )}
       <div className="visually-hidden" aria-live="polite" aria-atomic="true">
         {roadmapDraftState.announcement}
       </div>

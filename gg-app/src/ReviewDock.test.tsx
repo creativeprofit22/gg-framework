@@ -65,7 +65,7 @@ describe("ReviewDock", () => {
     expect(shell).toContain("flex: 0 0 auto");
     expect(shell).not.toMatch(/max-height|overflow:\s*auto/);
     expect(trigger).toContain("min-height: 48px");
-    expect(focused).toContain("67cqh");
+    expect(focused).toContain("50cqh");
     expect(focused).not.toMatch(/360px|40cqh/);
   });
   it("lets wheel scrolling reach the review reader from horizontally scrollable plan content", () => {

@@ -383,9 +383,14 @@ async function main() {
   // A Motion session must build from the packaged bundle (skills + prompt).
   const motionCwd = mkdtempSync(join(tmpdir(), "gg-smoke-motion-"));
   try {
+    // Minting any session requires the native shell secret, like the first one.
     const mk = await fetch(`http://127.0.0.1:${port}/session`, {
       method: "POST",
-      headers: { "content-type": "application/json", "x-gg-token": token },
+      headers: {
+        "content-type": "application/json",
+        "x-gg-daemon-token": daemonAuthToken,
+        "x-gg-token": token,
+      },
       body: JSON.stringify({ mode: "motion", cwd: join(motionCwd, "GG Motion") }),
     });
     const created = await mk.json().catch(() => ({}));

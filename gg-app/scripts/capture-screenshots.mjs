@@ -498,6 +498,15 @@ export function initScript(payload) {
     }
     return ids.size;
   };
+  // Any other window event the Rust shell emits (e.g. "local-patched-update").
+  window.__ggEmitEvent = (event, payload) => {
+    const ids = eventHandlers.get(event);
+    if (!ids) return 0;
+    for (const id of ids) {
+      callbacks.get(listeners.get(id)?.handler)?.({ event, id, payload });
+    }
+    return ids.size;
+  };
 
   // Silence the media/webcam surfaces that have no place in a screenshot.
   Object.defineProperty(navigator, "mediaDevices", { value: undefined, configurable: true });

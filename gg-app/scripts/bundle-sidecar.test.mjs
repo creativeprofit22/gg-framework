@@ -19,6 +19,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   buildAndPromoteDirectory,
   copyPackage,
+  copyPackagesConcurrently,
   pruneAllowlistedPackagePayloads,
   pruneForeignNativePayloads,
   selectedOptionalDependencies,
@@ -132,6 +133,101 @@ describe("sidecar optional dependency selection", () => {
         arch: "arm64",
       }),
     ).toThrow("sharp has no supported Windows host selection for win32/arm64");
+    expect(existsSync(destination)).toBe(false);
+  });
+});
+
+/** Every directory and file (with contents) under root, as sorted portable paths. */
+function treeSnapshot(root) {
+  const entries = [];
+  const visit = (dir) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true }).sort((a, b) =>
+      a.name < b.name ? -1 : 1,
+    )) {
+      const path = join(dir, entry.name);
+      const rel = path
+        .slice(root.length + 1)
+        .split(/[\\/]/)
+        .join("/");
+      if (entry.isDirectory()) {
+        entries.push(`${rel}/`);
+        visit(path);
+      } else entries.push(`${rel} = ${readFileSync(path, "utf8")}`);
+    }
+  };
+  visit(root);
+  return entries;
+}
+
+describe("concurrent sidecar package copy", () => {
+  function createDependencyFixture() {
+    const root = createSharpFixture();
+    createPackage(root, "host", {
+      dependencies: { leaf: "1.0.0", sharp: "0.34.5" },
+    });
+    createPackage(root, "leaf");
+    const host = join(root, "node_modules", "host");
+    writeFixtureFile(host, "lib/deep/nested/file.js", "nested");
+    mkdirSync(join(host, "empty-dir"), { recursive: true });
+    // A linked directory inside a package must be materialized, as cpSync's
+    // dereference does for pnpm-style links.
+    const linkedTarget = join(root, "linked-target");
+    writeFixtureFile(linkedTarget, "inside.txt", "linked content");
+    const linked = createDirectorySymlinkOrSkip(linkedTarget, join(host, "linked"));
+    return { root, linked };
+  }
+
+  it("produces exactly the tree the sequential copy produces", async () => {
+    const { root, linked } = createDependencyFixture();
+    const fromRequire = createRequire(join(root, "package.json"));
+    const sequential = join(root, "sequential", "node_modules");
+    const concurrent = join(root, "concurrent", "node_modules");
+    const options = { platform: "win32", arch: "x64" };
+
+    const sequentialCopied = new Set();
+    for (const name of ["host", "leaf"]) {
+      copyPackage(name, fromRequire, root, sequentialCopied, {
+        ...options,
+        destination: sequential,
+      });
+    }
+    const concurrentCopied = new Set();
+    const result = await copyPackagesConcurrently(
+      ["host", "leaf"],
+      fromRequire,
+      root,
+      concurrentCopied,
+      { ...options, destination: concurrent, concurrency: 3 },
+    );
+
+    expect(treeSnapshot(concurrent)).toEqual(treeSnapshot(sequential));
+    expect([...concurrentCopied]).toEqual([...sequentialCopied]);
+    expect(result.packages).toBe(concurrentCopied.size);
+    expect(treeSnapshot(concurrent)).toContain("host/empty-dir/");
+    expect(treeSnapshot(concurrent)).toContain("host/lib/deep/nested/file.js = nested");
+    expect(existsSync(join(concurrent, "@img", "sharp-linux-x64"))).toBe(false);
+    if (linked) {
+      expect(treeSnapshot(concurrent)).toContain("host/linked/inside.txt = linked content");
+    }
+  });
+
+  it("fails before writing anything for an unsupported Windows host architecture", async () => {
+    const { root } = createDependencyFixture();
+    const destination = join(root, "staged", "node_modules");
+
+    await expect(
+      copyPackagesConcurrently(
+        ["host"],
+        createRequire(join(root, "package.json")),
+        root,
+        new Set(),
+        {
+          destination,
+          platform: "win32",
+          arch: "arm64",
+        },
+      ),
+    ).rejects.toThrow("sharp has no supported Windows host selection for win32/arm64");
     expect(existsSync(destination)).toBe(false);
   });
 });

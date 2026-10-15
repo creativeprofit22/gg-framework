@@ -22,6 +22,12 @@
         "The `Goals` farm now makes cozy little sounds when you poke things, timed right to each animation.",
         "Your Local Fork still never checks for or downloads updates on its own, so upstream's new update key stays switched off here."
       ]
+    },
+    {
+      "title": "Reviews you can always reach",
+      "items": [
+        "Plan approvals and Roadmap drafts are back where you can see them. When the `Deck` arrived, a review waiting for you could slip underneath it, leaving your message box locked with nothing to click. `Plan approval required` and `Roadmap draft` now sit right above the `Deck`, so `Approve`, `Feedback` and `Create phase` are always in reach, and an open review takes half the window so your conversation stays in view. Update progress and `Retry Roadmap review` stay on top too."
+      ]
     }
   ]
 }

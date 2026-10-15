@@ -53,10 +53,23 @@ export const CURRENT_LOCAL_RELEASE_NOTES = requireCurrentReleaseNotes(releaseNot
 /** Newest first. Maintained only by the Local Fork release flow. */
 export const LOCAL_CHANGELOG: LocalChangelogEntry[] = [
   {
-    id: "local-2026-10-15-upstream-0920-fast-models",
+    id: "local-2026-10-15-enhancer-highlights-and-mcp-retry",
     label: CURRENT_LOCAL_RELEASE_NOTES.label,
     date: CURRENT_LOCAL_RELEASE_NOTES.date,
     items: CURRENT_LOCAL_RELEASE_NOTES.sections.flatMap(({ items }) => items),
+  },
+  {
+    id: "local-2026-10-15-upstream-0920-fast-models",
+    label: "Upstream 0.92.0, and Fast is now a model you pick",
+    date: "2026-10-15",
+    items: [
+      "Fast mode is here, on the plans you already pay for. Pick `GPT-6.1 Sol Fast`, `GPT-6 Astra Fast` or `GPT-6 Luna Fast` and Codex answers from its priority lane using your ChatGPT plan: same brains, less waiting, though your plan's limits go faster.",
+      "`Claude Opus 5.5 Fast` is in the model menu too, streaming answers up to `2.5x` faster with your Claude login. Anthropic bills it to your usage credits, so if they're off you'll be told exactly where to switch them on instead of seeing a confusing limit error.",
+      "The old `Fast on · 2.5× credits` switch under `More` is gone, because `GPT-6 Astra Fast` does exactly the same thing and now sits with the rest of your models. Chats where you'd switched it on reopen on `GPT-6 Astra Fast` by themselves, keeping the `Stable` or `Experimental` context you picked. Pick `GPT-6 Astra` again any time to go back to normal speed.",
+      "Zoom in or out with `Ctrl +` and `Ctrl -` all you like. Your chat now stays right where it belongs, with the newest message sitting neatly above the message box instead of sliding underneath it. Resizing the window or a split pane keeps your chat on its newest line too.",
+      "`esc` closes the panel under your message box, wherever you clicked. Your agent keeps right on working while you do it, and one more `esc` stops it whenever you want. With panes side by side, it closes only the panel in the pane you're working in, so the others stay just as you left them. `Usage` and `Model` now get the same tidy header and close button as everything else.",
+      "`Goal settings` now uses the whole panel. No more odd empty strip down the side, and the context box hugs what you've added instead of sitting there as a big empty slab.",
+    ],
   },
   {
     id: "local-2026-10-14-reviews-above-the-deck",

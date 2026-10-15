@@ -193,6 +193,8 @@ export function isHardBillingMessage(message: string): boolean {
     lower.includes("recharge") ||
     lower.includes("balance is too low") ||
     lower.includes("out of credits") ||
+    // Anthropic fast mode on a subscription without usage credits turned on.
+    lower.includes("usage credits are required") ||
     lower.includes("arrears") ||
     lower.includes("arrearage") ||
     lower.includes("token quota") ||

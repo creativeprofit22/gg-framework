@@ -1,6 +1,8 @@
 // Core entry point
 export { stream, localWireModelId } from "./stream.js";
 export { codexRequestProfile } from "./providers/openai-codex-request.js";
+export { FAST_MODE_SUFFIX, resolveFastModeModel } from "./fast-mode.js";
+export type { FastModeResolution } from "./fast-mode.js";
 
 // Preparatory provider policy (does not register a provider)
 export * from "./qwen-cloud-policy.js";

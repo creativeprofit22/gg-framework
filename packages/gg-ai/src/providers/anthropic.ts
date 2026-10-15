@@ -86,6 +86,8 @@ export function fineGrainedToolStreamingEnabled(): boolean {
 
 /** Beta that enables server-side refusal fallback (`fallbacks` body param). */
 export const SERVER_FALLBACK_BETA = "server-side-fallback-2026-07-01";
+/** Beta that gates `speed: "fast"` (fast mode research preview, Opus 5.5/5/4.8). */
+export const FAST_MODE_BETA = "fast-mode-2026-02-01";
 
 /**
  * Per-process memo of provider configs whose server-side-fallback request was
@@ -323,6 +325,12 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
   const { system: rawSystem, messages } = toAnthropicMessages(downgradedMessages, cacheControl, {
     fallbackBlocks: useServerFallback,
   });
+  // Fast mode (`speed: "fast"` + its beta) is a first-party-API feature; never
+  // send it to Anthropic-compatible endpoints (MiniMax, gateways).
+  const useFastMode =
+    options.speed === "fast" &&
+    options.provider === "anthropic" &&
+    isDirectAnthropicApi(options.baseUrl);
 
   // OAuth tokens require Claude Code identity in the system prompt
   const system = isOAuth
@@ -419,6 +427,7 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
       return contextEdits.length ? { context_management: { edits: contextEdits } } : {};
     })(),
     ...(useServerFallback ? { fallbacks: "default" } : {}),
+    ...(useFastMode ? { speed: "fast" } : {}),
     stream: useStreaming,
   } as Anthropic.MessageCreateParams;
   // Caller-supplied provider-specific body fields; they only fill unset fields.
@@ -443,6 +452,7 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
     // is only "1h" on the first-party endpoint (see toAnthropicCacheControl).
     ...(cacheControl?.ttl === "1h" ? ["extended-cache-ttl-2025-04-11"] : []),
     ...(useServerFallback ? [SERVER_FALLBACK_BETA] : []),
+    ...(useFastMode ? [FAST_MODE_BETA] : []),
   ];
 
   const toRequestOptions = (
@@ -962,6 +972,11 @@ function messageToResponse(message: Anthropic.Message): StreamResponse {
   };
 }
 
+/** Anthropic's refusal of a fast-mode request from a subscription without usage credits. */
+function isFastModeCreditsMessage(message: string): boolean {
+  return /usage credits are required for fast mode/i.test(message);
+}
+
 /**
  * Read Anthropic's unified rate-limit headers — the subscription (OAuth) quota
  * signal. `anthropic-ratelimit-unified-status: rejected` means the usage window
@@ -1033,6 +1048,18 @@ function toError(err: unknown): ProviderError {
     // meaningfully in the future — means the plan's usage is spent, not a
     // transient per-minute throttle. Stamp a canonical message so downstream
     // retry logic stops instead of burning minutes retrying.
+    // Fast mode on a Claude subscription bills usage credits only. Without them
+    // Anthropic answers 429 "Usage credits are required for fast mode." with the
+    // unified headers set, which must not read as the plan's usage running out.
+    // The shared billing markers keep the agent loop from retrying it.
+    if (isFastModeCreditsMessage(message)) {
+      return new ProviderError("anthropic", message, {
+        statusCode: err.status,
+        ...(requestId ? { requestId } : {}),
+        hint: "Fast mode bills Claude usage credits, not your plan. Turn them on at claude.ai/settings/usage, or switch to Claude Opus 5.5 (standard speed) in the model selector.",
+        cause: err,
+      });
+    }
     if (err.status === 429) {
       const limit = readUnifiedRateLimit(err.headers);
       const farOff = limit.resetsAt != null && limit.resetsAt * 1000 - Date.now() > 60_000;

@@ -21,6 +21,7 @@ import {
 import { sanitizeMessagesForWire } from "./utils/well-formed.js";
 import { observePreparedContext } from "./utils/context-observation.js";
 import { markContinuesTurn } from "./utils/turn-continuation.js";
+import { resolveFastModeModel } from "./fast-mode.js";
 
 /** OpenAI's documented cap: an embeddings `input` array may hold at most 2048 entries. */
 const OPENAI_EMBED_BATCH_SIZE = 2048;
@@ -316,7 +317,14 @@ function requireLocalBaseUrl(baseUrl: string | undefined): string {
  * const response = await stream({ provider: "openai", model: "gpt-4.1", messages });
  * ```
  */
-export function stream(options: StreamOptions): StreamResult {
+export function stream(requested: StreamOptions): StreamResult {
+  // Fast-mode ids (`claude-opus-5-5-fast`, `gpt-6.1-sol-fast`) are the base
+  // model at a faster speed tier — rewrite here so every call site (agent
+  // loop, compaction, sub-agents) and every model-id check below sees the real id.
+  const fastMode = resolveFastModeModel(requested.provider, requested.model);
+  const options: StreamOptions = fastMode.fast
+    ? { ...requested, model: fastMode.model, speed: "fast" }
+    : requested;
   const entry = providerRegistry.get(options.provider);
   if (!entry) {
     throw new GGAIError(

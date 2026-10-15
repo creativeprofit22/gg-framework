@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { FAST_MODE_SUFFIX, resolveFastModeModel } from "@kenkaiiii/gg-ai";
 import { XIAOMI_CREDITS_KEY } from "./auth-storage.js";
 import {
   MODELS,
@@ -86,6 +87,27 @@ describe("model registry invariants", () => {
         expect(model.codexExperimentalContextWindow).toBeLessThanOrEqual(model.contextWindow);
       }
     }
+  });
+
+  it("registers fast-mode entries as the same model as their base, wired in gg-ai", () => {
+    const fastIds = MODELS.filter((m) => m.id.endsWith(FAST_MODE_SUFFIX)).map((m) => m.id);
+    expect(fastIds).toEqual([
+      "claude-opus-5-5-fast",
+      "gpt-6-astra-fast",
+      "gpt-6.1-sol-fast",
+      "gpt-6-luna-fast",
+    ]);
+    for (const id of fastIds) {
+      const { id: _id, name, ...fast } = getModel(id) as ModelInfo;
+      const resolved = resolveFastModeModel(fast.provider, id);
+      expect(resolved.fast, `${id} resolves in gg-ai`).toBe(true);
+      const { id: _baseId, name: baseName, ...base } = getModel(resolved.model) as ModelInfo;
+      expect(fast, `${id} metadata matches ${resolved.model}`).toEqual(base);
+      expect(name).toBe(`${baseName} Fast`);
+    }
+    // Compaction summaries never land on a fast (premium) tier.
+    expect(getSummaryModel("openai", "gpt-6.1-sol-fast").id).toBe("gpt-6-luna");
+    expect(getSummaryModel("anthropic", "claude-opus-5-5-fast").id).toBe("claude-sonnet-5-5");
   });
 
   it("returns a registered default model for every provider", () => {

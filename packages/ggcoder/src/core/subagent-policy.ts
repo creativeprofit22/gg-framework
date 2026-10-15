@@ -1,3 +1,4 @@
+import { resolveFastModeModel } from "@kenkaiiii/gg-ai";
 import type { Provider, ThinkingLevel } from "@kenkaiiii/gg-ai";
 
 export const ASYNC_ORCHESTRATION_MARKER = "\n\n## Async subagent orchestration\n";
@@ -21,10 +22,12 @@ export function applyAsyncSubagentPolicy(
 ): string {
   const markerIndex = prompt.indexOf(ASYNC_ORCHESTRATION_MARKER);
   const basePrompt = markerIndex === -1 ? prompt : prompt.slice(0, markerIndex);
+  // Fast-mode ids are the same model at a faster tier — same policy.
+  const baseModel = resolveFastModeModel(provider, model).model;
   const supportsPolicy =
     toolNames.includes("spawn_agent") &&
     provider === "openai" &&
-    (model === "gpt-6-astra" || model === "gpt-6.1-sol");
+    (baseModel === "gpt-6-astra" || baseModel === "gpt-6.1-sol");
   if (!supportsPolicy) return basePrompt;
   return (
     basePrompt +

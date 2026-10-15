@@ -331,8 +331,13 @@ export interface StreamOptions {
   cacheRetention?: CacheRetention;
   /** Stable per-session cache routing key for providers that support it (OpenAI, Moonshot, Gemini Code Assist). */
   promptCacheKey?: string;
-  /** OpenAI service tier for latency-sensitive requests. */
+  /** OpenAI service tier for latency-sensitive requests. `"fast"` is the Local
+   *  Fork's Astra Fast toggle; the Codex transport sends it as `"priority"`. */
   serviceTier?: "auto" | "default" | "flex" | "priority" | "fast";
+  /** Provider speed tier. "fast" sends Anthropic `speed: "fast"` (first-party API
+   *  only) or OpenAI/Codex `service_tier: "priority"`. Set automatically by
+   *  `stream()` for fast-mode model ids (see `resolveFastModeModel`). */
+  speed?: "standard" | "fast";
   /** Codex endpoint only: send the Responses-Lite request shape (lite header,
    *  `parallel_tool_calls: false`, all-turns reasoning context). Unset follows
    *  the model family (on for gpt-5.6/gpt-6 models). Lite allows only one tool

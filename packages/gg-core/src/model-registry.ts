@@ -1,3 +1,4 @@
+import { resolveFastModeModel } from "@kenkaiiii/gg-ai";
 import type { Provider, ThinkingLevel } from "@kenkaiiii/gg-ai";
 import {
   QWEN_CLOUD_MODEL_CAPABILITIES,
@@ -143,9 +144,8 @@ export const MODELS: ModelInfo[] = [
     // context, 128K output, image input. Same always-on adaptive thinking with
     // the full effort ladder (low→max, xhigh included; the API-side default
     // effort is `medium`) and the same Fable 5.1 constraints gg-ai already
-    // handles (no forced tool use, thinking can't be disabled). Also eligible
-    // for the gated `speed: "fast"` research preview (waitlist-only, premium
-    // $8/$40 pricing — not wired up). Opus 5 is retired here — a session that
+    // handles (no forced tool use, thinking can't be disabled). Fast mode is
+    // the separate `claude-opus-5-5-fast` entry below. Opus 5 is retired here — a session that
     // still has it saved falls back to the provider default on next start.
     id: "claude-opus-5-5",
     name: "Claude Opus 5.5",
@@ -159,6 +159,25 @@ export const MODELS: ModelInfo[] = [
     // Anthropic's API and Claude Code both start the 5.5 family at medium; at a
     // given level 5.5 thinks more than 5, so the ladder ceiling (max) made fresh
     // sessions slow and expensive. Users can still opt up.
+    defaultThinkingLevel: "medium",
+    maxThinkingLevel: "max",
+  },
+  {
+    // Opus 5.5 in fast mode (research preview): the same model at up to 2.5x
+    // output tokens/sec, $8/$40 MTok. gg-ai's `stream()` sends it as
+    // `claude-opus-5-5` + `speed: "fast"` + the fast-mode beta. On a Claude
+    // subscription it bills usage credits only — never included plan usage —
+    // and Anthropic 429s "Usage credits are required for fast mode" until they
+    // are turned on. Its prompt cache is separate from standard-speed Opus.
+    id: "claude-opus-5-5-fast",
+    name: "Claude Opus 5.5 Fast",
+    provider: "anthropic",
+    contextWindow: 1_000_000,
+    maxOutputTokens: 128_000,
+    supportsThinking: true,
+    supportsImages: true,
+    supportsVideo: false,
+    costTier: "high",
     defaultThinkingLevel: "medium",
     maxThinkingLevel: "max",
   },
@@ -236,6 +255,26 @@ export const MODELS: ModelInfo[] = [
     costTier: "high",
     maxThinkingLevel: "ultra",
   },
+  {
+    // Codex Fast mode for Astra (catalog `service_tiers: priority`, "2x speed,
+    // increased usage"). gg-ai's `stream()` sends it as `gpt-6-astra` +
+    // `service_tier: "priority"`, exactly what the Codex CLI sends. On a
+    // ChatGPT plan it draws included limits at 2.5x the standard rate.
+    id: "gpt-6-astra-fast",
+    name: "GPT-6 Astra Fast",
+    provider: "openai",
+    contextWindow: 1_050_000,
+    codexContextWindow: 272_000,
+    // Same wire model as Astra, so the fork's experimental profile carries over.
+    codexExperimentalContextWindow: 872_000,
+    maxOutputTokens: 128_000,
+    supportsThinking: true,
+    defaultThinkingLevel: "low",
+    supportsImages: true,
+    supportsVideo: false,
+    costTier: "high",
+    maxThinkingLevel: "ultra",
+  },
   // GPT-6 Sol + Luna — released 2026-09-22 below Astra, replacing the whole
   // GPT-5.6 family (Sol/Terra/Luna; there is no GPT-6 Terra — OpenAI's Codex
   // catalog upgrades 5.6 Terra to 6 Sol). GPT-6.1 Sol (2026-09-29) then replaced
@@ -265,11 +304,44 @@ export const MODELS: ModelInfo[] = [
     maxThinkingLevel: "ultra",
   },
   {
+    // Codex Fast mode for 6.1 Sol ("2x speed, increased usage") — see
+    // `gpt-6-astra-fast` for the wire mapping and billing.
+    id: "gpt-6.1-sol-fast",
+    name: "GPT-6.1 Sol Fast",
+    provider: "openai",
+    contextWindow: 1_050_000,
+    codexContextWindow: 272_000,
+    maxOutputTokens: 128_000,
+    supportsThinking: true,
+    defaultThinkingLevel: "low",
+    supportsImages: true,
+    supportsVideo: false,
+    costTier: "medium",
+    maxThinkingLevel: "ultra",
+  },
+  {
     // Luna — "Fast and affordable model for easier tasks." (Codex priority 4,
     // default medium, needs a Codex client >= 0.155.0). $0.10/$0.50 MTok.
     // Reasoning tops out at `max`.
     id: "gpt-6-luna",
     name: "GPT-6 Luna",
+    provider: "openai",
+    contextWindow: 1_050_000,
+    codexContextWindow: 272_000,
+    maxOutputTokens: 128_000,
+    supportsThinking: true,
+    defaultThinkingLevel: "medium",
+    supportsImages: true,
+    supportsVideo: false,
+    costTier: "low",
+    maxThinkingLevel: "max",
+  },
+  {
+    // Codex Fast mode for Luna ("1.5x speed") — see `gpt-6-astra-fast` for the
+    // wire mapping and billing. Listed after Luna so compaction summaries
+    // (first `low` OpenAI model) stay on standard-speed Luna.
+    id: "gpt-6-luna-fast",
+    name: "GPT-6 Luna Fast",
     provider: "openai",
     contextWindow: 1_050_000,
     codexContextWindow: 272_000,
@@ -999,7 +1071,12 @@ const SUMMARY_COST_TIER: Readonly<Partial<Record<Provider, ModelInfo["costTier"]
 export function getSummaryModel(provider: Provider, currentModelId: string): ModelInfo {
   if (provider === "qwen-cloud") return getModel(QWEN_CLOUD_SUMMARY_MODEL_ID)!;
   const tier = SUMMARY_COST_TIER[provider];
-  const tagged = tier ? getModelsForProvider(provider).find((m) => m.costTier === tier) : undefined;
+  // Fast-mode entries bill a premium speed tier — never pick one for summaries.
+  const tagged = tier
+    ? getModelsForProvider(provider).find(
+        (m) => m.costTier === tier && !resolveFastModeModel(provider, m.id).fast,
+      )
+    : undefined;
   return tagged ?? getModel(currentModelId) ?? getDefaultModel(provider);
 }
 

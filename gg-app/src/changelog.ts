@@ -22,6 +22,14 @@ export interface ChangelogEntry {
 /** Newest first. Prepended by the `/release` flow. */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.92.0",
+    date: "2026-10-15",
+    items: [
+      "Fast mode just landed, right on the plans you already pay for. Pick `GPT-6.1 Sol Fast`, `GPT-6 Astra Fast` or `GPT-6 Luna Fast` and Codex serves your answers from its priority lane using your ChatGPT plan, same brains, less waiting.",
+      "`Claude Opus 5.5 Fast` is in the model menu too, streaming answers up to `2.5x` faster with your Claude login. Anthropic bills it to your usage credits, so if they're off I tell you exactly where to switch them on instead of throwing a confusing limit error.",
+    ],
+  },
+  {
     version: "0.91.2",
     date: "2026-10-15",
     items: [

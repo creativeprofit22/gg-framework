@@ -1,5 +1,17 @@
 # @kenkaiiii/ggcoder
 
+## 5.82.0
+
+### Minor Changes
+
+- Add fast-mode models over subscription logins: Claude Opus 5.5 Fast (`speed: "fast"`, billed to Claude usage credits) and GPT-6 Astra/6.1 Sol/Luna Fast (Codex `service_tier: "priority"`), with a clear error when Claude usage credits are off.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.82.0
+- @kenkaiiii/gg-agent@5.82.0
+- @kenkaiiii/gg-core@5.82.0
+
 ## 5.81.0
 
 ### Minor Changes

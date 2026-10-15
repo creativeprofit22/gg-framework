@@ -53,10 +53,27 @@ export const CURRENT_LOCAL_RELEASE_NOTES = requireCurrentReleaseNotes(releaseNot
 /** Newest first. Maintained only by the Local Fork release flow. */
 export const LOCAL_CHANGELOG: LocalChangelogEntry[] = [
   {
-    id: "local-2026-10-14-upstream-0911-deck-and-pinned-actions",
+    id: "local-2026-10-14-reviews-above-the-deck",
     label: CURRENT_LOCAL_RELEASE_NOTES.label,
     date: CURRENT_LOCAL_RELEASE_NOTES.date,
     items: CURRENT_LOCAL_RELEASE_NOTES.sections.flatMap(({ items }) => items),
+  },
+  {
+    id: "local-2026-10-14-upstream-0911-deck-and-pinned-actions",
+    label: "Upstream 0.91.1, with the Deck and your favorite buttons up top",
+    date: "2026-10-14",
+    items: [
+      "Meet the `Deck`, the new home for everything at the bottom of your window. Your model, usage, background tasks, checklist and radio now open right where you type instead of floating over your chat, so your conversation gets a lot more room to breathe.",
+      "`New`, `Notes` and `Tasks` stay pinned at the top of every window, one click each, so you never dig through a menu to start fresh or check your list. `Tasks` shows how many are waiting, and on a narrow window the buttons shrink to icons instead of disappearing.",
+      "Light mode keeps its liquid glass. The new title bar keys, the `Deck` and its panels all wear the same frosted look as the rest of the app, while Dark gets upstream's sleek new style. One `Appearance` setting switches every window at once.",
+      "Your project's Git story is one tap away. The `Git` panel shows every changed file with its line counts, plus your open pull requests and issues on GitHub.",
+      "Picking a model is quicker. Type something like `opus55` and the right one pops up, and you can jump straight to any thinking level instead of clicking through them one by one.",
+      "Tables and code blocks now stretch across the whole chat, so columns stop squishing while your reading text stays a comfy width. Settings also gets an `About` tab and opens fully loaded, without a half-ready flicker.",
+      "Attach a repo to a goal, or add a folder with `/add-dir`, and its own slash commands come right along in the `/` menu, running exactly like your project's own.",
+      "A goal that's already running in another window or on your phone is never started a second time, so you won't end up with two Kens working the same goal.",
+      "The `Goals` farm now makes cozy little sounds when you poke things, timed right to each animation.",
+      "Your Local Fork still never checks for or downloads updates on its own, so upstream's new update key stays switched off here.",
+    ],
   },
   {
     id: "local-2026-10-13-upstream-0880-ken-status-and-medium-claude",

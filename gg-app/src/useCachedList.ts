@@ -17,6 +17,12 @@ export interface CachedList<T> {
   loading: boolean;
   /** The last load failed and there's no earlier copy to fall back on. */
   error: string | null;
+  /**
+   * Refreshing failed (after retries) while an earlier copy is on screen, so
+   * that copy may be out of date. Pickers say so instead of silently passing
+   * an old list off as current.
+   */
+  refreshError: string | null;
   /** Load again; keeps showing the current copy meanwhile. */
   reload: () => void;
   /** Replace the shown copy (and the kept one) after a local change. */
@@ -24,6 +30,14 @@ export interface CachedList<T> {
 }
 
 const PREFIX = "gg-list:";
+
+/**
+ * A refresh behind a kept copy is retried after these delays before it is
+ * reported. A list asked for while the window's daemon is still starting or
+ * respawning fails transiently; giving up at once left that copy on screen
+ * for good.
+ */
+export const REFRESH_RETRY_DELAYS_MS = [1_000, 3_000] as const;
 
 function readKept<T>(key: string | null): T[] | null {
   if (!key) return null;
@@ -59,9 +73,16 @@ export function useCachedList<T>(
     items: T[];
     loading: boolean;
     error: string | null;
+    refreshError: string | null;
   }>(() => {
     const kept = readKept<T>(key);
-    return { key, items: kept ?? [], loading: key !== null && kept === null, error: null };
+    return {
+      key,
+      items: kept ?? [],
+      loading: key !== null && kept === null,
+      error: null,
+      refreshError: null,
+    };
   });
   const [nonce, setNonce] = useState(0);
   // The latest loader, read by the effect without making it re-run (and
@@ -75,38 +96,62 @@ export function useCachedList<T>(
   // never the previous list's rows.
   if (state.key !== key) {
     const kept = readKept<T>(key);
-    setState({ key, items: kept ?? [], loading: key !== null && kept === null, error: null });
+    setState({
+      key,
+      items: kept ?? [],
+      loading: key !== null && kept === null,
+      error: null,
+      refreshError: null,
+    });
   }
 
   useEffect(() => {
     if (key === null) return;
     const signal = { cancelled: false };
-    loadRef
-      .current(signal)
-      .then((items) => {
-        if (signal.cancelled) return;
-        keep(key, items);
-        setState({ key, items, loading: false, error: null });
-      })
-      .catch((reason: unknown) => {
-        if (signal.cancelled) return;
-        const message = reason instanceof Error ? reason.message : String(reason);
-        setState((current) =>
-          current.key !== key
-            ? current
-            : // A kept copy stays on screen; only a first load reports the error.
-              current.loading
-              ? { key, items: [], loading: false, error: message }
-              : current,
-        );
-      });
+    // A first load reports its failure at once (there is nothing else to
+    // show); a refresh behind a kept copy retries first.
+    const behindKeptCopy = readKept<T>(key) !== null;
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
+    const attempt = (retries: number): void => {
+      loadRef
+        .current(signal)
+        .then((items) => {
+          if (signal.cancelled) return;
+          keep(key, items);
+          setState({ key, items, loading: false, error: null, refreshError: null });
+        })
+        .catch((reason: unknown) => {
+          if (signal.cancelled) return;
+          const message = reason instanceof Error ? reason.message : String(reason);
+          const delay = REFRESH_RETRY_DELAYS_MS[retries];
+          if (behindKeptCopy && delay !== undefined) {
+            retryTimer = setTimeout(() => attempt(retries + 1), delay);
+            return;
+          }
+          setState((current) =>
+            current.key !== key
+              ? current
+              : // A kept copy stays on screen, flagged as possibly out of
+                // date; only a first load reports the error.
+                current.loading
+                ? { key, items: [], loading: false, error: message, refreshError: null }
+                : { ...current, refreshError: message },
+          );
+        });
+    };
+    attempt(0);
     return () => {
       signal.cancelled = true;
+      clearTimeout(retryTimer);
     };
   }, [key, nonce]);
 
   const reload = useCallback(() => {
-    setState((current) => (current.error ? { ...current, loading: true, error: null } : current));
+    setState((current) =>
+      current.error
+        ? { ...current, loading: true, error: null, refreshError: null }
+        : { ...current, refreshError: null },
+    );
     setNonce((n) => n + 1);
   }, []);
 
@@ -118,5 +163,12 @@ export function useCachedList<T>(
     });
   }, []);
 
-  return { items: state.items, loading: state.loading, error: state.error, reload, setItems };
+  return {
+    items: state.items,
+    loading: state.loading,
+    error: state.error,
+    refreshError: state.refreshError,
+    reload,
+    setItems,
+  };
 }

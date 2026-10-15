@@ -114,6 +114,14 @@ export function ChatPicker({
       : sessionList.error === copy.noRoot
         ? { summary: copy.noRoot, detail: null }
         : describeActionFailure(copy.loadAction, sessionList.error);
+  // Refreshing failed behind an earlier copy, which is still shown.
+  const stale: FailureCopy | null =
+    sessionList.refreshError === null
+      ? null
+      : describeActionFailure(
+          "refresh this list, so it may be out of date",
+          sessionList.refreshError,
+        );
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent): void => {
@@ -195,6 +203,14 @@ export function ChatPicker({
           <PickerError
             summary={error.summary}
             detail={error.detail}
+            retryDisabled={busy}
+            onRetry={sessionList.reload}
+          />
+        )}
+        {!loading && !error && stale && (
+          <PickerError
+            summary={stale.summary}
+            detail={stale.detail}
             retryDisabled={busy}
             onRetry={sessionList.reload}
           />

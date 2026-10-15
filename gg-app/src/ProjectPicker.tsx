@@ -122,13 +122,29 @@ export function ProjectPicker({
   );
   const sessionList = useCachedList<RecentSession>(
     selected ? `sessions:project:${selected.path}` : null,
-    () => (selected ? discoverSessions(selected.path) : Promise.resolve([])),
+    async () => {
+      if (!selected) return [];
+      // Like project discovery, the session list is served by this window's
+      // daemon. Asking before it is ready (the deep link back from a session
+      // asks at once) fails, which left a kept list from an earlier visit on
+      // screen with none of the sessions since.
+      await waitForCatalogReady();
+      return discoverSessions(selected.path);
+    },
   );
   const { items: sessions, loading: sessionsLoading } = sessionList;
   // Listing the selected project's sessions failed; shown instead of
   // "No previous sessions".
   const sessionsError: FailureCopy | null =
     sessionList.error === null ? null : describeActionFailure("load sessions", sessionList.error);
+  // Refreshing failed behind an earlier copy, which is still shown.
+  const sessionsStale: FailureCopy | null =
+    sessionList.refreshError === null
+      ? null
+      : describeActionFailure(
+          "refresh this list, so it may be out of date",
+          sessionList.refreshError,
+        );
   const [busy, setBusy] = useState(false);
   const [resumeError, setResumeError] = useState<ResumeFailure | null>(null);
   const resumeErrorId = useId();
@@ -529,6 +545,13 @@ export function ProjectPicker({
             <PickerError
               summary={sessionsError.summary}
               detail={sessionsError.detail}
+              onRetry={sessionList.reload}
+            />
+          )}
+          {!sessionsLoading && !sessionsError && sessionsStale && (
+            <PickerError
+              summary={sessionsStale.summary}
+              detail={sessionsStale.detail}
               onRetry={sessionList.reload}
             />
           )}

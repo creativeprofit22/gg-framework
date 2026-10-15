@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { useCachedList } from "./useCachedList";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { REFRESH_RETRY_DELAYS_MS, useCachedList } from "./useCachedList";
 
 beforeEach(() => sessionStorage.clear());
 afterEach(cleanup);
@@ -67,5 +67,92 @@ describe("useCachedList", () => {
     expect(result.current.items).toEqual(["a1"]);
     rerender({ k: "sessions:/b" });
     expect(result.current).toMatchObject({ items: [], loading: true });
+  });
+
+  describe("refresh behind a kept copy", () => {
+    beforeEach(() => vi.useFakeTimers());
+    afterEach(() => vi.useRealTimers());
+
+    it("retries a failed refresh, then swaps in the new list", async () => {
+      sessionStorage.setItem("gg-list:sessions:/p", JSON.stringify(["old"]));
+      let calls = 0;
+      const { result } = renderHook(() =>
+        useCachedList("sessions:/p", () => {
+          calls += 1;
+          // The daemon is still starting on the first ask (the regression).
+          return calls === 1
+            ? Promise.reject(new Error("session not ready"))
+            : Promise.resolve(["new", "old"]);
+        }),
+      );
+      await act(async () => {});
+      expect(result.current).toMatchObject({ items: ["old"], refreshError: null });
+
+      await act(async () => vi.advanceTimersByTimeAsync(REFRESH_RETRY_DELAYS_MS[0]));
+      expect(calls).toBe(2);
+      expect(result.current).toMatchObject({
+        items: ["new", "old"],
+        refreshError: null,
+        error: null,
+      });
+    });
+
+    it("flags the kept copy as possibly out of date once retries run out", async () => {
+      sessionStorage.setItem("gg-list:sessions:/p", JSON.stringify(["old"]));
+      let calls = 0;
+      const { result } = renderHook(() =>
+        useCachedList("sessions:/p", () => {
+          calls += 1;
+          return Promise.reject(new Error("daemon not ready"));
+        }),
+      );
+      await act(async () => {});
+      for (const delay of REFRESH_RETRY_DELAYS_MS) {
+        expect(result.current.refreshError).toBeNull();
+        await act(async () => vi.advanceTimersByTimeAsync(delay));
+      }
+      expect(calls).toBe(REFRESH_RETRY_DELAYS_MS.length + 1);
+      // Still shown (never blanked), but no longer passed off as current.
+      expect(result.current).toMatchObject({
+        items: ["old"],
+        error: null,
+        loading: false,
+        refreshError: "daemon not ready",
+      });
+    });
+
+    it("clears the flag when a manual reload succeeds", async () => {
+      sessionStorage.setItem("gg-list:sessions:/p", JSON.stringify(["old"]));
+      let fail = true;
+      const { result } = renderHook(() =>
+        useCachedList("sessions:/p", () =>
+          fail ? Promise.reject(new Error("offline")) : Promise.resolve(["fresh"]),
+        ),
+      );
+      await act(async () => {});
+      for (const delay of REFRESH_RETRY_DELAYS_MS) {
+        await act(async () => vi.advanceTimersByTimeAsync(delay));
+      }
+      expect(result.current.refreshError).toBe("offline");
+
+      fail = false;
+      await act(async () => result.current.reload());
+      expect(result.current).toMatchObject({ items: ["fresh"], refreshError: null });
+    });
+
+    it("stops retrying once unmounted", async () => {
+      sessionStorage.setItem("gg-list:sessions:/p", JSON.stringify(["old"]));
+      let calls = 0;
+      const { unmount } = renderHook(() =>
+        useCachedList("sessions:/p", () => {
+          calls += 1;
+          return Promise.reject(new Error("offline"));
+        }),
+      );
+      await act(async () => {});
+      unmount();
+      await act(async () => vi.advanceTimersByTimeAsync(10_000));
+      expect(calls).toBe(1);
+    });
   });
 });

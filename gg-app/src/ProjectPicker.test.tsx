@@ -619,6 +619,71 @@ describe("ProjectPicker returning from a session", () => {
     expect(screen.queryByRole("button", { name: "Open project directly" })).toBeNull();
   });
 
+  it("waits for the window's daemon before listing the project's sessions", async () => {
+    getSettingsMock.mockResolvedValue({ projectsRoot: "/Users/dev", configured: true });
+    let daemonReady: () => void = () => {};
+    waitForReadyMock.mockReturnValue(
+      new Promise<void>((resolve) => {
+        daemonReady = resolve;
+      }),
+    );
+    listProjectsMock.mockResolvedValue([PROJECT]);
+    listSessionsMock.mockResolvedValue([NATIVE_SESSION]);
+    render(
+      <ProjectPicker
+        onChosen={vi.fn()}
+        bindProject={bindProjectMock}
+        initialProjectPath={PROJECT.path}
+      />,
+    );
+    // Asking a still-starting daemon fails; the deep link used to ask at once.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(listSessionsMock).not.toHaveBeenCalled();
+    daemonReady();
+    expect(await screen.findByText(NATIVE_SESSION.preview)).toBeTruthy();
+    expect(listSessionsMock).toHaveBeenCalledWith(PROJECT.path);
+  });
+
+  it("says a kept session list may be out of date when it can't refresh, and Retry recovers", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const NEWER: RecentSession = {
+        ...NATIVE_SESSION,
+        id: "gg-2",
+        path: "/sessions/gg-2.jsonl",
+        preview: "Newer session",
+      };
+      sessionStorage.setItem(
+        `gg-list:sessions:project:${PROJECT.path}`,
+        JSON.stringify([NATIVE_SESSION]),
+      );
+      getSettingsMock.mockResolvedValue({ projectsRoot: "/Users/dev", configured: true });
+      waitForReadyMock.mockResolvedValue();
+      listProjectsMock.mockResolvedValue([PROJECT]);
+      listSessionsMock.mockRejectedValue(new Error("session not ready"));
+      render(
+        <ProjectPicker
+          onChosen={vi.fn()}
+          bindProject={bindProjectMock}
+          initialProjectPath={PROJECT.path}
+        />,
+      );
+      expect(screen.getByText(NATIVE_SESSION.preview)).toBeTruthy();
+      await vi.advanceTimersByTimeAsync(10_000);
+      const note = await screen.findByRole("alert");
+      expect(note.textContent).toContain("may be out of date");
+      // The earlier copy stays usable underneath.
+      expect(screen.getByText(NATIVE_SESSION.preview)).toBeTruthy();
+
+      listSessionsMock.mockResolvedValue([NEWER, NATIVE_SESSION]);
+      fireEvent.click(within(note).getByRole("button", { name: "Retry" }));
+      expect(await screen.findByText("Newer session")).toBeTruthy();
+      await waitFor(() => expect(screen.queryByText(/may be out of date/)).toBeNull());
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("falls back to the project list when the path isn't a known project", async () => {
     getSettingsMock.mockResolvedValue({ projectsRoot: "/Users/dev", configured: true });
     waitForReadyMock.mockResolvedValue();

@@ -9,6 +9,7 @@ import type * as ConfigModule from "../config.js";
 import { createTestSymlink } from "../test-utils/symlink.js";
 import { encodeCwd } from "./encode-cwd.js";
 import {
+  createSessionReadCache,
   discoverProjects,
   discoverProjectsRootFolders,
   discoveryPathKey,
@@ -846,6 +847,130 @@ describe("discoverProjects (ggcoder store)", () => {
 
     expect(sessions).toHaveLength(1);
     expect(sessions[0]?.preview).toBe("Replace title generation with project context");
+  });
+
+  describe("with a session read cache", () => {
+    const userMessage = (content: string, timestamp: string) => ({
+      type: "message",
+      timestamp,
+      message: { role: "user", content },
+    });
+
+    it("lists exactly what an uncached listing does", async () => {
+      const projectPath = path.join(tmp, "projects", "cached-equal");
+      await fs.mkdir(projectPath, { recursive: true });
+      for (let i = 0; i < 20; i++) {
+        const timestamp = new Date(Date.now() - i * 60_000).toISOString();
+        await writeSessionRecords(projectPath, `s${String(i).padStart(2, "0")}.jsonl`, {
+          id: `session-${i}`,
+          timestamp,
+          records: [userMessage(`Request ${i}`, timestamp)],
+        });
+      }
+      const cache = createSessionReadCache();
+
+      const uncached = await listRecentSessions(projectPath, 15);
+      expect(await listRecentSessions(projectPath, 15, state.sessionsDir, cache)).toEqual(uncached);
+      // Served from the cache the second time, still identical.
+      expect(await listRecentSessions(projectPath, 15, state.sessionsDir, cache)).toEqual(uncached);
+      expect(uncached.map((s) => s.preview)).toEqual(
+        Array.from({ length: 15 }, (_, i) => `Request ${i}`),
+      );
+      expect(await discoverProjects({ cache })).toEqual(await discoverProjects());
+    });
+
+    it("re-reads a session that changed and picks up a new one", async () => {
+      const projectPath = path.join(tmp, "projects", "cached-changes");
+      await fs.mkdir(projectPath, { recursive: true });
+      const start = new Date(Date.now() - 3_600_000).toISOString();
+      const file = await writeSessionRecords(projectPath, "a.jsonl", {
+        id: "session-a",
+        timestamp: start,
+        records: [userMessage("First request", start)],
+      });
+      const cache = createSessionReadCache();
+      const [before] = await listRecentSessions(projectPath, 5, state.sessionsDir, cache);
+      expect(before?.messageCount).toBe(1);
+
+      // The conversation continues: an appended reply changes size and mtime.
+      const later = new Date().toISOString();
+      await fs.appendFile(
+        file,
+        `${JSON.stringify({ type: "message", timestamp: later, message: { role: "assistant", content: "Fresh reply" } })}\n`,
+      );
+      await writeSessionRecords(projectPath, "b.jsonl", {
+        id: "session-b",
+        timestamp: later,
+        records: [userMessage("Second session", later)],
+      });
+
+      const after = await listRecentSessions(projectPath, 5, state.sessionsDir, cache);
+      const updated = after.find((s) => s.id === "session-a");
+      expect(updated).toMatchObject({ messageCount: 2, lastReply: "Fresh reply" });
+      expect(after.some((s) => s.id === "session-b")).toBe(true);
+      expect(after).toEqual(await listRecentSessions(projectPath, 5));
+    });
+
+    it("reuses an unchanged session instead of re-reading it", async () => {
+      const projectPath = path.join(tmp, "projects", "cached-reuse");
+      await fs.mkdir(projectPath, { recursive: true });
+      const timestamp = new Date(Date.now() - 600_000).toISOString();
+      const file = await writeSessionRecords(projectPath, "a.jsonl", {
+        id: "session-a",
+        timestamp,
+        records: [userMessage("Original words", timestamp)],
+      });
+      const cache = createSessionReadCache();
+      await listRecentSessions(projectPath, 5, state.sessionsDir, cache);
+
+      // Same length and mtime: only a re-read could notice this edit.
+      const raw = await fs.readFile(file, "utf8");
+      await fs.writeFile(file, raw.replace("Original words", "Replaced words"));
+      await fs.utimes(file, new Date(timestamp), new Date(timestamp));
+
+      const [cached] = await listRecentSessions(projectPath, 5, state.sessionsDir, cache);
+      expect(cached?.preview).toBe("Original words");
+      const [uncached] = await listRecentSessions(projectPath, 5);
+      expect(uncached?.preview).toBe("Replaced words");
+    });
+
+    it("never shows a stale relative time for a remembered session", async () => {
+      const projectPath = path.join(tmp, "projects", "cached-clock");
+      await fs.mkdir(projectPath, { recursive: true });
+      const timestamp = new Date().toISOString();
+      await writeSessionRecords(projectPath, "a.jsonl", {
+        id: "session-a",
+        timestamp,
+        records: [userMessage("Clock check", timestamp)],
+      });
+      const cache = createSessionReadCache();
+      const [first] = await listRecentSessions(projectPath, 5, state.sessionsDir, cache);
+      expect(first?.lastActiveDisplay).toBe("just now");
+
+      const twoHoursLater = Date.now() + 2 * 3_600_000;
+      vi.spyOn(Date, "now").mockReturnValue(twoHoursLater);
+      const [second] = await listRecentSessions(projectPath, 5, state.sessionsDir, cache);
+      expect(second?.lastActiveDisplay).toBe("2h ago");
+    });
+
+    it("lists a project once its cached store gains a used session", async () => {
+      const projectPath = path.join(tmp, "projects", "cached-discovery");
+      await fs.mkdir(projectPath, { recursive: true });
+      const cache = createSessionReadCache();
+      const manager = new SessionManager(state.sessionsDir);
+      const session = await manager.create(projectPath, "anthropic", "claude-sonnet-5");
+      // Opened, never used: not a project yet (and that answer is remembered).
+      expect((await discoverProjects({ cache })).some((p) => p.path === projectPath)).toBe(false);
+
+      await manager.appendEntry(session.path, {
+        type: "message",
+        id: "44444444-4444-4444-4444-444444444444",
+        parentId: null,
+        timestamp: new Date().toISOString(),
+        message: { role: "user", content: "now it is used" },
+      });
+      expect((await discoverProjects({ cache })).some((p) => p.path === projectPath)).toBe(true);
+    });
   });
 
   // Windows regression: the cwd extractors used to accept only POSIX absolute

@@ -238,7 +238,11 @@ import {
 } from "./core/programmatic/execution.js";
 import { appSidecarCodeCommandsResponse, DESKTOP_COMMAND_DISCOVERY_OPTIONS } from "./app-sidecar-command-listing.js";
 import { listingRouteResponse } from "./app-sidecar-listing-route.js";
-import { discoverProjects } from "./core/project-discovery.js";
+import {
+  createSessionReadCache,
+  discoverProjects,
+  type SessionReadCache,
+} from "./core/project-discovery.js";
 import { listSidecarSessions } from "./app-sidecar-sessions.js";
 import {
   loadTasksSync,
@@ -653,6 +657,10 @@ async function main(): Promise<void> {
   const authToken = configuredAuthToken || randomUUID();
 
   const paths = await ensureAppDirs();
+  // Per-file session reads, kept for the daemon's lifetime and shared by every
+  // window: a picker refresh re-reads only sessions that changed since the
+  // last one. Bounded (LRU), and invalidated by each file's size and mtime.
+  const sessionReadCache = createSessionReadCache();
   const applicationIdentity = parseAppIdentityArgument(process.argv.slice(2));
   // The shell scopes this filename to its Tauri product identity so production
   // and local-fork daemons never interleave or race log rotation.
@@ -1005,6 +1013,7 @@ async function main(): Promise<void> {
                 projectAutopilot,
                 broadcastNotesSnapshot,
                 sharedMcpPool,
+                sessionReadCache,
                 durableRoadmapExecution,
                 repoPolls: getDaemonRepoPolls(),
                 sessionIdsAt,
@@ -1362,6 +1371,8 @@ async function createSession(
     projectAutopilot: AppSidecarProjectAutopilotState;
     broadcastNotesSnapshot: (snapshot: ProjectNotesSnapshot) => void;
     sharedMcpPool: SharedMcpClientPool;
+    /** Daemon-wide per-file session reads behind /projects and /sessions. */
+    sessionReadCache: SessionReadCache;
     durableRoadmapExecution: boolean;
     /** Daemon-wide repo pollers shared by windows on the same repo. */
     repoPolls: RepoPolls;
@@ -1400,6 +1411,7 @@ async function createSession(
     projectAutopilot,
     broadcastNotesSnapshot,
     sharedMcpPool,
+    sessionReadCache,
     durableRoadmapExecution,
     repoPolls,
     sessionIdsAt,
@@ -4863,6 +4875,7 @@ async function createSession(
             hiddenPaths: hiddenProjects,
             // Goal workspaces have their own list; they are not coding projects.
             excludeRoots: [goalsRoot(paths.agentDir)],
+            cache: sessionReadCache,
           });
         },
         (message) => log("ERROR", "app-sidecar", "discoverProjects failed", { message }),
@@ -4882,7 +4895,10 @@ async function createSession(
       // reserved value "motion" lists Motion sessions.
       void listingRouteResponse(
         "sessions",
-        () => listSidecarSessions(target, requestedAgent, paths.sessionsDir),
+        () =>
+          listSidecarSessions(target, requestedAgent, paths.sessionsDir, {
+            cache: sessionReadCache,
+          }),
         (message) => log("ERROR", "app-sidecar", "listSidecarSessions failed", { message }),
       ).then(({ status, body }) => json(res, status, body));
       return;

@@ -7,10 +7,51 @@ import { getAppPaths } from "../config.js";
 import { encodeCwd, stripExtendedLengthPrefix } from "./encode-cwd.js";
 import { getModel } from "@kenkaiiii/gg-core/models";
 import { getUserSessionPrompt } from "./session-preview.js";
-import { isSessionPath, openSessionReadStream, resolveSessionPath } from "./session-storage.js";
+import {
+  isSessionPath,
+  MAX_REDIRECT_BYTES,
+  openSessionReadStream,
+  resolveSessionPath,
+} from "./session-storage.js";
 import { parseForeignTranscript } from "./foreign-session-import.js";
+import { StampedLru, type FileStamp } from "./stamped-lru.js";
 
 export type ProjectSource = "ggcoder" | "claude-code" | "codex" | "folder";
+
+/**
+ * Per-file results of reading GG Coder session stores, remembered across
+ * project and session listings by whoever owns it (the app daemon keeps one
+ * for its lifetime). Each value is reused only while its file is unchanged, so
+ * a picker refresh re-reads just the sessions that moved since the last one.
+ */
+export interface SessionReadCache {
+  /** Where a small session file points (itself unless it is a redirect). */
+  readonly redirects: StampedLru<string>;
+  /** Transcript summaries; `null` means "not a listable session". */
+  readonly summaries: StampedLru<SessionRecord | null>;
+  /** The header cwd of a session file, for project discovery. */
+  readonly headerCwds: StampedLru<string | null>;
+  /** Whether a session file recorded a message, for project recency. */
+  readonly firstMessages: StampedLru<string | null>;
+}
+
+/**
+ * Sized for a large store: the measured Local Fork store held about 5,000
+ * session files. Summaries are a few hundred bytes, so a full cache stays in
+ * the low megabytes.
+ */
+const SESSION_READ_CACHE_ENTRIES = 10_000;
+
+export function createSessionReadCache(
+  maxEntriesPerStore = SESSION_READ_CACHE_ENTRIES,
+): SessionReadCache {
+  return {
+    redirects: new StampedLru(maxEntriesPerStore),
+    summaries: new StampedLru(maxEntriesPerStore),
+    headerCwds: new StampedLru(maxEntriesPerStore),
+    firstMessages: new StampedLru(maxEntriesPerStore),
+  };
+}
 
 export interface DiscoverProjectsOptions {
   /** The user's configured projects folder; always scanned when set. */
@@ -28,6 +69,8 @@ export interface DiscoverProjectsOptions {
    * `~/.gg/goals`). Anything at or below one of these is dropped.
    */
   excludeRoots?: readonly string[];
+  /** Reuse per-file reads from earlier listings (see {@link SessionReadCache}). */
+  cache?: SessionReadCache;
 }
 
 export interface DiscoveredProject {
@@ -54,7 +97,7 @@ export async function discoverProjects(
   options: DiscoverProjectsOptions = {},
 ): Promise<DiscoveredProject[]> {
   const [gg, cc, cx] = await Promise.all([
-    discoverGgcoderProjects(),
+    discoverGgcoderProjects(options.cache),
     discoverClaudeProjects(),
     discoverCodexProjects(),
   ]);
@@ -205,7 +248,7 @@ export async function discoverProjectsRootFolders(
  * session header (`{"type":"session",...,"cwd":"/abs"}`) and only fall back to
  * decoding the directory name when no header carries a cwd.
  */
-async function discoverGgcoderProjects(): Promise<DiscoveredProject[]> {
+async function discoverGgcoderProjects(cache?: SessionReadCache): Promise<DiscoveredProject[]> {
   const sessionsDir = getAppPaths().sessionsDir;
   let entries: string[];
   try {
@@ -219,11 +262,16 @@ async function discoverGgcoderProjects(): Promise<DiscoveredProject[]> {
   // had dozens of session stores.
   const results = await mapConcurrent(entries, async (entry): Promise<DiscoveredProject | null> => {
     const dir = path.join(sessionsDir, entry);
-    const mtime = await lastUsedGgcoderSessionMtime(dir);
+    if (!(await isDirectory(dir))) return null;
+    // One listing serves both questions below (it used to be collected twice).
+    const files = await collectGgcoderSessionFiles(dir, 2, { cache });
+    files.sort((a, b) => b.mtime - a.mtime);
+    const mtime = await lastUsedGgcoderSessionMtime(files, cache);
     if (mtime === null) return null;
 
     const rawCwd =
-      (await readFirstFromGgcoderDir(dir, ggcoderCwdExtractor)) ?? fallbackUnderscoreDecode(entry);
+      (await readFirstFromGgcoderFiles(files, ggcoderCwdExtractor, cache?.headerCwds)) ??
+      fallbackUnderscoreDecode(entry);
     if (!rawCwd) return null;
     // Normalize traversal segments (e.g. an agent launched with cwd
     // `.../src-tauri/../..`) so the basename isn't a stray "..", and drop any
@@ -251,10 +299,14 @@ async function discoverGgcoderProjects(): Promise<DiscoveredProject[]> {
  */
 const IO_CONCURRENCY = 32;
 
-async function mapConcurrent<T, R>(items: readonly T[], fn: (item: T) => Promise<R>): Promise<R[]> {
+async function mapConcurrent<T, R>(
+  items: readonly T[],
+  fn: (item: T) => Promise<R>,
+  concurrency = IO_CONCURRENCY,
+): Promise<R[]> {
   const out = new Array<R>(items.length);
   let next = 0;
-  const workers = Array.from({ length: Math.min(IO_CONCURRENCY, items.length) }, async () => {
+  const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
     for (let i = next++; i < items.length; i = next++) {
       out[i] = await fn(items[i]!);
     }
@@ -547,13 +599,15 @@ async function maxJsonlMtime(dir: string): Promise<number | null> {
  * `listRecentSessions` applies. Compaction checkpoints re-save their messages,
  * so compacted conversations still count.
  */
-async function lastUsedGgcoderSessionMtime(dir: string): Promise<number | null> {
-  if (!(await isDirectory(dir))) return null;
-  const files = await collectGgcoderSessionFiles(dir, 2);
+async function lastUsedGgcoderSessionMtime(
+  newestFirst: readonly FileStamp[],
+  cache?: SessionReadCache,
+): Promise<number | null> {
   // Newest first: the first used file is also the latest real activity.
-  files.sort((a, b) => b.mtime - a.mtime);
-  for (const file of files) {
-    if (await readFirstFromGgcoderFile(file.path, ggcoderMessageExtractor)) return file.mtime;
+  for (const file of newestFirst) {
+    if (await readFirstFromGgcoderStamp(file, ggcoderMessageExtractor, cache?.firstMessages)) {
+      return file.mtime;
+    }
   }
   return null;
 }
@@ -594,13 +648,30 @@ async function collectJsonlFiles(
   }
 }
 
+/**
+ * Concurrent stats per session folder. Discovery already walks 32 folders at
+ * once, so this keeps the product (and open small-file reads) bounded.
+ */
+const STAMP_CONCURRENCY = 8;
+
 async function collectGgcoderSessionFiles(
   dir: string,
   maxDepth: number,
-  options: { failOnUnreadableRoot?: boolean } = {},
-): Promise<{ path: string; mtime: number }[]> {
-  const byResolvedPath = new Map<string, { path: string; mtime: number }>();
+  options: { failOnUnreadableRoot?: boolean; cache?: SessionReadCache } = {},
+): Promise<FileStamp[]> {
+  const candidates: string[] = [];
   await walk(dir, 0);
+  // Stamped concurrently (a large store has hundreds of files per project),
+  // then keyed in traversal order so ties sort exactly as before.
+  const stamped = await mapConcurrent(
+    candidates,
+    (fullPath) => stampSessionFile(fullPath, options.cache),
+    STAMP_CONCURRENCY,
+  );
+  const byResolvedPath = new Map<string, FileStamp>();
+  for (const file of stamped) {
+    if (file) byResolvedPath.set(file.path, file);
+  }
   return [...byResolvedPath.values()];
 
   async function walk(current: string, depth: number): Promise<void> {
@@ -616,17 +687,42 @@ async function collectGgcoderSessionFiles(
     for (const entry of entries) {
       const fullPath = path.join(current, entry.name);
       if (entry.isFile() && isSessionPath(entry.name)) {
-        try {
-          const resolvedPath = await resolveSessionPath(fullPath);
-          const stat = await fs.stat(resolvedPath);
-          byResolvedPath.set(resolvedPath, { path: resolvedPath, mtime: stat.mtimeMs });
-        } catch {
-          // Ignore malformed redirects, incomplete archives, and raced files.
-        }
+        candidates.push(fullPath);
       } else if (entry.isDirectory() && depth < maxDepth && !entry.name.endsWith(".assets")) {
         await walk(fullPath, depth + 1);
       }
     }
+  }
+}
+
+/**
+ * The transcript a session file resolves to, stamped with its size and mtime;
+ * `null` for malformed redirects, incomplete archives, and raced files.
+ *
+ * Only a small file can be a redirect pointer, so a large one is its own
+ * transcript and needs a single stat. A small one's resolution is remembered
+ * against its own stamp, so an unchanged pointer is not re-read.
+ */
+async function stampSessionFile(
+  fullPath: string,
+  cache: SessionReadCache | undefined,
+): Promise<FileStamp | null> {
+  try {
+    const own = await fs.stat(fullPath);
+    const ownStamp: FileStamp = {
+      path: path.resolve(fullPath),
+      size: own.size,
+      mtime: own.mtimeMs,
+    };
+    if (own.size > MAX_REDIRECT_BYTES) return ownStamp;
+    const known = cache?.redirects.lookup(ownStamp);
+    const resolvedPath = known ? known.value : await resolveSessionPath(fullPath);
+    if (!known) cache?.redirects.remember(ownStamp, resolvedPath);
+    if (resolvedPath === ownStamp.path) return ownStamp;
+    const target = await fs.stat(resolvedPath);
+    return { path: resolvedPath, size: target.size, mtime: target.mtimeMs };
+  } catch {
+    return null;
   }
 }
 
@@ -711,27 +807,42 @@ async function readFirstFromJsonlDir(
   return null;
 }
 
-async function readFirstFromGgcoderDir(
-  dir: string,
+async function readFirstFromGgcoderFiles(
+  newestFirst: readonly FileStamp[],
   extractor: LineExtractor,
+  memo?: StampedLru<string | null>,
 ): Promise<string | null> {
-  const files = await collectGgcoderSessionFiles(dir, 2);
-  files.sort((a, b) => b.mtime - a.mtime);
-  for (const file of files) {
-    const value = await readFirstFromGgcoderFile(file.path, extractor);
+  for (const file of newestFirst) {
+    const value = await readFirstFromGgcoderStamp(file, extractor, memo);
     if (value) return value;
   }
   return null;
 }
 
+/** {@link readFirstFromGgcoderFile}, remembered per file version in `memo`. */
+async function readFirstFromGgcoderStamp(
+  file: FileStamp,
+  extractor: LineExtractor,
+  memo?: StampedLru<string | null>,
+): Promise<string | null> {
+  const known = memo?.lookup(file);
+  if (known) return known.value;
+  const value = await readFirstFromGgcoderFile(file.path, extractor);
+  // A failed read (undefined) is retried next time rather than remembered.
+  if (value === undefined) return null;
+  memo?.remember(file, value);
+  return value;
+}
+
 /**
  * Stream one ggcoder session file, plain or archived, and return the first
  * non-null extractor result. Line-capped like {@link readFirstFromFile}.
+ * `undefined` means the file could not be read, as opposed to "no match".
  */
 async function readFirstFromGgcoderFile(
   file: string,
   extractor: LineExtractor,
-): Promise<string | null> {
+): Promise<string | null | undefined> {
   try {
     const { stream, close } = await openSessionReadStream(file);
     const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
@@ -749,6 +860,7 @@ async function readFirstFromGgcoderFile(
     }
   } catch {
     // A corrupt archive must not hide otherwise valid projects in this store.
+    return undefined;
   }
   return null;
 }
@@ -886,30 +998,46 @@ export async function listRecentSessions(
   cwd: string,
   limit = 5,
   sessionsDir = getAppPaths().sessionsDir,
+  cache?: SessionReadCache,
 ): Promise<RecentSession[]> {
   const dir = path.join(sessionsDir, encodeCwd(cwd));
-  const files = await collectGgcoderSessionFiles(dir, 1, { failOnUnreadableRoot: true });
+  const files = await collectGgcoderSessionFiles(dir, 1, { failOnUnreadableRoot: true, cache });
   if (files.length === 0) return [];
   files.sort((a, b) => b.mtime - a.mtime);
 
   const out: RecentSession[] = [];
   const seenConversationIds = new Set<string>();
   const requestedCwd = discoveryPathKey(stripExtendedLengthPrefix(cwd));
-  for (const f of files) {
-    if (out.length >= limit) break;
-    const parsed = await readSessionSummary(f.path);
-    if (!parsed || parsed.messageCount === 0) continue;
-    // encodeCwd is intentionally filesystem-safe but lossy. The transcript
-    // header is authoritative so colliding encoded directories cannot leak a
-    // different project's session into this picker or resume flow.
-    if (discoveryPathKey(stripExtendedLengthPrefix(parsed.cwd)) !== requestedCwd) continue;
-    if (seenConversationIds.has(parsed.conversationId)) continue;
-    seenConversationIds.add(parsed.conversationId);
-    const { conversationId: _conversationId, cwd: _cwd, ...session } = parsed;
-    out.push(session);
+  // Summaries are read a batch at a time, concurrently, newest first; the
+  // filters below still apply in that order, so the result is unchanged.
+  for (let start = 0; start < files.length && out.length < limit; start += SUMMARY_BATCH) {
+    const batch = files.slice(start, start + SUMMARY_BATCH);
+    const records = await mapConcurrent(
+      batch,
+      (file) => readSessionRecordCached(file, cache),
+      SUMMARY_CONCURRENCY,
+    );
+    for (const record of records) {
+      if (out.length >= limit) break;
+      const parsed = record ? toParsedRecentSession(record) : null;
+      if (!parsed || parsed.messageCount === 0) continue;
+      // encodeCwd is intentionally filesystem-safe but lossy. The transcript
+      // header is authoritative so colliding encoded directories cannot leak a
+      // different project's session into this picker or resume flow.
+      if (discoveryPathKey(stripExtendedLengthPrefix(parsed.cwd)) !== requestedCwd) continue;
+      if (seenConversationIds.has(parsed.conversationId)) continue;
+      seenConversationIds.add(parsed.conversationId);
+      const { conversationId: _conversationId, cwd: _cwd, ...session } = parsed;
+      out.push(session);
+    }
   }
   return out;
 }
+
+/** Files summarized per round; a round may read up to this many past the limit. */
+const SUMMARY_BATCH = 16;
+/** Concurrent full-transcript parses (each streams one file). */
+const SUMMARY_CONCURRENCY = 8;
 
 /**
  * List the most recent Claude Code and Codex conversations for a project cwd.
@@ -1043,8 +1171,28 @@ interface ParsedRecentSession extends RecentSession {
   cwd: string;
 }
 
-/** Single-pass parse of one session file: identity + count + activity + preview. */
-async function readSessionSummary(file: string): Promise<ParsedRecentSession | null> {
+/**
+ * Everything a picker row needs from one transcript, independent of when it is
+ * shown: the last activity is kept as a timestamp, not as "3h ago" text.
+ */
+export interface SessionRecord {
+  id: string;
+  conversationId: string;
+  cwd: string;
+  path: string;
+  preview: string;
+  /** Epoch ms of the last message (or the header), 0 when unknown. */
+  lastActivityMs: number;
+  messageCount: number;
+  lastReply?: string;
+  model?: string;
+}
+
+/**
+ * Single-pass parse of one session file: identity + count + activity + preview.
+ * `null` means it is not a session; `undefined` means it could not be read.
+ */
+async function readSessionRecord(file: string): Promise<SessionRecord | null | undefined> {
   try {
     const { path: resolvedPath, stream, close } = await openSessionReadStream(file);
     const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
@@ -1120,17 +1268,47 @@ async function readSessionSummary(file: string): Promise<ParsedRecentSession | n
           cwd,
           path: resolvedPath,
           preview: label || headerPreview || preview,
-          lastActiveDisplay: rel(lastActivity),
+          lastActivityMs: Date.parse(lastActivity) || 0,
           messageCount,
           ...(lastReply ? { lastReply } : {}),
           ...(modelId ? { model: modelDisplayName(modelId) } : {}),
         }
       : null;
   } catch {
-    return null;
+    // Unreadable right now (raced, locked, corrupt archive): skipped, and
+    // retried next listing rather than remembered.
+    return undefined;
   }
 }
 
-function rel(timestamp: string): string {
-  return formatRelativeTime(Date.parse(timestamp) || 0);
+/** {@link readSessionRecord}, remembered per file version when a cache is given. */
+async function readSessionRecordCached(
+  file: FileStamp,
+  cache: SessionReadCache | undefined,
+): Promise<SessionRecord | null> {
+  const known = cache?.summaries.lookup(file);
+  if (known) return known.value;
+  const record = await readSessionRecord(file.path);
+  if (record === undefined) return null;
+  cache?.summaries.remember(file, record);
+  return record;
+}
+
+/**
+ * The picker row for a record. "3h ago" is derived here, at listing time, so a
+ * remembered record never shows a stale relative time.
+ */
+function toParsedRecentSession(record: SessionRecord): ParsedRecentSession {
+  const { lastActivityMs, lastReply, model, ...rest } = record;
+  return {
+    id: rest.id,
+    conversationId: rest.conversationId,
+    cwd: rest.cwd,
+    path: rest.path,
+    preview: rest.preview,
+    lastActiveDisplay: formatRelativeTime(lastActivityMs),
+    messageCount: rest.messageCount,
+    ...(lastReply ? { lastReply } : {}),
+    ...(model ? { model } : {}),
+  };
 }

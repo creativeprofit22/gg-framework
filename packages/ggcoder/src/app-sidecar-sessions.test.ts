@@ -135,7 +135,7 @@ describe("gg-app sidecar session listings", () => {
     );
 
     // 1. It shows up in the session list, tagged with where it came from.
-    const sessions = await listSidecarSessions(cwd, null, coderSessionsDir, home);
+    const sessions = await listSidecarSessions(cwd, null, coderSessionsDir, { homeDir: home });
     const foreign = sessions.find((session) => session.source === "claude-code");
     expect(foreign).toBeDefined();
     expect(foreign?.path).toBe(transcript);
@@ -159,7 +159,7 @@ describe("gg-app sidecar session listings", () => {
     ).toEqual(["user", "assistant"]);
 
     // 3. It now also appears as a NATIVE row, so the next open skips the import.
-    const after = await listSidecarSessions(cwd, null, coderSessionsDir, home);
+    const after = await listSidecarSessions(cwd, null, coderSessionsDir, { homeDir: home });
     const native = after.find((session) => session.path === imported.sessionPath);
     expect(native).toBeDefined();
     expect(native?.source).toBeUndefined();
@@ -170,7 +170,7 @@ describe("gg-app sidecar session listings", () => {
     await writeClaudeTranscript(home, cwd, "cc-session-2", "Foreign prompt.");
     await writeSessions(coderSessionsDir, cwd, "coding", 2);
 
-    const sessions = await listSidecarSessions(cwd, null, coderSessionsDir, home);
+    const sessions = await listSidecarSessions(cwd, null, coderSessionsDir, { homeDir: home });
     const firstForeignIndex = sessions.findIndex((session) => session.source === "claude-code");
     const lastNativeIndex = sessions.map((session) => session.source).lastIndexOf(undefined);
     expect(firstForeignIndex).toBeGreaterThan(-1);
@@ -183,7 +183,7 @@ describe("gg-app sidecar session listings", () => {
     await fs.mkdir(otherCwd, { recursive: true });
     await writeClaudeTranscript(home, otherCwd, "cc-elsewhere", "Not this project.");
 
-    const sessions = await listSidecarSessions(cwd, null, coderSessionsDir, home);
+    const sessions = await listSidecarSessions(cwd, null, coderSessionsDir, { homeDir: home });
     expect(sessions.some((session) => session.source === "claude-code")).toBe(false);
   });
 
@@ -207,7 +207,9 @@ describe("gg-app sidecar session listings", () => {
     const home = path.join(tmp, "home");
     await writeClaudeTranscript(home, cwd, "cc-session-3", "Foreign prompt.");
 
-    const chatSessions = await listSidecarSessions(cwd, "general", coderSessionsDir, home);
+    const chatSessions = await listSidecarSessions(cwd, "general", coderSessionsDir, {
+      homeDir: home,
+    });
     expect(chatSessions.some((session) => session.source === "claude-code")).toBe(false);
   });
 

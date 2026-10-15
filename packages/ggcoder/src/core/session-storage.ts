@@ -21,7 +21,8 @@ export const SESSION_TEMP_MARKER = ".gg-session-tmp-";
 const REDIRECT_TYPE = "gg_session_redirect";
 const MEDIA_MARKER_PREFIX = `gg-session-asset:v${SESSION_MEDIA_MARKER_VERSION}:`;
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
-const MAX_REDIRECT_BYTES = 4096;
+/** Redirect pointers are tiny; a larger session file is never read as one. */
+export const MAX_REDIRECT_BYTES = 4096;
 
 export interface SessionRedirect {
   type: typeof REDIRECT_TYPE;

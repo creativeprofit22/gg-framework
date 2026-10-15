@@ -1,12 +1,19 @@
 {
   "schemaVersion": 1,
   "date": "2026-10-14",
-  "label": "Plan and Roadmap reviews are back above the Deck",
+  "label": "Reviews above the Deck, and session lists that keep up",
   "sections": [
     {
       "title": "Reviews you can always reach",
       "items": [
         "Plan approvals and Roadmap drafts are back where you can see them. When the `Deck` arrived, a review waiting for you could slip underneath it, leaving your message box locked with nothing to click. `Plan approval required` and `Roadmap draft` now sit right above the `Deck`, so `Approve`, `Feedback` and `Create phase` are always in reach, and an open review takes half the window so your conversation stays in view. Update progress and `Retry Roadmap review` stay on top too."
+      ]
+    },
+    {
+      "title": "Session lists that keep up",
+      "items": [
+        "Your newest sessions show up again when you go back to a project. Coming back from a session could ask for the list before the app was ready, and when that failed it quietly kept showing an older copy without anything you'd done since. It now waits until it's ready and tries again if a refresh fails. If it still can't refresh, you'll see `Couldn't refresh this list, so it may be out of date` with `Retry`, instead of an old list passed off as current.",
+        "Projects and sessions load faster, too. The app now remembers what each saved session contains and only re-reads the ones that changed, so going back to the same list is close to instant instead of taking a second or more."
       ]
     }
   ]

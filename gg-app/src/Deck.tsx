@@ -15,6 +15,8 @@ import {
 import type { ActiveSchedule } from "./RunningSchedulesButton";
 import { RunningSchedulesButton } from "./RunningSchedulesButton";
 import { CIIndicator } from "./CIIndicator";
+import { PanelHead } from "./DeckPanelHead";
+import { useDeckEscape } from "./deck-escape";
 import { EmbeddedModal } from "./modal-embed";
 import { Icon } from "./icons";
 import { modelDisplayName } from "./model-name";
@@ -63,6 +65,9 @@ export interface DeckTool {
 export type DeckToolId = "notes" | "todo" | "brain" | "checklist" | "health" | "scorecard" | "goal";
 
 export interface DeckProps {
+  /** This pane holds workspace focus. Split panes each render a deck, and
+   * only the focused one's open panel answers Escape. Omitted means focused. */
+  focused?: boolean;
   state: AgentState | null;
   hydrated: boolean;
   /** Code windows read out git; chat, motion and goals don't. */
@@ -121,7 +126,15 @@ export function Deck(props: DeckProps): React.ReactElement {
     return () => window.removeEventListener("focus", refresh);
   }, [radio.refresh]);
 
-  // Closing a panel hands focus back to the key that opened it, or the box.
+  // Window-wide (see deck-escape.ts), so gate it on pane focus: otherwise the
+  // first-mounted split pane claims every Escape and closes its own panel
+  // while the reader is working in another pane.
+  useDeckEscape(panel !== null && props.focused !== false, () => onPanelChange(null));
+
+  // Closing a panel hands focus back to the key that opened it from the
+  // keyboard, or else to the message box. A mouse click never focused the key
+  // (WebKit), so landing there after Escape would strand focus on a button:
+  // the next Escape could no longer stop a run.
   const wasOpen = useRef(false);
   const refreshRadio = radio.refresh;
   useEffect(() => {
@@ -141,7 +154,8 @@ export function Deck(props: DeckProps): React.ReactElement {
   }, [panel, refreshRadio]);
 
   function toggle(id: DeckPanelId, event: React.MouseEvent<HTMLElement>): void {
-    openerRef.current = event.currentTarget;
+    // A click from the keyboard (Enter/Space) has no click count.
+    openerRef.current = event.detail === 0 ? event.currentTarget : null;
     onPanelChange(panel === id ? null : id);
   }
 
@@ -153,12 +167,6 @@ export function Deck(props: DeckProps): React.ReactElement {
       className="deck"
       data-panel={panel ?? undefined}
       data-plan-mode={planMode || undefined}
-      onKeyDown={(event) => {
-        if (event.key === "Escape" && panel && !event.defaultPrevented) {
-          event.preventDefault();
-          onPanelChange(null);
-        }
-      }}
     >
       {panel && (
         <div
@@ -362,6 +370,7 @@ function PanelBody(
           progress={props.progress}
           onOpenScorecard={() => props.onPanelChange("scorecard")}
           extras={props.usageExtras}
+          onClose={close}
         />
       );
     case "bg":
@@ -388,37 +397,6 @@ function PanelBody(
       return tool ? <ToolPanel tool={tool} onClose={close} /> : null;
     }
   }
-}
-
-/** A panel's header: its name, then "esc" and a close key on the right. */
-function PanelHead({
-  title,
-  meta,
-  onClose,
-}: {
-  title: string;
-  meta?: ReactNode;
-  onClose: () => void;
-}): React.ReactElement {
-  return (
-    <div className="deck-prow tool-head">
-      <h2 className="tool-title">{title}</h2>
-      {meta && <span className="deck-pm">{meta}</span>}
-      <span className="deck-spacer" />
-      <span className="deck-hint" aria-hidden="true">
-        esc
-      </span>
-      <button
-        type="button"
-        className="key key-icon key-sm"
-        aria-label={`Close ${title}`}
-        title="Close"
-        onClick={onClose}
-      >
-        <Icon name="xmark" size={13} />
-      </button>
-    </div>
-  );
 }
 
 function isTool(panel: DeckPanelId): panel is DeckToolId {
@@ -694,6 +672,7 @@ function UsagePanel({
   progress,
   onOpenScorecard,
   extras,
+  onClose,
 }: {
   state: AgentState | null;
   contextPct: number;
@@ -702,6 +681,7 @@ function UsagePanel({
   progress: ProgressSnapshot | null;
   onOpenScorecard: () => void;
   extras: ReactNode;
+  onClose: () => void;
 }): React.ReactElement {
   const { snapshot, now } = useSubscriptionUsage(state?.provider ?? "");
   const five = snapshot?.windows.find((w) => w.kind === "current");
@@ -709,6 +689,7 @@ function UsagePanel({
   const stale = snapshot?.stale ? " · last known" : "";
   return (
     <div className="deck-panel">
+      <PanelHead title="Usage" onClose={onClose} />
       <div className="deck-prow usage-row">
         <Meter
           label="Context"

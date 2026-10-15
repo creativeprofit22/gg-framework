@@ -22,6 +22,15 @@ export interface ChangelogEntry {
 /** Newest first. Prepended by the `/release` flow. */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.91.2",
+    date: "2026-10-15",
+    items: [
+      "Zoom in or out with `Cmd +` and `Cmd -` all you like. Your chat now stays right where it belongs, with the newest message sitting neatly above the message box instead of sliding underneath it.",
+      "`esc` finally closes every panel under the message box, wherever you clicked. Your agent keeps right on working while you do it, and one more `esc` stops it whenever you want. `Usage` and `Model` now get the same tidy header and close button as everything else.",
+      "`Goal settings` now uses the whole panel. No more odd empty strip down the side, and the context box hugs what you've added instead of sitting there as a big empty slab.",
+    ],
+  },
+  {
     version: "0.91.1",
     date: "2026-10-14",
     items: [

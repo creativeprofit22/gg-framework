@@ -1207,6 +1207,29 @@
   display: flex;
   flex-direction: column;
 }
+/* Goal settings reuses the dialog's form, which is sized for a floating card:
+   520px wide, its own inner scroller, and a fixed 128px context box. In the
+   deck it takes the panel's full width, scrolls with the tool body, and the
+   context box fits what it holds (one line when empty, up to the dialog's
+   height when full, then scrolls). */
+.tool-body > .goal-modal {
+  width: auto;
+  max-height: none;
+}
+.tool-body > .goal-modal .goal-modal-body {
+  overflow: visible;
+  margin: 0;
+  padding: 0;
+}
+.tool-body > .goal-modal .goal-context-box {
+  height: auto;
+  max-height: 128px;
+}
+.tool-body > .goal-modal .goal-context-empty {
+  justify-content: flex-start;
+  padding: 0 var(--space-2);
+  text-align: left;
+}
 .tool-body .notes-input {
   flex: 1 1 auto;
   height: auto;

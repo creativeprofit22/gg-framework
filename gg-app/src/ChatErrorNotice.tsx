@@ -1,5 +1,6 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { useAnimatedHeight } from "./animated-height";
+import { viewportScale } from "./motion-geometry";
 import { prefersReducedMotion } from "./transcript-motion";
 import { usePresenceList } from "./usePresenceList";
 import { chatErrorCopy, chatErrorTone, type ChatErrorData } from "./chat-error";
@@ -18,7 +19,10 @@ function keepBottomInView(el: HTMLElement | null): void {
   if (!el || !scroller) return;
   const frame = scroller.closest<HTMLElement>(".transcript-frame");
   const dock = frame ? parseFloat(getComputedStyle(frame).getPropertyValue("--dock-h")) || 0 : 0;
-  const visibleBottom = scroller.getBoundingClientRect().bottom - dock - 12;
+  // --dock-h and the 12px are layout pixels; the rects are zoomed viewport
+  // pixels under the app's CSS zoom, so scale the former into rect space.
+  const view = scroller.getBoundingClientRect();
+  const visibleBottom = view.bottom - (dock + 12) * viewportScale(scroller, view);
   const overflow = el.getBoundingClientRect().bottom - visibleBottom;
   if (overflow > 0) scroller.scrollTop += overflow;
 }

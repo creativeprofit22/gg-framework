@@ -16,7 +16,7 @@ vi.mock("./toast", () => ({ toast: vi.fn() }));
 import { getRadioState, killTask, type BackgroundTask } from "./agent";
 import { useRadio } from "./useRadio";
 import { toast } from "./toast";
-import { TasksPanel } from "./Deck";
+import { Deck, TasksPanel, type DeckProps } from "./Deck";
 import { formatBackgroundTaskStatus, isBackgroundTaskRunning } from "./background-task-status";
 
 function task(over: Partial<BackgroundTask> = {}): BackgroundTask {
@@ -112,5 +112,55 @@ describe("deck radio", () => {
     );
     expect(result.current.stations).toEqual([]);
     warn.mockRestore();
+  });
+});
+
+// Fork: split panes each render a deck, and the Escape listener is
+// window-wide. Ungated, the first-mounted deck claims the key, so Escape in
+// pane 2 closed pane 1's panel. Only the focused pane's panel may close.
+describe("deck Escape across split panes", () => {
+  function deckProps(over: Partial<DeckProps>): DeckProps {
+    return {
+      state: null,
+      hydrated: true,
+      showGit: false,
+      panel: "more",
+      onPanelChange: vi.fn(),
+      status: null,
+      composer: null,
+      menu: null,
+      running: false,
+      contextPct: 0,
+      models: [],
+      modelsFailed: false,
+      onSelectModel: vi.fn(),
+      second: null,
+      tasks: [],
+      schedules: [],
+      onStopSchedule: vi.fn(),
+      projectHealth: null,
+      usageExtras: null,
+      progress: null,
+      tools: {},
+      ...over,
+    };
+  }
+
+  it("closes the focused pane's panel and leaves the other pane's open", () => {
+    vi.mocked(getRadioState).mockResolvedValue({ stations: [], current: null, volume: 1 });
+    const focusedChange = vi.fn();
+    const otherChange = vi.fn();
+    render(
+      <>
+        <Deck {...deckProps({ focused: false, onPanelChange: otherChange })} />
+        <Deck {...deckProps({ focused: true, onPanelChange: focusedChange })} />
+      </>,
+    );
+
+    fireEvent.keyDown(document.body, { key: "Escape" });
+
+    expect(focusedChange).toHaveBeenCalledTimes(1);
+    expect(focusedChange).toHaveBeenCalledWith(null);
+    expect(otherChange).not.toHaveBeenCalled();
   });
 });

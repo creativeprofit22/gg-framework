@@ -150,6 +150,23 @@ describe("layout moving the offset", () => {
     expect(t.pinned).toBe(true);
     expect(t.distance).toBe(0);
   });
+
+  // Regression: Cmd + zoom keeps WebKit's offset in device pixels, so in CSS
+  // pixels it moves up while the reflowed text grows taller below. That read
+  // as the reader scrolling up and left the newest lines under the composer.
+  it("keeps following when a zoom-in moves the offset up", () => {
+    const before = { scrollTop: 1600, scrollHeight: 2000, clientHeight: 400 };
+    const zoomedIn = { scrollTop: 1333, scrollHeight: 2600, clientHeight: 333 };
+
+    expect(pinAfterScroll(true, before.scrollTop, zoomedIn, true)).toBe(true);
+    expect(pinAfterScroll(true, before.scrollTop, zoomedIn)).toBe(false);
+  });
+
+  it("leaves a reader who scrolled up un-pinned across a zoom", () => {
+    const zoomedIn = { scrollTop: 600, scrollHeight: 2600, clientHeight: 333 };
+
+    expect(pinAfterScroll(false, 400, zoomedIn, true)).toBe(false);
+  });
 });
 
 describe("wheel intent", () => {

@@ -63,7 +63,19 @@ export function isHiddenScroller(el: HTMLElement): boolean {
   return false;
 }
 
-export function pinAfterScroll(pinned: boolean, lastTop: number, el: ScrollGeometry): boolean {
+export function pinAfterScroll(
+  pinned: boolean,
+  lastTop: number,
+  el: ScrollGeometry,
+  resized = false,
+): boolean {
+  // The viewport changed size since the last look (Cmd +/- zoom, a window
+  // resize). Its scroll is layout, not the reader: WebKit keeps the offset in
+  // device pixels across a zoom, so zooming in moves scrollTop up in CSS
+  // pixels while the reflowed text grows below. Read as an upward scroll, that
+  // un-pinned the chat and left the newest lines under the composer. A reader
+  // can't resize and scroll in one frame; a wheel still un-pins beforehand.
+  if (resized) return pinned;
   // Content that fits the viewport (say, a cleared conversation) has nothing
   // above it to read, so whatever arrives next should be followed.
   if (el.scrollHeight <= el.clientHeight) return true;

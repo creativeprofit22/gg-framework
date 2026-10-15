@@ -1552,10 +1552,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       const apply = (): void => {
         const frame = transcriptFrameRef.current;
         if (!frame) return;
-        const height = nextDockHeight(
-          dock.getBoundingClientRect().height,
-          frame.style.getPropertyValue("--dock-h"),
-        );
+        const height = nextDockHeight(dock, frame.style.getPropertyValue("--dock-h"));
         if (height === null) return;
         frame.style.setProperty("--dock-h", height);
         maybeScrollToBottom();
@@ -1575,28 +1572,61 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   // scroll it causes, so a commit landing in between can't erase the move.
   // A pane-swap/appearance restore is layout, not the reader: it keeps the pin
   // it restored but still becomes the baseline for the next direction check.
+  // The transcript's viewport size as last seen, so a scroll caused by a
+  // resize or a zoom step isn't mistaken for the reader's (transcript-pin.ts).
+  const lastViewportRef = useRef({ width: 0, height: 0 });
+  const noteTranscriptViewport = useCallback((el: HTMLElement): boolean => {
+    const last = lastViewportRef.current;
+    if (last.width === el.clientWidth && last.height === el.clientHeight) return false;
+    lastViewportRef.current = { width: el.clientWidth, height: el.clientHeight };
+    return true;
+  }, []);
   const onTranscriptScroll = useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
+    // Always refresh the size baseline, even for an ignored restore scroll.
+    const resized = noteTranscriptViewport(el);
     if (!ignoreRestoredScroll()) {
       stickToBottomRef.current = pinAfterScroll(
         stickToBottomRef.current,
         lastScrollTopRef.current,
         el,
+        resized,
       );
     }
     lastScrollTopRef.current = el.scrollTop;
-  }, [ignoreRestoredScroll]);
+  }, [ignoreRestoredScroll, noteTranscriptViewport]);
   const onTranscriptWheel = useCallback((e: React.WheelEvent<HTMLDivElement>) => {
     const el = scrollRef.current;
     if (el) stickToBottomRef.current = pinAfterWheel(stickToBottomRef.current, e, el);
   }, []);
   // The transcript remounts when a picker/home view takes over the pane; seed
   // the direction baseline from the new node so its first scroll reads right.
-  const attachTranscript = useCallback((el: HTMLDivElement | null) => {
-    scrollRef.current = el;
-    if (el) lastScrollTopRef.current = el.scrollTop;
-  }, []);
+  // Observed through the ref callback (upstream 9494aa2c), not a mount effect,
+  // so a remounted node is never left unobserved. A pane resize or zoom step
+  // keeps a pinned chat on its newest line.
+  const transcriptRoRef = useRef<ResizeObserver | null>(null);
+  const attachTranscript = useCallback(
+    (el: HTMLDivElement | null) => {
+      scrollRef.current = el;
+      if (el) {
+        lastScrollTopRef.current = el.scrollTop;
+        noteTranscriptViewport(el);
+      }
+      transcriptRoRef.current?.disconnect();
+      transcriptRoRef.current = null;
+      if (!el || typeof ResizeObserver === "undefined") return;
+      const ro = new ResizeObserver(() => {
+        // Record the new size here too: a resize with no scroll event would
+        // otherwise make the reader's next scroll read as layout.
+        noteTranscriptViewport(el);
+        if (chatLayout.resized()) maybeScrollToBottom();
+      });
+      ro.observe(el);
+      transcriptRoRef.current = ro;
+    },
+    [maybeScrollToBottom, chatLayout, noteTranscriptViewport],
+  );
 
   // Native drag leave/drop can be lost when the pointer exits the webview.
   useEffect(() => {
@@ -5725,6 +5755,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
           </div>
 
           <Deck
+            focused={props.focused !== false}
             state={state}
             hydrated={hydrated}
             showGit={workspaceMode === "code"}

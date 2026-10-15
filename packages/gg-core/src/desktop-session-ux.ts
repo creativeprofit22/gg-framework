@@ -279,6 +279,14 @@ export interface KenEventMetadata {
 export type OpenAICodexContextProfileEligibility =
   { canChange: true } | { canChange: false; reason: string };
 
+/**
+ * GPT-6 Astra at either speed. `gpt-6-astra-fast` is the same wire model at the
+ * priority tier, so it shares Astra's Codex context profiles.
+ */
+export function isOpenAICodexAstraModel(model: string | null | undefined): boolean {
+  return model === "gpt-6-astra" || model === "gpt-6-astra-fast";
+}
+
 /** Session UX authority carried by initial state and context extras. */
 export interface DesktopSessionUXState {
   /** Authoritative live-only asks. Legacy absence preserves cards; [] retires open cards. */

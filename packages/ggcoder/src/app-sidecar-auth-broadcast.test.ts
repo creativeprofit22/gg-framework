@@ -448,10 +448,7 @@ describe("OpenAI auth-state fan-out", () => {
       ),
     );
 
-    for (const [url, body] of [
-      ["/context-profile", { profile: "experimental" }],
-      ["/openai-codex-fast", { enabled: true }],
-    ] as const) {
+    for (const [url, body] of [["/context-profile", { profile: "experimental" }]] as const) {
       const result = await request("POST", url, { session: windowB, body });
       expect(result.status).toBe(409);
     }
@@ -473,10 +470,7 @@ describe("OpenAI auth-state fan-out", () => {
       );
     }
 
-    for (const [url, body] of [
-      ["/context-profile", { profile: "experimental" }],
-      ["/openai-codex-fast", { enabled: true }],
-    ] as const) {
+    for (const [url, body] of [["/context-profile", { profile: "experimental" }]] as const) {
       const result = await request("POST", url, { session: windowB, body });
       expect(result.status).toBe(409);
     }

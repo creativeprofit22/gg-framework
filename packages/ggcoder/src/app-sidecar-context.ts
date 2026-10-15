@@ -6,10 +6,7 @@ import type { AgentSessionState } from "./core/agent-session.js";
 interface ContextSnapshotSession {
   getState(): Pick<
     AgentSessionState,
-    | "accountId"
-    | "openAICodexContextProfile"
-    | "openAICodexFast"
-    | "openAICodexContextProfileEligibility"
+    "accountId" | "openAICodexContextProfile" | "openAICodexContextProfileEligibility"
   >;
   getContextUsage(): { used: number; size: number };
 }
@@ -22,7 +19,6 @@ export function getAgentSessionContextSnapshot(
   return {
     accountId: state.accountId ?? null,
     openAICodexContextProfile: state.openAICodexContextProfile,
-    openAICodexFast: state.openAICodexFast,
     openAICodexContextProfileEligibility: state.openAICodexContextProfileEligibility,
     contextTokens: usage.used,
     contextWindow: usage.size,

@@ -140,10 +140,6 @@ async function* runStream(
     include: ["reasoning.encrypted_content"],
   };
 
-  if (options.serviceTier) {
-    body.service_tier = options.serviceTier === "fast" ? "priority" : options.serviceTier;
-  }
-
   if (options.tools?.length) {
     body.tools = serializeResponsesTools(options.tools, {
       strict: (options.strictTools ?? true) ? true : null,

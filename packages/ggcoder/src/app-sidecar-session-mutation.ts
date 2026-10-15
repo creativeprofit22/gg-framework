@@ -11,7 +11,6 @@ export type SessionMutationKind =
   | "ken-transition"
   | "context-profile"
   | "continuation-commit"
-  | "openai-codex-fast"
   | "manual-plan-accept"
   | "autopilot-plan-accept"
   | "plan-revise";

@@ -771,7 +771,6 @@ describe("useAgentEvents", () => {
           model: "gpt-6-astra",
           accountId: null,
           openAICodexContextProfile: "stable",
-          openAICodexFast: false,
           contextTokens: 136_000,
           contextWindow: 272_000,
           cwd: "/tmp/proj",
@@ -785,7 +784,6 @@ describe("useAgentEvents", () => {
         ev("extras", {
           accountId: "account-live",
           openAICodexContextProfile: "experimental",
-          openAICodexFast: true,
           contextTokens: 300_000,
           contextWindow: 872_000,
         }),
@@ -794,7 +792,6 @@ describe("useAgentEvents", () => {
     expect(getState()).toMatchObject({
       accountId: "account-live",
       openAICodexContextProfile: "experimental",
-      openAICodexFast: true,
       contextTokens: 300_000,
       contextWindow: 872_000,
     });
@@ -804,7 +801,6 @@ describe("useAgentEvents", () => {
         ev("extras", {
           accountId: null,
           openAICodexContextProfile: "stable",
-          openAICodexFast: false,
           contextTokens: 136_000,
           contextWindow: 272_000,
         }),
@@ -813,33 +809,10 @@ describe("useAgentEvents", () => {
     expect(getState()).toMatchObject({
       accountId: null,
       openAICodexContextProfile: "stable",
-      openAICodexFast: false,
       contextTokens: 136_000,
       contextWindow: 272_000,
     });
     expect(getContextTokens()).toBe(136_000);
-  });
-
-  it("applies pane-scoped Fast changes", () => {
-    const { hook, getState } = setup();
-    act(() =>
-      hook.result.current.handleEvent(
-        ev("ready", {
-          provider: "openai",
-          model: "gpt-6-astra",
-          accountId: "account-live",
-          openAICodexContextProfile: "stable",
-          openAICodexFast: false,
-          contextTokens: 0,
-          contextWindow: 272_000,
-          cwd: "/tmp/proj",
-          running: false,
-          tasks: [],
-        }),
-      ),
-    );
-    act(() => hook.result.current.handleEvent(ev("fast_change", { openAICodexFast: true })));
-    expect(getState()?.openAICodexFast).toBe(true);
   });
 
   it("keeps authoritative context usage when turn_end reports token usage", () => {
@@ -851,7 +824,6 @@ describe("useAgentEvents", () => {
           model: "gpt-6-astra",
           accountId: "account-live",
           openAICodexContextProfile: "stable",
-          openAICodexFast: false,
           contextTokens: 136_000,
           contextWindow: 272_000,
           cwd: "/tmp/proj",

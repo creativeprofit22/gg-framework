@@ -12585,14 +12585,10 @@ select {
   align-items: center;
   gap: var(--space-6);
   min-width: 0;
-  /* Horizontal pill allowance, as on `.footer-right`: the context picker and
-     Fast toggle sit at this group's edges. */
+  /* Horizontal pill allowance, as on `.footer-right`: the context picker
+     sits at this group's edge. */
   padding-inline: var(--space-3);
   margin-inline: -6px;
-}
-.astra-fast-toggle.active {
-  color: var(--primary);
-  font-weight: 600;
 }
 
 /* Thinking level: borderless colored text (mirrors TUI footer), color graded
@@ -14919,8 +14915,7 @@ select {
     gap: var(--space-3) var(--space-6);
   }
 
-  .astra-control-group .model-picker,
-  .astra-fast-toggle {
+  .astra-control-group .model-picker {
     min-height: 28px;
     align-items: center;
   }
@@ -14928,10 +14923,8 @@ select {
   /* Keep the shared hover-pill pairing: horizontal padding stays cancelled by
      the equal negative margin, so the pill has its inset and the text never
      bleeds into neighbours. Vertical margin is 0 so the full 28px touch target
-     occupies real layout space in the wrapped rows. The context picker
-     shares the same pairing so both wrapped controls match. */
-  .astra-control-group .model-picker,
-  .astra-fast-toggle {
+     occupies real layout space in the wrapped rows. */
+  .astra-control-group .model-picker {
     padding: var(--space-2) var(--space-3);
     margin: 0 -6px;
   }

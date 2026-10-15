@@ -271,14 +271,20 @@ describe("streamOpenAI request shaping", () => {
     createMock.mockReset();
   });
 
-  it("sends the Fast service tier only when explicitly selected", async () => {
-    for (const serviceTier of ["fast", undefined] as const) {
+  it("sends priority for the fast speed tier only, and an explicit tier wins", async () => {
+    const cases = [
+      { speed: "fast" as const, serviceTier: undefined },
+      { speed: undefined, serviceTier: undefined },
+      { speed: "fast" as const, serviceTier: "flex" as const },
+    ];
+    for (const { speed, serviceTier } of cases) {
       createMock.mockResolvedValueOnce(createStreamingResult(""));
       const result = streamOpenAI({
         provider: "openai",
         model: "gpt-6-astra",
         messages: [{ role: "user", content: "hi" }],
         apiKey: "test-" + "key",
+        speed,
         serviceTier,
       });
       for await (const _event of result) {
@@ -286,8 +292,9 @@ describe("streamOpenAI request shaping", () => {
       }
     }
 
-    expect(createMock.mock.calls[0]?.[0]).toMatchObject({ service_tier: "fast" });
+    expect(createMock.mock.calls[0]?.[0]).toMatchObject({ service_tier: "priority" });
     expect(createMock.mock.calls[1]?.[0]).not.toHaveProperty("service_tier");
+    expect(createMock.mock.calls[2]?.[0]).toMatchObject({ service_tier: "flex" });
   });
 
   it.each<[Provider, Record<string, unknown>]>([

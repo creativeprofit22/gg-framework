@@ -892,7 +892,6 @@ describe("AgentSession OpenAI Codex context profiles", () => {
     await expect(session.switchOpenAICodexContextProfile("stable")).rejects.toThrow(/fixed after/);
     expect(session.getState().openAICodexContextProfile).toBe("experimental");
     await session.switchOpenAICodexContextProfile("experimental");
-    await session.switchOpenAICodexFast(true);
 
     await session.prompt("x".repeat(1_100_000));
     expect(agentLoopMock.mock.calls[1]?.[1]).toMatchObject({ maxTokens: 128_000 });
@@ -919,7 +918,7 @@ describe("AgentSession OpenAI Codex context profiles", () => {
       (await fs.readFile(checkpointPath, "utf-8")).split("\n")[0]!,
     );
     expect(checkpointHeader.openAICodexContextProfile).toBe("experimental");
-    expect(checkpointHeader.openAICodexFast).toBe(true);
+    expect(checkpointHeader).not.toHaveProperty("openAICodexFast");
     const { getAgentSessionContextWindow } = await import("../app-sidecar-context.js");
     expect(getAgentSessionContextWindow(session.getState())).toBe(872_000);
     await session.dispose();
@@ -939,7 +938,6 @@ describe("AgentSession OpenAI Codex context profiles", () => {
       size: 872_000,
       openAICodexContextProfile: "experimental",
     });
-    expect(resumed.getState().openAICodexFast).toBe(true);
     expect(getAgentSessionContextWindow(resumed.getState())).toBe(872_000);
 
     await expect(resumed.switchOpenAICodexContextProfile("stable")).rejects.toThrow(/fixed after/);
@@ -947,36 +945,94 @@ describe("AgentSession OpenAI Codex context profiles", () => {
     await resumed.dispose();
   });
 
-  it("hydrates OAuth identity and applies Fast only to Astra OAuth", async () => {
+  /** A saved session as older builds wrote it, with the retired Fast flag on. */
+  async function legacyFastSession(model: string): Promise<string> {
+    const { SessionManager } = await import("./session-manager.js");
+    const manager = new SessionManager(path.join(tmpHome, ".gg", "sessions"));
+    const stored = await manager.create(tmpProject, "openai", model, {
+      openAICodexContextProfile: "experimental",
+    });
+    await manager.appendEntry(stored.path, {
+      type: "message",
+      id: "legacy-fast-message",
+      parentId: null,
+      timestamp: new Date().toISOString(),
+      message: { role: "user", content: "earlier Fast turn" },
+    });
+    const [header = "", ...rest] = (await fs.readFile(stored.path, "utf-8")).split("\n");
+    const legacy = { ...(JSON.parse(header) as Record<string, unknown>), openAICodexFast: true };
+    await fs.writeFile(stored.path, [JSON.stringify(legacy), ...rest].join("\n"), "utf-8");
+    return stored.path;
+  }
+
+  async function resume(sessionPath: string, model: string) {
     const { AgentSession } = await import("./agent-session.js");
     const session = new AgentSession({
       provider: "openai",
-      model: "gpt-6-astra",
+      model,
       cwd: tmpProject,
       systemPrompt: "test system prompt",
+      sessionId: sessionPath,
       mcpEnabled: false,
       projectCustomization: false,
       selfCorrectionHooks: false,
     });
     await session.initialize();
+    return session;
+  }
 
-    expect(session.getState()).toMatchObject({
+  const savedHeader = async (sessionPath: string) =>
+    JSON.parse((await fs.readFile(sessionPath, "utf-8")).split("\n")[0] ?? "{}") as Record<
+      string,
+      unknown
+    >;
+
+  it("moves a saved Astra Fast session onto GPT-6 Astra Fast exactly once", async () => {
+    const sessionPath = await legacyFastSession("gpt-6-astra");
+
+    const migrated = await resume(sessionPath, "gpt-6-astra");
+    expect(migrated.getState()).toMatchObject({
       accountId: "chatgpt-account",
-      openAICodexFast: false,
+      model: "gpt-6-astra-fast",
+      openAICodexContextProfile: "experimental",
     });
-    await session.switchOpenAICodexFast(true);
-    await session.prompt("fast turn");
-    expect(agentLoopMock.mock.calls[0]?.[1]).toMatchObject({ serviceTier: "fast" });
+    expect(migrated.getContextUsage().size).toBe(872_000);
+    expect(migrated.getOpenAICodexContextProfileEligibility()).toEqual(lockedEligibility);
+    await migrated.prompt("first turn after upgrade");
+    expect(agentLoopMock.mock.calls.at(-1)?.[1]).toMatchObject({ model: "gpt-6-astra-fast" });
+    expect(agentLoopMock.mock.calls.at(-1)?.[1]?.serviceTier).toBeUndefined();
+    const header = await savedHeader(migrated.getState().sessionPath);
+    expect(header).not.toHaveProperty("openAICodexFast");
+    expect(header.openAICodexContextProfile).toBe("experimental");
+    await migrated.dispose();
 
-    await session.switchModel("openai", "gpt-5.6-sol");
-    expect(session.getState().openAICodexFast).toBe(true);
-    await session.prompt("unsupported turn");
-    expect(agentLoopMock.mock.calls[1]?.[1]?.serviceTier).toBeUndefined();
+    // With the flag gone, a later choice of standard Astra sticks on resume.
+    const later = await resume(sessionPath, "gpt-6-astra");
+    expect(later.getState().model).toBe("gpt-6-astra");
+    await later.dispose();
+  });
 
-    await session.switchModel("openai", "gpt-6-astra");
-    await session.prompt("fast again");
-    expect(agentLoopMock.mock.calls[2]?.[1]).toMatchObject({ serviceTier: "fast" });
-    await session.dispose();
+  it("clears the retired flag without moving sessions it never applied to", async () => {
+    const solPath = await legacyFastSession("gpt-5.6-sol");
+    const sol = await resume(solPath, "gpt-5.6-sol");
+    expect(sol.getState().model).toBe("gpt-5.6-sol");
+    expect(await savedHeader(solPath)).not.toHaveProperty("openAICodexFast");
+    await sol.dispose();
+
+    await writeJson(path.join(tmpHome, ".gg", "auth.json"), {
+      openai: {
+        accessToken: ["test", "api", "key"].join("-"),
+        refreshToken: "",
+        expiresAt: Date.now() + 3_600_000,
+      },
+    });
+    const apiKeyPath = await legacyFastSession("gpt-6-astra");
+    const apiKey = await resume(apiKeyPath, "gpt-6-astra");
+    expect(apiKey.getState()).toMatchObject({ accountId: undefined, model: "gpt-6-astra" });
+    await apiKey.prompt("api-key turn");
+    expect(agentLoopMock.mock.calls.at(-1)?.[1]).toMatchObject({ model: "gpt-6-astra" });
+    expect(await savedHeader(apiKeyPath)).not.toHaveProperty("openAICodexFast");
+    await apiKey.dispose();
   });
 
   it("refreshes shared OpenAI identity without refreshing an expired token", async () => {
@@ -1015,10 +1071,7 @@ describe("AgentSession OpenAI Codex context profiles", () => {
       messages: Message[],
       options: GgAgentModule.AgentOptions,
     ) {
-      expect(options).toMatchObject({
-        serviceTier: "fast",
-        serviceTierRequiresAccountId: true,
-      });
+      expect(options.serviceTier).toBeUndefined();
       const resolveCredentials = options.resolveCredentials;
       if (!resolveCredentials) throw new Error("missing credential resolver");
       await expect(resolveCredentials()).resolves.toMatchObject({
@@ -1051,48 +1104,13 @@ describe("AgentSession OpenAI Codex context profiles", () => {
       selfCorrectionHooks: false,
     });
     await session.initialize();
-    await session.switchOpenAICodexFast(true);
     await session.prompt("credential transition");
 
     expect(session.getState().accountId).toBeUndefined();
     await session.dispose();
   });
 
-  it("omits Fast for a restored API-key session", async () => {
-    const [{ AgentSession }, { SessionManager }] = await Promise.all([
-      import("./agent-session.js"),
-      import("./session-manager.js"),
-    ]);
-    await writeJson(path.join(tmpHome, ".gg", "auth.json"), {
-      openai: {
-        accessToken: ["test", "api", "key"].join("-"),
-        refreshToken: "",
-        expiresAt: Date.now() + 3_600_000,
-      },
-    });
-    const manager = new SessionManager(path.join(tmpHome, ".gg", "sessions"));
-    const stored = await manager.create(tmpProject, "openai", "gpt-6-astra", {
-      openAICodexFast: true,
-    });
-    const session = new AgentSession({
-      provider: "openai",
-      model: "gpt-6-astra",
-      cwd: tmpProject,
-      systemPrompt: "test system prompt",
-      sessionId: stored.path,
-      mcpEnabled: false,
-      projectCustomization: false,
-      selfCorrectionHooks: false,
-    });
-    await session.initialize();
-
-    expect(session.getState()).toMatchObject({ accountId: undefined, openAICodexFast: true });
-    await session.prompt("api-key turn");
-    expect(agentLoopMock.mock.calls[0]?.[1]?.serviceTier).toBeUndefined();
-    await session.dispose();
-  });
-
-  it("defaults legacy headers without a profile to stable and Fast off", async () => {
+  it("defaults legacy headers without a profile to stable on standard Astra", async () => {
     const [{ AgentSession }, { SessionManager }] = await Promise.all([
       import("./agent-session.js"),
       import("./session-manager.js"),
@@ -1123,7 +1141,7 @@ describe("AgentSession OpenAI Codex context profiles", () => {
       size: 272_000,
       openAICodexContextProfile: "stable",
     });
-    expect(resumed.getState().openAICodexFast).toBe(false);
+    expect(resumed.getState().model).toBe("gpt-6-astra");
     expect(resumed.getOpenAICodexContextProfileEligibility()).toEqual(lockedEligibility);
     await expect(resumed.switchOpenAICodexContextProfile("experimental")).rejects.toThrow(
       /fixed after/,

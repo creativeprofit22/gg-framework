@@ -50,7 +50,6 @@ describe("session compaction persistence", () => {
       sourceFingerprint: "f".repeat(64),
       retainedMessageCount: 1,
       openAICodexContextProfile: "experimental",
-      openAICodexFast: true,
       title: "Stable project title",
     });
 
@@ -66,7 +65,6 @@ describe("session compaction persistence", () => {
     expect(loaded.header.sourceFingerprint).toBe("f".repeat(64));
     expect(loaded.header.retainedMessageCount).toBe(1);
     expect(loaded.header.openAICodexContextProfile).toBe("experimental");
-    expect(loaded.header.openAICodexFast).toBe(true);
     expect(loaded.header.preview).toBe("Stable project title");
     expect(loaded.entries.find((entry) => entry.type === "label")?.label).toBe(
       "Stable project title",
@@ -78,30 +76,22 @@ describe("session compaction persistence", () => {
     expect(file).toContain("[Previous conversation summary]");
   });
 
-  it("retains resumed Fast state through headless compaction and defaults legacy state off", async () => {
+  it("never carries the retired Fast flag into a compacted checkpoint", async () => {
     const sessionsDir = await makeTempDir();
     const manager = new SessionManager(sessionsDir);
-    const messages = [message("system", "system prompt"), message("user", "summary")];
+    const source = await manager.create("/repo", "openai", "gpt-6-astra-fast");
 
-    const compactResumedSession = async (sourcePath: string) => {
-      const resumed = await manager.load(sourcePath);
-      const checkpoint = await createCompactedSessionCheckpoint(manager, {
-        cwd: resumed.header.cwd,
-        provider: resumed.header.provider,
-        model: resumed.header.model,
-        messages,
-        openAICodexFast: resumed.header.openAICodexFast ?? false,
-      });
-      return manager.load(checkpoint.path);
-    };
-
-    const fastSource = await manager.create("/repo", "openai", "gpt-6-astra", {
-      openAICodexFast: true,
+    const checkpoint = await createCompactedSessionCheckpoint(manager, {
+      cwd: "/repo",
+      provider: "openai",
+      model: "gpt-6-astra-fast",
+      messages: [message("system", "system prompt"), message("user", "summary")],
+      parentSessionId: source.id,
     });
-    const legacySource = await manager.create("/repo", "openai", "gpt-6-astra");
 
-    expect((await compactResumedSession(fastSource.path)).header.openAICodexFast).toBe(true);
-    expect((await compactResumedSession(legacySource.path)).header.openAICodexFast).toBe(false);
+    const loaded = await manager.load(checkpoint.path);
+    expect(loaded.header.model).toBe("gpt-6-astra-fast");
+    expect(loaded.header).not.toHaveProperty("openAICodexFast");
   });
 
   it("fingerprints provenance as part of the non-system compaction source", () => {

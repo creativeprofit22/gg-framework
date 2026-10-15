@@ -382,7 +382,11 @@ export interface SessionHeader {
   model: string;
   /** OAuth context sizing; absent legacy headers restore the stable profile. */
   openAICodexContextProfile?: OpenAICodexContextProfile;
-  /** Opt-in priority billing for eligible OpenAI Codex sessions; absent means off. */
+  /**
+   * Retired Astra Fast flag, read only to move older sessions onto
+   * `gpt-6-astra-fast` (see `AgentSession.migrateLegacyOpenAICodexFast`).
+   * New headers never write it; `clearLegacyOpenAICodexFast` removes it.
+   */
   openAICodexFast?: boolean;
   leafId: string | null;
 }
@@ -751,7 +755,6 @@ export class SessionManager {
       sourceFingerprint?: string;
       retainedMessageCount?: number;
       openAICodexContextProfile?: OpenAICodexContextProfile;
-      openAICodexFast?: boolean;
     },
   ): Promise<{
     id: string;
@@ -789,7 +792,6 @@ export class SessionManager {
       ...(options?.openAICodexContextProfile
         ? { openAICodexContextProfile: options.openAICodexContextProfile }
         : {}),
-      ...(options?.openAICodexFast ? { openAICodexFast: true } : {}),
       leafId: null,
     };
 
@@ -949,12 +951,15 @@ export class SessionManager {
             if ((parsed as SessionHeader).version === 2) {
               const v2 = parsed as SessionHeader;
               const profile = v2.openAICodexContextProfile;
+              const { openAICodexFast: legacyFast, ...rest } = v2;
               header = {
-                ...v2,
+                ...rest,
                 ...(profile === "stable" || profile === "experimental"
                   ? { openAICodexContextProfile: profile }
                   : { openAICodexContextProfile: undefined }),
-                openAICodexFast: v2.openAICodexFast === true,
+                // Retired flag: surface only a real `true` for the one-time
+                // move to Astra Fast; anything else is dropped.
+                ...(legacyFast === true ? { openAICodexFast: true } : {}),
               };
             } else {
               const v1 = parsed as SessionHeaderV1;
@@ -1780,13 +1785,14 @@ export class SessionManager {
     );
   }
 
-  async updateOpenAICodexFast(sessionPath: string, enabled: boolean): Promise<void> {
+  /** Drop the retired Astra Fast flag. Header-only atomic rewrite; history is untouched. */
+  async clearLegacyOpenAICodexFast(sessionPath: string): Promise<void> {
     await this.updateRequiredSessionHeader(
       sessionPath,
-      "updateOpenAICodexFast",
-      "Failed to persist the Fast setting.",
+      "clearLegacyOpenAICodexFast",
+      "Failed to clear the retired Fast setting.",
       (header) => {
-        header.openAICodexFast = enabled;
+        delete header.openAICodexFast;
       },
     );
   }

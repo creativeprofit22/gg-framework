@@ -3,7 +3,10 @@ import {
   getContextWindow,
   type OpenAICodexContextProfile,
 } from "@kenkaiiii/gg-core/models";
-import type { OpenAICodexContextProfileEligibility } from "@kenkaiiii/gg-core/desktop-session-ux";
+import {
+  isOpenAICodexAstraModel,
+  type OpenAICodexContextProfileEligibility,
+} from "@kenkaiiii/gg-core/desktop-session-ux";
 import type { AppSidecarSessionMutationCoordinator } from "./app-sidecar-session-mutation.js";
 
 export interface OpenAICodexAstraSessionState {
@@ -52,7 +55,7 @@ export async function runContextProfileRequest(
 }
 
 export function isOpenAICodexAstraSession(state: OpenAICodexAstraSessionState): boolean {
-  return state.provider === "openai" && state.model === "gpt-6-astra" && !!state.accountId;
+  return state.provider === "openai" && isOpenAICodexAstraModel(state.model) && !!state.accountId;
 }
 
 export async function runContextProfileMutation(

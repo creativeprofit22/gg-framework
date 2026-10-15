@@ -1328,12 +1328,6 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           }
           break;
         }
-        case "fast_change":
-          if (typeof d.openAICodexFast === "boolean") {
-            onAstraStateChange?.();
-            setState((s) => (s ? { ...s, openAICodexFast: d.openAICodexFast as boolean } : s));
-          }
-          break;
         case "model_change":
         case "chat_agent_change":
           setState((s) => (s ? { ...s, ...(d as Partial<AgentState>) } : s));
@@ -1733,7 +1727,6 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
             d.accountId !== undefined ||
             d.openAICodexContextProfileEligibility !== undefined ||
             d.openAICodexContextProfile !== undefined ||
-            d.openAICodexFast !== undefined ||
             d.contextTokens !== undefined ||
             d.contextWindow !== undefined
           ) {
@@ -1756,8 +1749,6 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
                     "openAICodexContextProfileEligibility" in d
                       ? parseContextProfileEligibility(d.openAICodexContextProfileEligibility)
                       : s.openAICodexContextProfileEligibility,
-                  openAICodexFast:
-                    typeof d.openAICodexFast === "boolean" ? d.openAICodexFast : s.openAICodexFast,
                   contextTokens:
                     typeof d.contextTokens === "number" ? d.contextTokens : s.contextTokens,
                   contextWindow: (d.contextWindow as number | undefined) ?? s.contextWindow,

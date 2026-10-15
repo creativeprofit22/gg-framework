@@ -18,12 +18,12 @@ afterEach(async () => {
 function Harness({
   manager,
   cwd,
-  openAICodexFast,
+  model,
   onPersisted,
 }: {
   manager: SessionManager;
   cwd: string;
-  openAICodexFast: boolean;
+  model: string;
   onPersisted: (path: string) => void;
 }) {
   const sessionManagerRef = useRef<SessionManager | null>(manager);
@@ -46,9 +46,8 @@ function Harness({
     turnMetricsRef,
     cwdRef,
     currentProvider: "openai",
-    currentModel: "gpt-6-astra",
+    currentModel: model,
     openAICodexContextProfile: "experimental",
-    openAICodexFast,
   });
 
   useEffect(() => {
@@ -64,20 +63,18 @@ function Harness({
 }
 
 describe("useSessionPersistence", () => {
-  it("retains Fast when a resumed session is compacted through the TUI", async () => {
+  it("keeps Astra Fast and its context profile when the TUI compacts a session", async () => {
     const sessionsDir = await mkdtemp(path.join(tmpdir(), "gg-session-persistence-"));
     tempDirs.push(sessionsDir);
     const manager = new SessionManager(sessionsDir);
-    const source = await manager.create("/repo", "openai", "gpt-6-astra", {
-      openAICodexFast: true,
-    });
+    const source = await manager.create("/repo", "openai", "gpt-6-astra-fast");
     const resumed = await manager.load(source.path);
     let checkpointPath: string | undefined;
     const mounted = render(
       <Harness
         manager={manager}
         cwd="/repo"
-        openAICodexFast={resumed.header.openAICodexFast ?? false}
+        model={resumed.header.model}
         onPersisted={(value) => (checkpointPath = value)}
       />,
       { patchConsole: false },
@@ -87,6 +84,7 @@ describe("useSessionPersistence", () => {
     mounted.unmount();
     const checkpoint = await manager.load(checkpointPath!);
     expect(checkpoint.header.openAICodexContextProfile).toBe("experimental");
-    expect(checkpoint.header.openAICodexFast).toBe(true);
+    expect(checkpoint.header.model).toBe("gpt-6-astra-fast");
+    expect(checkpoint.header).not.toHaveProperty("openAICodexFast");
   });
 });

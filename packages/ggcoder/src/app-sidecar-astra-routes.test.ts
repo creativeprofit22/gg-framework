@@ -5,7 +5,6 @@ import vm from "node:vm";
 import ts from "typescript";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { runContextProfileRequest } from "./app-sidecar-context-profile.js";
-import { runOpenAICodexFastRequest } from "./app-sidecar-fast.js";
 import {
   AppSidecarSessionMutationCoordinator,
   isAppSidecarSessionBusy,
@@ -25,7 +24,6 @@ const routes = [
     name: "context profile",
     url: "/context-profile",
     body: { profile: "experimental" },
-    setting: "profile",
     expectedValue: "experimental",
     run: (running: boolean) =>
       runContextProfileRequest({
@@ -35,21 +33,6 @@ const routes = [
         activeUsage: 0,
         mutations: new AppSidecarSessionMutationCoordinator(),
         switchProfile: vi.fn(async () => {}),
-      }),
-  },
-  {
-    name: "Fast",
-    url: "/openai-codex-fast",
-    body: { enabled: true },
-    setting: "fast",
-    expectedValue: true,
-    run: (running: boolean) =>
-      runOpenAICodexFastRequest({
-        body: { enabled: true },
-        state: eligibleState,
-        running,
-        mutations: new AppSidecarSessionMutationCoordinator(),
-        switchFast: vi.fn(async () => {}),
       }),
   },
 ] as const;
@@ -116,7 +99,6 @@ describe("app sidecar Astra control routes", () => {
       if (route.owner === "run claim") expect(runClaim.claim()).toBe(true);
       if (route.owner === "task sweep") expect(taskSweepClaim.claim()).toBe(true);
       const switchProfile = vi.fn(async () => {});
-      const switchFast = vi.fn(async () => {});
       const sessionMutations = new AppSidecarSessionMutationCoordinator();
       const context = vm.createContext({
         running: route.owner === "running",
@@ -126,13 +108,11 @@ describe("app sidecar Astra control routes", () => {
         runLifecycle: { running: route.owner === "run lifecycle" },
         isAppSidecarSessionBusy,
         runContextProfileRequest,
-        runOpenAICodexFastRequest,
         sessionMutations,
         session: {
           getState: () => eligibleState,
           getContextUsage: () => ({ used: 0 }),
           switchOpenAICodexContextProfile: switchProfile,
-          switchOpenAICodexFast: switchFast,
         },
         readBody: async (req: { body: string }) => req.body,
         json: (res: { resolve: (result: { status: number }) => void }, status: number) =>
@@ -146,14 +126,10 @@ describe("app sidecar Astra control routes", () => {
       });
       if (route.owner === "idle") {
         expect(response.status).toBe(200);
-        const selected = route.setting === "profile" ? switchProfile : switchFast;
-        const other = route.setting === "profile" ? switchFast : switchProfile;
-        expect(selected).toHaveBeenCalledExactlyOnceWith(route.expectedValue);
-        expect(other).not.toHaveBeenCalled();
+        expect(switchProfile).toHaveBeenCalledExactlyOnceWith(route.expectedValue);
       } else {
         expect(response.status).toBe(409);
         expect(switchProfile).not.toHaveBeenCalled();
-        expect(switchFast).not.toHaveBeenCalled();
       }
       expect(sessionMutations.owner).toBeNull();
     },

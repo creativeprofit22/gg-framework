@@ -112,7 +112,6 @@ function harness(history: HistoryEntry[] = []): {
     accountId: null,
     openAICodexContextProfileEligibility: { canChange: true },
     openAICodexContextProfile: "stable",
-    openAICodexFast: false,
     contextTokens: 0,
     contextWindow: 200_000,
     cwd: "/workspaces/checklist",

@@ -46,7 +46,6 @@ function fixture() {
     accountId: "oauth-account",
     openAICodexContextProfile: profile,
     openAICodexContextProfileEligibility: { canChange: true },
-    openAICodexFast: false,
   });
   const session = {
     getState: state,

@@ -51,6 +51,13 @@ afterEach(async () => {
   await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
 });
 
+/** Write the retired Astra Fast flag into a saved header, as older builds did. */
+async function withLegacyFastFlag(sessionPath: string, value: unknown): Promise<void> {
+  const [header = "", ...rest] = (await readFile(sessionPath, "utf-8")).split("\n");
+  const legacy = { ...(JSON.parse(header) as Record<string, unknown>), openAICodexFast: value };
+  await writeFile(sessionPath, [JSON.stringify(legacy), ...rest].join("\n"), "utf-8");
+}
+
 function entry(id: string): SessionEntry {
   return {
     type: "message",
@@ -67,11 +74,13 @@ describe("SessionManager context profiles", () => {
     const manager = new SessionManager(sessionsDir);
     const session = await manager.create("/repo", "openai", "gpt-6-astra", {
       openAICodexContextProfile: "experimental",
-      openAICodexFast: true,
     });
     const restored = (await manager.load(session.path)).header;
     expect(restored.openAICodexContextProfile).toBe("experimental");
-    expect(restored.openAICodexFast).toBe(true);
+    // The retired Astra Fast flag is never written to new headers.
+    expect(restored).not.toHaveProperty("openAICodexFast");
+    const firstLine = (await readFile(session.path, "utf-8")).split("\n")[0] ?? "";
+    expect(firstLine).not.toContain("openAICodexFast");
 
     const legacyPath = path.join(sessionsDir, "legacy.jsonl");
     await writeFile(
@@ -107,21 +116,41 @@ describe("SessionManager context profiles", () => {
     }
   });
 
-  it("preserves concurrent profile, Fast, and message writes", async () => {
+  it("surfaces only a real retired Fast flag from saved headers", async () => {
+    const manager = new SessionManager(await makeTempDir());
+    const loadWithFlag = async (value: unknown) => {
+      const session = await manager.create("/repo", "openai", "gpt-6-astra");
+      await withLegacyFastFlag(session.path, value);
+      return (await manager.load(session.path)).header;
+    };
+
+    expect((await loadWithFlag(true)).openAICodexFast).toBe(true);
+    for (const value of [false, "yes", 1, null]) {
+      expect(await loadWithFlag(value)).not.toHaveProperty("openAICodexFast");
+    }
+  });
+
+  it("clears the retired Fast flag without losing concurrent profile or message writes", async () => {
     const sessionsDir = await makeTempDir();
     const manager = new SessionManager(sessionsDir);
     const session = await manager.create("/repo", "openai", "gpt-6-astra");
+    await manager.appendEntry(session.path, entry("before-clear"));
+    await withLegacyFastFlag(session.path, true);
 
     await Promise.all([
       manager.updateOpenAICodexContextProfile(session.path, "experimental"),
-      manager.updateOpenAICodexFast(session.path, true),
+      manager.clearLegacyOpenAICodexFast(session.path),
       manager.appendEntry(session.path, entry("parallel-append")),
     ]);
 
     const loaded = await manager.load(session.path);
     expect(loaded.header.openAICodexContextProfile).toBe("experimental");
-    expect(loaded.header.openAICodexFast).toBe(true);
-    expect(loaded.entries.map((item) => item.id)).toContain("parallel-append");
+    expect(loaded.header).not.toHaveProperty("openAICodexFast");
+    expect(loaded.entries.map((item) => item.id)).toEqual(
+      expect.arrayContaining(["before-clear", "parallel-append"]),
+    );
+    const firstLine = (await readFile(session.path, "utf-8")).split("\n")[0] ?? "";
+    expect(firstLine).not.toContain("openAICodexFast");
   });
 
   it("preserves an append racing a context profile rewrite", async () => {

@@ -468,7 +468,6 @@ import type {
   KenState,
 } from "@kenkaiiii/gg-core/desktop-session-ux";
 import { runContextProfileRequest } from "./app-sidecar-context-profile.js";
-import { runOpenAICodexFastRequest } from "./app-sidecar-fast.js";
 import { runEnhancePromptRequest } from "./app-sidecar-enhance.js";
 import {
   captureSidecarError,
@@ -6267,32 +6266,6 @@ async function createSession(
         });
         if (result.status === 200) {
           broadcast("context_profile_change", result.body);
-          broadcast("extras", footerExtras());
-        }
-        json(res, result.status, result.body);
-      });
-      return;
-    }
-
-    if (method === "POST" && url === "/openai-codex-fast") {
-      void readBody(req, res).then(async (raw) => {
-        if (raw === null) return;
-        let body: unknown;
-        try {
-          body = JSON.parse(raw);
-        } catch {
-          json(res, 400, { error: "invalid JSON body" });
-          return;
-        }
-        const result = await runOpenAICodexFastRequest({
-          body,
-          state: session.getState(),
-          running: isAppSidecarSessionBusy(sessionBusyState()),
-          mutations: sessionMutations,
-          switchFast: (enabled) => session.switchOpenAICodexFast(enabled),
-        });
-        if (result.status === 200) {
-          broadcast("fast_change", result.body);
           broadcast("extras", footerExtras());
         }
         json(res, result.status, result.body);

@@ -81,38 +81,27 @@ describe("streamOpenAICodex", () => {
     expect(JSON.parse(init?.body as string)).not.toHaveProperty("max_output_tokens");
   });
 
-  it("maps Fast to OAuth priority and omits the disabled tier", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () =>
-        createSseResponse([
-          {
-            type: "response.completed",
-            response: { usage: { input_tokens: 10, output_tokens: 5 } },
-          },
-        ]),
-      ),
+  // Fork regression: the retired Astra Fast toggle sent `gpt-6-astra` with
+  // priority. Upstream's `gpt-6-astra-fast` must produce that same request.
+  it("sends GPT-6 Astra Fast as Astra at priority, and plain Astra without a tier", async () => {
+    const fetchMock = vi.fn(async (_url: string, _init: RequestInit) =>
+      createSseResponse([{ type: "response.completed", response: {} }]),
     );
-
-    const fetchMock = vi.mocked(fetch);
-    for (const serviceTier of ["fast", undefined] as const) {
-      const result = streamOpenAICodex({
+    vi.stubGlobal("fetch", fetchMock);
+    for (const model of ["gpt-6-astra-fast", "gpt-6-astra"]) {
+      await stream({
         provider: "openai",
-        model: "gpt-6-astra",
-        messages: [{ role: "user", content: "hi" }],
-        apiKey: "test-" + "key",
+        model,
+        apiKey: "test",
         accountId: "acct",
-        serviceTier,
-      });
-      for await (const _event of result) {
-        /* consume */
-      }
+        messages: [{ role: "user", content: "hi" }],
+      }).response;
     }
-
-    const fastBody = JSON.parse(fetchMock.mock.calls[0]?.[1]?.body as string);
-    const defaultBody = JSON.parse(fetchMock.mock.calls[1]?.[1]?.body as string);
-    expect(fastBody.service_tier).toBe("priority");
-    expect(defaultBody).not.toHaveProperty("service_tier");
+    const fastBody = JSON.parse(String(fetchMock.mock.calls[0]?.[1].body));
+    const plainBody = JSON.parse(String(fetchMock.mock.calls[1]?.[1].body));
+    expect(fastBody).toMatchObject({ model: "gpt-6-astra", service_tier: "priority" });
+    expect(plainBody.model).toBe("gpt-6-astra");
+    expect(plainBody).not.toHaveProperty("service_tier");
   });
   it.each(["invalid_encrypted_content", undefined])(
     "recovers rejected reasoning (%s) without changing history",

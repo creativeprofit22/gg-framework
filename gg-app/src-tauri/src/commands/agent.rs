@@ -1515,26 +1515,6 @@ pub(crate) async fn agent_set_context_profile(
     .await
 }
 
-/// Proxy: opt into GPT-6 Astra's priority service tier.
-#[tauri::command]
-pub(crate) async fn agent_set_openai_codex_fast(
-    webview: WebviewWindow,
-    pane_id: String,
-    client: tauri::State<'_, reqwest::Client>,
-    enabled: bool,
-) -> Result<serde_json::Value, String> {
-    let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
-    post_session_json(
-        &client,
-        &sidecar_base(port),
-        &gg_sid,
-        "/openai-codex-fast",
-        &serde_json::json!({ "enabled": enabled }),
-    )
-    .await
-}
-
 /// Proxy: pin Ken (mentor + autopilot) to a model, or clear the pin so he
 /// follows GG Coder's model again. `model: None` clears. Returns
 /// `{ kenProvider, kenModel, kenModelOverride }`.
@@ -2181,15 +2161,15 @@ mod tests {
     // plan_mutation_response_* tests below. The fork returns a structured PlanMutationError and the
     // frontend turns it into the message (covered by gg-app/src/agent-pane-client.test.ts).
 
-    fn openai_fast_proxy_result(
+    fn context_profile_proxy_result(
         status: reqwest::StatusCode,
         response_body: &str,
     ) -> Result<serde_json::Value, String> {
         session_json_proxy_result(
             status,
             response_body,
-            "/openai-codex-fast",
-            serde_json::json!({ "enabled": true }),
+            "/context-profile",
+            serde_json::json!({ "profile": "experimental" }),
         )
     }
 
@@ -2374,21 +2354,24 @@ mod tests {
     }
 
     #[test]
-    fn agent_set_openai_codex_fast_posts_authenticated_pane_request() {
+    fn agent_set_context_profile_posts_authenticated_pane_request() {
         assert_eq!(
-            openai_fast_proxy_result(reqwest::StatusCode::OK, r#"{"openAICodexFast":true}"#,),
-            Ok(serde_json::json!({ "openAICodexFast": true }))
+            context_profile_proxy_result(
+                reqwest::StatusCode::OK,
+                r#"{"openAICodexContextProfile":"experimental"}"#,
+            ),
+            Ok(serde_json::json!({ "openAICodexContextProfile": "experimental" }))
         );
     }
 
     #[test]
-    fn agent_set_openai_codex_fast_propagates_sidecar_conflict() {
+    fn agent_set_context_profile_propagates_sidecar_conflict() {
         assert_eq!(
-            openai_fast_proxy_result(
+            context_profile_proxy_result(
                 reqwest::StatusCode::CONFLICT,
-                r#"{"error":"Cannot change Fast while the agent is running."}"#,
+                r#"{"error":"Cannot change context mode while the agent is running."}"#,
             ),
-            Err("Cannot change Fast while the agent is running.".to_string())
+            Err("Cannot change context mode while the agent is running.".to_string())
         );
     }
 

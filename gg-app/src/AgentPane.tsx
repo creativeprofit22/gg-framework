@@ -2,6 +2,7 @@ import {
   ENHANCE_PROMPT_MAX_CHARS,
   CONTINUATION_NEXT_INSTRUCTION_MAX_CHARS,
   continuationInstructionError,
+  isOpenAICodexAstraModel,
   isPendingAskSnapshot,
 } from "@kenkaiiii/gg-core/desktop-session-ux";
 import {
@@ -736,7 +737,6 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     listModels,
     switchModel,
     setOpenAICodexContextProfile,
-    setOpenAICodexFast,
     switchKenModel,
     listCommands,
     listHistory,
@@ -3171,39 +3171,6 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       });
   }
 
-  function onToggleOpenAICodexFast(): void {
-    if (running || autopilotReviewing || astraMutationBusyRef.current || !state) return;
-    const previous = state.openAICodexFast;
-    const requested = !previous;
-    const authoritativeRevision = astraAuthoritativeRevisionRef.current;
-    astraMutationBusyRef.current = true;
-    setAstraControlsBusy(true);
-    setState((current) => (current ? { ...current, openAICodexFast: requested } : current));
-    void setOpenAICodexFast(requested)
-      .then((selection) => {
-        if (astraAuthoritativeRevisionRef.current !== authoritativeRevision) return;
-        setState((current) =>
-          current?.openAICodexFast === requested
-            ? { ...current, openAICodexFast: selection.openAICodexFast }
-            : current,
-        );
-      })
-      .catch((error) => {
-        if (astraAuthoritativeRevisionRef.current === authoritativeRevision) {
-          setState((current) =>
-            current?.openAICodexFast === requested
-              ? { ...current, openAICodexFast: previous }
-              : current,
-          );
-        }
-        toast(taskErrorMessage(error), "error");
-      })
-      .finally(() => {
-        astraMutationBusyRef.current = false;
-        if (mountedRef.current) setAstraControlsBusy(false);
-      });
-  }
-
   const contextProfileEligibility = parseContextProfileEligibility(
     state?.openAICodexContextProfileEligibility,
   );
@@ -3212,7 +3179,9 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     : contextProfileEligibility.reason;
   const contextProfileDescriptionId = `context-profile-lock-${paneId}`;
   const showContextProfileSelector =
-    state?.provider === "openai" && state.model === "gpt-6-astra" && Boolean(state.accountId);
+    state?.provider === "openai" &&
+    isOpenAICodexAstraModel(state.model) &&
+    Boolean(state.accountId);
 
   // Workflow commands matching the current `/prefix` (only while the input is a
   // single `/token` with no space yet). Empty when not in slash mode.
@@ -5975,22 +5944,6 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
                               {contextProfileLockReason}
                             </span>
                           )}
-                          <button
-                            aria-label={`Fast ${state.openAICodexFast ? "on" : "off"} · 2.5× credits`}
-                            title={
-                              state.openAICodexFast
-                                ? "Fast mode is on. Uses 2.5× credits. Click to turn off."
-                                : "Fast mode is off. Turn on to use Fast mode at 2.5× credits."
-                            }
-                            aria-checked={state.openAICodexFast}
-                            className={`thinking-toggle astra-fast-toggle${state.openAICodexFast ? " active" : ""}`}
-                            disabled={running || autopilotReviewing || astraControlsBusy}
-                            onClick={onToggleOpenAICodexFast}
-                            role="switch"
-                            type="button"
-                          >
-                            Fast {state.openAICodexFast ? "on" : "off"} · 2.5× credits
-                          </button>
                         </span>
                       </>
                     )}

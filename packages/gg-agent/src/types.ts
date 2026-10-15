@@ -389,8 +389,6 @@ export interface AgentOptions {
   fetch?: StreamOptions["fetch"];
   /** OpenAI service tier for latency-sensitive first-party API requests. */
   serviceTier?: StreamOptions["serviceTier"];
-  /** Suppress `serviceTier` whenever live per-turn OAuth identity is absent. */
-  serviceTierRequiresAccountId?: boolean;
   /** Codex Responses-Lite request shape override (see StreamOptions). */
   responsesLite?: StreamOptions["responsesLite"];
   /** Codex strict tool schema override (see StreamOptions). */

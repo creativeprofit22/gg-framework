@@ -5,7 +5,6 @@ import type { OpenAICodexContextProfile } from "./model-registry.js";
 export interface DesktopContextSnapshot extends DesktopSessionUXState {
   accountId: string | null;
   openAICodexContextProfile: OpenAICodexContextProfile;
-  openAICodexFast: boolean;
   contextTokens: number;
   contextWindow: number;
 }

@@ -13,7 +13,6 @@ describe("app sidecar context snapshot", () => {
       getState: () => ({
         accountId: "account-1",
         openAICodexContextProfile: "experimental",
-        openAICodexFast: true,
         openAICodexContextProfileEligibility: {
           canChange: false,
           reason:
@@ -26,7 +25,6 @@ describe("app sidecar context snapshot", () => {
     expect(snapshot).toEqual({
       accountId: "account-1",
       openAICodexContextProfile: "experimental",
-      openAICodexFast: true,
       openAICodexContextProfileEligibility: {
         canChange: false,
         reason:
@@ -44,7 +42,6 @@ describe("app sidecar context snapshot", () => {
         getState: () => ({
           accountId: undefined,
           openAICodexContextProfile: "stable",
-          openAICodexFast: false,
           openAICodexContextProfileEligibility: { canChange: true },
         }),
         getContextUsage: () => ({ used: 0, size: 272_000 }),
@@ -54,7 +51,6 @@ describe("app sidecar context snapshot", () => {
     expect(snapshot).toEqual({
       accountId: null,
       openAICodexContextProfile: "stable",
-      openAICodexFast: false,
       openAICodexContextProfileEligibility: { canChange: true },
       contextTokens: 0,
       contextWindow: 272_000,

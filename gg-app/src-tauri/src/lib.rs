@@ -263,7 +263,6 @@ pub fn run() {
             commands::agent::agent_models,
             commands::agent::agent_switch_model,
             commands::agent::agent_set_context_profile,
-            commands::agent::agent_set_openai_codex_fast,
             commands::agent::agent_switch_ken_model,
             commands::agent::agent_enhance_prompt,
             commands::agent::agent_commands,

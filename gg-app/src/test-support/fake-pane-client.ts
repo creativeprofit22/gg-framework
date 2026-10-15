@@ -92,7 +92,6 @@ export function fakePaneClient(
     cycleThinking: vi.fn(),
     switchModel: vi.fn(),
     setOpenAICodexContextProfile: vi.fn(),
-    setOpenAICodexFast: vi.fn(),
     switchKenModel: vi.fn(),
     getSettings: vi.fn(async () => new Promise(() => {})),
     saveSettings: vi.fn(),

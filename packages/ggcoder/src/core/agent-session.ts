@@ -116,6 +116,7 @@ import {
   type AppMarkerPayload,
   type RunJournalEntry,
   type RunOutcome,
+  type SessionHeader,
   type TurnMetricPayload,
 } from "./session-manager.js";
 import { ExtensionLoader } from "./extensions/loader.js";
@@ -658,7 +659,6 @@ export interface AgentSessionState {
   accountId?: string;
   openAICodexContextProfile: OpenAICodexContextProfile;
   openAICodexContextProfileEligibility: OpenAICodexContextProfileEligibility;
-  openAICodexFast: boolean;
 }
 
 // ── Agent Session ──────────────────────────────────────────
@@ -879,7 +879,6 @@ export class AgentSession {
   // Monotonic within a conversation: compaction/rewind can remove all messages.
   // Restore derives this from durable history and lineage, not a new header flag.
   private contextProfileLocked = false;
-  private openAICodexFast = false;
   private cwd: string;
   private readProgrammaticReadiness: () => Promise<ProgrammaticReadiness>;
   /** accountId from the most recently resolved credentials — cached so sync
@@ -3587,13 +3586,6 @@ ${content}
       lastResolvedAccessToken = apiKey;
       const modelInfo = getModel(this.model);
       const effectiveBaseUrl = this.baseUrl ?? creds.baseUrl;
-      const serviceTier =
-        this.openAICodexFast &&
-        this.provider === "openai" &&
-        this.model === "gpt-6-astra" &&
-        accountId
-          ? ("fast" as const)
-          : undefined;
       const generator = agentLoop(loopMessages, {
         ...(streamRules.length > 0 ? { streamRules: { rules: streamRules } } : {}),
         provider: this.provider,
@@ -3612,8 +3604,6 @@ ${content}
           this.planModeRef.current || options.capThinking
             ? clampThinkingForPlanMode(this.thinkingLevel)
             : this.thinkingLevel,
-        serviceTier,
-        ...(serviceTier ? { serviceTierRequiresAccountId: true } : {}),
         apiKey,
         // Per-turn credential resolution. A run can span many minutes; if any
         // process sharing auth.json refreshes this grant meanwhile, the token
@@ -4027,12 +4017,28 @@ ${content}
     this.openAICodexContextProfile = profile;
   }
 
-  async switchOpenAICodexFast(enabled: boolean): Promise<void> {
-    if (enabled === this.openAICodexFast) return;
-    if (!this.opts.transient && this.sessionPath) {
-      await this.sessionManager.updateOpenAICodexFast(this.sessionPath, enabled);
+  /**
+   * One-time move off the retired per-session Astra Fast flag. A session saved
+   * with it on resumes on `gpt-6-astra-fast`, but only where the flag used to
+   * apply: standard Astra through Codex OAuth, so no other pane is moved onto
+   * premium billing. The flag is then cleared so a later choice of standard
+   * Astra sticks. Clearing is best effort: a failed header write never blocks
+   * the resume.
+   */
+  private async migrateLegacyOpenAICodexFast(
+    header: SessionHeader,
+    sessionPath: string,
+  ): Promise<void> {
+    if (header.openAICodexFast !== true) return;
+    if (this.provider === "openai" && this.model === "gpt-6-astra" && this.lastAccountId) {
+      await this.switchModel("openai", "gpt-6-astra-fast");
     }
-    this.openAICodexFast = enabled;
+    if (this.opts.transient) return;
+    await this.sessionManager.clearLegacyOpenAICodexFast(sessionPath).catch((error: unknown) => {
+      log("WARN", "session", "Failed to clear the retired Fast flag", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
   }
 
   async switchModel(provider: string, model: string): Promise<void> {
@@ -4192,7 +4198,6 @@ ${content}
     this.conversationId = loaded.header.conversationId ?? loaded.header.id;
     this.checkpointGeneration = loaded.header.generation ?? 0;
     this.openAICodexContextProfile = loaded.header.openAICodexContextProfile ?? "stable";
-    this.openAICodexFast = loaded.header.openAICodexFast ?? false;
     this.currentLeafId = loaded.header.leafId;
     this.setSessionPath(loaded.path);
     this.kenTurns = this.sessionManager.getKenTurns(loaded.entries, loaded.header.leafId);
@@ -4244,7 +4249,6 @@ ${content}
               .filter((message) => getHistoryMessageVisibility(message) !== "hidden").length,
       preview: this.sessionPreview || undefined,
       openAICodexContextProfile: this.openAICodexContextProfile,
-      openAICodexFast: this.openAICodexFast,
     });
     this.recordCompactionPredecessor();
     this.sessionId = session.id;
@@ -5021,7 +5025,6 @@ ${content}
       accountId: this.lastAccountId,
       openAICodexContextProfile: this.openAICodexContextProfile,
       openAICodexContextProfileEligibility: this.getOpenAICodexContextProfileEligibility(),
-      openAICodexFast: this.openAICodexFast,
     };
   }
 
@@ -6905,7 +6908,6 @@ ${content}
       parentSessionId: continuingConversation ? this.sessionId : undefined,
       preview: this.sessionPreview || undefined,
       openAICodexContextProfile: this.openAICodexContextProfile,
-      openAICodexFast: this.openAICodexFast,
     });
     this.sessionId = session.id;
     this.checkpointGeneration = session.header.generation ?? 0;
@@ -6975,7 +6977,6 @@ ${content}
     }
     this.conversationId = restoredConversationId;
     this.openAICodexContextProfile = loaded.header.openAICodexContextProfile ?? "stable";
-    this.openAICodexFast = loaded.header.openAICodexFast ?? false;
     const legacyLabel = [...loaded.entries]
       .reverse()
       .find((entry) => entry.type === "label")
@@ -7093,6 +7094,7 @@ ${content}
       await this.compact(creds, "automatic");
       if (this.lastCompactionCompacted) {
         await this.recordInterruptedRuns(interruptedRuns);
+        await this.migrateLegacyOpenAICodexFast(loaded.header, loaded.path);
         return;
       }
     }
@@ -7106,6 +7108,7 @@ ${content}
     this.setSessionPath(loaded.path);
     this.lastPersistedIndex = this.messages.length;
     await this.recordInterruptedRuns(interruptedRuns);
+    await this.migrateLegacyOpenAICodexFast(loaded.header, loaded.path);
   }
 
   /**

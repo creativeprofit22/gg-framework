@@ -330,21 +330,15 @@ async function verifyPromptControls(page, width, mode, screenshot, outputDir, sc
       screenshots.push(output);
     }
   }
-  await verify("Fast", async () => {
+  await verify("Context profile", async () => {
     await ensureMoreOpen(page);
-    const fast = page.locator(".astra-fast-toggle");
-    for (const key of ["Space", "Enter"]) {
-      await assertControlReachable(fast, `${mode} Fast`);
-      const previous = await fast.getAttribute("aria-checked");
-      await page.keyboard.press(key);
-      await page.waitForFunction((before) => {
-        const button = document.querySelector(".astra-fast-toggle");
-        return !button.disabled && button.getAttribute("aria-checked") !== before;
-      }, previous);
-    }
+    const selector = page.locator(
+      '.astra-control-group select[aria-label="OpenAI Codex context profile"]',
+    );
+    await assertControlReachable(selector, `${mode} context profile`);
   });
   if (screenshot) {
-    const output = resolve(outputDir, `prompt-${mode}-fast-${width}.png`);
+    const output = resolve(outputDir, `prompt-${mode}-context-${width}.png`);
     await page.screenshot({ path: output });
     screenshots.push(output);
   }
@@ -380,8 +374,7 @@ async function closeMore(page) {
 }
 
 async function applyAstraScenario(page, scenario) {
-  const { accountId, contextTokens, contextWindow, openAICodexContextProfile, openAICodexFast } =
-    scenario.state;
+  const { accountId, contextTokens, contextWindow, openAICodexContextProfile } = scenario.state;
   await page.evaluate(
     ({ extras, running }) => {
       window.__ggEmit?.("run_end", {});
@@ -395,7 +388,6 @@ async function applyAstraScenario(page, scenario) {
         contextWindow,
         openAICodexContextProfile,
         openAICodexContextProfileEligibility: { canChange: true },
-        openAICodexFast,
       },
       running: scenario.controls === "disabled",
     },
@@ -618,7 +610,6 @@ export async function runWorkspaceNarrowVisualFixture({
         morePanel: '.deck-pad[aria-label="More"]',
         astraControls: ".astra-control-group",
         contextSelector: 'select[aria-label="OpenAI Codex context profile"]',
-        fastSwitch: '.astra-fast-toggle[role="switch"]',
         contextMeter: ".ctx-meter",
       });
       assert.equal(metrics.viewport.clientWidth, 320);
@@ -636,7 +627,6 @@ export async function runWorkspaceNarrowVisualFixture({
       if (scenario.controls !== "hidden") {
         assertContained(metrics, "morePanel", "astraControls");
         assertContained(metrics, "astraControls", "contextSelector");
-        assertContained(metrics, "astraControls", "fastSwitch");
       }
       scenarioShells[scenario.name] = metrics;
       // The pinned New session / Notes / Tasks keys must stay visible and
@@ -675,14 +665,6 @@ export async function runWorkspaceNarrowVisualFixture({
     const accessibilityEvidence = [];
     const reachabilityEvidence = [];
     await assertClippedControlRejected(page);
-    await page.evaluate(() => {
-      const invoke = window.__TAURI_INTERNALS__.invoke;
-      window.__TAURI_INTERNALS__.invoke = (command, args) => {
-        if (command === "agent_set_openai_codex_fast")
-          return Promise.resolve({ openAICodexFast: args.enabled });
-        return invoke(command, args);
-      };
-    });
     await context.grantPermissions(["clipboard-read", "clipboard-write"]);
     await page.evaluate(() => {
       const write = navigator.clipboard.writeText.bind(navigator.clipboard);
@@ -706,36 +688,15 @@ export async function runWorkspaceNarrowVisualFixture({
         await applyAstraScenario(page, scenario);
         await ensureMoreOpen(page);
         await assertAstraVisualState(page, scenario);
-        await page.locator(".astra-fast-toggle").hover();
+        await page
+          .locator('.astra-control-group select[aria-label="OpenAI Codex context profile"]')
+          .hover();
         if (screenshot) {
-          const output = resolve(outputDir, `prompt-fast-${scenario.name}-${width}.png`);
+          const output = resolve(outputDir, `prompt-astra-${scenario.name}-${width}.png`);
           await page.screenshot({ path: output });
           screenshots.push(output);
         }
       }
-      await ensureMoreOpen(page);
-      const fast = page.locator(".astra-fast-toggle");
-      await fast.focus();
-      await page.keyboard.press("Space");
-      await page.waitForFunction(
-        () =>
-          document.querySelector(".astra-fast-toggle")?.getAttribute("aria-checked") === "false" &&
-          !document.querySelector(".astra-fast-toggle")?.disabled,
-      );
-      // Disabling the switch while its mutation settles drops native focus.
-      await fast.focus();
-      await page.keyboard.press("Enter");
-      await page.waitForFunction(
-        () => document.querySelector(".astra-fast-toggle")?.getAttribute("aria-checked") === "true",
-      );
-      await fast.hover();
-      // The app tooltip layer shows a hovered control's `title` in its own
-      // tooltip (and holds the attribute aside), so assert what users see.
-      await page.waitForFunction(
-        (expected) =>
-          document.querySelector('.gg-tooltip[role="tooltip"]')?.textContent === expected,
-        "Fast mode is on. Uses 2.5× credits. Click to turn off.",
-      );
       await closeMore(page);
       const blocks = page.locator(".ken-prompt-block");
       const copies = blocks.locator(".ken-prompt-copy");
@@ -798,7 +759,7 @@ export async function runWorkspaceNarrowVisualFixture({
       });
       await copies.last().click();
       await page.getByRole("alert").filter({ hasText: "Could not copy prompt" }).waitFor();
-      // .astra-fast-toggle now lives in the More panel; open it for the contrast sample.
+      // The Astra context picker lives in the More panel; open it for the contrast sample.
       await ensureMoreOpen(page);
       const contrast = await page.evaluate(() => {
         const rgb = (value) =>
@@ -817,7 +778,7 @@ export async function runWorkspaceNarrowVisualFixture({
           ".ken-prompt-copy",
           ".ken-prompt-error",
           ".ken-prompt-success",
-          ".astra-fast-toggle",
+          '.astra-control-group select[aria-label="OpenAI Codex context profile"]',
         ].map((selector) => {
           const element = document.querySelector(selector);
           const foreground = getComputedStyle(element).color;

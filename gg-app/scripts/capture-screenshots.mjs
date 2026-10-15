@@ -92,22 +92,20 @@ const astraState = {
 
 export const astraVisualScenarios = [
   {
-    name: "astra-stable-fast-off",
+    name: "astra-stable",
     state: {
       ...astraState,
       openAICodexContextProfile: "stable",
-      openAICodexFast: false,
       contextTokens: 136_000,
       contextWindow: 272_000,
     },
     controls: "enabled",
   },
   {
-    name: "astra-experimental-fast-on",
+    name: "astra-experimental",
     state: {
       ...astraState,
       openAICodexContextProfile: "experimental",
-      openAICodexFast: true,
       contextTokens: 741_200,
       contextWindow: 872_000,
     },
@@ -120,7 +118,6 @@ export const astraVisualScenarios = [
       running: true,
       runState: "running",
       openAICodexContextProfile: "stable",
-      openAICodexFast: true,
       contextTokens: 68_000,
       contextWindow: 272_000,
     },
@@ -132,7 +129,6 @@ export const astraVisualScenarios = [
       ...astraState,
       accountId: null,
       openAICodexContextProfile: "stable",
-      openAICodexFast: false,
       contextTokens: 108_800,
       contextWindow: 272_000,
     },
@@ -143,7 +139,6 @@ export const astraVisualScenarios = [
     state: {
       ...astraState,
       openAICodexContextProfile: "stable",
-      openAICodexFast: false,
       contextTokens: 300_000,
       contextWindow: 272_000,
     },
@@ -179,28 +174,10 @@ export async function assertAstraVisualState(page, scenario) {
   }
   await controls.waitFor();
   const contextSelector = controls.locator('select[aria-label="OpenAI Codex context profile"]');
-  const fastLabel = `Fast ${scenario.state.openAICodexFast ? "on" : "off"} · 2.5× credits`;
-  const fastSwitch = controls.getByRole("switch", { name: fastLabel, exact: true });
-  assert.equal(await fastSwitch.textContent(), fastLabel);
-  // The app tooltip layer holds a hovered control's `title` aside and puts it
-  // back when the pointer leaves, so move off the switch before reading it.
-  await page.mouse.move(0, 0);
-  await page.waitForFunction(() =>
-    document.querySelector(".astra-fast-toggle")?.hasAttribute("title"),
-  );
-  assert.equal(
-    await fastSwitch.getAttribute("title"),
-    scenario.state.openAICodexFast
-      ? "Fast mode is on. Uses 2.5× credits. Click to turn off."
-      : "Fast mode is off. Turn on to use Fast mode at 2.5× credits.",
-  );
   assert.equal(await contextSelector.inputValue(), scenario.state.openAICodexContextProfile);
-  assert.equal(
-    await fastSwitch.getAttribute("aria-checked"),
-    String(scenario.state.openAICodexFast),
-  );
   assert.equal(await contextSelector.isDisabled(), scenario.controls === "disabled");
-  assert.equal(await fastSwitch.isDisabled(), scenario.controls === "disabled");
+  // The retired Astra Fast switch must not return; Fast is a model choice now.
+  assert.equal(await controls.getByRole("switch").count(), 0);
 }
 
 const authProviders = [

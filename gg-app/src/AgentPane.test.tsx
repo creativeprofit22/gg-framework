@@ -372,7 +372,6 @@ const agentState = (model: string): AgentState => ({
   accountId: null,
   openAICodexContextProfileEligibility: { canChange: true },
   openAICodexContextProfile: "stable",
-  openAICodexFast: false,
   contextTokens: 0,
   contextWindow: 200_000,
   provider: "azure",
@@ -550,7 +549,6 @@ function client(paneId: string, generation: number): PaneAgentClient {
     cycleThinking: vi.fn(),
     switchModel: vi.fn(),
     setOpenAICodexContextProfile: vi.fn(),
-    setOpenAICodexFast: vi.fn(),
     switchKenModel: vi.fn(),
     getSettings: vi.fn(),
     saveSettings: vi.fn(),
@@ -1857,7 +1855,7 @@ async function openAutopilotToggle(): Promise<HTMLElement> {
   return screen.findByRole("switch", { name: "Autopilot" });
 }
 
-/** Astra context/Fast controls live in each pane's ⋯ More deck menu; open them all. */
+/** Astra context controls live in each pane's ⋯ More deck menu; open them all. */
 async function openMoreMenus(count = 1): Promise<void> {
   await waitFor(() =>
     expect(screen.getAllByRole("button", { name: "More" }).length).toBeGreaterThanOrEqual(count),
@@ -3141,7 +3139,7 @@ describe("AgentPane lifecycle", () => {
   });
 
   it.each([false, undefined])(
-    "locks context without authority (%s), retaining value and Fast",
+    "locks context without authority (%s), retaining value",
     async (canChange) => {
       const pane = client("astra-locked", 1);
       const reason =
@@ -3167,9 +3165,6 @@ describe("AgentPane lifecycle", () => {
       );
       fireEvent.change(selector, { target: { value: "stable" } });
       expect(pane.setOpenAICodexContextProfile).not.toHaveBeenCalled();
-      expect((screen.getByRole("switch", { name: /Fast off/ }) as HTMLButtonElement).disabled).toBe(
-        false,
-      );
     },
   );
 
@@ -3190,14 +3185,31 @@ describe("AgentPane lifecycle", () => {
     expect(
       await screen.findByRole("combobox", { name: "OpenAI Codex context profile" }),
     ).toBeDefined();
-    expect(
-      screen
-        .getByRole("switch", { name: /Fast (on|off) · 2.5× credits/ })
-        .getAttribute("aria-checked"),
-    ).toBe("false");
     expect(screen.getByText("136,000 / 272K · 50%")).toBeDefined();
-
+    // Fork: the retired Fast switch must not come back next to the picker.
+    expect(screen.queryByRole("switch", { name: /Fast/ })).toBeNull();
     mounted.unmount();
+
+    // Fork: Astra Fast is the same model at priority, so its context
+    // profiles stay reachable after the toggle's retirement.
+    const fastPane = client("astra-fast-oauth", 1);
+    vi.mocked(fastPane.getState).mockResolvedValue({
+      ...agentState("gpt-6-astra-fast"),
+      provider: "openai",
+      accountId: "account-1",
+      openAICodexContextProfile: "experimental",
+      contextWindow: 872_000,
+    });
+    const fastMounted = render(
+      <AgentPane client={fastPane} target={target} workspaceOwnsSessionLifecycle />,
+    );
+    await openMoreMenus();
+    const fastSelector = (await screen.findByRole("combobox", {
+      name: "OpenAI Codex context profile",
+    })) as HTMLSelectElement;
+    expect(fastSelector.value).toBe("experimental");
+    fastMounted.unmount();
+
     const apiKeyPane = client("astra-api-key", 1);
     vi.mocked(apiKeyPane.getState).mockResolvedValue({
       ...agentState("gpt-6-astra"),
@@ -3209,7 +3221,6 @@ describe("AgentPane lifecycle", () => {
     await screen.findAllByText("gpt-6-astra");
     await openMoreMenus();
     expect(screen.queryByRole("combobox", { name: "OpenAI Codex context profile" })).toBeNull();
-    expect(screen.queryByRole("switch", { name: /Fast (on|off) · 2.5× credits/ })).toBeNull();
   });
 
   it("keeps Astra controls independent across panes", async () => {
@@ -3220,7 +3231,6 @@ describe("AgentPane lifecycle", () => {
       provider: "openai",
       accountId: "left-account",
       openAICodexContextProfile: "stable",
-      openAICodexFast: false,
       contextTokens: 136_000,
       contextWindow: 272_000,
     });
@@ -3229,7 +3239,6 @@ describe("AgentPane lifecycle", () => {
       provider: "openai",
       accountId: "right-account",
       openAICodexContextProfile: "experimental",
-      openAICodexFast: true,
       contextTokens: 300_000,
       contextWindow: 872_000,
     });
@@ -3244,22 +3253,9 @@ describe("AgentPane lifecycle", () => {
     const selectors = await screen.findAllByRole("combobox", {
       name: "OpenAI Codex context profile",
     });
-    const fastSwitches = screen.getAllByRole("switch", { name: /Fast (on|off) · 2.5× credits/ });
     expect(selectors.map((selector) => (selector as HTMLSelectElement).value)).toEqual([
       "stable",
       "experimental",
-    ]);
-    expect(fastSwitches.map((button) => button.textContent)).toEqual([
-      "Fast off · 2.5× credits",
-      "Fast on · 2.5× credits",
-    ]);
-    expect(fastSwitches.map((button) => button.title)).toEqual([
-      "Fast mode is off. Turn on to use Fast mode at 2.5× credits.",
-      "Fast mode is on. Uses 2.5× credits. Click to turn off.",
-    ]);
-    expect(fastSwitches.map((button) => button.getAttribute("aria-checked"))).toEqual([
-      "false",
-      "true",
     ]);
     expect(screen.getByText("136,000 / 272K · 50%")).toBeDefined();
     expect(screen.getByText("300,000 / 872K · 34%")).toBeDefined();
@@ -3355,15 +3351,12 @@ describe("AgentPane lifecycle", () => {
     const selector = await screen.findByRole("combobox", {
       name: "OpenAI Codex context profile",
     });
-    const fast = screen.getByRole("switch", { name: /Fast (on|off) · 2.5× credits/ });
 
     act(() => emit?.({ type: "autopilot_review_start", data: {} }));
     await waitFor(() => expect(selector).toMatchObject({ disabled: true }));
-    expect(fast).toMatchObject({ disabled: true });
 
     act(() => emit?.({ type: "autopilot_done", data: {} }));
     await waitFor(() => expect(selector).toMatchObject({ disabled: false }));
-    expect(fast).toMatchObject({ disabled: false });
   });
 
   it.each([false, true])("restores context profile focus unless moved (%s)", async (moved) => {
@@ -3390,7 +3383,6 @@ describe("AgentPane lifecycle", () => {
     const selector = await screen.findByRole("combobox", {
       name: "OpenAI Codex context profile",
     });
-    const fast = screen.getByRole("switch", { name: /Fast (on|off) · 2.5× credits/ });
     selector.focus();
     fireEvent.change(selector, { target: { value: "experimental" } });
     // WebView2 drops focus when a focused select is disabled; jsdom does not.
@@ -3400,47 +3392,12 @@ describe("AgentPane lifecycle", () => {
     expect(document.activeElement).toBe(moved ? other : document.body);
     expect((selector as HTMLSelectElement).value).toBe("experimental");
     expect(selector).toMatchObject({ disabled: true });
-    expect(fast).toMatchObject({ disabled: true });
     await waitFor(() =>
       expect(pane.setOpenAICodexContextProfile).toHaveBeenCalledWith("experimental"),
     );
     mutation.resolve({ openAICodexContextProfile: "experimental", contextWindow: 872_000 });
     await waitFor(() => expect(selector).toMatchObject({ disabled: false }));
     expect(document.activeElement).toBe(moved ? other : selector);
-  });
-
-  it("optimistically settles and rolls back Fast mutations", async () => {
-    const pane = client("astra-fast", 1);
-    vi.mocked(pane.getState).mockResolvedValue({
-      ...agentState("gpt-6-astra"),
-      provider: "openai",
-      accountId: "account-1",
-      openAICodexContextProfile: "stable",
-      openAICodexFast: false,
-      contextWindow: 272_000,
-    });
-    const mutation = deferred<{ openAICodexFast: boolean }>();
-    vi.mocked(pane.setOpenAICodexFast).mockReturnValueOnce(mutation.promise);
-    render(<AgentPane client={pane} target={target} workspaceOwnsSessionLifecycle />);
-    await openMoreMenus();
-    const fast = await screen.findByRole("switch", { name: /Fast (on|off) · 2.5× credits/ });
-    const selector = screen.getByRole("combobox", { name: "OpenAI Codex context profile" });
-
-    fireEvent.click(fast);
-    expect(fast.getAttribute("aria-checked")).toBe("true");
-    expect(fast.textContent).toBe("Fast on · 2.5× credits");
-    expect(fast).toMatchObject({ disabled: true });
-    expect(pane.setOpenAICodexFast).toHaveBeenCalledWith(true);
-    expect(selector).toMatchObject({ disabled: true });
-    mutation.resolve({ openAICodexFast: true });
-    await waitFor(() => expect(selector).toMatchObject({ disabled: false }));
-
-    vi.mocked(pane.setOpenAICodexFast).mockRejectedValueOnce(new Error("Fast unavailable"));
-    fireEvent.click(fast);
-    await waitFor(() => expect(fast.getAttribute("aria-checked")).toBe("true"));
-    expect(nativeMocks.toast).toHaveBeenCalledWith("Fast unavailable", "error");
-    expect(pane.setOpenAICodexFast).toHaveBeenLastCalledWith(false);
-    expect(fast.textContent).toBe("Fast on · 2.5× credits");
   });
 
   it("preserves newer authoritative state when a profile mutation fails", async () => {
@@ -3451,7 +3408,6 @@ describe("AgentPane lifecycle", () => {
       provider: "openai",
       accountId: "account-1",
       openAICodexContextProfile: "experimental",
-      openAICodexFast: false,
       contextWindow: 872_000,
     });
     const mutation = deferred<{

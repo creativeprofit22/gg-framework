@@ -1045,10 +1045,7 @@ export async function* agentLoop(
           cacheRetention: options.cacheRetention,
           onContextPrepared: options.onContextPrepared,
           promptCacheKey: options.promptCacheKey,
-          serviceTier:
-            options.serviceTierRequiresAccountId && !liveAccountId
-              ? undefined
-              : options.serviceTier,
+          serviceTier: options.serviceTier,
           responsesLite: options.responsesLite,
           strictTools: options.strictTools,
           supportsImages: options.supportsImages,

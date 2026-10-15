@@ -6,7 +6,8 @@
     {
       "title": "Fast, right in the model picker",
       "items": [
-        "Fast mode is here, on the plans you already pay for. Pick `GPT-6.1 Sol Fast`, `GPT-6 Astra Fast` or `GPT-6 Luna Fast` and Codex answers from its priority lane using your ChatGPT plan: same brains, less waiting, though your plan's limits go faster. `Claude Opus 5.5 Fast` is in the model menu too, streaming answers up to `2.5x` faster with your Claude login. Anthropic bills it to your usage credits, so if they're off you'll be told exactly where to switch them on instead of seeing a confusing limit error.",
+        "Fast mode is here, on the plans you already pay for. Pick `GPT-6.1 Sol Fast`, `GPT-6 Astra Fast` or `GPT-6 Luna Fast` and Codex answers from its priority lane using your ChatGPT plan: same brains, less waiting, though your plan's limits go faster.",
+        "`Claude Opus 5.5 Fast` is in the model menu too, streaming answers up to `2.5x` faster with your Claude login. Anthropic bills it to your usage credits, so if they're off you'll be told exactly where to switch them on instead of seeing a confusing limit error.",
         "The old `Fast on · 2.5× credits` switch under `More` is gone, because `GPT-6 Astra Fast` does exactly the same thing and now sits with the rest of your models. Chats where you'd switched it on reopen on `GPT-6 Astra Fast` by themselves, keeping the `Stable` or `Experimental` context you picked. Pick `GPT-6 Astra` again any time to go back to normal speed."
       ]
     },

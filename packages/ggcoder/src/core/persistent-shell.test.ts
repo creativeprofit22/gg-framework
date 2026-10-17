@@ -193,7 +193,11 @@ d("PersistentShell", () => {
     });
     expect(res.outputSnapshot.totalInputBytes).toBeGreaterThan(512);
     expect(res.outputSnapshot.retainedBytes).toBeLessThanOrEqual(512);
-    expect(res.outputSnapshot.content).toBe(res.output);
+    // Full output is byte-bounded only; the snapshot is its last-100-line tail.
+    expect(res.outputCapped).toBe(true);
+    expect(Buffer.byteLength(res.output)).toBeLessThanOrEqual(512);
+    expect(res.output.length).toBeGreaterThan(res.outputSnapshot.content.length);
+    expect(res.output.endsWith(res.outputSnapshot.content)).toBe(true);
     expect(res.output.endsWith("end\n")).toBe(true);
     // Session state survived — the command completed instead of timing out.
     const after = await sh.run('echo "$GG_PSH_CAP"', 10_000, signal());

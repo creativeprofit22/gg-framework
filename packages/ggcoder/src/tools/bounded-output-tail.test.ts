@@ -2,10 +2,49 @@ import { describe, expect, it } from "vitest";
 import {
   BOUNDED_OUTPUT_MAX_BYTES,
   BOUNDED_OUTPUT_MAX_LINES,
+  BoundedOutputBuffer,
   BoundedOutputTail,
   isBinaryOutputChunk,
   OutputChunkDecoder,
 } from "./bounded-output-tail.js";
+
+describe("BoundedOutputBuffer", () => {
+  it("keeps every line, not just the last 100", () => {
+    const buffer = new BoundedOutputBuffer();
+    const lines = Array.from({ length: 2_500 }, (_, index) => `line-${index}\n`);
+    for (const line of lines) buffer.append(line);
+
+    expect(buffer.content()).toBe(lines.join(""));
+    expect(buffer.capped).toBe(false);
+  });
+
+  it("drops the oldest text first once over the byte limit, without splitting characters", () => {
+    const buffer = new BoundedOutputBuffer(9);
+    buffer.append("old-");
+    buffer.append("界界");
+    buffer.append("new\n");
+
+    expect(buffer.content()).toBe("界new\n");
+    expect(Buffer.byteLength(buffer.content(), "utf8")).toBeLessThanOrEqual(9);
+    expect(buffer.capped).toBe(true);
+  });
+
+  it("keeps only the newest suffix of a single oversized chunk", () => {
+    const buffer = new BoundedOutputBuffer(4);
+    buffer.append("abcdefgh");
+
+    expect(buffer.content()).toBe("efgh");
+    expect(buffer.capped).toBe(true);
+  });
+
+  it("stays bounded across many evicted chunks", () => {
+    const buffer = new BoundedOutputBuffer(100);
+    for (let index = 0; index < 5_000; index += 1) buffer.append(`chunk-${index}\n`);
+
+    expect(Buffer.byteLength(buffer.content(), "utf8")).toBeLessThanOrEqual(100);
+    expect(buffer.content().endsWith("chunk-4999\n")).toBe(true);
+  });
+});
 
 describe("BoundedOutputTail", () => {
   it("preserves a terminal newline without inventing an empty line", () => {

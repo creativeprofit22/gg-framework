@@ -122,7 +122,7 @@ Today's date: <DATE>
 }
 {
   "name": "bash",
-  "description": "Run a non-interactive bash command (TERM=dumb, pipefail) in the project root. Output tail is kept. Runs past the soft limit (default 2 min) hand off to a background task, not killed: continue with task_output id + wait_ms. Servers/watchers/REPLs: run_in_background + wake.pattern, then task_output wait_ms; never `&`, nohup or sleep. Leave servers running. Kill by exact PID.",
+  "description": "Run a non-interactive bash command (TERM=dumb, pipefail) in the project root. Long output is compressed (head, tail, errors kept); full text saved to a file. Runs past the soft limit (default 2 min) hand off to a background task, not killed: continue with task_output id + wait_ms. Servers/watchers/REPLs: run_in_background + wake.pattern, then task_output wait_ms; never `&`, nohup or sleep. Leave servers running. Kill by exact PID.",
   "input_schema": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",

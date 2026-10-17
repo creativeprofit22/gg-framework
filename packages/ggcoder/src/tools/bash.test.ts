@@ -354,6 +354,10 @@ describe("createBashTool shell snapshot", () => {
     // 2026-08 guardrail additions (audit P1/P2); git rule now lives in the system prompt.
     expect(tool.description).toContain("never `&`, nohup or sleep");
     expect(tool.description).toContain("Kill by exact PID");
+    // The model receives full output (compressed past the limit, saved to a
+    // file); a tail-only promise made it re-read or rerun to dodge truncation.
+    expect(tool.description).toContain("full text saved to a file");
+    expect(tool.description).not.toContain("tail is kept");
   });
 });
 
@@ -549,6 +553,36 @@ describe.skipIf(resolveShell("").isCmdFallback)("createBashTool on a real Bash s
       await manager.shutdownAllAndWait();
     }
   });
+
+  // Regression: without this comparison the verification gate treated every
+  // build and filtered check as unproven, re-demanding checks on later turns.
+  it("records whether a filtered check left workspace inputs unchanged", async () => {
+    const repo = path.join(tmpHome, "repo");
+    await fs.mkdir(repo);
+    execFileSync("git", ["init", "--quiet"], { cwd: repo });
+    await fs.writeFile(
+      path.join(repo, "pure.test.mjs"),
+      'import { test } from "node:test";\ntest("pure", () => {});\n',
+    );
+    await fs.writeFile(
+      path.join(repo, "writes.test.mjs"),
+      'import { test } from "node:test";\nimport { writeFileSync } from "node:fs";\n' +
+        'test("writes", () => writeFileSync("out.txt", "x"));\n',
+    );
+    const tool = createBashTool(repo, new ProcessManager());
+    const diagnostics = async (command: string) =>
+      structuredBashResult(await tool.execute({ command }, ctx(command))).details.bashDiagnostics;
+
+    expect(await diagnostics("node --test pure.test.mjs 2>&1 | grep pass")).toMatchObject({
+      exitCode: 0,
+      sourceUnchanged: true,
+    });
+    expect(await diagnostics("node --test writes.test.mjs 2>&1 | grep pass")).toMatchObject({
+      exitCode: 0,
+      sourceUnchanged: false,
+    });
+    expect(await diagnostics("echo plain")).not.toHaveProperty("sourceUnchanged");
+  }, 30_000);
 
   it("still exits 0 for a passing command piped through a limiter", async () => {
     const tool = createBashTool(tmpHome, new ProcessManager());
@@ -989,6 +1023,30 @@ describe("foreground limits: hand-off, inactivity and held pipes", () => {
     expect(result).toMatch(/exited \(code 0/);
     expect(result).not.toContain("stopped:");
     expect(result).toContain("tick 14");
+    await shutdownAndWait(processManager);
+  }, 30_000);
+
+  it("seeds the background log with all output printed before the hand-off", async () => {
+    const processManager = new ProcessManager();
+    const command = await nodeScript(
+      "prelude",
+      "for (let i = 0; i < 150; i++) console.log('line ' + i); setTimeout(() => {}, 1500);",
+    );
+
+    const { outcome } = await foreground(processManager, command, {
+      yieldMs: 500,
+      inactivityMs: 5_000,
+      hardMs: null,
+      exitSettleMs: 500,
+    });
+
+    expect(outcome.reason).toBe("backgrounded");
+    const id = outcome.backgroundTaskId ?? "";
+    await waitFor(createTaskOutputTool(processManager), id);
+    const { output } = await processManager.readOutput(id, true);
+    expect(output).toMatch(/^line 0$/m);
+    expect(output).toMatch(/^line 49$/m);
+    expect(output).toMatch(/^line 149$/m);
     await shutdownAndWait(processManager);
   }, 30_000);
 

@@ -67,12 +67,17 @@ export interface BashDiagnostics {
   elapsedMs: number;
   logPath: string;
   tail: string;
+  /** True only when the model-facing output exceeded its byte limit and the
+   *  oldest part was dropped; the shorter `tail` is truncated independently. */
   outputCapped: boolean;
   totalOutputBytes: number;
   retainedOutputBytes: number;
   droppedOutputBytes: number;
   backgroundTaskId: string | null;
   pipesHeldAfterExit: boolean;
+  /** Host comparison of workspace inputs before and after a build or a check
+   *  wrapped in read-only commands; absent when not compared. */
+  sourceUnchanged?: boolean;
 }
 
 export interface BashToolResultDetails {

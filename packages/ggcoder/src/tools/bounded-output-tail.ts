@@ -125,6 +125,71 @@ export class BoundedOutputTail {
   }
 }
 
+/**
+ * Complete command output bounded only by encoded UTF-8 bytes, so the model
+ * sees everything a command printed (the shared renderer then compresses and
+ * offloads it). Past the byte limit the oldest text is dropped first. Chunks
+ * are evicted by advancing a head index, keeping heavy output linear-time.
+ */
+export class BoundedOutputBuffer {
+  private chunks: string[] = [];
+  private chunkBytes: number[] = [];
+  private head = 0;
+  private bytes = 0;
+  private didCap = false;
+
+  constructor(private readonly maxBytes = BOUNDED_OUTPUT_MAX_BYTES) {
+    if (!Number.isInteger(maxBytes) || maxBytes < 1) {
+      throw new RangeError("maxBytes must be a positive integer");
+    }
+  }
+
+  append(text: string): void {
+    if (text.length === 0) return;
+    let kept = text;
+    let keptBytes = Buffer.byteLength(text, "utf8");
+    if (keptBytes > this.maxBytes) {
+      kept = utf8Suffix(text, this.maxBytes);
+      keptBytes = Buffer.byteLength(kept, "utf8");
+      this.didCap = true;
+    }
+    this.chunks.push(kept);
+    this.chunkBytes.push(keptBytes);
+    this.bytes += keptBytes;
+
+    while (this.bytes > this.maxBytes && this.head < this.chunks.length) {
+      const first = this.chunks[this.head] ?? "";
+      const firstBytes = this.chunkBytes[this.head] ?? 0;
+      const over = this.bytes - this.maxBytes;
+      this.didCap = true;
+      if (firstBytes <= over) {
+        this.bytes -= firstBytes;
+        this.head += 1;
+        continue;
+      }
+      const trimmed = utf8Suffix(first, firstBytes - over);
+      const trimmedBytes = Buffer.byteLength(trimmed, "utf8");
+      this.chunks[this.head] = trimmed;
+      this.chunkBytes[this.head] = trimmedBytes;
+      this.bytes -= firstBytes - trimmedBytes;
+    }
+
+    if (this.head > 1024 && this.head * 2 > this.chunks.length) {
+      this.chunks = this.chunks.slice(this.head);
+      this.chunkBytes = this.chunkBytes.slice(this.head);
+      this.head = 0;
+    }
+  }
+
+  content(): string {
+    return this.chunks.slice(this.head).join("");
+  }
+
+  get capped(): boolean {
+    return this.didCap;
+  }
+}
+
 const ALLOWED_TEXT_CONTROLS = new Set([0x08, 0x09, 0x0a, 0x0d, 0x1b]);
 const REPLACEMENT_CHARACTER = "\uFFFD";
 

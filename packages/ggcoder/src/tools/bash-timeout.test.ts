@@ -102,9 +102,9 @@ function expectRenderedDiagnostics(result: string, reason: string): void {
     expect(result).toMatch(new RegExp(`\\n${label}: .+`));
   }
   expect(result).toContain(`Reason: ${reason}`);
-  expect(result).toContain(`Final output (last ${BOUNDED_OUTPUT_MAX_LINES} lines):`);
-  expect(result).toContain("--- begin final output ---");
-  expect(result).toContain("--- end final output ---");
+  // Output is rendered once above the diagnostics; the tail lives in details only.
+  expect(result).not.toContain("Final output (last");
+  expect(result).not.toContain("--- begin final output ---");
 }
 
 function structuredBashResult(result: unknown): {
@@ -1196,7 +1196,7 @@ if (selectedProbe !== undefined) {
       expect(persisted).not.toContain("�");
     });
 
-    it("returns exactly the final 100 lines after a high-volume timeout", async () => {
+    it("returns complete output plus a final-100-line tail after a high-volume timeout", async () => {
       vi.useFakeTimers();
       const fake = createFakeChild(2_000_000_040);
       const lines = Array.from({ length: 140 }, (_, index) => `timeout-line-${index}\n`);
@@ -1211,9 +1211,11 @@ if (selectedProbe !== undefined) {
 
       const result = await resultPromise;
       expect(result.outcome.reason).toBe("timedOut");
-      expect(result.rawOutput).toBe(lines.slice(-BOUNDED_OUTPUT_MAX_LINES).join(""));
-      expect(result.rawOutput.split("\n").filter(Boolean)).toHaveLength(BOUNDED_OUTPUT_MAX_LINES);
-      expect(result.outputCapped).toBe(true);
+      expect(result.rawOutput).toBe(lines.join(""));
+      expect(result.outputCapped).toBe(false);
+      expect(result.outputSnapshot.content).toBe(lines.slice(-BOUNDED_OUTPUT_MAX_LINES).join(""));
+      expect(result.outputSnapshot.retainedLines).toBe(BOUNDED_OUTPUT_MAX_LINES);
+      expect(result.outputSnapshot.capped).toBe(true);
     });
 
     it("preserves a non-newline-terminated final line", async () => {
@@ -1793,7 +1795,7 @@ if (selectedProbe !== undefined) {
       });
     });
 
-    it("reports capped output byte counts without changing rendered result text", async () => {
+    it("reports capped tail byte counts while rendering the complete output", async () => {
       const fake = createFakeChild(2_000_000_051);
       const tool = createBashTool(process.cwd(), testProcessManager(), operationsFor(fake.child));
       const resultPromise = tool.execute(
@@ -1814,16 +1816,19 @@ if (selectedProbe !== undefined) {
       expect(result.details).toMatchObject({
         bashDiagnostics: {
           tail: retainedOutput,
-          outputCapped: true,
+          // Regression: the 100-line tail cap must not mark the model-facing
+          // output as capped; that invalidated verification receipts.
+          outputCapped: false,
           totalOutputBytes: Buffer.byteLength(completeOutput),
           retainedOutputBytes: Buffer.byteLength(retainedOutput),
           droppedOutputBytes: Buffer.byteLength(completeOutput) - Buffer.byteLength(retainedOutput),
         },
       });
       expect(result.content).toContain("Exit code: 0\n");
-      expect(result.content).toContain(
-        `[Foreground output tail capped at ${BOUNDED_OUTPUT_MAX_LINES} lines / 10 MB.`,
-      );
+      // Regression: the model used to see only the last 100 lines.
+      expect(result.content).toContain(`Exit code: 0\n${completeOutput}`);
+      expect(result.content.split("capped-line-0\n")).toHaveLength(2);
+      expect(result.content).not.toContain("earliest part was dropped");
       expect(result.content).not.toContain("Total output bytes:");
       expectRenderedDiagnostics(result.content, "completed");
     });
@@ -2138,14 +2143,14 @@ if (selectedProbe !== undefined) {
         reason: "completed",
         exitCode: 0,
         tail: retainedOutput,
-        outputCapped: true,
+        outputCapped: false,
         totalOutputBytes: Buffer.byteLength(completeOutput),
         retainedOutputBytes: Buffer.byteLength(retainedOutput),
         droppedOutputBytes: Buffer.byteLength(completeOutput) - Buffer.byteLength(retainedOutput),
       });
-      expect(result.content).toContain(
-        `[Foreground output tail capped at ${BOUNDED_OUTPUT_MAX_LINES} lines / 10 MB.`,
-      );
+      expect(result.content).toContain(completeOutput);
+      expect(result.content.split(lines.at(-1) ?? "").length).toBe(2);
+      expect(result.content).not.toContain("earliest part was dropped");
       const retainedLog = await fs.readFile(diagnostics.logPath, "utf8");
       expect(retainedLog).toContain(lines[0]);
       expect(retainedLog).toContain(lines.at(-1));

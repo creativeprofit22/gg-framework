@@ -18,6 +18,7 @@ import type { ForegroundExecutionReason } from "../types.js";
 
 import {
   BOUNDED_OUTPUT_MAX_LINES,
+  BoundedOutputBuffer,
   BoundedOutputTail,
   type BoundedOutputTailSnapshot,
   OutputChunkDecoder,
@@ -45,7 +46,11 @@ export interface PersistentRunResult {
   elapsedMs: number;
   pid: number | null;
   error: Error | null;
+  /** Complete output, bounded only by the byte limit (oldest dropped first). */
   output: string;
+  /** Whether `output` dropped its oldest text to stay within the byte limit. */
+  outputCapped: boolean;
+  /** Last-lines tail for diagnostics. */
   outputSnapshot: BoundedOutputTailSnapshot;
 }
 
@@ -248,6 +253,7 @@ export class PersistentShell {
         pid: this.child?.pid ?? null,
         error: null,
         output: "persistent shell is busy with a previous command",
+        outputCapped: false,
         outputSnapshot: {
           ...emptySnapshot(),
           content: "persistent shell is busy with a previous command",
@@ -273,6 +279,7 @@ export class PersistentShell {
         pid: null,
         error: spawnError,
         output: "",
+        outputCapped: false,
         outputSnapshot: emptySnapshot(),
       });
     }
@@ -300,6 +307,7 @@ export class PersistentShell {
 
     return new Promise<PersistentRunResult>((resolve) => {
       const outputTail = new BoundedOutputTail(BOUNDED_OUTPUT_MAX_LINES, this.maxOutputBytes);
+      const fullOutput = new BoundedOutputBuffer(this.maxOutputBytes);
       const stdoutState: PersistentOutputStreamState = {
         source: "stdout",
         decoder: new OutputChunkDecoder(),
@@ -345,6 +353,7 @@ export class PersistentShell {
       const emitText = (source: PersistentOutputSource, text: string): void => {
         if (!text) return;
         outputTail.append(text);
+        fullOutput.append(text);
         writeForegroundLog(source, text);
         onChunk?.(text, totalBytes);
       };
@@ -354,6 +363,7 @@ export class PersistentShell {
         const marker = `[${state.source} binary output omitted: ${state.binaryBytes} bytes]\n`;
         state.reportedBinaryBytes = state.binaryBytes;
         outputTail.append(marker);
+        fullOutput.append(marker);
         writeForegroundLog(state.source, marker);
         onChunk?.(marker, totalBytes);
       };
@@ -424,7 +434,8 @@ export class PersistentShell {
           elapsedMs: Math.max(0, Date.now() - startedAt),
           pid: child.pid ?? null,
           error,
-          output: outputSnapshot.content,
+          output: fullOutput.content(),
+          outputCapped: fullOutput.capped,
           outputSnapshot,
         });
       };

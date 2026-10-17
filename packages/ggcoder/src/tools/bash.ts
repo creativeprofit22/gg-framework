@@ -38,7 +38,7 @@ import {
 import { checkCommandPolicy, type GetNetworkPolicy } from "../core/network-guard.js";
 import {
   BOUNDED_OUTPUT_MAX_BYTES,
-  BOUNDED_OUTPUT_MAX_LINES,
+  BoundedOutputBuffer,
   BoundedOutputTail,
   type BoundedOutputTailSnapshot,
   OutputChunkDecoder,
@@ -52,6 +52,7 @@ import {
 import type { WakeRules } from "../core/process-manager.js";
 import { annotateSandboxDenial } from "../core/sandbox-feedback.js";
 import { collectVerificationReview } from "./verification-review.js";
+import { captureVerificationSnapshot } from "../core/verification-snapshot.js";
 
 /** Tool env, plus the tweaks that only make sense inside the OS sandbox. */
 function sandboxAwareEnv(sandboxed: boolean): Record<string, string> {
@@ -63,7 +64,7 @@ function sandboxAwareEnv(sandboxed: boolean): Record<string, string> {
 const NO_DEADLINE = 0;
 const FOREGROUND_TIMEOUT_CLEANUP_GRACE_MS = 1_000;
 const FOREGROUND_LIMITS_DESCRIPTION =
-  "Output tail is kept. Runs past the soft limit (default 2 min) hand off to a background task, " +
+  "Long output is compressed (head, tail, errors kept); full text saved to a file. Runs past the soft limit (default 2 min) hand off to a background task, " +
   "not killed: continue with task_output id + wait_ms.";
 const MAX_OUTPUT_BYTES = BOUNDED_OUTPUT_MAX_BYTES;
 
@@ -144,16 +145,17 @@ export async function renderBashOutput(
 
 export interface ForegroundCommandExecution {
   outcome: ForegroundExecutionOutcome;
+  /** Complete output for the model, bounded only by bytes (oldest dropped first). */
   rawOutput: string;
+  /** Whether `rawOutput` dropped its oldest text to stay within the byte limit. */
   outputCapped: boolean;
+  /** Last-lines tail for diagnostics details. */
   outputSnapshot: BoundedOutputTailSnapshot;
   isCmdFallback: boolean;
 }
 
-function bashDiagnostics(
-  outcome: ForegroundExecutionOutcome,
-  output: BoundedOutputTailSnapshot,
-): BashDiagnostics {
+function bashDiagnostics(execution: ForegroundCommandExecution): BashDiagnostics {
+  const { outcome, outputSnapshot: output } = execution;
   const { metadata } = outcome;
   return {
     executionId: metadata.executionId,
@@ -168,7 +170,9 @@ function bashDiagnostics(
     elapsedMs: outcome.elapsedMs,
     logPath: metadata.logPath,
     tail: output.content,
-    outputCapped: output.capped,
+    // Model-facing cap (10 MB, oldest dropped) — not the 100-line diagnostics
+    // tail, which `retainedOutputBytes`/`droppedOutputBytes` describe.
+    outputCapped: execution.outputCapped,
     totalOutputBytes: output.totalInputBytes,
     retainedOutputBytes: output.retainedBytes,
     droppedOutputBytes: Math.max(0, output.totalInputBytes - output.retainedBytes),
@@ -177,7 +181,11 @@ function bashDiagnostics(
   };
 }
 
-function formatForegroundDiagnostics(outcome: ForegroundExecutionOutcome, tail: string): string {
+/**
+ * Model-facing diagnostics. The output itself is rendered once above this
+ * block; the last-lines tail lives only in `details.bashDiagnostics.tail`.
+ */
+function formatForegroundDiagnostics(outcome: ForegroundExecutionOutcome): string {
   const { metadata } = outcome;
   return (
     "Execution diagnostics:\n" +
@@ -191,12 +199,7 @@ function formatForegroundDiagnostics(outcome: ForegroundExecutionOutcome, tail: 
     `Exit code: ${outcome.exitCode ?? "none"}\n` +
     `Signal: ${outcome.signal ?? "none"}\n` +
     `Elapsed: ${outcome.elapsedMs}ms\n` +
-    `Log: ${metadata.logPath}\n` +
-    `Final output (last ${BOUNDED_OUTPUT_MAX_LINES} lines):\n` +
-    "--- begin final output ---\n" +
-    tail +
-    (tail.endsWith("\n") || tail.length === 0 ? "" : "\n") +
-    "--- end final output ---"
+    `Log: ${metadata.logPath}`
   );
 }
 
@@ -253,6 +256,7 @@ export async function executeForegroundCommand({
     sandboxed: false,
   };
   const outputTail = new BoundedOutputTail();
+  const fullOutput = new BoundedOutputBuffer();
   let totalBytes = 0;
   let lastOutputAt = startedAt;
   let pid: number | null = null;
@@ -386,8 +390,8 @@ export async function executeForegroundCommand({
           pipesHeldAfterExit: extra.pipesHeldAfterExit ?? false,
           ...(extra.leftoverStopped ? { leftoverStopped: true } : {}),
         },
-        rawOutput: outputSnapshot.content,
-        outputCapped: outputSnapshot.capped,
+        rawOutput: fullOutput.content(),
+        outputCapped: fullOutput.capped,
         outputSnapshot,
         isCmdFallback: effectiveLaunch.isCmdFallback,
       };
@@ -458,7 +462,9 @@ export async function executeForegroundCommand({
             }
             // finalize detaches every foreground listener synchronously, so
             // the manager's listeners are the only ones from here on.
-            const seedOutput = outputTail.snapshot().content;
+            // Seed with the full bounded buffer, not the 100-line tail, so the
+            // background log keeps everything printed before the hand-off.
+            const seedOutput = fullOutput.content();
             finalize("backgrounded", null, null, null, { backgroundTaskId: taskId });
             log("INFO", "bash", "Foreground command handed off to background task", {
               taskId,
@@ -517,6 +523,7 @@ export async function executeForegroundCommand({
       const emitText = (source: ForegroundOutputSource, output: string): void => {
         if (!output) return;
         outputTail.append(output);
+        fullOutput.append(output);
         writeForegroundLog(`[${source}] ${output}`);
         onUpdate?.(output, totalBytes);
       };
@@ -525,6 +532,7 @@ export async function executeForegroundCommand({
         const marker = `[${state.source} binary output omitted: ${state.binaryBytes} bytes]\n`;
         state.reportedBinaryBytes = state.binaryBytes;
         outputTail.append(marker);
+        fullOutput.append(marker);
         writeForegroundLog(`[${state.source}] ${marker}`);
         onUpdate?.(marker, totalBytes);
       };
@@ -708,7 +716,7 @@ async function executePersistentCommand({
       pipesHeldAfterExit: false,
     },
     rawOutput: result.output,
-    outputCapped: result.outputSnapshot.capped,
+    outputCapped: result.outputCapped,
     outputSnapshot: result.outputSnapshot,
     isCmdFallback: false,
   };
@@ -720,9 +728,9 @@ async function renderStructuredForegroundResult(
   command?: string,
 ): Promise<{ content: string; details: BashToolResultDetails; isError?: boolean }> {
   const { outcome } = execution;
-  const diagnostics = formatForegroundDiagnostics(outcome, execution.rawOutput);
+  const diagnostics = formatForegroundDiagnostics(outcome);
   const details: BashToolResultDetails = {
-    bashDiagnostics: bashDiagnostics(outcome, execution.outputSnapshot),
+    bashDiagnostics: bashDiagnostics(execution),
   };
   if (outcome.reason === "spawnError") {
     return {
@@ -739,9 +747,8 @@ async function renderStructuredForegroundResult(
   let output = await renderBashOutput(execution.rawOutput, command, !execution.isCmdFallback);
   if (execution.outputCapped) {
     output =
-      `[Foreground output tail capped at ${BOUNDED_OUTPUT_MAX_LINES} lines / ` +
-      `${MAX_OUTPUT_BYTES / 1024 / 1024} MB. Complete sanitized log: ` +
-      `${outcome.metadata.logPath}]\n` +
+      `[Output exceeded ${MAX_OUTPUT_BYTES / 1024 / 1024} MB; the earliest part was dropped. ` +
+      `Complete sanitized log: ${outcome.metadata.logPath}]\n` +
       output;
   }
   // Windows without Git Bash: commands ran under cmd.exe, NOT bash. Tell
@@ -1090,6 +1097,16 @@ export function createBashTool(
       } catch (error) {
         return `Exit code: 1\nOS sandbox unavailable; command was not run: ${(error as Error).message}`;
       }
+      // A build, or a check wrapped in read-only commands, is evidence only
+      // when workspace inputs are unchanged across the run (upstream's snapshot
+      // rule). Both snapshots are taken inside this call, so nothing the
+      // command writes can land before the "before" snapshot.
+      const inputsBefore =
+        ops === localOperations &&
+        classifyVerificationCommand(command, { posixShell: !shell.isCmdFallback })
+          .snapshotEligible === true
+          ? await captureVerificationSnapshot(cwd)
+          : undefined;
       // Stop may have landed while the launch was being prepared. The abort
       // listener below would never fire for an already-aborted signal.
       if (context.signal.aborted) return CANCELLED_BEFORE_START;
@@ -1109,6 +1126,15 @@ export function createBashTool(
           : undefined,
       });
       const rendered = await renderStructuredForegroundResult(execution, false, command);
+      // A hand-off is still running: its "after" state does not exist yet.
+      if (
+        inputsBefore !== undefined &&
+        rendered.details.bashDiagnostics.reason !== "backgrounded"
+      ) {
+        const inputsAfter = inputsBefore === null ? null : await captureVerificationSnapshot(cwd);
+        rendered.details.bashDiagnostics.sourceUnchanged =
+          inputsBefore !== null && inputsAfter === inputsBefore;
+      }
       const result = {
         ...rendered,
         content: annotateSandboxDenial(rendered.content, launch.sandboxed),

@@ -70,6 +70,120 @@ describe("verificationProblem (upstream 0.86.0 rule on the fork ledger)", () => 
     });
     expect(ledger.verificationProblem()).toBeNull();
   });
+
+  // Regressions: each of these left checked work "Unverified", so Autopilot
+  // re-demanded checks on later read-only questions.
+  function runCommand(
+    ledger: SessionVerificationEvidenceLedger,
+    id: string,
+    command: string,
+    { exitCode = 0, sourceUnchanged }: { exitCode?: number; sourceUnchanged?: boolean } = {},
+  ) {
+    ledger.recordToolResult({
+      name: "bash",
+      args: { command },
+      evidenceRevision: ledger.revision,
+      evidenceRun: ledger.runId,
+      isError: exitCode !== 0,
+      details: {
+        bashDiagnostics: {
+          executionId: id,
+          command,
+          cwd: process.cwd(),
+          startedAt: Date.now(),
+          reason: exitCode === 0 ? "completed" : "nonZeroExit",
+          exitCode,
+          ...(sourceUnchanged === undefined ? {} : { sourceUnchanged }),
+        },
+      },
+    });
+  }
+
+  it("keeps the covering check after more than 100 later commands", () => {
+    const ledger = new SessionVerificationEvidenceLedger();
+    editFile(ledger, "src/app.ts");
+    runCommand(ledger, "check", "pnpm check");
+    for (let index = 0; index <= 100; index += 1) {
+      runCommand(ledger, `log-${index}`, "git log -1");
+    }
+    expect(ledger.verificationProblem()).toBeNull();
+  });
+
+  it("re-owes checks after a build only when it changed workspace inputs", () => {
+    const build = "pnpm --filter gg-app build";
+    const ledger = new SessionVerificationEvidenceLedger({ posixShell: true });
+    editFile(ledger, "src/app.ts");
+    runCommand(ledger, "check", "pnpm check");
+    runCommand(ledger, "build-same", build, { sourceUnchanged: true });
+    expect(ledger.verificationProblem()).toBeNull();
+    runCommand(ledger, "build-changed", build, { sourceUnchanged: false });
+    expect(ledger.verificationProblem()).toMatch(/^Unverified: no successful check/);
+    runCommand(ledger, "recheck", "pnpm check");
+    runCommand(ledger, "build-uncompared", build);
+    expect(ledger.verificationProblem()).toMatch(/^Unverified: no successful check/);
+    runCommand(ledger, "build-failed", build, { exitCode: 1, sourceUnchanged: true });
+    expect(ledger.verificationProblem()).toMatch(/^Unverified: a check failed/);
+  });
+
+  it("counts a check piped through grep only with pipefail and unchanged inputs", () => {
+    const piped = "pnpm test 2>&1 | grep -E 'pass|fail'";
+    const verdict = (
+      options: { posixShell: boolean },
+      run: { exitCode?: number; sourceUnchanged?: boolean },
+    ) => {
+      const ledger = new SessionVerificationEvidenceLedger(options);
+      editFile(ledger, "src/app.ts");
+      runCommand(ledger, "piped", piped, run);
+      return ledger.verificationProblem();
+    };
+    expect(verdict({ posixShell: true }, { sourceUnchanged: true })).toBeNull();
+    expect(verdict({ posixShell: true }, {})).toMatch(/^Unverified: no successful check/);
+    expect(verdict({ posixShell: true }, { sourceUnchanged: false })).toMatch(
+      /^Unverified: no successful check/,
+    );
+    // cmd.exe has no pipefail, so grep's exit could hide a failed check.
+    expect(verdict({ posixShell: false }, { sourceUnchanged: true })).toMatch(
+      /^Unverified: no successful check/,
+    );
+    // grep matching nothing also exits 1: not proof that the check failed.
+    expect(verdict({ posixShell: true }, { exitCode: 1, sourceUnchanged: true })).toMatch(
+      /^Unverified: no successful check/,
+    );
+  });
+
+  it("credits a handed-off check that finishes after ordinary commands", () => {
+    const ledger = new SessionVerificationEvidenceLedger();
+    editFile(ledger, "src/app.ts");
+    ledger.recordToolResult({
+      name: "bash",
+      args: { command: "pnpm test" },
+      evidenceRevision: ledger.revision,
+      evidenceRun: ledger.runId,
+      isError: false,
+      details: {
+        bashDiagnostics: {
+          executionId: "handed-off",
+          command: "pnpm test",
+          cwd: process.cwd(),
+          startedAt: Date.now(),
+          reason: "backgrounded",
+          exitCode: null,
+          backgroundTaskId: "task-1",
+        },
+      },
+    });
+    runCommand(ledger, "log", "git log -1");
+    expect(ledger.verificationProblem()).toMatch(/^Unverified: no successful check/);
+    ledger.recordToolResult({
+      name: "task_output",
+      args: { id: "task-1" },
+      isError: false,
+      details: {
+        taskOutput: { id: "task-1", isRunning: false, exitCode: 0, stopReason: null },
+      },
+    });
+    expect(ledger.verificationProblem()).toBeNull();
+  });
 });
 
 describe("request-scoped host verification", () => {

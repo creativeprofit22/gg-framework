@@ -11,6 +11,7 @@ import {
 } from "../tools/read-only-bash.js";
 import { editTargetPaths } from "../tools/edit-targets.js";
 import { getSafeToolEnv } from "../tools/safe-env.js";
+import { resolveShell } from "./shell.js";
 import { isCheckOwnFile, isCodeFilePath } from "./verification-paths.js";
 
 export interface VerificationCommandClassification {
@@ -909,6 +910,7 @@ const READ_ONLY_OR_METADATA_TOOLS = new Set([
   "roadmap_checkpoint",
   "roadmap_inspect",
   "roadmap_phase_draft",
+  "roadmap_phase_edit",
   "roadmap_status",
   "skill",
   "task_output",
@@ -965,6 +967,7 @@ interface BashExecutionDiagnostics {
   timeoutMs?: unknown;
   logPath?: unknown;
   backgroundTaskId?: unknown;
+  sourceUnchanged?: unknown;
 }
 
 interface BackgroundTaskOutputDetails {
@@ -1021,8 +1024,44 @@ export class SessionVerificationEvidenceLedger {
     string,
     { generation: number; run: number; evidence: RoadmapShellEvidence }
   >();
-  /** Background task ID → execution ID of a check handed off by the soft yield. */
-  private readonly pendingBackground = new Map<string, string>();
+  /** Background task ID → the check handed off by the soft yield. */
+  private readonly pendingBackground = new Map<
+    string,
+    { executionId: string; command: string; generation: number }
+  >();
+  /** Latest outcome of each check since the last code change. Kept apart from
+   *  `entries`, so ordinary commands evicting old executions cannot drop the
+   *  check that covers the current changes. */
+  private readonly coverage = new Map<string, "passed" | "failed">();
+  /** bash runs with pipefail (not the cmd.exe fallback): see classifyVerificationCommand. */
+  private readonly posixShell: boolean;
+
+  constructor({ posixShell = !resolveShell("").isCmdFallback }: { posixShell?: boolean } = {}) {
+    this.posixShell = posixShell;
+  }
+
+  /** Classification as the live shell runs the command. */
+  classify(command: string): VerificationCommandClassification {
+    return classifyVerificationCommand(command, { posixShell: this.posixShell });
+  }
+
+  private covers(generation: number): boolean {
+    return this.codeChangeGeneration === null || generation >= this.codeChangeGeneration;
+  }
+
+  private setCoverage(command: string, status: string): void {
+    if (status !== "passed" && status !== "failed") return;
+    this.coverage.delete(command);
+    this.coverage.set(command, status);
+    while (this.coverage.size > SESSION_VERIFICATION_LEDGER_MAX_ENTRIES) {
+      // Drop the oldest pass first: dropping a failure would hide it.
+      const oldest =
+        [...this.coverage].find(([, outcome]) => outcome === "passed")?.[0] ??
+        this.coverage.keys().next().value;
+      if (oldest === undefined) break;
+      this.coverage.delete(oldest);
+    }
+  }
 
   get runId(): number {
     return this.run;
@@ -1053,13 +1092,7 @@ export class SessionVerificationEvidenceLedger {
    */
   verificationProblem(): string | null {
     if (this.codeChangeGeneration !== null) {
-      const latest = new Map<string, RoadmapShellEvidence["status"]>();
-      for (const entry of this.entries.values()) {
-        if (entry.generation < this.codeChangeGeneration) continue;
-        if (!classifyVerificationCommand(entry.evidence.command).accepted) continue;
-        latest.set(entry.evidence.command, entry.evidence.status);
-      }
-      const statuses = [...latest.values()];
+      const statuses = [...this.coverage.values()];
       if (statuses.includes("failed")) return VERIFICATION_PROBLEM_FAILED;
       if (!statuses.includes("passed")) return VERIFICATION_PROBLEM_MISSING;
     }
@@ -1111,12 +1144,29 @@ export class SessionVerificationEvidenceLedger {
     planMode?: boolean;
   }): void {
     const run = input.evidenceRun ?? this.run;
+    const diagnostics =
+      input.name === "bash"
+        ? (input.details as { bashDiagnostics?: BashExecutionDiagnostics } | undefined)
+            ?.bashDiagnostics
+        : undefined;
+    const gateClassification =
+      input.name === "bash" ? this.classify(String(input.args.command ?? "").trim()) : undefined;
+    // The bash tool compares workspace inputs around builds and checks wrapped
+    // in read-only commands (upstream's snapshot rule); absent = not compared.
+    const inputsCompared =
+      gateClassification?.snapshotEligible === true &&
+      typeof diagnostics?.sourceUnchanged === "boolean";
+    const inputsUnchanged = inputsCompared && diagnostics?.sourceUnchanged === true;
     if (isWorkspaceMutation(input)) {
       this.generation += 1;
       if (run === this.run) this.runChanged = true;
       const refusedPlanEdit = input.planMode === true && input.name !== "bash";
-      if (!input.isError && !refusedPlanEdit && isCodeMutation(input)) {
+      const codeChanged = inputsCompared
+        ? !inputsUnchanged
+        : !input.isError && isCodeMutation(input);
+      if (!refusedPlanEdit && codeChanged) {
         this.codeChangeGeneration = this.generation;
+        this.coverage.clear();
       }
     }
     if (input.name === "task_output") {
@@ -1125,8 +1175,6 @@ export class SessionVerificationEvidenceLedger {
     }
     if (input.name !== "bash") return;
 
-    const details = input.details as { bashDiagnostics?: BashExecutionDiagnostics } | undefined;
-    const diagnostics = details?.bashDiagnostics;
     // A handed-off check counts as run only once its terminal result is recorded.
     if (
       run === this.run &&
@@ -1239,15 +1287,24 @@ export class SessionVerificationEvidenceLedger {
     }
     const existing = this.entries.get(executionId);
     if (existing) return;
-    this.entries.set(executionId, {
-      generation: input.evidenceRevision ?? this.generation,
-      run,
-      evidence,
-    });
+    const generation = input.evidenceRevision ?? this.generation;
+    this.entries.set(executionId, { generation, run, evidence });
+    if (gateClassification && this.covers(generation)) {
+      if (gateClassification.accepted) {
+        this.setCoverage(command, evidence.status);
+      } else if (
+        inputsUnchanged &&
+        !gateClassification.snapshotPreserveOnly &&
+        // A read-only command around the check may own the non-zero exit.
+        !(evidence.status === "failed" && gateClassification.ambiguousFailure)
+      ) {
+        this.setCoverage(command, evidence.status);
+      }
+    }
     const backgroundTaskId =
       typeof diagnostics?.backgroundTaskId === "string" ? diagnostics.backgroundTaskId : "";
     if (diagnostics?.reason === "backgrounded" && backgroundTaskId) {
-      this.pendingBackground.set(backgroundTaskId, executionId);
+      this.pendingBackground.set(backgroundTaskId, { executionId, command, generation });
     }
     while (this.entries.size > SESSION_VERIFICATION_LEDGER_MAX_ENTRIES) {
       const oldestExecutionId = this.entries.keys().next().value;
@@ -1265,14 +1322,19 @@ export class SessionVerificationEvidenceLedger {
   private recordBackgroundCompletion(details: unknown): void {
     const task = (details as { taskOutput?: BackgroundTaskOutputDetails } | undefined)?.taskOutput;
     if (!task || typeof task.id !== "string" || task.isRunning !== false) return;
-    const executionId = this.pendingBackground.get(task.id);
-    if (executionId === undefined) return;
+    const pending = this.pendingBackground.get(task.id);
+    if (pending === undefined) return;
     this.pendingBackground.delete(task.id);
-    const entry = this.entries.get(executionId);
+    const outcome = backgroundTerminalOutcome(task);
+    // The gate needs only that no code changed since the check started; the
+    // ordinary commands that stale Roadmap evidence below do not stale it.
+    if (this.classify(pending.command).accepted && this.covers(pending.generation)) {
+      this.setCoverage(pending.command, outcome.status);
+    }
+    const entry = this.entries.get(pending.executionId);
     // Evicted, or the workspace changed after the command started: leave it stale.
     if (!entry || entry.generation !== this.generation) return;
 
-    const outcome = backgroundTerminalOutcome(task);
     const evidence: RoadmapShellEvidence = {
       ...entry.evidence,
       status: outcome.status,
@@ -1322,6 +1384,7 @@ export class SessionVerificationEvidenceLedger {
     this.beginRun();
     this.entries.clear();
     this.pendingBackground.clear();
+    this.coverage.clear();
   }
 }
 

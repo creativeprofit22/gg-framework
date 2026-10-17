@@ -1,6 +1,10 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { describeOmitted, describeCompressed, OMITTED_NOTE_MAX_CHARS } from "./truncate.js";
 import { renderBashOutput } from "./bash.js";
+import { useFakeHome } from "../test-support/fake-home.js";
 
 describe("describeOmitted", () => {
   it("is empty when nothing notable was cut (note stays byte-identical)", () => {
@@ -71,6 +75,20 @@ describe("describeOmitted", () => {
 });
 
 describe("describeCompressed + bash note", () => {
+  let tmpDir: string;
+  let restoreHome: () => void;
+
+  // Over-limit output is offloaded to ~/.gg/tool-output; keep it out of the real home.
+  beforeEach(async () => {
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "truncate-omitted-test-"));
+    restoreHome = useFakeHome(path.join(tmpDir, "home"));
+  });
+
+  afterEach(async () => {
+    restoreHome();
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  });
+
   it("describes only lines the compressor dropped", () => {
     const original = ["a", "ERROR boom", "b"].join("\n");
     expect(describeCompressed(original, original)).toBe("");
@@ -90,5 +108,9 @@ describe("describeCompressed + bash note", () => {
     const out = await renderBashOutput(lines.join("\n"));
     const note = out.split("\n")[0];
     expect(note).toMatch(/^\[Compressed \(log\).*Omitted part: \d+ files: /);
+    // Regression: the offloaded full output must land in the fake home, not the real one.
+    const saved = /Full output saved to (.+?) — /.exec(note ?? "")?.[1];
+    expect(saved).toBeDefined();
+    expect(path.resolve(saved ?? "")).toContain(path.resolve(tmpDir, "home"));
   });
 });

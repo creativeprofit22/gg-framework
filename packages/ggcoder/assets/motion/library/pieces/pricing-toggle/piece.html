@@ -1,0 +1,18 @@
+<!doctype html>
+<!-- Illustrative pricing UI, not a live checkout. Edit plan/copy in markup and MONTHLY/ANNUAL rates below. -->
+<html lang="en"><head><meta charset="UTF-8"><script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script></head><body>
+<div id="pricing-toggle-root" data-composition-id="pricing-toggle" data-start="0" data-duration="5" data-width="1920" data-height="1080">
+<style>
+[data-composition-id="pricing-toggle"]{position:absolute;inset:0;color:var(--ink);font-family:var(--text)}
+[data-composition-id="pricing-toggle"] .card{position:absolute;left:610px;top:150px;width:700px;height:780px;box-sizing:border-box;padding:56px;background:var(--field);color:var(--ink);border:2px solid var(--line);border-radius:var(--radius)}
+[data-composition-id="pricing-toggle"] .switch{display:flex;position:relative;border:2px solid var(--ink);border-radius:var(--radius);height:72px;overflow:hidden}
+[data-composition-id="pricing-toggle"] .thumb{position:absolute;left:0;top:0;bottom:0;width:50%;background:var(--ink);color:var(--field)}
+[data-composition-id="pricing-toggle"] .option{width:50%;position:relative;text-align:center;font-size:26px;line-height:72px}
+[data-composition-id="pricing-toggle"] .monthly{color:var(--field)}
+[data-composition-id="pricing-toggle"] h2{font:40px/1.2 var(--display);margin:55px 0 18px}
+[data-composition-id="pricing-toggle"] .price{font-family:var(--display);font-weight:var(--display-weight);font-size:140px;line-height:1.15;letter-spacing:var(--display-tracking);font-variant-numeric:tabular-nums}
+[data-composition-id="pricing-toggle"] .unit{font-size:26px;color:var(--muted)}
+[data-composition-id="pricing-toggle"] .terms{font-size:24px;line-height:1.4;color:var(--muted);min-height:68px;margin-top:24px}
+[data-composition-id="pricing-toggle"] .cta{margin-top:28px;padding:22px;background:var(--ink);color:var(--field);font-size:26px;line-height:1.3;text-align:center;border-radius:var(--radius)}
+</style><div class="card"><div class="switch"><div class="thumb"></div><span class="option monthly">Monthly</span><span class="option annual">Yearly</span></div><!-- edit: plan name, sample price and action --><h2>Studio</h2><span class="price">$24</span><span class="unit"> / month</span><p class="terms">Billed monthly. Cancel anytime.</p><div class="cta">Choose Studio</div></div></div>
+<script>(()=>{const MONTHLY=24,ANNUAL=18;const root=document.querySelector('[data-composition-id="pricing-toggle"]');const style=getComputedStyle(root);const state={progress:0};const draw=()=>{root.querySelector('.price').textContent='$'+Math.round(MONTHLY+(ANNUAL-MONTHLY)*state.progress);root.querySelector('.terms').textContent=state.progress<.5?'Billed monthly. Cancel anytime.':`$${ANNUAL*12} billed yearly. Save 25%.`;};const tl=gsap.timeline({paused:true});tl.from(root.querySelector('.card'),{y:45,opacity:0,duration:.6,ease:'power3.out'},0).to(root.querySelector('.thumb'),{xPercent:100,duration:.5,ease:'power3.inOut'},1.6).to(root.querySelector('.monthly'),{color:style.getPropertyValue('--ink').trim(),duration:.5},1.6).to(root.querySelector('.annual'),{color:style.getPropertyValue('--field').trim(),duration:.5},1.6).to(state,{progress:1,duration:.5,ease:'power3.inOut',onUpdate:draw},1.6).to({},{duration:2.9});draw();window.__timelines=window.__timelines||{};window.__timelines["pricing-toggle"]=tl;})();</script></body></html>

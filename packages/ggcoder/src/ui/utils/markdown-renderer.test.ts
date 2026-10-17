@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import stripAnsi from "strip-ansi";
+import { STEROIDS_COLLAPSIBLE_TABLE_MARKER } from "@kenkaiiii/gg-core";
 import { renderMarkdownToAnsiLines } from "./markdown-renderer.js";
 import type { Theme } from "../theme/theme.js";
 import darkTheme from "../theme/dark.json" with { type: "json" };
@@ -25,6 +26,22 @@ describe("renderMarkdownToAnsiLines tables", () => {
     expect(lines.some((line) => line.startsWith("┌"))).toBe(true);
     expect(lines.some((line) => line.includes("alpha"))).toBe(true);
     expect(lines.some((line) => line.includes("|"))).toBe(false);
+  });
+
+  it("drops the collapsible-table marker line but keeps the table", () => {
+    const marked = `Intro line.\n\n${STEROIDS_COLLAPSIBLE_TABLE_MARKER}\n| Name | Status |\n|---|---|\n| alpha | ok |`;
+    const lines = renderPlain(marked);
+    expect(lines.some((line) => line.includes(STEROIDS_COLLAPSIBLE_TABLE_MARKER))).toBe(false);
+    expect(lines.some((line) => line.startsWith("┌"))).toBe(true);
+    expect(lines.some((line) => line.includes("alpha"))).toBe(true);
+  });
+
+  it("keeps other HTML comments and the marker inside code blocks visible", () => {
+    const lines = renderPlain(
+      `<!-- other note -->\n\n\`\`\`\n${STEROIDS_COLLAPSIBLE_TABLE_MARKER}\n\`\`\``,
+    );
+    expect(lines.some((line) => line.includes("<!-- other note -->"))).toBe(true);
+    expect(lines.some((line) => line.includes(STEROIDS_COLLAPSIBLE_TABLE_MARKER))).toBe(true);
   });
 
   it("keeps a streaming table intact when the last row is partial", () => {

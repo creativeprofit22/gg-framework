@@ -1,0 +1,16 @@
+{
+  "id": "retro-grid",
+  "name": "Retro grid",
+  "kind": "background",
+  "description": "A perspective grid floor scrolling steadily toward the viewer and fading into a hazy horizon. Synthwave-adjacent depth kept restrained in the look's line color; a backdrop for launches, titles and tech intros. Converted from Magic UI's Retro Grid.",
+  "tags": ["grid", "perspective", "floor", "retro", "synthwave", "horizon", "scrolling", "depth", "tech", "magic-ui"],
+  "fonts": [],
+  "duration": 6,
+  "previewAt": 3,
+  "license": "MIT",
+  "source": {
+    "url": "https://github.com/magicuidesign/magicui/blob/main/apps/www/registry/magicui/retro-grid.tsx",
+    "author": "Magic UI"
+  },
+  "previewLook": "duotone-broadcast"
+}

@@ -1,0 +1,12 @@
+{
+  "id": "broadcast-frame",
+  "name": "Broadcast frame",
+  "kind": "frame",
+  "description": "Transparent overlay: four uppercase mono corner labels, edge crop marks, a drawn underline and a running timecode. Stays on for the whole video; relabel it per scene.",
+  "tags": ["overlay", "labels", "timecode", "hud", "editorial", "broadcast", "mono"],
+  "fonts": [],
+  "duration": 4,
+  "previewAt": 2,
+  "license": "original",
+  "previewLook": "duotone-broadcast"
+}

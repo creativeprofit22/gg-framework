@@ -1,0 +1,11 @@
+{
+  "id": "editorial-ink",
+  "name": "Editorial Ink",
+  "description": "A documentary title sequence printed in ink: deep bottle-green (or oxblood) field with film grain and a vignette, bone-colored type, soft and slightly wonky Fraunces for titles and Newsreader italic for the human voice. One lamplight ochre accent. Slow, patient, respectful motion.",
+  "tags": ["editorial", "documentary", "serif", "dark", "warm", "grain", "storytelling", "quiet"],
+  "fonts": ["Fraunces", "Newsreader", "Martian Mono"],
+  "bestFor": ["documentaries", "human stories", "brand films", "founder stories", "nonprofits", "long-form journalism"],
+  "pieces": [],
+  "samplePieces": [],
+  "previewAt": 3.2
+}

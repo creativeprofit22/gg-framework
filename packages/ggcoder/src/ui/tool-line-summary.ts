@@ -1,5 +1,6 @@
-import { basename, plural, shortenValue } from "./tool-group-summary.js";
+import { basename, plural, shortenValue, steroidsQuery } from "./tool-group-summary.js";
 import { getToolTone, type ToolTone } from "./transcript/tool-presentation.js";
+import { editTargetLabel } from "../tools/edit-targets.js";
 
 const MAX_DETAIL = 44;
 
@@ -35,15 +36,11 @@ const VERBS: Record<string, VerbPair> = {
   skill: { running: "Loading skill", done: "Loaded skill" },
   source_path: { running: "Resolving", done: "Resolved" },
   tasks: { running: "Updating tasks", done: "Updated tasks" },
+  checklist: { running: "Checking checklist", done: "Checked checklist" },
   screenshot: { running: "Capturing", done: "Captured" },
   enter_plan: { running: "Entering plan", done: "Entered plan" },
   exit_plan: { running: "Submitting plan", done: "Submitted plan" },
-  "mcp__kencode-search__searchCode": { running: "Searching code", done: "Searched code" },
-  "mcp__kencode-search__referenceSources": {
-    running: "Finding references",
-    done: "Found references",
-  },
-  "mcp__kencode-search__discoverRepos": { running: "Discovering repos", done: "Discovered repos" },
+  steroids: { running: "Reading real code", done: "Read real code" },
 };
 
 function humanizeName(name: string): VerbPair {
@@ -70,9 +67,10 @@ function firstLine(text: string): string {
 /** The detail fragment (file, pattern, command, …). `quote` wraps it in quotes. */
 function toolDetail(name: string, args: Record<string, unknown>): { text: string; quote: boolean } {
   switch (name) {
+    case "edit":
+      return { text: editTargetLabel(args, basename), quote: false };
     case "read":
     case "write":
-    case "edit":
       return { text: basename(String(args.file_path ?? "")), quote: false };
     case "ls":
       return { text: shortenValue(String(args.path ?? "."), MAX_DETAIL), quote: false };
@@ -84,17 +82,33 @@ function toolDetail(name: string, args: Record<string, unknown>): { text: string
     case "web_fetch":
       return { text: hostOf(String(args.url ?? "")), quote: false };
     case "web_search":
-    case "mcp__kencode-search__searchCode":
       return { text: shortenValue(String(args.query ?? ""), MAX_DETAIL), quote: true };
+    case "steroids":
+      return { text: shortenValue(steroidsQuery(args), MAX_DETAIL), quote: true };
     case "subagent":
       return { text: shortenValue(String(args.agent ?? ""), MAX_DETAIL), quote: false };
     case "skill":
       return { text: shortenValue(String(args.skill ?? ""), MAX_DETAIL), quote: false };
     case "source_path":
       return { text: shortenValue(String(args.package ?? ""), MAX_DETAIL), quote: false };
+    case "checklist":
+      return { text: shortenValue(String(args.id ?? ""), MAX_DETAIL), quote: false };
     default:
       return { text: "", quote: false };
   }
+}
+
+const CHECKLIST_RECORD_VERBS: VerbPair = {
+  running: "Recording checklist",
+  done: "Recorded checklist",
+};
+
+/** Indexing can take minutes; "Reading real code" would look hung. */
+function steroidsVerbs(args: Record<string, unknown>): { running: string; done: string } | null {
+  if (args.action === "add" || (args.action === "discover" && args.add === true)) {
+    return { running: "Indexing repos", done: "Indexed repos" };
+  }
+  return null;
 }
 
 function countNonEmptyLines(result: string): number {
@@ -164,7 +178,11 @@ export function buildToolLineParts(
   args: Record<string, unknown>,
   input: ToolLineInput,
 ): ToolLinePart[] {
-  const verbs = VERBS[name] ?? humanizeName(name);
+  const verbs =
+    (name === "checklist" && args.action === "record" ? CHECKLIST_RECORD_VERBS : null) ??
+    steroidsVerbs(args) ??
+    VERBS[name] ??
+    humanizeName(name);
   const tone: ToolTone = getToolTone(name);
   const verb = input.done ? verbs.done : verbs.running;
   const { text: detail, quote } = toolDetail(name, args);

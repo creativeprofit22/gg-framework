@@ -1,0 +1,16 @@
+{
+  "id": "orbiting-circles",
+  "name": "Orbiting circles",
+  "kind": "diagram",
+  "description": "Icon chips orbit a central accent badge on two rings, the outer ring counter-rotating. Rings draw on, chips pop in with a stagger, then everything keeps turning at a calm, seek-safe pace. Use for ecosystems, integrations, 'everything around one core'. Edit ORBITS (radius, period, direction, icons) and CENTER.",
+  "tags": ["orbit", "ecosystem", "integrations", "icons", "rings", "hub", "loop", "launch", "magic-ui"],
+  "fonts": [],
+  "duration": 6,
+  "previewAt": 3,
+  "license": "MIT",
+  "source": {
+    "url": "https://github.com/magicuidesign/magicui/blob/main/apps/www/registry/magicui/orbiting-circles.tsx",
+    "author": "Magic UI"
+  },
+  "previewLook": "soft-light-ad"
+}

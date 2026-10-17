@@ -9,8 +9,23 @@ coverage/
 # Auth & secrets
 .env
 .env.*
-~/.gg/
+.npmrc
+
+# Local agent config and maintainer-only notes
 .gg/
+!/.gg/
+/.gg/*
+!/.gg/commands/
+/.gg/commands/*
+!/.gg/commands/release.md
+!/.gg/commands/cleanup.md
+/.claude/
+.claude/*.lock
+CLAUDE.md
+
+# After Effects source projects never belong in the repo.
+*.[aA][eE][pP]
+*.[aA][eE][pP][xX]
 
 # Scratch / ad-hoc test files
 test_*.mjs
@@ -24,8 +39,6 @@ Thumbs.db
 .vscode/
 .idea/
 
-# Local tool locks
-.claude/*.lock
 
 # Python
 __pycache__/
@@ -37,24 +50,56 @@ __pycache__/
 target/
 .build/
 
-# npm
-.npmrc
-
-# gg-editor: generated from src/skills/*.md by scripts/build-skills.mjs (runs in build/check/test)
-packages/gg-editor/src/skills.ts
-
 # Goal audit generated evidence
 .goal-artifacts/
 .goal-evidence/
 artifacts/
 packages/ggcoder/.goal-evidence/
-scripts/goal-deep-audit/*.json
-scripts/goal-deep-audit/*.log
-.gg/ideal-sim/
 packages/ggcoder/ideal-sim/
 
-# prompt-bench scratch sandboxes
+# Local benchmarks, experiments and one-off tooling. Only the pieces CI or
+# contributors rely on are un-ignored below; everything else stays local.
+/bench/*
+!/bench/baseline/
+/bench/baseline/*
+!/bench/baseline/sizes.json
+!/bench/baseline/search.json
+!/bench/size-gate.mjs
+!/bench/search-bench.mjs
+!/bench/search/
+# Raw per-call search benchmark results stay local (zipped evidence goes to .gg/verification/).
+/bench/search-results/
+!/bench/startup-gate.mjs
+!/bench/ui-library-real-flow/
+/bench/ui-library-real-flow/runs/
+/bench/ui-library-real-flow/live-approval.json
+/benchmarks/
+/experiments/*
+!/experiments/prompt-bench/
 experiments/prompt-bench/.bench-sandbox-*
+/scripts/
+packages/*/.bench-*.mjs
 
-# scratch — top coding agents scan
-top-coding-agents.md
+# Temporary A/B sidecar builder; private harness and outputs live under /bench/.
+/gg-app/scripts/.review-control-bundle.mjs
+
+# Local research/strategy notes
+# Dated agent audit / study reports are maintainer notes, not public docs.
+/docs/*-audit-*.md
+/bench/ui-library-real-flow/REPORT.md
+/experiments/prompt-bench/review-bench.md
+/*-vs-*.md
+/*-report.md
+/fixes.md
+/*coding-agent*.md
+
+# Challenge feature: design sandbox and dev-only preview harness.
+#
+# Neither ships. `mockups/` is the standalone HTML/CSS/JS sandbox the fight's
+# visual language was designed in; `dev/` is a browser harness that mounts the
+# real ActivityBar so the offer can be eyeballed without the Tauri runtime.
+# Vite builds a single entry (index.html), so a production build never sees
+# them — a clean build emits dist/index.html and nothing else. Ignored so
+# `git add -A` cannot sweep 216KB of scratch into a release.
+/gg-app/mockups/
+/gg-app/dev/

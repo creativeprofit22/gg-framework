@@ -1,0 +1,265 @@
+[
+  {
+    "family": "Mona Sans",
+    "dir": "mona-sans",
+    "license": "OFL-1.1",
+    "files": [
+      {
+        "file": "mona-sans-normal.woff2",
+        "style": "normal",
+        "weight": "200 900",
+        "stretch": "75% 125%"
+      }
+    ]
+  },
+  {
+    "family": "Hubot Sans",
+    "dir": "hubot-sans",
+    "license": "OFL-1.1",
+    "files": [
+      {
+        "file": "hubot-sans-normal.woff2",
+        "style": "normal",
+        "weight": "200 900",
+        "stretch": "75% 125%"
+      }
+    ]
+  },
+  {
+    "family": "Bricolage Grotesque",
+    "dir": "bricolage-grotesque",
+    "license": "OFL-1.1",
+    "files": [
+      {
+        "file": "bricolage-grotesque-normal.woff2",
+        "style": "normal",
+        "weight": "200 800",
+        "stretch": "75% 100%"
+      }
+    ]
+  },
+  {
+    "family": "Schibsted Grotesk",
+    "dir": "schibsted-grotesk",
+    "license": "OFL-1.1",
+    "files": [
+      {
+        "file": "schibsted-grotesk-normal.woff2",
+        "style": "normal",
+        "weight": "400 900",
+        "stretch": null
+      }
+    ]
+  },
+  {
+    "family": "Host Grotesk",
+    "dir": "host-grotesk",
+    "license": "OFL-1.1",
+    "files": [
+      {
+        "file": "host-grotesk-normal.woff2",
+        "style": "normal",
+        "weight": "300 800",
+        "stretch": null
+      }
+    ]
+  },
+  {
+    "family": "Funnel Display",
+    "dir": "funnel-display",
+    "license": "OFL-1.1",
+    "files": [
+      {
+        "file": "funnel-display-normal.woff2",
+        "style": "normal",
+        "weight": "300 800",
+        "stretch": null
+      }
+    ]
+  },
+  {
+    "family": "Anybody",
+    "dir": "anybody",
+    "license": "OFL-1.1",
+    "files": [
+      {
+        "file": "anybody-normal.woff2",
+        "style": "normal",
+        "weight": "100 900",
+        "stretch": "50% 150%"
+      }
+    ]
+  },
+  {
+    "family": "Archivo",
+    "dir": "archivo",
+    "license": "OFL-1.1",
+    "files": [
+      {
+        "file": "archivo-normal.woff2",
+        "style": "normal",
+        "weight": "100 900",
+        "stretch": "62% 125%"
+      }
+    ]
+  },
+  {
+    "family": "Big Shoulders",
+    "dir": "big-shoulders",
+    "license": "OFL-1.1",
+    "files": [
+      {
+        "file": "big-shoulders-normal.woff2",
+        "style": "normal",
+        "weight": "100 900",
+        "stretch": null
+      }
+    ]
+  },
+  {
+    "family": "Fraunces",
+    "dir": "fraunces",
+    "license": "OFL-1.1",
+    "files": [
+      {
+        "file": "fraunces-italic.woff2",
+        "style": "italic",
+        "weight": "100 900",
+        "stretch": null
+      },
+      {
+        "file": "fraunces-normal.woff2",
+        "style": "normal",
+        "weight": "100 900",
+        "stretch": null
+      }
+    ]
+  },
+  {
+    "family": "Newsreader",
+    "dir": "newsreader",
+    "license": "OFL-1.1",
+    "files": [
+      {
+        "file": "newsreader-italic.woff2",
+        "style": "italic",
+        "weight": "200 800",
+        "stretch": null
+      },
+      {
+        "file": "newsreader-normal.woff2",
+        "style": "normal",
+        "weight": "200 800",
+        "stretch": null
+      }
+    ]
+  },
+  {
+    "family": "Doto",
+    "dir": "doto",
+    "license": "OFL-1.1",
+    "files": [
+      {
+        "file": "doto-normal.woff2",
+        "style": "normal",
+        "weight": "100 900",
+        "stretch": null
+      }
+    ]
+  },
+  {
+    "family": "Gloock",
+    "dir": "gloock",
+    "license": "OFL-1.1",
+    "files": [
+      {
+        "file": "gloock-normal.woff2",
+        "style": "normal",
+        "weight": "400",
+        "stretch": null
+      }
+    ]
+  },
+  {
+    "family": "Young Serif",
+    "dir": "young-serif",
+    "license": "OFL-1.1",
+    "files": [
+      {
+        "file": "young-serif-normal.woff2",
+        "style": "normal",
+        "weight": "400",
+        "stretch": null
+      }
+    ]
+  },
+  {
+    "family": "Martian Mono",
+    "dir": "martian-mono",
+    "license": "OFL-1.1",
+    "files": [
+      {
+        "file": "martian-mono-normal.woff2",
+        "style": "normal",
+        "weight": "100 800",
+        "stretch": "75% 112.5%"
+      }
+    ]
+  },
+  {
+    "family": "Unbounded",
+    "dir": "unbounded",
+    "license": "OFL-1.1",
+    "use": "Wide, rounded display face for big titles.",
+    "files": [
+      {
+        "file": "unbounded-normal.woff2",
+        "style": "normal",
+        "weight": "200 900",
+        "stretch": null
+      }
+    ]
+  },
+  {
+    "family": "Sora",
+    "dir": "sora",
+    "license": "OFL-1.1",
+    "use": "Clean geometric sans for body text and captions.",
+    "files": [
+      {
+        "file": "sora-normal.woff2",
+        "style": "normal",
+        "weight": "100 800",
+        "stretch": null
+      }
+    ]
+  },
+  {
+    "family": "Short Stack",
+    "dir": "short-stack",
+    "license": "OFL-1.1",
+    "use": "Casual handwritten feel.",
+    "files": [
+      {
+        "file": "short-stack-normal.woff2",
+        "style": "normal",
+        "weight": "400",
+        "stretch": null
+      }
+    ]
+  },
+  {
+    "family": "Finger Paint",
+    "dir": "finger-paint",
+    "license": "OFL-1.1",
+    "use": "Playful painted, childlike handwritten feel.",
+    "files": [
+      {
+        "file": "finger-paint-normal.woff2",
+        "style": "normal",
+        "weight": "400",
+        "stretch": null
+      }
+    ]
+  }
+]

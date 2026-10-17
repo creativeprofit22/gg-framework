@@ -9,6 +9,7 @@ import {
   createCompactedSessionCheckpoint,
   formatRestoreInfoText,
   getRestoredMessagesForDisplay,
+  sourceFingerprint,
 } from "./session-compaction.js";
 
 const tempDirs: string[] = [];
@@ -43,6 +44,13 @@ describe("session compaction persistence", () => {
       provider: "openai",
       model: "gpt-5",
       messages,
+      conversationId: "original-conversation",
+      generation: 3,
+      parentSessionId: "parent-checkpoint",
+      sourceFingerprint: "f".repeat(64),
+      retainedMessageCount: 1,
+      openAICodexContextProfile: "experimental",
+      title: "Stable project title",
     });
 
     const loaded = await manager.load(checkpoint.path);
@@ -51,11 +59,51 @@ describe("session compaction persistence", () => {
     expect(loaded.header.cwd).toBe("/repo");
     expect(loaded.header.provider).toBe("openai");
     expect(loaded.header.model).toBe("gpt-5");
+    expect(loaded.header.conversationId).toBe("original-conversation");
+    expect(loaded.header.generation).toBe(3);
+    expect(loaded.header.parentSessionId).toBe("parent-checkpoint");
+    expect(loaded.header.sourceFingerprint).toBe("f".repeat(64));
+    expect(loaded.header.retainedMessageCount).toBe(1);
+    expect(loaded.header.openAICodexContextProfile).toBe("experimental");
+    expect(loaded.header.preview).toBe("Stable project title");
+    expect(loaded.entries.find((entry) => entry.type === "label")?.label).toBe(
+      "Stable project title",
+    );
     expect(loadedMessages).toEqual(messages.slice(1));
 
     const file = await readFile(checkpoint.path, "utf-8");
     expect(file).not.toContain("system prompt");
     expect(file).toContain("[Previous conversation summary]");
+  });
+
+  it("never carries the retired Fast flag into a compacted checkpoint", async () => {
+    const sessionsDir = await makeTempDir();
+    const manager = new SessionManager(sessionsDir);
+    const source = await manager.create("/repo", "openai", "gpt-6-astra-fast");
+
+    const checkpoint = await createCompactedSessionCheckpoint(manager, {
+      cwd: "/repo",
+      provider: "openai",
+      model: "gpt-6-astra-fast",
+      messages: [message("system", "system prompt"), message("user", "summary")],
+      parentSessionId: source.id,
+    });
+
+    const loaded = await manager.load(checkpoint.path);
+    expect(loaded.header.model).toBe("gpt-6-astra-fast");
+    expect(loaded.header).not.toHaveProperty("openAICodexFast");
+  });
+
+  it("fingerprints provenance as part of the non-system compaction source", () => {
+    const base: Message = { role: "user", content: "same text" };
+    const tagged: Message = {
+      ...base,
+      provenance: { source: "runtime", kind: "automation", visibility: "hidden" },
+    };
+    expect(sourceFingerprint([message("system", "one"), base])).toBe(
+      sourceFingerprint([message("system", "different"), base]),
+    );
+    expect(sourceFingerprint([base])).not.toBe(sourceFingerprint([tagged]));
   });
 
   it("appends only messages at and after the requested start index", async () => {

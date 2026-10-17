@@ -1,0 +1,12 @@
+{
+  "id": "toast-stack",
+  "name": "Toast stack",
+  "kind": "ui",
+  "description": "Three iOS-style notifications drop in from the top one after another; each lands in front with a soft spring while the earlier ones slide back into a stack (smaller, dimmer, peeking out below). Frosted white cards with app icon, title and body line.",
+  "tags": ["notification", "toast", "ios", "alerts", "stack", "depth", "saas", "app"],
+  "fonts": [],
+  "duration": 5,
+  "previewAt": 3.9,
+  "license": "original",
+  "previewLook": "soft-light-ad"
+}

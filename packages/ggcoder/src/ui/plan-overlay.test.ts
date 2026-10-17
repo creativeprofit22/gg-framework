@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import fs from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
+import { createTestSymlink } from "../test-utils/symlink.js";
 
 // ── Plan loading logic (extracted from PlanOverlay.tsx) ──────
 // We re-implement the pure loading function here for testability,
@@ -175,7 +176,7 @@ describe("loadPlanEntries", () => {
     await fs.mkdir(plansDir, { recursive: true });
 
     const brokenLink = path.join(plansDir, "broken.md");
-    await fs.symlink("/nonexistent/path/file.md", brokenLink);
+    await createTestSymlink("/nonexistent/path/file.md", brokenLink, "file");
 
     const entries = await loadPlanEntries(tmpDir);
     expect(entries).toHaveLength(1);

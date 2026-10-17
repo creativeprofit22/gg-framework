@@ -2,13 +2,25 @@
  * AST-aware code retrieval — the pure, UI-free core shared by the semantic-search
  * benchmark and the `code_search` tool.
  *
- * `chunkFile` parses a TS/JS source into top-level declaration chunks (functions,
+ * `chunkFile` splits a source file into top-level declaration chunks (functions,
  * classes, interfaces, types, enums, consts) with their full bodies; `bm25Rank`
  * ranks chunks against a natural-language query with a real BM25 retriever (no
  * embedding dependency). Delivering only the top-ranked symbol chunks is what
  * cuts the input tokens an agent spends locating code versus reading whole files.
+ *
+ * TS/JS is chunked from a real AST. Every other supported language is chunked by
+ * a line scanner: declaration patterns plus brace or indentation tracking. That
+ * is deliberately dependency-free — a parser per language would cost five more
+ * dependencies and a startup penalty on every search, to sharpen boundaries that
+ * BM25 ranking is already tolerant of.
  */
+import path from "node:path";
 import ts from "typescript";
+import {
+  chunkByBraces,
+  chunkByIndentation,
+  type BraceLanguage,
+} from "./code-retrieval-chunkers.js";
 
 export interface Chunk {
   file: string;
@@ -18,7 +30,41 @@ export interface Chunk {
   startLine: number;
 }
 
+/** Languages with a symbol chunker. Everything else is skipped by the caller. */
+export type ChunkLanguage = "tsjs" | "python" | "go" | "rust" | "java" | "csharp";
+
+const EXTENSION_LANGUAGES: Record<string, ChunkLanguage> = {
+  ".ts": "tsjs",
+  ".tsx": "tsjs",
+  ".mts": "tsjs",
+  ".cts": "tsjs",
+  ".js": "tsjs",
+  ".jsx": "tsjs",
+  ".mjs": "tsjs",
+  ".cjs": "tsjs",
+  ".py": "python",
+  ".pyi": "python",
+  ".go": "go",
+  ".rs": "rust",
+  ".java": "java",
+  ".cs": "csharp",
+};
+
+/** Which chunker handles a path, or undefined when none does. */
+export function languageForFile(rel: string): ChunkLanguage | undefined {
+  return EXTENSION_LANGUAGES[path.extname(rel).toLowerCase()];
+}
+
+/** Every extension `code_search` can index, without leading dots. */
+export const CHUNKABLE_EXTENSIONS: readonly string[] = Object.keys(EXTENSION_LANGUAGES).map((e) =>
+  e.slice(1),
+);
+
 export function chunkFile(rel: string, source: string): Chunk[] {
+  const language = languageForFile(rel);
+  if (language === undefined) return [];
+  if (language === "python") return chunkByIndentation(rel, source);
+  if (language !== "tsjs") return chunkByBraces(rel, source, language as BraceLanguage);
   const sf = ts.createSourceFile(rel, source, ts.ScriptTarget.Latest, true);
   const chunks: Chunk[] = [];
   sf.forEachChild((node) => {

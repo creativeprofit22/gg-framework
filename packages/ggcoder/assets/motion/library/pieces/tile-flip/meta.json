@@ -1,0 +1,6 @@
+{
+  "id": "tile-flip", "name": "Tile flip", "kind": "transition",
+  "description": "A diagonal wave of perspective tiles closes over a cut and folds away in the same order.",
+  "tags": ["tiles", "perspective", "cascade"], "fonts": [], "duration": 3,
+  "previewAt": 0.4, "license": "original", "previewLook": "duotone-broadcast"
+}

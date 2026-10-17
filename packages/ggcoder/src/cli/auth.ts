@@ -9,7 +9,9 @@ import { loginAnthropic } from "../core/oauth/anthropic.js";
 import { loginOpenAI } from "../core/oauth/openai.js";
 import { loginGemini } from "../core/oauth/gemini.js";
 import { loginKimi } from "../core/oauth/kimi.js";
-import { MOONSHOT_OAUTH_KEY, XIAOMI_CREDITS_KEY } from "@kenkaiiii/gg-core";
+import { loginXai } from "../core/oauth/xai.js";
+import { XIAOMI_CREDITS_KEY, dualAuthProvider } from "@kenkaiiii/gg-core";
+import { getAuthProvider, describeAuthMethods } from "../core/auth-providers.js";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "../core/oauth/types.js";
 import {
   CLI_VERSION,
@@ -37,6 +39,27 @@ export async function runLogin(): Promise<void> {
     return;
   }
 
+  const meta = getAuthProvider(provider);
+  // Native-only providers must never reach generic prompts or OAuth dispatch.
+  if (!meta || meta.methods.length === 0) {
+    console.log(
+      chalk.hex("#fbbf24")(
+        meta
+          ? `${meta.label} setup is not supported by ggcoder login. Use the desktop app's native connection service.`
+          : `Terminal login is not supported for ${provider}.`,
+      ),
+    );
+    if (provider === "qwen-cloud") {
+      console.log(
+        chalk.hex("#6b7280")(
+          "The standalone CLI does not read the desktop vault. Its separate runtime environment path uses QWEN_CLOUD_TOKEN_PLAN_KEY; this login command does not store that key.",
+        ),
+      );
+    }
+    closeLogger();
+    return;
+  }
+
   console.log(
     chalk.hex("#60a5fa").bold("\nLogging in to ") +
       chalk.hex("#a78bfa")(displayName(provider)) +
@@ -57,30 +80,49 @@ export async function runLogin(): Promise<void> {
             "\n",
         );
       },
-      onPromptCode: async (message) => {
-        return rl.question(message + " ");
+      onPromptCode: async (message, signal) => {
+        // `signal` fires when the code already arrived over the loopback
+        // callback, so the competing paste prompt is torn down rather than
+        // holding the terminal open after login has already succeeded.
+        return signal ? rl.question(message + " ", { signal }) : rl.question(message + " ");
       },
       onStatus: (message) => {
         console.log(chalk.hex("#6b7280")(message));
       },
     };
 
-    // Moonshot supports two auth methods: Kimi Code OAuth (preferred) and a
-    // Moonshot Open Platform API key. Let the user pick; OAuth credentials are
-    // stored under a distinct key so both can coexist (OAuth wins at runtime).
-    let kimiViaOAuth = false;
-    if (provider === "moonshot") {
+    // Dual-auth providers (Moonshot/Kimi, xAI/Grok) accept subscription OAuth
+    // *and* a metered API key. Let the user pick; OAuth credentials are stored
+    // under a distinct key so both can coexist (OAuth wins at runtime, the key
+    // covers OAuth being out — see gg-core's DUAL_AUTH_PROVIDERS).
+    const dual = dualAuthProvider(provider);
+    let useOAuth = false;
+    if (dual) {
+      for (const detail of describeAuthMethods(provider)) {
+        const n = detail.method === "oauth" ? "1" : "2";
+        console.log(chalk.hex("#a78bfa")(`  (${n}) ${detail.label}`));
+        console.log(chalk.hex("#6b7280")(`      ${detail.billing}`));
+        if (detail.requires) console.log(chalk.hex("#6b7280")(`      Needs: ${detail.requires}`));
+      }
+      console.log(
+        chalk.hex("#6b7280")(
+          `\n  Connecting both is fine — ${dual.oauthLabel} is used first and the ` +
+            `${dual.apiKeyLabel} covers it while subscription usage is out.\n`,
+        ),
+      );
       const choice = (
         await rl.question(
-          chalk.hex("#60a5fa")("Sign in with (1) Kimi OAuth [default] or (2) API key? "),
+          chalk.hex("#60a5fa")(
+            `Sign in with (1) ${dual.oauthLabel} [default] or (2) ${dual.apiKeyLabel}? `,
+          ),
         )
       ).trim();
-      kimiViaOAuth = choice === "" || choice === "1";
+      useOAuth = choice === "" || choice === "1";
     }
 
     // Xiaomi splits API-key auth across two distinct endpoints: the Token Plan
     // (default, current behavior) and API Credits (required for models like
-    // mimo-v2.5-pro-ultraspeed that aren't served over the Token Plan).
+    // mimo-v2.6-pro-ultraspeed that aren't served over the Token Plan).
     let xiaomiCredits = false;
     if (provider === "xiaomi") {
       const choice = (
@@ -95,32 +137,13 @@ export async function runLogin(): Promise<void> {
 
     let creds;
     let storageKey: string = provider;
-    if (provider === "moonshot" && kimiViaOAuth) {
-      creds = await loginKimi(callbacks);
-      storageKey = MOONSHOT_OAUTH_KEY;
-    } else if (
-      provider === "glm" ||
-      provider === "moonshot" ||
-      provider === "xiaomi" ||
-      provider === "minimax" ||
-      provider === "deepseek" ||
-      provider === "openrouter" ||
-      provider === "sakana"
-    ) {
-      const keyLabel =
-        provider === "glm"
-          ? "Z.AI"
-          : provider === "xiaomi"
-            ? "Xiaomi MiMo"
-            : provider === "minimax"
-              ? "MiniMax"
-              : provider === "deepseek"
-                ? "DeepSeek"
-                : provider === "openrouter"
-                  ? "OpenRouter"
-                  : provider === "sakana"
-                    ? "Sakana"
-                    : "Moonshot";
+    if (dual && useOAuth && meta.methods.includes("oauth")) {
+      creds = provider === "moonshot" ? await loginKimi(callbacks) : await loginXai(callbacks);
+      storageKey = dual.oauthKey;
+    } else if (getAuthProvider(provider)?.methods.includes("apikey")) {
+      // Key label comes from AUTH_PROVIDERS so the CLI and the desktop app can
+      // never drift on what a provider's key is called.
+      const keyLabel = getAuthProvider(provider)?.apiKeyLabel ?? displayName(provider);
       const apiKey = await rl.question(chalk.hex("#60a5fa")(`Paste your ${keyLabel} API key: `));
       if (!apiKey.trim()) {
         console.log(chalk.hex("#ef4444")("No API key provided. Login cancelled."));
@@ -141,13 +164,14 @@ export async function runLogin(): Promise<void> {
       if (provider === "xiaomi" && xiaomiCredits) {
         storageKey = XIAOMI_CREDITS_KEY;
       }
+    } else if (meta.methods.includes("oauth") && provider === "anthropic") {
+      creds = await loginAnthropic(callbacks);
+    } else if (meta.methods.includes("oauth") && provider === "gemini") {
+      creds = await loginGemini(callbacks);
+    } else if (meta.methods.includes("oauth") && provider === "openai") {
+      creds = await loginOpenAI(callbacks);
     } else {
-      creds =
-        provider === "anthropic"
-          ? await loginAnthropic(callbacks)
-          : provider === "gemini"
-            ? await loginGemini(callbacks)
-            : await loginOpenAI(callbacks);
+      throw new Error(`No supported terminal login method for ${meta.label}.`);
     }
 
     await authStorage.setCredentials(storageKey, creds);
@@ -190,7 +214,11 @@ export async function runDoctor(): Promise<void> {
   const ggDir = path.join(home, ".gg");
   const authFile = path.join(ggDir, "auth.json");
   const lockFile = authFile + ".lock";
-  const myUid = process.getuid!();
+  // uid/gid exist only on POSIX; Windows has no file ownership to check or fix.
+  const ids =
+    process.getuid && process.geteuid && process.getgid
+      ? { uid: process.getuid(), euid: process.geteuid(), gid: process.getgid() }
+      : null;
   let fixed = 0;
 
   // ── Environment ─────────────────────────────────────────────
@@ -199,12 +227,12 @@ export async function runDoctor(): Promise<void> {
   console.log(dim(`    $HOME:     ${process.env.HOME ?? "(not set)"}`));
   console.log(dim(`    Node.js:   ${process.version}`));
   console.log(dim(`    Platform:  ${process.platform} ${process.arch}`));
-  console.log(dim(`    UID:       ${myUid}  EUID: ${process.geteuid!()}`));
+  if (ids) console.log(dim(`    UID:       ${ids.uid}  EUID: ${ids.euid}`));
 
   if (process.env.HOME && process.env.HOME !== home) {
     console.log(warn("\n    ⚠ $HOME differs from os.homedir() — this can cause auth mismatches"));
   }
-  if (myUid !== process.geteuid!()) {
+  if (ids && ids.uid !== ids.euid) {
     console.log(warn("    ⚠ uid ≠ euid — running with elevated privileges (sudo?)"));
     console.log(dim("      Running ggcoder with sudo can cause ownership issues."));
     console.log(dim("      Use without sudo, or fix after: sudo chown -R $(whoami) ~/.gg"));
@@ -221,10 +249,10 @@ export async function runDoctor(): Promise<void> {
     console.log(dim(`    Mode:  0o${mode.toString(8)}  UID: ${stat.uid}`));
 
     // Fix ownership
-    if (stat.uid !== myUid) {
-      console.log(warn(`    ⚠ Owned by uid ${stat.uid}, expected ${myUid}`));
+    if (ids && stat.uid !== ids.uid) {
+      console.log(warn(`    ⚠ Owned by uid ${stat.uid}, expected ${ids.uid}`));
       try {
-        await fsP.chown(ggDir, myUid, process.getgid!());
+        await fsP.chown(ggDir, ids.uid, ids.gid);
         console.log(good("    ✓ Fixed directory ownership"));
         fixed++;
       } catch {
@@ -287,10 +315,10 @@ export async function runDoctor(): Promise<void> {
     );
 
     // Fix ownership
-    if (stat.uid !== myUid) {
-      console.log(warn(`    ⚠ Owned by uid ${stat.uid}, expected ${myUid}`));
+    if (ids && stat.uid !== ids.uid) {
+      console.log(warn(`    ⚠ Owned by uid ${stat.uid}, expected ${ids.uid}`));
       try {
-        await fsP.chown(authFile, myUid, process.getgid!());
+        await fsP.chown(authFile, ids.uid, ids.gid);
         console.log(good("    ✓ Fixed file ownership"));
         fixed++;
       } catch {

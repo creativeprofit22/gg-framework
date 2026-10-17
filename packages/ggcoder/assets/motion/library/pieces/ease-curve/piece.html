@@ -1,0 +1,103 @@
+<!doctype html>
+<!--
+  ease-curve: an easing graph that draws itself, a dot riding the curve and
+  a live "T / VALUE" readout. Swap EASE for any curve (a growth chart, a
+  latency drop) — the pattern is "a diagram that demonstrates the word".
+  Params: EASE (function t -> value), LABEL, --ec-x / --ec-y (position).
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+  </head>
+  <body>
+    <div
+      id="ease-curve-root"
+      data-composition-id="ease-curve"
+      data-start="0"
+      data-duration="4"
+      data-width="1920"
+      data-height="1080"
+    >
+      <style>
+        [data-composition-id="ease-curve"] {
+          --ec-x: 1180px;
+          --ec-y: 330px;
+          position: absolute;
+          inset: 0;
+          color: var(--ink, #111);
+          font-family: var(--mono, monospace);
+        }
+        [data-composition-id="ease-curve"] svg {
+          position: absolute;
+          left: var(--ec-x);
+          top: var(--ec-y);
+          overflow: visible;
+        }
+        [data-composition-id="ease-curve"] text {
+          font-family: var(--mono, monospace);
+          font-size: 22px;
+          letter-spacing: 1.3px;
+          fill: currentColor;
+        }
+        [data-composition-id="ease-curve"] .ec-grid line {
+          stroke: var(--line, rgba(0, 0, 0, 0.2));
+          stroke-width: 1.5;
+        }
+      </style>
+      <svg width="620" height="560" viewBox="0 0 620 560">
+        <!-- edit: label -->
+        <text x="0" y="-26" id="ec-label">EASE: EXPO.OUT</text>
+        <g class="ec-grid">
+          <line x1="155" y1="0" x2="155" y2="500" />
+          <line x1="310" y1="0" x2="310" y2="500" />
+          <line x1="465" y1="0" x2="465" y2="500" />
+          <line x1="0" y1="125" x2="620" y2="125" />
+          <line x1="0" y1="250" x2="620" y2="250" />
+          <line x1="0" y1="375" x2="620" y2="375" />
+        </g>
+        <line x1="0" y1="500" x2="620" y2="0" stroke="currentColor" stroke-opacity="0.35" stroke-width="2" stroke-dasharray="6 8" />
+        <line x1="0" y1="0" x2="0" y2="500" stroke="currentColor" stroke-width="3" />
+        <line x1="0" y1="500" x2="620" y2="500" stroke="currentColor" stroke-width="3" />
+        <path id="ec-curve" fill="none" stroke="currentColor" stroke-width="5" stroke-linecap="round" />
+        <circle id="ec-dot" r="10" cx="0" cy="500" fill="currentColor" />
+        <text x="0" y="548" id="ec-readout">T 0.00    VALUE 0.00</text>
+      </svg>
+    </div>
+    <script>
+      (function () {
+        const EASE = (t) => (t >= 1 ? 1 : 1 - Math.pow(2, -10 * t));
+        const W = 620;
+        const H = 500;
+        const STEPS = 120;
+        const pts = [];
+        for (let i = 0; i <= STEPS; i++) {
+          const t = i / STEPS;
+          pts.push([t * W, H - EASE(t) * H]);
+        }
+        const curve = document.getElementById("ec-curve");
+        const dot = document.getElementById("ec-dot");
+        const readout = document.getElementById("ec-readout");
+        const state = { p: 0 };
+        function draw() {
+          const n = Math.max(1, Math.round(state.p * STEPS));
+          curve.setAttribute(
+            "d",
+            "M" + pts.slice(0, n + 1).map((p) => `${p[0].toFixed(1)} ${p[1].toFixed(1)}`).join(" L"),
+          );
+          const [x, y] = pts[n];
+          dot.setAttribute("cx", x);
+          dot.setAttribute("cy", y);
+          const t = n / STEPS;
+          readout.textContent = `T ${t.toFixed(2)}    VALUE ${EASE(t).toFixed(2)}`;
+        }
+        const tl = gsap.timeline({ paused: true });
+        tl.fromTo(state, { p: 0 }, { p: 1, duration: 1.8, ease: "none", onUpdate: draw }, 0.4);
+        tl.to({}, { duration: 1.8 });
+        draw();
+        window.__timelines = window.__timelines || {};
+        window.__timelines["ease-curve"] = tl;
+      })();
+    </script>
+  </body>
+</html>

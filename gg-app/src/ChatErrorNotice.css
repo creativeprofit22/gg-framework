@@ -1,0 +1,174 @@
+/* Words only, no lead art: a headline in its colour, the guidance under it,
+   and Details as a key. The status line reports the outcome as it happens;
+   this is the record in the transcript. */
+.chat-error-notice {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: start;
+  /* On the reply column: the same left edge and measure as GG's text. */
+  max-width: 36em;
+  margin: var(--space-3) 0 var(--space-6);
+  font-family: var(--sans);
+  font-size: var(--fs-read);
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+.chat-error-copy {
+  min-width: 0;
+}
+/* Headline and Details on one line, the key centred on the headline. */
+.chat-error-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-5);
+}
+.chat-error-headline {
+  padding-block: var(--space-1);
+  line-height: 1.4;
+  font-size: 1em;
+  font-weight: 600;
+  color: var(--error);
+}
+.chat-error-warning .chat-error-headline {
+  color: var(--warning);
+}
+.chat-error-history .chat-error-headline {
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+.chat-error-recovery {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  column-gap: var(--space-6);
+  margin-top: var(--space-1);
+  font-size: 0.9em;
+  line-height: 1.55;
+  color: var(--text-muted);
+}
+.chat-error-recovery > span {
+  padding-block: var(--space-1);
+}
+.chat-error-recovery .model-picker {
+  padding-block: 0;
+  min-height: 28px;
+  max-width: 100%;
+}
+.chat-error-recovery .model-select-text,
+.chat-error-recovery .model-button {
+  font-size: var(--fs-base);
+  font-weight: 400;
+  line-height: 1.3;
+  padding: calc((28px - 1.3em) / 2) 0;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+/* Details: a key, like every other small action. */
+.chat-error-details-toggle {
+  flex: 0 0 auto;
+  height: 24px;
+  padding: 0 var(--space-4);
+  border: 0;
+  border-radius: var(--radius-button);
+  background: var(--key);
+  color: var(--text-secondary);
+  box-shadow:
+    inset 0 1px 0 var(--key-hi),
+    0 1px 0 var(--key-edge),
+    0 2px 4px -2px var(--key-shadow);
+  font-size: var(--fs-xs);
+  font-weight: 500;
+  line-height: 1.25;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background-color var(--t-fast),
+    color var(--t-fast);
+}
+.chat-error-details-toggle:hover {
+  background: var(--surface-3);
+  color: var(--text);
+}
+.chat-error-details-toggle[aria-expanded="true"] {
+  background: var(--well);
+  box-shadow: inset 0 1px 2px var(--well-shadow);
+}
+.chat-error-details-toggle:active {
+  color: var(--primary);
+}
+.chat-error-notice :is(button, select):focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 3px;
+}
+/* The stable shell owns measured height; all spacing is inside it. */
+.chat-error-details {
+  display: flow-root;
+  overflow: hidden;
+  /* Its own row under the copy (one column since the critter left). */
+  grid-column: 1 / -1;
+  color: var(--text-secondary);
+  font-size: 0.9em;
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+.chat-error-details[hidden] {
+  display: none;
+}
+/* The report itself: a recessed panel under the guidance, on the same left
+   edge, so it reads as this notice's detail rather than loose chat text. The
+   gap above lives inside the measured shell, so it opens and folds with it. */
+.chat-error-details-body {
+  min-height: 0;
+  overflow: hidden;
+  /* The gap above is padding, inside the measured shell (a margin would
+     collapse out of it and the fold would jump by the gap). */
+  padding-top: var(--space-4);
+}
+.chat-error-details-panel {
+  padding: var(--space-5) var(--space-6);
+  border-radius: var(--radius-card);
+  background: var(--well);
+  box-shadow: inset 0 1px 2px var(--well-shadow);
+}
+.chat-error-details:not([hidden]) .chat-error-details-body {
+  animation: fade-in var(--dur-row) var(--ease-out) both;
+}
+.chat-error-details.leaving .chat-error-details-body {
+  animation: details-out var(--dur-row) var(--ease-in) both;
+}
+@keyframes details-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+.chat-error-details p {
+  margin: 0;
+}
+.chat-error-details p + p {
+  margin-top: var(--space-3);
+}
+/* The first line of the report is its title. */
+.chat-error-details p:first-child {
+  color: var(--text);
+  font-weight: 600;
+}
+@media (prefers-reduced-motion: reduce) {
+  .chat-error-details-toggle {
+    transition: none;
+  }
+  .chat-error-details:not([hidden]) .chat-error-details-body {
+    animation: none;
+  }
+}
+@media (forced-colors: active) {
+  .chat-error-notice .chat-error-headline {
+    color: CanvasText;
+  }
+  .chat-error-notice :is(button, select):focus-visible {
+    outline-color: Highlight;
+  }
+}

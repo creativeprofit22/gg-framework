@@ -1,0 +1,83 @@
+<!doctype html>
+<!--
+  studio-backdrop: a seamless photo-studio cyclorama in the look's field
+  color. Back wall, a soft cove where wall curves into floor, a key-light
+  pool on the wall and a darker floor zone where a product would sit. The
+  key light drifts very slowly. Works on light and dark fields (light and
+  shade are neutral white/black overlays on --field).
+  Params (CSS): --sb-horizon (cove height, % from top), --sb-key-x /
+  --sb-key-y (key light center), --sb-light (key strength 0–1),
+  --sb-shade (shadow strength 0–1). DRIFT (px the key moves over the piece).
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+  </head>
+  <body>
+    <div
+      id="studio-backdrop-root"
+      data-composition-id="studio-backdrop"
+      data-start="0"
+      data-duration="6"
+      data-width="1920"
+      data-height="1080"
+    >
+      <style>
+        [data-composition-id="studio-backdrop"] {
+          --sb-horizon: 64%;
+          --sb-key-x: 50%;
+          --sb-key-y: 34%;
+          --sb-light: 0.55;
+          --sb-shade: 0.16;
+          position: absolute;
+          inset: 0;
+          overflow: hidden;
+          background: var(--field, #eef1f7);
+        }
+        [data-composition-id="studio-backdrop"] .sb-l {
+          position: absolute;
+          inset: 0;
+        }
+        /* Wall darkens gently toward the top; the cove catches a band of light;
+           the floor falls off toward the camera. */
+        [data-composition-id="studio-backdrop"] .sb-cyc {
+          background: linear-gradient(
+            180deg,
+            rgba(0, 0, 0, calc(var(--sb-shade) * 0.8)) 0%,
+            rgba(0, 0, 0, calc(var(--sb-shade) * 0.2)) 40%,
+            rgba(255, 255, 255, calc(var(--sb-light) * 0.14)) calc(var(--sb-horizon) - 8%),
+            rgba(255, 255, 255, calc(var(--sb-light) * 0.3)) var(--sb-horizon),
+            rgba(255, 255, 255, calc(var(--sb-light) * 0.12)) calc(var(--sb-horizon) + 12%),
+            rgba(0, 0, 0, calc(var(--sb-shade) * 0.5)) 100%
+          );
+        }
+        [data-composition-id="studio-backdrop"] .sb-key {
+          inset: -10%;
+          background:
+            radial-gradient(34% 40% at var(--sb-key-x) var(--sb-key-y), rgba(255, 255, 255, calc(var(--sb-light) * 0.55)), transparent 70%),
+            radial-gradient(70% 60% at var(--sb-key-x) calc(var(--sb-key-y) + 8%), rgba(255, 255, 255, calc(var(--sb-light) * 0.22)), transparent 72%);
+        }
+        /* Contact shadow zone on the floor, and the room's corners falling off. */
+        [data-composition-id="studio-backdrop"] .sb-floor {
+          background:
+            radial-gradient(26% 7% at 50% 80%, rgba(0, 0, 0, calc(var(--sb-shade) * 0.7)), transparent 100%),
+            radial-gradient(60% 18% at 50% 84%, rgba(0, 0, 0, calc(var(--sb-shade) * 0.35)), transparent 100%),
+            radial-gradient(120% 100% at 50% 45%, transparent 55%, rgba(0, 0, 0, calc(var(--sb-shade) * 1.2)) 100%);
+        }
+      </style>
+      <div class="sb-l sb-cyc"></div>
+      <div class="sb-l sb-key" id="sb-key"></div>
+      <div class="sb-l sb-floor"></div>
+    </div>
+    <script>
+      (function () {
+        const DRIFT = 60;
+        const tl = gsap.timeline({ paused: true });
+        tl.fromTo("#sb-key", { x: -DRIFT / 2, y: 6 }, { x: DRIFT / 2, y: -6, duration: 6, ease: "sine.inOut" }, 0);
+        window.__timelines = window.__timelines || {};
+        window.__timelines["studio-backdrop"] = tl;
+      })();
+    </script>
+  </body>
+</html>

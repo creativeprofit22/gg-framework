@@ -1,5 +1,7 @@
+import type { ReactNode } from "react";
 import { theme } from "./theme";
 import { Modal } from "./Modal";
+import { ModalDismissButton } from "./modal-embed";
 
 interface Props {
   title: string;
@@ -7,6 +9,8 @@ interface Props {
   confirmLabel?: string;
   cancelLabel?: string;
   busy?: boolean;
+  content?: ReactNode;
+  className?: string;
   onConfirm: () => void;
   onClose: () => void;
 }
@@ -22,18 +26,19 @@ export function ConfirmModal({
   confirmLabel = "Confirm",
   cancelLabel = "Cancel",
   busy = false,
+  content,
+  className,
   onConfirm,
   onClose,
 }: Props): React.ReactElement {
   return (
-    <Modal title={title} onClose={onClose}>
+    <Modal title={title} onClose={onClose} className={className}>
       <div className="modal-hint" style={{ color: theme.textSecondary }}>
         {message}
       </div>
+      {content}
       <div className="modal-actions">
-        <button className="modal-btn" onClick={onClose}>
-          {cancelLabel}
-        </button>
+        <ModalDismissButton onClick={onClose}>{cancelLabel}</ModalDismissButton>
         <button className="modal-btn primary" disabled={busy} onClick={onConfirm}>
           {busy ? "\u2026" : confirmLabel}
         </button>

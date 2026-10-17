@@ -1,0 +1,12 @@
+{
+  "id": "blueprint-grid",
+  "name": "Blueprint grid",
+  "kind": "background",
+  "description": "A technical drawing surface: a minor/major grid draws itself outward from the center, then edge rulers with ticks, tiny mono coordinates, a center crosshair and one dimension callout settle in. Engineering, spec and how-it-works backdrops.",
+  "tags": ["grid", "blueprint", "technical", "drawing", "rulers", "coordinates", "crosshair", "engineering", "draw-on", "mono"],
+  "fonts": [],
+  "duration": 5,
+  "previewAt": 3.4,
+  "license": "original",
+  "previewLook": "soft-light-ad"
+}

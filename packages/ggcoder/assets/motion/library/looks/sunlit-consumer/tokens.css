@@ -1,0 +1,15 @@
+.look-sunlit-consumer {
+  --field: #f4ebdc;
+  --field-2: #70442e;
+  --ink: #382b23;
+  --accent: #995133;
+  --muted: #75604e;
+  --line: #d6c2a7;
+  --display: "Fraunces", serif;
+  --display-weight: 500;
+  --display-stretch: 100%;
+  --display-tracking: -0.045em;
+  --text: "Host Grotesk", sans-serif;
+  --mono: "Martian Mono", monospace;
+  --radius: 28px;
+}

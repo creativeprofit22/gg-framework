@@ -1,0 +1,11 @@
+{
+  "id": "terminal-phosphor",
+  "name": "Terminal Phosphor",
+  "description": "A phosphor CRT in a dark room: near-black glass, green phosphor type with a soft bloom, fine scanlines and a curved-glass vignette. Commands type out character by character in Martian Mono; results land as huge Doto dot-matrix readouts. Amber is reserved for the one alert or win.",
+  "tags": ["terminal", "cli", "developer", "retro", "dot-matrix", "mono", "dark", "green"],
+  "fonts": ["Doto", "Martian Mono"],
+  "bestFor": ["developer tools", "CLI launches", "benchmarks", "infrastructure", "hacker aesthetics", "changelogs"],
+  "pieces": [],
+  "samplePieces": [],
+  "previewAt": 3.4
+}

@@ -1,0 +1,12 @@
+{
+  "id": "sparkline-draw",
+  "name": "Sparkline draw",
+  "kind": "data",
+  "description": "A line chart that draws itself left to right over a soft accent area fill, a head dot riding the leading edge, then the last value is flagged with a ringed dot and a display label. Mono y-axis ticks and x labels on hairline gridlines. Edit DATA, X_LABELS, Y_MAX and FMT for growth, usage or revenue curves.",
+  "tags": ["chart", "line-chart", "sparkline", "growth", "draw-on", "area", "data", "traction", "explainer"],
+  "fonts": [],
+  "duration": 5,
+  "previewAt": 3.6,
+  "license": "original",
+  "previewLook": "duotone-broadcast"
+}

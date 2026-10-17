@@ -1,9 +1,34 @@
 // Core entry point
-export { stream } from "./stream.js";
+export { stream, localWireModelId } from "./stream.js";
+export { codexRequestProfile } from "./providers/openai-codex-request.js";
+export { FAST_MODE_SUFFIX, resolveFastModeModel } from "./fast-mode.js";
+export type { FastModeResolution } from "./fast-mode.js";
+
+// Preparatory provider policy (does not register a provider)
+export * from "./qwen-cloud-policy.js";
+
+// Embeddings + reranking (resolved through the same provider registry)
+export { embed, rerank } from "./embed.js";
+export type {
+  EmbedInputType,
+  EmbedOptions,
+  EmbedResult,
+  EmbedUsage,
+  RerankOptions,
+  RerankResponse,
+  RerankResult,
+  RerankUsage,
+  ProviderEmbedFn,
+  ProviderEmbedRequest,
+  ProviderEmbedResponse,
+  ProviderRerankFn,
+  ProviderRerankRequest,
+  ProviderRerankResponse,
+} from "./embed-types.js";
 
 // Provider registry
 export { providerRegistry } from "./provider-registry.js";
-export type { ProviderStreamFn, ProviderEntry } from "./provider-registry.js";
+export type { ProviderStreamFn, ProviderEntry, ProviderCapability } from "./provider-registry.js";
 
 // Types
 export type {
@@ -22,6 +47,10 @@ export type {
   ServerToolDefinition,
   RawContent,
   ContentPart,
+  MessageProvenanceSource,
+  MessageProvenanceKind,
+  MessageProvenanceVisibility,
+  MessageProvenance,
   SystemMessage,
   UserMessage,
   AssistantMessage,
@@ -42,6 +71,9 @@ export type {
   StreamResponse,
   Usage,
   StreamOptions,
+  PreparedContext,
+  ProviderOptions,
+  OpenRouterProviderPreferences,
 } from "./types.js";
 
 // Classes
@@ -55,14 +87,45 @@ export {
   isHardBillingMessage,
 } from "./errors.js";
 export type { ErrorSource, FormattedError } from "./errors.js";
+export { formatChatError } from "./chat-error.js";
+export type { ChatErrorReason, FormattedChatError } from "./chat-error.js";
 export { classifyProviderError } from "./error-classification.js";
+export { REDACTION_MARKER, environmentSecrets, redactText, redactValue } from "./redaction.js";
+export type { RedactionOptions } from "./redaction.js";
+
+// UTF-16 well-formedness: providers reject request bodies holding lone surrogates.
+export {
+  hasLoneSurrogate,
+  sanitizeMessagesForWire,
+  sliceHead,
+  sliceTail,
+  toWellFormedText,
+} from "./utils/well-formed.js";
 
 // Provider-level diagnostics (raw SSE event types, etc.)
 export { setProviderDiagnostic } from "./utils/diag.js";
 export type { ProviderDiagnosticFn } from "./utils/diag.js";
 
+// Base tool schema resolution before provider adapters
+// (rawInputSchema passthrough for MCP tools, zodToJsonSchema otherwise).
+// Providers may normalize, sanitize, or enforce strict schemas afterward.
+export { resolveToolSchema } from "./utils/zod-to-json-schema.js";
+
 // Provider request transforms (exposed for request-building + verification)
-export { toAnthropicMessages, toOpenAIMessages } from "./providers/transform.js";
+export {
+  clampProviderContextImages,
+  dropInvalidToolCalls,
+  isValidToolCallName,
+  toolCallNameRuleFor,
+  TOOL_CALL_NAME_RULES,
+  toAnthropicMessages,
+  toOpenAIMessages,
+} from "./providers/transform.js";
+export type { ToolCallNameRule } from "./providers/transform.js";
+export { continuesTurn, opensTurn } from "./utils/turn-continuation.js";
+
+// Codex model family served with the Responses-Lite request shape
+export { usesResponsesLite } from "./providers/openai-codex-request.js";
 
 // Cache pre-warming (Anthropic — fires a max_tokens:1 warm-up to prime the KV cache)
 export { prewarmAnthropicCache } from "./providers/anthropic.js";
@@ -74,6 +137,8 @@ export {
   palsuThinking,
   palsuToolCall,
   palsuAssistantMessage,
+  palsuEmbedding,
+  palsuRerankScore,
 } from "./providers/palsu.js";
 export type {
   PalsuProviderHandle,

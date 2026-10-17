@@ -1,0 +1,6178 @@
+import {
+  ENHANCE_PROMPT_MAX_CHARS,
+  CONTINUATION_NEXT_INSTRUCTION_MAX_CHARS,
+  continuationInstructionError,
+  isOpenAICodexAstraModel,
+  isPendingAskSnapshot,
+} from "@kenkaiiii/gg-core/desktop-session-ux";
+import {
+  Activity,
+  createElement,
+  lazy,
+  memo,
+  Suspense,
+  useCallback,
+  useContext,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type SetStateAction,
+} from "react";
+import { createChatLayoutMotion } from "./chat-layout-motion";
+import { createEntranceLifetime, dissolveInVisible, enterTranscriptRow } from "./transcript-motion";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { open, save } from "@tauri-apps/plugin-dialog";
+import { theme } from "./theme";
+import { WorkingBeam } from "./WorkingBeam";
+import { ChatErrorNotice } from "./ChatErrorNotice";
+import { showScreen } from "./view-transition";
+import { nextDockHeight } from "./dock-height";
+import { finishEntrances } from "./finish-entrances";
+import { parseProjectHealth } from "./project-health";
+import { activeChatErrorId, readChatError, type ChatErrorItem } from "./chat-error";
+import { usePaneSwapViewState, type RegisterPaneSwapViewState } from "./usePaneSwapViewState";
+import { ActionMetal } from "./ActionMetal";
+import { menuCommands, paletteCommands } from "./menu-commands";
+import { CommandPalette } from "./CommandPalette";
+import { autosizeComposer } from "./composer-autosize";
+import { pageKeyDirection, shouldPageTranscript, transcriptPageStep } from "./transcript-page-keys";
+import { pinAfterScroll, pinAfterWheel } from "./transcript-pin";
+import {
+  COMPACT_IDLE_PLACEHOLDER,
+  COMPACT_RUNNING_PLACEHOLDER,
+  fieldTextBox,
+  fitPlaceholder,
+  type FieldTextBox,
+} from "./composer-placeholder";
+import { ProgrammaticChat, ProgrammaticExecutionEvidenceView } from "./ProgrammaticChat";
+import type { ProgrammaticExecutionEvidence } from "@kenkaiiii/gg-core/programmatic-chat-contract";
+import {
+  PromptSubmissionError,
+  type ContinuationCommitRequest,
+  type ContinuationDestination,
+  type ContinuationHandoffResponse,
+  createPaneAgentClient,
+  isSwitchModelError,
+  newWindow,
+  parseContextProfileEligibility,
+  focusWindowByOffset,
+  arrangeAllWindows,
+  onWindowOrder,
+  restoreTarget,
+  onModelsChanged,
+  onTrayIntent,
+  takeTrayIntent,
+  setUpdateAvailable,
+  setRemoteActive as setRemoteActiveIPC,
+  windowLabel,
+  setWindowTitle,
+  openProjectPath,
+  getDroppedPathInfo,
+  readDroppedFileAttachment,
+  openImageDataUrl,
+  type AgentState,
+  type WorkspaceMode,
+  type ChatAgentId,
+  type ModelOption,
+  type PendingPlanReview,
+  type CommandProblem,
+  type SlashCommand,
+  type BackgroundTask,
+  type ProjectTask,
+  type FileHit,
+  type QueuedMessage,
+  type TrayIntent,
+  type ChecklistEntry,
+  type PromptSegment,
+  type AskUserPrompt,
+  type PaneAgentClient,
+  type PaneSessionTarget,
+  workspaceProductName,
+  NewSessionError,
+  PlanMutationError,
+  kickoffGoal,
+  pauseGoal,
+  resumeGoal,
+  setCritterModel,
+} from "./agent";
+import { createSafeTauriUnlisten, type SafeTauriUnlisten } from "./tauri-listener";
+import { ActivityBar } from "./ActivityBar";
+import { KenActivityBar } from "./KenActivityBar";
+import { useTaskActivity } from "./useTaskActivity";
+import { useKenMentor } from "./useKenMentor";
+import { useAutopilot } from "./useAutopilot";
+import { useAgentEvents, type RunEnd } from "./useAgentEvents";
+import { HookNotice, type HookKind, type VerificationReason } from "./HookNotice";
+import { PlanDecisionNotice, type PlanDecision } from "./PlanDecisionNotice";
+import { StreamingMarkdown } from "./StreamingMarkdown";
+import { createLiveTextStore, LiveTextContext, useLiveText } from "./live-text";
+import { LiveToolPanel, type LiveToolEntry } from "./LiveToolPanel";
+import { SubAgentFeed, type SubAgentLine } from "./SubAgentFeed";
+import { CritterFloor, collectFloorAgents, type CritterGroup } from "./CritterFloor";
+import { COORDINATOR_KEY, goalViewFor } from "./goal-world-agents";
+import {
+  EMPTY_TALLY,
+  blockingAsk,
+  coordinatorAtWork,
+  floorPhase,
+  tallyGoal,
+  type GoalTally,
+} from "./goal-progress";
+import { latestKenLine } from "./goal-ken-talk";
+import { kenStatusOf, lastRunOf } from "./goal-ken-status";
+import type { Item as GoalTranscriptItem } from "./transcript-item";
+import {
+  FINISH_SETTLE_MS,
+  goalFinishOf,
+  goalIsQuiet,
+  openStretch,
+  recordRun,
+  type GoalFinish,
+  type GoalRun,
+} from "./goal-finish";
+import { dropHiddenFocus } from "./hidden-focus";
+import { GoalSettingsModal } from "./GoalSettingsModal";
+// The farm loads on demand; it is only needed once a goal has started.
+const GoalWorld = lazy(() =>
+  import("./GoalWorld").then((module) => ({ default: module.GoalWorld })),
+);
+import { CompactionNotice } from "./CompactionNotice";
+import { ModelSelect } from "./ModelSelect";
+import { SlashMenu } from "./SlashMenu";
+import { QueuedBar } from "./QueuedBar";
+import { ScheduleHint } from "./ScheduleHint";
+import {
+  describeSchedule,
+  isScheduleDraft,
+  parseScheduleCommand,
+  withInterval,
+} from "./scheduleCommand";
+import { useSchedules } from "./useSchedules";
+import { FileMentionMenu } from "./FileMentionMenu";
+import { ReferencedFiles, appendReferencedFiles, parseReferencedFiles } from "./ReferencedFiles";
+import { TasksModal, type TasksLoadState } from "./TasksModal";
+import { ChecklistScreen, type ChecklistLoad, type ChecklistNotice } from "./ChecklistScreen";
+import { ProjectNotes, type ProjectNotesPromptActions } from "./ProjectNotes";
+import { MemoryModal } from "./MemoryModal";
+import { ShimmerText } from "./ShimmerText";
+import { WakeScreen } from "./WakeScreen";
+import { MotionStarters } from "./MotionStarters";
+import { ComposerStarters } from "./ComposerStarters";
+import { CHAT_STARTERS, CODE_STARTERS, TASKS_DRAFT_PROMPT } from "./session-starters";
+import { ConfirmModal } from "./ConfirmModal";
+import {
+  ContinuationConfirmationModal,
+  type ContinuationConfirmationState,
+} from "./ContinuationConfirmationModal";
+import { LocalUpdateConfirmModal } from "./LocalUpdateConfirmModal";
+import { InitGitModal } from "./InitGitModal";
+import { PlanModeLogo } from "./PlanModeLogo";
+import { KenPowerBanner } from "./KenPowerBanner";
+import { KenFace } from "./KenFace";
+import { PlanReviewModal } from "./PlanReviewModal";
+import { ReviewDock, type ReviewDockItem } from "./ReviewDock";
+import { McpElicitModal } from "./McpElicitModal";
+import { WindowLayoutButton } from "./WindowLayoutButton";
+import { ProjectPicker } from "./ProjectPicker";
+import { ChatPicker } from "./ChatPicker";
+import { BackButton } from "./BackButton";
+import { Badge } from "./Badge";
+import { HomeScreen } from "./HomeScreen";
+// Lazy: Goals is an opt-in surface; keep its picker out of the startup bundle.
+const GoalPicker = lazy(() =>
+  import("./GoalPicker").then((module) => ({ default: module.GoalPicker })),
+);
+import { SettingsModal } from "./LazySettingsModal";
+import { initialEntryView, type EntryView } from "./app-entry-view";
+import { submitDisposition, withoutSupersedingMessage } from "./submit-disposition";
+import { Toaster } from "./Toaster";
+import { RankBadge } from "./RankBadge";
+import { Confetti } from "./Confetti";
+import { ScorecardPanel } from "./Scorecard";
+import { ProjectHealthPanel } from "./ProjectHealthBadge";
+import { WorkspaceHeader } from "./WorkspaceHeader";
+import { DeckMenu, TitleBarActions } from "./WorkspaceHeaderActions";
+import { Deck, type DeckPanelId } from "./Deck";
+import { ContextMeter } from "./ContextMeter";
+import "./Deck.css";
+import { formatWorkspaceTitle } from "./workspace-title";
+import { useProgress } from "./useProgress";
+import { SettingsScreen, type SettingsTabId } from "./SettingsScreen";
+import { KenPromptActionProvider, Markdown } from "./LazyMarkdown";
+import { PaneIdContext, PaneIdProvider } from "./pane-context";
+import { TranscriptSkeleton, Skeleton } from "./Skeleton";
+import { useAppUpdate } from "./update";
+import { formatBuildIdentity } from "./build-info";
+import {
+  MENTOR_DISPLAY_NAME,
+  MENTOR_HANDLE,
+  MENTOR_HANDLE_ALTERNATION,
+  PRODUCT_DISPLAY_NAME,
+} from "./brand";
+import { shouldConfirmLocalUpdate } from "./local-update-confirmation";
+import { recoverPromptLabel } from "./prompt-labels";
+import { playSound } from "./sounds";
+import { segmentDoneMarkers, hasDoneMarker, countPlanSteps } from "./plan-steps";
+import {
+  ArrowUpIcon,
+  PaperclipIcon,
+  AtIcon,
+  GitBranchIcon,
+  SquareIcon,
+} from "@phosphor-icons/react";
+import { AttachmentBar } from "./AttachmentBar";
+import { AskBand } from "./AskBand";
+import {
+  dropSupersededAsks,
+  isExpiredAskError,
+  mergeAskAnswers,
+  reconcilePendingAsks,
+  type AskAnswerDelta,
+} from "./ask-user";
+import { glowPlacement, glowStateFor, glowVars } from "./window-glow";
+import {
+  type DraftEnhancement,
+  EnhancedSegments,
+  followDraftEdit,
+  rebaseSegments,
+} from "./PromptEnhancement";
+import { EnhanceDissolve } from "./EnhanceDissolve";
+import { toast } from "./toast";
+import { fileToPending, toWire, attachmentToPending, type PendingAttachment } from "./attachments";
+import { RoadmapPhaseDraftReviewModal } from "./RoadmapPhaseDraftReviewModal";
+import { useRoadmapDraft } from "./useRoadmapDraft";
+import { describeRoadmapDraft } from "./roadmap-phase-draft-state";
+import { basename } from "./tool-format";
+import {
+  deriveKenPromptTitle,
+  type KenPromptAction,
+  type KenPromptActionDispatcher,
+  type KenPromptActionResult,
+  type KenPromptSavePreview,
+} from "./ken-prompt-actions";
+import {
+  AMBIGUOUS_NEW_SESSION_MESSAGE,
+  AUTOPILOT_NEW_SESSION_RETRY_MESSAGE,
+  LocalSessionMutationBusyError,
+  notesPromptActionResult,
+  taskErrorMessage,
+} from "./agent-pane-session-errors";
+import { noInputSlashSubmissionError, slashCommandForInput } from "./slash-input-policy";
+import { useSessionResetCoordinator } from "./useSessionResetCoordinator";
+import { useProgrammaticChatActions, useProgrammaticChatState } from "./useProgrammaticChat";
+import { useKenPromptActions } from "./useKenPromptActions";
+import { useRoadmapPhaseActions } from "./useRoadmapPhaseActions";
+import "./App.css";
+// Local Fork-owned sheets split out of App.css; they must load directly after it, in this order.
+import "./WorkspaceShell.css";
+import "./NotesRoadmap.css";
+import "./LocalUpdateSummaryOption.css";
+// Liquid glass layer from upstream. Delete this line to revert.
+import "./glass.css";
+
+const BUILD_IDENTITY = formatBuildIdentity();
+// Mentor-handle patterns, built from brand.ts so renames stay in sync.
+// Case-insensitive with a word boundary so `@kennedy.ts` still picks files.
+function ggModelRole(mode: WorkspaceMode): string {
+  return mode === "chat"
+    ? "GG's model — answers your messages"
+    : `${workspaceProductName(mode)}'s model — does the work`;
+}
+const KEN_MODEL_ROLE = `${MENTOR_DISPLAY_NAME}'s model — reviews ${PRODUCT_DISPLAY_NAME}'s work and answers ${MENTOR_HANDLE}`;
+const MENTOR_HANDLE_PREFIX_RE = new RegExp(`^@${MENTOR_HANDLE_ALTERNATION}\\b`, "i");
+// Overlay split: leading whitespace, then the literal handle token.
+const MENTOR_HANDLE_OVERLAY_RE = new RegExp(`^(\\s*)(@${MENTOR_HANDLE_ALTERNATION})`, "i");
+// Submit routing: handle, optional colon, trailing whitespace.
+const MENTOR_HANDLE_SUBMIT_RE = new RegExp(`^@${MENTOR_HANDLE_ALTERNATION}\\b:?\\s*`, "i");
+
+const DEFAULT_INPUT_PLACEHOLDER = `Type a message, / commands, @ files, ${MENTOR_HANDLE} for help`;
+const INPUT_PLACEHOLDERS = [
+  DEFAULT_INPUT_PLACEHOLDER,
+  `Need a second opinion? Ask ${MENTOR_HANDLE}`,
+  `Stuck on what to do next? Ask ${MENTOR_HANDLE}`,
+  DEFAULT_INPUT_PLACEHOLDER,
+  `Want a second set of eyes? Ask ${MENTOR_HANDLE}`,
+  `Unsure how to proceed? Ask ${MENTOR_HANDLE}`,
+  `Need a quick review? Ask ${MENTOR_HANDLE}`,
+] as const;
+const RUNNING_INPUT_PLACEHOLDERS = [
+  "Agent is working. Add a follow-up if you want",
+  "Got another thought? Queue it here",
+  "Agent is on it. You can stack the next note",
+  "Thinking ahead? Drop the next instruction",
+  "Keep going. Your next message will queue up",
+] as const;
+const INPUT_PLACEHOLDER_INTERVAL_MS = 12_000;
+const PLACEHOLDER_SHUFFLE_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+const PLACEHOLDER_SHUFFLE_FRAMES = 18;
+const PLACEHOLDER_SHUFFLE_FRAME_MS = 24;
+
+// Autopilot Ken's "all clear" line, rotated so the auto-review loop doesn't
+// repeat the exact same sentence every time GG Coder's work checks out.
+// Info row shown when a video attachment is sent to a model without native
+// video analysis. Shared by the live send path and history restore so the
+// resumed transcript matches the live one exactly.
+const VIDEO_CAPABILITY_WARNING =
+  "This model can't watch video directly. The agent can still extract frames or audio with ffmpeg if needed — switch to a video-capable model (Gemini, Kimi, MiniMax) for native video analysis.";
+
+const ALL_CLEAR_VARIATIONS = [
+  "All clear. Looks good to me.",
+  "Checks out. Nothing left to flag.",
+  "Nice, this holds up. Nothing more from me.",
+  "Solid work. I've got no notes.",
+  "Yep, that covers it. All good.",
+  "Looks right to me — ship it.",
+  "Clean pass. Nothing to add here.",
+  "That does the job. No complaints.",
+  "Good to go, no issues found.",
+  "This holds together. All clear.",
+] as const;
+
+function stableIndex(seed: string, modulo: number): number {
+  let hash = 2166136261;
+  for (let i = 0; i < seed.length; i++) {
+    hash ^= seed.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0) % modulo;
+}
+
+function allClearCopy(seed: string | undefined, fallbackId: number): string {
+  const index = seed
+    ? stableIndex(seed, ALL_CLEAR_VARIATIONS.length)
+    : fallbackId % ALL_CLEAR_VARIATIONS.length;
+  return ALL_CLEAR_VARIATIONS[index];
+}
+
+function shufflePlaceholderFrame(target: string, frame: number): string {
+  const revealCount = Math.ceil((target.length * frame) / PLACEHOLDER_SHUFFLE_FRAMES);
+  return Array.from(target, (char, index) => {
+    if (index < revealCount || /\s|[.,?/@]/.test(char)) return char;
+    const pick = Math.floor(Math.random() * PLACEHOLDER_SHUFFLE_CHARS.length);
+    return PLACEHOLDER_SHUFFLE_CHARS[pick];
+  }).join("");
+}
+
+// ── Transcript model ───────────────────────────────────────
+// Tool activity lives in the pinned LiveToolPanel except durable MCP failures.
+// Exported (type-only) so the Ken mentor hook can produce/typecheck ken + error
+// transcript items without a runtime import cycle.
+export type Item =
+  // `command` marks a workflow slash command — rendered as just the short
+  // `/name` with a highlight + shimmer, never the expanded prompt body.
+  // `label` overrides what's shown with a friendly shimmer phrase (e.g.
+  // "Initializing Git…") while the full prompt still goes to the agent.
+  | {
+      kind: "user";
+      id: number;
+      /** Server-assigned continuation acceptance identity, distinct from the UI row ID. */
+      acceptedMessageId?: string;
+      text: string;
+      command?: boolean;
+      label?: string;
+      images?: string[];
+      files?: string[];
+      // Corrected-term segments from the prompt enhancer, when this message was
+      // sent unedited straight after an enhance. Drives the highlighted bubble.
+      enhancements?: PromptSegment[];
+      // True while this message is still waiting in the mid-run steering queue.
+      // Rendered dimmed until an authoritative queue snapshot confirms delivery.
+      queued?: boolean;
+      queueId?: string;
+      promoted?: boolean;
+      // True when this prompt was addressed to Ken (`@Ken …`). Renders the bubble
+      // in Ken's color so the transcript shows it went to the mentor, not GG Coder.
+      ken?: boolean;
+      // True when this bubble came from clicking a "Send to GG Coder" button on
+      // one of Ken's recommended prompts. Renders as a shimmering "Sent to GG
+      // Coder" label in Ken's color (like a slash command shows `/name`), instead
+      // of the full prompt body that was actually sent to GG Coder.
+      kenSent?: boolean;
+    }
+  | { kind: "assistant"; id: number; text: string }
+  // Ken Kai (mentor agent) reply — magenta-tinted bubble + "Ken Kai" badge,
+  // streamed from the ken_* SSE events. Never mistaken for GG Coder.
+  | { kind: "ken"; id: number; text: string }
+  | { kind: "info"; id: number; text: string }
+  | { kind: "programmatic_execution_evidence"; id: number; items: ProgrammaticExecutionEvidence[] }
+  | {
+      kind: "mcp_tool_failure";
+      id: number;
+      name: string;
+      result: string;
+      displayName?: string;
+    }
+  // Structured error (see gg-ai's formatError): headline always answers "is this
+  // me or them", message is the raw detail (omitted when redundant with the
+  // headline), guidance is the action line (retry / switch model / log in /
+  // wait until a reset time). `text` is a legacy fallback for older items.
+  | ChatErrorItem
+  // Agent self-correction hook notice (ideal review / loop-break / re-grounding),
+  // rendered as a working critter row with critter-themed wording.
+  | { kind: "hook"; id: number; hook: HookKind; verificationReason?: VerificationReason }
+  // Images produced by a tool (screenshot / read of an image file).
+  | { kind: "images"; id: number; images: TranscriptImage[]; caption?: string }
+  // Image generation in progress — a shimmering square placeholder that gets
+  // replaced by the final image when the tool result arrives.
+  | { kind: "generating_image"; id: number; prompt: string; toolCallId: string }
+  // Plan-mode entry banner (ASCII logo + optional reason).
+  | { kind: "plan"; id: number; reason: string }
+  // What the user did with a reviewed plan: an amber critter row.
+  | { kind: "plan_decision"; id: number; decision: PlanDecision }
+  // A question from the `ask_user` tool — clickable options rendered in the
+  // thread. The turn is blocked until the answers are sent, or until the run
+  // ends without them (`cancelled`, which closes the band).
+  | {
+      kind: "ask";
+      id: number;
+      prompt: AskUserPrompt;
+      /** Answers so far. Partial until every question in the band has one. */
+      answers?: Record<string, string | string[]>;
+      /** The complete set reached the blocked tool call. */
+      sent?: boolean;
+      /** Answered in this window just now (it moved to the end as a new row). */
+      answeredLive?: boolean;
+      cancelled?: boolean;
+      /** Soft deadline passed: the agent went on; an answer is still delivered late. */
+      deferred?: boolean;
+    }
+  // A task kicked off from the Tasks modal (shown at the top of its session).
+  | { kind: "task"; id: number; title: string }
+  // Sub-agents delegated in a turn — a live, in-chat feed of each one's tools.
+  | { kind: "subagent_group"; id: number; agents: SubAgentLine[]; aborted?: boolean }
+  // Context compaction — shimmering "compacting…" while running, then a quiet
+  // "compacted · N → M messages" summary when done.
+  | {
+      kind: "compaction";
+      id: number;
+      status: "running" | "done";
+      originalCount?: number;
+      newCount?: number;
+    }
+  // Autopilot Ken verdict — emitted by the auto-review loop and rendered like a
+  // normal @Ken reply bubble (Ken dot + text), not a separate marker style.
+  // `phase` selects the message: he prompted GG Coder (with the `body` he sent),
+  // gave the all-clear, needs a human (with `reason`), or hit the round cap.
+  | {
+      kind: "autopilot";
+      id: number;
+      phase: "prompted" | "done" | "human" | "capped" | "plan_approved";
+      reason?: string;
+      body?: string;
+      /** Stable seed from persisted marker data so resumed all-clear copy doesn't flicker. */
+      copySeed?: string;
+    };
+
+export interface TranscriptImage {
+  /** data: URL (base64) ready to drop into <img src>. */
+  src: string;
+  /** Source file path, shown as a caption + used as a stable key. */
+  path?: string;
+}
+
+let idSeq = 0;
+const nextId = (): number => ++idSeq;
+
+// BLACK_CIRCLE — ⏺ on mac (matches the TUI figure).
+const DOT = "\u23FA";
+
+function hasDraggedFiles(dataTransfer: DataTransfer | null): boolean {
+  return Array.from(dataTransfer?.types ?? []).includes("Files");
+}
+
+type WebkitEntry = { isDirectory?: boolean };
+type DirectoryAwareDataTransferItem = DataTransferItem & {
+  webkitGetAsEntry?: () => WebkitEntry | null;
+};
+
+function isDirectoryDragItem(item: DataTransferItem): boolean {
+  const entry = (item as DirectoryAwareDataTransferItem).webkitGetAsEntry?.();
+  return entry?.isDirectory === true;
+}
+
+function filesForAttachment(dataTransfer: DataTransfer): File[] {
+  const items = Array.from(dataTransfer.items ?? []);
+  if (items.length === 0) return Array.from(dataTransfer.files);
+  return items
+    .filter((item) => item.kind === "file" && !isDirectoryDragItem(item))
+    .map((item) => item.getAsFile())
+    .filter((file): file is File => file !== null);
+}
+
+function canHandleWindowFileDrop(): boolean {
+  return !document.querySelector(".modal-backdrop");
+}
+
+export interface PaneSnapshot {
+  paneId: string;
+  generation?: number | null;
+  mode: WorkspaceMode;
+  chatAgent?: ChatAgentId;
+  cwd: string | null;
+  sessionPath: string | null;
+  sessionTitle: string | null;
+  projectBound: boolean;
+  restoreChecked: boolean;
+  activeWork: boolean;
+}
+
+export interface PaneInputActions {
+  focus: () => void;
+  setNativeFileDragOver: (dragging: boolean) => void;
+  handleNativeDrop: (paths: string[]) => void;
+}
+
+export interface AgentPaneProps {
+  client?: PaneAgentClient;
+  paneId?: string;
+  kind?: "primary" | "auxiliary";
+  focused?: boolean;
+  windowFocused?: boolean;
+  initialTarget?: PaneSessionTarget | null;
+  onFocus?: (paneId: string) => void;
+  onSnapshot?: (snapshot: PaneSnapshot) => void;
+  onUserTargetChange?: () => void;
+  workspaceOwnsSessionLifecycle?: boolean;
+  reclaimNativeSession?: boolean;
+  registerInput?: (paneId: string, actions: PaneInputActions | null) => void;
+  registerSwapViewState?: RegisterPaneSwapViewState;
+  preserveWorkspaceFocus?: () => boolean;
+  /** Receives the header element that hosts the workspace's pane controls
+   *  (split, swap, close); null while this pane shows no session header. */
+  paneChromeSlotRef?: (el: HTMLElement | null) => void;
+  target?: PaneSessionTarget | null;
+  generation?: number | null;
+  onGenerationChange?: (generation: number) => void;
+  onLifecycleError?: (error: unknown) => void;
+}
+
+export function AgentPane(props: AgentPaneProps): React.ReactElement {
+  const paneId = props.paneId ?? props.client?.paneId ?? "primary";
+  const kind = props.kind ?? (paneId === "primary" ? "primary" : "auxiliary");
+  const { onUserTargetChange, onSnapshot, registerInput } = props;
+  const generatedClient = useMemo(() => createPaneAgentClient(paneId), [paneId]);
+  const client = props.client ?? generatedClient;
+  const ownsWindowGlobals = kind === "primary" && props.client === undefined;
+  const {
+    getState,
+    sendPrompt,
+    prepareContinuationHandoff,
+    commitContinuation,
+    sendKenPrompt,
+    cancelKen,
+    setAutopilot,
+    cancel,
+    newSession,
+    listModels,
+    switchModel,
+    setOpenAICodexContextProfile,
+    switchKenModel,
+    listCommands,
+    listHistory,
+    cancelQueued,
+    exportTranscriptName,
+    saveTranscript,
+    listTasks,
+    getChecklist,
+    runTask,
+    runAllTasks,
+    deleteTask,
+    searchFiles,
+    enhancePrompt,
+    getServeStatus,
+    startServe,
+    stopServe,
+    acceptPlan: acceptPlanIPC,
+    revisePlan: revisePlanIPC,
+  } = client;
+  const subscribe = client.subscribe;
+  const catalogClient = useMemo(() => createPaneAgentClient("primary"), []);
+  const [items, setItems] = useState<Item[]>([]);
+  // Streaming reply text lives outside `items` so each chunk re-renders only
+  // the row that is streaming (see live-text.ts).
+  const [liveText] = useState(createLiveTextStore);
+  const lifecycleEpochRef = useRef(0);
+  const hydrateEpochRef = useRef(0);
+  const mountedRef = useRef(true);
+  const generationRef = useRef(props.generation);
+  // Managed panes acquire their generation internally. Do not erase it on rerenders
+  // merely because their owner does not mirror the optional prop back to us.
+  if (props.generation !== undefined) generationRef.current = props.generation;
+  const onGenerationChangeRef = useRef(props.onGenerationChange);
+  onGenerationChangeRef.current = props.onGenerationChange;
+  const onLifecycleErrorRef = useRef(props.onLifecycleError);
+  onLifecycleErrorRef.current = props.onLifecycleError;
+  const adoptGeneration = useCallback((generation: number): void => {
+    generationRef.current = generation;
+    onGenerationChangeRef.current?.(generation);
+  }, []);
+  const waitForReady = useCallback(async (): Promise<void> => {
+    const ready = await client.waitForReady();
+    adoptGeneration(ready.generation);
+  }, [adoptGeneration, client]);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      lifecycleEpochRef.current += 1;
+      hydrateEpochRef.current += 1;
+    };
+  }, []);
+
+  const target = props.target ?? props.initialTarget ?? null;
+  useEffect(() => {
+    const epoch = ++lifecycleEpochRef.current;
+    // Problems describe the previous target's command files; never carry them over.
+    setPaletteProblems([]);
+    if (!target) return;
+    setWorkspaceMode(target.mode ?? "code");
+    let ownedGeneration: number | null = null;
+    const existingGeneration = generationRef.current;
+    const shouldRestore =
+      props.workspaceOwnsSessionLifecycle ||
+      props.reclaimNativeSession ||
+      existingGeneration != null;
+    const operation = shouldRestore ? client.restore(target) : client.create(target);
+    void operation
+      .then((next) => {
+        if (!props.workspaceOwnsSessionLifecycle) ownedGeneration = next;
+        if (mountedRef.current && lifecycleEpochRef.current === epoch) {
+          adoptGeneration(next);
+          setNeedsProject(false);
+          setHydrateNonce((nonce) => nonce + 1);
+        } else if (ownedGeneration !== null) {
+          void client.dispose(ownedGeneration).catch(() => {});
+        }
+      })
+      .catch((error) => {
+        if (mountedRef.current && lifecycleEpochRef.current === epoch) {
+          onLifecycleErrorRef.current?.(error);
+        }
+      });
+    return () => {
+      if (lifecycleEpochRef.current === epoch) lifecycleEpochRef.current += 1;
+      if (!props.workspaceOwnsSessionLifecycle && ownedGeneration !== null) {
+        void client.dispose(ownedGeneration).catch(() => {});
+      }
+    };
+  }, [
+    adoptGeneration,
+    client,
+    props.reclaimNativeSession,
+    props.workspaceOwnsSessionLifecycle,
+    target,
+  ]);
+
+  // Ken Kai (mentor agent): own running flag, token/thinking metrics, streaming
+  // bubble, and `ken_*` SSE handling. Lives in its own hook; App just consumes
+  // the state for rendering and delegates ken events to `handleKenEvent`.
+  const {
+    kenRunning,
+    kenTokens,
+    kenRunStartTs,
+    kenIsThinking,
+    kenThinkingStartTs,
+    kenThinkingAccumMs,
+    handleKenEvent,
+    hydrateKen,
+    clearKenStream,
+    captureKenHydration,
+    captureKenTarget,
+    captureKenRun,
+    captureKenOperation,
+  } = useKenMentor({ setItems, nextId, liveText });
+  // Ken's face talks on the reply he is streaming right now: the last row,
+  // while his run is live. Only that row's props change, so memo holds.
+  const currentErrorId = useMemo(() => activeChatErrorId(items), [items]);
+  const lastItem = items[items.length - 1];
+  const talkingKenId = kenRunning && lastItem?.kind === "ken" ? lastItem.id : null;
+  // Autopilot Ken (auto-reviewer): consumes the `autopilot_*` event family into
+  // compact transcript markers + a "Ken reviewing…" flag. Separate hook, same
+  // shared setItems/nextId pattern as useKenMentor.
+  const { autopilotReviewing, handleAutopilotEvent } = useAutopilot({ setItems, nextId });
+  const { snapshot: progress, levelUp, levelUpNonce, levelUpOrigin } = useProgress(client);
+  const [xpChips, setXpChips] = useState<Array<{ id: string; label: string }>>([]);
+  const lastProgressXpRef = useRef<number | null>(null);
+  const [confettiNonce, setConfettiNonce] = useState<string | null>(null);
+  // Local Fork: the level-up badge flourish survives the one-row title bar —
+  // it appears in the title bar only while a level/rank celebration plays.
+  const [rankCelebrateNonce, setRankCelebrateNonce] = useState<string | null>(null);
+  const [input, setInput] = useState("");
+  const [placeholderIndex, setPlaceholderIndex] = useState(0);
+  const [displayPlaceholder, setDisplayPlaceholder] = useState(DEFAULT_INPUT_PLACEHOLDER);
+  const displayPlaceholderRef = useRef(DEFAULT_INPUT_PLACEHOLDER);
+  // Shell-style prompt history for ↑/↓ recall in the chat input. Newest entries
+  // last. `historyIndex` is null while editing a fresh draft; stepping ↑ walks
+  // backwards into history, ↓ forwards. `historyDraftRef` stashes the in-progress
+  // text so stepping ↓ past the newest entry restores what was being typed.
+  const promptHistoryRef = useRef<string[]>([]);
+  const [historyIndex, setHistoryIndex] = useState<number | null>(null);
+  const historyDraftRef = useRef("");
+  // Staged attachments (paste / attach button / whole-window drag-drop) shown above the input.
+  const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
+  const [attachmentsLoading, setAttachmentsLoading] = useState(false);
+  const attachmentReadsRef = useRef(0);
+  const attachmentGenerationRef = useRef(0);
+  const clearAttachments = useCallback((): void => {
+    // A read started in an old session must not attach to a new one.
+    attachmentGenerationRef.current++;
+    attachmentReadsRef.current = 0;
+    setAttachmentsLoading(false);
+    setAttachments([]);
+  }, []);
+  useEffect(
+    () => () => {
+      attachmentGenerationRef.current++;
+    },
+    [],
+  );
+  const stageAttachments = useCallback(
+    async (read: () => Promise<(PendingAttachment | null)[]>): Promise<void> => {
+      // A slash command that takes no attachments owns the composer: drop new
+      // reads instead of staging them behind it (Local Fork guard).
+      if (noAttachmentSlashCommandRef.current) return;
+      const generation = attachmentGenerationRef.current;
+      attachmentReadsRef.current++;
+      setAttachmentsLoading(true);
+      try {
+        const loaded = await read();
+        if (generation !== attachmentGenerationRef.current) return;
+        const ok = loaded.filter((item): item is PendingAttachment => item !== null);
+        if (ok.length > 0 && !noAttachmentSlashCommandRef.current)
+          setAttachments((previous) => [...previous, ...ok]);
+        if (ok.length !== loaded.length)
+          toast("Some attachments could not be loaded. Try again.", "error");
+      } catch {
+        if (generation === attachmentGenerationRef.current)
+          toast("Attachments could not be loaded. Try again.", "error");
+      } finally {
+        if (generation === attachmentGenerationRef.current) {
+          attachmentReadsRef.current--;
+          setAttachmentsLoading(attachmentReadsRef.current > 0);
+        }
+      }
+    },
+    [],
+  );
+  const [isFileDragOver, setIsFileDragOver] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  // The most recent prompt-enhancement result. `plain` is the text now in the
+  // textarea; `segments` drive the highlighted terms in the sent bubble. Edits
+  // re-anchor the segments onto the new text (followDraftEdit), keeping every
+  // corrected term the edit didn't touch. `enhancing` shows the pulse on the
+  // Enhance pill mid-call.
+  const [enhancement, setEnhancement] = useState<DraftEnhancement | null>(null);
+  const [enhancing, setEnhancing] = useState(false);
+  // The floating "Enhance" pill is shown only after the user pauses typing for
+  // ~1s (and hidden again on the next keystroke / send / empty input).
+  const [enhanceHintVisible, setEnhanceHintVisible] = useState(false);
+  // Drives the Matrix dissolve→decode animation over the input while enhancing.
+  // `newText` is null until the enhancer returns (dissolve/scramble), then the
+  // enhanced text (decode). Null when no animation is playing.
+  const [enhanceAnim, setEnhanceAnim] = useState<{
+    oldText: string;
+    newText: string | null;
+  } | null>(null);
+  // Holds the resolved enhancement so the animation's onDone can apply it once
+  // the decode settles (rather than popping the text in mid-animation).
+  const pendingEnhanceRef = useRef<{
+    enhanced: string;
+    segments: PromptSegment[];
+    isCurrent: () => boolean;
+  } | null>(null);
+  // Number of messages queued mid-run (injected as steering by the sidecar).
+  const [queuedCount, setQueuedCount] = useState(0);
+  // Pending queued messages, so each can be cancelled individually. Kept
+  // alongside the count because the sidecar is the source of truth for both.
+  const [queuedMessages, setQueuedMessages] = useState<QueuedMessage[]>([]);
+  const [state, setState] = useState<AgentState | null>(null);
+  // Transient "KEN IS ON"/"KEN IS OFF" takeover banner shown when Autopilot
+  // is toggled. Null = not showing; the banner clears itself via `onDone`
+  // once its slide-out animation finishes.
+  const [kenPowerBanner, setKenPowerBanner] = useState<"on" | "off" | null>(null);
+  const [autopilotPending, setAutopilotPending] = useState<(() => boolean) | null>(null);
+  const autopilotPendingRef = useRef<(() => boolean) | null>(null);
+  const [running, setRunning] = useState(false);
+  // Bumped on each transcript reload; restarts the goal header's tally.
+  const [transcriptEpoch, setTranscriptEpoch] = useState(0);
+  // Last composer keystroke (0 = none since this pane opened). The first
+  // keystroke after opening or a >4 min idle pause prewarms the prompt cache.
+  const lastKeystrokeAtRef = useRef(0);
+  const [hasFinishedRun, setHasFinishedRun] = useState(false);
+  // Footer model pickers: hidden role descriptions announced with each control.
+  const glowSeed = `${windowLabel}:${props.paneId}`;
+  const glowStyle = useMemo(() => glowVars(glowPlacement(glowSeed)), [glowSeed]);
+  const glowState = glowStateFor(running, hasFinishedRun);
+  const wasRunning = useRef(false);
+  useEffect(() => {
+    if (running) {
+      wasRunning.current = true;
+      setHasFinishedRun(false);
+    } else if (wasRunning.current) {
+      wasRunning.current = false;
+      setHasFinishedRun(true);
+    }
+  }, [running]);
+  const cancelling = state?.runState === "cancelling";
+  const requestCancel = useCallback(() => {
+    if (cancelling) return;
+    void cancel().catch(() => {
+      // Native/sidecar transport failures may prevent the SSE cancel_failed
+      // frame; restore the owned-running affordance so retry remains possible.
+      setState((previous) =>
+        previous ? { ...previous, running: true, runState: "running" } : previous,
+      );
+      setRunning(true);
+      setStatus("cancellation failed; agent still running");
+    });
+  }, [cancel, cancelling]);
+  const [status, setStatus] = useState("connecting to agent\u2026");
+  const [liveToolFeed, setLiveToolFeed] = useState<LiveToolEntry[]>([]);
+  const [tokens, setTokens] = useState(0);
+  const [doneStatus, setDoneStatus] = useState<string | null>(null);
+  // Pending plan awaiting an explicit workflow-gate decision in the review dock.
+  // Collapsing details never resolves the persisted approval gate.
+  const [planReview, setPlanReview] = useState<PendingPlanReview | null>(null);
+  const [expandedPlanIdentity, setExpandedPlanIdentity] = useState<string | null>(null);
+  const [planGateBusy, setPlanGateBusy] = useState(false);
+  // Exact operation that entered Plan Mode. Kept in webview memory only: approval
+  // replays this prompt after the sidecar has accepted the plan.
+  const planResumePromptRef = useRef<string | null>(null);
+  // Path of the plan awaiting review, captured from `plan_exit`. Needed on accept
+  // to bake the plan's `## Steps` into the agent's system prompt so it emits
+  // `[DONE:n]` progress markers (drives the activity bar's Plan Steps widget).
+  const planReviewPathRef = useRef<string | null>(null);
+  // Approved-plan progress for the activity bar: total steps + completed set.
+  const [planTotal, setPlanTotal] = useState(0);
+  const [planDone, setPlanDone] = useState<Set<number>>(new Set());
+  // Refs mirror the plan progress state for the memoized SSE event handler,
+  // which intentionally does not re-capture React state on every render.
+  const planTotalRef = useRef(0);
+  const planDoneRef = useRef<Set<number>>(new Set());
+  // Approval-time count kept only as a compatibility fallback for an older
+  // sidecar whose session_reset has no canonical live-file total.
+  const pendingPlanTotalRef = useRef<number | null>(null);
+  const [isThinking, setIsThinking] = useState(false);
+  const [thinkingStartTs, setThinkingStartTs] = useState<number | null>(null);
+  const [thinkingAccumMs, setThinkingAccumMs] = useState(0);
+  const [models, setModels] = useState<ModelOption[]>([]);
+  // The hydration model load failed, so the footer pickers say so instead of
+  // claiming they are still connecting (ported from upstream 0.82.2).
+  const [modelsFailed, setModelsFailed] = useState(false);
+  // Hydration could not reach the agent: shown in place of the dead-end status
+  // line, with a way to try again.
+  const [connectError, setConnectError] = useState<string | null>(null);
+  const [, setModelCatalogRefreshNonce] = useState(0);
+  const [commands, setCommands] = useState<SlashCommand[]>([]);
+  // Command files that could not be listed, shown by the Ctrl/Cmd+K palette.
+  // Always written together with `commands` from one guarded catalog response.
+  const [paletteProblems, setPaletteProblems] = useState<CommandProblem[]>([]);
+  const commandRequestRef = useRef(0);
+  const commandClientRef = useRef(client);
+  commandClientRef.current = client;
+  const commandModeRef = useRef<WorkspaceMode>("code");
+  const refreshCommands = useCallback(async () => {
+    const request = ++commandRequestRef.current;
+    const mode = commandModeRef.current;
+    const generation = generationRef.current;
+    const lifecycle = lifecycleEpochRef.current;
+    const current = (): boolean =>
+      client === commandClientRef.current &&
+      mountedRef.current &&
+      request === commandRequestRef.current &&
+      mode === commandModeRef.current &&
+      generation === generationRef.current &&
+      lifecycle === lifecycleEpochRef.current;
+    try {
+      // One request feeds both the command list and the palette's problems so
+      // they can never describe different targets, modes or generations.
+      if (client.listCommandCatalog) {
+        const catalog = await client.listCommandCatalog();
+        if (catalog !== null && current()) {
+          setCommands(catalog.commands);
+          setPaletteProblems(catalog.problems);
+        }
+        return;
+      }
+      const next = await listCommands();
+      if (next !== null && current()) setCommands(next);
+    } catch {
+      // A failed refresh must not replace a successful catalog.
+    }
+  }, [listCommands, client]);
+  const invalidateCommandRequests = useCallback(() => {
+    commandRequestRef.current++;
+  }, []);
+  useEffect(() => {
+    const onFocus = () => {
+      void refreshCommands();
+    };
+    window.addEventListener("focus", onFocus);
+    return () => {
+      invalidateCommandRequests();
+      window.removeEventListener("focus", onFocus);
+    };
+  }, [refreshCommands, invalidateCommandRequests]);
+  const [slashIndex, setSlashIndex] = useState(0);
+  // Caret offset in the composer, tracked so the `/schedule` hint can highlight
+  // the slot the user is currently typing in.
+  const [caret, setCaret] = useState(0);
+  // `/schedule` runtime. Fires each due prompt through the normal send path,
+  // skipping any occurrence that comes due mid-run rather than stacking agents.
+  // In-memory for the life of the window — see useSchedules.
+  const { schedules, addSchedule, stopSchedule } = useSchedules({
+    queuedPrompts: useMemo(() => queuedMessages.map((m) => m.text), [queuedMessages]),
+    onFire: useCallback((prompt: string) => {
+      // keepInput: the user did not press Enter for this — leave whatever they
+      // are typing untouched.
+      submitTextRef.current(prompt, undefined, { keepInput: true });
+    }, []),
+  });
+  // `@`-mention file picker state. `mention` is the active token being typed
+  // (its query + where it starts in the input); `fileMatches` is the live
+  // search result; `fileIndex` is the keyboard-highlighted row.
+  const [mention, setMention] = useState<{ query: string; start: number } | null>(null);
+  const [fileMatches, setFileMatches] = useState<FileHit[]>([]);
+  const [fileIndex, setFileIndex] = useState(0);
+  // Files referenced via `@`, tracked as chips (NOT left in the input text).
+  // Their paths are appended to the prompt on submit.
+  const [mentionedPaths, setMentionedPaths] = useState<string[]>([]);
+  const composerRef = useRef({ input, attachments, mentionedPaths, enhancement });
+  composerRef.current = { input, attachments, mentionedPaths, enhancement };
+  const promptSubmissionPendingRef = useRef<(() => boolean) | null>(null);
+  const kenCurrentSubmissionRef = useRef<(() => boolean) | null>(null);
+  const promptSessionResetEpochRef = useRef(0);
+  const matchedSlashCommand = slashCommandForInput(input, commands)?.command ?? null;
+  const noInputSlashCommand =
+    matchedSlashCommand?.input.text === "none" ? matchedSlashCommand : null;
+  const noReferenceSlashCommand =
+    matchedSlashCommand?.input.references === "none" ? matchedSlashCommand : null;
+  const noAttachmentSlashCommand =
+    matchedSlashCommand?.input.attachments === "none" ? matchedSlashCommand : null;
+  const noInputSlashCommandRef = useRef<SlashCommand | null>(null);
+  const noReferenceSlashCommandRef = useRef<SlashCommand | null>(null);
+  const noAttachmentSlashCommandRef = useRef<SlashCommand | null>(null);
+  noInputSlashCommandRef.current = noInputSlashCommand;
+  noReferenceSlashCommandRef.current = noReferenceSlashCommand;
+  noAttachmentSlashCommandRef.current = noAttachmentSlashCommand;
+  // Footer extras mirrored from the sidecar: live background tasks and the
+  // running context-window usage (input-side tokens of the latest turn).
+  const [tasks, setTasks] = useState<BackgroundTask[]>([]);
+  const [contextTokens, setContextTokens] = useState(0);
+  const [astraControlsBusy, setAstraControlsBusy] = useState(false);
+  const astraMutationBusyRef = useRef(false);
+  const astraAuthoritativeRevisionRef = useRef(0);
+  const contextProfileFocusRef = useRef<HTMLSelectElement | null>(null);
+  useLayoutEffect(() => {
+    if (astraControlsBusy) return;
+    const selector = contextProfileFocusRef.current;
+    contextProfileFocusRef.current = null;
+    // Disabling the select during a save drops WebView2 focus onto the body.
+    // Restore only that lost focus, never a control the user moved to.
+    if (selector?.isConnected && !selector.disabled && document.activeElement === document.body) {
+      selector.focus({ preventScroll: true });
+    }
+  }, [astraControlsBusy]);
+  // Project task list (the agent's `tasks` tool store) + the Tasks modal.
+  // Updated live via the `tasks_list` SSE event while a run-all sweep advances.
+  const [projectTasks, setProjectTasksState] = useState<ProjectTask[]>([]);
+  // Lets the modal tell "no tasks" apart from "still loading" or "failed to load".
+  const [tasksLoad, setTasksLoad] = useState<TasksLoadState>("idle");
+  // Any delivered list (fetched, pushed over SSE, or returned by a delete) is a
+  // successful load, so it also clears a pending or failed load state.
+  const setProjectTasks = useCallback((next: SetStateAction<ProjectTask[]>): void => {
+    setProjectTasksState(next);
+    setTasksLoad("idle");
+  }, []);
+  // What has taken the message box's place in the deck, if anything (upstream
+  // 0.91): Tasks, Checklist, Brain, Scorecard, Goal settings, Git, Model…
+  const [deckPanel, setDeckPanel] = useState<DeckPanelId | null>(null);
+  const showTasks = deckPanel === "todo";
+  // The checklist is a deck tool like Tasks: open while the deck shows it.
+  const showChecklist = deckPanel === "checklist";
+  const setShowChecklist = useCallback((next: SetStateAction<boolean>) => {
+    setDeckPanel((open) => {
+      const isOpen = open === "checklist";
+      const want = typeof next === "function" ? next(isOpen) : next;
+      if (want) return "checklist";
+      return isOpen ? null : open;
+    });
+  }, []);
+  const closeDeckPanel = useCallback(
+    (id: DeckPanelId) => setDeckPanel((open) => (open === id ? null : open)),
+    [],
+  );
+  const [checklistLoad, setChecklistLoad] = useState<ChecklistLoad>({ kind: "loading" });
+  const [checklistRunId, setChecklistRunId] = useState<string | null>(null);
+  const [checklistNotice, setChecklistNotice] = useState<ChecklistNotice | null>(null);
+  const checklistRunRef = useRef<{
+    id: string;
+    checkedAt: string | null;
+    expectsRecord: boolean;
+  } | null>(null);
+  const checklistFetchRef = useRef(0);
+  const checklistWasOpen = useRef(false);
+  // Every window chooses a code or chat workspace before connecting. Mode stays
+  // separate from picker visibility so restore and reopened pickers are explicit.
+  const [needsProject, setNeedsProject] = useState(true);
+  const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>("code");
+  commandModeRef.current = workspaceMode;
+  const rawProjectHealth = state?.projectHealth;
+  const projectHealth = useMemo(
+    () => (workspaceMode === "code" ? parseProjectHealth(rawProjectHealth) : null),
+    [workspaceMode, rawProjectHealth],
+  );
+  // False until the boot-time workspace-restore check resolves.
+  const [restoreChecked, setRestoreChecked] = useState(false);
+  // Every window starts from the mode-neutral home screen before choosing Code or Chat.
+  const [entryView, setEntryView] = useState<EntryView>(initialEntryView(kind === "auxiliary"));
+  const [settingsTab, setSettingsTab] = useState<SettingsTabId>("general");
+  // Re-open the matching session picker over an already-open workspace.
+  const [showPicker, setShowPicker] = useState(false);
+  // Bumped on each workspace/session choice to force re-hydration.
+  const [hydrateNonce, setHydrateNonce] = useState(0);
+  const { activity, handleActivityEvent } = useTaskActivity(hydrateNonce);
+  // New-session confirmation modal + in-flight guard.
+  const [confirmNewSession, setConfirmNewSession] = useState(false);
+  const [showLocalUpdateConfirm, setShowLocalUpdateConfirm] = useState(false);
+  const [summarizeDecisions, setSummarizeDecisions] = useState(false);
+  // Hide/show the live tool panel (the rolling feed above the activity bar).
+  // Mirrors navHidden: persisted across reloads, and auto-enabled when windows
+  // are tiled (tight space) so freshly opened windows boot with it collapsed.
+  const [toolsHidden, setToolsHidden] = useState(() => {
+    try {
+      return localStorage.getItem("gg-tools-hidden") === "1";
+    } catch {
+      return false;
+    }
+  });
+  const setToolsHiddenPersisted = useCallback((hidden: boolean) => {
+    try {
+      localStorage.setItem("gg-tools-hidden", hidden ? "1" : "0");
+    } catch {
+      /* ignore */
+    }
+    setToolsHidden(hidden);
+  }, []);
+  const toggleTools = useCallback(
+    () => setToolsHiddenPersisted(!toolsHidden),
+    [toolsHidden, setToolsHiddenPersisted],
+  );
+  const [newSessionBusy, setNewSessionBusy] = useState(false);
+  const sessionMutationLockRef = useRef(false);
+  const kenPromptActionLockRef = useRef(false);
+  const continuationAttemptRef = useRef<{
+    request: ContinuationCommitRequest;
+    prepared: ContinuationHandoffResponse;
+    destination?: ContinuationDestination;
+    acceptedMessageId?: string;
+  } | null>(null);
+  const appliedContinuationMessagesRef = useRef(new Set<string>());
+  const continuationResetsRef = useRef(new Set<string>());
+  const retiredConversationIdsRef = useRef(new Set<string>());
+  const [continuationConfirmation, setContinuationConfirmation] =
+    useState<ContinuationConfirmationState | null>(null);
+  const continuationConfirmationRef = useRef<
+    ((choice: { profile: "stable" | "experimental" | null } | null) => void) | null
+  >(null);
+  useEffect(() => () => continuationConfirmationRef.current?.(null), []);
+  // Transcript export (the download button in the activity bar). The chosen
+  // folder is remembered so the second export lands where the first one did —
+  // stored per-machine, not per-project, because that's how people organise
+  // exports (one "agent transcripts" folder, many projects).
+  // The export pill tracks hover of the chat area itself (re-rendering only the
+  // pill); `exporting` pins it while a save is in flight.
+  const [exporting, setExporting] = useState(false);
+  const exportTranscript = useCallback(async () => {
+    setExporting(true);
+    try {
+      const filename = (await exportTranscriptName()) ?? "your-chat.md";
+      let lastDir: string | null = null;
+      try {
+        lastDir = localStorage.getItem("gg-export-dir");
+      } catch {
+        /* ignore */
+      }
+      const target = await save({
+        title: "Save transcript",
+        defaultPath: lastDir ? `${lastDir}/${filename}` : filename,
+        filters: [{ name: "Markdown", extensions: ["md"] }],
+      });
+      if (!target) return; // user cancelled — not an error, say nothing
+      await saveTranscript(target);
+      const dir = target.replace(/[/\\][^/\\]*$/, "");
+      try {
+        if (dir) localStorage.setItem("gg-export-dir", dir);
+      } catch {
+        /* ignore */
+      }
+      toast(`Saved ${target.split(/[/\\]/).pop() ?? "transcript"}`, "success");
+    } catch (e) {
+      toast(`Could not save transcript: ${String(e)}`, "error");
+    } finally {
+      setExporting(false);
+    }
+  }, [exportTranscriptName, saveTranscript]);
+  // App self-update (GitHub releases). Drives the footer update banner.
+  const appUpdate = useAppUpdate();
+
+  // ── macOS menu-bar tray ───────────────────────────────────────────────────
+  // Settings opened from the tray. Owned HERE, not by HomeScreen, because the
+  // tray targets a WINDOW and that window may be showing Home, a picker, or a
+  // live workspace — only App renders in all three.
+  const [showTraySettings, setShowTraySettings] = useState(false);
+  // Bumped to ask HomeScreen to re-read serve/auth state after the tray changed
+  // it. A counter, not a boolean, so repeat tray clicks always re-fire.
+  const [homeRefreshSignal, setHomeRefreshSignal] = useState(0);
+
+  const closeTraySettings = useCallback((): void => {
+    setShowTraySettings(false);
+    // Home gates Code/Chat on the projects folder + a provider; re-read them in
+    // case this modal is where they were just set.
+    setHomeRefreshSignal((n) => n + 1);
+  }, []);
+
+  // Rust owns the tray menu but not the updater — the webview polls GitHub. Push
+  // availability down so "Update now" shows only while an update is pending.
+  const updateVersion = appUpdate.phase === "available" ? appUpdate.version : null;
+  useEffect(() => {
+    if (ownsWindowGlobals) void setUpdateAvailable(updateVersion);
+  }, [ownsWindowGlobals, updateVersion]);
+
+  // Remote (the Telegram serve loop) lives in the sidecar, so the tray can't
+  // know its state — poll it and push it down, which keeps the menu item's label
+  // honest even when Remote is toggled from Home or another window. Nothing in
+  // React renders it, so this returns the value instead of holding state; Rust
+  // is the one that needs it, and it already de-dupes unchanged pushes.
+  const syncRemote = useCallback(async (): Promise<boolean> => {
+    if (!ownsWindowGlobals) return false;
+    try {
+      await waitForReady();
+      const { running } = await getServeStatus();
+      void setRemoteActiveIPC(running);
+      return running;
+    } catch {
+      return false;
+    }
+  }, [getServeStatus, ownsWindowGlobals, waitForReady]);
+
+  useEffect(() => {
+    if (!ownsWindowGlobals) return;
+    void syncRemote();
+    const id = setInterval(() => void syncRemote(), 30_000);
+    return () => clearInterval(id);
+  }, [ownsWindowGlobals, syncRemote]);
+
+  const applyTrayIntent = useCallback(
+    (intent: TrayIntent): void => {
+      switch (intent) {
+        case "update":
+          void appUpdate.install();
+          break;
+        // Route to the session picker for the requested mode. On Home that's the
+        // entry view; over an open workspace it's the picker overlay, which keeps
+        // the running session intact until a different one is chosen.
+        case "new-chat":
+        case "new-code": {
+          const mode = intent === "new-chat" ? "chat" : "code";
+          setWorkspaceMode(mode);
+          if (needsProject) setEntryView(mode === "chat" ? "chats" : "projects");
+          else setShowPicker(true);
+          break;
+        }
+        // A toggle, matching the menu item's label. Re-read the live status
+        // first rather than trusting the poll, so a stale cache can't start a
+        // second serve loop or stop one the user just started elsewhere.
+        case "remote":
+          void syncRemote()
+            .then(async (running) => {
+              if (running) {
+                await stopServe();
+                toast("Remote is off.", "success");
+              } else {
+                await startServe();
+                toast("Remote is on.", "success");
+              }
+            })
+            .catch((e: unknown) => toast(`Remote failed: ${String(e)}`, "error"))
+            .finally(() => {
+              void syncRemote();
+              setHomeRefreshSignal((n) => n + 1);
+            });
+          break;
+        case "settings":
+          setShowTraySettings(true);
+          break;
+      }
+    },
+    [appUpdate, needsProject, startServe, stopServe, syncRemote],
+  );
+
+  // The handler is re-created on most renders (it closes over `appUpdate`, a
+  // fresh object each render). Holding it in a ref keeps the Tauri listener
+  // registered exactly ONCE for the window's lifetime — re-subscribing per
+  // render raced listen/unlisten and threw inside the event plugin.
+  const trayIntentRef = useRef(applyTrayIntent);
+  useEffect(() => {
+    trayIntentRef.current = applyTrayIntent;
+  }, [applyTrayIntent]);
+
+  // Two delivery paths, because a window built BY the tray isn't listening yet
+  // when the menu is clicked: an existing window gets the event, a new one
+  // claims the parked intent on mount.
+  useEffect(() => {
+    if (!ownsWindowGlobals) return;
+    let unlisten: SafeTauriUnlisten | null = null;
+    let disposed = false;
+    void onTrayIntent((intent) => trayIntentRef.current(intent)).then((un) => {
+      if (disposed) void un();
+      else unlisten = un;
+    });
+    return () => {
+      disposed = true;
+      void unlisten?.();
+    };
+  }, [ownsWindowGlobals]);
+
+  useEffect(() => {
+    if (!ownsWindowGlobals) return;
+    void takeTrayIntent().then((intent) => {
+      if (intent) applyTrayIntent(intent);
+    });
+    // Mount-only: the parked intent is consumed once, by the window it opened.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ownsWindowGlobals]);
+  // Initialize-git modal (shown via the top-right button when not yet a repo).
+  const [showInitGit, setShowInitGit] = useState(false);
+  // True once the initial hydrate (state + models + commands + history) has
+  // settled for the current project/session. Gates the footer + chrome so they
+  // reveal fully-formed in one pass instead of popping in piecemeal (cwd, git,
+  // thinking, model each arriving separately would reflow the bar mid-load).
+  const [hydrated, setHydrated] = useState(false);
+  // Roots added or removed mid-session bring their own slash commands. This
+  // pane's refresh is pane-scoped and generation-guarded (refreshCommands).
+  const rootsKey = (state?.additionalRoots ?? []).join("\n");
+  const rootsSeenRef = useRef(rootsKey);
+  useEffect(() => {
+    if (!hydrated || rootsSeenRef.current === rootsKey) return;
+    rootsSeenRef.current = rootsKey;
+    void refreshCommands();
+  }, [hydrated, rootsKey, refreshCommands]);
+  // Rows at or after this id arrived live (after hydration) and may play an entrance.
+  const [liveFromId, setLiveFromId] = useState(Number.POSITIVE_INFINITY);
+  const entrances = useMemo(() => createEntranceLifetime(liveFromId), [liveFromId]);
+  // The chat never leaves the screen for the checklist any more (deck panel).
+  const chatView = useMemo(() => ({ visible: true }), []);
+  // Children consume before playback. This parent effect also settles messages
+  // received while Activity is hidden, when their own effects cannot run.
+  useLayoutEffect(() => {
+    const last = items[items.length - 1];
+    if (last) entrances.settle(last.id);
+  }, [entrances, items, showChecklist]);
+
+  const readyRef = useRef(false);
+  // Mirror of `state` for use inside the memoized event handler (which doesn't
+  // re-capture state). Lets turn_end pick the right context-token formula by
+  // provider without re-subscribing the SSE listener on every state change.
+  const stateRef = useRef<AgentState | null>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const liveRegionRef = useRef<HTMLDivElement>(null);
+  const chatLayout = useMemo(
+    () =>
+      createChatLayoutMotion(() => ({
+        transcript: scrollRef.current,
+        surfaces: [liveRegionRef.current],
+      })),
+    [],
+  );
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+  const projectNotesActionsRef = useRef<ProjectNotesPromptActions>(null);
+  const observedSessionResetOperationsRef = useRef<Set<string>>(new Set());
+  const recoveredSessionResetOperationRef = useRef<string | null>(null);
+  // Authority survives the transient mutation lock, including an unavailable receipt.
+  const unresolvedSessionResetRef = useRef<{
+    generation: number | null | undefined;
+    operationId: string | null;
+  } | null>(null);
+  const blockUnconfirmedSession = useCallback((): boolean => {
+    if (!unresolvedSessionResetRef.current) return false;
+    toast(AMBIGUOUS_NEW_SESSION_MESSAGE, "error", 7_000);
+    return true;
+  }, []);
+  const sessionResetOperationWaitersRef = useRef(
+    new Map<
+      string,
+      {
+        resolve(): void;
+        reject(error: Error): void;
+        timeout: ReturnType<typeof setTimeout>;
+      }
+    >(),
+  );
+  // NOTE: the build-session event machine's private refs (streaming bubble id,
+  // rAF buffer, per-run accumulators, sub-agent / compaction group ids) now live
+  // inside the useAgentEvents hook. Only the cross-cutting refs that App's render
+  // + other handlers also touch (stateRef above, the plan refs + stickToBottom
+  // below) stay here and are passed into the hook.
+
+  // Whether the transcript is "pinned" to the bottom. Auto-scroll only runs
+  // while pinned. The user scrolling up un-pins it — so they can read freely
+  // even while the agent keeps streaming — and scrolling back down to the
+  // bottom re-pins (rules in transcript-pin.ts). Default true so a fresh
+  // transcript follows the newest output.
+  const stickToBottomRef = useRef(true);
+  // The transcript's offset as last seen by a scroll event or left by our own
+  // scrollToBottom — the baseline that tells an up-scroll from a down-scroll.
+  const lastScrollTopRef = useRef(0);
+  const { ignoreRestoredScroll } = usePaneSwapViewState({
+    paneId,
+    scrollRef,
+    inputRef,
+    stickToBottomRef,
+    register: props.registerSwapViewState,
+  });
+
+  // Pin to the bottom. Images (screenshots / attachments) load asynchronously
+  // and grow the content after this fires, so it's also called from each image's
+  // onLoad to keep the newest content visible.
+  const scrollToBottom = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    el.scrollTo({ top: el.scrollHeight });
+    // A reader's scroll landing in this same frame shares one scroll event with
+    // this jump; measuring it from the pre-jump offset would read up as down.
+    lastScrollTopRef.current = el.scrollTop;
+  }, []);
+
+  // Motion continuity (upstream 9494aa2c): commit captured layout before paint.
+  useLayoutEffect(() => {
+    if (chatLayout.commit(stickToBottomRef.current, scrollToBottom) && scrollRef.current) {
+      lastScrollTopRef.current = scrollRef.current.scrollTop;
+    }
+  });
+  useLayoutEffect(() => () => chatLayout.cancel(), [chatLayout, hydrateNonce]);
+
+  // Same as scrollToBottom, but a no-op while the user has scrolled up to read.
+  const maybeScrollToBottom = useCallback(() => {
+    if (stickToBottomRef.current) scrollToBottom();
+  }, [scrollToBottom]);
+
+  // The dock (everything below the conversation) floats over the transcript's
+  // bottom edge; its height goes to the frame as --dock-h so a pinned chat keeps
+  // the newest message clear of it. A callback ref: the dock unmounts whenever a
+  // picker takes over the pane and must be observed afresh when it returns.
+  const transcriptFrameRef = useRef<HTMLDivElement>(null);
+  const dockElRef = useRef<HTMLDivElement | null>(null);
+  const dockRoRef = useRef<ResizeObserver | null>(null);
+  const dockRef = useCallback(
+    (dock: HTMLDivElement | null) => {
+      dockRoRef.current?.disconnect();
+      dockRoRef.current = null;
+      dockElRef.current = dock;
+      if (!dock) return;
+      const apply = (): void => {
+        const frame = transcriptFrameRef.current;
+        if (!frame) return;
+        const height = nextDockHeight(dock, frame.style.getPropertyValue("--dock-h"));
+        if (height === null) return;
+        frame.style.setProperty("--dock-h", height);
+        maybeScrollToBottom();
+      };
+      apply();
+      if (typeof ResizeObserver === "undefined") return;
+      const observer = new ResizeObserver(apply);
+      observer.observe(dock);
+      dockRoRef.current = observer;
+    },
+    [maybeScrollToBottom],
+  );
+
+  // Track the user's scroll intent by direction, not distance: while a reply
+  // streams, every commit re-pins, so any "near the bottom" allowance snapped a
+  // small scroll up straight back down. The wheel handler runs before the
+  // scroll it causes, so a commit landing in between can't erase the move.
+  // A pane-swap/appearance restore is layout, not the reader: it keeps the pin
+  // it restored but still becomes the baseline for the next direction check.
+  // The transcript's viewport size as last seen, so a scroll caused by a
+  // resize or a zoom step isn't mistaken for the reader's (transcript-pin.ts).
+  const lastViewportRef = useRef({ width: 0, height: 0 });
+  const noteTranscriptViewport = useCallback((el: HTMLElement): boolean => {
+    const last = lastViewportRef.current;
+    if (last.width === el.clientWidth && last.height === el.clientHeight) return false;
+    lastViewportRef.current = { width: el.clientWidth, height: el.clientHeight };
+    return true;
+  }, []);
+  const onTranscriptScroll = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    // Always refresh the size baseline, even for an ignored restore scroll.
+    const resized = noteTranscriptViewport(el);
+    if (!ignoreRestoredScroll()) {
+      stickToBottomRef.current = pinAfterScroll(
+        stickToBottomRef.current,
+        lastScrollTopRef.current,
+        el,
+        resized,
+      );
+    }
+    lastScrollTopRef.current = el.scrollTop;
+  }, [ignoreRestoredScroll, noteTranscriptViewport]);
+  const onTranscriptWheel = useCallback((e: React.WheelEvent<HTMLDivElement>) => {
+    const el = scrollRef.current;
+    if (el) stickToBottomRef.current = pinAfterWheel(stickToBottomRef.current, e, el);
+  }, []);
+  // The transcript remounts when a picker/home view takes over the pane; seed
+  // the direction baseline from the new node so its first scroll reads right.
+  // Observed through the ref callback (upstream 9494aa2c), not a mount effect,
+  // so a remounted node is never left unobserved. A pane resize or zoom step
+  // keeps a pinned chat on its newest line.
+  const transcriptRoRef = useRef<ResizeObserver | null>(null);
+  const attachTranscript = useCallback(
+    (el: HTMLDivElement | null) => {
+      scrollRef.current = el;
+      if (el) {
+        lastScrollTopRef.current = el.scrollTop;
+        noteTranscriptViewport(el);
+      }
+      transcriptRoRef.current?.disconnect();
+      transcriptRoRef.current = null;
+      if (!el || typeof ResizeObserver === "undefined") return;
+      const ro = new ResizeObserver(() => {
+        // Record the new size here too: a resize with no scroll event would
+        // otherwise make the reader's next scroll read as layout.
+        noteTranscriptViewport(el);
+        if (chatLayout.resized()) maybeScrollToBottom();
+      });
+      ro.observe(el);
+      transcriptRoRef.current = ro;
+    },
+    [maybeScrollToBottom, chatLayout, noteTranscriptViewport],
+  );
+
+  // Native drag leave/drop can be lost when the pointer exits the webview.
+  useEffect(() => {
+    if (!isFileDragOver) return;
+    const reset = (): void => setIsFileDragOver(false);
+    const timer = window.setTimeout(reset, 4000);
+    window.addEventListener("blur", reset);
+    window.addEventListener("drop", reset);
+    return () => {
+      window.clearTimeout(timer);
+      window.removeEventListener("blur", reset);
+      window.removeEventListener("drop", reset);
+    };
+  }, [isFileDragOver]);
+
+  const insertDroppedFolderPaths = useCallback((paths: string[]): void => {
+    if (paths.length === 0 || noInputSlashCommandRef.current) return;
+    const text = paths.join(" ");
+    const append = (prev: string): string => {
+      if (!prev.trim()) return text;
+      return `${prev}${/\s$/.test(prev) ? "" : " "}${text}`;
+    };
+    const previous = composerRef.current.input;
+    setInput(append);
+    setEnhancement((current) => followDraftEdit(current, previous, append(previous)));
+    requestAnimationFrame(() => inputRef.current?.focus());
+  }, []);
+
+  const showXpChip = useCallback((label: string) => {
+    const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    playSound("xp");
+    setXpChips((chips) => [...chips.slice(-2), { id, label }]);
+    window.setTimeout(() => {
+      setXpChips((chips) => chips.filter((chip) => chip.id !== id));
+    }, 1700);
+  }, []);
+
+  useEffect(() => {
+    if (!progress) return;
+    const previous = lastProgressXpRef.current;
+    lastProgressXpRef.current = progress.xp;
+    if (previous == null) return;
+    const gained = progress.xp - previous;
+    // Chip + sound only in the window whose run earned the XP — other windows
+    // still receive the frame (badge/percent update) but stay quiet.
+    if (gained > 0 && progress.origin) showXpChip(`+${gained} XP`);
+  }, [progress, showXpChip]);
+
+  useEffect(() => {
+    if (!levelUp || !levelUpNonce) return;
+    toast(
+      levelUp.rankChanged ? `Rank up! → ${levelUp.rankName}` : `Level up! → Level ${levelUp.to}`,
+      "success",
+      5200,
+    );
+    // Level/rank visuals show everywhere; sound only plays in the earning window.
+    if (levelUpOrigin) playSound("levelUp");
+    setRankCelebrateNonce(levelUpNonce);
+    const clearRank = window.setTimeout(() => setRankCelebrateNonce(null), 2400);
+
+    let clearConfetti = 0;
+    setConfettiNonce(null);
+    if (levelUp.tierChanged) {
+      setConfettiNonce(levelUpNonce);
+      clearConfetti = window.setTimeout(() => setConfettiNonce(null), 1900);
+    }
+
+    return () => {
+      window.clearTimeout(clearRank);
+      if (clearConfetti) window.clearTimeout(clearConfetti);
+    };
+  }, [levelUp, levelUpNonce, levelUpOrigin]);
+
+  // Re-pin to the bottom before every paint — but only while pinned. The live
+  // tool panel + activity bar (.liveregion) grow/shrink below the transcript as
+  // tools run and finish; since the transcript is a flexible sibling, that
+  // growth steals height from it and would leave the newest content (often the
+  // just-sent user prompt) scrolled under the fold. Keying this layout effect on
+  // the live-region's height inputs (tool feed, run state, done status) AND
+  // `items` re-pins synchronously after layout but before paint, so the prompt
+  // is never hidden. useLayoutEffect (not a ResizeObserver) avoids the post-paint
+  // flash and the RO's unreliable timing relative to the flex re-layout. The
+  // stick-to-bottom gate keeps it from yanking the view away while the user is
+  // scrolled up reading mid-stream.
+  useLayoutEffect(() => {
+    maybeScrollToBottom();
+  }, [items, liveToolFeed, running, doneStatus, queuedCount, maybeScrollToBottom]);
+
+  // Settle the scroll position after a session hydrates. The single layout-effect
+  // scroll above runs the instant `items` is set, but the transcript keeps
+  // growing afterward — web fonts swap in (FOUT reflows text taller), code blocks
+  // and markdown finish laying out — which leaves the view pinned a little above
+  // the true bottom. Re-pin across the next two frames and once fonts are ready,
+  // gated on stick-to-bottom so it never yanks the view if the user scrolled up.
+  useEffect(() => {
+    if (!hydrated) return;
+    let raf1 = 0;
+    let raf2 = 0;
+    raf1 = requestAnimationFrame(() => {
+      maybeScrollToBottom();
+      // After the first pin, so the rows that dissolve are the ones in view.
+      if (scrollRef.current) dissolveInVisible(scrollRef.current);
+      raf2 = requestAnimationFrame(maybeScrollToBottom);
+    });
+    let cancelled = false;
+    void document.fonts?.ready.then(() => {
+      if (!cancelled) maybeScrollToBottom();
+    });
+    return () => {
+      cancelled = true;
+      cancelAnimationFrame(raf1);
+      cancelAnimationFrame(raf2);
+    };
+  }, [hydrated, hydrateNonce, maybeScrollToBottom]);
+
+  useEffect(() => {
+    stateRef.current = state;
+  }, [state]);
+
+  const [windowFocused, setWindowFocused] = useState(() => document.hasFocus());
+  // Cosmetic work only belongs to a focused, visible, empty code composer.
+  const animatePlaceholder =
+    windowFocused &&
+    props.windowFocused !== false &&
+    props.focused !== false &&
+    !needsProject &&
+    !showPicker &&
+    !showChecklist &&
+    workspaceMode === "code" &&
+    input.length === 0;
+  // The empty composer is one line tall, so a hint wider than the field is cut
+  // mid-phrase; swap to a short hint instead. Width comes from the field's own
+  // resize observer; text is measured with the field's font on a canvas.
+  const [inputTextBox, setInputTextBox] = useState<FieldTextBox | null>(null);
+  const measureCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const measureHint = useCallback(
+    (text: string): number | null => {
+      if (!inputTextBox) return null;
+      measureCanvasRef.current ??= document.createElement("canvas");
+      const context = measureCanvasRef.current.getContext("2d");
+      if (!context) return null;
+      context.font = inputTextBox.font;
+      return context.measureText(text).width;
+    },
+    [inputTextBox],
+  );
+  const inputPlaceholder = fitPlaceholder(
+    running
+      ? RUNNING_INPUT_PLACEHOLDERS[placeholderIndex % RUNNING_INPUT_PLACEHOLDERS.length]
+      : INPUT_PLACEHOLDERS[placeholderIndex % INPUT_PLACEHOLDERS.length],
+    running ? COMPACT_RUNNING_PLACEHOLDER : COMPACT_IDLE_PLACEHOLDER,
+    inputTextBox?.availablePx ?? null,
+    measureHint,
+  );
+  const setAnimatedPlaceholder = useCallback((text: string) => {
+    displayPlaceholderRef.current = text;
+    setDisplayPlaceholder(text);
+  }, []);
+  useEffect(() => {
+    if (!animatePlaceholder) return;
+    const id = window.setInterval(() => {
+      setPlaceholderIndex((i) => i + 1);
+    }, INPUT_PLACEHOLDER_INTERVAL_MS);
+    return () => window.clearInterval(id);
+  }, [animatePlaceholder]);
+  useEffect(() => {
+    if (!animatePlaceholder) {
+      setAnimatedPlaceholder(inputPlaceholder);
+      return;
+    }
+    if (displayPlaceholderRef.current === inputPlaceholder) return;
+
+    let frame = 0;
+    const id = window.setInterval(() => {
+      frame += 1;
+      const text =
+        frame >= PLACEHOLDER_SHUFFLE_FRAMES
+          ? inputPlaceholder
+          : shufflePlaceholderFrame(inputPlaceholder, frame);
+      setAnimatedPlaceholder(text);
+      if (frame >= PLACEHOLDER_SHUFFLE_FRAMES) window.clearInterval(id);
+    }, PLACEHOLDER_SHUFFLE_FRAME_MS);
+    return () => window.clearInterval(id);
+  }, [animatePlaceholder, inputPlaceholder, setAnimatedPlaceholder]);
+
+  // Stop the browser from navigating to / opening a file dropped anywhere
+  // (which would replace the whole UI with the raw file). The active chat view
+  // handles files as attachments; native Tauri drop events add folder paths to
+  // the draft because browser File objects cannot represent directories well.
+  useEffect(() => {
+    const prevent = (e: DragEvent): void => {
+      // Only files — don't interfere with text selection drags.
+      if (hasDraggedFiles(e.dataTransfer)) e.preventDefault();
+    };
+    window.addEventListener("dragover", prevent);
+    window.addEventListener("drop", prevent);
+    return () => {
+      window.removeEventListener("dragover", prevent);
+      window.removeEventListener("drop", prevent);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!ownsWindowGlobals) return;
+    let disposed = false;
+    let unlisten: SafeTauriUnlisten | undefined;
+    void getCurrentWebview()
+      .onDragDropEvent((event) => {
+        if (disposed) return;
+        const payload = event.payload;
+        if (payload.type === "enter" || payload.type === "over") {
+          if (canHandleWindowFileDrop()) setIsFileDragOver(true);
+          return;
+        }
+        if (payload.type === "leave") {
+          setIsFileDragOver(false);
+          return;
+        }
+        setIsFileDragOver(false);
+        if (!canHandleWindowFileDrop() || payload.paths.length === 0) return;
+        const generation = attachmentGenerationRef.current;
+        void stageAttachments(async () => {
+          const infos = await getDroppedPathInfo(payload.paths);
+          if (disposed || generation !== attachmentGenerationRef.current) return [];
+          insertDroppedFolderPaths(infos.filter((info) => info.isDir).map((info) => info.path));
+          const filePaths = infos.filter((info) => !info.isDir).map((info) => info.path);
+          return Promise.all(
+            filePaths.map(async (path): Promise<PendingAttachment | null> => {
+              const attachment = await readDroppedFileAttachment(path);
+              return attachment ? attachmentToPending(attachment) : null;
+            }),
+          );
+        });
+      })
+      .then((off) => {
+        const stop = createSafeTauriUnlisten(off, "webview-drag-drop");
+        if (disposed) void stop();
+        else unlisten = stop;
+      });
+    return () => {
+      disposed = true;
+      void unlisten?.();
+    };
+  }, [insertDroppedFolderPaths, ownsWindowGlobals, stageAttachments]);
+
+  // Keep the native window title aligned with the visible title-bar context.
+  useEffect(() => {
+    if (!ownsWindowGlobals) return;
+    const fallbackTitle = workspaceProductName(workspaceMode);
+    const title =
+      !needsProject && !showPicker
+        ? formatWorkspaceTitle(
+            state?.cwd,
+            state?.gitBranch,
+            fallbackTitle,
+            state?.gitDirtyFileCount,
+            state?.gitHubIssues ?? null,
+            state?.gitHubPRs ?? null,
+          )
+        : fallbackTitle;
+    setWindowTitle(title);
+  }, [
+    needsProject,
+    ownsWindowGlobals,
+    showPicker,
+    state?.cwd,
+    state?.gitBranch,
+    state?.gitDirtyFileCount,
+    state?.gitHubIssues,
+    state?.gitHubPRs,
+    workspaceMode,
+  ]);
+
+  // Auto-grow the composer without letting its temporary collapse un-pin the transcript.
+  const autosizeInput = useCallback(() => {
+    autosizeComposer(inputRef.current, scrollRef.current, stickToBottomRef.current);
+  }, []);
+
+  useLayoutEffect(() => {
+    autosizeInput();
+  }, [input, enhanceAnim, autosizeInput]);
+
+  // Re-measure when wrapping changes independently of the draft value.
+  const inputResizeObserverRef = useRef<ResizeObserver | null>(null);
+  const inputResizeFrameRef = useRef<number | null>(null);
+  const attachInput = useCallback(
+    (el: HTMLTextAreaElement | null) => {
+      inputRef.current = el;
+      inputResizeObserverRef.current?.disconnect();
+      inputResizeObserverRef.current = null;
+      if (inputResizeFrameRef.current !== null) {
+        cancelAnimationFrame(inputResizeFrameRef.current);
+        inputResizeFrameRef.current = null;
+      }
+      if (!el || typeof ResizeObserver === "undefined") return;
+      // Zero width means not laid out (jsdom, hidden pane): keep the full hint.
+      const trackTextBox = (): void => {
+        setInputTextBox(el.clientWidth > 0 ? fieldTextBox(el) : null);
+      };
+      trackTextBox();
+      let lastWidth = el.clientWidth;
+      const observer = new ResizeObserver(() => {
+        const width = el.clientWidth;
+        if (width === lastWidth) return;
+        lastWidth = width;
+        trackTextBox();
+        if (inputResizeFrameRef.current !== null) {
+          cancelAnimationFrame(inputResizeFrameRef.current);
+        }
+        inputResizeFrameRef.current = requestAnimationFrame(() => {
+          inputResizeFrameRef.current = null;
+          autosizeInput();
+        });
+      });
+      observer.observe(el);
+      inputResizeObserverRef.current = observer;
+    },
+    [autosizeInput],
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    void document.fonts?.ready.then(() => {
+      if (!cancelled) autosizeInput();
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [autosizeInput]);
+
+  // Keyboard shortcuts for multi-window navigation.
+  //   Cmd/Ctrl+N         → new project window
+  //   Cmd/Ctrl+`          → cycle forward through windows (reading order)
+  //   Cmd/Ctrl+Shift+`    → cycle backward
+  //   Cmd/Ctrl+Shift+A    → auto-arrange all windows into a clean grid
+  useEffect(() => {
+    if (!ownsWindowGlobals) return;
+    const onKey = (e: KeyboardEvent): void => {
+      const meta = e.metaKey || e.ctrlKey;
+      if (!meta) return;
+      // New window: Cmd/Ctrl + N (no Shift/Alt).
+      if (e.key.toLowerCase() === "n" && !e.altKey && !e.shiftKey) {
+        e.preventDefault();
+        void newWindow();
+        return;
+      }
+      // Cycle windows: Cmd/Ctrl + Backquote (Shift = backward).
+      // Use e.code (physical key) — Shift turns ` into ~, but code stays stable.
+      if (e.code === "Backquote" && !e.altKey) {
+        e.preventDefault();
+        void focusWindowByOffset(e.shiftKey ? -1 : 1);
+        return;
+      }
+      // Auto-arrange all windows: Cmd/Ctrl + Shift + A.
+      if (e.shiftKey && (e.key === "a" || e.key === "A") && !e.altKey) {
+        e.preventDefault();
+        void arrangeAllWindows();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [ownsWindowGlobals]);
+
+  // Cmd/Ctrl+K → palette of the commands whose files declare a `collection`
+  // marker, grouped by `group` frontmatter (missing → Other), plus any command
+  // files that could not be listed. Ordinary commands stay in the slash menu.
+  // An unreadable file cannot reveal its collection, so any known problem also
+  // opens the palette (otherwise a fully broken collection would look like
+  // nothing); with no collection commands and no problems the shortcut stays
+  // silent. Every pane registers this; only the focused pane in the focused
+  // window acts.
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const collectionCommands = useMemo(() => paletteCommands(commands), [commands]);
+  const hasCollectionCommands = collectionCommands.length > 0;
+  const paletteAvailable = hasCollectionCommands || paletteProblems.length > 0;
+  const paneKeyFocus = windowFocused && props.windowFocused !== false && props.focused !== false;
+  useEffect(() => {
+    if (!paneKeyFocus || !paletteAvailable) return;
+    const onKey = (e: KeyboardEvent): void => {
+      if (!(e.metaKey || e.ctrlKey) || e.shiftKey || e.altKey) return;
+      if (e.key.toLowerCase() !== "k" || e.defaultPrevented) return;
+      // Needs a chat box to fill, and never stacks over another dialog.
+      if (!inputRef.current) return;
+      if (document.querySelector('[role="dialog"][aria-modal="true"]')) return;
+      e.preventDefault();
+      setPaletteOpen(true);
+      void refreshCommands();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [paneKeyFocus, paletteAvailable, refreshCommands]);
+
+  // Position in the multi-window reading order (e.g. window 2 of 4), plus
+  // whether this window is the focused one. Driven by the Rust `window-order`
+  // broadcast so the label updates automatically when windows move/close.
+  const [windowIndex, setWindowIndex] = useState<number | null>(null);
+  const [windowTotal, setWindowTotal] = useState(1);
+  const [isThisFocused, setIsThisFocused] = useState(true);
+
+  // Focus the chat input whenever this window gains focus (or clicked anywhere),
+  // so switching between project windows lands the cursor in the input without
+  // a second click. Skips when the user is selecting text or focused elsewhere
+  // intentionally (e.g. a menu button).
+  useEffect(() => {
+    const focusInput = (): void => {
+      const active = document.activeElement;
+      if (active instanceof HTMLElement && active.closest("button, select")) return;
+      if (window.getSelection()?.toString()) return;
+      // A modal/overlay owns keyboard focus while open — stealing it back to the
+      // chat input means the user can't type in the modal's fields. Bail when one
+      // is present (every modal renders inside `.modal-backdrop`).
+      if (document.querySelector(".modal-backdrop, .checklist-screen")) return;
+      // Don't yank focus out of another editable field (a different input,
+      // textarea, or contenteditable) the user is intentionally typing in.
+      if (
+        active instanceof HTMLElement &&
+        active !== inputRef.current &&
+        (active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.isContentEditable)
+      ) {
+        return;
+      }
+      inputRef.current?.focus();
+    };
+    const onFocus = (): void => {
+      setWindowFocused(true);
+      focusInput();
+    };
+    const onBlur = (): void => setWindowFocused(false);
+    window.addEventListener("focus", onFocus);
+    window.addEventListener("blur", onBlur);
+    window.addEventListener("mouseup", focusInput);
+    return () => {
+      window.removeEventListener("focus", onFocus);
+      window.removeEventListener("blur", onBlur);
+      window.removeEventListener("mouseup", focusInput);
+    };
+  }, []);
+
+  // Subscribe to the reading-order broadcast from Rust so each window knows its
+  // position (e.g. "1/4") and whether it's focused. Updates automatically when
+  // windows are arranged, moved (debounced), created, closed, or focused.
+  useEffect(() => {
+    if (!ownsWindowGlobals) return;
+    let disposed = false;
+    let unlisten: SafeTauriUnlisten | undefined;
+    void onWindowOrder((e) => {
+      const idx = e.order.indexOf(windowLabel);
+      setWindowIndex(idx >= 0 ? idx + 1 : null);
+      setWindowTotal(e.order.length);
+      setIsThisFocused(e.focused === windowLabel);
+    }).then((stop) => {
+      if (disposed) void stop();
+      else unlisten = stop;
+    });
+    return () => {
+      disposed = true;
+      void unlisten?.();
+    };
+  }, [ownsWindowGlobals]);
+
+  // Global UI click sound — plays only when an actual interactive element is
+  // clicked (buttons, links, role=button, options, labels), never bare
+  // background/text. Capture phase so it fires even when a handler stops
+  // propagation; left button only.
+  useEffect(() => {
+    if (!ownsWindowGlobals) return;
+    const INTERACTIVE = "button, a, [role='button'], [role='option'], label, summary, select";
+    const onClick = (e: MouseEvent): void => {
+      if (e.button !== 0) return;
+      const target = e.target as Element | null;
+      const el = target?.closest?.(INTERACTIVE);
+      if (!el) return;
+      if (el.hasAttribute("disabled") || el.getAttribute("aria-disabled") === "true") return;
+      // The autopilot toggle plays its own dedicated sound (only when turning
+      // on) instead of the generic click, so skip it here to avoid a double cue.
+      if (el.closest("[data-suppress-click-sound]")) return;
+      playSound("click");
+    };
+    document.addEventListener("click", onClick, true);
+    return () => document.removeEventListener("click", onClick, true);
+  }, [ownsWindowGlobals]);
+
+  useEffect(() => {
+    if (props.focused && !props.preserveWorkspaceFocus?.()) inputRef.current?.focus();
+  }, [props.focused, props.preserveWorkspaceFocus]);
+
+  const {
+    registerSessionResetOperationWaiter,
+    shouldApplySessionReset,
+    onContinuationAccepted,
+    onAuthoritativeSessionReset,
+  } = useSessionResetCoordinator({
+    observedSessionResetOperationsRef,
+    sessionResetOperationWaitersRef,
+    recoveredSessionResetOperationRef,
+    unresolvedSessionResetRef,
+    generationRef,
+    sessionMutationLockRef,
+    stateRef,
+    continuationResetsRef,
+    retiredConversationIdsRef,
+    continuationAttemptRef,
+    appliedContinuationMessagesRef,
+    promptSessionResetEpochRef,
+    promptSubmissionPendingRef,
+    kenCurrentSubmissionRef,
+    setState,
+    setItems,
+    nextId,
+  });
+
+  const {
+    state: roadmapDraftState,
+    dispatch: dispatchRoadmapDraft,
+    refresh: refreshRoadmapDraft,
+    refreshError: roadmapDraftRefreshError,
+    onChange: onRoadmapPhaseDraftChange,
+    approve: approveRoadmapDraft,
+    reject: rejectRoadmapDraft,
+  } = useRoadmapDraft(
+    client,
+    JSON.stringify([state?.sessionId, state?.cwd, hydrateNonce]),
+    hydrated,
+    () => projectNotesActionsRef.current?.refresh(),
+  );
+  const onAstraStateChange = useCallback(() => {
+    astraAuthoritativeRevisionRef.current += 1;
+  }, []);
+
+  // Build-session SSE handling + assistant-streaming helpers live in the
+  // useAgentEvents hook (mirrors useKenMentor). It owns the event machine's
+  // private refs + the streaming helpers; App keeps owning the build-session
+  // state (its render + other handlers use it) and passes the setters +
+  // cross-cutting refs in. App consumes `handleEvent` (for the SSE subscription)
+  // and the two helpers it still calls directly (`pushItem`, `endStreamingText`).
+  const programmaticChat = useProgrammaticChatState({
+    paneId,
+    generationRef,
+    promptSessionResetEpochRef,
+    state,
+    workspaceMode,
+  });
+  const {
+    programmaticGeneration,
+    programmaticOpen,
+    setProgrammaticOpen,
+    programmatic,
+    dispatchProgrammatic,
+    onProgrammaticAssessment,
+    onProgrammaticActivity,
+  } = programmaticChat;
+
+  // A goal cut off by a daemon restart carries on (pane-scoped).
+  const resumeCutOffGoal = useCallback(() => {
+    void resumeGoal(paneId).catch((e: unknown) =>
+      toast(
+        `Couldn't pick the goal back up: ${e instanceof Error ? e.message : String(e)}`,
+        "error",
+      ),
+    );
+  }, [paneId]);
+  // Every run of a started goal, for its finish card (see goal-finish).
+  const [goalRuns, setGoalRuns] = useState<readonly GoalRun[]>([]);
+  const goalRunTargetRef = useRef<string | null>(null);
+  const recordGoalRun = useCallback((run: RunEnd) => {
+    const goalId = goalRunTargetRef.current;
+    if (goalId) setGoalRuns((runs) => recordRun(runs, { ...run, goalId }));
+  }, []);
+
+  const { handleEvent, pushItem, acceptSubmission, endStreamingText, replacePlanReview } =
+    useAgentEvents({
+      client,
+      setItems,
+      nextId,
+      handleKenEvent,
+      hydrateKen,
+      handleAutopilotEvent,
+      handleActivityEvent,
+      setState,
+      setTasks,
+      setProjectTasks,
+      setStatus,
+      setRunning,
+      setLiveToolFeed,
+      setTokens,
+      setContextTokens,
+      setDoneStatus,
+      setIsThinking,
+      setThinkingStartTs,
+      setThinkingAccumMs,
+      setPlanTotal,
+      setPlanDone,
+      setPlanReview,
+      setQueuedCount,
+      setQueuedMessages,
+      setAttachments: () => {
+        if (!unresolvedSessionResetRef.current) clearAttachments();
+      },
+      setCommands,
+      refreshCommands,
+      setModels,
+      onAstraStateChange,
+      onRoadmapPhaseDraftChange,
+      onRoadmapPhaseDraftRefresh: refreshRoadmapDraft,
+      onProgrammaticActivity,
+      onProgrammaticAssessment,
+      programmaticGeneration,
+      stateRef,
+      planDoneRef,
+      planTotalRef,
+      planReviewPathRef,
+      pendingPlanTotalRef,
+      stickToBottomRef,
+      liveText,
+      onSessionReset: onAuthoritativeSessionReset,
+      shouldApplySessionReset,
+      onContinuationAccepted,
+      onGoalNeedsResume: resumeCutOffGoal,
+      onRunEnd: recordGoalRun,
+    });
+
+  const { programmaticBusy, performProgrammatic, runSelectedProgrammatic } =
+    useProgrammaticChatActions({
+      chat: programmaticChat,
+      client,
+      workspaceMode,
+      hydrated,
+      hydrateNonce,
+      running,
+      planGateBusy,
+      autopilotReviewing,
+      kenRunning,
+      planMode: state?.planMode,
+      stateRef,
+      lifecycleEpochRef,
+      mountedRef,
+      refreshCommands,
+      acceptSubmission,
+      nextId,
+    });
+
+  const handleEventRef = useRef(handleEvent);
+  handleEventRef.current = handleEvent;
+  const hydrationEventsRef = useRef<{
+    epoch: number;
+    generation: typeof generationRef.current;
+    events: Parameters<typeof handleEvent>[0][];
+  } | null>(null);
+
+  // Run the connect/ready flow against the current sidecar and hydrate state,
+  // models, and commands. Re-invoked after a project switch respawns the
+  // sidecar (its port changes, so we re-wait for readiness).
+  const hydrate = useCallback(async (): Promise<void> => {
+    const epoch = ++hydrateEpochRef.current;
+    const unresolved = unresolvedSessionResetRef.current;
+    const lifecycle = lifecycleEpochRef.current;
+    const pending = {
+      epoch,
+      generation: generationRef.current,
+      events: [] as Parameters<typeof handleEvent>[0][],
+    };
+    hydrationEventsRef.current = pending;
+    const isCurrent = () =>
+      mountedRef.current &&
+      epoch === hydrateEpochRef.current &&
+      lifecycle === lifecycleEpochRef.current &&
+      pending.generation === generationRef.current;
+    const replayEvents = () => {
+      if (hydrationEventsRef.current !== pending) return;
+      hydrationEventsRef.current = null;
+      for (const event of pending.events) handleEventRef.current(event);
+    };
+    readyRef.current = false;
+    setHydrated(false);
+    setLiveFromId(Number.POSITIVE_INFINITY);
+    setStatus("connecting to agent\u2026");
+    setConnectError(null);
+    setModelsFailed(false);
+    try {
+      const ready = await client.waitForReady();
+      if (!isCurrent()) return;
+      adoptGeneration(ready.generation);
+      pending.generation = ready.generation;
+      const generation = generationRef.current;
+      const applyKenHydration = captureKenHydration();
+      const st = await getState().catch(() => null);
+      if (!isCurrent()) return;
+      if (st) applyKenHydration(st.kenState);
+      if (st) {
+        setState(st);
+        setRunning(st.running);
+        setContextTokens(st.contextTokens);
+        replacePlanReview(st.pendingPlanReview ?? null);
+      }
+      const available = await listModels();
+      if (!isCurrent()) return;
+      // null = the fetch failed; keep whatever the picker already had.
+      if (available) setModels(available);
+      setModelsFailed(available === null);
+      await refreshCommands();
+      if (!isCurrent()) return;
+      // Project task list for the Tasks modal + nav button.
+      try {
+        const projectTasks = await listTasks();
+        if (!isCurrent()) return;
+        setProjectTasks(projectTasks);
+      } catch (error) {
+        if (!isCurrent()) return;
+        setTasksLoad("error");
+        toast(taskErrorMessage(error), "error");
+      }
+      // Hydrate the transcript when resuming an existing session — the webview
+      // only sees live SSE events, so past messages must be fetched explicitly.
+      const history = await listHistory();
+      if (
+        !isCurrent() ||
+        generation !== generationRef.current ||
+        unresolvedSessionResetRef.current !== unresolved
+      )
+        return;
+      if (history.length > 0 || unresolved) {
+        clearKenStream();
+        // A freshly hydrated session lands at the bottom (newest message).
+        stickToBottomRef.current = true;
+        // Seed ↑/↓ recall from the resumed prompts (chronological), so history
+        // works after reopening a session — not just within the live one. App-
+        // button prompts (shimmer labels) weren't typed by the user, so skip
+        // them; everything else the user actually entered is included.
+        promptHistoryRef.current = history
+          .filter((h) => h.role === "user" && !(!h.command && recoverPromptLabel(h.text)))
+          .map((h) => {
+            const parsed = !h.command ? parseReferencedFiles(h.text) : null;
+            return (parsed ? parsed.text : h.text).trim();
+          })
+          .filter((t, i, a) => t.length > 0 && a[i - 1] !== t);
+        // Reloaded rows get new keys; the goal tally starts again from them.
+        setTranscriptEpoch((epoch) => epoch + 1);
+        setItems(
+          history.flatMap((h): Item | Item[] => {
+            if (h.mcpToolFailure)
+              return {
+                kind: "mcp_tool_failure",
+                id: nextId(),
+                name: h.mcpToolFailure.name,
+                result: h.mcpToolFailure.result,
+              };
+            // Tool-produced images (screenshots, generate_image) — reconstructed
+            // from persisted ImageContent blocks, downsampled by the sidecar.
+            if (h.toolImages && h.toolImages.length > 0)
+              return [
+                ...(h.text ? [{ kind: "info" as const, id: nextId(), text: h.text }] : []),
+                {
+                  kind: "images",
+                  id: nextId(),
+                  images: h.toolImages.map((img) => ({ src: img.src, path: img.path })),
+                },
+              ];
+            // Sub-agent delegation group — reconstructed from persisted tool_call
+            // + tool_result pairing. toolUseCount/activities aren't persisted, so
+            // the resumed feed shows agent name + status only.
+            if (h.subagentGroup && h.subagentGroup.length > 0)
+              return {
+                kind: "subagent_group",
+                id: nextId(),
+                agents: h.subagentGroup.map((a, i) => ({
+                  toolCallId: `history-${i}`,
+                  agentName: a.agentName,
+                  status: a.status,
+                  activities: [],
+                  toolUseCount: a.toolUseCount,
+                  tokenUsage: { input: 0, output: 0 },
+                })),
+              };
+            if (h.hook) return { kind: "hook", id: nextId(), hook: h.hook };
+            // A resumed compacted session shows the quiet compaction notice in
+            // place of the raw summary body (counts aren't persisted).
+            if (h.compacted)
+              return {
+                kind: "compaction",
+                id: nextId(),
+                status: "done",
+                originalCount: h.compactionCounts?.originalCount,
+                newCount: h.compactionCounts?.newCount,
+              };
+            // Persisted display-only markers: plan-mode banner, task header,
+            // error rows, and the video-capability info row — all rendered
+            // identically to their live counterparts.
+            if (h.plan) return { kind: "plan", id: nextId(), reason: h.plan.reason };
+            if (h.task) return { kind: "task", id: nextId(), title: h.task.title };
+            if (h.error) {
+              return {
+                kind: "error",
+                id: nextId(),
+                ...readChatError({ ...h.error }, h.error.scope, true),
+              };
+            }
+            if (h.infoKind === "video_warning")
+              return { kind: "info", id: nextId(), text: VIDEO_CAPABILITY_WARNING };
+            // Ken "Send to GG Coder" prompts: restore the shimmer label, not the
+            // full prompt body (matches live).
+            if (h.kenSent && h.role === "user")
+              return { kind: "user", id: nextId(), text: h.text, kenSent: true };
+            // Persisted Ken (mentor) turns: his reply restores as a Ken bubble,
+            // the `@Ken` question as a Ken-tinted user bubble (matches live).
+            if (h.ken && h.role === "assistant") return { kind: "ken", id: nextId(), text: h.text };
+            if (h.ken && h.role === "user")
+              return { kind: "user", id: nextId(), text: h.text, ken: true };
+            // Persisted autopilot verdict marker: render identically to the
+            // live item so a resumed session never shows the raw verdict text
+            // (e.g. "ALL_CLEAR") the model actually replied with.
+            if (h.autopilot)
+              return {
+                kind: "autopilot",
+                id: nextId(),
+                phase: h.autopilot.phase,
+                reason: h.autopilot.reason,
+                body: h.autopilot.body,
+                copySeed: h.autopilot.copySeed,
+              };
+            if (h.role !== "user") return { kind: h.role, id: nextId(), text: h.text };
+            // App-button prompts (e.g. "Initialize Git") were shown live as a
+            // friendly shimmer label, not the expanded body. The label is
+            // webview-only, so recover it from the restored prompt text. Slash
+            // commands are already collapsed to `/name` by the sidecar (h.command).
+            const label = !h.command ? recoverPromptLabel(h.text) : null;
+            // Recover @-referenced files appended to the prompt so resumed
+            // sessions show the same file chips (and clean text) as when sent.
+            const parsed = !h.command && label === null ? parseReferencedFiles(h.text) : null;
+            return {
+              kind: "user",
+              id: nextId(),
+              text: parsed ? parsed.text : h.text,
+              command: h.command || label !== null,
+              ...(label !== null ? { label } : {}),
+              images: h.images && h.images.length > 0 ? h.images : undefined,
+              ...(parsed && parsed.files.length > 0 ? { files: parsed.files } : {}),
+              ...(h.enhancements && h.enhancements.length > 0
+                ? { enhancements: h.enhancements }
+                : {}),
+            };
+          }),
+        );
+      }
+      if (st?.conversationId && st.sessionId && unresolvedSessionResetRef.current === unresolved) {
+        if (unresolved?.operationId)
+          recoveredSessionResetOperationRef.current = unresolved.operationId;
+        unresolvedSessionResetRef.current = null;
+        stateRef.current = st;
+      }
+      setStatus(st?.runState === "cancelling" ? "cancelling..." : "ready");
+      // Apply the snapshot before live events, including their buffered stream
+      // writes. Never replace a transcript after opening the submission gate.
+      if (isPendingAskSnapshot(st?.pendingAsks)) {
+        const pendingAsks = st.pendingAsks;
+        const deferredAsks = isPendingAskSnapshot(st.deferredAsks) ? st.deferredAsks : undefined;
+        setItems((previous) => reconcilePendingAsks(previous, pendingAsks, nextId, deferredAsks));
+      }
+      // A new goal's coordinator speaks first; a goal cut off mid-work carries on.
+      if (st?.goal?.needsKickoff) {
+        void kickoffGoal(paneId).catch((e: unknown) =>
+          toast(
+            `Couldn't start the goal's first reply: ${e instanceof Error ? e.message : String(e)}`,
+            "error",
+          ),
+        );
+      }
+      if (st?.goal?.needsResume) {
+        void resumeGoal(paneId).catch((e: unknown) =>
+          toast(
+            `Couldn't pick the goal back up: ${e instanceof Error ? e.message : String(e)}`,
+            "error",
+          ),
+        );
+      }
+      replayEvents();
+      readyRef.current = true;
+      setHydrated(true);
+    } catch (err) {
+      if (!isCurrent()) return;
+      replayEvents();
+      const message = err instanceof Error ? err.message : String(err);
+      setStatus(`agent failed to start: ${message}`);
+      setConnectError(message);
+      setHydrated(true);
+    } finally {
+      if (hydrationEventsRef.current === pending) hydrationEventsRef.current = null;
+      if (isCurrent()) setLiveFromId(idSeq + 1);
+    }
+  }, [
+    client,
+    adoptGeneration,
+    getState,
+    refreshCommands,
+    listHistory,
+    listModels,
+    listTasks,
+    setProjectTasks,
+    replacePlanReview,
+    captureKenHydration,
+    clearKenStream,
+    paneId,
+  ]);
+
+  useEffect(() => {
+    // Keep the pane subscription (and its identity-lookup event buffer) alive
+    // across renders; only the handler changes when UI state changes.
+    const unsub = subscribe((event) => {
+      const pending = hydrationEventsRef.current;
+      if (pending) {
+        if (
+          pending.epoch === hydrateEpochRef.current &&
+          pending.generation === generationRef.current
+        ) {
+          pending.events.push(event);
+        }
+        return;
+      }
+      handleEventRef.current(event);
+    });
+    return () => unsub();
+  }, [subscribe]);
+
+  // Boot-time/reload workspace recovery: Rust keeps THIS window's active target
+  // for its lifetime. A restored app launch and a WebKit content-process reload
+  // therefore both hydrate straight back into the existing daemon session.
+  useEffect(() => {
+    if (kind !== "primary" || props.workspaceOwnsSessionLifecycle) {
+      setRestoreChecked(true);
+      return;
+    }
+    const epoch = lifecycleEpochRef.current;
+    void restoreTarget()
+      .then((restoredTarget) => {
+        if (!mountedRef.current || lifecycleEpochRef.current !== epoch) return;
+        if (restoredTarget) {
+          setWorkspaceMode(restoredTarget.mode);
+          onProjectChosen();
+        }
+      })
+      .finally(() => {
+        if (mountedRef.current && lifecycleEpochRef.current === epoch) setRestoreChecked(true);
+      });
+  }, [kind, props.workspaceOwnsSessionLifecycle]);
+
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: SafeTauriUnlisten | undefined;
+    void onModelsChanged(() => {
+      setModelCatalogRefreshNonce((nonce) => nonce + 1);
+      // A refreshed catalog invalidates an open picker, even when it compares equal.
+      setDeckPanel((panel) => (panel === "model" ? null : panel));
+      void (async () => {
+        try {
+          await waitForReady();
+          const [available, refreshedState] = await Promise.all([
+            client.listModels(),
+            client.getState(),
+          ]);
+          if (cancelled) return;
+          if (available) setModels(available);
+          setModelsFailed(available === null);
+          setState(refreshedState);
+        } catch {
+          // The normal readiness/hydration path reports daemon failures.
+        }
+      })();
+    }).then((stop) => {
+      if (cancelled) void stop();
+      else unlisten = stop;
+    });
+    return () => {
+      cancelled = true;
+      void unlisten?.();
+    };
+  }, [client, waitForReady]);
+
+  useEffect(() => {
+    // Only the main window auto-connects to its default project. Secondary
+    // (project-*) windows show the picker first and connect on selection.
+    // hydrateNonce forces a re-run when re-selecting a session in an already-
+    // connected window (needsProject stays false there).
+    if (!needsProject) void hydrate();
+  }, [needsProject, hydrate, hydrateNonce]);
+
+  // Open Tasks in the deck, refreshing the list from the sidecar first so it
+  // reflects any tasks the agent just added.
+  const openTasks = useCallback(() => {
+    setDeckPanel("todo");
+    setTasksLoad("loading");
+    void listTasks()
+      .then(setProjectTasks)
+      .catch((error: unknown) => {
+        setTasksLoad("error");
+        toast(taskErrorMessage(error), "error");
+      });
+  }, [listTasks, setProjectTasks]);
+
+  const refreshChecklist = useCallback(
+    async (completed?: {
+      id: string;
+      checkedAt: string | null;
+      expectsRecord: boolean;
+    }): Promise<void> => {
+      const fetchId = ++checklistFetchRef.current;
+      // Pane-scoped: Rust resolves this pane's session from its paneId.
+      const snapshot = await getChecklist();
+      if (fetchId !== checklistFetchRef.current) return;
+      setChecklistLoad(snapshot ? { kind: "ready", snapshot } : { kind: "error" });
+      if (snapshot) {
+        setChecklistNotice((previous) => {
+          const notice = completed?.expectsRecord
+            ? {
+                id: completed.id,
+                checkedAt: completed.checkedAt,
+                message: "No result recorded. View the conversation for details.",
+              }
+            : previous;
+          if (!notice) return null;
+          const checkedAt = snapshot.items.find((item) => item.id === notice.id)?.checkedAt;
+          return checkedAt && checkedAt !== notice.checkedAt ? null : notice;
+        });
+      }
+    },
+    [getChecklist],
+  );
+  const openChecklist = useCallback(() => {
+    setShowChecklist(true);
+    setChecklistLoad({ kind: "loading" });
+    void refreshChecklist();
+  }, [refreshChecklist, setShowChecklist]);
+  useEffect(() => {
+    if (!showChecklist && checklistWasOpen.current)
+      inputRef.current?.focus({ preventScroll: true });
+    checklistWasOpen.current = showChecklist;
+  }, [showChecklist]);
+  // Refresh from the record, not from an assistant's claim of success. This also
+  // picks up checks recorded during ordinary chat while this view is open.
+  useEffect(
+    () =>
+      subscribe((event) => {
+        if (event.type !== "run_end") return;
+        const completed = checklistRunRef.current;
+        checklistRunRef.current = null;
+        setChecklistRunId(null);
+        if (showChecklist || completed) void refreshChecklist(completed ?? undefined);
+      }),
+    [subscribe, showChecklist, refreshChecklist],
+  );
+  useEffect(
+    () => () => {
+      checklistFetchRef.current++;
+      checklistRunRef.current = null;
+    },
+    [],
+  );
+
+  // Run a single task: the sidecar opens a fresh session and streams progress
+  // back (session_reset → task_start → run_start/…/run_end). Close the modal so
+  // the transcript is visible while it runs.
+  //
+  // These three handlers still toast, but they also RETURN the promise and
+  // rethrow, so the modal's controller can keep one action pending (no double
+  // dispatch) and show the same failure inline next to the task it belongs to.
+  const handleRunTask = useCallback(
+    (id: string): Promise<void> =>
+      runTask(id)
+        .then(() => {
+          closeDeckPanel("todo");
+        })
+        .catch((error: unknown) => {
+          toast(taskErrorMessage(error), "error");
+          throw error;
+        }),
+    [runTask, closeDeckPanel],
+  );
+
+  // Run every pending task sequentially (a fresh session each), in order.
+  const handleRunAllTasks = useCallback(
+    (): Promise<void> =>
+      runAllTasks()
+        .then(() => {
+          closeDeckPanel("todo");
+        })
+        .catch((error: unknown) => {
+          toast(taskErrorMessage(error), "error");
+          throw error;
+        }),
+    [runAllTasks, closeDeckPanel],
+  );
+
+  const handleDeleteTask = useCallback(
+    (id: string): Promise<void> =>
+      deleteTask(id)
+        .then(setProjectTasks)
+        .catch((error: unknown) => {
+          toast(taskErrorMessage(error), "error");
+          throw error;
+        }),
+    [deleteTask, setProjectTasks],
+  );
+
+  // Pin Ken to a model (or null → clear the pin, follow GG Coder). The
+  // sidecar's ken_model_change broadcast updates state; the .then is just a
+  // faster local echo of the same payload.
+  // A Goal pane's second model: the one GG Goals' workers ("critters") run on.
+  function onSelectCritterModel(modelId: string | null): void {
+    const current = state?.goal?.critterModel ?? null;
+    if (modelId === current) return;
+    void setCritterModel(modelId, paneId)
+      .then((res) => {
+        setState((s) =>
+          s?.goal ? { ...s, goal: { ...s.goal, critterModel: res.critterModel } } : s,
+        );
+      })
+      .catch((e: unknown) => toast(e instanceof Error ? e.message : String(e), "error"));
+  }
+
+  function onSelectKenModel(modelId: string | null): void {
+    if (state && modelId !== null && state.kenModelOverride && modelId === state.kenModel) return;
+    if (state && modelId === null && !state.kenModelOverride) return;
+    void switchKenModel(modelId)
+      .then((res) => {
+        setState((s) =>
+          s
+            ? {
+                ...s,
+                kenProvider: res.kenProvider,
+                kenModel: res.kenModel,
+                kenModelOverride: res.kenModelOverride,
+              }
+            : s,
+        );
+      })
+      .catch((error: unknown) => {
+        toast(error instanceof Error ? error.message : String(error), "error");
+      });
+  }
+
+  function onSelectModel(modelId: string): void {
+    if (state && modelId === state.model) return;
+    void switchModel(modelId).then((res) => {
+      if (isSwitchModelError(res)) {
+        // The sidecar refuses with a reason worth reading ("Ollama isn't
+        // running at …", "has no tool calling"). Show it — otherwise the
+        // picker just snaps back with no explanation.
+        toast(res.error, "error");
+        return;
+      }
+      // Sakana Fugu easter egg: blow the fugu horn when a Fugu model is picked.
+      if (res.model.startsWith("fugu")) playSound("fugu");
+      setState((s) =>
+        s
+          ? {
+              ...s,
+              provider: res.provider,
+              model: res.model,
+              thinkingLevel: res.thinkingLevel,
+              supportedThinkingLevels: res.supportedThinkingLevels,
+            }
+          : s,
+      );
+    });
+  }
+
+  function onSelectContextProfile(profile: string, selector: HTMLSelectElement): void {
+    if (
+      running ||
+      autopilotReviewing ||
+      astraMutationBusyRef.current ||
+      !state ||
+      !parseContextProfileEligibility(state.openAICodexContextProfileEligibility).canChange ||
+      (profile !== "stable" && profile !== "experimental") ||
+      profile === state.openAICodexContextProfile
+    ) {
+      return;
+    }
+    contextProfileFocusRef.current = document.activeElement === selector ? selector : null;
+    const previousProfile = state.openAICodexContextProfile;
+    const previousWindow = state.contextWindow;
+    const authoritativeRevision = astraAuthoritativeRevisionRef.current;
+    astraMutationBusyRef.current = true;
+    setAstraControlsBusy(true);
+    setState((current) => (current ? { ...current, openAICodexContextProfile: profile } : current));
+    void setOpenAICodexContextProfile(profile)
+      .then((selection) => {
+        if (astraAuthoritativeRevisionRef.current !== authoritativeRevision) return;
+        setState((current) =>
+          current?.openAICodexContextProfile === profile
+            ? {
+                ...current,
+                openAICodexContextProfile: selection.openAICodexContextProfile,
+                contextWindow: selection.contextWindow,
+              }
+            : current,
+        );
+      })
+      .catch((error) => {
+        if (astraAuthoritativeRevisionRef.current === authoritativeRevision) {
+          setState((current) =>
+            current?.openAICodexContextProfile === profile
+              ? {
+                  ...current,
+                  openAICodexContextProfile: previousProfile,
+                  contextWindow: previousWindow,
+                }
+              : current,
+          );
+        }
+        toast(taskErrorMessage(error), "error");
+      })
+      .finally(() => {
+        astraMutationBusyRef.current = false;
+        if (mountedRef.current) setAstraControlsBusy(false);
+      });
+  }
+
+  const contextProfileEligibility = parseContextProfileEligibility(
+    state?.openAICodexContextProfileEligibility,
+  );
+  const contextProfileLockReason = contextProfileEligibility.canChange
+    ? undefined
+    : contextProfileEligibility.reason;
+  const contextProfileDescriptionId = `context-profile-lock-${paneId}`;
+  const showContextProfileSelector =
+    state?.provider === "openai" &&
+    isOpenAICodexAstraModel(state.model) &&
+    Boolean(state.accountId);
+
+  // Workflow commands matching the current `/prefix` (only while the input is a
+  // single `/token` with no space yet). Empty when not in slash mode.
+  const slashQuery =
+    input.startsWith("/") && !input.includes(" ") ? input.slice(1).toLowerCase() : null;
+  // `/schedule ` (past the command token) swaps the palette for the argument
+  // hint. An invalid draft is blocked from being sent to the agent.
+  const scheduleDraft = isScheduleDraft(input);
+  const scheduleParse = scheduleDraft ? parseScheduleCommand(input) : null;
+  // Drives the composer's invalid affordance; submit() enforces the block.
+  const scheduleInvalid = scheduleParse !== null && !scheduleParse.ok;
+  const slashMatches =
+    slashQuery !== null
+      ? menuCommands(commands).filter(
+          (c) =>
+            c.name.toLowerCase().startsWith(slashQuery) ||
+            c.aliases.some((a) => a.toLowerCase().startsWith(slashQuery)),
+        )
+      : [];
+  const slashOpen = slashMatches.length > 0;
+  const discoveringCommands = input.startsWith("/") && !/\s/.test(input);
+  useEffect(() => {
+    if (discoveringCommands) void refreshCommands();
+  }, [discoveringCommands, refreshCommands]);
+  // Clamp so a shrinking match list never points past the end.
+  const clampedSlashIndex = slashMatches.length > 0 ? slashIndex % slashMatches.length : 0;
+
+  // `@Ken` is the mentor-agent address, not a file mention. When the input leads
+  // with it (case-insensitive, word-boundary so `@kennedy.ts` still picks files),
+  // Ken is "active": the file picker is suppressed and the input is tinted in
+  // Ken's color with a shimmering marker, so it's obvious the message goes to Ken.
+  const kenActive = workspaceMode === "code" && MENTOR_HANDLE_PREFIX_RE.test(input.trimStart());
+  // Split the input for the `@Ken` highlight overlay: any leading whitespace,
+  // the literal `@Ken` token (preserving the user's casing), then the rest. Only
+  // the token shimmers; lead+rest render in the normal input color.
+  const kenInputParts = (() => {
+    const m = MENTOR_HANDLE_OVERLAY_RE.exec(input);
+    if (!m) return null;
+    return { lead: m[1], token: m[2], rest: input.slice(m[1].length + m[2].length) };
+  })();
+  // `@`-mention picker: open whenever a mention token is active and the search
+  // returned at least one file. Clamp the highlighted row to the result count.
+  // Never open while `@Ken` is active — that token addresses Ken, not a file.
+  const mentionOpen = mention !== null && fileMatches.length > 0 && !kenActive;
+  const clampedFileIndex = fileMatches.length > 0 ? fileIndex % fileMatches.length : 0;
+
+  // True when `text` is a known workflow command invocation (first token).
+  function isWorkflowCommand(text: string): boolean {
+    if (!text.startsWith("/")) return false;
+    const name = text.slice(1).split(" ")[0]?.toLowerCase() ?? "";
+    return commands.some(
+      (c) => c.name.toLowerCase() === name || c.aliases.some((a) => a.toLowerCase() === name),
+    );
+  }
+
+  // Top-right commit affordance. `/commit` is built in (it runs the project's
+  // checks, reviews, commits and pushes), so every project gets it; the
+  // `/setup-commit` fallback only covers an older sidecar that lacks it.
+  const hasCommit = commands.some((c) => c.name === "commit");
+  const hasSetupCommit = commands.some((c) => c.name === "setup-commit");
+  const commitCommand = hasCommit ? "commit" : hasSetupCommit ? "setup-commit" : null;
+  // Until the project is a git repo, setting up commits is pointless — offer
+  // "Initialize Git" first (modal collects visibility + repo name, then drives
+  // the agent). isGitRepo can be undefined on older sidecars / before hydrate;
+  // only treat an explicit `false` as "not a repo".
+  const needsGitInit = state?.isGitRepo === false;
+  // Default repo name = the project folder name.
+  const defaultRepoName = (state?.cwd ?? "").split(/[\\/]/).filter(Boolean).pop() ?? "";
+
+  const showStarters =
+    hydrated &&
+    status === "ready" &&
+    items.length === 0 &&
+    !running &&
+    input.trim() === "" &&
+    attachments.length === 0;
+
+  /** Put text in the composer with the caret at the end, ready to finish and send. */
+  function fillComposer(text: string): void {
+    setInput(text);
+    setCaret(text.length);
+    requestAnimationFrame(() => {
+      const el = inputRef.current;
+      if (!el) return;
+      el.focus();
+      el.setSelectionRange(text.length, text.length);
+    });
+  }
+
+  /**
+   * Fill the interval slot from a preset chip. Replaces an existing interval
+   * rather than appending, so clicking `1h` after `15m` swaps it instead of
+   * producing a second bar. Keeps focus in the composer so typing continues.
+   */
+  function fillScheduleInterval(preset: string): void {
+    const { text, caret: caretAt } = withInterval(input, preset);
+    setInput(text);
+    requestAnimationFrame(() => {
+      const el = inputRef.current;
+      if (!el) return;
+      el.focus();
+      el.setSelectionRange(caretAt, caretAt);
+      setCaret(caretAt);
+    });
+  }
+
+  /** Ordered pane events own queue state, including confirmed cancellation IDs. */
+  function handleCancelQueued(id: string): void {
+    void cancelQueued(id);
+  }
+
+  function pickSlashCommand(cmd: SlashCommand): void {
+    if (cmd.name === "add-dir" || cmd.name === "remove-dir") {
+      setInput("");
+      setMention(null);
+      setMentionedPaths([]);
+      clearAttachments();
+      setIsFileDragOver(false);
+      setSlashIndex(0);
+      void pickWorkspaceDirectory(cmd.name);
+      return;
+    }
+
+    const next = cmd.input.text === "none" ? `/${cmd.name}` : `/${cmd.name} `;
+    setInput(next);
+    setSlashIndex(0);
+    setCaret(next.length);
+    if (cmd.input.references === "none") {
+      setMention(null);
+      setMentionedPaths([]);
+    }
+    if (cmd.input.attachments === "none") {
+      clearAttachments();
+      setIsFileDragOver(false);
+    }
+    if (cmd.input.text === "none") setEnhancement(null);
+    requestAnimationFrame(() => inputRef.current?.focus());
+  }
+
+  async function pickWorkspaceDirectory(command: "add-dir" | "remove-dir"): Promise<void> {
+    inputRef.current?.blur();
+    try {
+      const selected = await open({
+        directory: true,
+        multiple: false,
+        title:
+          command === "add-dir"
+            ? "Add project folder to workspace"
+            : "Remove project folder from workspace",
+      });
+      if (typeof selected !== "string") return;
+      submitTextRef.current(
+        `/${command} ${selected}`,
+        command === "add-dir" ? "/add-dir" : "/remove-dir",
+      );
+    } finally {
+      requestAnimationFrame(() => inputRef.current?.focus());
+    }
+  }
+
+  // Detect an active `@`-mention token at the caret: a `@` that starts at a word
+  // boundary with no whitespace between it and the caret. Returns the query text
+  // after `@` and the `@`'s index, or null when not in a mention.
+  function detectMention(text: string, caret: number): { query: string; start: number } | null {
+    const before = text.slice(0, caret);
+    const at = before.lastIndexOf("@");
+    if (at < 0) return null;
+    // Must start at the line start or after whitespace.
+    const prev = at > 0 ? before[at - 1] : " ";
+    if (prev !== undefined && !/\s/.test(prev)) return null;
+    const query = before.slice(at + 1);
+    // A space ends the token — no mention once the path is followed by a space.
+    if (/\s/.test(query)) return null;
+    return { query, start: at };
+  }
+
+  // Sync the mention picker to the current input + caret on every change.
+  function updateMention(text: string, caret: number): void {
+    setMention(noReferenceSlashCommandRef.current ? null : detectMention(text, caret));
+  }
+
+  // Debounced file search whenever the active mention query changes. Skipped when
+  // `@Ken` is active so typing `@ken` never spawns a file lookup or picker.
+  useEffect(() => {
+    if (mention === null || kenActive || noReferenceSlashCommand) {
+      setFileMatches([]);
+      return;
+    }
+    let cancelled = false;
+    const t = setTimeout(() => {
+      void searchFiles(mention.query).then((files) => {
+        if (!cancelled) {
+          setFileMatches(files);
+          setFileIndex(0);
+        }
+      });
+    }, 80);
+    return () => {
+      cancelled = true;
+      clearTimeout(t);
+    };
+  }, [mention, kenActive, noReferenceSlashCommand, searchFiles]);
+
+  // Pick a file: drop the typed `@query` from the input, add the file as a chip
+  // (deduped), and restore the caret where the token was. The path lives in chip
+  // state, never in the textarea text.
+  function pickMentionFile(file: FileHit): void {
+    if (mention === null || noReferenceSlashCommandRef.current) return;
+    const el = inputRef.current;
+    const caret = el?.selectionStart ?? input.length;
+    const head = input.slice(0, mention.start);
+    const tail = input.slice(caret);
+    const next = head + tail;
+    setInput(next);
+    setEnhancement((current) => followDraftEdit(current, input, next));
+    setMentionedPaths((prev) => (prev.includes(file.path) ? prev : [...prev, file.path]));
+    setMention(null);
+    setFileMatches([]);
+    requestAnimationFrame(() => {
+      el?.focus();
+      el?.setSelectionRange(head.length, head.length);
+    });
+  }
+
+  // Drop a referenced-file chip.
+  function removeMentionChip(p: string): void {
+    setMentionedPaths((prev) => prev.filter((x) => x !== p));
+  }
+
+  const capturePromptSession = useCallback((): (() => boolean) => {
+    const generation = generationRef.current;
+    const hydration = hydrateEpochRef.current;
+    const reset = promptSessionResetEpochRef.current;
+    const conversationId = stateRef.current?.conversationId;
+    const sessionId = stateRef.current?.sessionId;
+    return () =>
+      mountedRef.current &&
+      generation === generationRef.current &&
+      hydration === hydrateEpochRef.current &&
+      reset === promptSessionResetEpochRef.current &&
+      conversationId === stateRef.current?.conversationId &&
+      sessionId === stateRef.current?.sessionId;
+  }, []);
+
+  async function handleAutopilotChange(next: boolean): Promise<void> {
+    if (autopilotPendingRef.current?.() || blockUnconfirmedSession()) return;
+    const sessionIsCurrent = capturePromptSession();
+    const lifecycle = lifecycleEpochRef.current;
+    const isCurrent = () => sessionIsCurrent() && lifecycle === lifecycleEpochRef.current;
+    autopilotPendingRef.current = isCurrent;
+    setAutopilotPending(() => isCurrent);
+    setKenPowerBanner(null);
+    try {
+      const confirmed = await setAutopilot(next);
+      if (!isCurrent()) return;
+      setState((previous) => (previous ? { ...previous, autopilot: confirmed } : previous));
+      setKenPowerBanner(confirmed ? "on" : "off");
+      playSound(confirmed ? "done" : "click");
+    } catch (error) {
+      if (isCurrent()) {
+        setKenPowerBanner(null);
+        toast(`Could not change Autopilot: ${taskErrorMessage(error)}. Try again.`, "error");
+      }
+    } finally {
+      if (autopilotPendingRef.current === isCurrent) {
+        autopilotPendingRef.current = null;
+        if (mountedRef.current) setAutopilotPending(null);
+      }
+    }
+  }
+
+  // Keep the draft until acceptance. A late receipt must not clear newer edits
+  // or a different session's composer, including newly staged media/references.
+  function captureComposerAcceptance(clearMedia = true): () => void {
+    const sent = composerRef.current;
+    const isCurrent = capturePromptSession();
+    return () => {
+      const current = composerRef.current;
+      if (!isCurrent()) return;
+      if (
+        current.input !== sent.input ||
+        current.attachments !== sent.attachments ||
+        current.mentionedPaths !== sent.mentionedPaths ||
+        current.enhancement !== sent.enhancement
+      )
+        return;
+      setInput("");
+      setSlashIndex(0);
+      if (clearMedia) {
+        clearAttachments();
+        setMention(null);
+        setMentionedPaths([]);
+        setEnhancement(null);
+      }
+    };
+  }
+
+  function reportPromptFailure(error: unknown): void {
+    const rejected = error instanceof PromptSubmissionError && error.category === "rejected";
+    pushItem({
+      kind: "error",
+      id: nextId(),
+      headline: rejected ? "Prompt wasn’t sent" : "Prompt status is uncertain",
+      message: error instanceof Error ? error.message : String(error),
+      guidance: rejected
+        ? "Review the error above before sending again."
+        : "The prompt may have been accepted. Check this session’s activity and history before deciding whether to send it again.",
+    });
+  }
+
+  // Submit arbitrary text as if typed + entered. Shared by the input, the
+  // top-right commit button, and the workspace directory picker. `label` shows
+  // a friendly shimmer phrase in the transcript while the full `text` is still
+  // sent to the agent.
+  //
+  // `keepInput` is for sends the user did not initiate right now — a scheduled
+  // prompt firing on its interval. Those must NOT clear the composer, or a
+  // schedule that comes due mid-sentence deletes what the user was typing.
+  // Returns whether the prompt was dispatched; `onError` replaces the default
+  // failure report for callers (the checklist) that surface it themselves.
+  // Project Health → agent. The prompt (from the sidecar) has the agent check
+  // the findings and ask with ask_user before fixing anything. Like a checklist
+  // run it leaves the composer draft alone and returns to the chat.
+  function reviewProjectHealth(prompt: string, label: string): boolean {
+    if (!submitText(prompt, label, { keepInput: true })) return false;
+    setDeckPanel(null);
+    return true;
+  }
+
+  function submitText(
+    text: string,
+    label?: string,
+    opts?: { keepInput?: boolean; onError?: (error: unknown) => void },
+  ): boolean {
+    if (blockUnconfirmedSession() || sessionMutationLockRef.current) return false;
+    // A pending plan is the only operation that can move this session forward.
+    // Do not let toolbar commands or scheduled prompts silently clear its gate.
+    if (planReview !== null) return false;
+    const trimmed = text.trim();
+    // Mid-run this QUEUES as steering, exactly like a typed message (see
+    // submit()): the sidecar injects it into the running loop. Dropping it
+    // instead would be silent — the folder picker especially, which gives no
+    // hint that the directory you just chose went nowhere.
+    const disposition = submitDisposition(trimmed, readyRef.current, running);
+    if (disposition === "ignore") return false;
+    const queued = disposition === "queue";
+    const supersedesQuestion = hasOpenAsk();
+    // Keep approval controls and queue state unchanged until the host accepts.
+    const userItem: Item = {
+      kind: "user",
+      id: nextId(),
+      text: trimmed,
+      command: label !== undefined || isWorkflowCommand(trimmed),
+      ...(label !== undefined ? { label } : {}),
+    };
+    const isCurrent = capturePromptSession();
+    const acceptComposer = opts?.keepInput ? () => {} : captureComposerAcceptance(false);
+    if (!queued) endStreamingText();
+    void sendPrompt(trimmed)
+      .then((submission) => {
+        if (!isCurrent()) return;
+        acceptComposer();
+        if (supersedesQuestion) dismissOpenAsks();
+        // Only the sidecar knows whether this reply reaches the run now or waits
+        // (a deferred question does not steer); a waiting prompt stays visible.
+        const steers = submission.queued && submission.steers;
+        if (steers) noteSupersedingSend(trimmed);
+        stickToBottomRef.current = true;
+        acceptSubmission(userItem, submission, steers);
+        if (!submission.queued) planResumePromptRef.current = trimmed;
+      })
+      .catch((error) => {
+        if (!isCurrent()) return;
+        if (opts?.onError) opts.onError(error);
+        else reportPromptFailure(error);
+      });
+    return true;
+  }
+
+  // Scheduled prompts fire from a ticker that is set up once, so it can't close
+  // over this render's `submitText`. The ref keeps the ticker pointed at the
+  // current one without re-creating the interval on every render.
+  const submitTextRef = useRef(submitText);
+  submitTextRef.current = submitText;
+
+  // Return to chat without consuming the draft. Agent setup runs the existing
+  // /init workflow; audits require a recorded result, never an inferred pass.
+  function handleRunChecklistItem(item: ChecklistEntry): void {
+    const setup = item.id === "agent-setup";
+    const prompt = setup ? "/init" : item.runPrompt;
+    if (prompt === null || running || checklistRunRef.current || !readyRef.current) return;
+    const run = { id: item.id, checkedAt: item.checkedAt, expectsRecord: !setup };
+    checklistRunRef.current = run;
+    setChecklistRunId(item.id);
+    setChecklistNotice(null);
+    const failed = (): void => {
+      if (checklistRunRef.current !== run) return;
+      checklistRunRef.current = null;
+      setChecklistRunId(null);
+      setChecklistNotice({
+        id: item.id,
+        checkedAt: item.checkedAt,
+        message: setup
+          ? "Couldn't start /init. Try again."
+          : "Couldn't start this check. Try again.",
+      });
+    };
+    if (
+      submitText(prompt, setup ? "/init" : `Checking ${item.title}`, {
+        keepInput: true,
+        onError: failed,
+      })
+    ) {
+      setShowChecklist(false);
+    } else {
+      failed();
+    }
+  }
+
+  const typingAskRef = useRef<{ itemId: number; promptId: string; questionId: string } | null>(
+    null,
+  );
+
+  const hasOpenAsk = useCallback((): boolean => {
+    return items.some((item) => item.kind === "ask" && !item.sent && !item.cancelled);
+  }, [items]);
+
+  const dismissOpenAsks = useCallback((): void => {
+    // Acknowledgement may arrive after the next approval; retire only captured cards.
+    const capturedIds = new Set(items.filter((item) => item.kind === "ask").map((item) => item.id));
+    setItems((current) =>
+      current.flatMap((item) => (capturedIds.has(item.id) ? dropSupersededAsks([item]) : [item])),
+    );
+    if (typingAskRef.current && capturedIds.has(typingAskRef.current.itemId))
+      typingAskRef.current = null;
+  }, [items, setItems]);
+
+  const supersedingTextRef = useRef<string | null>(null);
+  const [supersedingText, setSupersedingText] = useState<string | null>(null);
+  const supersedeClearRef = useRef<number | null>(null);
+  const noteSupersedingSend = useCallback((text: string): void => {
+    supersedingTextRef.current = text;
+    setSupersedingText(text);
+    if (supersedeClearRef.current !== null) window.clearTimeout(supersedeClearRef.current);
+    supersedeClearRef.current = window.setTimeout(() => {
+      supersedingTextRef.current = null;
+      setSupersedingText(null);
+    }, 5000);
+  }, []);
+  useEffect(() => {
+    const text = supersedingTextRef.current;
+    if (text !== null && !queuedMessages.some((message) => message.text === text)) {
+      supersedingTextRef.current = null;
+      setSupersedingText(null);
+    }
+  }, [queuedMessages]);
+  useEffect(
+    () => () => {
+      if (supersedeClearRef.current !== null) window.clearTimeout(supersedeClearRef.current);
+    },
+    [],
+  );
+  const visibleQueuedMessages = useMemo(
+    () => withoutSupersedingMessage(queuedMessages, supersedingText),
+    [queuedMessages, supersedingText],
+  );
+  // Sub-agent groups for the critter floor. Recomputed with `items`, but the
+  // floor compares group identities and ignores token-only re-renders.
+  const critterGroups = useMemo(
+    () =>
+      items.filter(
+        (item): item is Extract<Item, { kind: "subagent_group" }> & CritterGroup =>
+          item.kind === "subagent_group",
+      ),
+    [items],
+  );
+
+  // ── Goal world ── (ported from upstream App.tsx; goal calls are pane-scoped)
+  const [goalChatFor, setGoalChatFor] = useState<string | null>(null);
+  const setGoalPaused = useCallback(
+    (paused: boolean) => {
+      const act = paused
+        ? pauseGoal(paneId).then(() => {
+            if (running) requestCancel();
+          })
+        : resumeGoal(paneId).then((resumed) => {
+            if (!resumed && !state?.goal?.paused) {
+              toast(
+                "Nothing to carry on: the goal finished. Tell GG Goals what's next in the chat.",
+              );
+            }
+          });
+      void act.catch((e: unknown) =>
+        toast(
+          `Couldn't ${paused ? "pause" : "resume"} the goal: ${e instanceof Error ? e.message : String(e)}`,
+          "error",
+        ),
+      );
+    },
+    [paneId, running, requestCancel, state?.goal?.paused],
+  );
+  const workspaceHeaderRef = useRef<HTMLDivElement>(null);
+  const { activeGoalId, view: goalView } = goalViewFor(state?.goal, goalChatFor);
+  const goalWorldOpen = goalView === "workers";
+  // When the current run began, for the activity bar's timer (survives the chat hiding).
+  const [runStartedAt, setRunStartedAt] = useState<number | null>(null);
+  useEffect(() => {
+    setRunStartedAt((prev) => (running ? (prev ?? Date.now()) : null));
+  }, [running]);
+  const chatScrollOnHideRef = useRef<{ pinned: boolean; top: number } | null>(null);
+  useLayoutEffect(() => {
+    if (goalWorldOpen) {
+      chatScrollOnHideRef.current = {
+        pinned: stickToBottomRef.current,
+        top: lastScrollTopRef.current,
+      };
+      dropHiddenFocus();
+      return;
+    }
+    const saved = chatScrollOnHideRef.current;
+    chatScrollOnHideRef.current = null;
+    // Shown again, not opened: every entrance inside lands at its end at once
+    // (see finish-entrances.ts), so the deck and its notices don't replay.
+    if (saved) finishEntrances([transcriptFrameRef.current, dockElRef.current]);
+    const el = scrollRef.current;
+    if (!saved || !el) return;
+    stickToBottomRef.current = saved.pinned;
+    if (saved.pinned) scrollToBottom();
+    else {
+      el.scrollTop = saved.top;
+      lastScrollTopRef.current = el.scrollTop;
+    }
+  }, [goalWorldOpen, scrollToBottom]);
+  useEffect(() => {
+    if (!goalWorldOpen) return;
+    document.addEventListener("focusin", dropHiddenFocus);
+    return () => document.removeEventListener("focusin", dropHiddenFocus);
+  }, [goalWorldOpen]);
+  // Page Up / Page Down page the focused pane's transcript, even from the
+  // composer (rules in transcript-page-keys.ts).
+  useEffect(() => {
+    if (!paneKeyFocus || goalWorldOpen) return;
+    const onKey = (e: KeyboardEvent): void => {
+      const direction = pageKeyDirection(e);
+      const el = scrollRef.current;
+      if (direction === null || !el) return;
+      const pane = el.closest(".agent-pane");
+      if (!pane || !shouldPageTranscript(e.target, pane, inputRef.current)) return;
+      if (document.querySelector('[role="dialog"][aria-modal="true"]')) return;
+      e.preventDefault();
+      // The transcript's scroll padding reserves the title bar and dock overlays.
+      const style = getComputedStyle(el);
+      const top = Number.parseFloat(style.scrollPaddingTop) || 0;
+      const bottom = Number.parseFloat(style.scrollPaddingBottom) || 0;
+      const delta = direction * transcriptPageStep(el.clientHeight, top, bottom);
+      // Like a wheel, un-pin before the scroll so a streaming commit can't snap it back.
+      stickToBottomRef.current = pinAfterWheel(
+        stickToBottomRef.current,
+        { deltaX: 0, deltaY: delta, ctrlKey: false },
+        el,
+      );
+      const instant =
+        e.repeat || window.matchMedia?.("(prefers-reduced-motion: reduce)").matches === true;
+      el.scrollBy({ top: delta, behavior: instant ? "instant" : "smooth" });
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [paneKeyFocus, goalWorldOpen]);
+  const goalWorkers = useMemo(
+    () => (activeGoalId ? collectFloorAgents(critterGroups) : []),
+    [activeGoalId, critterGroups],
+  );
+  const goalWaitingOnUser = useMemo(
+    () =>
+      activeGoalId !== null &&
+      items.some((item) => item.kind === "ask" && !item.sent && !item.cancelled),
+    [activeGoalId, items],
+  );
+  // The fork's pane Item is a superset of upstream's transcript Item; goal helpers read only shared kinds.
+  const goalItems = items as unknown as readonly GoalTranscriptItem[];
+  const goalAsk = useMemo(
+    () => (activeGoalId ? blockingAsk(goalItems) : null),
+    [activeGoalId, goalItems],
+  );
+  const [seenGoalAsks, setSeenGoalAsks] = useState<ReadonlySet<string>>(() => new Set());
+  useEffect(() => {
+    if (!goalAsk || goalView !== "chat") return;
+    setSeenGoalAsks((seen) => (seen.has(goalAsk.id) ? seen : new Set([...seen, goalAsk.id])));
+  }, [goalAsk, goalView]);
+  const goalAskNotice = useMemo(
+    () =>
+      goalAsk && !seenGoalAsks.has(goalAsk.id)
+        ? { question: goalAsk.question, more: goalAsk.more }
+        : null,
+    [goalAsk, seenGoalAsks],
+  );
+  const kenSaid = useMemo(
+    () => (activeGoalId ? latestKenLine(goalItems, (id) => liveText.get(id) !== undefined) : null),
+    [activeGoalId, goalItems, liveText],
+  );
+  useEffect(() => {
+    goalRunTargetRef.current = activeGoalId;
+  }, [activeGoalId]);
+  const [goalClosedAt, setGoalClosedAt] = useState(0);
+  const [goalFinish, setGoalFinish] = useState<GoalFinish | null>(null);
+  const goalStretch = useMemo(
+    () => (activeGoalId ? openStretch(goalRuns, activeGoalId, goalClosedAt) : []),
+    [activeGoalId, goalRuns, goalClosedAt],
+  );
+  const goalQuiet =
+    goalStretch.length > 0 &&
+    goalIsQuiet({
+      paused: state?.goal?.paused === true,
+      running,
+      waitingOnUser: goalWaitingOnUser,
+      workers: goalWorkers,
+    });
+  const finishInputsRef = useRef({ groups: critterGroups, said: kenSaid });
+  useEffect(() => {
+    finishInputsRef.current = { groups: critterGroups, said: kenSaid };
+  }, [critterGroups, kenSaid]);
+  useEffect(() => {
+    if (!goalQuiet) return;
+    const timer = window.setTimeout(() => {
+      const { groups, said } = finishInputsRef.current;
+      const last = goalStretch[goalStretch.length - 1];
+      if (last) setGoalClosedAt(last.endedAt);
+      setGoalFinish(goalFinishOf(goalStretch, groups, said));
+    }, FINISH_SETTLE_MS);
+    return () => window.clearTimeout(timer);
+  }, [goalQuiet, goalStretch]);
+  useEffect(() => {
+    if (goalFinish && (running || goalView === "chat")) setGoalFinish(null);
+  }, [goalFinish, running, goalView]);
+  const shownGoalFinish = goalFinish?.goalId === activeGoalId ? goalFinish : null;
+  // What Ken is doing right now, for the Workers view's status pill and the
+  // thought mark over his head (see goal-ken-status).
+  const goalPaused = state?.goal?.paused === true;
+  const goalLastRun = useMemo(
+    () => (activeGoalId ? lastRunOf(goalRuns, activeGoalId, goalItems) : null),
+    [activeGoalId, goalRuns, goalItems],
+  );
+  const kenStatus = useMemo(
+    () =>
+      activeGoalId
+        ? kenStatusOf({
+            running,
+            paused: goalPaused,
+            waitingOnUser: goalWaitingOnUser,
+            liveTools: liveToolFeed,
+            workers: goalWorkers,
+            lastRun: goalLastRun,
+          })
+        : null,
+    [activeGoalId, running, goalPaused, goalWaitingOnUser, liveToolFeed, goalWorkers, goalLastRun],
+  );
+  const tallySource = `${activeGoalId ?? ""}:${transcriptEpoch}`;
+  const tallyInput = useMemo(
+    () => [
+      ...goalWorkers.map((worker) => ({ key: worker.key, phase: floorPhase(worker.status) })),
+      ...(running && coordinatorAtWork(liveToolFeed)
+        ? [{ key: COORDINATOR_KEY, phase: "working" as const }]
+        : []),
+    ],
+    [goalWorkers, running, liveToolFeed],
+  );
+  const [tallyState, setTallyState] = useState<{ source: string; tally: GoalTally }>({
+    source: "",
+    tally: EMPTY_TALLY,
+  });
+  useEffect(() => {
+    setTallyState((prev) => {
+      const base = prev.source === tallySource ? prev.tally : EMPTY_TALLY;
+      const tally = tallyGoal(base, tallyInput);
+      return prev.source === tallySource && tally === prev.tally
+        ? prev
+        : { source: tallySource, tally };
+    });
+  }, [tallySource, tallyInput]);
+  const goalTally = useMemo(
+    () =>
+      !activeGoalId
+        ? null
+        : tallyState.source === tallySource
+          ? tallyState.tally
+          : tallyGoal(EMPTY_TALLY, tallyInput),
+    [activeGoalId, tallyState, tallySource, tallyInput],
+  );
+
+  const pendingAskAnswers = useRef(new Set<number>());
+  const handleAskAnswer = useCallback(
+    (itemId: number, promptId: string, delta: AskAnswerDelta, sendNow = false): void => {
+      const item = items.find((candidate) => candidate.id === itemId);
+      if (
+        !item ||
+        item.kind !== "ask" ||
+        item.prompt.id !== promptId ||
+        item.sent ||
+        item.cancelled ||
+        pendingAskAnswers.current.has(itemId)
+      )
+        return;
+      const merged = mergeAskAnswers(item.answers, delta, item.prompt.questions);
+      setItems((current) =>
+        current.map((candidate) =>
+          candidate === item ? { ...item, answers: merged.answers } : candidate,
+        ),
+      );
+      // `sendNow` is the band's explicit Send: questions left open reach the
+      // agent as "(no answer)" rather than holding the whole turn hostage.
+      if (!merged.complete && !(sendNow && Object.keys(merged.answers).length > 0)) return;
+      pendingAskAnswers.current.add(itemId);
+      void client
+        .answerAskUser(promptId, "answer", merged.answers)
+        .then(() =>
+          setItems((current) =>
+            current.map((candidate) =>
+              candidate.kind === "ask" &&
+              candidate.id === itemId &&
+              candidate.prompt.id === promptId &&
+              !candidate.cancelled
+                ? { ...candidate, sent: true }
+                : candidate,
+            ),
+          ),
+        )
+        .catch((error: unknown) => {
+          if (isExpiredAskError(error)) {
+            // Nothing is waiting for this answer any more. Say so on the card
+            // rather than leaving buttons that silently do nothing.
+            setItems((current) =>
+              current.map((candidate) =>
+                candidate.kind === "ask" &&
+                candidate.id === itemId &&
+                candidate.prompt.id === promptId &&
+                !candidate.sent
+                  ? { ...candidate, cancelled: true }
+                  : candidate,
+              ),
+            );
+            setStatus("That question expired before your answer arrived.");
+            return;
+          }
+          setStatus(`could not answer question: ${String(error)}`);
+        })
+        .finally(() => pendingAskAnswers.current.delete(itemId));
+    },
+    [client, items],
+  );
+
+  const handleAskType = useCallback(
+    (itemId: number, promptId: string, questionId: string, seed = ""): void => {
+      typingAskRef.current = { itemId, promptId, questionId };
+      if (seed) setInput(seed);
+      requestAnimationFrame(() => inputRef.current?.focus());
+    },
+    [],
+  );
+
+  const { createAuthoritativeNewSession, restorePromptToComposer, commitPreparedContinuation } =
+    useKenPromptActions({
+      running,
+      autopilotReviewing,
+      newSessionBusy,
+      setNewSessionBusy,
+      sessionMutationLockRef,
+      unresolvedSessionResetRef,
+      generationRef,
+      observedSessionResetOperationsRef,
+      recoveredSessionResetOperationRef,
+      retiredConversationIdsRef,
+      stateRef,
+      setState,
+      continuationAttemptRef,
+      continuationResetsRef,
+      sessionResetOperationWaitersRef,
+      setContinuationConfirmation,
+      setInput,
+      inputRef,
+      newSession,
+      getState,
+      commitContinuation,
+      waitForReady,
+      handleEvent,
+      blockUnconfirmedSession,
+      registerSessionResetOperationWaiter,
+    });
+
+  const dispatchKenPromptAction = useCallback(
+    async (action: KenPromptAction): Promise<KenPromptActionResult> => {
+      const prompt = action.prompt;
+      if (
+        (action.type === "send-current" || action.type === "send-fresh") &&
+        blockUnconfirmedSession()
+      ) {
+        return { status: "failed", action: action.type, message: AMBIGUOUS_NEW_SESSION_MESSAGE };
+      }
+      if (action.type === "send-fresh") {
+        const message = continuationInstructionError(prompt);
+        if (message)
+          return { status: "failed", action: action.type, message, recoverPrompt: prompt };
+      }
+      if (!prompt) {
+        return { status: "failed", action: action.type, message: "This prompt is empty." };
+      }
+      if (planReview !== null && (action.type === "send-current" || action.type === "send-fresh")) {
+        return {
+          status: "failed",
+          action: action.type,
+          message: "Approve or dismiss the pending plan before sending another prompt.",
+        };
+      }
+
+      if (action.type === "send-current") {
+        if (sessionMutationLockRef.current) {
+          return {
+            status: "failed",
+            action: action.type,
+            message: "A session change is already in progress.",
+          };
+        }
+        if (kenPromptActionLockRef.current || kenCurrentSubmissionRef.current?.()) {
+          return {
+            status: "failed",
+            action: action.type,
+            message: "This prompt is already being sent.",
+          };
+        }
+        const disposition = submitDisposition(prompt, readyRef.current, running);
+        if (disposition === "ignore") {
+          return {
+            status: "failed",
+            action: action.type,
+            message: `${PRODUCT_DISPLAY_NAME} is still connecting. Try again in a moment.`,
+          };
+        }
+        const isCurrent = capturePromptSession();
+        kenCurrentSubmissionRef.current = isCurrent;
+        try {
+          const supersedesQuestion = hasOpenAsk();
+          const submission = await sendPrompt(prompt, [], { kenSent: true });
+          if (!isCurrent()) return { status: "cancelled" };
+          if (supersedesQuestion) dismissOpenAsks();
+          // Ken corrections always steer; without a question to replace they
+          // still wear the queued look until the run picks them up.
+          const hideQueued = supersedesQuestion && submission.queued && submission.steers;
+          if (hideQueued) noteSupersedingSend(prompt);
+          if (!submission.queued) planResumePromptRef.current = prompt;
+          stickToBottomRef.current = true;
+          acceptSubmission(
+            {
+              kind: "user",
+              id: nextId(),
+              text: prompt,
+              kenSent: true,
+            },
+            submission,
+            hideQueued,
+          );
+          if (!submission.queued) endStreamingText();
+          return { status: "sent", session: "current" };
+        } catch {
+          if (!isCurrent()) return { status: "cancelled" };
+          return {
+            status: "failed",
+            action: action.type,
+            message: "Couldn’t send the prompt. Try again.",
+          };
+        } finally {
+          if (kenCurrentSubmissionRef.current === isCurrent) kenCurrentSubmissionRef.current = null;
+        }
+      }
+
+      if (action.type === "send-fresh") {
+        if (autopilotReviewing) {
+          return {
+            status: "failed",
+            action: action.type,
+            message: AUTOPILOT_NEW_SESSION_RETRY_MESSAGE,
+          };
+        }
+        if (running) {
+          return {
+            status: "failed",
+            action: action.type,
+            message: "Wait for the current build to finish before starting a new session.",
+          };
+        }
+        if (kenPromptActionLockRef.current || kenCurrentSubmissionRef.current?.()) {
+          return {
+            status: "failed",
+            action: action.type,
+            message: "This prompt action is already in progress.",
+          };
+        }
+        kenPromptActionLockRef.current = true;
+        try {
+          const choice = await new Promise<{ profile: "stable" | "experimental" | null } | null>(
+            (resolve) => {
+              continuationConfirmationRef.current = resolve;
+              setContinuationConfirmation({
+                prompt,
+                profile: showContextProfileSelector ? state!.openAICodexContextProfile : null,
+                busy: false,
+              });
+            },
+          );
+          continuationConfirmationRef.current = null;
+          if (!choice) return { status: "cancelled" };
+          if (blockUnconfirmedSession() || sessionMutationLockRef.current)
+            return {
+              status: "failed",
+              action: action.type,
+              message: "A session change is already in progress.",
+            };
+          sessionMutationLockRef.current = true;
+          setNewSessionBusy(true);
+          try {
+            const prepared = await prepareContinuationHandoff(prompt);
+            continuationAttemptRef.current = {
+              prepared,
+              request: {
+                preparedId: prepared.preparedId,
+                operationId: crypto.randomUUID(),
+                ...(choice.profile ? { profile: choice.profile } : {}),
+              },
+            };
+          } catch (error) {
+            const reason = taskErrorMessage(error);
+            const sizeAdvice = /\b413\b|next instruction is too long|request body too large/i.test(
+              reason,
+            )
+              ? ` Shorten the continuation instruction and try again (current length: ${prompt.length} UTF-16 units; maximum: ${CONTINUATION_NEXT_INSTRUCTION_MAX_CHARS}). Nothing has been truncated.`
+              : "";
+            const message = `Couldn’t prepare the continuation handoff. ${reason}${sizeAdvice} No reset or submission was requested.`;
+            sessionMutationLockRef.current = false;
+            setNewSessionBusy(false);
+            restorePromptToComposer(prompt);
+            setContinuationConfirmation((current) =>
+              current
+                ? {
+                    ...current,
+                    busy: false,
+                    error: message,
+                  }
+                : current,
+            );
+            return {
+              status: "failed",
+              action: action.type,
+              message,
+              recoverPrompt: prompt,
+            };
+          }
+          return await commitPreparedContinuation(true);
+        } finally {
+          kenPromptActionLockRef.current = false;
+        }
+      }
+
+      const notesActions = projectNotesActionsRef.current;
+      if (!notesActions) {
+        return {
+          status: "failed",
+          action: action.type,
+          message: "Project Notes are unavailable for this workspace.",
+        };
+      }
+
+      if (action.type === "prepare-save") {
+        return {
+          status: "preview",
+          preview: {
+            prompt,
+            suggestedTitle: deriveKenPromptTitle(prompt),
+            destinations: notesActions.listDestinations(),
+            recommendedDestination: { kind: "new-draft" },
+          },
+        };
+      }
+
+      const saveResult = await notesActions.savePrompt(
+        action.target.kind === "new-draft"
+          ? { kind: "new-draft", title: action.target.title, prompt }
+          : {
+              kind: "existing-phase",
+              phaseId: action.target.phaseId,
+              prompt,
+              expectedSourcePrompt: action.target.expectedSourcePrompt,
+            },
+      );
+      const latestPreview: KenPromptSavePreview = {
+        prompt,
+        suggestedTitle: deriveKenPromptTitle(prompt),
+        destinations: notesActions.listDestinations(),
+        recommendedDestination: { kind: "new-draft" },
+      };
+      return notesPromptActionResult(saveResult, latestPreview);
+    },
+    [
+      acceptSubmission,
+      capturePromptSession,
+      autopilotReviewing,
+      commitPreparedContinuation,
+      dismissOpenAsks,
+      endStreamingText,
+      noteSupersedingSend,
+      planReview,
+      pushItem,
+      restorePromptToComposer,
+      running,
+      sendPrompt,
+      prepareContinuationHandoff,
+      hasOpenAsk,
+      showContextProfileSelector,
+      state,
+    ],
+  );
+
+  const kenPromptDispatcher = useMemo<KenPromptActionDispatcher>(
+    () => ({
+      dispatch: dispatchKenPromptAction,
+      blockedReason: (action) => {
+        if (planReview !== null && (action === "send-current" || action === "send-fresh")) {
+          return "Approve or dismiss the pending plan before sending another prompt.";
+        }
+        if (action !== "send-fresh") return null;
+        if (autopilotReviewing) return AUTOPILOT_NEW_SESSION_RETRY_MESSAGE;
+        if (running) return "Wait for the current build to finish before starting a new session.";
+        if (newSessionBusy || sessionMutationLockRef.current) {
+          return "A session change is already in progress.";
+        }
+        return null;
+      },
+    }),
+    [autopilotReviewing, dispatchKenPromptAction, newSessionBusy, planReview, running],
+  );
+
+  // Record a sent prompt for ↑/↓ recall (skips consecutive duplicates, capped).
+  function recordHistory(text: string): void {
+    const h = promptHistoryRef.current;
+    if (text && h[h.length - 1] !== text) h.push(text);
+    if (h.length > 200) h.shift();
+    setHistoryIndex(null);
+    historyDraftRef.current = "";
+  }
+
+  // Replace the input with a recalled history entry and park the caret at the end.
+  function applyHistory(text: string): void {
+    setInput(text);
+    requestAnimationFrame(() => {
+      const el = inputRef.current;
+      if (el) el.selectionStart = el.selectionEnd = el.value.length;
+    });
+  }
+
+  // Walk prompt history with ↑ (dir -1, older) / ↓ (dir +1, newer). Returns true
+  // when it consumed the key. Only triggers when the caret is on the first line
+  // (↑) or last line (↓) so multi-line editing still moves the cursor normally.
+  function navigateHistory(dir: -1 | 1, el: HTMLTextAreaElement): boolean {
+    const hist = promptHistoryRef.current;
+    if (hist.length === 0) return false;
+    const collapsed = el.selectionStart === el.selectionEnd;
+    const caret = el.selectionStart ?? 0;
+    if (dir === -1) {
+      const onFirstLine = collapsed && !el.value.slice(0, caret).includes("\n");
+      if (!onFirstLine) return false;
+      if (historyIndex === null) {
+        historyDraftRef.current = el.value;
+        const idx = hist.length - 1;
+        setHistoryIndex(idx);
+        applyHistory(hist[idx]);
+      } else if (historyIndex > 0) {
+        const idx = historyIndex - 1;
+        setHistoryIndex(idx);
+        applyHistory(hist[idx]);
+      }
+      return true; // consume even at the oldest entry
+    }
+    if (historyIndex === null) return false; // not navigating — let ↓ move the caret
+    const onLastLine = collapsed && !el.value.slice(caret).includes("\n");
+    if (!onLastLine) return false;
+    if (historyIndex < hist.length - 1) {
+      const idx = historyIndex + 1;
+      setHistoryIndex(idx);
+      applyHistory(hist[idx]);
+    } else {
+      setHistoryIndex(null);
+      applyHistory(historyDraftRef.current);
+    }
+    return true;
+  }
+
+  // Apply a finished enhancement to the input: fill the textarea with the plain
+  // text, stash the highlighted segments (drives the inline highlight overlay +
+  // sent bubble), and park the caret at the end.
+  function applyEnhanceResult(r: { enhanced: string; segments: PromptSegment[] }): void {
+    setInput(r.enhanced);
+    setEnhancement({ enhanced: r.enhanced, plain: r.enhanced, segments: r.segments });
+    requestAnimationFrame(() => {
+      const el = inputRef.current;
+      if (el) {
+        el.focus();
+        el.selectionStart = el.selectionEnd = el.value.length;
+      }
+    });
+  }
+
+  // Run the prompt enhancer: rewrite the current draft via the active model into
+  // a tighter, terminology-correct prompt. The result plays in over the input as
+  // a Matrix dissolve→decode animation (unless reduced-motion), then fills it.
+  const enhanceLimitReasonId = useId();
+  const enhanceOverLimit = input.length > ENHANCE_PROMPT_MAX_CHARS;
+  const enhanceLimitReason = `Enhancement is limited to ${ENHANCE_PROMPT_MAX_CHARS.toLocaleString("en-US")} characters (some symbols count as two). Shorten the draft to enhance it. You can still send this draft unchanged.`;
+
+  async function runEnhance(): Promise<void> {
+    const draft = input;
+    if (!draft.trim() || draft.length > ENHANCE_PROMPT_MAX_CHARS || enhancing) return;
+    const sessionIsCurrent = capturePromptSession();
+    const isCurrent = () => sessionIsCurrent() && composerRef.current.input === draft;
+    setEnhanceHintVisible(false);
+    setEnhancing(true);
+
+    const reduced =
+      typeof window.matchMedia === "function" &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+    if (reduced) {
+      try {
+        const result = await enhancePrompt(draft);
+        if (isCurrent()) applyEnhanceResult(result);
+      } catch (err) {
+        toast(err instanceof Error ? err.message : String(err), "error");
+      } finally {
+        setEnhancing(false);
+      }
+      return;
+    }
+
+    // Start the dissolve immediately (newText null), then flip to decode when the
+    // enhancer returns. applyEnhanceResult + cleanup run in the animation's
+    // onDone so the text never pops in before the decode settles.
+    setEnhanceAnim({ oldText: draft, newText: null });
+    try {
+      const r = await enhancePrompt(draft);
+      if (!isCurrent()) {
+        setEnhanceAnim(null);
+        setEnhancing(false);
+        return;
+      }
+      pendingEnhanceRef.current = { ...r, isCurrent };
+      setEnhanceAnim((a) => (a ? { ...a, newText: r.enhanced } : null));
+    } catch (err) {
+      toast(err instanceof Error ? err.message : String(err), "error");
+      setEnhanceAnim(null);
+      setEnhancing(false);
+    }
+  }
+
+  // The dissolve→decode animation finished: hand off to the real input WITHOUT a
+  // flash. The decoded text lives in the .enh-diss overlay (on top); the textarea
+  // sits hidden beneath it (.input-anim). If we removed the overlay and filled
+  // the textarea in the same commit, you'd see the overlay text vanish and the
+  // textarea text reflow/resize a frame later. So: fill the textarea FIRST (still
+  // hidden under the overlay) and let useLayoutEffect size it, THEN drop the
+  // overlay on the next frame — the sized text is already in place underneath.
+  function onEnhanceAnimDone(): void {
+    const r = pendingEnhanceRef.current;
+    pendingEnhanceRef.current = null;
+    if (r?.isCurrent()) {
+      setInput(r.enhanced);
+      setEnhancement({ enhanced: r.enhanced, plain: r.enhanced, segments: r.segments });
+    }
+    requestAnimationFrame(() => {
+      setEnhanceAnim(null);
+      setEnhancing(false);
+      const el = inputRef.current;
+      if (el) {
+        el.focus();
+        el.selectionStart = el.selectionEnd = el.value.length;
+      }
+    });
+  }
+
+  // Show the corner "Enhance" pill whenever the input holds text — it stays put
+  // (no debounce) and only hides when the box is empty. Shows even while the agent
+  // is running, so a queued follow-up draft can be enhanced too: enhancePrompt is
+  // a standalone one-shot call, independent of the agent loop. Still skipped mid-
+  // enhance, with a menu open, or when the draft is already the current
+  // enhancement (nothing left to improve).
+  useEffect(() => {
+    if (enhancing || !hydrated) return setEnhanceHintVisible(false);
+    if (input.trim().length === 0) return setEnhanceHintVisible(false);
+    if (slashOpen || mentionOpen) return setEnhanceHintVisible(false);
+    // Never offer to rewrite a `/schedule` draft: the enhancer rewrites prose
+    // and would happily mangle the `| 15m` argument tail into something the
+    // parser rejects.
+    if (scheduleDraft) return setEnhanceHintVisible(false);
+    if (enhancement && enhancement.enhanced === input) return setEnhanceHintVisible(false);
+    setEnhanceHintVisible(true);
+  }, [input, enhancing, hydrated, slashOpen, mentionOpen, scheduleDraft, enhancement]);
+
+  // Both typed `@Ken` prompts and composer quick actions use this path so Ken's
+  // transcript identity and transport stay identical. Quick actions opt out of
+  // clearing composer state, preserving the user's in-progress work.
+  function cancelCurrentKen(): void {
+    const identity = captureKenRun(); // Capture before transport readiness or any other await.
+    if (!identity) return;
+    const isCurrent = captureKenOperation();
+    void cancelKen(identity).catch((error: unknown) => {
+      if (isCurrent())
+        pushItem({ kind: "error", id: nextId(), text: `${MENTOR_DISPLAY_NAME}: ${String(error)}` });
+    });
+  }
+
+  function sendToKen(question: string, addressedText: string, preserveComposer = false): void {
+    if (blockUnconfirmedSession() || sessionMutationLockRef.current) return;
+    const trimmedQuestion = question.trim();
+    const trimmedAddressedText = addressedText.trim();
+    if (!readyRef.current || planReview !== null || !trimmedQuestion || !trimmedAddressedText) {
+      return;
+    }
+
+    // Authority comes from Ken hydration, never from the displayed session or a later ready response.
+    const kenTarget = captureKenTarget();
+    if (!kenTarget) return;
+    const isCurrent = captureKenOperation();
+    const composerDraft = input;
+    recordHistory(trimmedAddressedText);
+    stickToBottomRef.current = true;
+    // Display the canonical handle (not the raw typed alias/case/colon) so the live
+    // bubble matches the daemon's reloaded `@Ken <question>` row. History above
+    // still recalls exactly what the user typed.
+    pushItem({
+      kind: "user",
+      id: nextId(),
+      text: `${MENTOR_HANDLE} ${trimmedQuestion}`,
+      ken: true,
+    });
+    if (!preserveComposer) {
+      setInput("");
+      setSlashIndex(0);
+      setMention(null);
+      setMentionedPaths([]);
+      setEnhancement(null);
+    }
+    void sendKenPrompt(trimmedQuestion, kenTarget).catch((error: unknown) => {
+      if (!isCurrent()) return;
+      pushItem({ kind: "error", id: nextId(), text: `${MENTOR_DISPLAY_NAME}: ${String(error)}` });
+      // Recover a rejected typed question without overwriting work entered while it was pending.
+      if (!preserveComposer) setInput((current) => current || composerDraft);
+    });
+  }
+
+  // Submit the current input together with any staged attachments. Images are
+  // echoed inline in the user's bubble; all media is sent to the agent.
+  function submit(): void {
+    if (blockUnconfirmedSession() || sessionMutationLockRef.current) return;
+    if (promptSubmissionPendingRef.current?.()) return;
+    if (!readyRef.current) return;
+    if (attachmentReadsRef.current > 0) {
+      toast("Attachments are still loading. Please wait.");
+      return;
+    }
+    const trimmed = input.trim();
+    const typedAsk = typingAskRef.current;
+    if (typedAsk && trimmed) {
+      typingAskRef.current = null;
+      setInput("");
+      setSlashIndex(0);
+      handleAskAnswer(typedAsk.itemId, typedAsk.promptId, { [typedAsk.questionId]: trimmed });
+      return;
+    }
+    if (!readyRef.current || planReview !== null) return;
+    if (!trimmed && attachments.length === 0 && mentionedPaths.length === 0) return;
+    const noInputError = noInputSlashSubmissionError(
+      input,
+      commands,
+      attachments.length,
+      mentionedPaths.length,
+    );
+    if (noInputError) {
+      const match = slashCommandForInput(input, commands);
+      if (match?.args && match.command.input.text === "none") {
+        setInput(`/${match.command.name}`);
+      }
+      if (match?.command.input.references === "none") {
+        setMention(null);
+        setMentionedPaths([]);
+      }
+      if (match?.command.input.attachments === "none") clearAttachments();
+      pushItem({
+        kind: "error",
+        id: nextId(),
+        headline: "Command input blocked",
+        guidance: noInputError,
+      });
+      return;
+    }
+
+    if (
+      workspaceMode === "code" &&
+      /^\/(?:setup-programmatic|programmatic|programmatic-run)(?:\s|$)/.test(trimmed)
+    )
+      onProgrammaticActivity(true);
+
+    // `/schedule` registers a recurring prompt instead of sending anything now.
+    // An invalid draft is refused outright — sending it would run the raw command
+    // text as a prompt — and the hint above the composer already says why.
+    if (isScheduleDraft(input)) {
+      const result = parseScheduleCommand(input);
+      if (!result.ok) return;
+      addSchedule(result.value);
+      // Confirm in the transcript, otherwise pressing Enter looks like it did
+      // nothing: the first run is a whole interval away, so there is no other
+      // feedback until then.
+      pushItem({
+        kind: "user",
+        id: nextId(),
+        text: trimmed,
+        command: true,
+        label: `Scheduled · ${describeSchedule(result.value)}`,
+      });
+      recordHistory(trimmed);
+      stickToBottomRef.current = true;
+      setInput("");
+      setSlashIndex(0);
+      return;
+    }
+
+    // `@Ken <prompt>` (case-insensitive, optional colon) routes to Ken Kai, the
+    // read-only mentor agent — NOT GG Coder. Ken runs concurrently with any
+    // build run; his reply streams into a magenta bubble via ken_* events.
+    const kenMatch = workspaceMode === "code" ? MENTOR_HANDLE_SUBMIT_RE.exec(trimmed) : null;
+    if (kenMatch) {
+      if (attachments.length > 0) {
+        toast(
+          `${MENTOR_DISPLAY_NAME} cannot receive attachments. Remove ${MENTOR_HANDLE} to send them to ${PRODUCT_DISPLAY_NAME}.`,
+          "warning",
+        );
+        return;
+      }
+      const question = trimmed.slice(kenMatch[0].length).trim();
+      sendToKen(question, trimmed);
+      return;
+    }
+
+    const acceptComposer = captureComposerAcceptance();
+    const isCurrent = capturePromptSession();
+    promptSubmissionPendingRef.current = isCurrent;
+    const finishSubmission = () => {
+      if (promptSubmissionPendingRef.current === isCurrent)
+        promptSubmissionPendingRef.current = null;
+    };
+    recordHistory(trimmed);
+    // A user send always re-pins to the bottom — they want to see their message.
+    stickToBottomRef.current = true;
+    // Referenced files are appended to the prompt as a small block so the agent
+    // knows which paths to read; they aren't shown in the user's bubble text.
+    const prompt =
+      mentionedPaths.length > 0 ? appendReferencedFiles(trimmed, mentionedPaths) : trimmed;
+    // Carry the enhancer's highlighted segments (re-anchored through any edits)
+    // into the sent bubble, aligned to the trimmed text the bubble shows.
+    const sentEnhancements =
+      enhancement && enhancement.plain === input
+        ? (rebaseSegments(enhancement.segments, input, trimmed) ?? undefined)
+        : undefined;
+    // While a run is in flight, the message is QUEUED as steering (the sidecar
+    // injects it mid-loop). Attachments queue too — they're persisted and ride
+    // the same native-block path when the queue drains. Queued rows render
+    // dimmed until run_end clears the flag.
+    if (running) {
+      const supersedesQuestion = hasOpenAsk();
+      const queuedWire = attachments.map(toWire);
+      const queuedImgs = attachments.filter((a) => a.previewUrl).map((a) => a.previewUrl!);
+      const userItem: Item = {
+        kind: "user",
+        id: nextId(),
+        text: trimmed,
+        command: isWorkflowCommand(trimmed),
+        images: queuedImgs.length > 0 ? queuedImgs : undefined,
+        files: mentionedPaths.length > 0 ? mentionedPaths : undefined,
+        enhancements: sentEnhancements,
+      };
+      void sendPrompt(
+        prompt,
+        queuedWire,
+        sentEnhancements ? { enhancements: sentEnhancements } : undefined,
+      )
+        .then((submission) => {
+          if (!isCurrent()) return;
+          acceptComposer();
+          if (supersedesQuestion) dismissOpenAsks();
+          // Server-decided: a deferred question does not make this prompt steer.
+          const steers = submission.queued && submission.steers;
+          if (steers) noteSupersedingSend(prompt);
+          acceptSubmission(userItem, submission, steers);
+          if (!submission.queued) planResumePromptRef.current = prompt;
+        })
+        .catch((error) => {
+          if (isCurrent()) reportPromptFailure(error);
+        })
+        .finally(finishSubmission);
+      return;
+    }
+    const wire = attachments.map(toWire);
+    const imgPreviews = attachments.filter((a) => a.previewUrl).map((a) => a.previewUrl!);
+    const pendingUserId = nextId();
+    const pendingVideoWarningId = nextId();
+    const pendingUserItem: Extract<Item, { kind: "user" }> = {
+      kind: "user",
+      id: pendingUserId,
+      text: trimmed,
+      command: isWorkflowCommand(trimmed),
+      images: imgPreviews.length > 0 ? imgPreviews : undefined,
+      files: mentionedPaths.length > 0 ? mentionedPaths : undefined,
+      enhancements: sentEnhancements,
+    };
+    pushItem(pendingUserItem);
+    // Warn the user when a video attachment is sent to a model without native
+    // video analysis — the agent can still use ffmpeg to extract frames/audio,
+    // but can't watch the clip directly.
+    if (wire.some((a) => a.kind === "video") && !(state?.supportsVideo ?? false)) {
+      pushItem({
+        kind: "info",
+        id: pendingVideoWarningId,
+        text: VIDEO_CAPABILITY_WARNING,
+      });
+    }
+    endStreamingText();
+    void sendPrompt(prompt, wire, sentEnhancements ? { enhancements: sentEnhancements } : undefined)
+      .then((submission) => {
+        if (!isCurrent()) return;
+        acceptComposer();
+        acceptSubmission(pendingUserItem, submission);
+        if (!submission.queued) planResumePromptRef.current = prompt;
+      })
+      .catch((error) => {
+        if (!isCurrent()) return;
+        // Only a definite rejection disproves the optimistic row. A lost receipt
+        // can follow persistence/startup; retain the row with the uncertainty notice
+        // until session history is reloaded rather than pretending it was not sent.
+        if (error instanceof PromptSubmissionError && error.category === "rejected") {
+          setItems((current) =>
+            current.filter(
+              (item) => item.id !== pendingUserId && item.id !== pendingVideoWarningId,
+            ),
+          );
+        }
+        reportPromptFailure(error);
+      })
+      .finally(finishSubmission);
+  }
+
+  // ── Attachment intake (paste / attach button / whole-window drag-drop) ──
+  async function addFiles(files: FileList | File[]): Promise<void> {
+    if (noAttachmentSlashCommandRef.current) return;
+    const list = Array.from(files);
+    await stageAttachments(() =>
+      Promise.all(list.map((file) => fileToPending(file).catch(() => null))),
+    );
+  }
+
+  function handleWindowDragEnter(e: React.DragEvent<HTMLDivElement>): void {
+    if (
+      noAttachmentSlashCommandRef.current ||
+      !hasDraggedFiles(e.dataTransfer) ||
+      !canHandleWindowFileDrop()
+    )
+      return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "copy";
+    setIsFileDragOver(true);
+  }
+
+  function handleWindowDragOver(e: React.DragEvent<HTMLDivElement>): void {
+    if (
+      noAttachmentSlashCommandRef.current ||
+      !hasDraggedFiles(e.dataTransfer) ||
+      !canHandleWindowFileDrop()
+    )
+      return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "copy";
+    setIsFileDragOver(true);
+  }
+
+  function handleWindowDragLeave(e: React.DragEvent<HTMLDivElement>): void {
+    if (!hasDraggedFiles(e.dataTransfer)) return;
+    const nextTarget = e.relatedTarget;
+    if (nextTarget instanceof Node && e.currentTarget.contains(nextTarget)) return;
+    setIsFileDragOver(false);
+  }
+
+  function handleWindowDrop(e: React.DragEvent<HTMLDivElement>): void {
+    if (!hasDraggedFiles(e.dataTransfer)) return;
+    e.preventDefault();
+    setIsFileDragOver(false);
+    if (noAttachmentSlashCommandRef.current || !canHandleWindowFileDrop()) return;
+    const files = filesForAttachment(e.dataTransfer);
+    if (files.length > 0) void addFiles(files);
+  }
+
+  function removeAttachment(id: number): void {
+    setAttachments((prev) => prev.filter((a) => a.id !== id));
+  }
+
+  // ── Durable plan review actions ──
+
+  function recoverPlanMutation(error: unknown, fallback: string): void {
+    if (error instanceof PlanMutationError && error.pendingPlanReview !== undefined) {
+      const recovered = error.pendingPlanReview;
+      replacePlanReview((current) =>
+        current &&
+        planReview &&
+        current.checkpointId === planReview.checkpointId &&
+        current.generation === planReview.generation &&
+        stateRef.current?.sessionId === state?.sessionId
+          ? recovered
+          : current,
+      );
+    }
+    toast(error instanceof PlanMutationError ? error.message : fallback, "error", 7_000);
+  }
+
+  async function acceptPlan(): Promise<void> {
+    if (blockUnconfirmedSession() || sessionMutationLockRef.current || planGateBusy) return;
+    // Capture the approved plan's step count BEFORE the IPC — accepting starts a
+    // fresh session on the sidecar, whose session_reset broadcast nulls
+    // planReview (and clears the transcript + counters) here.
+    const nextPlanTotal = planReview ? countPlanSteps(planReview.content) : 0;
+    // Stash a fallback for older sidecars. The current sidecar puts its canonical
+    // live-file count directly on session_reset, which wins over this snapshot.
+    pendingPlanTotalRef.current = nextPlanTotal;
+    // Accept the plan: the sidecar wipes the planning conversation into a FRESH
+    // session (so the build doesn't carry all the plan-mode research), bakes the
+    // approved plan into the new system prompt, and broadcasts authoritative
+    // progress before this request resolves. Do not re-seed from stale modal
+    // content after the await: the plan file may already have changed.
+    setPlanGateBusy(true);
+    try {
+      if (!planReview) return;
+      await acceptPlanIPC(planReview.checkpointId, planReview.generation);
+      planResumePromptRef.current = null;
+      replacePlanReview((current) =>
+        stateRef.current?.sessionId === state?.sessionId &&
+        current?.checkpointId === planReview.checkpointId &&
+        current.generation === planReview.generation
+          ? null
+          : current,
+      );
+      pushItem({ kind: "info", id: nextId(), text: "\u2713 Plan accepted. Resuming." });
+    } catch (error) {
+      pendingPlanTotalRef.current = null;
+      recoverPlanMutation(error, "Couldn’t approve the plan. The approval gate is still open.");
+    } finally {
+      setPlanGateBusy(false);
+    }
+  }
+
+  async function sendPlanFeedback(feedback: string): Promise<void> {
+    if (blockUnconfirmedSession() || sessionMutationLockRef.current || planGateBusy) return;
+    if (!planReview) return;
+    setPlanGateBusy(true);
+    try {
+      await revisePlanIPC(planReview.checkpointId, planReview.generation, feedback);
+      replacePlanReview((current) =>
+        current &&
+        stateRef.current?.sessionId === state?.sessionId &&
+        current.checkpointId === planReview.checkpointId &&
+        current.generation === planReview.generation
+          ? { ...current, state: "revision-requested", feedback }
+          : current,
+      );
+      pushItem({ kind: "info", id: nextId(), text: "✎ Feedback sent. Revising the plan." });
+    } catch (error) {
+      recoverPlanMutation(error, "Couldn’t request revision. The approval gate is still open.");
+    } finally {
+      setPlanGateBusy(false);
+    }
+  }
+
+  async function retryPlanRevision(): Promise<void> {
+    if (blockUnconfirmedSession() || sessionMutationLockRef.current || planGateBusy) return;
+    if (!planReview || planReview.state !== "revision-requested" || !planReview.feedback) return;
+    setPlanGateBusy(true);
+    try {
+      await revisePlanIPC(planReview.checkpointId, planReview.generation, planReview.feedback);
+      pushItem({ kind: "info", id: nextId(), text: "↻ Revision retry started." });
+    } catch (error) {
+      recoverPlanMutation(
+        error,
+        "Couldn’t retry revision. The persisted request is still available.",
+      );
+    } finally {
+      setPlanGateBusy(false);
+    }
+  }
+
+  // The toolbar and Ken prompt actions share the same correlated reset path.
+  async function startNewSession(): Promise<void> {
+    try {
+      await createAuthoritativeNewSession();
+      setConfirmNewSession(false);
+    } catch (error) {
+      if (error instanceof LocalSessionMutationBusyError) {
+        toast(error.message, "error", 7_000);
+        return;
+      }
+      if (error instanceof NewSessionError && error.kind === "creation-rejected") {
+        toast(
+          "Couldn’t create a new session. The current session is unchanged; try again.",
+          "error",
+        );
+        return;
+      }
+      // An ambiguous outcome must not offer a blind retry against an unknown session.
+      setConfirmNewSession(false);
+      toast(AMBIGUOUS_NEW_SESSION_MESSAGE, "error", 7_000);
+    }
+  }
+
+  // Re-point this window at a freshly chosen project: clear the old transcript
+  // and force a re-hydrate against the new sidecar. Bumping the nonce re-runs
+  // the hydrate effect even when needsProject is already false (switching
+  // sessions from the reopened picker), which flipping the boolean alone won't.
+  function onProjectChosen(): void {
+    checklistFetchRef.current++;
+    checklistRunRef.current = null;
+    setShowChecklist(false);
+    setChecklistRunId(null);
+    setChecklistNotice(null);
+    setChecklistLoad({ kind: "loading" });
+    stickToBottomRef.current = true;
+    setItems([]);
+    setLiveToolFeed([]);
+    setState(null);
+    setTasks([]);
+    setContextTokens(0);
+    setTokens(0);
+    setDoneStatus(null);
+    replacePlanReview(null);
+    planTotalRef.current = 0;
+    planDoneRef.current = new Set();
+    setPlanTotal(0);
+    setPlanDone(new Set());
+    if (!unresolvedSessionResetRef.current) clearAttachments();
+    setQueuedCount(0);
+    setQueuedMessages([]);
+    setHydrated(false);
+    setNeedsProject(false);
+    setHydrateNonce((n) => n + 1);
+  }
+
+  const bindPickerProject = useCallback(
+    async (cwd: string, sessionPath?: string): Promise<number> => {
+      const nextGeneration = await client.selectWorkspace(
+        { mode: "code", cwd, sessionPath: sessionPath ?? null },
+        generationRef.current ?? 0,
+      );
+      adoptGeneration(nextGeneration);
+      return nextGeneration;
+    },
+    [adoptGeneration, client],
+  );
+  const bindPickerChat = useCallback(
+    async (
+      cwd: string,
+      sessionPath: string | undefined,
+      chatAgent: ChatAgentId,
+    ): Promise<number> => {
+      const nextGeneration = await client.selectWorkspace(
+        { mode: "chat", cwd, sessionPath: sessionPath ?? null, chatAgent },
+        generationRef.current ?? 0,
+      );
+      adoptGeneration(nextGeneration);
+      return nextGeneration;
+    },
+    [adoptGeneration, client],
+  );
+  const bindPickerMotion = useCallback(
+    async (cwd: string, sessionPath: string | undefined): Promise<number> => {
+      const nextGeneration = await client.selectWorkspace(
+        { mode: "motion", cwd, sessionPath: sessionPath ?? null },
+        generationRef.current ?? 0,
+      );
+      adoptGeneration(nextGeneration);
+      return nextGeneration;
+    },
+    [adoptGeneration, client],
+  );
+  const handlePickerChosen = useCallback((): void => {
+    onUserTargetChange?.();
+    onProjectChosen();
+  }, [onUserTargetChange]);
+  // A Goal is a code workspace rooted at its Goal folder. Bind it through this
+  // pane's client (pane-scoped) before the shared reset + re-hydrate.
+  const handleGoalChosen = useCallback((): void => {
+    handlePickerChosen();
+  }, [handlePickerChosen]);
+
+  const { startRoadmapPhase, resumeRoadmapPhase } = useRoadmapPhaseActions({
+    state,
+    stateRef,
+    generationRef,
+    client,
+    running,
+    autopilotReviewing,
+    newSessionBusy,
+    blockUnconfirmedSession,
+    adoptGeneration,
+    onProjectChosen,
+  });
+
+  useEffect(() => {
+    onSnapshot?.({
+      paneId,
+      generation: generationRef.current ?? null,
+      mode: state?.mode ?? target?.mode ?? workspaceMode,
+      chatAgent: state?.chatAgent ?? target?.chatAgent,
+      cwd: state?.cwd ?? target?.cwd ?? null,
+      sessionPath: state?.sessionPath ?? target?.sessionPath ?? null,
+      sessionTitle: formatWorkspaceTitle(
+        state?.cwd,
+        state?.gitBranch,
+        workspaceProductName(workspaceMode),
+        state?.gitDirtyFileCount,
+      ),
+      projectBound: !needsProject && Boolean(state?.cwd ?? target?.cwd),
+      restoreChecked,
+      activeWork: running || autopilotReviewing,
+    });
+  }, [
+    autopilotReviewing,
+    needsProject,
+    paneId,
+    props.generation,
+    onSnapshot,
+    restoreChecked,
+    running,
+    state?.chatAgent,
+    state?.cwd,
+    state?.gitBranch,
+    state?.gitDirtyFileCount,
+    state?.mode,
+    state?.sessionPath,
+    target?.chatAgent,
+    target?.cwd,
+    target?.mode,
+    target?.sessionPath,
+    workspaceMode,
+  ]);
+
+  useEffect(() => {
+    registerInput?.(paneId, {
+      focus: () => inputRef.current?.focus(),
+      setNativeFileDragOver: (dragging) => {
+        setIsFileDragOver(dragging && canHandleWindowFileDrop());
+      },
+      handleNativeDrop: (paths) => {
+        if (!canHandleWindowFileDrop() || paths.length === 0) return;
+        setIsFileDragOver(false);
+        const generation = attachmentGenerationRef.current;
+        void stageAttachments(async () => {
+          const infos = await getDroppedPathInfo(paths);
+          if (generation !== attachmentGenerationRef.current) return [];
+          insertDroppedFolderPaths(infos.filter((info) => info.isDir).map((info) => info.path));
+          const filePaths = infos.filter((info) => !info.isDir).map((info) => info.path);
+          return Promise.all(
+            filePaths.map(async (path): Promise<PendingAttachment | null> => {
+              const attachment = await readDroppedFileAttachment(path);
+              return attachment ? attachmentToPending(attachment) : null;
+            }),
+          );
+        });
+      },
+    });
+    return () => registerInput?.(paneId, null);
+  }, [insertDroppedFolderPaths, paneId, registerInput, stageAttachments]);
+
+  // Show explicit recovery feedback while Rust resolves this window's durable
+  // target. This branch used to paint only the dark background, which looked
+  // indistinguishable from a dead/black webview during a slow recovery.
+  if (needsProject && !restoreChecked) {
+    return (
+      <div className="app app-restoring" style={{ background: theme.background }}>
+        <div className="app-restoring-status" role="status" aria-live="polite">
+          <span className="app-restoring-dot" aria-hidden="true" />
+          Restoring workspace…
+        </div>
+      </div>
+    );
+  }
+
+  if (needsProject) {
+    return (
+      <div className="app" style={{ background: theme.background }}>
+        {entryView === "home" ? (
+          <HomeScreen
+            onProjects={() => {
+              setWorkspaceMode("code");
+              setEntryView("projects");
+            }}
+            onChat={() => {
+              setWorkspaceMode("chat");
+              setEntryView("chats");
+            }}
+            onMotion={() => {
+              setWorkspaceMode("motion");
+              setEntryView("motion");
+            }}
+            onGoals={() => {
+              setWorkspaceMode("code");
+              setEntryView("goals");
+            }}
+            onSettings={(tab) => {
+              setSettingsTab(tab ?? "general");
+              setEntryView("settings");
+            }}
+            refreshSignal={homeRefreshSignal}
+            waitForAgentReady={catalogClient.waitForReady}
+          />
+        ) : entryView === "settings" ? (
+          <SettingsScreen
+            initialTab={settingsTab}
+            // Home panes have no session yet; the catalog client's daemon session
+            // is running, so MCP management never waits on an unstarted pane.
+            mcpClient={catalogClient}
+            onClose={() => {
+              setEntryView("home");
+              // Settings may have changed the folder or providers.
+              setHomeRefreshSignal((n) => n + 1);
+            }}
+          />
+        ) : entryView === "chats" ? (
+          <ChatPicker
+            onChosen={handlePickerChosen}
+            onClose={() => setEntryView("home")}
+            waitForCatalogReady={catalogClient.waitForReady}
+            discoverSessions={catalogClient.listSessions}
+            bindChat={bindPickerChat}
+            showWindowControls={kind === "primary"}
+          />
+        ) : entryView === "goals" ? (
+          <Suspense fallback={null}>
+            <GoalPicker
+              openGoal={bindPickerProject}
+              onChosen={handleGoalChosen}
+              onClose={() => setEntryView("home")}
+            />
+          </Suspense>
+        ) : entryView === "motion" ? (
+          <ChatPicker
+            mode="motion"
+            onChosen={handlePickerChosen}
+            onClose={() => setEntryView("home")}
+            waitForCatalogReady={catalogClient.waitForReady}
+            discoverSessions={catalogClient.listSessions}
+            bindChat={bindPickerMotion}
+            showWindowControls={kind === "primary"}
+          />
+        ) : (
+          <ProjectPicker
+            onChosen={handlePickerChosen}
+            waitForCatalogReady={catalogClient.waitForReady}
+            discoverProjects={catalogClient.listProjects}
+            discoverSessions={catalogClient.listSessions}
+            renameSession={catalogClient.renameSession}
+            bindProject={bindPickerProject}
+            refreshSignal={homeRefreshSignal}
+            showWindowControls={kind === "primary"}
+            onClose={() => setEntryView("home")}
+          />
+        )}
+        {showTraySettings && <SettingsModal onClose={closeTraySettings} />}
+        <Toaster />
+      </div>
+    );
+  }
+
+  // Picker reopened over an already-open workspace. Back from the picker returns
+  // to the home screen; choosing a session resets and re-hydrates this window.
+  if (showPicker) {
+    const pickerProps = {
+      onChosen: () => {
+        setShowPicker(false);
+        handlePickerChosen();
+      },
+      onClose: () => {
+        setShowPicker(false);
+        setNeedsProject(true);
+        setEntryView("home" as const);
+      },
+      waitForCatalogReady: catalogClient.waitForReady,
+      discoverSessions: catalogClient.listSessions,
+      refreshSignal: homeRefreshSignal,
+      showWindowControls: kind === "primary",
+    };
+    return (
+      <div className="app" style={{ background: theme.background }}>
+        {workspaceMode === "chat" ? (
+          <ChatPicker
+            initialAgent={state?.chatAgent ?? "general"}
+            bindChat={bindPickerChat}
+            {...pickerProps}
+          />
+        ) : workspaceMode === "motion" ? (
+          <ChatPicker mode="motion" bindChat={bindPickerMotion} {...pickerProps} />
+        ) : state?.goal ? (
+          <Suspense fallback={null}>
+            <GoalPicker
+              openGoal={bindPickerProject}
+              onChosen={() => {
+                setShowPicker(false);
+                handleGoalChosen();
+              }}
+              onClose={pickerProps.onClose}
+            />
+          </Suspense>
+        ) : (
+          <ProjectPicker
+            initialProjectPath={state?.cwd ?? null}
+            discoverProjects={catalogClient.listProjects}
+            renameSession={catalogClient.renameSession}
+            bindProject={bindPickerProject}
+            {...pickerProps}
+          />
+        )}
+        {showTraySettings && <SettingsModal onClose={closeTraySettings} />}
+      </div>
+    );
+  }
+
+  const planIdentity = planReview
+    ? `${state?.sessionId}:${planReview.checkpointId}:${planReview.generation}`
+    : null;
+  const expandedReview = roadmapDraftState.open
+    ? "roadmap"
+    : planIdentity && expandedPlanIdentity === planIdentity
+      ? "plan"
+      : null;
+  const setExpandedReview = (id: ReviewDockItem["id"] | null) => {
+    setExpandedPlanIdentity(id === "plan" ? planIdentity : null);
+    dispatchRoadmapDraft({ type: id === "roadmap" ? "open" : "dismiss" });
+  };
+  const reviewItems: ReviewDockItem[] = [];
+  if (workspaceMode === "code" && planReview)
+    reviewItems.push({
+      id: "plan",
+      identity: planIdentity!,
+      label: "Plan approval required",
+      summary:
+        planReview.state === "revision-requested"
+          ? "Revision requested"
+          : "Review the saved plan before approving",
+      content: (
+        <PlanReviewModal
+          content={planReview.content}
+          kenReviewing={autopilotReviewing}
+          kenReady={planReview.reviewStatus === "ready"}
+          readinessReason={
+            planReview.state === "pending-review" && planReview.reviewStatus === "ready"
+              ? planReview.feedback
+              : null
+          }
+          revisionPending={planReview.state === "revision-requested"}
+          revisionRunning={running}
+          busy={planGateBusy}
+          onAccept={() => void acceptPlan()}
+          onFeedback={(feedback) => void sendPlanFeedback(feedback)}
+          onRetryRevision={() => void retryPlanRevision()}
+        />
+      ),
+    });
+
+  const roadmapDraftDescription = roadmapDraftState.draft
+    ? describeRoadmapDraft(roadmapDraftState.draft)
+    : null;
+  if (roadmapDraftState.draft && roadmapDraftDescription)
+    reviewItems.push({
+      id: "roadmap",
+      identity: `${state?.sessionId}:${roadmapDraftState.draft.id}`,
+      label: roadmapDraftDescription.label,
+      summary: roadmapDraftDescription.summary,
+      content: (
+        <RoadmapPhaseDraftReviewModal
+          draft={roadmapDraftState.draft}
+          open
+          decision={roadmapDraftState.decision}
+          error={roadmapDraftState.error}
+          announcement=""
+          onApprove={approveRoadmapDraft}
+          onReject={rejectRoadmapDraft}
+        />
+      ),
+    });
+
+  const roadmapDraftTrigger = roadmapDraftDescription ? (
+    <button
+      type="button"
+      className="btn btn-sm btn-ghost roadmap-draft-trigger"
+      onClick={() => setExpandedReview("roadmap")}
+      title="Review pending Roadmap draft"
+      aria-label={roadmapDraftDescription.triggerLabel}
+      aria-expanded={expandedReview === "roadmap"}
+    >
+      <GitBranchIcon size={13} aria-hidden="true" />
+      <span>Review draft</span>
+      <span className="roadmap-draft-trigger-count" aria-hidden="true">
+        {roadmapDraftDescription.count}
+      </span>
+    </button>
+  ) : null;
+
+  const backLabel =
+    workspaceMode === "chat"
+      ? "Back to chats"
+      : workspaceMode === "motion"
+        ? "Back to motion sessions"
+        : "Back to this project's sessions";
+  const goBack = (): void => {
+    const back = (): void => {
+      setDeckPanel(null);
+      setShowPicker(true);
+    };
+    // A Goal's farm sits under a frosted header WebKit leaves out of its
+    // snapshots; leave it without a crossfade, as the Fork always has.
+    if (state?.goal) back();
+    else showScreen(back);
+  };
+  const closeDeckThen =
+    (run: () => void): (() => void) =>
+    () => {
+      setDeckPanel(null);
+      run();
+    };
+  // Context-window usage for the deck's model key: 0 (hidden) until there is
+  // both a window size and a real token reading from a completed turn.
+  const contextPct =
+    state?.contextWindow && contextTokens > 0
+      ? Math.min(100, Math.round((contextTokens / state.contextWindow) * 100))
+      : 0;
+
+  const content = (
+    <div
+      className={`app agent-pane${props.focused !== false ? " pane-focused" : ""}${isFileDragOver ? " app-file-dragover" : ""}${windowFocused && props.windowFocused !== false ? " window-focused" : ""}${workspaceMode === "code" && showChecklist ? " checklist-open" : ""}${goalWorldOpen && !showChecklist ? " goal-world-open" : ""}`}
+      data-glow={glowState}
+      style={{ background: "var(--workspace-pane-bg, var(--bg))", ...glowStyle }}
+      onPointerDown={() => props.onFocus?.(paneId)}
+      onDragEnter={handleWindowDragEnter}
+      onDragOver={handleWindowDragOver}
+      onDragLeave={handleWindowDragLeave}
+      onDrop={handleWindowDrop}
+    >
+      {confettiNonce && <Confetti key={confettiNonce} />}
+
+      <WorkspaceHeader
+        ref={workspaceHeaderRef}
+        workspaceMode={workspaceMode}
+        cwd={state?.cwd}
+        goalName={state?.goal?.name ?? null}
+        gitBranch={state?.gitBranch}
+        gitDirtyFileCount={state?.gitDirtyFileCount}
+        gitHubIssues={state?.gitHubIssues}
+        gitHubPRs={state?.gitHubPRs}
+        additionalRoots={state?.additionalRoots}
+        subtitle={
+          workspaceMode === "chat"
+            ? state?.chatAgent === "therapist"
+              ? "Therapist"
+              : state?.chatAgent === "research"
+                ? "Research"
+                : "Brainstorm"
+            : workspaceMode === "motion"
+              ? "Motion Agent"
+              : null
+        }
+        paneChromeSlotRef={props.paneChromeSlotRef}
+        leading={<BackButton label={backLabel} onClick={goBack} />}
+        trailing={
+          <>
+            {roadmapDraftTrigger}
+            {rankCelebrateNonce && (
+              <div className="rank-badge-wrap">
+                <RankBadge
+                  snapshot={progress}
+                  celebrateNonce={rankCelebrateNonce}
+                  onClick={() => setDeckPanel("scorecard")}
+                />
+              </div>
+            )}
+            <TitleBarActions
+              workspaceMode={workspaceMode}
+              isGoal={Boolean(state?.goal)}
+              goalView={goalView}
+              onGoalViewChange={(view) => setGoalChatFor(view === "chat" ? activeGoalId : null)}
+              goalNeedsAnswer={goalWaitingOnUser}
+              goalTally={goalTally}
+              goalState={
+                state?.goal?.paused
+                  ? "paused"
+                  : running || (goalTally?.working ?? 0) > 0
+                    ? "running"
+                    : "stopped"
+              }
+              onGoalPauseChange={state?.goal?.phase === "active" ? setGoalPaused : undefined}
+              xpChips={xpChips}
+              running={running || planReview !== null}
+              dirtyCount={state?.gitDirtyFileCount ?? 0}
+              needsGitInit={needsGitInit}
+              onInitGit={() => setShowInitGit(true)}
+              commitCommand={commitCommand}
+              hasCommit={hasCommit}
+              onCommit={() =>
+                submitText(
+                  `/${commitCommand}`,
+                  hasCommit ? "Committing\u2026" : "Setting up commits\u2026",
+                )
+              }
+              onNewSession={() => setConfirmNewSession(true)}
+              newSessionDisabled={running || autopilotReviewing || newSessionBusy}
+              notes={
+                workspaceMode === "code" && !state?.goal ? (
+                  <ProjectNotes
+                    ref={projectNotesActionsRef}
+                    cwd={state?.cwd ?? null}
+                    client={client}
+                    onStartPhase={startRoadmapPhase}
+                    onStartNextPhase={async (checkpointId, nextPhaseId) => {
+                      if (blockUnconfirmedSession()) {
+                        return {
+                          status: "failed",
+                          code: "session-busy",
+                          operationId: null,
+                          message: AMBIGUOUS_NEW_SESSION_MESSAGE,
+                        };
+                      }
+                      return client.startNextPhase(checkpointId, nextPhaseId);
+                    }}
+                    commands={commands}
+                    onRunCommand={(invocation) => submitText(invocation)}
+                    onCancelPhase={(phaseId) => client.cancelPhaseRun(phaseId)}
+                    onResumePhase={resumeRoadmapPhase}
+                    phaseStartUnavailableReason={
+                      state?.mode === "code"
+                        ? null
+                        : "Roadmap phases can only start in coding mode."
+                    }
+                    phaseActionDisabled={
+                      running || autopilotReviewing || newSessionBusy || planReview !== null
+                    }
+                    paneFocused={props.focused !== false}
+                    windowFocused={windowFocused && props.windowFocused !== false}
+                  />
+                ) : undefined
+              }
+              projectTasks={projectTasks}
+              onOpenTasks={workspaceMode === "code" && !state?.goal ? openTasks : undefined}
+              tasksOpen={showTasks}
+            />
+          </>
+        }
+      />
+
+      {/* Kept alive while hidden (Chat view), so switching back doesn't rebuild the farm. */}
+      {activeGoalId && (
+        <Activity mode={goalWorldOpen ? "visible" : "hidden"}>
+          <Suspense fallback={null}>
+            <GoalWorld
+              key={activeGoalId}
+              headerRef={workspaceHeaderRef}
+              goalId={activeGoalId}
+              running={running}
+              liveTools={liveToolFeed}
+              waitingOnUser={goalWaitingOnUser}
+              workers={goalWorkers}
+              ask={goalAskNotice}
+              kenSaid={kenSaid}
+              onShowChat={() => setGoalChatFor(activeGoalId)}
+              finish={shownGoalFinish}
+              onCloseFinish={() => setGoalFinish(null)}
+              kenStatus={kenStatus}
+            />
+          </Suspense>
+        </Activity>
+      )}
+
+      {/* React owns chat visibility rather than a stylesheet override. Activity
+          keeps the draft and transcript state, and suspends hidden child effects. */}
+      <Activity mode={goalWorldOpen ? "hidden" : "visible"}>
+        {/* Non-scrolling frame the same size as the chat viewport. The banner
+          lives HERE, not inside `.transcript` — `.transcript` scrolls, and an
+          absolutely positioned child of a scrolling container is pinned to the
+          top of the scrolled CONTENT, not the visible viewport, so in an
+          existing session scrolled down it rendered far above what's on
+          screen. Anchoring to this non-scrolling sibling keeps it pinned to
+          what the user is actually looking at, at any scroll position. */}
+        <div className="conversation-stack">
+          <div ref={transcriptFrameRef} className="transcript-frame">
+            {workspaceMode === "code" && kenPowerBanner && (
+              <KenPowerBanner mode={kenPowerBanner} onDone={() => setKenPowerBanner(null)} />
+            )}
+            <div
+              className="transcript"
+              ref={attachTranscript}
+              onScroll={onTranscriptScroll}
+              onWheel={onTranscriptWheel}
+            >
+              {!hydrated && items.length === 0 ? (
+                <TranscriptSkeleton />
+              ) : (
+                <>
+                  {items.length === 0 &&
+                    (connectError !== null ? (
+                      <div className="picker-empty transcript-reveal" role="alert">
+                        <span>Couldn't connect to the agent.</span>
+                        <span style={{ color: theme.textDim }}>{connectError}</span>
+                        <button
+                          type="button"
+                          className="btn btn-sm btn-ghost"
+                          onClick={() => setHydrateNonce((n) => n + 1)}
+                        >
+                          Try again
+                        </button>
+                      </div>
+                    ) : status === "ready" ? (
+                      <WakeScreen
+                        chat={workspaceMode === "chat"}
+                        motion={workspaceMode === "motion"}
+                      />
+                    ) : (
+                      <div className="line transcript-reveal" style={{ color: theme.textDim }}>
+                        {`\u273b ${status}`}
+                      </div>
+                    ))}
+                  <KenPromptActionProvider value={kenPromptDispatcher}>
+                    <LiveTextContext.Provider value={liveText}>
+                      {items.map((it) =>
+                        createElement(TranscriptRow, {
+                          key: it.id,
+                          item: it,
+                          view: chatView,
+                          animateIn: it.id >= liveFromId,
+                          consumeEntrance: entrances.consume,
+                          kenTalking: it.id === talkingKenId,
+                          errorActive: it.id === currentErrorId,
+                          errorModelPicker:
+                            it.kind === "error" && it.id === currentErrorId ? (
+                              <ModelSelect
+                                models={models}
+                                currentModel={
+                                  it.scope === "ken_error" || it.scope === "autopilot_error"
+                                    ? (state?.kenModel ?? state?.model ?? "")
+                                    : (state?.model ?? "")
+                                }
+                                onSelect={
+                                  it.scope === "ken_error" || it.scope === "autopilot_error"
+                                    ? onSelectKenModel
+                                    : onSelectModel
+                                }
+                                disabled={running || kenRunning || autopilotReviewing}
+                                title={
+                                  it.scope === "ken_error" || it.scope === "autopilot_error"
+                                    ? `Switch ${MENTOR_DISPLAY_NAME}'s model`
+                                    : "Switch model"
+                                }
+                                label={
+                                  it.reason === "usage_limit" ? "Switch provider" : "Choose model"
+                                }
+                                color={theme.primary}
+                              />
+                            ) : undefined,
+                          onImageLoad: maybeScrollToBottom,
+                          onAskAnswer: handleAskAnswer,
+                          onAskType: handleAskType,
+                        }),
+                      )}
+                    </LiveTextContext.Provider>
+                  </KenPromptActionProvider>
+                  {workspaceMode === "code" &&
+                    programmaticOpen &&
+                    programmatic.generation === programmaticGeneration && (
+                      <ProgrammaticChat
+                        state={programmatic}
+                        busy={programmaticBusy}
+                        planMode={state?.planMode ?? false}
+                        onAction={(request) => void performProgrammatic(request)}
+                        onSelect={(id) => {
+                          dispatchProgrammatic({ type: "select", id });
+                          void performProgrammatic({ version: 1, action: "detail", id });
+                        }}
+                        onSelectCandidate={(source, id) => {
+                          if (source === "history" && programmaticBusy) return;
+                          dispatchProgrammatic({ type: "select-candidate", source, id });
+                          if (source === "history")
+                            void performProgrammatic({
+                              version: 1,
+                              action: "history-detail",
+                              candidateId: id,
+                              offset: 0,
+                            });
+                        }}
+                        onRun={() => void runSelectedProgrammatic()}
+                      />
+                    )}
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* The dock: everything below the conversation, floating over its
+          bottom edge (the transcript reserves its height as --dock-h).
+          Anything that must stay visible above the conversation — pending
+          reviews, their recovery notice, update banners — lives INSIDE it:
+          the dock paints over its siblings, so a sibling placed after or
+          beside it is hidden underneath (scripts/check-dock-layering.mjs
+          fails the build on that). */}
+        <div ref={dockRef} className="dock">
+          {/* Until history replay applies (readyRef, the submission gate), say
+            so — the removed footer used to carry this connecting status. */}
+          {!readyRef.current && (
+            <span className="dock-status" role="status" style={{ color: theme.textDim }}>
+              {status}
+            </span>
+          )}
+          <ReviewDock
+            items={reviewItems}
+            expanded={expandedReview}
+            onExpandedChange={setExpandedReview}
+            onLayoutChange={maybeScrollToBottom}
+            fallbackFocus={() => inputRef.current?.focus()}
+          />
+          {roadmapDraftRefreshError && (
+            <div role="status" className="roadmap-draft-refresh-error">
+              {roadmapDraftRefreshError}
+              <button type="button" className="btn btn-ghost" onClick={refreshRoadmapDraft}>
+                Retry Roadmap review
+              </button>
+            </div>
+          )}
+          {/* Sub-agents walk on top of the pinned region as critters. */}
+          <CritterFloor groups={critterGroups} />
+          <div ref={liveRegionRef} className="liveregion">
+            {/* Starting points sit just above the activity bar, only for an empty,
+              loaded, ready conversation. They fill the composer (never send) and
+              hide as soon as the user types or attaches something. */}
+            {showStarters &&
+              (workspaceMode === "motion" ? (
+                <MotionStarters onPick={fillComposer} />
+              ) : (
+                <ComposerStarters
+                  starters={workspaceMode === "chat" ? CHAT_STARTERS : CODE_STARTERS}
+                  label="Ways to start"
+                  onPick={fillComposer}
+                />
+              ))}
+            {!toolsHidden && <LiveToolPanel entries={liveToolFeed} />}
+          </div>
+
+          <Deck
+            focused={props.focused !== false}
+            state={state}
+            hydrated={hydrated}
+            showGit={workspaceMode === "code"}
+            panel={deckPanel}
+            onPanelChange={setDeckPanel}
+            running={running}
+            contextPct={contextPct}
+            models={models}
+            modelsFailed={modelsFailed}
+            onSelectModel={onSelectModel}
+            second={
+              state?.goal
+                ? {
+                    name: "Critters",
+                    followLabel: "GG Goals",
+                    model: state.goal.critterModel ?? state.model,
+                    following: !state.goal.critterModel,
+                    disabled: false,
+                    onSelect: onSelectCritterModel,
+                  }
+                : workspaceMode === "code" && state
+                  ? {
+                      name: MENTOR_DISPLAY_NAME,
+                      followLabel: PRODUCT_DISPLAY_NAME,
+                      model: state.kenModel ?? state.model,
+                      following: !state.kenModelOverride,
+                      disabled: running || kenRunning || autopilotReviewing,
+                      onSelect: onSelectKenModel,
+                      title: state.kenModelOverride
+                        ? `${MENTOR_DISPLAY_NAME} is pinned to a separate model — click to change`
+                        : `${MENTOR_DISPLAY_NAME} follows ${PRODUCT_DISPLAY_NAME}'s model — click to pin one`,
+                      role: KEN_MODEL_ROLE,
+                      primaryTitle: `Switch ${workspaceProductName(workspaceMode)}'s model`,
+                      primaryRole: ggModelRole(workspaceMode),
+                    }
+                  : null
+            }
+            tasks={tasks}
+            schedules={schedules}
+            onStopSchedule={stopSchedule}
+            projectHealth={projectHealth}
+            onReviewHealth={reviewProjectHealth}
+            tools={{
+              todo:
+                workspaceMode === "code" && !state?.goal
+                  ? {
+                      title: "Tasks",
+                      meta: `${projectTasks.filter((t) => t.status !== "done").length} pending`,
+                      body: (
+                        <TasksModal
+                          tasks={projectTasks}
+                          loadState={tasksLoad}
+                          onRetryLoad={openTasks}
+                          running={running || autopilotReviewing || newSessionBusy}
+                          onRun={handleRunTask}
+                          onRunAll={handleRunAllTasks}
+                          onDelete={handleDeleteTask}
+                          onClose={() => closeDeckPanel("todo")}
+                          onDraftTasks={() => {
+                            // Draft only: close the list and hand the user an editable
+                            // request. Unsent text is kept as the work to break down.
+                            closeDeckPanel("todo");
+                            const existing = input.trim();
+                            fillComposer(
+                              existing ? `${TASKS_DRAFT_PROMPT}${existing}` : TASKS_DRAFT_PROMPT,
+                            );
+                          }}
+                        />
+                      ),
+                    }
+                  : undefined,
+              checklist:
+                workspaceMode === "code" && !state?.goal
+                  ? {
+                      title: "Checklist",
+                      meta:
+                        checklistLoad.kind === "ready"
+                          ? `${checklistLoad.snapshot.items.filter((i) => i.status === "passed").length} of ${checklistLoad.snapshot.items.length} passing`
+                          : undefined,
+                      body: (
+                        <ChecklistScreen
+                          load={checklistLoad}
+                          running={running || checklistRunId !== null}
+                          activeId={checklistRunId}
+                          notice={checklistNotice}
+                          onRun={handleRunChecklistItem}
+                          onRetry={() => {
+                            setChecklistLoad({ kind: "loading" });
+                            void refreshChecklist();
+                          }}
+                        />
+                      ),
+                    }
+                  : undefined,
+              health:
+                workspaceMode === "code" && !state?.goal
+                  ? {
+                      title: "Project Health",
+                      body: (
+                        <ProjectHealthPanel
+                          health={projectHealth}
+                          onReview={reviewProjectHealth}
+                          onDone={() => closeDeckPanel("health")}
+                        />
+                      ),
+                    }
+                  : undefined,
+              goal: state?.goal
+                ? {
+                    title: "Goal settings",
+                    body: (
+                      <GoalSettingsModal
+                        context={state.goal.context ?? []}
+                        instructions={state.goal.instructions ?? ""}
+                        busy={running}
+                        onClose={() => closeDeckPanel("goal")}
+                        onSaved={(next) => {
+                          setState((s) => (s?.goal ? { ...s, goal: { ...s.goal, ...next } } : s));
+                          // Newly attached repos bring their own slash commands.
+                          void refreshCommands();
+                        }}
+                      />
+                    ),
+                  }
+                : undefined,
+              scorecard: progress
+                ? { title: "Scorecard", body: <ScorecardPanel snapshot={progress} /> }
+                : undefined,
+              brain:
+                workspaceMode === "chat"
+                  ? {
+                      title: "Brain",
+                      body: <MemoryModal onClose={() => closeDeckPanel("brain")} />,
+                    }
+                  : undefined,
+            }}
+            progress={progress}
+            usageExtras={
+              windowTotal > 1 &&
+              windowIndex !== null && (
+                <span
+                  className={`deck-pm${isThisFocused ? "" : " dim"}`}
+                  title={`Window ${windowIndex} of ${windowTotal} · ⌘\` to cycle`}
+                >
+                  Window {windowIndex} of {windowTotal}
+                </span>
+              )
+            }
+            menu={
+              <DeckMenu
+                workspaceMode={workspaceMode}
+                isGoal={Boolean(state?.goal)}
+                running={running}
+                autopilot={state?.autopilot ?? false}
+                autopilotReviewing={autopilotReviewing}
+                autopilotDisabled={newSessionBusy || !state || !!autopilotPending?.()}
+                onAutopilotChange={(next) => void handleAutopilotChange(next)}
+                onOpenMemories={() => setDeckPanel("brain")}
+                showChecklist={showChecklist}
+                onOpenChecklist={openChecklist}
+                hasHealth={projectHealth !== null}
+                onOpenHealth={() => setDeckPanel("health")}
+                onOpenRadio={() => setDeckPanel("radio")}
+                onOpenGoalSettings={state?.goal ? () => setDeckPanel("goal") : undefined}
+                canExport={items.length > 0}
+                exporting={exporting}
+                onExport={closeDeckThen(() => void exportTranscript())}
+                onArrange={() => setToolsHiddenPersisted(true)}
+                onBack={closeDeckThen(goBack)}
+                backLabel={backLabel}
+                extras={
+                  <>
+                    {BUILD_IDENTITY && (
+                      <span className="key footer-custom-build" title="Local build">
+                        {`\u25C6 ${BUILD_IDENTITY}`}
+                      </span>
+                    )}
+                    <WindowLayoutButton />
+                    {showContextProfileSelector && (
+                      <>
+                        <span className="astra-control-group" aria-busy={astraControlsBusy}>
+                          <label
+                            className="model-picker"
+                            style={{ color: theme.secondary }}
+                            title={
+                              contextProfileLockReason ??
+                              "OpenAI Codex context window: stable 272K or experimental 872K"
+                            }
+                          >
+                            <span className="model-select-text">
+                              Context {state.openAICodexContextProfile}
+                            </span>
+                            <select
+                              aria-label="OpenAI Codex context profile"
+                              className="model-select"
+                              value={state.openAICodexContextProfile}
+                              title={contextProfileLockReason}
+                              aria-describedby={
+                                contextProfileLockReason ? contextProfileDescriptionId : undefined
+                              }
+                              disabled={
+                                running ||
+                                autopilotReviewing ||
+                                astraControlsBusy ||
+                                !contextProfileEligibility.canChange
+                              }
+                              onChange={(event) =>
+                                onSelectContextProfile(event.target.value, event.currentTarget)
+                              }
+                            >
+                              <option value="stable">Stable · 272K</option>
+                              <option value="experimental">Experimental · 872K</option>
+                            </select>
+                          </label>
+                          {contextProfileLockReason && (
+                            <span id={contextProfileDescriptionId} hidden>
+                              {contextProfileLockReason}
+                            </span>
+                          )}
+                        </span>
+                      </>
+                    )}
+                    {/* Shown for every provider with a known window, as the old footer did. */}
+                    {state && state.contextWindow > 0 && (
+                      <ContextMeter used={contextTokens} window={state.contextWindow} />
+                    )}
+                  </>
+                }
+              />
+            }
+            status={
+              <>
+                {state?.planMode && workspaceMode === "code" && (
+                  <span className="footer-plan">
+                    <ShimmerText base={theme.secondary} bright="#ddd6fe">
+                      {"\u25C6 plan mode"}
+                    </ShimmerText>
+                  </span>
+                )}
+                {/* Automatic review stays in this pane's task row; manual @Ken keeps its own bar. */}
+                {workspaceMode === "code" && kenRunning && !running && !autopilotReviewing ? (
+                  <KenActivityBar
+                    runStartTs={kenRunStartTs}
+                    tokens={kenTokens}
+                    isThinking={kenIsThinking}
+                    thinkingStartTs={kenThinkingStartTs}
+                    thinkingAccumMs={kenThinkingAccumMs}
+                    onCancel={() => cancelCurrentKen()}
+                  />
+                ) : (
+                  <ActivityBar
+                    runStartedAt={runStartedAt}
+                    running={running}
+                    activity={activity}
+                    cancelling={cancelling}
+                    tokens={tokens}
+                    doneStatus={doneStatus}
+                    isThinking={isThinking}
+                    thinkingStartTs={thinkingStartTs}
+                    thinkingAccumMs={thinkingAccumMs}
+                    planTotal={workspaceMode !== "code" ? 0 : planTotal}
+                    planDone={workspaceMode !== "code" ? 0 : Math.min(planDone.size, planTotal)}
+                    onCancel={requestCancel}
+                    toolsHidden={toolsHidden}
+                    hasToolFeed={liveToolFeed.length > 0}
+                    onToggleTools={toggleTools}
+                  />
+                )}
+              </>
+            }
+            composer={
+              <>
+                <div
+                  className={`inputwrap${isFileDragOver ? " dragover" : ""}${
+                    scheduleInvalid ? " schedule-invalid" : ""
+                  }`}
+                >
+                  <WorkingBeam active={running || kenRunning || autopilotReviewing} />
+                  {scheduleDraft ? (
+                    <ScheduleHint
+                      input={input}
+                      caret={caret}
+                      onPickInterval={fillScheduleInterval}
+                    />
+                  ) : (
+                    slashOpen && (
+                      <SlashMenu
+                        commands={slashMatches}
+                        activeIndex={clampedSlashIndex}
+                        onSelect={pickSlashCommand}
+                        onHover={setSlashIndex}
+                      />
+                    )
+                  )}
+                  {paletteOpen && (
+                    <CommandPalette
+                      commands={collectionCommands}
+                      problems={paletteProblems}
+                      onClose={() => setPaletteOpen(false)}
+                      onInsert={(cmd) => {
+                        setPaletteOpen(false);
+                        pickSlashCommand(cmd);
+                      }}
+                      onSend={(cmd) => {
+                        setPaletteOpen(false);
+                        submitText(`/${cmd.name}`);
+                      }}
+                    />
+                  )}
+                  {mentionOpen && !noReferenceSlashCommand && (
+                    <FileMentionMenu
+                      files={fileMatches}
+                      activeIndex={clampedFileIndex}
+                      isRecent={mention?.query === ""}
+                      onSelect={pickMentionFile}
+                      onHover={setFileIndex}
+                    />
+                  )}
+                  <AttachmentBar
+                    attachments={attachments}
+                    onRemove={removeAttachment}
+                    onOpenImage={(src) => void openImageDataUrl(src)}
+                  />
+                  <ReferencedFiles paths={mentionedPaths} onRemove={removeMentionChip} />
+                  <QueuedBar messages={visibleQueuedMessages} onCancel={handleCancelQueued} />
+                  <div className="inputrow">
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      multiple
+                      accept="image/*,video/*"
+                      disabled={planReview !== null || noAttachmentSlashCommand !== null}
+                      style={{ display: "none" }}
+                      onChange={(event) => {
+                        if (event.target.files) void addFiles(event.target.files);
+                        event.target.value = "";
+                      }}
+                    />
+                    <button
+                      className="icon-circle"
+                      aria-label="Attach files"
+                      title={
+                        noAttachmentSlashCommand
+                          ? `/${noAttachmentSlashCommand.name} does not accept attachments`
+                          : planReview !== null
+                            ? "Resolve the pending plan first"
+                            : "Attach files"
+                      }
+                      disabled={planReview !== null || noAttachmentSlashCommand !== null}
+                      onClick={() => fileInputRef.current?.click()}
+                    >
+                      <PaperclipIcon size={15} />
+                    </button>
+                    <div className="input-stack">
+                      {enhanceAnim && (
+                        <EnhanceDissolve
+                          oldText={enhanceAnim.oldText}
+                          newText={enhanceAnim.newText}
+                          onDone={onEnhanceAnimDone}
+                        />
+                      )}
+                      {/* `@Ken` active: a textarea can't color just one token, so we mirror
+                      the input in an aligned overlay where the leading `@Ken` shimmers
+                      in Ken's color. The textarea text below is made transparent (caret
+                      stays visible) so only this styled copy shows. Metrics match
+                      `.input` 1:1 so wrapping/caret line up. */}
+                      {kenActive && kenInputParts && (
+                        <div className="ken-input-highlight" aria-hidden="true">
+                          {kenInputParts.lead}
+                          <ShimmerText base={theme.ken}>{kenInputParts.token}</ShimmerText>
+                          {kenInputParts.rest}
+                        </div>
+                      )}
+                      <textarea
+                        ref={attachInput}
+                        className={`input${enhanceAnim ? " input-anim" : ""}${kenActive ? " input-ken" : ""}`}
+                        rows={1}
+                        // No-input commands stay keyboard-submittable while preventing edits.
+                        readOnly={enhanceAnim !== null || noInputSlashCommand !== null}
+                        disabled={planReview !== null}
+                        title={
+                          noInputSlashCommand
+                            ? `Send /${noInputSlashCommand.name} as-is; it accepts no added input`
+                            : undefined
+                        }
+                        value={input}
+                        placeholder={
+                          planReview !== null
+                            ? "Approve or dismiss the pending plan to continue…"
+                            : workspaceMode === "chat"
+                              ? "Ask anything…"
+                              : workspaceMode === "motion"
+                                ? "Describe a video, paste a link, or drop a PDF…"
+                                : displayPlaceholder
+                        }
+                        onPaste={(event) => {
+                          if (noInputSlashCommandRef.current) {
+                            event.preventDefault();
+                            return;
+                          }
+                          const files = Array.from(event.clipboardData.files);
+                          if (files.length === 0) return;
+                          event.preventDefault();
+                          if (!noAttachmentSlashCommandRef.current) void addFiles(files);
+                        }}
+                        onChange={(event) => {
+                          if (noInputSlashCommandRef.current) return;
+                          const now = Date.now();
+                          if (!running && now - lastKeystrokeAtRef.current > 4 * 60_000) {
+                            void client.prewarmCache();
+                          }
+                          lastKeystrokeAtRef.current = now;
+                          setInput(event.target.value);
+                          setSlashIndex(0);
+                          setCaret(event.target.selectionStart ?? event.target.value.length);
+                          // Typing exits history-recall mode so ↑/↓ start fresh next time.
+                          if (historyIndex !== null) setHistoryIndex(null);
+                          // Re-anchor the corrected terms onto the edited text so their
+                          // highlights survive edits; terms the edit touched are dropped.
+                          if (enhancement && event.target.value !== enhancement.plain)
+                            setEnhancement(followDraftEdit(enhancement, input, event.target.value));
+                          updateMention(
+                            event.target.value,
+                            event.target.selectionStart ?? event.target.value.length,
+                          );
+                        }}
+                        onClick={(e) => {
+                          const el = e.currentTarget;
+                          setCaret(el.selectionStart ?? el.value.length);
+                          updateMention(el.value, el.selectionStart ?? el.value.length);
+                        }}
+                        onKeyUp={(e) => {
+                          const el = e.currentTarget;
+                          setCaret(el.selectionStart ?? el.value.length);
+                          if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+                            updateMention(el.value, el.selectionStart ?? el.value.length);
+                          }
+                        }}
+                        onKeyDown={(e) => {
+                          // While the dissolve→decode animation plays the input is locked;
+                          // swallow keys so Enter can't submit the un-enhanced draft.
+                          if (enhanceAnim) {
+                            e.preventDefault();
+                            return;
+                          }
+                          if (mentionOpen && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
+                            e.preventDefault();
+                            const delta = e.key === "ArrowDown" ? 1 : -1;
+                            setFileIndex(
+                              (i) => (i + delta + fileMatches.length) % fileMatches.length,
+                            );
+                          } else if (
+                            mentionOpen &&
+                            (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey))
+                          ) {
+                            e.preventDefault();
+                            const file = fileMatches[clampedFileIndex];
+                            if (file) pickMentionFile(file);
+                          } else if (mentionOpen && e.key === "Escape") {
+                            e.preventDefault();
+                            setMention(null);
+                          } else if (slashOpen && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
+                            e.preventDefault();
+                            const delta = e.key === "ArrowDown" ? 1 : -1;
+                            setSlashIndex(
+                              (i) => (i + delta + slashMatches.length) % slashMatches.length,
+                            );
+                          } else if (
+                            slashOpen &&
+                            (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey))
+                          ) {
+                            e.preventDefault();
+                            const cmd = slashMatches[clampedSlashIndex];
+                            if (cmd) pickSlashCommand(cmd);
+                          } else if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+                            // Menus are closed here (handled above), so arrows recall sent
+                            // prompts shell-style — unless the caret is mid-text in a
+                            // multi-line draft, where navigateHistory declines and the
+                            // cursor moves normally.
+                            if (navigateHistory(e.key === "ArrowUp" ? -1 : 1, e.currentTarget)) {
+                              e.preventDefault();
+                            }
+                          } else if (e.key === "Enter" && !e.shiftKey) {
+                            // Enter sends; Shift+Enter inserts a newline (textarea default).
+                            e.preventDefault();
+                            submit();
+                          } else if (e.key === "Escape") {
+                            // Cancel the build if it's running; otherwise cancel Ken so the
+                            // "esc to cancel" on his bar actually works.
+                            if (slashOpen) setInput("");
+                            else if (running && !cancelling) requestCancel();
+                            else if (kenRunning) cancelCurrentKen();
+                          }
+                        }}
+                        autoFocus
+                      />
+                    </div>
+                    {workspaceMode === "code" && (
+                      <button
+                        type="button"
+                        className="btn btn-ghost btn-sm"
+                        aria-expanded={programmaticOpen}
+                        disabled={!hydrated || programmatic.generation !== programmaticGeneration}
+                        onClick={() => setProgrammaticOpen((value) => !value)}
+                      >
+                        Opportunities
+                      </button>
+                    )}
+                    {workspaceMode === "code" && (
+                      <button
+                        type="button"
+                        className="ken-next-pill"
+                        title={
+                          planReview !== null
+                            ? "Resolve the pending plan first"
+                            : kenRunning
+                              ? "Ken is already running"
+                              : "Ask Ken what to do next"
+                        }
+                        disabled={kenRunning || planReview !== null}
+                        onClick={() => sendToKen("next?", `${MENTOR_HANDLE} next?`, true)}
+                      >
+                        Ken, next?
+                      </button>
+                    )}
+                    <div className="inputactions-trailing">
+                      <WorkingBeam active={running} size="sm" />
+                      <ActionMetal
+                        active={
+                          !running &&
+                          !cancelling &&
+                          readyRef.current &&
+                          planReview === null &&
+                          (!!input.trim() || attachments.length > 0 || mentionedPaths.length > 0)
+                        }
+                        windowFocused={
+                          windowFocused && props.windowFocused !== false && props.focused !== false
+                        }
+                      />
+                      <button
+                        type="button"
+                        className={`icon-circle icon-circle-primary composer-send-icon${running ? " is-stop" : ""}`}
+                        aria-label={running ? "Stop response" : "Send message"}
+                        title={
+                          running
+                            ? cancelling
+                              ? "Stopping…"
+                              : "Stop response"
+                            : attachmentsLoading
+                              ? "Loading attachments…"
+                              : "Send message"
+                        }
+                        disabled={
+                          running
+                            ? cancelling
+                            : !readyRef.current ||
+                              planReview !== null ||
+                              attachmentsLoading ||
+                              (!input.trim() &&
+                                attachments.length === 0 &&
+                                mentionedPaths.length === 0)
+                        }
+                        onClick={running ? requestCancel : submit}
+                      >
+                        {running ? (
+                          <SquareIcon size={12} weight="fill" />
+                        ) : (
+                          <ArrowUpIcon size={16} />
+                        )}
+                      </button>
+                    </div>
+                  </div>
+                  {!enhanceAnim && (
+                    // Pill pinned to the center of the input box (.inputwrap) top border,
+                    // overlapping it. Decoupled from text flow, so it never overlaps text,
+                    // drifts, or shifts the caret/height; centered (not in a corner) to
+                    // stay clear of the status row's "esc to cancel". Always mounted (so it
+                    // can transition both ways); the `visible` class fades/slides it in
+                    // when there's text and out when there isn't.
+                    <div className={`enhance-pill-host${enhanceHintVisible ? " visible" : ""}`}>
+                      <ActionMetal
+                        active={
+                          enhanceHintVisible &&
+                          !enhancing &&
+                          !enhanceOverLimit &&
+                          planReview === null
+                        }
+                        windowFocused={
+                          windowFocused && props.windowFocused !== false && props.focused !== false
+                        }
+                        variant="button"
+                      />
+                      <button
+                        className={`enhance-pill${enhancing ? " enhancing" : ""}`}
+                        title={
+                          enhanceOverLimit
+                            ? enhanceLimitReason
+                            : "Enhance prompt — clearer wording + correct terms"
+                        }
+                        aria-describedby={
+                          enhanceOverLimit && enhanceHintVisible ? enhanceLimitReasonId : undefined
+                        }
+                        disabled={
+                          planReview !== null ||
+                          enhancing ||
+                          !enhanceHintVisible ||
+                          enhanceOverLimit
+                        }
+                        aria-hidden={!enhanceHintVisible}
+                        onClick={() => void runEnhance()}
+                      >
+                        {enhancing ? "Enhancing…" : "Enhance?"}
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                {enhanceOverLimit && enhanceHintVisible && (
+                  <p id={enhanceLimitReasonId} role="status" style={{ color: theme.textDim }}>
+                    {enhanceLimitReason}
+                  </p>
+                )}
+              </>
+            }
+          />
+
+          {/* Update banners ride the bottom of the dock, as upstream's
+            UpdateBanner does, so the floating dock never covers them. */}
+          {appUpdate.phase === "available" && !appUpdate.localPatched && (
+            <button
+              className="update-banner"
+              title={appUpdate.installTitle}
+              onClick={() => {
+                if (shouldConfirmLocalUpdate(appUpdate.localPatched, appUpdate.phase)) {
+                  setSummarizeDecisions(false);
+                  setShowLocalUpdateConfirm(true);
+                } else {
+                  void appUpdate.install();
+                }
+              }}
+            >
+              <span className="update-banner-dot" />
+              {appUpdate.localPatched
+                ? `${appUpdate.installLabel} — click to review the protected source update`
+                : `${MENTOR_DISPLAY_NAME} just updated ${PRODUCT_DISPLAY_NAME}!`}
+              {!appUpdate.localPatched && <Badge>Install</Badge>}
+            </button>
+          )}
+          {appUpdate.phase === "installing" && !appUpdate.localPatched && (
+            <div
+              className="update-banner update-banner-busy update-banner-progress"
+              role="progressbar"
+              aria-valuenow={appUpdate.progress ?? 0}
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-label="Downloading update"
+            >
+              <span
+                className="update-banner-fill"
+                style={{ width: `${appUpdate.progress ?? 0}%` }}
+              />
+              <span className="update-banner-pct">{`${appUpdate.progress ?? 0}%`}</span>
+            </div>
+          )}
+          {appUpdate.localPatched &&
+            ["installing", "completed", "error"].includes(appUpdate.phase) && (
+              <div className="update-banner update-banner-busy" title={appUpdate.installTitle}>
+                <span className="update-banner-dot" />
+                {appUpdate.statusMessage ?? appUpdate.installLabel}
+              </div>
+            )}
+        </div>
+      </Activity>
+
+      {workspaceMode === "code" && showInitGit && (
+        <InitGitModal
+          defaultName={defaultRepoName}
+          onClose={() => setShowInitGit(false)}
+          onInitialize={(prompt) => {
+            setShowInitGit(false);
+            submitText(prompt, "Initializing Git\u2026");
+          }}
+        />
+      )}
+
+      {props.focused !== false && showLocalUpdateConfirm && (
+        <LocalUpdateConfirmModal
+          summarizeDecisions={summarizeDecisions}
+          setSummarizeDecisions={setSummarizeDecisions}
+          setShowLocalUpdateConfirm={setShowLocalUpdateConfirm}
+          install={appUpdate.install}
+        />
+      )}
+
+      {continuationConfirmation && (
+        <ContinuationConfirmationModal
+          continuationConfirmation={continuationConfirmation}
+          setContinuationConfirmation={setContinuationConfirmation}
+          continuationConfirmationRef={continuationConfirmationRef}
+          commitPreparedContinuation={commitPreparedContinuation}
+        />
+      )}
+
+      {confirmNewSession && (
+        <ConfirmModal
+          title={workspaceMode === "chat" ? "New Chat" : "New Session"}
+          message={
+            workspaceMode === "chat"
+              ? "Start a fresh chat? Your current conversation is saved in Sessions."
+              : "Start a fresh session? Your current conversation is saved in Sessions."
+          }
+          confirmLabel={workspaceMode === "chat" ? "New Chat" : "New Session"}
+          busy={newSessionBusy}
+          onConfirm={() => void startNewSession()}
+          onClose={() => setConfirmNewSession(false)}
+        />
+      )}
+
+      <div className="visually-hidden" aria-live="polite" aria-atomic="true">
+        {roadmapDraftState.announcement}
+      </div>
+      <div className="visually-hidden" aria-live="polite" aria-atomic="true">
+        {planReview ? "A plan is awaiting your review. Approval is required before execution." : ""}
+      </div>
+
+      {/* Always mounted: an MCP server can ask for input at any moment, in any
+          workspace mode, and its tool call stays blocked until we answer. */}
+      <McpElicitModal />
+
+      {/* Settings reached from the menu-bar tray. Rendered in every view branch
+          (Home, picker, workspace) because the tray targets a WINDOW and can't
+          know which of the three it is showing. */}
+      {showTraySettings && <SettingsModal onClose={closeTraySettings} />}
+    </div>
+  );
+  return <PaneIdProvider value={paneId}>{content}</PaneIdProvider>;
+}
+
+/**
+ * A GG Coder reply. While it streams, its text comes from the live-text store
+ * (`useLiveText`), so new chunks re-render this row alone, not the pane.
+ */
+function AssistantReply({
+  id,
+  text: stored,
+  onGrow,
+}: {
+  id: number;
+  text: string;
+  onGrow?: () => void;
+}): React.ReactElement {
+  const { text, streaming } = useLiveText(id, stored);
+  // Split out [DONE:n] plan-step markers so each renders as a "✓ Step n"
+  // completion row instead of leaking the raw marker into the prose.
+  const segments = hasDoneMarker(text)
+    ? segmentDoneMarkers(text)
+    : [{ kind: "text" as const, text }];
+  // Step rows that arrive mid-stream dissolve in; ones already in the reply
+  // when it mounted (restored history) don't.
+  const [mountedSegments] = useState(segments.length);
+  return (
+    <>
+      {segments.map((seg, i) =>
+        seg.kind === "done" ? (
+          <div
+            key={i}
+            className={`plan-step-done${i >= mountedSegments ? " dissolve-in" : ""}`}
+            data-swap-row={`${id}-${i}`}
+          >
+            <span className="plan-step-check" aria-hidden="true">
+              {"\u2713"}
+            </span>
+            <span className="plan-step-label">{`Step ${seg.stepNum} completed`}</span>
+          </div>
+        ) : (
+          <div key={i} className="assistant-msg" data-swap-row={`${id}-${i}`}>
+            <span className="assistant-dot" style={{ color: theme.primary }}>
+              {DOT}
+            </span>
+            <div className="assistant-text">
+              <StreamingMarkdown text={seg.text} streaming={streaming} onGrow={onGrow} />
+            </div>
+          </div>
+        ),
+      )}
+    </>
+  );
+}
+
+/**
+ * Ken Kai's reply: led by his little pixel face (it talks while the reply
+ * streams in) instead of the dot, framed by a teal rule. No badge, no byline.
+ * The Markdown component special-cases ```prompt fences into a "Send to GG
+ * Coder" button. Streams through the live-text store like `AssistantReply`.
+ */
+function KenReply({
+  id,
+  text: stored,
+  talking,
+  onGrow,
+}: {
+  id: number;
+  text: string;
+  talking: boolean;
+  onGrow?: () => void;
+}): React.ReactElement {
+  const { text, streaming } = useLiveText(id, stored);
+  return (
+    <div className="assistant-msg ken-msg" data-swap-row={id}>
+      <span className="assistant-dot ken-face-slot">
+        <KenFace mood="chat" talking={talking} />
+      </span>
+      <div className="assistant-text">
+        <StreamingMarkdown text={text} streaming={streaming} onGrow={onGrow} />
+      </div>
+    </div>
+  );
+}
+
+// ── Row renderers ──────────────────────────────────────────
+// Memoized per row. While a reply streams, its text grows in the live-text
+// store (live-text.ts) and only that row re-renders, via `useLiveText`; `items`
+// changes when rows are added, finished or removed. Those updates keep the SAME
+// object reference for every untouched row, and `onImageLoad` is a stable
+// useCallback, so a default shallow `memo` re-renders only the rows whose
+// `item` actually changed and the rest bail out.
+// Entrance wrapper (upstream 9494aa2c): live rows keep a stable wrapper and
+// consume entrance eligibility once; the body below renders the row itself.
+const TranscriptRow = memo(function TranscriptRow({
+  view,
+  animateIn = false,
+  consumeEntrance,
+  ...rest
+}: React.ComponentProps<typeof TranscriptRowBody> & {
+  view: { readonly visible: boolean };
+  animateIn?: boolean;
+  consumeEntrance: (id: number) => boolean;
+}): React.ReactElement | null {
+  const entranceRef = useRef<HTMLDivElement>(null);
+  const itemId = rest.item.id;
+  useLayoutEffect(() => {
+    if (!view.visible || !animateIn) return;
+    const el = entranceRef.current;
+    if (!consumeEntrance(itemId)) {
+      for (const word of el?.querySelectorAll(".md-word") ?? []) {
+        for (const animation of word.getAnimations?.() ?? []) animation.cancel();
+      }
+      return;
+    }
+    if (el) return enterTranscriptRow(el);
+  }, [animateIn, consumeEntrance, itemId, view]);
+  const row = createElement(TranscriptRowBody, rest);
+  if (!animateIn) return row;
+  return (
+    <div ref={entranceRef} data-kind={rest.item.kind}>
+      {row}
+    </div>
+  );
+});
+
+const TranscriptRowBody = memo(function TranscriptRowBody({
+  item,
+  kenTalking = false,
+  errorActive = false,
+  errorModelPicker,
+  onImageLoad,
+  onAskAnswer,
+  onAskType,
+}: {
+  item: Item;
+  /** This is the Ken reply currently streaming in, so his face talks. */
+  kenTalking?: boolean;
+  errorActive?: boolean;
+  errorModelPicker?: React.ReactNode;
+  onImageLoad?: () => void;
+  onAskAnswer?: (
+    itemId: number,
+    promptId: string,
+    delta: AskAnswerDelta,
+    sendNow?: boolean,
+  ) => void;
+  onAskType?: (itemId: number, promptId: string, questionId: string, seed?: string) => void;
+}): React.ReactElement | null {
+  const paneId = useContext(PaneIdContext);
+  switch (item.kind) {
+    case "user":
+      if (item.kenSent) {
+        // Sent from a Ken "Send to GG Coder" button: show a shimmering "Sent to GG
+        // Coder" in Ken's color (like a slash command shows `/name`), not the
+        // full prompt body. The full body still went to GG Coder.
+        return (
+          <div
+            data-swap-row={item.id}
+            className={`user-msg command labelled user-ken-sent${item.queued ? " queued" : ""}`}
+          >
+            {item.queued && <span className="queued-pill">queued</span>}
+            <span className="command-shimmer" style={{ color: theme.ken }}>
+              Sent to {PRODUCT_DISPLAY_NAME}
+            </span>
+          </div>
+        );
+      }
+      if (item.command) {
+        // Workflow command: show just the short `/name` (or a friendly `label`
+        // phrase) with a highlight + shimmer sweep. The full expanded prompt
+        // was sent to the agent. Labels read as prose, so drop the mono font.
+        return (
+          <div
+            data-swap-row={item.id}
+            className={`user-msg command${item.label ? " labelled" : ""}`}
+          >
+            <span className="command-shimmer" style={{ color: theme.commandColor }}>
+              {item.label ?? item.text}
+            </span>
+          </div>
+        );
+      }
+      return (
+        <div
+          data-swap-row={item.id}
+          className={`user-msg${item.queued ? " queued" : ""}${item.promoted ? " promoted" : ""}${item.ken ? " user-ken" : ""}`}
+        >
+          {(item.queued || item.promoted) && (
+            <span className="queued-pill" aria-hidden={item.promoted}>
+              queued
+            </span>
+          )}
+          {item.images && item.images.length > 0 && (
+            <div className="user-img-row">
+              {item.images.map((src, i) => (
+                <button
+                  key={i}
+                  type="button"
+                  className="user-img-open"
+                  aria-label="Open attached image"
+                  title="Open in image viewer"
+                  onClick={() => void openImageDataUrl(src)}
+                >
+                  <img className="user-img" src={src} alt="" onLoad={onImageLoad} />
+                </button>
+              ))}
+            </div>
+          )}
+          {item.enhancements && item.enhancements.some((s) => s.kind === "term") ? (
+            <EnhancedSegments segments={item.enhancements} />
+          ) : (
+            item.text
+          )}
+          {item.files && item.files.length > 0 && (
+            <div className="user-files-row">
+              {item.files.map((p) => (
+                <span key={p} className="user-file-chip" title={p}>
+                  <AtIcon size={11} style={{ color: theme.accent }} />
+                  <span style={{ color: theme.code }}>{p}</span>
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+      );
+    case "assistant":
+      return <AssistantReply id={item.id} text={item.text} onGrow={onImageLoad} />;
+    case "ken":
+      return <KenReply id={item.id} text={item.text} talking={kenTalking} onGrow={onImageLoad} />;
+    case "autopilot": {
+      // Autopilot Ken's verdict, rendered like a normal @Ken reply (his face +
+      // teal-framed text) rather than its own marker style. The text is his verdict as
+      // prose: for a PROMPT he shows what he sent GG Coder back to do; the
+      // terminal verdicts read as short Ken one-liners. `done` rotates through
+      // several casual Ken lines (picked deterministically off the item's
+      // stable id, so it never flickers on re-render) instead of always
+      // repeating the exact same sentence turn after turn.
+      const copy: Record<Extract<Item, { kind: "autopilot" }>["phase"], string> = {
+        prompted: item.body?.trim()
+          ? `Sending ${PRODUCT_DISPLAY_NAME} back in:\n\n${item.body.trim()}`
+          : `Sending ${PRODUCT_DISPLAY_NAME} back in for another pass.`,
+        done: [allClearCopy(item.copySeed, item.id), item.reason?.trim()]
+          .filter(Boolean)
+          .join("\n\n"),
+        human: item.reason?.trim() ? item.reason.trim() : "Need you to weigh in on this one.",
+        capped: "Paused autopilot after 3 rounds. Take a look before I keep going.",
+        plan_approved: [
+          "Plan looks solid. Approved it — implementation is underway.",
+          item.reason?.trim(),
+        ]
+          .filter(Boolean)
+          .join("\n\n"),
+      };
+      return (
+        <div className="assistant-msg ken-msg" data-swap-row={item.id}>
+          <span className="assistant-dot ken-face-slot">
+            <KenFace mood="chat" />
+          </span>
+          <div className="assistant-text">
+            <Markdown>{copy[item.phase]}</Markdown>
+          </div>
+        </div>
+      );
+    }
+    case "programmatic_execution_evidence":
+      return <ProgrammaticExecutionEvidenceView items={item.items} />;
+    case "info":
+      return (
+        <div className="line info" data-swap-row={item.id} style={{ color: theme.textDim }}>
+          {item.text}
+        </div>
+      );
+    case "mcp_tool_failure": {
+      const label = item.displayName ?? item.name.replace(/^mcp__/, "").replace("__", " / ");
+      return (
+        <div
+          className="line error"
+          data-swap-row={item.id}
+          role="status"
+          aria-label={`Failed MCP tool: ${label}`}
+        >
+          <div style={{ color: theme.error, fontWeight: 600 }}>Failed</div>
+          <div style={{ color: theme.text }}>{label}</div>
+          <div style={{ color: theme.textDim, whiteSpace: "pre-wrap" }}>{item.result}</div>
+        </div>
+      );
+    }
+    case "error":
+      return (
+        <div data-swap-row={item.id}>
+          <ChatErrorNotice
+            error={item}
+            active={errorActive}
+            modelPicker={errorModelPicker}
+            onContentGrow={onImageLoad}
+          />
+        </div>
+      );
+    case "hook":
+      return (
+        <HookNotice
+          hook={item.hook}
+          variantKey={`hook-${item.id}`}
+          verificationReason={item.verificationReason}
+        />
+      );
+    case "images":
+      return (
+        <div className="img-grid" data-swap-row={item.id}>
+          {item.images.map((img, i) => {
+            const openImage = (): void => {
+              if (img.path) void openProjectPath(img.path, paneId);
+            };
+            return (
+              <figure
+                key={img.path ?? i}
+                className={`img-card${img.path ? " img-card-clickable" : ""}`}
+                role={img.path ? "button" : undefined}
+                tabIndex={img.path ? 0 : undefined}
+                title={img.path ? `Open ${img.path}` : undefined}
+                onClick={openImage}
+                onKeyDown={(e) => {
+                  if (!img.path || (e.key !== "Enter" && e.key !== " ")) return;
+                  e.preventDefault();
+                  openImage();
+                }}
+              >
+                <img
+                  className="img-thumb"
+                  src={img.src}
+                  alt={img.path ?? "image"}
+                  onLoad={onImageLoad}
+                />
+                {img.path && (
+                  <figcaption className="img-cap" title={img.path}>
+                    {basename(img.path)}
+                  </figcaption>
+                )}
+              </figure>
+            );
+          })}
+        </div>
+      );
+    case "generating_image":
+      return (
+        <div className="img-grid" data-swap-row={item.id}>
+          <div className="img-gen-placeholder">
+            <Skeleton width={200} height={200} radius={12} />
+            <span className="img-gen-label">
+              {item.prompt.length > 60 ? item.prompt.slice(0, 57) + "\u2026" : item.prompt}
+            </span>
+          </div>
+        </div>
+      );
+    case "plan":
+      return <PlanModeLogo reason={item.reason} />;
+    case "plan_decision":
+      return <PlanDecisionNotice decision={item.decision} variantKey={String(item.id)} />;
+    case "ask":
+      return (
+        <AskBand
+          prompt={item.prompt}
+          answers={item.answers}
+          sent={item.sent}
+          answeredLive={item.answeredLive}
+          cancelled={item.cancelled}
+          deferred={item.deferred}
+          onAnswer={(delta, sendNow) => onAskAnswer?.(item.id, item.prompt.id, delta, sendNow)}
+          onTypeInstead={(questionId, seed) =>
+            onAskType?.(item.id, item.prompt.id, questionId, seed)
+          }
+        />
+      );
+    case "task":
+      return (
+        <div className="line task-row" data-swap-row={item.id}>
+          <span className="task-row-glyph" style={{ color: theme.primary }}>
+            {"\u25B8 "}
+          </span>
+          <span style={{ color: theme.textMuted }}>{"Task: "}</span>
+          <span style={{ color: theme.text, fontWeight: 600 }}>{item.title}</span>
+        </div>
+      );
+    case "subagent_group":
+      return <SubAgentFeed agents={item.agents} aborted={item.aborted} />;
+    case "compaction":
+      return (
+        <CompactionNotice
+          status={item.status}
+          variantKey={`compaction-${item.id}`}
+          originalCount={item.originalCount}
+          newCount={item.newCount}
+        />
+      );
+    default:
+      return null;
+  }
+});
+
+export default AgentPane;

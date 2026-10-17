@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-10-15",
+  "label": "Enhanced prompts keep their highlights, and stuck tools come back",
+  "sections": [
+    {
+      "title": "Small fixes you'll feel every day",
+      "items": [
+        "Tweak a prompt after `Enhance?` without losing its help. The terms it corrected stay highlighted while you edit the rest of your message, and hovering one still shows what you originally typed. Only a term you change yourself drops its highlight, since the explanation no longer fits. The highlights carry over into your sent message too.",
+        "A tool server that failed to start gets another try every time you start fresh with `New`. If it connects this time, its tools are ready in your new chat without restarting the app. Servers waiting for you to sign in are left alone until you do."
+      ]
+    }
+  ]
+}

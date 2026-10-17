@@ -1,0 +1,6 @@
+{
+  "id": "color-wipe", "name": "Color wipe", "kind": "transition",
+  "description": "A narrow accent leads a solid field across the cut, then clears the incoming scene.",
+  "tags": ["cut", "wipe", "duotone"], "fonts": [], "duration": 2,
+  "previewAt": 0.28, "license": "original", "previewLook": "duotone-broadcast"
+}

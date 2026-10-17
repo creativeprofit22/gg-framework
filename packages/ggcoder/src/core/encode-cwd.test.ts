@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { encodeCwd } from "./encode-cwd.js";
+import { encodeCwd, stripExtendedLengthPrefix } from "./encode-cwd.js";
 
 describe("encodeCwd — Unix paths (unchanged behavior)", () => {
   it("encodes a typical Unix project path", () => {
@@ -65,5 +65,34 @@ describe("encodeCwd — produces a valid folder name (no mkdir failure)", () => 
       expect(encoded).toMatch(/^[^<>:"|?*\\/\s]+$/);
       expect(encoded.length).toBeGreaterThan(0);
     }
+  });
+});
+
+describe("stripExtendedLengthPrefix", () => {
+  // Shared by encodeCwd (write side) and project discovery (read side): both
+  // must agree, or a project recorded as `\\?\C:\proj` by a shipped build
+  // lists separately from the same project's plain `C:\proj`.
+  it("normalizes a drive-letter extended-length path", () => {
+    expect(stripExtendedLengthPrefix(String.raw`\\?\C:\Users\dev\proj`)).toBe(
+      String.raw`C:\Users\dev\proj`,
+    );
+  });
+
+  it("normalizes the UNC form back to a plain UNC path", () => {
+    expect(stripExtendedLengthPrefix(String.raw`\\?\UNC\server\share\proj`)).toBe(
+      String.raw`\\server\share\proj`,
+    );
+  });
+
+  it("leaves plain Windows, UNC and POSIX paths untouched", () => {
+    expect(stripExtendedLengthPrefix(String.raw`C:\Users\dev`)).toBe(String.raw`C:\Users\dev`);
+    expect(stripExtendedLengthPrefix(String.raw`\\server\share`)).toBe(String.raw`\\server\share`);
+    expect(stripExtendedLengthPrefix("/Users/dev")).toBe("/Users/dev");
+  });
+
+  it("agrees with encodeCwd: both forms map to one store directory", () => {
+    expect(encodeCwd(String.raw`\\?\C:\Users\dev\proj`)).toBe(
+      encodeCwd(String.raw`C:\Users\dev\proj`),
+    );
   });
 });

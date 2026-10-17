@@ -1,0 +1,191 @@
+<!doctype html>
+<!--
+  comparison-bars: 3–5 horizontal bars grow to their values with a stagger,
+  each value counting up at the bar's tip; labels sit left, the WINNER bar is
+  filled with the accent and tagged. Transparent background.
+  Params (top of script):
+    BARS     [{ label, value }] — 3 to 5, any order
+    WINNER   index of the accent bar
+    MAX      value that fills the whole track (defaults to the largest value)
+    DECIMALS digits after the point; UNIT appended to each value
+    GROW     seconds each bar takes; STAGGER between bars
+  Copy: TITLE and the winner TAG in the markup.
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+  </head>
+  <body>
+    <div
+      id="comparison-bars-root"
+      data-composition-id="comparison-bars"
+      data-start="0"
+      data-duration="4"
+      data-width="1920"
+      data-height="1080"
+    >
+      <style>
+        [data-composition-id="comparison-bars"] {
+          position: absolute;
+          inset: 0;
+          color: var(--ink, #111);
+          font-family: var(--text, sans-serif);
+        }
+        [data-composition-id="comparison-bars"] .cb-wrap {
+          position: absolute;
+          left: 200px;
+          width: 1520px;
+          top: 50%;
+          transform: translateY(-50%);
+        }
+        [data-composition-id="comparison-bars"] .cb-title {
+          font-family: var(--mono, monospace);
+          font-size: 24px;
+          letter-spacing: 0.12em;
+          text-transform: uppercase;
+          color: var(--muted, rgba(0, 0, 0, 0.6));
+          margin: 0 0 56px 380px;
+        }
+        [data-composition-id="comparison-bars"] .cb-row {
+          display: grid;
+          grid-template-columns: 350px 1fr;
+          column-gap: 30px;
+          align-items: center;
+          height: 88px;
+          margin-bottom: 36px;
+        }
+        [data-composition-id="comparison-bars"] .cb-label {
+          text-align: right;
+          font-family: var(--display, sans-serif);
+          font-weight: var(--display-weight, 700);
+          font-stretch: var(--display-stretch, 100%);
+          letter-spacing: var(--display-tracking, -0.02em);
+          font-size: 40px;
+          line-height: 1.3;
+          white-space: nowrap;
+          opacity: 0.72;
+        }
+        [data-composition-id="comparison-bars"] .is-winner .cb-label {
+          opacity: 1;
+          color: var(--accent, #111);
+        }
+        [data-composition-id="comparison-bars"] .cb-track {
+          position: relative;
+          height: 100%;
+          border-left: 3px solid var(--ink, #111);
+        }
+        [data-composition-id="comparison-bars"] .cb-bar {
+          position: absolute;
+          left: 0;
+          top: 8px;
+          bottom: 8px;
+          width: 0;
+          border-radius: 0 var(--radius, 0px) var(--radius, 0px) 0;
+          background: color-mix(in srgb, var(--ink, #111) 24%, transparent);
+        }
+        [data-composition-id="comparison-bars"] .is-winner .cb-bar {
+          background: var(--accent, #111);
+        }
+        [data-composition-id="comparison-bars"] .cb-val {
+          position: absolute;
+          top: 50%;
+          transform: translateY(-50%);
+          left: 24px;
+          display: flex;
+          align-items: center;
+          gap: 18px;
+          white-space: nowrap;
+          font-family: var(--mono, monospace);
+          font-size: 34px;
+          font-variant-numeric: tabular-nums;
+        }
+        [data-composition-id="comparison-bars"] .is-winner .cb-val {
+          font-weight: 700;
+          color: var(--accent, #111);
+        }
+        [data-composition-id="comparison-bars"] .cb-tag {
+          padding: 6px 14px 5px;
+          border-radius: 999px;
+          font-size: 22px;
+          font-weight: 400;
+          letter-spacing: 0.1em;
+          background: var(--accent, #111);
+          color: var(--field, #fff);
+        }
+      </style>
+      <div class="cb-wrap">
+        <!-- edit: title -->
+        <div class="cb-title">Illustrative benchmark · requests / second</div>
+        <div id="cb-rows"></div>
+      </div>
+    </div>
+    <script>
+      (function () {
+        // edit: bars (3–5)
+        const BARS = [
+          { label: "Prototype", value: 12480 },
+          { label: "Vendor A", value: 7920 },
+          { label: "Vendor B", value: 5310 },
+          { label: "Legacy stack", value: 2140 },
+        ];
+        const WINNER = 0;
+        const MAX = Math.max(...BARS.map((b) => b.value));
+        const DECIMALS = 0;
+        const UNIT = "";
+        const TAG = "FASTEST"; // edit: winner tag ("" to hide)
+        const GROW = 1.3;
+        const STAGGER = 0.16;
+        const TRACK = 740; // px the MAX value fills (leaves room for the value)
+
+        const root = document.querySelector('[data-composition-id="comparison-bars"]');
+        const list = root.querySelector("#cb-rows");
+        const fmt = (x) =>
+          x.toLocaleString("en-US", { minimumFractionDigits: DECIMALS, maximumFractionDigits: DECIMALS }) + UNIT;
+        const rows = BARS.map((b, i) => {
+          const row = document.createElement("div");
+          row.className = "cb-row" + (i === WINNER ? " is-winner" : "");
+          row.innerHTML =
+            '<div class="cb-label"></div><div class="cb-track"><div class="cb-bar"></div>' +
+            '<div class="cb-val"><span class="cb-num"></span></div></div>';
+          row.querySelector(".cb-label").textContent = b.label;
+          let tag = null;
+          if (i === WINNER && TAG) {
+            tag = document.createElement("span");
+            tag.className = "cb-tag";
+            tag.textContent = TAG;
+            row.querySelector(".cb-val").appendChild(tag);
+          }
+          list.appendChild(row);
+          return {
+            row,
+            bar: row.querySelector(".cb-bar"),
+            val: row.querySelector(".cb-val"),
+            num: row.querySelector(".cb-num"),
+            tag,
+            b,
+            s: { p: 0 },
+          };
+        });
+
+        const tl = gsap.timeline({ paused: true });
+        rows.forEach((r, i) => {
+          const at = 0.25 + i * STAGGER;
+          const w = (r.b.value / MAX) * TRACK;
+          const paint = () => {
+            r.bar.style.width = (w * r.s.p).toFixed(1) + "px";
+            r.val.style.left = (w * r.s.p + 24).toFixed(1) + "px";
+            r.num.textContent = fmt(r.b.value * r.s.p);
+          };
+          tl.fromTo(r.row, { opacity: 0, x: -30 }, { opacity: 1, x: 0, duration: 0.5, ease: "expo.out" }, at);
+          tl.fromTo(r.s, { p: 0 }, { p: 1, duration: GROW, ease: "expo.out", onUpdate: paint }, at + 0.1);
+          if (r.tag) tl.fromTo(r.tag, { opacity: 0, scale: 0.6 }, { opacity: 1, scale: 1, duration: 0.4, ease: "back.out(2)" }, at + GROW * 0.8);
+          paint();
+        });
+        tl.to({}, { duration: Math.max(0.1, 4 - tl.duration()) });
+        window.__timelines = window.__timelines || {};
+        window.__timelines["comparison-bars"] = tl;
+      })();
+    </script>
+  </body>
+</html>

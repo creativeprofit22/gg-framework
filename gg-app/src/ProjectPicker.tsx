@@ -1,23 +1,73 @@
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import { open as openFolderDialog } from "@tauri-apps/plugin-dialog";
+import { PencilSimpleIcon, XIcon } from "@phosphor-icons/react";
 import { theme } from "./theme";
 import {
   waitForReady,
   listProjects,
+  setProjectHidden,
   listSessions,
-  selectProject,
+  renameSession as renameSessionTitle,
+  importTranscript,
   getSettings,
+  saveSettings,
   focusWindowByOffset,
   arrangeAllWindows,
   type DiscoveredProject,
   type RecentSession,
 } from "./agent";
-import { Badge, sourceStyle } from "./Badge";
+import { Badge } from "./Badge";
+import { sourceStyle } from "./source-style";
+import { PRODUCT_DISPLAY_NAME } from "./brand";
 import { ListSkeleton } from "./Skeleton";
+import { useCachedList } from "./useCachedList";
 import { BackButton } from "./BackButton";
 import { WindowLayoutButton } from "./WindowLayoutButton";
 import { RadioButton } from "./RadioButton";
 import { NewProjectModal } from "./NewProjectModal";
+import { describeActionFailure, describeOpenFailure, type FailureCopy } from "./open-failure";
+import { PickerError } from "./PickerError";
+import { PickerMoreMenu } from "./PickerMoreMenu";
+
+/**
+ * Does this row point at another tool's transcript rather than a GG Coder
+ * session? Those need an import before they can be opened.
+ */
+function isForeignSession(session: RecentSession): boolean {
+  return session.source === "claude-code" || session.source === "codex";
+}
+
+/** Stable comparison across Windows casing, slash, and extended-length forms. */
+function projectPathKey(projectPath: string): string {
+  let normalized = projectPath.trim();
+  const lowerPath = normalized.toLowerCase();
+  if (lowerPath.startsWith("\\\\?\\unc\\")) normalized = `\\\\${normalized.slice(8)}`;
+  else if (lowerPath.startsWith("\\\\?\\")) normalized = normalized.slice(4);
+  const windowsPath = /^[a-z]:[\\/]/i.test(normalized) || normalized.startsWith("\\\\");
+  normalized = normalized.replace(/\\/g, "/").replace(/\/+$/, "");
+  return windowsPath ? normalized.toLowerCase() : normalized;
+}
+
+/** Matches the daemon's cap on saved session names. */
+const SESSION_TITLE_MAX_LENGTH = 80;
+
+/** The one session row being renamed: what has been typed, and how saving went. */
+interface RenameDraft {
+  id: string;
+  draft: string;
+  saving: boolean;
+  error: FailureCopy | null;
+}
+
+/** A failed open, split into what the user reads and what support needs. */
+interface ResumeFailure extends FailureCopy {
+  /** What to reopen. Data, not a closure, so Retry runs this render's `busy` guard. */
+  retry:
+    | { cwd: string; sessionPath?: string; row?: RecentSession }
+    | { cwd: string; session: RecentSession };
+  /** The session row the failure belongs to; the error renders beneath it. */
+  rowId?: string;
+}
 
 interface Props {
   /** Called after the agent has been re-pointed at `cwd` (+ optional session). */
@@ -30,6 +80,21 @@ interface Props {
   initialProjectPath?: string | null;
   /** Shown when the picker is reachable from an open project (enables "back"). */
   onClose?: () => void;
+  waitForCatalogReady?: () => Promise<unknown>;
+  discoverProjects?: () => Promise<DiscoveredProject[]>;
+  discoverSessions?: (cwd: string) => Promise<RecentSession[]>;
+  /** Save a session's new name; resolves to the name as stored. */
+  renameSession?: (cwd: string, sessionPath: string, title: string) => Promise<string>;
+  bindProject: (cwd: string, sessionPath?: string) => Promise<unknown>;
+  saveProjectsRoot?: (projectsRoot: string) => Promise<unknown>;
+  refreshSignal?: number;
+  showWindowControls?: boolean;
+}
+
+/** A stand-in for a project not yet discovered: its folder name and path. */
+function projectFromPath(path: string): DiscoveredProject {
+  const name = path.split(/[\\/]/).filter(Boolean).pop() ?? path;
+  return { name, path, lastActiveDisplay: "", sources: [] };
 }
 
 /**
@@ -42,16 +107,77 @@ export function ProjectPicker({
   onChosen,
   initialProjectPath,
   onClose,
+  waitForCatalogReady = waitForReady,
+  discoverProjects = listProjects,
+  discoverSessions = listSessions,
+  renameSession = renameSessionTitle,
+  bindProject,
+  saveProjectsRoot = saveSettings,
+  refreshSignal = 0,
+  showWindowControls = true,
 }: Props): React.ReactElement {
-  const [projects, setProjects] = useState<DiscoveredProject[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [selected, setSelected] = useState<DiscoveredProject | null>(null);
-  const [sessions, setSessions] = useState<RecentSession[]>([]);
-  const [sessionsLoading, setSessionsLoading] = useState(false);
+  // Both lists are shown at once on a return visit and refreshed quietly
+  // (see useCachedList). Discovery failing shows plain words + Details instead
+  // of "No projects yet", but only when there's no earlier list to show.
+  const projectList = useCachedList<DiscoveredProject>("projects", async () => {
+    // The window's sidecar serves project discovery; wait for it before asking.
+    await waitForCatalogReady();
+    return discoverProjects();
+  });
+  const { items: projects, loading } = projectList;
+  const projectsError: FailureCopy | null =
+    projectList.error === null ? null : describeActionFailure("load projects", projectList.error);
+  const [folderError, setFolderError] = useState<FailureCopy | null>(null);
+  // Deep-linked from an open project, the picker starts in that project's
+  // sessions at once: its name comes from the path, and the list loads behind
+  // it. Waiting for discovery first flashed "Choose a project" on every trip
+  // back from a session.
+  const [selected, setSelected] = useState<DiscoveredProject | null>(() =>
+    initialProjectPath ? projectFromPath(initialProjectPath) : null,
+  );
+  const sessionList = useCachedList<RecentSession>(
+    selected ? `sessions:project:${selected.path}` : null,
+    async () => {
+      if (!selected) return [];
+      // Like project discovery, the session list is served by this window's
+      // daemon. Asking before it is ready (the deep link back from a session
+      // asks at once) fails, which left a kept list from an earlier visit on
+      // screen with none of the sessions since.
+      await waitForCatalogReady();
+      return discoverSessions(selected.path);
+    },
+  );
+  const { items: sessions, loading: sessionsLoading } = sessionList;
+  // Listing the selected project's sessions failed; shown instead of
+  // "No previous sessions".
+  const sessionsError: FailureCopy | null =
+    sessionList.error === null ? null : describeActionFailure("load sessions", sessionList.error);
+  // Refreshing failed behind an earlier copy, which is still shown.
+  const sessionsStale: FailureCopy | null =
+    sessionList.refreshError === null
+      ? null
+      : describeActionFailure(
+          "refresh this list, so it may be out of date",
+          sessionList.refreshError,
+        );
   const [busy, setBusy] = useState(false);
+  const [resumeError, setResumeError] = useState<ResumeFailure | null>(null);
+  const resumeErrorId = useId();
   const [projectsRoot, setProjectsRoot] = useState("");
   const [showNew, setShowNew] = useState(false);
   const [query, setQuery] = useState("");
+  const [renaming, setRenaming] = useState<RenameDraft | null>(null);
+  const renameIdPrefix = useId();
+  // The row whose Rename button takes focus back once its editor has closed.
+  const [refocusRenameIndex, setRefocusRenameIndex] = useState<number | null>(null);
+
+  // After the commit that removes the editor, not on an animation frame: a
+  // hidden or minimised window may never paint, which left focus on <body>.
+  useEffect(() => {
+    if (refocusRenameIndex === null || renaming) return;
+    document.getElementById(`${renameIdPrefix}-rename-${refocusRenameIndex}`)?.focus();
+    setRefocusRenameIndex(null);
+  }, [refocusRenameIndex, renaming, renameIdPrefix]);
 
   const q = query.trim().toLowerCase();
   const filteredProjects = q
@@ -78,7 +204,9 @@ export function ProjectPicker({
 
   useEffect(() => {
     let cancelled = false;
-    // Settings are read natively (Rust) — no sidecar wait needed.
+    // Settings are read natively (Rust) — no sidecar wait needed. Re-read on
+    // refreshSignal so a tray Settings folder change updates the New project
+    // preview (Rust creates under the freshly read root).
     void getSettings()
       .then((s) => {
         if (!cancelled && s) setProjectsRoot(s.projectsRoot);
@@ -87,131 +215,362 @@ export function ProjectPicker({
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [refreshSignal]);
 
+  // Deep-linked: once discovery answers, swap the placeholder for the real
+  // project (name, sources). Not among them: fall back to the project list.
   useEffect(() => {
-    let cancelled = false;
-    // The window's sidecar serves project discovery; wait for it before asking.
-    void waitForReady()
-      .then(() => listProjects())
-      .then((p) => {
-        if (cancelled) return;
-        setProjects(p);
-        setLoading(false);
-        // Deep-link straight to the current project's sessions when asked.
-        if (initialProjectPath) {
-          const match = p.find((proj) => proj.path === initialProjectPath);
-          if (match) openProject(match);
-        }
-      })
-      .catch(() => {
-        if (!cancelled) setLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    if (!initialProjectPath || loading || projectList.error !== null) return;
+    const initialPathKey = projectPathKey(initialProjectPath);
+    const match = projects.find((proj) => projectPathKey(proj.path) === initialPathKey);
+    setSelected((open) => {
+      if (!open || projectPathKey(open.path) !== initialPathKey) return open;
+      return match ?? null;
+    });
+  }, [initialProjectPath, loading, projectList.error, projects]);
 
-  function openProject(project: DiscoveredProject): void {
-    setSelected(project);
-    setSessions([]);
-    setSessionsLoading(true);
-    void listSessions(project.path).then((s) => {
-      setSessions(s);
-      setSessionsLoading(false);
+  // A tray Settings change (refreshSignal) re-reads discovery quietly.
+  const reloadProjects = projectList.reload;
+  useEffect(() => {
+    if (refreshSignal > 0) reloadProjects();
+  }, [refreshSignal, reloadProjects]);
+
+  /**
+   * Drop a project from the list and persist the decision. Removed optimistically
+   * because discovery is a multi-store filesystem scan — re-listing to confirm
+   * would leave the row sitting there for a visible beat.
+   */
+  function hideProject(project: DiscoveredProject): void {
+    const index = projects.findIndex((p) => p.path === project.path);
+    projectList.setItems((prev) => prev.filter((p) => p.path !== project.path));
+    void setProjectHidden(project.path, true).catch(() => {
+      // Persisting failed, so the row is still real: put it back at its old
+      // position rather than leaving the list disagreeing with what the next
+      // launch will show. Rows are sorted by recency server-side, so restoring
+      // by index preserves that order without duplicating the sort here.
+      projectList.setItems((prev) => {
+        if (prev.some((p) => p.path === project.path)) return prev;
+        const next = [...prev];
+        next.splice(index < 0 ? next.length : index, 0, project);
+        return next;
+      });
     });
   }
 
-  function choose(cwd: string, sessionPath?: string): void {
-    if (busy) return;
-    setBusy(true);
-    // Re-point this window's agent (respawns the sidecar), then let App re-run
-    // its ready flow against the new sidecar.
-    void selectProject(cwd, sessionPath)
-      .then(() => onChosen(cwd))
-      .catch(() => setBusy(false));
+  function openProject(project: DiscoveredProject): void {
+    setSelected(project);
+    setResumeError(null);
+    setRenaming(null);
   }
 
-  // Open an existing folder from disk as a project. The native folder picker is
-  // directories-only (that's where projects live); a chosen path re-points this
-  // window's agent exactly like selecting a discovered project.
+  /** Keyboard focus returns to the row's Rename button once the editor closes. */
+  function renameButtonId(index: number): string {
+    return `${renameIdPrefix}-rename-${index}`;
+  }
+
+  function startRename(session: RecentSession): void {
+    if (busy) return;
+    setRenaming({ id: session.id, draft: session.preview, saving: false, error: null });
+  }
+
+  function closeRename(index: number): void {
+    setRenaming(null);
+    setRefocusRenameIndex(index);
+  }
+
+  /**
+   * Save the typed name. The row shows it at once and the list then refreshes
+   * quietly, so it picks up the daemon's copy. A failure keeps the editor open
+   * with what was typed, so Save simply tries again.
+   */
+  function saveRename(cwd: string, session: RecentSession, index: number): void {
+    if (!renaming || renaming.id !== session.id || renaming.saving) return;
+    const title = renaming.draft.replace(/\s+/g, " ").trim();
+    if (!title) return;
+    if (title === session.preview) {
+      closeRename(index);
+      return;
+    }
+    setRenaming({ ...renaming, saving: true, error: null });
+    void renameSession(cwd, session.path, title)
+      .then((saved) => {
+        sessionList.setItems((items) =>
+          items.map((item) => (item.id === session.id ? { ...item, preview: saved } : item)),
+        );
+        closeRename(index);
+        sessionList.reload();
+      })
+      .catch((reason: unknown) => {
+        setRenaming((current) =>
+          current?.id === session.id
+            ? {
+                ...current,
+                saving: false,
+                error: describeActionFailure("rename this session", reason),
+              }
+            : current,
+        );
+      });
+  }
+
+  /**
+   * Bind this window to `cwd` (+ optional session). `row` is the list row the
+   * user clicked, if any — an imported session opens by a new path, so the row
+   * is carried separately to keep a failure beside what was clicked.
+   */
+  function choose(cwd: string, sessionPath?: string, row?: RecentSession): void {
+    if (busy) return;
+    setBusy(true);
+    setResumeError(null);
+    // The pane client resolves only after the selected daemon generation is ready.
+    // A failed resume therefore stays in the picker and shows its real cause.
+    void bindProject(cwd, sessionPath)
+      .then(() => onChosen(cwd))
+      .catch((reason: unknown) => {
+        const message = reason instanceof Error ? reason.message : String(reason);
+        setResumeError({
+          ...describeOpenFailure(message, row?.preview),
+          retry: {
+            cwd,
+            ...(sessionPath === undefined ? {} : { sessionPath }),
+            ...(row ? { row } : {}),
+          },
+          ...(row ? { rowId: row.id } : {}),
+        });
+        setBusy(false);
+      });
+  }
+
+  /**
+   * Open a session row. A native row resumes directly; a Claude Code / Codex row
+   * is imported into a real GG Coder session first, then opened by its new path.
+   * The import is silent — from the user's side this is just "open that
+   * conversation", which is why there is no separate import affordance.
+   */
+  function chooseSession(cwd: string, session: RecentSession): void {
+    if (busy) return;
+    if (!isForeignSession(session)) {
+      choose(cwd, session.path, session);
+      return;
+    }
+    setBusy(true);
+    setResumeError(null);
+    void importTranscript(session.path, cwd)
+      .then((result) => {
+        if (!result.ok) {
+          setResumeError({
+            ...describeActionFailure("import that conversation", result.error),
+            retry: { cwd, session },
+            rowId: session.id,
+          });
+          setBusy(false);
+          return;
+        }
+        // Re-enter the normal resume path with the freshly written session.
+        setBusy(false);
+        choose(cwd, result.sessionPath, session);
+      })
+      .catch((reason: unknown) => {
+        setResumeError({
+          ...describeActionFailure("import that conversation", reason),
+          retry: { cwd, session },
+          rowId: session.id,
+        });
+        setBusy(false);
+      });
+  }
+
+  // Open one exact folder as a project, without changing the discovery root.
   function openExisting(): void {
     if (busy) return;
     void openFolderDialog({
       directory: true,
       multiple: false,
-      title: "Open existing project",
+      title: "Open project directly",
     })
       .then((picked) => {
         if (typeof picked === "string") choose(picked);
       })
-      .catch(() => {});
+      .catch((reason: unknown) => {
+        setFolderError(describeActionFailure("open the folder picker", reason));
+      });
   }
+
+  // Save a parent folder as the discovery root, then immediately refresh so its
+  // direct child projects become visible without restarting the app.
+  function addProjectsFolder(): void {
+    if (busy) return;
+    setFolderError(null);
+    void openFolderDialog({
+      directory: true,
+      multiple: false,
+      title: "Add projects folder",
+    })
+      .then(async (picked) => {
+        if (typeof picked !== "string") return;
+        setBusy(true);
+        try {
+          await saveProjectsRoot(picked);
+          setProjectsRoot(picked);
+          setQuery("");
+          reloadProjects();
+        } catch (reason: unknown) {
+          setFolderError(describeActionFailure("add that projects folder", reason));
+        } finally {
+          setBusy(false);
+        }
+      })
+      .catch((reason: unknown) => {
+        setFolderError(describeActionFailure("open the folder picker", reason));
+      });
+  }
+
+  // A failed open sits directly under the row that was clicked; a new session
+  // or a direct folder open has no row, so its error stays at the top.
+  const failedRowId = resumeError?.rowId;
+  const failedRowShown =
+    !sessionsLoading && failedRowId !== undefined && sessions.some((s) => s.id === failedRowId);
+  const resumeErrorBlock = resumeError && (
+    <PickerError
+      id={resumeErrorId}
+      summary={resumeError.summary}
+      detail={resumeError.detail}
+      retryDisabled={busy}
+      onRetry={() => {
+        const target = resumeError.retry;
+        if ("session" in target) chooseSession(target.cwd, target.session);
+        else choose(target.cwd, target.sessionPath, target.row);
+      }}
+    />
+  );
 
   return (
     <div className="picker">
       <div className="picker-head" data-tauri-drag-region>
-        {selected ? (
-          <BackButton label="All projects" onClick={() => setSelected(null)} />
-        ) : onClose ? (
-          <BackButton label="Back" onClick={onClose} />
-        ) : null}
-        <span className="picker-title">{selected ? selected.name : "Choose a project"}</span>
-        {!selected && !loading && <Badge>{projects.length}</Badge>}
-        {!selected && !loading && projects.length > 0 && (
-          <input
-            className="picker-search"
-            type="text"
-            placeholder={"Search projects\u2026"}
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            aria-label="Search projects"
-          />
-        )}
-        <span className="picker-head-actions">
+        {/* The page's own controls share the list's column; window controls stay at the edge. */}
+        <div className="picker-head-main" data-tauri-drag-region>
           {selected ? (
-            <button
-              className="btn btn-primary btn-sm"
-              disabled={busy}
-              onClick={() => choose(selected.path)}
-            >
-              {"+ New session"}
-            </button>
-          ) : (
-            <>
-              <button
-                className="btn btn-ghost btn-sm"
-                disabled={busy}
-                onMouseDown={(e) => e.stopPropagation()}
-                onClick={openExisting}
-              >
-                {"Open existing"}
-              </button>
-              <button className="btn btn-primary btn-sm" onClick={() => setShowNew(true)}>
-                {"+ New project"}
-              </button>
-            </>
+            <BackButton
+              label="All projects"
+              onClick={() => {
+                setSelected(null);
+                setRenaming(null);
+              }}
+            />
+          ) : onClose ? (
+            <BackButton label="Back" onClick={onClose} />
+          ) : null}
+          <span className="picker-title">{selected ? selected.name : "Choose a project"}</span>
+          {!selected && !loading && <Badge>{projects.length}</Badge>}
+          {!selected && !loading && projects.length > 0 && (
+            <input
+              className="picker-search"
+              type="text"
+              placeholder={"Search projects\u2026"}
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              aria-label="Search projects"
+            />
           )}
-          <RadioButton />
-          <WindowLayoutButton />
-        </span>
+          <span className="picker-head-actions" data-tauri-drag-region>
+            {selected ? (
+              <button
+                type="button"
+                className="btn btn-primary btn-sm"
+                disabled={busy}
+                onClick={() => choose(selected.path)}
+              >
+                {"+ New session"}
+              </button>
+            ) : (
+              <>
+                {/* Wide panes show the secondary actions inline; narrow panes
+                    (container query in App.css) fold them into More. */}
+                <span className="picker-actions-wide" data-tauri-drag-region>
+                  <button
+                    className="btn btn-ghost btn-sm"
+                    disabled={busy}
+                    onMouseDown={(e) => e.stopPropagation()}
+                    onClick={addProjectsFolder}
+                  >
+                    {"Add projects folder"}
+                  </button>
+                  <button
+                    className="btn btn-ghost btn-sm"
+                    disabled={busy}
+                    onMouseDown={(e) => e.stopPropagation()}
+                    onClick={openExisting}
+                  >
+                    {"Open project directly"}
+                  </button>
+                </span>
+                <span className="picker-actions-narrow">
+                  <PickerMoreMenu
+                    disabled={busy}
+                    items={[
+                      { label: "Add projects folder", onSelect: addProjectsFolder },
+                      { label: "Open project directly", onSelect: openExisting },
+                    ]}
+                  />
+                </span>
+                <button
+                  type="button"
+                  className="btn btn-primary btn-sm"
+                  onClick={() => setShowNew(true)}
+                >
+                  {"+ New project"}
+                </button>
+              </>
+            )}
+          </span>
+        </div>
+        {showWindowControls && (
+          <span className="picker-head-window" data-tauri-drag-region>
+            <RadioButton />
+            <WindowLayoutButton />
+          </span>
+        )}
       </div>
 
       {!selected ? (
         <div className="picker-list">
+          {/* "Open project directly" fails here, with no row to sit under. */}
+          {resumeError && resumeErrorBlock}
           {loading && <ListSkeleton rows={6} />}
-          {!loading && projects.length === 0 && (
+          {!loading && projectsError && (
+            <PickerError
+              summary={projectsError.summary}
+              detail={projectsError.detail}
+              onRetry={projectList.reload}
+            />
+          )}
+          {!loading && folderError && (
+            <PickerError
+              summary={folderError.summary}
+              detail={folderError.detail}
+              retryDisabled={busy}
+              onRetry={addProjectsFolder}
+            />
+          )}
+          {!loading && !projectsError && projects.length === 0 && (
             <div className="picker-empty">
               <span style={{ color: theme.textMuted }}>No projects yet.</span>
-              <span style={{ display: "flex", gap: 8 }}>
+              <span style={{ display: "flex", gap: "var(--space-4)" }}>
+                <button
+                  className="btn btn-ghost btn-sm"
+                  disabled={busy}
+                  onMouseDown={(e) => e.stopPropagation()}
+                  onClick={addProjectsFolder}
+                >
+                  {"Add projects folder"}
+                </button>
                 <button
                   className="btn btn-ghost btn-sm"
                   disabled={busy}
                   onMouseDown={(e) => e.stopPropagation()}
                   onClick={openExisting}
                 >
-                  {"Open existing"}
+                  {"Open project directly"}
                 </button>
                 <button className="btn btn-primary btn-sm" onClick={() => setShowNew(true)}>
                   {"+ New project"}
@@ -227,40 +586,60 @@ export function ProjectPicker({
           {!loading && filteredProjects.length > 0 && (
             <div className="picker-reveal">
               {filteredProjects.map((p) => (
-                <button
-                  key={p.path}
-                  className="picker-item"
-                  onClick={() => openProject(p)}
-                  title={p.path}
-                >
-                  <span className="picker-row">
-                    <span className="picker-name" style={{ color: theme.text }}>
-                      {p.name}
+                <div key={p.path} className="picker-item-wrap">
+                  <button className="picker-item" onClick={() => openProject(p)} title={p.path}>
+                    <span className="picker-row">
+                      <span className="picker-name" style={{ color: theme.text }}>
+                        {p.name}
+                      </span>
+                      <Badge>{p.lastActiveDisplay}</Badge>
                     </span>
-                    <Badge>{p.lastActiveDisplay}</Badge>
-                  </span>
-                  <span className="picker-sources">
-                    {p.sources.map((s, i) => {
-                      const { label, color } = sourceStyle(s);
-                      return (
-                        <span key={s} style={{ color }}>
-                          {i > 0 ? (
-                            <span style={{ color: theme.textDim }}>{" \u00b7 "}</span>
-                          ) : null}
-                          {label}
-                        </span>
-                      );
-                    })}
-                  </span>
-                </button>
+                    {/* Where the project comes from, as tinted glass pills. */}
+                    <span className="picker-sources">
+                      {p.sources.map((s) => {
+                        const { label, color } = sourceStyle(s);
+                        return (
+                          <Badge key={s} color={color}>
+                            {label}
+                          </Badge>
+                        );
+                      })}
+                    </span>
+                  </button>
+                  <button
+                    className="picker-hide"
+                    aria-label={`Hide ${p.name}`}
+                    title="Hide from this list"
+                    onClick={() => hideProject(p)}
+                  >
+                    {/* The same drawn X as the modal close buttons: a text ×
+                        sits low and off-centre in a round button. */}
+                    <XIcon size={12} weight="bold" aria-hidden="true" />
+                  </button>
+                </div>
               ))}
             </div>
           )}
         </div>
       ) : (
         <div className="picker-list">
+          {resumeError && !failedRowShown && resumeErrorBlock}
           {sessionsLoading && <ListSkeleton rows={4} />}
-          {!sessionsLoading && sessions.length === 0 && (
+          {!sessionsLoading && sessionsError && (
+            <PickerError
+              summary={sessionsError.summary}
+              detail={sessionsError.detail}
+              onRetry={sessionList.reload}
+            />
+          )}
+          {!sessionsLoading && !sessionsError && sessionsStale && (
+            <PickerError
+              summary={sessionsStale.summary}
+              detail={sessionsStale.detail}
+              onRetry={sessionList.reload}
+            />
+          )}
+          {!sessionsLoading && !sessionsError && sessions.length === 0 && (
             <div className="picker-empty">
               <span style={{ color: theme.textMuted }}>No previous sessions yet.</span>
               <button
@@ -274,24 +653,122 @@ export function ProjectPicker({
           )}
           {!sessionsLoading && sessions.length > 0 && (
             <div className="picker-reveal">
-              {sessions.map((s) => (
-                <button
-                  key={s.id}
-                  className="picker-item"
-                  disabled={busy}
-                  onClick={() => choose(selected.path, s.path)}
-                >
-                  <span className="picker-row">
-                    <span className="picker-name picker-preview" style={{ color: theme.text }}>
-                      {s.preview || "(no preview)"}
-                    </span>
-                    <Badge>{s.lastActiveDisplay}</Badge>
-                  </span>
-                  <span className="picker-meta" style={{ color: theme.textMuted }}>
-                    {`${s.messageCount} msgs`}
-                  </span>
-                </button>
-              ))}
+              {sessions.map((s, index) => {
+                const editing = renaming?.id === s.id ? renaming : null;
+                const renameErrorId = `${renameIdPrefix}-rename-error-${index}`;
+                return (
+                  <div key={s.id} className="picker-item-wrap picker-session-wrap">
+                    {editing ? (
+                      <form
+                        className="picker-rename-form"
+                        onSubmit={(event) => {
+                          event.preventDefault();
+                          saveRename(selected.path, s, index);
+                        }}
+                      >
+                        <input
+                          className="picker-search picker-rename-input"
+                          type="text"
+                          aria-label="Session name"
+                          aria-describedby={editing.error ? renameErrorId : undefined}
+                          maxLength={SESSION_TITLE_MAX_LENGTH}
+                          value={editing.draft}
+                          readOnly={editing.saving}
+                          autoFocus
+                          onFocus={(event) => event.currentTarget.select()}
+                          onChange={(event) => {
+                            const draft = event.target.value;
+                            setRenaming((current) =>
+                              current?.id === s.id ? { ...current, draft } : current,
+                            );
+                          }}
+                          onKeyDown={(event) => {
+                            if (event.key !== "Escape") return;
+                            event.preventDefault();
+                            event.stopPropagation();
+                            if (!editing.saving) closeRename(index);
+                          }}
+                        />
+                        <button
+                          type="button"
+                          className="btn btn-ghost btn-sm"
+                          disabled={editing.saving}
+                          onClick={() => closeRename(index)}
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          type="submit"
+                          className="btn btn-primary btn-sm"
+                          disabled={editing.saving || !editing.draft.trim()}
+                        >
+                          {editing.saving ? "Saving\u2026" : "Save"}
+                        </button>
+                      </form>
+                    ) : (
+                      <button
+                        className="picker-item"
+                        disabled={busy}
+                        aria-describedby={
+                          failedRowShown && s.id === failedRowId ? resumeErrorId : undefined
+                        }
+                        onClick={() => chooseSession(selected.path, s)}
+                        title={
+                          isForeignSession(s)
+                            ? `From ${sourceStyle(s.source ?? "").label} — opens as a ${PRODUCT_DISPLAY_NAME} session`
+                            : undefined
+                        }
+                      >
+                        <span className="picker-row">
+                          <span
+                            className="picker-name picker-preview"
+                            style={{ color: theme.text }}
+                          >
+                            {s.preview || "(no preview)"}
+                          </span>
+                          <Badge>{s.lastActiveDisplay}</Badge>
+                        </span>
+                        <span className="picker-meta" style={{ color: theme.textMuted }}>
+                          {isForeignSession(s) && (
+                            <Badge
+                              className="picker-source-tag"
+                              color={sourceStyle(s.source ?? "").color}
+                            >
+                              {sourceStyle(s.source ?? "").label}
+                            </Badge>
+                          )}
+                          {s.model && <Badge className="picker-model-tag">{s.model}</Badge>}
+                          <Badge>{`${s.messageCount} msgs`}</Badge>
+                        </span>
+                        {s.lastReply && <span className="picker-snippet">{s.lastReply}</span>}
+                      </button>
+                    )}
+                    {failedRowShown && s.id === failedRowId && resumeErrorBlock}
+                    {editing?.error && (
+                      <PickerError
+                        id={renameErrorId}
+                        summary={editing.error.summary}
+                        detail={editing.error.detail}
+                      />
+                    )}
+                    {/* Another tool's transcript is not ours to rename. After
+                        the row in the DOM, so Tab reaches a row, then its Rename. */}
+                    {!isForeignSession(s) && !editing && (
+                      <button
+                        type="button"
+                        id={renameButtonId(index)}
+                        className="picker-hide picker-rename"
+                        aria-label={`Rename ${s.preview || "session"}`}
+                        title="Rename"
+                        disabled={busy}
+                        onClick={() => startRename(s)}
+                      >
+                        <PencilSimpleIcon size={12} weight="bold" aria-hidden="true" />
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           )}
         </div>
@@ -301,7 +778,8 @@ export function ProjectPicker({
         <NewProjectModal
           projectsRoot={projectsRoot}
           onClose={() => setShowNew(false)}
-          onCreated={(cwd) => {
+          onCreated={async (cwd) => {
+            await bindProject(cwd);
             setShowNew(false);
             onChosen(cwd);
           }}

@@ -1,0 +1,12 @@
+{
+  "id": "line-stack-reveal",
+  "name": "Line stack reveal",
+  "kind": "type",
+  "description": "A 2–4 line headline where each line rises out of its own mask with a tight 0.08s expo.out stagger, a small mono eyebrow above, last line optionally in the accent color. The workhorse title-card / statement reveal. Transparent, sits on any background.",
+  "tags": ["headline", "title", "mask", "reveal", "stagger", "lines", "statement", "multi-line", "kinetic"],
+  "fonts": [],
+  "duration": 3,
+  "previewAt": 1.8,
+  "license": "original",
+  "previewLook": "soft-light-ad"
+}

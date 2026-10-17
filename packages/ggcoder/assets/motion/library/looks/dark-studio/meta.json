@@ -1,0 +1,11 @@
+{
+  "id": "dark-studio",
+  "name": "Dark Studio",
+  "description": "A near-black set lit by one soft key light from above. Product UI sits on a glass slab with a brushed-metal rim and a floor reflection; one cool ice-blue accent marks the single thing that matters. Wide, calm Mona Sans headlines. The Apple / Linear dark keynote launch.",
+  "tags": ["dark", "product", "launch", "keynote", "glass", "cinematic", "premium", "ui"],
+  "fonts": ["Mona Sans", "Martian Mono"],
+  "bestFor": ["product launches", "SaaS feature reveals", "app UI walkthroughs", "keynote openers", "developer platforms"],
+  "pieces": [],
+  "samplePieces": [],
+  "previewAt": 2.8
+}

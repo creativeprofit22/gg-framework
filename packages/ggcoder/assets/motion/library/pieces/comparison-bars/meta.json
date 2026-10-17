@@ -1,0 +1,12 @@
+{
+  "id": "comparison-bars",
+  "name": "Comparison bars",
+  "kind": "data",
+  "description": "3–5 horizontal bars grow to their values with a stagger, each number counting up at the bar's tip; display labels sit left of a baseline. The winner bar is filled with the accent and tagged. Edit BARS, WINNER, UNIT and the title for benchmarks, pricing or 'us vs them' slides.",
+  "tags": ["bar-chart", "comparison", "benchmark", "bars", "count-up", "winner", "data", "vs", "explainer"],
+  "fonts": [],
+  "duration": 4,
+  "previewAt": 2.9,
+  "license": "original",
+  "previewLook": "soft-light-ad"
+}

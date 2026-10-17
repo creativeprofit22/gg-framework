@@ -1,0 +1,209 @@
+<!doctype html>
+<!--
+  blueprint-grid: a technical drawing surface. A minor/major grid in --line
+  draws itself outward from the center (each line grows from the center
+  axis, nearer lines first), then edge rulers with dimension ticks, tiny
+  mono coordinates, a center crosshair and one dimension callout settle in.
+  Opaque, on --field.
+  Params (top of script): MINOR (px), MAJOR_EVERY (minor cells per major),
+  DRAW_START / DRAW_DUR (s), UNIT (label suffix), DIM_CELLS (majors the
+  dimension callout spans).
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+  </head>
+  <body>
+    <div
+      id="blueprint-grid-root"
+      data-composition-id="blueprint-grid"
+      data-start="0"
+      data-duration="5"
+      data-width="1920"
+      data-height="1080"
+    >
+      <style>
+        [data-composition-id="blueprint-grid"] {
+          position: absolute;
+          inset: 0;
+          overflow: hidden;
+          background: var(--field, #eef1f7);
+        }
+        [data-composition-id="blueprint-grid"] canvas {
+          position: absolute;
+          left: 0;
+          top: 0;
+          width: 1920px;
+          height: 1080px;
+        }
+        [data-composition-id="blueprint-grid"] .bp-probe-line { color: var(--line, rgba(0, 0, 0, 0.18)); font-family: var(--mono, monospace); }
+        [data-composition-id="blueprint-grid"] .bp-probe-muted { color: var(--muted, rgba(0, 0, 0, 0.55)); }
+        [data-composition-id="blueprint-grid"] .bp-probe-ink { color: var(--ink, #111); }
+      </style>
+      <canvas id="bp-canvas" width="1920" height="1080"></canvas>
+      <i class="bp-probe-line" id="bp-line"></i><i class="bp-probe-muted" id="bp-muted"></i><i class="bp-probe-ink" id="bp-ink"></i>
+    </div>
+    <script>
+      (function () {
+        const MINOR = 40;
+        const MAJOR_EVERY = 5;
+        const DRAW_START = 0.2;
+        const DRAW_DUR = 1.8;
+        const UNIT = "";
+        const DIM_CELLS = 3;
+        const W = 1920;
+        const H = 1080;
+        const CX = W / 2;
+        const CY = H / 2;
+        const RULER = 34;
+
+        const cs = (id) => getComputedStyle(document.getElementById(id));
+        const LINE = cs("bp-line").color;
+        const MUTED = cs("bp-muted").color;
+        const INK = cs("bp-ink").color;
+        const MONO = cs("bp-line").fontFamily;
+
+        const canvas = document.getElementById("bp-canvas");
+        const ctx = canvas.getContext("2d");
+        const clamp = (v) => Math.max(0, Math.min(1, v));
+        const expoOut = (v) => (v >= 1 ? 1 : 1 - Math.pow(2, -10 * v));
+        const cubicOut = (v) => 1 - Math.pow(1 - v, 3);
+
+        const cols = [];
+        for (let k = -Math.ceil(CX / MINOR); k <= Math.ceil(CX / MINOR); k++) cols.push(k);
+        const rows = [];
+        for (let k = -Math.ceil(CY / MINOR); k <= Math.ceil(CY / MINOR); k++) rows.push(k);
+        const maxK = Math.max(cols[cols.length - 1], rows[rows.length - 1]);
+
+        const grid = { p: 0 };
+        const marks = { q: 0 };
+        const state = { get p() { return grid.p; }, get q() { return marks.q; } };
+        function line(x1, y1, x2, y2) {
+          ctx.beginPath();
+          ctx.moveTo(x1, y1);
+          ctx.lineTo(x2, y2);
+          ctx.stroke();
+        }
+        function draw() {
+          ctx.clearRect(0, 0, W, H);
+          ctx.strokeStyle = LINE;
+          // Grid: every line grows out of the center axis, staggered by distance.
+          const grow = (k) => expoOut(clamp((state.p - (Math.abs(k) / maxK) * 0.5) / 0.5));
+          for (const k of cols) {
+            const g = grow(k);
+            if (g <= 0) continue;
+            const major = k % MAJOR_EVERY === 0;
+            ctx.globalAlpha = major ? 1 : 0.5;
+            ctx.lineWidth = major ? 1.5 : 1;
+            const x = Math.round(CX + k * MINOR) + 0.5;
+            line(x, CY - g * CY, x, CY + g * CY);
+          }
+          for (const k of rows) {
+            const g = grow(k);
+            if (g <= 0) continue;
+            const major = k % MAJOR_EVERY === 0;
+            ctx.globalAlpha = major ? 1 : 0.5;
+            ctx.lineWidth = major ? 1.5 : 1;
+            const y = Math.round(CY + k * MINOR) + 0.5;
+            line(CX - g * CX, y, CX + g * CX, y);
+          }
+
+          // Rulers, coordinates, crosshair, dimension callout.
+          const q = cubicOut(clamp(state.q));
+          if (q <= 0) return;
+          // Clear the ruler strips so the scale reads on clean field.
+          ctx.globalCompositeOperation = "destination-out";
+          ctx.globalAlpha = q;
+          ctx.fillRect(0, 0, W, RULER);
+          ctx.fillRect(0, RULER, RULER, H - RULER);
+          ctx.globalCompositeOperation = "source-over";
+          ctx.strokeStyle = INK;
+          ctx.lineWidth = 1.5;
+          ctx.globalAlpha = q * 0.7;
+          for (const k of cols) {
+            const x = Math.round(CX + k * MINOR) + 0.5;
+            const len = k % MAJOR_EVERY === 0 ? 14 : 6;
+            line(x, RULER, x, RULER + len * q);
+          }
+          for (const k of rows) {
+            const y = Math.round(CY + k * MINOR) + 0.5;
+            const len = k % MAJOR_EVERY === 0 ? 14 : 6;
+            line(RULER, y, RULER + len * q, y);
+          }
+          line(RULER, RULER + 0.5, W, RULER + 0.5);
+          line(RULER + 0.5, RULER, RULER + 0.5, H);
+
+          ctx.globalAlpha = q;
+          ctx.fillStyle = MUTED;
+          ctx.font = `500 12px ${MONO}`;
+          ctx.textBaseline = "bottom";
+          ctx.textAlign = "center";
+          for (const k of cols) {
+            if (k % MAJOR_EVERY !== 0) continue;
+            const x = CX + k * MINOR;
+            if (x < RULER + 30 || x > W - 30) continue;
+            ctx.fillText(String(k * MINOR) + UNIT, x, RULER - 8);
+          }
+          ctx.textAlign = "right";
+          ctx.textBaseline = "middle";
+          for (const k of rows) {
+            if (k % MAJOR_EVERY !== 0) continue;
+            const y = CY + k * MINOR;
+            if (y < RULER + 20 || y > H - 20) continue;
+            ctx.save();
+            ctx.translate(RULER - 10, y);
+            ctx.rotate(-Math.PI / 2);
+            ctx.textAlign = "center";
+            ctx.textBaseline = "bottom";
+            ctx.fillText(String(-k * MINOR) + UNIT, 0, 0);
+            ctx.restore();
+          }
+
+          // Center crosshair + registration circle.
+          ctx.strokeStyle = INK;
+          ctx.lineWidth = 1.5;
+          ctx.globalAlpha = q * 0.85;
+          const c = 22 * q;
+          line(CX - c, CY + 0.5, CX + c, CY + 0.5);
+          line(CX + 0.5, CY - c, CX + 0.5, CY + c);
+          ctx.beginPath();
+          ctx.arc(CX + 0.5, CY + 0.5, 11, 0, Math.PI * 2 * q);
+          ctx.stroke();
+
+          // Dimension callout spanning DIM_CELLS majors, lower right quadrant.
+          const span = DIM_CELLS * MAJOR_EVERY * MINOR;
+          const x0 = CX + MAJOR_EVERY * MINOR;
+          const y0 = CY + 2 * MAJOR_EVERY * MINOR - MINOR;
+          const x1 = x0 + span * q;
+          line(x0 + 0.5, y0 - 12, x0 + 0.5, y0 + 12);
+          line(x0, y0 + 0.5, x1, y0 + 0.5);
+          line(x1 + 0.5, y0 - 12, x1 + 0.5, y0 + 12);
+          ctx.beginPath();
+          ctx.moveTo(x0 + 10, y0 - 5);
+          ctx.lineTo(x0 + 1, y0 + 0.5);
+          ctx.lineTo(x0 + 10, y0 + 6);
+          ctx.moveTo(x1 - 10, y0 - 5);
+          ctx.lineTo(x1, y0 + 0.5);
+          ctx.lineTo(x1 - 10, y0 + 6);
+          ctx.stroke();
+          ctx.fillStyle = INK;
+          ctx.globalAlpha = q;
+          ctx.font = `500 13px ${MONO}`;
+          ctx.textAlign = "center";
+          ctx.textBaseline = "bottom";
+          ctx.fillText(`${span}${UNIT || " PX"}`, x0 + span / 2, y0 - 10);
+          ctx.globalAlpha = 1;
+        }
+
+        const tl = gsap.timeline({ paused: true });
+        tl.fromTo(grid, { p: 0 }, { p: 1, duration: DRAW_DUR, ease: "none", onUpdate: draw }, DRAW_START);
+        tl.fromTo(marks, { q: 0 }, { q: 1, duration: 0.9, ease: "none", immediateRender: false, onUpdate: draw }, DRAW_START + DRAW_DUR * 0.6);
+        tl.to({}, { duration: 5 - (DRAW_START + DRAW_DUR * 0.6 + 0.9) });
+        draw();
+        window.__timelines = window.__timelines || {};
+        window.__timelines["blueprint-grid"] = tl;
+      })();
+    </script>
+  </body>
+</html>

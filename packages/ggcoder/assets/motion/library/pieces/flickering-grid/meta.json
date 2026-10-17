@@ -1,0 +1,16 @@
+{
+  "id": "flickering-grid",
+  "name": "Flickering grid",
+  "kind": "background",
+  "description": "A fine field of small accent-colored squares whose opacities flicker quietly at random, masked soft toward the edges. Data, signal and AI/tech backdrops with a living, digital texture. Converted from Magic UI's Flickering Grid.",
+  "tags": ["grid", "squares", "flicker", "pixels", "digital", "data", "signal", "tech", "ai", "subtle", "magic-ui"],
+  "fonts": [],
+  "duration": 6,
+  "previewAt": 3,
+  "license": "MIT",
+  "source": {
+    "url": "https://github.com/magicuidesign/magicui/blob/main/apps/www/registry/magicui/flickering-grid.tsx",
+    "author": "Magic UI"
+  },
+  "previewLook": "soft-light-ad"
+}

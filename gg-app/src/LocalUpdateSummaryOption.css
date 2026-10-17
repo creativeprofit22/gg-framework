@@ -1,0 +1,29 @@
+/* Local Fork-owned styles, loaded immediately after App.css (see AgentPane.tsx / main.tsx imports). */
+.local-update-summary-option {
+  display: flex;
+  gap: var(--space-5);
+  align-items: flex-start;
+  margin-top: var(--space-7);
+  cursor: pointer;
+}
+
+.local-update-summary-option input {
+  margin-top: 3px;
+  accent-color: var(--primary);
+}
+
+.local-update-summary-option span {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.local-update-summary-option strong {
+  color: var(--text);
+  font-size: var(--fs-base);
+}
+
+.local-update-summary-option small {
+  color: var(--text-secondary);
+  font-size: var(--fs-sm);
+  line-height: 1.45;
+}

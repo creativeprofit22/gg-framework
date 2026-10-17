@@ -1,0 +1,156 @@
+<!doctype html>
+<!--
+  donut-fill: a ring fills clockwise to a percentage (stroke-dashoffset) while
+  the number counts up in the center; a tick dial frames the ring and a mono
+  caption sits beneath. Transparent background.
+  Params (top of script):
+    VALUE    0..100 target percentage
+    DECIMALS digits after the point
+    FILL     seconds for the ring to fill
+  Copy: caption in the markup. CSS: --df-x / --df-y (ring center).
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+  </head>
+  <body>
+    <div
+      id="donut-fill-root"
+      data-composition-id="donut-fill"
+      data-start="0"
+      data-duration="4"
+      data-width="1920"
+      data-height="1080"
+    >
+      <style>
+        [data-composition-id="donut-fill"] {
+          --df-x: 960px;
+          --df-y: 480px;
+          position: absolute;
+          inset: 0;
+          color: var(--ink, #111);
+          font-family: var(--text, sans-serif);
+        }
+        [data-composition-id="donut-fill"] svg {
+          position: absolute;
+          left: calc(var(--df-x) - 350px);
+          top: calc(var(--df-y) - 350px);
+          overflow: visible;
+        }
+        [data-composition-id="donut-fill"] .df-ticks line {
+          stroke: var(--line, rgba(0, 0, 0, 0.2));
+          stroke-width: 3;
+          stroke-linecap: round;
+        }
+        [data-composition-id="donut-fill"] .df-ticks line.is-major {
+          stroke: var(--muted, rgba(0, 0, 0, 0.6));
+        }
+        [data-composition-id="donut-fill"] .df-track {
+          fill: none;
+          stroke: var(--line, rgba(0, 0, 0, 0.2));
+          stroke-width: 52;
+        }
+        [data-composition-id="donut-fill"] .df-fill {
+          fill: none;
+          stroke: var(--accent, #111);
+          stroke-width: 52;
+          stroke-linecap: round;
+        }
+        [data-composition-id="donut-fill"] .df-center {
+          position: absolute;
+          left: calc(var(--df-x) - 240px);
+          top: calc(var(--df-y) - 120px);
+          width: 480px;
+          height: 240px;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          justify-content: center;
+        }
+        [data-composition-id="donut-fill"] .df-num {
+          font-family: var(--display, sans-serif);
+          font-weight: var(--display-weight, 800);
+          font-stretch: var(--display-stretch, 100%);
+          letter-spacing: var(--display-tracking, -0.02em);
+          font-size: 190px;
+          line-height: 0.9;
+          font-variant-numeric: tabular-nums;
+          white-space: nowrap;
+        }
+        [data-composition-id="donut-fill"] .df-num .df-unit {
+          font-size: 0.45em;
+          margin-left: 0.04em;
+          vertical-align: 0.78em;
+        }
+        [data-composition-id="donut-fill"] .df-caption {
+          position: absolute;
+          left: 0;
+          right: 0;
+          top: calc(var(--df-y) + 390px);
+          text-align: center;
+          font-family: var(--mono, monospace);
+          font-size: 26px;
+          letter-spacing: 0.12em;
+          text-transform: uppercase;
+          color: var(--muted, rgba(0, 0, 0, 0.6));
+        }
+      </style>
+      <svg width="700" height="700" viewBox="-350 -350 700 700">
+        <g class="df-ticks" id="df-ticks"></g>
+        <circle class="df-track" r="270" />
+        <circle class="df-fill" id="df-fill" r="270" transform="rotate(-90)" />
+      </svg>
+      <div class="df-center"><div class="df-num" id="df-num"></div></div>
+      <!-- edit: caption -->
+      <div class="df-caption" id="df-caption">of teams ship every week</div>
+    </div>
+    <script>
+      (function () {
+        // edit: value
+        const VALUE = 73;
+        const DECIMALS = 0;
+        const FILL = 1.8;
+
+        const NS = "http://www.w3.org/2000/svg";
+        const root = document.querySelector('[data-composition-id="donut-fill"]');
+        const ticks = root.querySelector("#df-ticks");
+        for (let i = 0; i < 60; i++) {
+          const a = (i / 60) * Math.PI * 2 - Math.PI / 2;
+          const major = i % 15 === 0;
+          const r0 = 320;
+          const r1 = major ? 346 : 334;
+          const l = document.createElementNS(NS, "line");
+          l.setAttribute("x1", (Math.cos(a) * r0).toFixed(1));
+          l.setAttribute("y1", (Math.sin(a) * r0).toFixed(1));
+          l.setAttribute("x2", (Math.cos(a) * r1).toFixed(1));
+          l.setAttribute("y2", (Math.sin(a) * r1).toFixed(1));
+          if (major) l.setAttribute("class", "is-major");
+          ticks.appendChild(l);
+        }
+
+        const fill = root.querySelector("#df-fill");
+        const num = root.querySelector("#df-num");
+        const C = 2 * Math.PI * 270;
+        fill.setAttribute("stroke-dasharray", C.toFixed(2));
+        const s = { v: 0 };
+        function paint() {
+          fill.setAttribute("stroke-dashoffset", (C * (1 - s.v / 100)).toFixed(2));
+          fill.style.opacity = s.v > 0.2 ? 1 : 0;
+          num.innerHTML = s.v.toFixed(DECIMALS) + '<span class="df-unit">%</span>';
+        }
+
+        const tl = gsap.timeline({ paused: true });
+        tl.fromTo(root.querySelectorAll("#df-ticks line"), { opacity: 0 }, { opacity: 1, duration: 0.25, stagger: 0.008, ease: "none" }, 0);
+        tl.fromTo(root.querySelector(".df-track"), { opacity: 0, scale: 0.9, transformOrigin: "50% 50%" }, { opacity: 1, scale: 1, duration: 0.6, ease: "expo.out" }, 0.1);
+        tl.fromTo(root.querySelector(".df-center"), { opacity: 0, y: 20 }, { opacity: 1, y: 0, duration: 0.5, ease: "expo.out" }, 0.3);
+        tl.fromTo(s, { v: 0 }, { v: VALUE, duration: FILL, ease: "power3.inOut", onUpdate: paint }, 0.45);
+        tl.fromTo(root.querySelector("#df-caption"), { opacity: 0, y: 16 }, { opacity: 1, y: 0, duration: 0.5, ease: "expo.out" }, 0.45 + FILL - 0.4);
+        tl.to({}, { duration: Math.max(0.1, 4 - tl.duration()) });
+        paint();
+        window.__timelines = window.__timelines || {};
+        window.__timelines["donut-fill"] = tl;
+      })();
+    </script>
+  </body>
+</html>

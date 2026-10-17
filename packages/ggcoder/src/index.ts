@@ -39,6 +39,7 @@ export {
   getContextWindow,
   usesOpenAICodexTransport,
   getMaxThinkingLevel,
+  getDefaultThinkingLevel,
   getNextThinkingLevel,
   getSupportedThinkingLevels,
   isThinkingLevelSupported,
@@ -58,7 +59,7 @@ export { renderApp } from "./ui/render.js";
 // Config
 export { APP_NAME, VERSION, getAppPaths, ensureAppDirs } from "./config.js";
 
-// Project discovery (shared with gg-boss + gg-app sidecar)
+// Project discovery (shared with the gg-app sidecar)
 export {
   discoverProjects,
   listRecentSessions,
@@ -79,6 +80,7 @@ export type {
 export type {
   AgentSessionOptions,
   AgentSessionState,
+  BackgroundTaskSnapshot,
   BusEventMap,
   ContextWindowOptions,
   ModelInfo,

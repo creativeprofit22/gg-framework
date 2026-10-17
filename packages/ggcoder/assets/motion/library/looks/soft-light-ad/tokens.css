@@ -1,0 +1,17 @@
+/* Soft Light Ad: airy cool-white field, one brand blue, a deep blue light
+   pool at the edge, soft clay 3D and illustrative UI with soft shadows. */
+.look-soft-light-ad {
+  --field: #eef1f7;
+  --field-2: #0b2a8f;
+  --ink: #3a4150;
+  --accent: #2f5bff;
+  --muted: rgba(58, 65, 80, 0.78);
+  --line: rgba(58, 65, 80, 0.12);
+  --display: "Host Grotesk", sans-serif;
+  --display-weight: 500;
+  --display-stretch: 100%;
+  --display-tracking: -0.02em;
+  --text: "Host Grotesk", sans-serif;
+  --mono: "Martian Mono", monospace;
+  --radius: 22px;
+}

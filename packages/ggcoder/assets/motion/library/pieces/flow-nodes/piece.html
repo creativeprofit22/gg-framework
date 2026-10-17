@@ -1,0 +1,230 @@
+<!doctype html>
+<!--
+  flow-nodes: 3–5 labeled stage boxes in a row. Each box lands, then the
+  arrow to the next one draws on (stroke-dashoffset) and a pulse dot keeps
+  travelling along every drawn connection. The last node is filled with
+  --accent as the outcome. Transparent background.
+  Params (top of script):
+    NODES      [{ label, sub }] — 3 to 5 stages, left to right (edit here)
+    STEP       seconds between one node landing and the next
+    PULSE      seconds for one pulse to cross a connection
+  CSS: --fn-y (vertical centre of the row).
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+  </head>
+  <body>
+    <div
+      id="flow-nodes-root"
+      data-composition-id="flow-nodes"
+      data-start="0"
+      data-duration="5"
+      data-width="1920"
+      data-height="1080"
+    >
+      <style>
+        [data-composition-id="flow-nodes"] {
+          --fn-y: 585px;
+          position: absolute;
+          inset: 0;
+          color: var(--ink, #111);
+          font-family: var(--text, sans-serif);
+        }
+        [data-composition-id="flow-nodes"] .fn-caption {
+          position: absolute;
+          left: 140px;
+          top: calc(var(--fn-y) - 190px);
+          font-family: var(--mono, monospace);
+          font-size: 24px;
+          letter-spacing: 0.12em;
+          text-transform: uppercase;
+          color: var(--muted, rgba(0, 0, 0, 0.6));
+          font-variant-numeric: tabular-nums;
+        }
+        [data-composition-id="flow-nodes"] .fn-node {
+          position: absolute;
+          top: calc(var(--fn-y) - 100px);
+          height: 200px;
+          box-sizing: border-box;
+          padding: 26px 28px;
+          border: 3px solid var(--ink, #111);
+          border-radius: var(--radius, 0px);
+          background: color-mix(in srgb, var(--ink, #111) 6%, transparent);
+          display: flex;
+          flex-direction: column;
+          justify-content: space-between;
+          opacity: 0;
+        }
+        [data-composition-id="flow-nodes"] .fn-node.is-last {
+          background: var(--accent, #111);
+          border-color: var(--accent, #111);
+          color: var(--field, #fff);
+        }
+        [data-composition-id="flow-nodes"] .fn-idx,
+        [data-composition-id="flow-nodes"] .fn-sub {
+          font-family: var(--mono, monospace);
+          font-size: 22px;
+          letter-spacing: 0.08em;
+          text-transform: uppercase;
+          font-variant-numeric: tabular-nums;
+          opacity: 0.7;
+          white-space: nowrap;
+        }
+        [data-composition-id="flow-nodes"] .fn-label {
+          font-family: var(--display, sans-serif);
+          font-weight: var(--display-weight, 800);
+          font-stretch: var(--display-stretch, 100%);
+          letter-spacing: var(--display-tracking, -0.02em);
+          font-size: 50px;
+          line-height: 1;
+          white-space: nowrap;
+        }
+        [data-composition-id="flow-nodes"] svg {
+          position: absolute;
+          left: 0;
+          top: 0;
+          overflow: visible;
+        }
+        [data-composition-id="flow-nodes"] .fn-wire {
+          fill: none;
+          stroke: var(--ink, #111);
+          stroke-width: 4;
+          stroke-linecap: round;
+          stroke-linejoin: round;
+        }
+        [data-composition-id="flow-nodes"] .fn-dot {
+          fill: var(--accent, #111);
+        }
+        [data-composition-id="flow-nodes"] .fn-halo {
+          fill: none;
+          stroke: var(--accent, #111);
+          stroke-width: 3;
+        }
+      </style>
+      <!-- edit: caption -->
+      <div class="fn-caption" id="fn-caption">Pipeline · 4 stages</div>
+      <div id="fn-nodes"></div>
+      <svg id="fn-svg" width="1920" height="1080" viewBox="0 0 1920 1080"></svg>
+    </div>
+    <script>
+      (function () {
+        // edit: stages (3–5), left to right
+        const NODES = [
+          { label: "Ingest", sub: "raw events" },
+          { label: "Parse", sub: "schema check" },
+          { label: "Enrich", sub: "join + score" },
+          { label: "Ship", sub: "to warehouse" },
+        ];
+        const STEP = 0.62;
+        const PULSE = 1.1;
+        const START = 0.25;
+        const DURATION = 5;
+
+        const root = document.querySelector('[data-composition-id="flow-nodes"]');
+        const nodesEl = document.getElementById("fn-nodes");
+        const svg = document.getElementById("fn-svg");
+        const NS = "http://www.w3.org/2000/svg";
+        const n = NODES.length;
+        const LEFT = 140;
+        const SPAN = 1640;
+        const W = n <= 3 ? 360 : n === 4 ? 290 : 250;
+        const GAP = (SPAN - n * W) / (n - 1);
+        const cy = parseFloat(getComputedStyle(root).getPropertyValue("--fn-y")) || 540;
+        const pad = n === 5 ? 16 : 24;
+
+        const boxes = NODES.map((d, i) => {
+          const el = document.createElement("div");
+          el.className = "fn-node" + (i === n - 1 ? " is-last" : "");
+          el.style.left = LEFT + i * (W + GAP) + "px";
+          el.style.width = W + "px";
+          const idx = document.createElement("div");
+          idx.className = "fn-idx";
+          idx.textContent = String(i + 1).padStart(2, "0");
+          const label = document.createElement("div");
+          label.className = "fn-label";
+          label.textContent = d.label;
+          const sub = document.createElement("div");
+          sub.className = "fn-sub";
+          sub.textContent = d.sub;
+          el.append(idx, label, sub);
+          nodesEl.appendChild(el);
+          return el;
+        });
+
+        const wires = [];
+        for (let i = 0; i < n - 1; i++) {
+          const x0 = LEFT + i * (W + GAP) + W + pad;
+          const x1 = LEFT + (i + 1) * (W + GAP) - pad;
+          const len = x1 - x0;
+          const line = document.createElementNS(NS, "path");
+          line.setAttribute("class", "fn-wire");
+          line.setAttribute("d", `M${x0} ${cy} L${x1} ${cy}`);
+          line.style.strokeDasharray = `${len} ${len}`;
+          line.style.strokeDashoffset = len;
+          line.style.opacity = 0;
+          const head = document.createElementNS(NS, "path");
+          head.setAttribute("class", "fn-wire");
+          head.setAttribute("d", `M${x1 - 16} ${cy - 14} L${x1} ${cy} L${x1 - 16} ${cy + 14}`);
+          head.style.opacity = 0;
+          const halo = document.createElementNS(NS, "circle");
+          halo.setAttribute("class", "fn-halo");
+          halo.setAttribute("r", 18);
+          halo.setAttribute("cy", cy);
+          const dot = document.createElementNS(NS, "circle");
+          dot.setAttribute("class", "fn-dot");
+          dot.setAttribute("r", 9);
+          dot.setAttribute("cy", cy);
+          svg.append(line, head, halo, dot);
+          wires.push({ x0, x1, len, line, head, dot, halo, drawn: 0 });
+        }
+
+        const tl = gsap.timeline({ paused: true });
+        boxes.forEach((box, i) => {
+          const at = START + i * STEP;
+          tl.fromTo(
+            box,
+            { opacity: 0, y: 36, scale: 0.94 },
+            { opacity: 1, y: 0, scale: 1, duration: 0.55, ease: "expo.out" },
+            at,
+          );
+          if (i < n - 1) {
+            const w = wires[i];
+            tl.set(w.line, { opacity: 1 }, at + 0.3);
+            tl.to(w.line, { strokeDashoffset: 0, duration: STEP * 0.8, ease: "power2.inOut" }, at + 0.3);
+            tl.to(w.head, { opacity: 1, duration: 0.12, ease: "none" }, at + 0.3 + STEP * 0.72);
+            w.drawn = at + 0.3 + STEP * 0.8;
+          }
+        });
+
+        // Pulses: a pure function of timeline time, derived on a clock tween.
+        const clock = { t: 0 };
+        function pulses() {
+          for (const w of wires) {
+            const local = clock.t - w.drawn;
+            let o = 0;
+            let x = w.x0;
+            let ring = 0;
+            if (local > 0) {
+              const f = (local / PULSE) % 1;
+              const e = f < 0.5 ? 2 * f * f : 1 - Math.pow(-2 * f + 2, 2) / 2;
+              x = w.x0 + (w.len - 24) * e;
+              o = Math.min(1, Math.sin(Math.PI * f) * 2.2);
+              ring = f;
+            }
+            w.dot.setAttribute("cx", x.toFixed(1));
+            w.dot.style.opacity = o;
+            w.halo.setAttribute("cx", x.toFixed(1));
+            w.halo.setAttribute("r", (10 + ring * 14).toFixed(1));
+            w.halo.style.opacity = (o * (1 - ring) * 0.6).toFixed(3);
+          }
+        }
+        tl.fromTo(clock, { t: 0 }, { t: DURATION, duration: DURATION, ease: "none", onUpdate: pulses }, 0);
+        pulses();
+        window.__timelines = window.__timelines || {};
+        window.__timelines["flow-nodes"] = tl;
+      })();
+    </script>
+  </body>
+</html>

@@ -1,0 +1,12 @@
+{
+  "id": "mesh-gradient",
+  "name": "Mesh gradient",
+  "kind": "background",
+  "description": "A slow, restrained mesh gradient in the look's own colors: soft pools of the alternate field and accent drift over the main field with a gentle light lift, finished with fine grain so it never bands. Premium brand, title and outro backdrops.",
+  "tags": ["gradient", "mesh", "blobs", "soft", "drift", "ambient", "grain", "premium", "brand", "backdrop"],
+  "fonts": [],
+  "duration": 8,
+  "previewAt": 4,
+  "license": "original",
+  "previewLook": "soft-light-ad"
+}

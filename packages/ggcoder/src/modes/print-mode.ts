@@ -26,6 +26,7 @@ export async function runPrintMode(options: PrintModeOptions): Promise<void> {
   process.on("SIGINT", onSigint);
 
   const sessionOpts: AgentSessionOptions = {
+    unattended: true,
     provider: options.provider,
     model: options.model,
     baseUrl: options.baseUrl,

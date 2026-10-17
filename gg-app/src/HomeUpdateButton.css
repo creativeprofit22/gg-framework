@@ -1,0 +1,153 @@
+/* ── Home's update key (HomeUpdateButton.tsx) ──
+   An arcade key at the top of Home: a pixel plate (indigo face, gold rim)
+   standing on its dark-gold side. Both are 9-slice pixel art from
+   update-key-art.ts, drawn 2px per cell, so the stepped corners stay crisp at
+   any width. The words, arrow, XP meter and burst are the shared parts
+   (UpdateKeyParts.css). Pressing pushes the face down onto its side; nothing
+   on the key ever fades. */
+.home-update {
+  position: relative;
+  display: block;
+  width: 284px;
+  height: 44px;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  cursor: pointer;
+  animation: lvl-arrive 520ms var(--ease-pop) backwards;
+}
+.home-update:disabled {
+  cursor: default;
+}
+.home-update:focus-visible {
+  outline: 2px solid var(--text);
+  outline-offset: 4px;
+  border-radius: var(--radius-sm);
+}
+.lvl-base,
+.lvl-face {
+  position: absolute;
+  left: 0;
+  right: 0;
+  border: 8px solid transparent;
+}
+.lvl-base {
+  top: 6px;
+  bottom: 0;
+  border-image: var(--lvl-base) 4 fill / 8px stretch;
+}
+.lvl-face {
+  top: 0;
+  bottom: 4px;
+  display: flex;
+  align-items: center;
+  gap: var(--space-5);
+  padding: 0 var(--space-3);
+  border-image: var(--lvl-plate) 4 fill / 8px stretch;
+  color: #e9e5ff;
+  transition:
+    transform 70ms var(--ease-out),
+    filter var(--t-fast);
+}
+.home-update:hover:not(:disabled) .lvl-face {
+  filter: brightness(1.14);
+}
+/* Pressed: the face goes down onto its side, a short and solid travel. */
+.home-update:active:not(:disabled) .lvl-face {
+  transform: translateY(4px);
+  filter: brightness(0.96);
+  transition-duration: 40ms;
+}
+.home-update:hover:not(:disabled) .lvl-arrow {
+  transform: translateY(-2px);
+}
+
+.lvl-versions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  margin-left: auto;
+  font-family: var(--mono);
+  font-size: var(--fs-xs);
+  line-height: 1.2;
+  white-space: nowrap;
+  color: #c9c2ff;
+  font-variant-numeric: tabular-nums;
+}
+.lvl-versions-to {
+  color: #ffd23a;
+}
+.lvl-versions-new {
+  color: #ffffff;
+  font-weight: 700;
+}
+
+/* Two twinkles on the key's corners, out of step with each other. */
+.lvl-sparkle {
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  pointer-events: none;
+  animation: lvl-twinkle 1.8s steps(1, end) infinite;
+  animation-play-state: var(--loop-play-state, running);
+}
+.lvl-sparkle-a {
+  top: -5px;
+  left: -4px;
+}
+.lvl-sparkle-b {
+  right: -4px;
+  bottom: 2px;
+  animation-delay: 0.9s;
+}
+@keyframes lvl-twinkle {
+  0%,
+  100% {
+    opacity: 0;
+    transform: scale(0.6);
+  }
+  20% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  40% {
+    opacity: 0.5;
+    transform: scale(0.8);
+  }
+}
+
+/* Done: UPDATED! in the middle, a flash. */
+.home-update.is-done .lvl-face {
+  justify-content: center;
+  animation: lvl-flash 700ms var(--ease-out) both;
+}
+
+/* The key pops up when an update arrives. */
+@keyframes lvl-arrive {
+  from {
+    opacity: 0;
+    transform: translateY(-10px) scale(0.85);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .home-update,
+  .home-update.is-done .lvl-face {
+    animation: none;
+  }
+  .lvl-sparkle {
+    display: none;
+  }
+}
+@media (forced-colors: active) {
+  .lvl-base {
+    display: none;
+  }
+  .lvl-face {
+    border: 2px solid ButtonText;
+    border-image: none;
+    background: ButtonFace;
+  }
+}

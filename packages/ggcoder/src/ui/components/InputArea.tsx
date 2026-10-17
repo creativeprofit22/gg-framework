@@ -232,10 +232,11 @@ interface InputAreaProps {
   onToggleMarkdown?: () => void;
   cwd: string;
   commands?: SlashCommandInfo[];
+  onDiscoverCommands?: () => void;
   /**
    * Locked badge rendered before the prompt arrow on the first visual line.
    * The user cannot delete or edit it — typed text always follows. Used by
-   * downstream tools (gg-boss) to show the active scope/project pill.
+   * downstream tools to show the active scope/project pill.
    */
   scopeBadge?: React.ReactNode;
   /**
@@ -251,7 +252,7 @@ interface InputAreaProps {
   disableMouseTracking?: boolean;
   /**
    * Fired when the user presses Tab (outside slash-completion mode). Used by
-   * downstream tools (gg-boss) to cycle the scope badge.
+   * downstream tools to cycle the scope badge.
    */
   onTab?: () => void;
   /**
@@ -342,6 +343,7 @@ export function InputArea({
   onToggleMarkdown,
   cwd,
   commands = [],
+  onDiscoverCommands,
   scopeBadge,
   disableMouseTracking,
   mouseScroll,
@@ -406,8 +408,12 @@ export function InputArea({
   const pasteTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Detect if we're in slash command mode
-  const isSlashMode = value.startsWith("/") && !value.includes(" ") && commands.length > 0;
+  const wantsSlashMode = value.startsWith("/") && !value.includes(" ");
+  const isSlashMode = wantsSlashMode && commands.length > 0;
   const slashFilter = isSlashMode ? value.slice(1) : "";
+  useEffect(() => {
+    if (wantsSlashMode) onDiscoverCommands?.();
+  }, [wantsSlashMode, onDiscoverCommands]);
   const filteredCommands = useMemo(
     () => (isSlashMode ? filterCommands(commands, slashFilter) : []),
     [isSlashMode, commands, slashFilter],
@@ -500,8 +506,7 @@ export function InputArea({
 
     const originalEmit = internal_eventEmitter.emit.bind(internal_eventEmitter);
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const wrappedEmit = (event: string | symbol, ...args: any[]): boolean => {
+    const wrappedEmit = (event: string | symbol, ...args: unknown[]): boolean => {
       if (event === "input" && typeof args[0] === "string") {
         const data = args[0] as string;
 
@@ -595,7 +600,7 @@ export function InputArea({
   useEffect(() => {
     if (!isActive || !internal_eventEmitter) return;
     // Hard-bail when mouse tracking is disabled at the prop level — used by
-    // gg-boss to avoid the Ghostty phantom-paste bug where rapid mode toggles
+    // downstream tools to avoid the Ghostty phantom-paste bug where rapid mode toggles
     // get interpreted as bracketed-paste boundaries during high-frequency UI
     // updates (e.g. workers running, status bar shimmering). Without this we
     // skip the wrapper install too, so no escape-sequence stripping happens
@@ -672,8 +677,7 @@ export function InputArea({
       scrollTimer = setTimeout(reenableMouse, NATIVE_INTERACTION_SAFETY_MS);
     };
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    internal_eventEmitter.emit = (event: string | symbol, ...args: any[]): boolean => {
+    internal_eventEmitter.emit = (event: string | symbol, ...args: unknown[]): boolean => {
       if (event === "input" && typeof args[0] === "string") {
         const data = args[0] as string;
         // Strip all terminal focus reports and SGR mouse sequences from the data
@@ -1339,8 +1343,8 @@ export function InputArea({
           setSelectionAnchor(null);
           return;
         }
-        // Outside slash mode, Tab is delegated — used by gg-boss to cycle
-        // the scope badge.
+        // Outside slash mode, Tab is delegated — downstream tools use it to
+        // cycle the scope badge.
         onTab?.();
         return;
       }

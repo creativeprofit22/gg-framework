@@ -1,10 +1,11 @@
-import type { OAuthClientProvider } from "@modelcontextprotocol/sdk/client/auth.js";
+import { OAuthError, OAuthErrorCode } from "@modelcontextprotocol/client";
 import type {
+  OAuthClientProvider,
   OAuthClientInformation,
   OAuthClientInformationFull,
   OAuthClientMetadata,
   OAuthTokens,
-} from "@modelcontextprotocol/sdk/shared/auth.js";
+} from "@modelcontextprotocol/client";
 import crypto from "node:crypto";
 import { McpOAuthStore } from "./oauth-store.js";
 
@@ -113,7 +114,13 @@ export class McpOAuthProvider implements OAuthClientProvider {
   async codeVerifier(): Promise<string> {
     const entry = await this.store.get(this.serverName);
     if (!entry.codeVerifier) {
-      throw new Error("No PKCE code verifier saved for this MCP server.");
+      // v2 consolidates every OAuth failure onto OAuthError + OAuthErrorCode, so
+      // callers can classify this with the same check they use for a rejected
+      // token exchange instead of matching on a bare Error message.
+      throw new OAuthError(
+        OAuthErrorCode.InvalidGrant,
+        `No PKCE code verifier saved for MCP server "${this.serverName}". Start the login again.`,
+      );
     }
     return entry.codeVerifier;
   }

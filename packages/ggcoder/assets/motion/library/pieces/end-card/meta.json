@@ -1,0 +1,6 @@
+{
+  "id": "end-card", "name": "End card", "kind": "frame",
+  "description": "A centered closing statement, one next action and a quiet destination with a long readable hold.",
+  "tags": ["closing", "cta", "sign-off"], "fonts": [], "duration": 5,
+  "previewAt": 2, "license": "original", "previewLook": "duotone-broadcast"
+}

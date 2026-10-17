@@ -1,0 +1,16 @@
+/* Editorial Ink: deep ink-green field, bone type, soft wonky Fraunces, Newsreader for voices. */
+.look-editorial-ink {
+  --field: #0f2a24;
+  --field-2: #3a1318;
+  --ink: #ece4d4;
+  --accent: #e3a857;
+  --muted: rgba(236, 228, 212, 0.64);
+  --line: rgba(236, 228, 212, 0.2);
+  --display: "Fraunces", serif;
+  --display-weight: 340;
+  --display-stretch: 100%;
+  --display-tracking: -0.025em;
+  --text: "Newsreader", serif;
+  --mono: "Martian Mono", monospace;
+  --radius: 2px;
+}

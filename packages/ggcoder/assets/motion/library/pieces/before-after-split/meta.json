@@ -1,0 +1,12 @@
+{
+  "id": "before-after-split",
+  "name": "Before / after split",
+  "kind": "diagram",
+  "description": "A comparison card: a vertical divider with a round handle wipes across a noisy, muted 'before' panel to reveal a calm accent 'after' panel, overshoots, then settles at the middle so both metrics read (before on the right, after on the left). Edit the tags, metric names and values in the markup and the chart series in the script.",
+  "tags": ["before-after", "comparison", "split", "wipe", "slider", "improvement", "metric", "launch", "explainer"],
+  "fonts": [],
+  "duration": 5,
+  "previewAt": 3.6,
+  "license": "original",
+  "previewLook": "soft-light-ad"
+}

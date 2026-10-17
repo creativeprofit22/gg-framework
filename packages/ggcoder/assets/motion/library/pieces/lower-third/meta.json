@@ -1,0 +1,6 @@
+{
+  "id": "lower-third", "name": "Lower third", "kind": "frame",
+  "description": "A left-aligned speaker caption with a ruled edge and a masked entrance and exit.",
+  "tags": ["speaker", "caption", "interview"], "fonts": [], "duration": 5,
+  "previewAt": 1.5, "license": "original", "previewLook": "duotone-broadcast"
+}

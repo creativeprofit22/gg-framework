@@ -1,0 +1,227 @@
+<!doctype html>
+<!--
+  timeline-track: a horizontal timeline. The track draws left to right, a
+  playhead rides its tip, and each milestone pops in (tick, dot, mono date
+  above, label below) as the playhead reaches it; the last milestone is the
+  accent "now". The playhead stops on the last milestone; the rail beyond it stays faint
+  (the future). A mono readout under the caption names the latest milestone
+  reached.
+  Params (top of script):
+    MILESTONES  [{ date, label, at }] — 3–6; `at` is 0..1 along the track
+    DRAW        seconds for the track + playhead to cross
+  CSS: --tt-y (vertical position of the track).
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+  </head>
+  <body>
+    <div
+      id="timeline-track-root"
+      data-composition-id="timeline-track"
+      data-start="0"
+      data-duration="5"
+      data-width="1920"
+      data-height="1080"
+    >
+      <style>
+        [data-composition-id="timeline-track"] {
+          --tt-y: 600px;
+          position: absolute;
+          inset: 0;
+          color: var(--ink, #111);
+          font-family: var(--text, sans-serif);
+        }
+        [data-composition-id="timeline-track"] .tt-caption {
+          position: absolute;
+          left: 160px;
+          top: calc(var(--tt-y) - 250px);
+          font-family: var(--mono, monospace);
+          font-size: 24px;
+          letter-spacing: 0.12em;
+          text-transform: uppercase;
+          color: var(--muted, rgba(0, 0, 0, 0.6));
+        }
+        [data-composition-id="timeline-track"] .tt-rail,
+        [data-composition-id="timeline-track"] .tt-fill {
+          position: absolute;
+          left: 160px;
+          width: 1600px;
+          top: calc(var(--tt-y) - 3px);
+          height: 6px;
+          border-radius: 3px;
+        }
+        [data-composition-id="timeline-track"] .tt-rail {
+          background: var(--line, rgba(0, 0, 0, 0.2));
+        }
+        [data-composition-id="timeline-track"] .tt-fill {
+          background: var(--ink, #111);
+          transform-origin: 0 50%;
+          transform: scaleX(0);
+        }
+        [data-composition-id="timeline-track"] .tt-head {
+          position: absolute;
+          top: calc(var(--tt-y) - 70px);
+          width: 0;
+          height: 140px;
+        }
+        [data-composition-id="timeline-track"] .tt-head::before {
+          content: "";
+          position: absolute;
+          left: -2px;
+          top: 0;
+          width: 4px;
+          height: 140px;
+          background: var(--accent, #111);
+          border-radius: 2px;
+        }
+        [data-composition-id="timeline-track"] .tt-head::after {
+          content: "";
+          position: absolute;
+          left: -13px;
+          top: -16px;
+          width: 26px;
+          height: 16px;
+          background: var(--accent, #111);
+          clip-path: polygon(0 0, 100% 0, 50% 100%);
+        }
+        [data-composition-id="timeline-track"] .tt-ms {
+          position: absolute;
+          top: var(--tt-y);
+          width: 0;
+          height: 0;
+        }
+        [data-composition-id="timeline-track"] .tt-dot {
+          position: absolute;
+          left: -15px;
+          top: -15px;
+          width: 30px;
+          height: 30px;
+          box-sizing: border-box;
+          border-radius: 50%;
+          border: 5px solid var(--ink, #111);
+          background: var(--field, #fff);
+        }
+        [data-composition-id="timeline-track"] .tt-ms.is-now .tt-dot {
+          background: var(--accent, #111);
+          border-color: var(--accent, #111);
+          box-shadow: 0 0 0 10px color-mix(in srgb, var(--accent, #111) 22%, transparent);
+        }
+        [data-composition-id="timeline-track"] .tt-date {
+          position: absolute;
+          bottom: 44px;
+          left: 0;
+          transform: translateX(-50%);
+          font-family: var(--mono, monospace);
+          font-size: 26px;
+          letter-spacing: 0.06em;
+          font-variant-numeric: tabular-nums;
+          white-space: nowrap;
+          color: var(--muted, rgba(0, 0, 0, 0.6));
+        }
+        [data-composition-id="timeline-track"] .tt-label {
+          position: absolute;
+          top: 44px;
+          left: 0;
+          transform: translateX(-50%);
+          font-family: var(--display, sans-serif);
+          font-weight: var(--display-weight, 800);
+          font-stretch: var(--display-stretch, 100%);
+          letter-spacing: var(--display-tracking, -0.02em);
+          font-size: 44px;
+          line-height: 1.05;
+          text-align: center;
+          white-space: nowrap;
+        }
+        [data-composition-id="timeline-track"] .tt-ms.is-now .tt-label,
+        [data-composition-id="timeline-track"] .tt-ms.is-now .tt-date {
+          color: var(--accent, #111);
+        }
+        [data-composition-id="timeline-track"] .tt-readout {
+          position: absolute;
+          left: 160px;
+          top: calc(var(--tt-y) - 204px);
+          font-family: var(--mono, monospace);
+          font-size: 24px;
+          letter-spacing: 0.08em;
+          font-variant-numeric: tabular-nums;
+          color: var(--ink, #111);
+        }
+      </style>
+      <!-- edit: caption -->
+      <div class="tt-caption">Roadmap · 2023 → 2026</div>
+      <div class="tt-readout" id="tt-readout">REACHED —</div>
+      <div class="tt-rail"></div>
+      <div class="tt-fill" id="tt-fill"></div>
+      <div id="tt-ms"></div>
+      <div class="tt-head" id="tt-head"></div>
+    </div>
+    <script>
+      (function () {
+        // edit: milestones (at = 0..1 position along the track; last = "now")
+        const MILESTONES = [
+          { date: "MAR 2023", label: "Prototype", at: 0.06 },
+          { date: "NOV 2023", label: "Private beta", at: 0.3 },
+          { date: "JUN 2024", label: "Public launch", at: 0.54 },
+          { date: "FEB 2025", label: "1M users", at: 0.76 },
+          { date: "2026", label: "v2", at: 0.95 },
+        ];
+        const DRAW = 3.0;
+        const START = 0.4;
+        const LEFT = 160;
+        const WIDTH = 1600;
+
+        const holder = document.getElementById("tt-ms");
+        const fill = document.getElementById("tt-fill");
+        const head = document.getElementById("tt-head");
+        const readout = document.getElementById("tt-readout");
+        const ms = MILESTONES.map((m, i) => {
+          const el = document.createElement("div");
+          el.className = "tt-ms" + (i === MILESTONES.length - 1 ? " is-now" : "");
+          el.style.left = LEFT + m.at * WIDTH + "px";
+          el.innerHTML = '<div class="tt-date"></div><div class="tt-dot"></div><div class="tt-label"></div>';
+          el.querySelector(".tt-date").textContent = m.date;
+          el.querySelector(".tt-label").textContent = m.label;
+          holder.appendChild(el);
+          return el;
+        });
+
+        const END = MILESTONES[MILESTONES.length - 1].at;
+        const state = { p: 0 };
+        function render() {
+          const x = state.p * END;
+          fill.style.transform = `scaleX(${x.toFixed(4)})`;
+          head.style.left = (LEFT + x * WIDTH).toFixed(1) + "px";
+          let reached = null;
+          for (const m of MILESTONES) if (m.at <= x + 1e-4) reached = m;
+          readout.textContent = reached ? `REACHED  ${reached.date} · ${reached.label.toUpperCase()}` : "REACHED  —";
+        }
+
+        const tl = gsap.timeline({ paused: true });
+        tl.fromTo(head, { opacity: 0 }, { opacity: 1, duration: 0.3, ease: "none" }, START - 0.2);
+        tl.fromTo(state, { p: 0 }, { p: 1, duration: DRAW, ease: "power1.inOut", onUpdate: render }, START);
+        // Each milestone pops when the eased playhead reaches it.
+        const inv = (y) => {
+          // Inverse of power1.inOut (quadratic in/out) for y in 0..1.
+          return y < 0.5 ? Math.sqrt(y / 2) : 1 - Math.sqrt((1 - y) / 2);
+        };
+        ms.forEach((el, i) => {
+          const at = START + inv(MILESTONES[i].at / END) * DRAW;
+          const dot = el.querySelector(".tt-dot");
+          const date = el.querySelector(".tt-date");
+          const label = el.querySelector(".tt-label");
+          tl.fromTo(dot, { scale: 0 }, { scale: 1, duration: 0.45, ease: "back.out(2.2)" }, at - 0.05);
+          tl.fromTo(date, { opacity: 0, y: 14 }, { opacity: 1, y: 0, duration: 0.45, ease: "power3.out" }, at);
+          tl.fromTo(label, { opacity: 0, y: -14 }, { opacity: 1, y: 0, duration: 0.45, ease: "power3.out" }, at + 0.04);
+        });
+        // The playhead hands off to the "now" dot so it never covers its label.
+        tl.to(head, { opacity: 0, duration: 0.3, ease: "power1.out" }, START + DRAW + 0.05);
+        tl.to({}, { duration: 0.4 });
+        render();
+        window.__timelines = window.__timelines || {};
+        window.__timelines["timeline-track"] = tl;
+      })();
+    </script>
+  </body>
+</html>

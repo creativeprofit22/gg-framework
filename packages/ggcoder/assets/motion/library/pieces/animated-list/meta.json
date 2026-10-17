@@ -1,0 +1,16 @@
+{
+  "id": "animated-list",
+  "name": "Animated list",
+  "kind": "ui",
+  "description": "Notification cards arrive one by one at the top of a list: each springs in from scale 0 (anchored at its top edge) and pushes the older cards down with the same spring; the list fades out at the bottom. Activity feeds, 'things keep happening' beats. Converted from Magic UI's Animated List.",
+  "tags": ["list", "feed", "notifications", "activity", "spring", "stack", "saas", "magic-ui"],
+  "fonts": [],
+  "duration": 6,
+  "previewAt": 5.2,
+  "license": "MIT",
+  "source": {
+    "url": "https://github.com/magicuidesign/magicui/blob/main/apps/www/registry/magicui/animated-list.tsx",
+    "author": "Magic UI"
+  },
+  "previewLook": "soft-light-ad"
+}

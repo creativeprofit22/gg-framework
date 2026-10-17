@@ -1,0 +1,11 @@
+<!doctype html>
+<!-- Lower third. Edit name and role in markup. Safe inset 96px; exit begins at 4.2s. -->
+<html lang="en"><head><meta charset="UTF-8"><script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script></head><body>
+<div id="lower-third-root" data-composition-id="lower-third" data-start="0" data-duration="5" data-width="1920" data-height="1080">
+<style>
+[data-composition-id="lower-third"]{position:absolute;inset:0;color:var(--ink);font-family:var(--text)}
+[data-composition-id="lower-third"] .caption{position:absolute;left:96px;bottom:96px;padding:30px 42px;border-left:8px solid var(--accent);background:var(--field);color:var(--ink);overflow:hidden}
+[data-composition-id="lower-third"] .name{font-family:var(--display);font-weight:var(--display-weight);font-size:64px;letter-spacing:var(--display-tracking);line-height:1.15;margin:0 0 14px}
+[data-composition-id="lower-third"] .role{font-family:var(--mono);font-size:24px;line-height:1.4;color:var(--muted);margin:0}
+</style><div class="caption"><!-- edit: speaker name and role --><p class="name">Alex Morgan</p><p class="role">Motion designer / Field notes</p></div></div>
+<script>(()=>{const root=document.querySelector('[data-composition-id="lower-third"]');const box=root.querySelector('.caption');const tl=gsap.timeline({paused:true});tl.from(box,{clipPath:'inset(0 100% 0 0)',duration:.55,ease:'power3.out'},0).from(root.querySelectorAll('p'),{y:24,opacity:0,stagger:.12,duration:.45,ease:'power2.out'},.2).to(box,{clipPath:'inset(0 0 0 100%)',duration:.5,ease:'power3.in'},4.2).to({},{duration:.3});window.__timelines=window.__timelines||{};window.__timelines["lower-third"]=tl;})();</script></body></html>

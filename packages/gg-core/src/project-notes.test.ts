@@ -1,0 +1,1424 @@
+import fs from "node:fs/promises";
+import { describe, expect, it } from "vitest";
+import {
+  NOTES_COMPLETION_GATE_OUTCOMES,
+  NOTES_COMPLETION_UNMET_GATE_CODES,
+  NOTES_IMPLEMENTATION_RUN_OUTCOMES,
+  NOTES_LIFECYCLE_EVENT_SOURCES,
+  NOTES_PHASE_STATUSES,
+  NOTES_ROADMAP_REFERENCE_POLICY_OUTCOMES,
+  NOTES_ROADMAP_REASON_MAX_LENGTH,
+  canonicalProjectKey,
+  canonicalReferenceIdentity,
+  classifyLegacyNotesLifecycleEvent,
+  classifyRoadmapAutoStartEligibility,
+  isNotesCompletionGateOutcome,
+  isNotesCompletionUnmetGateCode,
+  isNotesDocumentV2,
+  isNotesDocumentV3,
+  isNotesImplementationRunOutcome,
+  isNotesLifecycleEventSource,
+  isNotesPhaseStatus,
+  isNotesRoadmapReferencePolicyOutcome,
+  isNotesSessionLink,
+  isNullableNotesSessionLink,
+  isValidNotesReminderDeliveryPair,
+  migrateNotesDocumentV2,
+  migrateNotesDocumentV3PhaseShape,
+  normalizeCanonicalUrl,
+  notesAutomaticStatusAfterOverrideReset,
+  notesPhaseStatusForRoadmapTransition,
+  NOTES_REFERENCE_METADATA_FIELDS,
+  NOTES_REFERENCE_METADATA_MAX_LENGTH,
+  NOTES_REFERENCE_URL_MAX_LENGTH,
+  NOTES_REMINDER_NOTE_MAX_LENGTH,
+  isNotesDirectCompletionAuthority,
+  isNotesPhaseAdvancementSourceCurrent,
+  validateNotesCompletionReviewFields,
+  validateNotesDocumentV3,
+  validateNotesImplementationCheckpointFields,
+  validateNotesPhaseExecution,
+  validateNotesReferenceProjection,
+  validateNotesSessionLink,
+  type NotesDocumentV2,
+  type NotesDocumentV3,
+  type NotesPhase,
+  type NotesPhaseExecutionV1,
+  type NotesPhaseStatus,
+  type NotesVerificationEvidenceV2,
+  type NotesRoadmapDirectPhaseAdvancementCheckpoint,
+  type NotesRoadmapImplementationCheckpoint,
+  type NotesRoadmapPhaseAdvancementCheckpoint,
+  type NotesRoadmapPhaseAdvancementConfirmation,
+  type NotesRoadmapStatusUpdate,
+  type NotesRoadmapTransition,
+  type NotesRoadmapStatusOutcome,
+  type NotesSessionLink,
+} from "./project-notes.js";
+
+import {
+  completionCompatibilityFixture,
+  encodeCompatibleDone,
+} from "./test-fixtures/project-notes-completion-compatibility.js";
+// Frozen verbatim pre-step-2 validator, not a permissive mock or future validator alias.
+import { validateNotesDocumentV3 as validateOldNotes } from "./test-fixtures/project-notes-pre-simplification-validator.js";
+
+const NOW = "2026-07-25T12:34:56.000Z";
+const CURRENT_SESSION = { sessionId: "session-current", sessionPath: "/sessions/current.jsonl" };
+
+function protectedStatusReport(
+  id: string,
+  transition: NotesRoadmapTransition,
+  statusOutcome: Extract<NotesRoadmapStatusOutcome, "manual-override" | "done-terminal">,
+): NotesRoadmapStatusUpdate {
+  return {
+    type: "status-update",
+    id,
+    actor: "gg-coder",
+    transition,
+    progress: "Protected automatic status report",
+    blocker: transition === "blocked" ? "Verification is pending" : null,
+    requiredExternalAction: transition === "blocked" ? "Run the focused verification" : null,
+    evidence: [],
+    verification: null,
+    verificationReason: null,
+    verificationSession: null,
+    statusOutcome,
+    proposedReferences: [],
+    timestamp: NOW,
+  };
+}
+
+function pendingAutomaticStatus(
+  status: Exclude<NotesPhaseStatus, "not-started" | "done">,
+  expectedSession: NotesSessionLink | null,
+): NotesPhase["pendingAutomaticLifecycleTransition"] {
+  return {
+    status,
+    source: "agent",
+    reason: "Protected lifecycle transition",
+    kind: "other",
+    timestamp: NOW,
+    expectedSession,
+  };
+}
+
+async function fixture(): Promise<NotesDocumentV3> {
+  return JSON.parse(
+    await fs.readFile(new URL("../../../fixtures/project-notes-v3.json", import.meta.url), "utf8"),
+  ) as NotesDocumentV3;
+}
+
+interface DirectCompletionFixture {
+  document: NotesDocumentV3;
+  phase: NotesPhase;
+  verification: NotesRoadmapStatusUpdate;
+  implementation: NotesRoadmapImplementationCheckpoint;
+  checkpoint: NotesRoadmapDirectPhaseAdvancementCheckpoint;
+}
+
+async function directCompletionFixture(): Promise<DirectCompletionFixture> {
+  const document = await fixture();
+  const phase = document.phases[0]!;
+  const verification = phase.roadmapEvents[0]!;
+  if (verification.type !== "status-update") throw new Error("expected verification fixture");
+  verification.transition = "done";
+  verification.statusOutcome = "completion-pending";
+  const implementation = phase.roadmapEvents[1]!;
+  if (implementation.type !== "implementation-checkpoint") {
+    throw new Error("expected implementation fixture");
+  }
+  implementation.verificationStatusUpdateId = verification.id;
+  const checkpoint: NotesRoadmapDirectPhaseAdvancementCheckpoint = {
+    type: "phase-advancement-checkpoint",
+    id: "direct-advancement-checkpoint-1",
+    implementationCheckpointId: implementation.id,
+    verificationStatusUpdateId: verification.id,
+    completedPhaseId: phase.id,
+    nextPhaseId: document.phases[1]!.id,
+    timestamp: NOW,
+  };
+  phase.roadmapEvents = [verification, implementation, checkpoint];
+  return { document, phase, verification, implementation, checkpoint };
+}
+
+function legacyV2(): NotesDocumentV2 {
+  return {
+    version: 2,
+    reference: "legacy",
+    currentFocus: "Migrate Notes",
+    tasks: [
+      {
+        id: "",
+        text: "Empty ID",
+        status: "todo",
+        createdAt: NOW,
+        updatedAt: NOW,
+        completedAt: null,
+        archivedAt: null,
+      },
+      {
+        id: "duplicate",
+        text: "First duplicate",
+        status: "todo",
+        createdAt: NOW,
+        updatedAt: NOW,
+        completedAt: null,
+        archivedAt: null,
+      },
+      {
+        id: "duplicate",
+        text: "Second duplicate",
+        status: "done",
+        createdAt: NOW,
+        updatedAt: NOW,
+        completedAt: NOW,
+        archivedAt: null,
+      },
+    ],
+    handoff: { text: "Continue", updatedAt: NOW, readAt: null },
+    updatedAt: NOW,
+    legacyImportedAt: null,
+  };
+}
+
+function durableExecution(): NotesPhaseExecutionV1 {
+  const repository = {
+    projectKey: "c:/work/project",
+    identityHash: "b".repeat(64),
+    rootCommit: "c".repeat(40),
+  };
+  const workspace = {
+    version: 1 as const,
+    repository,
+    headCommit: "d".repeat(40),
+    worktreeDigest: "e".repeat(64),
+    clean: true,
+  };
+  return {
+    version: 1,
+    state: "implementing",
+    repository,
+    plan: {
+      planId: "plan-1",
+      contentHash: "f".repeat(64),
+      snapshotPath: ".gg/plans/approved/plan-1.md",
+      approvedAt: NOW,
+      approvedRevision: 4,
+      baseCommit: workspace.headCommit,
+      steps: [
+        {
+          id: "a".repeat(64),
+          index: 1,
+          text: "Implement durable execution",
+          state: "completed",
+          completedAt: NOW,
+          workspace,
+        },
+      ],
+    },
+    evidence: [
+      {
+        commandHash: "1".repeat(64),
+        commandDisplay: "pnpm test",
+        exitCode: 0,
+        classifierVersion: "roadmap-v1",
+        verdict: "approved",
+        criterionId: "criterion-1",
+        observedAt: NOW,
+        workspace,
+      },
+    ],
+    pendingCompletion: null,
+    lastSession: CURRENT_SESSION,
+    migration: { source: "native", reconciledAt: NOW },
+  };
+}
+
+function expectError(value: unknown, path: string, message?: string): void {
+  const result = validateNotesDocumentV3(value);
+  expect(result).toMatchObject({
+    ok: false,
+    error: { path, ...(message === undefined ? {} : { message }) },
+  });
+}
+
+describe("project Notes contract", () => {
+  it("preserves copied legacy evidence and pending intent through both real validators", async () => {
+    const document = await completionCompatibilityFixture();
+    const before = structuredClone(document);
+    expect(validateOldNotes(document)).toMatchObject({ ok: true });
+    expect(validateNotesDocumentV3(document)).toMatchObject({ ok: true });
+    expect(document).toEqual(before);
+    expect(document.phases[0]!.execution!.evidence).toHaveLength(2);
+    expect(document.phases[0]!.execution!.pendingCompletion).not.toBeNull();
+  });
+
+  it("accepts direct Done's legacy wire encoding without fabricating checkpoints", async () => {
+    const before = await completionCompatibilityFixture();
+    const next = encodeCompatibleDone(before);
+    const oldResult = validateOldNotes(next);
+    expect(oldResult, JSON.stringify(oldResult.ok ? null : oldResult.error)).toMatchObject({
+      ok: true,
+    });
+    expect(validateNotesDocumentV3(next)).toMatchObject({ ok: true });
+    expect(next.phases[0]).toEqual(before.phases[0]);
+    expect(next.phases[2]!.execution).toEqual(before.phases[2]!.execution);
+    expect(next.phases[2]!.roadmapEvents.slice(0, -1)).toEqual(before.phases[2]!.roadmapEvents);
+    expect(next.phases[2]!.roadmapEvents.at(-1)).toMatchObject({
+      transition: "done",
+      statusOutcome: "completion-pending",
+      verificationSession: null,
+    });
+    expect(next.phases[2]!.lifecycleEvents.slice(0, -1)).toEqual(before.phases[2]!.lifecycleEvents);
+    const invalid = structuredClone(next);
+    Object.assign(invalid.phases[2]!.roadmapEvents.at(-1)!, { statusOutcome: "applied" });
+    expect(validateOldNotes(invalid)).toMatchObject({ ok: false });
+  });
+  it("classifies automatic Roadmap candidates by exact full-set eligibility", async () => {
+    const document = await fixture();
+    const template = document.phases[0]!;
+    const candidate = (id: string, order: number): NotesPhase => ({
+      ...template,
+      id,
+      order,
+      status: "not-started",
+      archivedAt: null,
+      session: null,
+      overrides: { ...template.overrides, status: null },
+    });
+    const target = candidate("target", -1);
+    const bound = candidate("bound", 2);
+    bound.session = { sessionId: "bound", sessionPath: "/bound" };
+    const overridden = candidate("overridden", 3);
+    overridden.overrides.status = { value: "not-started", source: "user", updatedAt: NOW };
+
+    expect(
+      classifyRoadmapAutoStartEligibility(
+        [target, candidate("source", 0), bound, overridden],
+        "source",
+      ),
+    ).toMatchObject({ kind: "unique", phase: { id: "target" } });
+    expect(
+      classifyRoadmapAutoStartEligibility([target, candidate("other", 99)], "source"),
+    ).toMatchObject({ kind: "ambiguous", phases: [{ id: "target" }, { id: "other" }] });
+  });
+  it.each([
+    ["pending", "planning"],
+    ["in-progress", "in-progress"],
+    ["blocked", "needs-attention"],
+    ["review", "review"],
+  ] as const)("maps the %s roadmap transition to %s", (transition, status) => {
+    expect(notesPhaseStatusForRoadmapTransition(transition)).toBe(status);
+  });
+
+  it.each([
+    {
+      name: "keeps Done terminal",
+      arrange(phase: NotesPhase) {
+        phase.status = "done";
+        phase.pendingAutomaticLifecycleTransition = pendingAutomaticStatus("review", {
+          ...CURRENT_SESSION,
+        });
+        phase.roadmapEvents = [protectedStatusReport("blocked", "blocked", "manual-override")];
+      },
+      expected: "done",
+    },
+    {
+      name: "applies a pending transition for the matching session",
+      arrange(phase: NotesPhase) {
+        phase.pendingAutomaticLifecycleTransition = pendingAutomaticStatus("review", {
+          ...CURRENT_SESSION,
+        });
+        phase.roadmapEvents = [
+          protectedStatusReport("older-protected", "blocked", "manual-override"),
+        ];
+      },
+      expected: "review",
+    },
+    {
+      name: "ignores a pending transition for a stale session path",
+      arrange(phase: NotesPhase) {
+        phase.status = "planning";
+        phase.pendingAutomaticLifecycleTransition = pendingAutomaticStatus("review", {
+          sessionId: CURRENT_SESSION.sessionId,
+          sessionPath: "/sessions/stale.jsonl",
+        });
+      },
+      expected: "planning",
+    },
+    {
+      name: "uses the latest protected manual report",
+      arrange(phase: NotesPhase) {
+        phase.roadmapEvents = [
+          protectedStatusReport("older-protected", "pending", "manual-override"),
+          protectedStatusReport("latest-protected", "review", "manual-override"),
+          {
+            ...protectedStatusReport("newer-unprotected", "blocked", "manual-override"),
+            statusOutcome: "same-status",
+          },
+        ];
+      },
+      expected: "review",
+    },
+    {
+      name: "uses a protected done-terminal report",
+      arrange(phase: NotesPhase) {
+        phase.roadmapEvents = [protectedStatusReport("done-terminal", "pending", "done-terminal")];
+      },
+      expected: "planning",
+    },
+    {
+      name: "maps a protected blocked transition to Needs attention",
+      arrange(phase: NotesPhase) {
+        phase.roadmapEvents = [protectedStatusReport("blocked", "blocked", "manual-override")];
+      },
+      expected: "needs-attention",
+    },
+    {
+      name: "falls back to the current status",
+      arrange(phase: NotesPhase) {
+        phase.status = "cancelled";
+      },
+      expected: "cancelled",
+    },
+  ] satisfies Array<{
+    name: string;
+    arrange(phase: NotesPhase): void;
+    expected: NotesPhaseStatus;
+  }>)("restores automatic status: $name", async ({ arrange, expected }) => {
+    const document = await fixture();
+    const phase = document.phases[0]!;
+    phase.status = "in-progress";
+    phase.session = { ...CURRENT_SESSION };
+    phase.pendingAutomaticLifecycleTransition = null;
+    phase.roadmapEvents = [];
+    arrange(phase);
+
+    expect(notesAutomaticStatusAfterOverrideReset(phase)).toBe(expected);
+  });
+
+  it.each([
+    [NOTES_PHASE_STATUSES, isNotesPhaseStatus],
+    [NOTES_LIFECYCLE_EVENT_SOURCES, isNotesLifecycleEventSource],
+    [NOTES_IMPLEMENTATION_RUN_OUTCOMES, isNotesImplementationRunOutcome],
+    [NOTES_COMPLETION_GATE_OUTCOMES, isNotesCompletionGateOutcome],
+    [NOTES_COMPLETION_UNMET_GATE_CODES, isNotesCompletionUnmetGateCode],
+    [NOTES_ROADMAP_REFERENCE_POLICY_OUTCOMES, isNotesRoadmapReferencePolicyOutcome],
+  ] as const)("derives every runtime guard from its canonical tuple", (values, guard) => {
+    expect(values.every((value) => guard(value))).toBe(true);
+    expect(guard("not-a-notes-value")).toBe(false);
+  });
+
+  it("shares checkpoint and completion-review field semantics", () => {
+    expect(
+      validateNotesImplementationCheckpointFields({
+        planStepTotal: 3,
+        completedPlanSteps: [1, 3, 2],
+        runOutcome: "succeeded",
+      }),
+    ).toEqual({ field: "completedPlanSteps", code: "invalid-step", index: 2 });
+    expect(
+      validateNotesImplementationCheckpointFields({
+        planStepTotal: 3,
+        completedPlanSteps: [1, 2, 3],
+        runOutcome: "succeeded",
+      }),
+    ).toBeNull();
+    expect(
+      validateNotesCompletionReviewFields({
+        decision: "accepted",
+        evidence: [],
+        reason: null,
+      }),
+    ).toEqual({ field: "evidence", code: "accepted-requires-evidence" });
+    expect(
+      validateNotesCompletionReviewFields({
+        decision: "rejected",
+        evidence: [],
+        reason: "Needs another pass",
+      }),
+    ).toBeNull();
+  });
+  it.each([
+    ["C:\\Work\\.\\App\\..\\Project\\", "c:/work/project"],
+    ["C:/../Project", "c:/project"],
+    ["\\\\Server\\Share\\Folder\\..\\Project", "//server/share/project"],
+    ["/Work/./App/../Project/", "/Work/Project"],
+    ["/work/../../project", "/project"],
+    ["work/../../project", "../project"],
+    ["", "."],
+  ])("canonicalizes project path %s", (cwd, expected) => {
+    expect(canonicalProjectKey(cwd)).toBe(expected);
+  });
+
+  it("folds Windows path case while preserving POSIX path case", () => {
+    expect(canonicalProjectKey("C:/WORK/PROJECT")).toBe(canonicalProjectKey("c:\\work\\project"));
+    expect(canonicalProjectKey("\\\\SERVER\\SHARE\\PROJECT")).toBe(
+      canonicalProjectKey("//server/share/project"),
+    );
+    expect(canonicalProjectKey("/Work/Project")).not.toBe(canonicalProjectKey("/work/project"));
+  });
+
+  it("requires lifecycle event kinds in the current v3 type", () => {
+    type CurrentLifecycleEvent = NotesDocumentV3["phases"][number]["lifecycleEvents"][number];
+    type KindIsRequired = CurrentLifecycleEvent extends { kind: CurrentLifecycleEvent["kind"] }
+      ? true
+      : false;
+    const kindIsRequired: KindIsRequired = true;
+
+    expect(kindIsRequired).toBe(true);
+  });
+
+  it("accepts the canonical fixture without cloning or rewriting it", async () => {
+    const document = await fixture();
+
+    expect(validateNotesDocumentV3(document)).toEqual({ ok: true, document });
+    expect(isNotesDocumentV3(document)).toBe(true);
+    expect(migrateNotesDocumentV3PhaseShape(document)).toEqual({ ok: true, document });
+  });
+
+  it("strictly binds pending automatic lifecycle provenance to an active status override", async () => {
+    const withoutOverride = await fixture();
+    withoutOverride.phases[0]!.overrides.status = null;
+    expectError(
+      withoutOverride,
+      "phases[0].pendingAutomaticLifecycleTransition",
+      "requires an active status override",
+    );
+
+    const malformedSession = await fixture();
+    malformedSession.phases[0]!.pendingAutomaticLifecycleTransition!.expectedSession = {
+      sessionId: "session",
+      sessionPath: "",
+    };
+    expectError(
+      malformedSession,
+      "phases[0].pendingAutomaticLifecycleTransition.expectedSession.sessionPath",
+    );
+
+    const incompatibleKind = await fixture();
+    incompatibleKind.phases[0]!.pendingAutomaticLifecycleTransition!.kind = "approval-opened";
+    expectError(incompatibleKind, "phases[0].pendingAutomaticLifecycleTransition.kind");
+  });
+
+  it("validates reference and session projections with the authoritative semantics", async () => {
+    const document = await fixture();
+    const { capturedAt: _capturedAt, ...projection } = document.references[0]!;
+
+    expect(validateNotesReferenceProjection(projection)).toBeNull();
+    expect(validateNotesReferenceProjection({ ...projection, issue: 0 })).toMatchObject({
+      path: "reference.issue",
+    });
+    expect(
+      validateNotesReferenceProjection({
+        ...projection,
+        path: null,
+        range: { startLine: 1, endLine: 2 },
+      }),
+    ).toMatchObject({ path: "reference.path" });
+    const completeSession = { sessionId: "session-1", sessionPath: "/session.jsonl" };
+    expect(validateNotesSessionLink(completeSession)).toBeNull();
+    expect(isNotesSessionLink(completeSession)).toBe(true);
+    expect(isNullableNotesSessionLink(completeSession)).toBe(true);
+    expect(isNotesSessionLink(null)).toBe(false);
+    expect(isNullableNotesSessionLink(null)).toBe(true);
+
+    for (const malformed of [
+      { sessionId: "", sessionPath: "/session.jsonl" },
+      { sessionId: "   ", sessionPath: "/session.jsonl" },
+      { sessionId: "session-1", sessionPath: "" },
+      { sessionId: "session-1", sessionPath: " \t " },
+      { ...completeSession, extra: true },
+    ]) {
+      expect(isNotesSessionLink(malformed)).toBe(false);
+      expect(isNullableNotesSessionLink(malformed)).toBe(false);
+    }
+    expect(validateNotesSessionLink({ sessionId: "session-1", sessionPath: "" })).toMatchObject({
+      path: "session.sessionPath",
+    });
+  });
+
+  it.each([
+    ["in-app", "not-required"],
+    ["native", "granted"],
+    ["in-app-fallback", "denied"],
+    ["in-app-fallback", "unavailable"],
+  ] as const)("accepts the valid %s and %s reminder delivery pair", (channel, permission) => {
+    expect(isValidNotesReminderDeliveryPair(channel, permission)).toBe(true);
+  });
+
+  it.each([
+    ["in-app", "granted"],
+    ["native", "denied"],
+    ["in-app-fallback", "not-required"],
+  ] as const)("rejects the impossible %s and %s reminder delivery pair", (channel, permission) => {
+    expect(isValidNotesReminderDeliveryPair(channel, permission)).toBe(false);
+  });
+
+  it("rejects impossible current-v3 reminder evidence at its permission path", async () => {
+    const document = await fixture();
+    document.phases[0]!.reminder!.lastDelivery!.permission = "granted";
+    const expected = {
+      ok: false as const,
+      error: {
+        path: "phases[0].reminder.lastDelivery.permission",
+        message: "permission does not match delivery channel",
+      },
+    };
+
+    expect(validateNotesDocumentV3(document)).toEqual(expected);
+    expect(migrateNotesDocumentV3PhaseShape(document)).toEqual(expected);
+  });
+  it("accepts the backend final-review evidence-only status outcome", async () => {
+    const document = await fixture();
+    const update = document.phases[0]!.roadmapEvents.find(
+      (event) => event.type === "status-update",
+    )!;
+    update.statusOutcome = "evidence-only";
+
+    expect(validateNotesDocumentV3(document)).toEqual({ ok: true, document });
+  });
+
+  it("validates separate blocker reasons and required external actions on current blocked reports", async () => {
+    const document = await fixture();
+    const phase = document.phases[0]!;
+    const update = phase.roadmapEvents.find((event) => event.type === "status-update")!;
+    phase.roadmapEvents = [update];
+    update.transition = "blocked";
+    update.blocker = "A release owner has not approved the deployment";
+    update.requiredExternalAction = "Ask the release owner to approve the deployment";
+
+    expect(validateNotesDocumentV3(document)).toEqual({ ok: true, document });
+
+    for (const [field, value] of [
+      ["blocker", "   "],
+      ["blocker", "x".repeat(NOTES_ROADMAP_REASON_MAX_LENGTH + 1)],
+      ["requiredExternalAction", "\t"],
+      ["requiredExternalAction", "x".repeat(NOTES_ROADMAP_REASON_MAX_LENGTH + 1)],
+    ] as const) {
+      const malformed = structuredClone(document);
+      const malformedUpdate = malformed.phases[0]!.roadmapEvents[0]!;
+      if (malformedUpdate.type !== "status-update") throw new Error("expected status update");
+      malformedUpdate[field] = value;
+      expectError(malformed, `phases[0].roadmapEvents[0].${field}`);
+    }
+  });
+
+  it.each(["blocker", "requiredExternalAction"] as const)(
+    "requires non-blocked reports to keep $0 null",
+    async (field) => {
+      const document = await fixture();
+      const update = document.phases[0]!.roadmapEvents.find(
+        (event) => event.type === "status-update",
+      )!;
+      update[field] = "Unexpected blocked-only detail";
+
+      expectError(document, `phases[0].roadmapEvents[0].${field}`);
+    },
+  );
+
+  it("deterministically stabilizes missing and duplicate v2 task IDs", () => {
+    const legacy = legacyV2();
+
+    expect(isNotesDocumentV2(legacy)).toBe(true);
+    const first = migrateNotesDocumentV2(legacy);
+    const second = migrateNotesDocumentV2(structuredClone(legacy));
+
+    expect(first).toEqual(second);
+    expect(first).toMatchObject({
+      ok: true,
+      document: {
+        version: 3,
+        phases: [],
+        references: [],
+        tasks: [{ id: "legacy-task-1" }, { id: "duplicate" }, { id: "legacy-task-3" }],
+      },
+    });
+  });
+
+  it.each([
+    ["waiting-for-approval", "agent", "legacy approval copy", "approval-opened"],
+    ["needs-attention", "session", "legacy runtime copy", "attention-runtime-opened"],
+    ["needs-attention", "agent", "bash failed: legacy copy", "attention-tool-opened"],
+    ["needs-attention", "agent", "legacy question copy", "attention-question-opened"],
+    ["needs-attention", "system", "legacy generic copy", "attention-generic-opened"],
+    ["in-progress", "user", "Plan approved by user", "approval-resolved"],
+    ["in-progress", "agent", "Plan approved by Autopilot", "approval-resolved"],
+    ["in-progress", "session", "Implementation run started", "attention-implementation-resolved"],
+    [
+      "in-progress",
+      "session",
+      "Implementation session resumed",
+      "attention-implementation-resolved",
+    ],
+    ["review", "session", "Review session resumed", "attention-review-resolved"],
+    ["in-progress", "session", "localized new copy", "other"],
+  ] as const)(
+    "classifies legacy $0/$1 lifecycle copy once as $3",
+    (toStatus, source, reason, expected) => {
+      expect(classifyLegacyNotesLifecycleEvent({ toStatus, source, reason })).toBe(expected);
+    },
+  );
+
+  it("migrates every additive legacy-v3 field family and nothing else", async () => {
+    const expected = await fixture();
+    const legacy = structuredClone(expected) as unknown as {
+      phases: Array<Record<string, unknown>>;
+    };
+    const firstPhase = legacy.phases[0]!;
+    const secondPhase = legacy.phases[1]!;
+    delete firstPhase.archivedAt;
+    delete firstPhase.pendingAutomaticLifecycleTransition;
+    delete secondPhase.archivedAt;
+    delete secondPhase.pendingAutomaticLifecycleTransition;
+    delete secondPhase.roadmapEvents;
+    for (const phase of legacy.phases) {
+      for (const event of phase.lifecycleEvents as Array<Record<string, unknown>>) {
+        delete event.kind;
+      }
+    }
+
+    const reminder = firstPhase.reminder as Record<string, unknown>;
+    delete reminder.occurrenceKey;
+    delete reminder.lastDelivery;
+
+    const events = firstPhase.roadmapEvents as Array<Record<string, unknown>>;
+    const statusUpdate = events.find((event) => event.type === "status-update")!;
+    firstPhase.roadmapEvents = [statusUpdate];
+    delete statusUpdate.verification;
+    delete statusUpdate.verificationReason;
+    delete statusUpdate.verificationSession;
+    delete statusUpdate.requiredExternalAction;
+    const source = expected.references[0]!;
+    statusUpdate.proposedReferences = [
+      {
+        provider: source.provider,
+        tool: source.tool,
+        canonicalUrl: source.canonicalUrl,
+        owner: source.owner,
+        repo: source.repo,
+        revision: source.revision,
+        path: source.path,
+        range: source.range,
+        issue: source.issue,
+        pullRequest: source.pullRequest,
+        query: source.query,
+        anchor: source.anchor,
+        relevance: source.relevance,
+        id: "legacy-proposal",
+        disposition: "pending",
+        referenceId: null,
+      },
+    ];
+
+    const migrated = migrateNotesDocumentV3PhaseShape(legacy);
+
+    expect(migrated).toMatchObject({
+      ok: true,
+      document: {
+        phases: [
+          {
+            archivedAt: null,
+            pendingAutomaticLifecycleTransition: null,
+            lifecycleEvents: [
+              { kind: "other" },
+              { kind: "other" },
+              { kind: "attention-question-opened" },
+            ],
+            reminder: {
+              occurrenceKey: "reminder-review-contract",
+              lastDelivery: null,
+            },
+            roadmapEvents: [
+              {
+                verification: null,
+                verificationReason: null,
+                verificationSession: null,
+                requiredExternalAction: null,
+                proposedReferences: [{ policyOutcome: "manual-review" }],
+              },
+            ],
+          },
+          {
+            archivedAt: null,
+            pendingAutomaticLifecycleTransition: null,
+            lifecycleEvents: [{ kind: "other" }, { kind: "other" }],
+            roadmapEvents: [],
+          },
+        ],
+      },
+    });
+  });
+
+  it("adds only verificationSession to the recognized intermediate status-update shape", async () => {
+    const legacy = await fixture();
+    const update = legacy.phases[0]!.roadmapEvents.find(
+      (event) => event.type === "status-update",
+    )! as unknown as Record<string, unknown>;
+    legacy.phases[0]!.roadmapEvents = [update as never];
+    delete update.verificationSession;
+
+    const migrated = migrateNotesDocumentV3PhaseShape(legacy);
+    expect(migrated.ok).toBe(true);
+    if (!migrated.ok) throw new Error(migrated.error.message);
+    expect(migrated.document.phases[0]!.roadmapEvents).toMatchObject([
+      { verificationSession: null },
+    ]);
+  });
+
+  it("migrates a legacy blocked report by preserving its blocker as the action fallback", async () => {
+    const legacy = await fixture();
+    const update = legacy.phases[0]!.roadmapEvents.find(
+      (event) => event.type === "status-update",
+    )! as unknown as Record<string, unknown>;
+    legacy.phases[0]!.roadmapEvents = [update as never];
+    update.transition = "blocked";
+    update.blocker = "Repository access is unavailable";
+    delete update.requiredExternalAction;
+
+    const migrated = migrateNotesDocumentV3PhaseShape(legacy);
+
+    expect(migrated.ok).toBe(true);
+    if (!migrated.ok) throw new Error(migrated.error.message);
+    expect(migrated.document.phases[0]!.roadmapEvents).toMatchObject([
+      {
+        transition: "blocked",
+        blocker: "Repository access is unavailable",
+        requiredExternalAction: "Repository access is unavailable",
+      },
+    ]);
+  });
+
+  it("does not strip unknown keys from legacy-v3 lookalikes", async () => {
+    const legacy = (await fixture()) as unknown as {
+      phases: Array<Record<string, unknown>>;
+    };
+    delete legacy.phases[0]!.archivedAt;
+    legacy.phases[0]!.privateState = true;
+
+    const strict = validateNotesDocumentV3(legacy);
+    const migrated = migrateNotesDocumentV3PhaseShape(legacy);
+
+    expect(strict).toMatchObject({ ok: false, error: { path: "phases[0]" } });
+    expect(migrated).toEqual(strict);
+  });
+
+  it.each([
+    [
+      "task",
+      (document: NotesDocumentV3) => Object.assign(document.tasks[0]!, { extra: true }),
+      "tasks[0]",
+    ],
+    [
+      "reference range",
+      (document: NotesDocumentV3) => Object.assign(document.references[1]!.range!, { extra: true }),
+      "references[1].range",
+    ],
+    [
+      "reminder delivery",
+      (document: NotesDocumentV3) =>
+        Object.assign(document.phases[0]!.reminder!.lastDelivery!, { extra: true }),
+      "phases[0].reminder.lastDelivery",
+    ],
+    [
+      "lifecycle event",
+      (document: NotesDocumentV3) =>
+        Object.assign(document.phases[0]!.lifecycleEvents[0]!, { extra: true }),
+      "phases[0].lifecycleEvents[0]",
+    ],
+    [
+      "roadmap event",
+      (document: NotesDocumentV3) =>
+        Object.assign(document.phases[0]!.roadmapEvents[0]!, { extra: true }),
+      "phases[0].roadmapEvents[0]",
+    ],
+  ])("rejects unknown keys in a nested %s at a stable path", async (_name, mutate, path) => {
+    const document = await fixture();
+    mutate(document);
+    expectError(document, path);
+  });
+
+  it("normalizes URL identity while preserving path, query, and fragment", () => {
+    expect(normalizeCanonicalUrl("HTTPS://EXAMPLE.COM:443/a/b/?q=A#L2")).toBe(
+      "https://example.com/a/b?q=A#L2",
+    );
+    expect(normalizeCanonicalUrl("ftp://example.com/a")).toBeNull();
+    expect(normalizeCanonicalUrl("https://user@example.com/a")).toBeNull();
+    expect(
+      canonicalReferenceIdentity({
+        provider: " GitHub ",
+        canonicalUrl: "HTTPS://GITHUB.COM:443/owner/repo/",
+      }),
+    ).toBe("github\nhttps://github.com/owner/repo");
+  });
+
+  it.each(NOTES_REFERENCE_METADATA_FIELDS)("enforces the metadata limit for %s", async (field) => {
+    const exact = await fixture();
+    exact.references[0] = {
+      ...exact.references[0]!,
+      provider: "example",
+      [field]: "x".repeat(NOTES_REFERENCE_METADATA_MAX_LENGTH),
+    };
+    const oversized = structuredClone(exact);
+    oversized.references[0] = {
+      ...oversized.references[0]!,
+      [field]: "x".repeat(NOTES_REFERENCE_METADATA_MAX_LENGTH + 1),
+    };
+
+    expect(validateNotesDocumentV3(exact).ok).toBe(true);
+    expectError(oversized, `references[0].${field}`);
+  });
+
+  it("enforces URL and reminder limits", async () => {
+    const prefix = "https://example.com/";
+    const exactUrl = `${prefix}${"x".repeat(NOTES_REFERENCE_URL_MAX_LENGTH - prefix.length)}`;
+    const exact = await fixture();
+    exact.references[0] = { ...exact.references[0]!, provider: "example", canonicalUrl: exactUrl };
+    exact.phases[0]!.reminder!.note = "x".repeat(NOTES_REMINDER_NOTE_MAX_LENGTH);
+    expect(validateNotesDocumentV3(exact).ok).toBe(true);
+
+    const longUrl = structuredClone(exact);
+    longUrl.references[0]!.canonicalUrl += "x";
+    expectError(longUrl, "references[0].canonicalUrl");
+
+    const longNote = structuredClone(exact);
+    longNote.phases[0]!.reminder!.note += "x";
+    expectError(longNote, "phases[0].reminder.note");
+  });
+
+  it("rejects duplicate task, phase, reference IDs, and canonical identities", async () => {
+    const duplicateTask = await fixture();
+    duplicateTask.tasks[1]!.id = duplicateTask.tasks[0]!.id;
+    expectError(duplicateTask, "tasks[1].id");
+
+    const duplicatePhase = await fixture();
+    duplicatePhase.phases[1]!.id = duplicatePhase.phases[0]!.id;
+    expectError(duplicatePhase, "phases[1].id");
+
+    const duplicateReferenceId = await fixture();
+    duplicateReferenceId.references[1]!.id = duplicateReferenceId.references[0]!.id;
+    expectError(duplicateReferenceId, "references[1].id");
+
+    const duplicateIdentity = await fixture();
+    duplicateIdentity.references[1] = {
+      ...duplicateIdentity.references[0]!,
+      id: "duplicate-source",
+      provider: " GitHub ",
+      canonicalUrl: `${duplicateIdentity.references[0]!.canonicalUrl}/`,
+    };
+    expectError(duplicateIdentity, "references[1].canonicalUrl");
+  });
+
+  it.each([
+    {
+      field: "id" as const,
+      duplicateValue: "reminder-review-contract",
+      uniqueValue: "occurrence-second-reminder",
+      path: "phases[1].reminder.id",
+      message: "duplicate reminder ID; already used at phases[0].reminder.id",
+    },
+    {
+      field: "occurrenceKey" as const,
+      duplicateValue: "occurrence-review-contract",
+      uniqueValue: "reminder-second-reminder",
+      path: "phases[1].reminder.occurrenceKey",
+      message: "duplicate occurrence key; already used at phases[0].reminder.occurrenceKey",
+    },
+  ])(
+    "rejects a document-wide duplicate reminder $field at its duplicate path",
+    async (testCase) => {
+      const document = await fixture();
+      const firstReminder = document.phases[0]!.reminder!;
+      document.phases[1]!.reminder = {
+        ...firstReminder,
+        id: testCase.field === "id" ? testCase.duplicateValue : testCase.uniqueValue,
+        occurrenceKey:
+          testCase.field === "occurrenceKey" ? testCase.duplicateValue : testCase.uniqueValue,
+        lastDelivery: null,
+      };
+
+      expectError(document, testCase.path, testCase.message);
+    },
+  );
+
+  it("enforces lifecycle and roadmap chronology", async () => {
+    const lifecycle = await fixture();
+    lifecycle.phases[0]!.lifecycleEvents[1]!.timestamp = "2026-07-22T00:00:00.000Z";
+    expectError(
+      lifecycle,
+      "phases[0].lifecycleEvents[1].timestamp",
+      "events must be chronological",
+    );
+
+    const roadmap = await fixture();
+    roadmap.phases[0]!.roadmapEvents[1]!.timestamp = "2026-07-24T00:00:00.000Z";
+    expectError(roadmap, "phases[0].roadmapEvents[1].timestamp", "events must be chronological");
+  });
+
+  it.each([
+    [
+      "failed run",
+      (document: NotesDocumentV3) => {
+        const checkpoint = document.phases[0]!.roadmapEvents.find(
+          (event) => event.type === "implementation-checkpoint",
+        )!;
+        checkpoint.runOutcome = "failed";
+      },
+    ],
+    [
+      "incomplete plan",
+      (document: NotesDocumentV3) => {
+        const checkpoint = document.phases[0]!.roadmapEvents.find(
+          (event) => event.type === "implementation-checkpoint",
+        )!;
+        checkpoint.completedPlanSteps = [1, 2];
+      },
+    ],
+    [
+      "failed verification",
+      (document: NotesDocumentV3) => {
+        const update = document.phases[0]!.roadmapEvents.find(
+          (event) => event.type === "status-update",
+        )!;
+        update.verification = "failed";
+        update.verificationReason = "Focused verification failed";
+      },
+    ],
+    [
+      "unaccepted exception",
+      (document: NotesDocumentV3) => {
+        const update = document.phases[0]!.roadmapEvents.find(
+          (event) => event.type === "status-update",
+        )!;
+        update.verification = "exception-requested";
+        update.verificationReason = "Needs reviewer acceptance";
+      },
+    ],
+    [
+      "different verification session",
+      (document: NotesDocumentV3) => {
+        const update = document.phases[0]!.roadmapEvents.find(
+          (event) => event.type === "status-update",
+        )!;
+        update.verificationSession = { sessionId: "other", sessionPath: "/sessions/other.jsonl" };
+      },
+    ],
+  ])("rejects Done when the completion gate has a %s", async (_name, mutate) => {
+    const document = await fixture();
+    mutate(document);
+    expectError(document, "phases[0].roadmapEvents[2]");
+  });
+
+  it("rejects Done when matching completion evidence belongs to a prior phase session", async () => {
+    const document = await fixture();
+    document.phases[0]!.session = {
+      sessionId: "replacement-session",
+      sessionPath: "/sessions/replacement.jsonl",
+    };
+
+    expectError(
+      document,
+      "phases[0].roadmapEvents[2]",
+      "Done requires accepted review evidence, a successful complete implementation checkpoint, passed verification or an accepted verification exception, evidence matching the current phase session, and no unmet gates",
+    );
+  });
+
+  it("uses current status, not legacy certification, for explicit next-phase selection", async () => {
+    const { phase, checkpoint } = await directCompletionFixture();
+    phase.roadmapEvents = [];
+    phase.status = "done";
+    phase.overrides.status = null;
+    phase.completedAt = checkpoint.timestamp;
+    expect(isNotesPhaseAdvancementSourceCurrent(phase, checkpoint)).toBe(true);
+    phase.completedAt = "2099-01-01T00:00:00.000Z";
+    expect(isNotesPhaseAdvancementSourceCurrent(phase, checkpoint)).toBe(false);
+    phase.completedAt = checkpoint.timestamp;
+    phase.status = "in-progress";
+    expect(isNotesPhaseAdvancementSourceCurrent(phase, checkpoint)).toBe(false);
+  });
+
+  // Persisted legacy evidence chains remain strictly validated for old-reader compatibility.
+  it("accepts authoritative direct completion evidence", async () => {
+    const state = await directCompletionFixture();
+
+    expect(isNotesDirectCompletionAuthority(state.phase, state.checkpoint)).toBe(true);
+    expect(validateNotesDocumentV3(state.document)).toEqual({
+      ok: true,
+      document: state.document,
+    });
+  });
+
+  it.each<[string, (state: DirectCompletionFixture) => void]>([
+    [
+      "implementation is not latest",
+      ({ phase, implementation, checkpoint }) => {
+        const later = { ...implementation, id: "checkpoint-later" };
+        phase.roadmapEvents = [phase.roadmapEvents[0]!, implementation, later, checkpoint];
+      },
+    ],
+    [
+      "implementation did not succeed",
+      ({ implementation }) => {
+        implementation.runOutcome = "failed";
+      },
+    ],
+    [
+      "implementation plan is incomplete",
+      ({ implementation }) => {
+        implementation.completedPlanSteps = [];
+      },
+    ],
+    [
+      "verification is not exactly linked",
+      ({ implementation }) => {
+        implementation.verificationStatusUpdateId = "different-verification";
+      },
+    ],
+    [
+      "evidence does not match the phase session",
+      ({ phase }) => {
+        phase.session = { sessionId: "replacement", sessionPath: "/sessions/replacement.jsonl" };
+      },
+    ],
+    [
+      "verification actor is not gg-coder",
+      ({ verification }) => {
+        verification.actor = "ken";
+      },
+    ],
+    [
+      "verification transition is not Done",
+      ({ verification }) => {
+        verification.transition = "in-progress";
+      },
+    ],
+    [
+      "verification outcome is not completion-pending",
+      ({ verification }) => {
+        verification.statusOutcome = "applied";
+      },
+    ],
+    [
+      "verification result did not pass",
+      ({ verification }) => {
+        verification.verification = "failed";
+      },
+    ],
+    [
+      "verification follows implementation",
+      ({ phase, verification, implementation, checkpoint }) => {
+        phase.roadmapEvents = [implementation, verification, checkpoint];
+      },
+    ],
+  ])("rejects direct completion authority when %s", async (_name, mutate) => {
+    const state = await directCompletionFixture();
+    mutate(state);
+
+    expect(isNotesDirectCompletionAuthority(state.phase, state.checkpoint)).toBe(false);
+  });
+
+  it("rejects the exact mutated-fixture direct advancement bypass", async () => {
+    const state = await directCompletionFixture();
+    state.implementation.completedPlanSteps = [];
+    state.verification.transition = "in-progress";
+    state.verification.statusOutcome = "applied";
+
+    expectError(
+      state.document,
+      "phases[0].roadmapEvents[2]",
+      "direct advancement requires current complete implementation and exact passed Done verification for the phase session",
+    );
+  });
+
+  it("rejects direct completion after a later untyped status report", async () => {
+    const state = await directCompletionFixture();
+    const laterStatus: NotesRoadmapStatusUpdate = {
+      ...state.verification,
+      id: "status-after-done",
+      transition: "in-progress",
+      progress: "Work continued after verification",
+      evidence: [],
+      verification: null,
+      verificationReason: null,
+      verificationSession: null,
+      statusOutcome: "applied",
+    };
+    state.phase.roadmapEvents = [
+      state.verification,
+      laterStatus,
+      state.implementation,
+      state.checkpoint,
+    ];
+
+    expect(isNotesDirectCompletionAuthority(state.phase, state.checkpoint)).toBe(false);
+    expectError(
+      state.document,
+      "phases[0].roadmapEvents[3]",
+      "direct advancement requires current complete implementation and exact passed Done verification for the phase session",
+    );
+  });
+
+  it("rejects direct Done intent without passed verification", async () => {
+    const document = await fixture();
+    const verification = document.phases[0]!.roadmapEvents[0]!;
+    if (verification.type !== "status-update") throw new Error("expected verification fixture");
+    verification.transition = "done";
+    verification.statusOutcome = "completion-pending";
+    verification.verification = "failed";
+    verification.verificationReason = "Focused verification failed";
+
+    expectError(
+      document,
+      "phases[0].roadmapEvents[0]",
+      "Done intent requires coding-session ownership and passed verification",
+    );
+  });
+
+  it.each(["user", "system"] as const)(
+    "accepts durable phase advancement checkpoint and %s confirmation events",
+    async (actor) => {
+      const document = await fixture();
+      const phase = document.phases[0]!;
+      const checkpoint: NotesRoadmapPhaseAdvancementCheckpoint = {
+        type: "phase-advancement-checkpoint",
+        id: "advancement-checkpoint-1",
+        completionReviewId: "review-schema-contract",
+        completedPhaseId: phase.id,
+        nextPhaseId: document.phases[1]!.id,
+        reviewer: "ken-autopilot",
+        timestamp: NOW,
+      };
+      const confirmation: NotesRoadmapPhaseAdvancementConfirmation = {
+        type: "phase-advancement-confirmation",
+        id: "advancement-confirmation-1",
+        checkpointId: checkpoint.id,
+        nextPhaseId: checkpoint.nextPhaseId,
+        actor,
+        operationId: "start-operation-1",
+        timestamp: NOW,
+      };
+      phase.roadmapEvents.push(checkpoint, confirmation);
+
+      expect(validateNotesDocumentV3(document)).toEqual({ ok: true, document });
+    },
+  );
+
+  it.each([
+    ["checkpoint id", (event: Record<string, unknown>) => (event.id = "")],
+    ["checkpoint timestamp", (event: Record<string, unknown>) => (event.timestamp = "today")],
+    [
+      "completion review",
+      (event: Record<string, unknown>) => (event.completionReviewId = "missing"),
+    ],
+    ["completed phase", (event: Record<string, unknown>) => (event.completedPhaseId = "other")],
+    ["next phase", (event: Record<string, unknown>) => (event.nextPhaseId = "missing")],
+    ["reviewer mode", (event: Record<string, unknown>) => (event.reviewer = "ken")],
+  ])("rejects malformed phase advancement checkpoint %s", async (_name, mutate) => {
+    const document = await fixture();
+    const event: Record<string, unknown> = {
+      type: "phase-advancement-checkpoint",
+      id: "advancement-checkpoint-1",
+      completionReviewId: "review-schema-contract",
+      completedPhaseId: document.phases[0]!.id,
+      nextPhaseId: document.phases[1]!.id,
+      reviewer: "ken-autopilot",
+      timestamp: NOW,
+    };
+    mutate(event);
+    document.phases[0]!.roadmapEvents.push(event as never);
+
+    expect(validateNotesDocumentV3(document).ok).toBe(false);
+  });
+
+  it.each([
+    ["confirmation id", (event: Record<string, unknown>) => (event.id = "")],
+    ["confirmation timestamp", (event: Record<string, unknown>) => (event.timestamp = "today")],
+    ["checkpoint", (event: Record<string, unknown>) => (event.checkpointId = "missing")],
+    ["next phase", (event: Record<string, unknown>) => (event.nextPhaseId = "phase-other")],
+    ["actor", (event: Record<string, unknown>) => (event.actor = "ken")],
+    ["operation", (event: Record<string, unknown>) => (event.operationId = "")],
+  ])("rejects malformed phase advancement confirmation %s", async (_name, mutate) => {
+    const document = await fixture();
+    const checkpoint: NotesRoadmapPhaseAdvancementCheckpoint = {
+      type: "phase-advancement-checkpoint",
+      id: "advancement-checkpoint-1",
+      completionReviewId: "review-schema-contract",
+      completedPhaseId: document.phases[0]!.id,
+      nextPhaseId: document.phases[1]!.id,
+      reviewer: "ken-autopilot",
+      timestamp: NOW,
+    };
+    const event: Record<string, unknown> = {
+      type: "phase-advancement-confirmation",
+      id: "advancement-confirmation-1",
+      checkpointId: checkpoint.id,
+      nextPhaseId: checkpoint.nextPhaseId,
+      actor: "user",
+      operationId: "start-operation-1",
+      timestamp: NOW,
+    };
+    mutate(event);
+    document.phases[0]!.roadmapEvents.push(checkpoint, event as never);
+
+    expect(validateNotesDocumentV3(document).ok).toBe(false);
+  });
+
+  it("retains compatibility with v3 documents that predate advancement events", async () => {
+    const document = await fixture();
+    expect(
+      document.phases.every((phase) =>
+        phase.roadmapEvents.every(
+          (event) =>
+            event.type !== "phase-advancement-checkpoint" &&
+            event.type !== "phase-advancement-confirmation",
+        ),
+      ),
+    ).toBe(true);
+    expect(validateNotesDocumentV3(document)).toEqual({ ok: true, document });
+  });
+
+  it("accepts historical non-Done completion evidence from a prior phase session", async () => {
+    const document = await fixture();
+    const phase = document.phases[0]!;
+    phase.session = {
+      sessionId: "replacement-session",
+      sessionPath: "/sessions/replacement.jsonl",
+    };
+    const review = phase.roadmapEvents.find((event) => event.type === "completion-review")!;
+    review.gateOutcome = "review";
+    review.unmetGateCodes = ["stale-session"];
+
+    expect(validateNotesDocumentV3(document)).toEqual({ ok: true, document });
+  });
+});
+
+describe("durable phase execution contracts", () => {
+  it("round-trips legacy V1 and execution-backed V2 evidence without rewriting", async () => {
+    const document = await fixture();
+    const execution = durableExecution();
+    const legacyEvidence = execution.evidence[0]!;
+    const v2Evidence: NotesVerificationEvidenceV2 = {
+      version: 2,
+      executionId: "execution-231",
+      commandHash: "2".repeat(64),
+      commandDisplay: "cargo test --manifest-path gg-app/src-tauri/Cargo.toml",
+      cwd: "E:/Projects/gg-framework-fork",
+      exitCode: 0,
+      classifierVersion: "roadmap-verification-v1",
+      verdict: "approved",
+      criterionId: "3".repeat(64),
+      observedAt: NOW,
+      workspace: legacyEvidence.workspace,
+      safeToolEnvironmentDigest: "4".repeat(64),
+    };
+    execution.evidence.push(v2Evidence);
+    document.phases[0]!.execution = execution;
+
+    const result = validateNotesDocumentV3(document);
+    expect(result).toEqual({ ok: true, document });
+    expect(document.phases[0]!.execution!.evidence).toEqual([legacyEvidence, v2Evidence]);
+  });
+
+  it.each([
+    ["execution ID", (evidence: NotesVerificationEvidenceV2) => (evidence.executionId = "")],
+    [
+      "environment digest",
+      (evidence: NotesVerificationEvidenceV2) =>
+        (evidence.safeToolEnvironmentDigest = "not-a-digest"),
+    ],
+    ["command digest", (evidence: NotesVerificationEvidenceV2) => (evidence.commandHash = "BAD")],
+    ["criterion ID", (evidence: NotesVerificationEvidenceV2) => (evidence.criterionId = "BAD")],
+  ])("rejects malformed V2 %s", (_label, mutate) => {
+    const execution = durableExecution();
+    const evidence: NotesVerificationEvidenceV2 = {
+      version: 2,
+      executionId: "execution-232",
+      commandHash: "2".repeat(64),
+      commandDisplay: "pnpm check",
+      cwd: "E:/Projects/gg-framework-fork",
+      exitCode: 0,
+      classifierVersion: "roadmap-verification-v1",
+      verdict: "approved",
+      criterionId: "3".repeat(64),
+      observedAt: NOW,
+      workspace: execution.evidence[0]!.workspace,
+      safeToolEnvironmentDigest: "4".repeat(64),
+    };
+    mutate(evidence);
+    execution.evidence = [evidence];
+    expect(validateNotesPhaseExecution(execution)).not.toBeNull();
+  });
+
+  it("accepts additive execution while preserving legacy v3 phases", async () => {
+    const legacy = await fixture();
+    expect(validateNotesDocumentV3(legacy)).toEqual({ ok: true, document: legacy });
+
+    const document = structuredClone(legacy);
+    document.phases[0]!.execution = durableExecution();
+    expect(validateNotesDocumentV3(document)).toEqual({ ok: true, document });
+  });
+
+  it.each([
+    [
+      "identity hash",
+      (execution: NotesPhaseExecutionV1) => {
+        execution.repository.identityHash = "BAD";
+      },
+    ],
+    [
+      "absolute snapshot",
+      (execution: NotesPhaseExecutionV1) => {
+        execution.plan!.snapshotPath = "C:\\plans\\plan.md";
+      },
+    ],
+    [
+      "renumbered step",
+      (execution: NotesPhaseExecutionV1) => {
+        execution.plan!.steps[0]!.index = 2;
+      },
+    ],
+    [
+      "duplicate step",
+      (execution: NotesPhaseExecutionV1) => {
+        execution.plan!.steps.push(execution.plan!.steps[0]!);
+      },
+    ],
+    [
+      "cross-repository workspace",
+      (execution: NotesPhaseExecutionV1) => {
+        const workspace = execution.plan!.steps[0]!.workspace!;
+        workspace.repository = { ...workspace.repository, identityHash: "2".repeat(64) };
+      },
+    ],
+    [
+      "malformed timestamp",
+      (execution: NotesPhaseExecutionV1) => {
+        execution.plan!.approvedAt = "today";
+      },
+    ],
+    [
+      "unknown field",
+      (execution: NotesPhaseExecutionV1) => {
+        (execution as unknown as Record<string, unknown>).extra = true;
+      },
+    ],
+  ])("rejects malformed %s", (_label, mutate) => {
+    const execution = durableExecution();
+    mutate(execution);
+    expect(validateNotesPhaseExecution(execution)).not.toBeNull();
+  });
+
+  it("accepts explicit evidence revalidation and idempotency metadata", () => {
+    const execution = durableExecution();
+    execution.evidence[0]!.state = "needs-revalidation";
+    execution.migration.reconciliation = {
+      operationId: "reconcile-1",
+      requestHash: "2".repeat(64),
+    };
+    expect(validateNotesPhaseExecution(execution)).toBeNull();
+
+    execution.migration.reconciledAt = null;
+    expect(validateNotesPhaseExecution(execution)).not.toBeNull();
+  });
+});

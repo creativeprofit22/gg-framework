@@ -1,0 +1,11 @@
+{
+  "id": "blueprint",
+  "name": "Blueprint",
+  "description": "An engineering drawing that builds itself: a deep cobalt field with a faint drafting grid, white line drawings that draw on stroke by stroke, dimension lines and leader callouts, a title block in the corner. Wide Hubot Sans headlines, Martian Mono for the annotation only. One signal yellow marks the single measurement that matters.",
+  "tags": ["blueprint", "technical", "line-drawing", "engineering", "cobalt", "diagram", "explainer", "annotation"],
+  "fonts": ["Hubot Sans", "Martian Mono"],
+  "bestFor": ["engineering explainers", "hardware and product teardowns", "how-it-works videos", "infrastructure diagrams", "patents and R&D stories"],
+  "pieces": ["blueprint-grid", "flow-nodes", "stack-layers", "chapter-card"],
+  "samplePieces": [],
+  "previewAt": 3.2
+}

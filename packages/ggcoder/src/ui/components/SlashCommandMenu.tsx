@@ -6,6 +6,8 @@ export interface SlashCommandInfo {
   name: string;
   aliases: string[];
   description: string;
+  /** Muted placeholder for accepted arguments, from `argument-hint` frontmatter. */
+  argumentHint?: string;
   sectionTitle?: string;
 }
 
@@ -35,6 +37,7 @@ export function SlashCommandMenu({ commands, selectedIndex, width }: SlashComman
   const visible = commands.slice(start, end);
   const maxLabelLength = Math.max(...commands.map((cmd) => cmd.name.length));
   const commandColumnWidth = Math.min(maxLabelLength, Math.floor(width * 0.5));
+  const selectedHint = commands[idx]?.argumentHint;
 
   return (
     <Box flexDirection="column" paddingX={1} width={width}>
@@ -66,6 +69,11 @@ export function SlashCommandMenu({ commands, selectedIndex, width }: SlashComman
         );
       })}
       {end < total && <Text color={theme.textDim}>▼</Text>}
+      {selectedHint && (
+        <Text color={theme.textDim} italic wrap="truncate">
+          /{commands[idx]?.name} {selectedHint}
+        </Text>
+      )}
       {total > MAX_SUGGESTIONS_TO_SHOW && (
         <Text color={theme.textDim}>
           ({idx + 1}/{total})

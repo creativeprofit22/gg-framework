@@ -25,6 +25,7 @@ import { arch, hostname, release, type } from "node:os";
 import path from "node:path";
 
 import { getAppPaths } from "../paths.js";
+import { oauthRequestSignal } from "./request-timeout.js";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "./types.js";
 
 /** Public OAuth client id registered by Kimi Code (no client secret / PKCE). */
@@ -69,6 +70,11 @@ function asciiHeader(value: string, fallback = "unknown"): string {
 function macOsProductVersion(): string | undefined {
   try {
     const version = execFileSync("/usr/bin/sw_vers", ["-productVersion"], {
+      env: Object.fromEntries(
+        Object.entries(process.env).filter(
+          ([name]) => name.toUpperCase() !== "QWEN_CLOUD_TOKEN_PLAN_KEY",
+        ),
+      ),
       encoding: "utf-8",
       timeout: 1000,
     }).trim();
@@ -157,6 +163,7 @@ async function postForm(
       Accept: "application/json",
     },
     body: new URLSearchParams(params).toString(),
+    signal: oauthRequestSignal(),
   });
   let data: Record<string, unknown> = {};
   try {
@@ -202,6 +209,7 @@ function credsFromTokenResponse(
     accessToken,
     refreshToken,
     expiresAt: Date.now() + expiresIn * 1000,
+    expiresIn,
     baseUrl: kimiCodeBaseUrl(),
   };
 }

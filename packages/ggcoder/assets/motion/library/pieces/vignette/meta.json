@@ -1,0 +1,12 @@
+{
+  "id": "vignette",
+  "name": "Vignette",
+  "kind": "texture",
+  "description": "Transparent soft elliptical edge falloff that darkens (or, retinted, lightens) the corners and keeps the center clean, with an optional slow breathe. Focuses the eye and gives flat fields a lens feel.",
+  "tags": ["vignette", "edges", "falloff", "lens", "focus", "overlay", "texture", "cinematic", "transparent"],
+  "fonts": [],
+  "duration": 6,
+  "previewAt": 3,
+  "license": "original",
+  "previewLook": "duotone-broadcast"
+}

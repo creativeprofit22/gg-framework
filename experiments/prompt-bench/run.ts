@@ -9,15 +9,21 @@ interface Config {
   iterations: number;
   section: string | null;
   targets: string[] | null;
+  /** Substring match on variant id (e.g. "full,preguard"). */
+  variants: string[] | null;
+  /** Substring match on task id (e.g. "question-not-fix,green-honestly"). */
+  tasks: string[] | null;
 }
 
 function parseArgs(argv: string[]): Config {
-  const cfg: Config = { iterations: 10, section: null, targets: null };
+  const cfg: Config = { iterations: 10, section: null, targets: null, variants: null, tasks: null };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--iterations" || a === "-n") cfg.iterations = Number(argv[++i]);
     else if (a === "--section" || a === "-s") cfg.section = argv[++i] ?? null;
     else if (a === "--targets" || a === "-t") cfg.targets = (argv[++i] ?? "").split(",");
+    else if (a === "--variant" || a === "-v") cfg.variants = (argv[++i] ?? "").split(",");
+    else if (a === "--task") cfg.tasks = (argv[++i] ?? "").split(",");
   }
   return cfg;
 }
@@ -93,13 +99,17 @@ async function main(): Promise<void> {
   const cfg = parseArgs(process.argv.slice(2));
   const targets = TARGETS.filter((t) => !cfg.targets || cfg.targets.includes(t.label));
   const sections = SECTIONS.filter((s) => !cfg.section || s.key === cfg.section);
+  const pickVariants = (s: (typeof SECTIONS)[number]) =>
+    s.variants.filter((v) => !cfg.variants || cfg.variants.some((f) => v.id.includes(f)));
 
   console.log(
     `prompt-bench — ${cfg.iterations} iterations/cell · targets: ${targets.map((t) => t.label).join(", ")}\n`,
   );
 
   for (const section of sections) {
-    const tasks = tasksForSection(section.key);
+    const tasks = tasksForSection(section.key).filter(
+      (t) => !cfg.tasks || cfg.tasks.some((f) => t.id.includes(f)),
+    );
     if (tasks.length === 0) continue;
 
     console.log(`\n══ SECTION: ${section.key} ══`);
@@ -112,7 +122,7 @@ async function main(): Promise<void> {
         console.log(header);
 
         // baseline = first variant (the .full one)
-        for (const variant of section.variants) {
+        for (const variant of pickVariants(section)) {
           const systemPrompt = assemblePrompt(section.key, variant);
           const cell: CellResult = { checkPass: {}, iterations: 0, errors: 0 };
 

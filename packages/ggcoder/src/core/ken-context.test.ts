@@ -3,6 +3,7 @@ import os from "node:os";
 import {
   buildKenDigest,
   buildKenAutopilotContext,
+  buildKenAutopilotSessionContext,
   buildKenAutopilotPlanContext,
   AUTOPILOT_REVIEW_INSTRUCTION,
   AUTOPILOT_PLAN_REVIEW_INSTRUCTION,
@@ -727,6 +728,27 @@ describe("buildKenDigest", () => {
     expect(evidence).toContain("PASSED: `tsc --noEmit`");
     expect(evidence).toContain("UNCLASSIFIED: `vitest --watch`");
     expect(evidence).not.toContain("git status");
+  });
+
+  // Regression: the gate verdict was dropped, so Ken re-demanded checks the
+  // host gate already accepted on later read-only turns.
+  it("tells Ken the live host gate verdict from the build session", () => {
+    const session = (problem: string | null) => ({
+      getMessages: (): Message[] => [],
+      getContinuationReviewRecord: () => undefined,
+      getVerificationProblem: () => problem,
+    });
+    const gate = (problem: string | null) =>
+      buildKenAutopilotSessionContext(session(problem), base)
+        .split("## Command observations")[1]
+        ?.split("## Your task")[0];
+    expect(gate(null)).toContain(
+      "Current host gate: satisfied; do not require reruns merely because older checks failed",
+    );
+    expect(gate("Unverified: rerun the check")).toContain(
+      "Current host gate: Unverified: rerun the check.",
+    );
+    expect(buildKenAutopilotContext({ ...base, messages: [] })).not.toContain("Current host gate");
   });
 
   it("autopilot review instruction separates true human decisions from safe implied follow-ups", () => {

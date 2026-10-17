@@ -69,6 +69,8 @@ export interface KenDigestInput {
   pendingQuestions?: readonly AskUserPrompt[];
   /** Host-owned execution outcomes, independent of transcript retention. */
   verificationEvidence?: SessionVerificationEvidenceLedgerSnapshot;
+  /** The host verification gate's current verdict (null = satisfied). */
+  verificationProblem?: string | null;
   /** Platform string (defaults to process.platform). */
   platform?: string;
   /** Override the recent-message cap (tests). */
@@ -456,6 +458,7 @@ export function buildKenAutopilotSessionContext(
     getMessages(): Message[];
     getContinuationReviewRecord(): ContinuationReviewRecord | undefined;
     getVerificationEvidenceLedgerSnapshot?(): SessionVerificationEvidenceLedgerSnapshot;
+    getVerificationProblem?(): string | null;
   },
   input: Omit<KenAutopilotContextInput, "messages">,
 ): string {
@@ -463,6 +466,7 @@ export function buildKenAutopilotSessionContext(
     ...input,
     messages: session.getMessages(),
     verificationEvidence: session.getVerificationEvidenceLedgerSnapshot?.(),
+    verificationProblem: session.getVerificationProblem?.(),
     continuationReview: session.getContinuationReviewRecord(),
   });
 }
@@ -472,6 +476,7 @@ export function buildKenAutopilotPlanSessionContext(
     getMessages(): Message[];
     getContinuationReviewRecord(): ContinuationReviewRecord | undefined;
     getVerificationEvidenceLedgerSnapshot?(): SessionVerificationEvidenceLedgerSnapshot;
+    getVerificationProblem?(): string | null;
   },
   input: Omit<KenAutopilotContextInput, "messages" | "continuationReview"> & {
     planContent: string;
@@ -481,6 +486,7 @@ export function buildKenAutopilotPlanSessionContext(
     ...input,
     messages: session.getMessages(),
     verificationEvidence: session.getVerificationEvidenceLedgerSnapshot?.(),
+    verificationProblem: session.getVerificationProblem?.(),
     continuationReview: session.getContinuationReviewRecord(),
   });
 }
@@ -492,6 +498,7 @@ export function buildKenInteractiveSessionContext(
   session: {
     getMessages(): Message[];
     getVerificationEvidenceLedgerSnapshot?(): SessionVerificationEvidenceLedgerSnapshot;
+    getVerificationProblem?(): string | null;
     getContinuationReviewRecord(): ContinuationReviewRecord | undefined;
     getConversationIdentity(): { conversationId: string };
     getState(): { openAICodexContextProfile: string };
@@ -509,6 +516,7 @@ export function buildKenInteractiveSessionContext(
     ...input,
     messages,
     verificationEvidence: session.getVerificationEvidenceLedgerSnapshot?.(),
+    verificationProblem: session.getVerificationProblem?.(),
   });
   if (!record) return digest;
 
@@ -793,7 +801,7 @@ function renderDigest(input: KenDigestInput, framing: DigestFraming): string {
     ...legacyEvidence.slice(-12).map((evidence) => ({ ...evidence, stale: true })),
     ...hostEvidence.filter((evidence) => evidence.status !== "unclassified"),
   ].slice(-12);
-  if (verificationEvidence.length > 0) {
+  if (verificationEvidence.length > 0 || input.verificationProblem !== undefined) {
     const rows = verificationEvidence.map(
       (evidence) =>
         `- ${evidence.stale ? "HISTORICAL " : "OBSERVED "}${evidence.status === "rejected" ? "UNCLASSIFIED" : evidence.status.toUpperCase()}: \`${cap(evidence.command, 180)}\` — ${evidence.reason}` +
@@ -813,6 +821,10 @@ function renderDigest(input: KenDigestInput, framing: DigestFraming): string {
     sections.push(
       "## Command observations\n" +
         "These are recorded command outcomes, not certification of requirements. Historical reports were not rerun. Unclassified or unavailable results are not test failures. Explain relevant checks, gaps and unavailable checks honestly; no command is required per criterion.\n" +
+        // Upstream wording: without it, Ken re-demands checks the gate already accepts.
+        (input.verificationProblem !== undefined
+          ? `Current host gate: ${input.verificationProblem ?? "satisfied; do not require reruns merely because older checks failed or named records were not retained across restart"}.\n`
+          : "") +
         rows.join("\n"),
     );
   }

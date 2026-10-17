@@ -9,6 +9,9 @@ describe("RoadmapInspectParams", () => {
     expect(RoadmapInspectParams.parse({ scope: "active-phase" })).toEqual({
       scope: "active-phase",
     });
+    expect(RoadmapInspectParams.parse({ phase_id: "phase-1" })).toEqual({ phase_id: "phase-1" });
+    expect(() => RoadmapInspectParams.parse({ phase_id: "" })).toThrow();
+    expect(() => RoadmapInspectParams.parse({ phase_id: "x".repeat(513) })).toThrow();
     expect(() => RoadmapInspectParams.parse({ scope: "everything" })).toThrow();
     expect(() => RoadmapInspectParams.parse({ unexpected: true })).toThrow();
   });
@@ -25,7 +28,7 @@ describe("createRoadmapInspectTool", () => {
     expect(tool.name).toBe("roadmap_inspect");
   });
 
-  it("exports a strict transform-free scope-only provider schema and inspection guidance", () => {
+  it("exports a strict transform-free provider schema and inspection guidance", () => {
     const tool = createRoadmapInspectTool(async () => ({
       status: "missing",
       projectKey: "project-1",
@@ -38,6 +41,7 @@ describe("createRoadmapInspectTool", () => {
       type: "object",
       properties: {
         scope: expect.objectContaining({ type: "string", enum: ["active-phase", "roadmap"] }),
+        phase_id: expect.objectContaining({ type: "string", minLength: 1, maxLength: 512 }),
       },
       required: [],
       additionalProperties: false,
@@ -48,5 +52,6 @@ describe("createRoadmapInspectTool", () => {
     expect(tool.description).toContain("not proof of current criteria");
     expect(tool.description).toContain("legacy summaries may lack evidence and provenance");
     expect(tool.description).toContain("bounded Project Notes v3 Roadmap projection");
+    expect(tool.description).toContain("Pass phase_id to read one phase's full sourcePrompt");
   });
 });

@@ -17,6 +17,11 @@ export function requestPathname(requestUrl: string): string {
   }
 }
 
+export function hasDaemonAuth(req: http.IncomingMessage, expectedToken: string): boolean {
+  const provided = req.headers["x-gg-daemon-token"];
+  return typeof provided === "string" && provided === expectedToken;
+}
+
 export function isExactRecord(
   value: unknown,
   expectedKeys: readonly string[],

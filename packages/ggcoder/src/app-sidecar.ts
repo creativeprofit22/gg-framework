@@ -44,6 +44,7 @@ import type {
   DesktopContextSnapshot,
   DesktopSessionUXState,
   KnownProjectTaskBlockReason,
+  ProjectTaskStatus,
 } from "@kenkaiiii/gg-core";
 import { getAgentSessionContextSnapshot } from "./app-sidecar-context.js";
 import { applyDesktopMcpMutation } from "./app-sidecar-mcp-lifecycle.js";
@@ -56,11 +57,8 @@ import {
 } from "./app-sidecar-continuation-handoff.js";
 import {
   AppSidecarDecisionSummaryService,
-  DECISION_SUMMARY_CONTEXT_MAX_BYTES,
   type DecisionSummarySessionOptions,
 } from "./app-sidecar-decision-summary.js";
-import { handleDecisionSummaryRequest } from "./app-sidecar-decision-summary-route.js";
-import { CONTINUATION_HANDOFF_LIMITS } from "./core/continuation-handoff.js";
 import { SharedMcpClientPool } from "./core/mcp/shared-client-pool.js";
 import { RunLifecycle, type RunState } from "./core/run-lifecycle.js";
 import {
@@ -243,7 +241,9 @@ import {
   discoverProjects,
   type SessionReadCache,
 } from "./core/project-discovery.js";
-import { listSidecarSessions } from "./app-sidecar-sessions.js";
+import { listSidecarSessions, renameSidecarSession } from "./app-sidecar-sessions.js";
+import { SessionManager } from "./core/session-manager.js";
+import { sameSessionFile } from "./core/session-storage.js";
 import {
   loadTasksSync,
   deleteTaskSync,
@@ -251,6 +251,8 @@ import {
   getNextRunnableTask,
   markTaskInProgress,
   finalizeTaskRun,
+  recoverAbandonedTaskRunsSync,
+  type TaskRunSettlement,
 } from "./core/tasks-store.js";
 import { readChecklistSnapshot } from "./core/checklist-snapshot.js";
 import { initLogger, log } from "./core/logger.js";
@@ -323,8 +325,10 @@ import {
 import type { ElicitResult } from "@modelcontextprotocol/client";
 import {
   askSoftDeadlineMs,
+  askUserParkOptions,
   createAskUserBridge,
   deliverLateAnswer,
+  isUnattendedAskRun,
   promptSteersRun,
   withoutDeferral,
   type AskQuestion,
@@ -335,51 +339,30 @@ import { createAskUserTool } from "./tools/ask-user.js";
 import { commandCreationReviewer } from "./core/programmatic/command-creation.js";
 import { AppSidecarReloadCoordinator } from "./app-sidecar-reload.js";
 import { AppSidecarSessionRouter, sessionEventFrame } from "./app-sidecar-session-router.js";
-import { createAppSidecarPhaseDeletionCoordinator, type PhaseDeletionSession } from "./app-sidecar-phase-deletion.js";
-import { createAppSidecarNotesHandler, type AppSidecarNotesHandler } from "./app-sidecar-notes.js";
+import type { PhaseDeletionSession } from "./app-sidecar-phase-deletion.js";
+import type { AppSidecarNotesHandler } from "./app-sidecar-notes.js";
 import {
-  createAppSidecarStorageDiagnostics,
   parseAppIdentityArgument,
   type AppSidecarStorageDiagnostics,
 } from "./app-sidecar-storage-diagnostics.js";
-import {
-  createAppSidecarPhaseBindingService,
-  hasLivePhaseLeaseSession,
-  type AppSidecarPhaseBindingService,
-} from "./app-sidecar-phase-binding.js";
-import {
-  isRoadmapPhaseLeasePredecessorProofV1,
-  PHASE_LEASE_RENEW_INTERVAL_MS,
-  RoadmapPhaseLeaseRepository,
-  type RoadmapPhaseLeasePredecessorProofV1,
-} from "./roadmap-phase-lease-repository.js";
+import type { AppSidecarPhaseBindingService } from "./app-sidecar-phase-binding.js";
+import { createAppSidecarPhaseLeaseRuntime } from "./app-sidecar-phase-lease-runtime.js";
 import {
   captureGitWorkspaceSnapshot,
   createApprovedPlan,
   PlanSnapshotResumeError,
   RepositoryUnverifiableError,
 } from "./roadmap-phase-execution.js";
-import {
-  isPhaseBindingRoute,
-  parsePhaseBindingBody,
-  phaseBindingHttpStatus,
-} from "./app-sidecar-phase-binding-route.js";
-import {
+import type {
   AppSidecarReminderCoordinator,
-  createAppSidecarReminderHandler,
-  type AppSidecarReminderHandler,
+  AppSidecarReminderHandler,
 } from "./app-sidecar-reminders.js";
-import {
-  ProjectNotesRepository,
-  canonicalProjectKey,
-  type ProjectNotesSnapshot,
-} from "./project-notes-repository.js";
+import type { ProjectNotesRepository, ProjectNotesSnapshot } from "./project-notes-repository.js";
 import {
   launchBoundPhase,
   type BoundPhaseCandidate,
   type PhaseStartResponseBody,
 } from "./app-sidecar-phase-launch.js";
-import { handlePhaseStartRoute } from "./app-sidecar-phase-route.js";
 import {
   AppSidecarPlanGate,
   approvedPlanArtifactContent,
@@ -400,17 +383,16 @@ import {
   AppSidecarPlanHandoff,
   type ApprovedPlanConsumptionIdentity,
 } from "./app-sidecar-plan-handoff.js";
+import { hasDaemonAuth } from "./app-sidecar-http-json.js";
 import {
-  parsePhaseAdvancementStartBody,
-  parsePhaseAdvancementStartRoute,
-} from "./app-sidecar-phase-advancement-route.js";
-import { AppSidecarJsonBodyError, readJsonBody } from "./app-sidecar-http-json.js";
+  createAppSidecarRoadmapDaemonServices,
+  handleAppSidecarPhaseCancellationRoute,
+} from "./app-sidecar-roadmap-daemon.js";
+import { createAppSidecarRoadmapSessionRoutes } from "./app-sidecar-roadmap-session-routes.js";
+import { createAppSidecarLocalSessionRoutes } from "./app-sidecar-local-session-routes.js";
 import { AppSidecarPhaseCandidateStore } from "./app-sidecar-phase-candidates.js";
 import { AppSidecarPhaseImplementationPlanTracker } from "./app-sidecar-phase-completion.js";
-import {
-  AppSidecarPhaseCancellationCoordinator,
-  type ActiveOperationCancellationResult,
-} from "./app-sidecar-phase-cancellation.js";
+import type { ActiveOperationCancellationResult } from "./app-sidecar-phase-cancellation.js";
 import {
   commitImplementationRunStart,
   commitPlanApprovalCheckpoint,
@@ -418,13 +400,13 @@ import {
   phaseCheckpointFailurePayload,
 } from "./app-sidecar-phase-checkpoint.js";
 import { AppSidecarPhaseLifecycleCoordinator } from "./app-sidecar-phase-lifecycle.js";
-import { AppSidecarRoadmapReconciliationCoordinator } from "./app-sidecar-roadmap-reconciliation.js";
-import { AppSidecarProjectAutopilotState } from "./app-sidecar-autopilot-state.js";
+import type { AppSidecarRoadmapReconciliationCoordinator } from "./app-sidecar-roadmap-reconciliation.js";
+import type { AppSidecarProjectAutopilotState } from "./app-sidecar-autopilot-state.js";
 import {
   APP_SIDECAR_KEN_ALLOWED_TOOL_NAMES,
   AppSidecarRoadmapToolHost,
 } from "./app-sidecar-roadmap-tool-host.js";
-import { AppSidecarRoadmapDraftCoordinator } from "./app-sidecar-roadmap-drafts.js";
+import type { AppSidecarRoadmapDraftCoordinator } from "./app-sidecar-roadmap-drafts.js";
 import { AppSidecarRoadmapDraftToolHost } from "./app-sidecar-roadmap-draft-tool-host.js";
 import {
   commitChatResearchTransition,
@@ -440,13 +422,7 @@ import {
   createPhaseScopedRoadmapWiring,
 } from "./app-sidecar-roadmap-session-options.js";
 import { createRoadmapBindTool } from "./tools/roadmap-bind.js";
-import {
-  AppSidecarRoadmapDraftDecisionService,
-  parseRoadmapPhaseDraftRejectBody,
-  parseRoadmapPhaseDraftRoute,
-  roadmapPhaseDraftApprovalHttpStatus,
-  roadmapPhaseDraftRejectionHttpStatus,
-} from "./app-sidecar-roadmap-draft-route.js";
+import type { AppSidecarRoadmapDraftDecisionService } from "./app-sidecar-roadmap-draft-route.js";
 import {
   AppSidecarSessionMutationCoordinator,
   isAppSidecarSessionBusy,
@@ -458,15 +434,8 @@ import {
   runAppSidecarPromptStartup,
   type SessionMutationOwner,
 } from "./app-sidecar-session-mutation.js";
-import {
-  AppSidecarContinuationSession,
-  parseContinuationCommitRequest,
-} from "./app-sidecar-continuation-session.js";
-import type {
-  AskUserAcknowledgement,
-  ContinuationCommitResponse,
-  KenState,
-} from "@kenkaiiii/gg-core/desktop-session-ux";
+import { AppSidecarContinuationSession } from "./app-sidecar-continuation-session.js";
+import type { AskUserAcknowledgement, KenState } from "@kenkaiiii/gg-core/desktop-session-ux";
 import { runContextProfileRequest } from "./app-sidecar-context-profile.js";
 import { runEnhancePromptRequest } from "./app-sidecar-enhance.js";
 import {
@@ -595,35 +564,6 @@ async function probeMcp(
 interface SseClient {
   id: number;
   res: http.ServerResponse;
-}
-
-function hasDaemonAuth(req: http.IncomingMessage, expectedToken: string): boolean {
-  const provided = req.headers["x-gg-daemon-token"];
-  return typeof provided === "string" && provided === expectedToken;
-}
-
-type RoadmapDurabilityDiagnostic =
-  | "legacy-plan-missing"
-  | "legacy-plan-identity-mismatch"
-  | "phase-lease-lost";
-const roadmapDurabilityDiagnostics = new Map<RoadmapDurabilityDiagnostic, number>();
-
-function recordRoadmapDurabilityDiagnostic(code: RoadmapDurabilityDiagnostic): void {
-  const count = (roadmapDurabilityDiagnostics.get(code) ?? 0) + 1;
-  roadmapDurabilityDiagnostics.set(code, count);
-  log("INFO", "roadmap-durability", "typed compatibility diagnostic", { code, count });
-}
-
-function parseDaemonPredecessorProof(
-  raw: string | undefined,
-): RoadmapPhaseLeasePredecessorProofV1 | undefined {
-  if (!raw) return undefined;
-  try {
-    const value: unknown = JSON.parse(raw);
-    return isRoadmapPhaseLeasePredecessorProofV1(value) ? value : undefined;
-  } catch {
-    return undefined;
-  }
 }
 
 async function main(): Promise<void> {
@@ -770,108 +710,38 @@ async function main(): Promise<void> {
     const target = path.resolve(cwd);
     return [...sessions.values()].some((ctx) => path.resolve(ctx.cwd) === target && ctx.isBusy());
   };
+  /**
+   * Rename a conversation in every pane persisting to `sessionPath`, saving it
+   * to the file once. A pane carries its name into later checkpoints, so an
+   * open session must learn the new name or compaction would restore the old.
+   */
+  const renameLiveSession = async (sessionPath: string, title: string): Promise<boolean> => {
+    const live = [...sessions.values()].filter((ctx) => {
+      const current = ctx.session.getState().sessionPath;
+      return Boolean(current) && sameSessionFile(current, sessionPath);
+    });
+    for (const [index, ctx] of live.entries()) await ctx.session.renameSession(title, index === 0);
+    return live.length > 0;
+  };
 
   // Providers currently mid-OAuth in some window. Daemon-level so two windows
   // cannot race two browser flows for the same provider into one auth file.
   const oauthInFlightProviders = new Set<string>();
-  const notesRepository = new ProjectNotesRepository(paths.agentDir);
-  // Mutation fencing is standard, independent of historical completion rollout settings.
-  const durableRoadmapExecution = true;
-  const phaseLeaseRepository = new RoadmapPhaseLeaseRepository(paths.agentDir, {
-    // Only consulted for expired leases recorded by this process: a lease whose
-    // session is not live here (directly or via compaction lineage) is orphaned.
-    hasLiveLocalSession: (holder) =>
-      hasLivePhaseLeaseSession(
-        Array.from(sessions.values(), (context) => context.session),
-        holder,
-      ),
-  });
-  const daemonInstanceId = process.env.GG_DAEMON_INSTANCE_ID?.trim() || randomUUID();
-  const processStartToken =
-    process.env.GG_PROCESS_START_TOKEN?.trim() || `${process.pid}:${Date.now()}`;
-  const predecessorProof = parseDaemonPredecessorProof(process.env.GG_DAEMON_PREDECESSOR_PROOF);
-  const storageDiagnostics = createAppSidecarStorageDiagnostics({
-    applicationIdentity,
-    agentDataRoot: paths.agentDir,
-    repository: notesRepository,
-  });
-  const roadmapReconciliations = new AppSidecarRoadmapReconciliationCoordinator();
-  const roadmapDrafts = new AppSidecarRoadmapDraftCoordinator({
-    onChange: (projectKey, draft) => {
-      for (const context of sessions.values()) {
-        if (canonicalProjectKey(context.cwd) === projectKey) {
-          context.broadcast("roadmap_phase_draft_change", draft);
-        }
-      }
-    },
-  });
-  const projectAutopilot = new AppSidecarProjectAutopilotState();
-  const broadcastNotesSnapshot = (snapshot: ProjectNotesSnapshot): void => {
-    reminderCoordinator?.observeSnapshot(snapshot);
-    for (const context of sessions.values()) {
-      if (canonicalProjectKey(context.cwd) === snapshot.projectKey) {
-        context.broadcastNotesChange(snapshot);
-      }
-    }
-  };
-  const phaseBinding = createAppSidecarPhaseBindingService({
-    repository: notesRepository,
-    onCommittedSnapshot: broadcastNotesSnapshot,
-    leaseRepository: phaseLeaseRepository,
-    daemonInstanceId,
-    processId: process.pid,
-    processStartToken,
-    predecessorProof,
-  });
-  const roadmapDraftDecisions = new AppSidecarRoadmapDraftDecisionService({
-    drafts: roadmapDrafts,
-    repository: notesRepository,
-    reconciliations: roadmapReconciliations,
-    onCommittedSnapshot: broadcastNotesSnapshot,
-  });
-  const phaseCancellations = new AppSidecarPhaseCancellationCoordinator({
-    repository: notesRepository,
-    sessions: () => sessions.values(),
-    broadcastSnapshot: broadcastNotesSnapshot,
-  });
-  const reminderCoordinator = new AppSidecarReminderCoordinator({
-    repository: notesRepository,
-    onReminderDue: (projectKey) => {
-      for (const context of sessions.values()) {
-        if (canonicalProjectKey(context.cwd) === projectKey) {
-          context.broadcast("roadmap_reminder_due", {});
-        }
-      }
-    },
-    onCommitted: broadcastNotesSnapshot,
-    onError: (error) => captureSidecarError(error, "app-sidecar.reminders.coordinator"),
-  });
-  const reminders = createAppSidecarReminderHandler(reminderCoordinator, (error) =>
-    captureSidecarError(error, "app-sidecar.reminders.request"),
-  );
-  const phaseDeletion = createAppSidecarPhaseDeletionCoordinator({
-    repository: notesRepository, leases: phaseLeaseRepository, reconciliations: roadmapReconciliations,
-    listSessions: () => [...sessions.values()].map(context => context.phaseDeletionSession),
-    onCommittedSnapshot: broadcastNotesSnapshot,
-  });
-  const notes = createAppSidecarNotesHandler({
-    repository: notesRepository,
-    phaseDeletion: { execute: async (input, context) => {
-      const owner = sessions.get(context.logicalSessionId);
-      if (!owner || canonicalProjectKey(owner.cwd) !== canonicalProjectKey(context.cwd)) {
-        return { status: "unavailable", message: "The authenticated project session is unavailable." };
-      }
-      return phaseDeletion.execute(input, owner.phaseDeletionSession);
-    } },
-    diagnostics: storageDiagnostics,
-    onCommittedSnapshot: broadcastNotesSnapshot,
-    onError: (error) => {
-      captureSidecarError(error, "app-sidecar.notes.request");
-      log("ERROR", "app-sidecar", "notes request failed", {
-        message: error instanceof Error ? error.message : String(error),
-      });
-    },
-  });
+  const {
+    notesRepository,
+    durableRoadmapExecution,
+    storageDiagnostics,
+    roadmapReconciliations,
+    roadmapDrafts,
+    projectAutopilot,
+    broadcastNotesSnapshot,
+    phaseBinding,
+    roadmapDraftDecisions,
+    phaseCancellations,
+    reminderCoordinator,
+    reminders,
+    notes,
+  } = createAppSidecarRoadmapDaemonServices({ paths, applicationIdentity, sessions });
   const memoryStore = new MemoryStore({
     onChange: ({ memories }) => {
       for (const ctx of sessions.values()) {
@@ -1017,6 +887,7 @@ async function main(): Promise<void> {
                 repoPolls: getDaemonRepoPolls(),
                 sessionIdsAt,
                 busyAt,
+                renameLiveSession,
               },
               { id, mode, chatAgent, cwd: sessionCwd, sessionPath },
             );
@@ -1146,25 +1017,7 @@ async function main(): Promise<void> {
         return;
       }
 
-      const phaseCancellationMatch =
-        method === "POST" ? /^\/phases\/([^/]+)\/cancel$/.exec(url) : null;
-      if (phaseCancellationMatch) {
-        let phaseId: string;
-        try {
-          phaseId = decodeURIComponent(phaseCancellationMatch[1] ?? "");
-        } catch {
-          daemonJson(res, 400, { error: "invalid phase id" });
-          return;
-        }
-        void phaseCancellations
-          .cancel(ctx.cwd, phaseId)
-          .then((result) => daemonJson(res, 200, result))
-          .catch((error) => {
-            captureSidecarError(error, "app-sidecar.phase.cancel");
-            daemonJson(res, 500, { error: "phase cancellation failed" });
-          });
-        return;
-      }
+      if (handleAppSidecarPhaseCancellationRoute(method, url, res, ctx, phaseCancellations)) return;
 
       ctx.handle(req, res, url, method);
     }, "app-sidecar.http"),
@@ -1379,6 +1232,8 @@ async function createSession(
     sessionIdsAt: (cwd: string) => string[];
     /** Whether any live window session in `cwd` is working right now. */
     busyAt: (cwd: string) => boolean;
+    /** Rename an open conversation in every pane; false when none has it open. */
+    renameLiveSession: (sessionPath: string, title: string) => Promise<boolean>;
   },
   opts: {
     id: string;
@@ -1415,6 +1270,7 @@ async function createSession(
     repoPolls,
     sessionIdsAt,
     busyAt,
+    renameLiveSession,
   } = deps;
   const paths = deps.paths;
   const mode = opts.mode;
@@ -1604,19 +1460,29 @@ async function createSession(
   // /ask/:id. Registered ONLY here — a TUI/headless/subagent run has nobody to
   // answer, so the tool is absent there rather than hanging on a dead channel.
   //
-  // Soft deadline ("async ask"): past it the tool returns "no answer yet —
-  // proceed on your best guess" and the question STAYS OPEN. A later answer
-  // rides the ordinary user queue: steering into a live run, or the next turn
-  // when idle. The deadline is short when nobody is watching (autopilot, task
-  // run-all, a scheduled prompt).
+  // Human-driven run: `ask_user` has NO deadline — the turn waits until the
+  // user answers, types a message instead, or stops the run (Stop keeps the
+  // card answerable; a later answer arrives as a message).
+  //
+  // Unattended run (an active Autopilot cycle, task Run All, a scheduled
+  // prompt): soft deadline ("async ask"). Past it the tool returns "no answer
+  // yet — proceed on your best guess" and the question STAYS OPEN. A later
+  // answer rides the ordinary user queue: steering into a live run, or the
+  // next turn when idle. Autopilot merely being switched on is NOT unattended:
+  // the user's own turn is still theirs; only Ken's cycle sets autopilotActive.
   let scheduledRunActive = false;
+  const unattendedAskRun = (): boolean =>
+    isUnattendedAskRun({
+      autopilotRunActive: autopilotActive,
+      taskRunAll,
+      scheduledRunActive,
+    });
   const asks = createAskUserBridge({
     broadcast: (prompt) => broadcast("ask_user", prompt),
     onSettled: (event) => broadcast("ask_user_settled", event),
-    timeoutMs: () =>
-      askSoftDeadlineMs(
-        isAutopilotEnabled() || autopilotActive || taskRunAll || scheduledRunActive,
-      ),
+    // Host reviews always have a deadline (fail closed); `ask_user` opts out
+    // of it in human-driven runs via askUserParkOptions below.
+    timeoutMs: () => askSoftDeadlineMs(unattendedAskRun()),
     onTimeout: (prompt, deferred) => {
       if (!deferred) {
         log("WARN", "app-sidecar", "ask_user timed out", { id: prompt.id });
@@ -1675,7 +1541,7 @@ async function createSession(
     }
   };
   const askUserTool = createAskUserTool(async (request) => {
-    const result = await asks.park(request);
+    const result = await asks.park(request, askUserParkOptions(unattendedAskRun()));
     await startGoalFrom(result, request.questions);
     return result;
   });
@@ -1742,51 +1608,21 @@ async function createSession(
   let planGate!: AppSidecarPlanGate;
   const persistPlanGateMarker = (checkpoint: PersistedPlanReviewCheckpoint) =>
     session.persistRequiredAppMarker("plan_gate", checkpoint as unknown as Record<string, unknown>);
-  let deferredPhaseLeaseReleaseOperationId: string | null = null;
-  async function releaseCurrentPhaseLease(operationId: string): Promise<void> {
-    if (!session.getRoadmapPhaseLeaseMarker()) return;
-    if (session.getPhaseLeaseRunState() === "running") {
-      deferredPhaseLeaseReleaseOperationId = operationId;
-      throw new Error("Phase lease release deferred until the provider run settles.");
-    }
-    const outcome = await phaseBinding.releaseCurrent(operationId, session);
-    if (
-      outcome.status === "released" ||
-      (outcome.status === "duplicate" && outcome.lease === null)
-    ) {
-      if (deferredPhaseLeaseReleaseOperationId === operationId) {
-        deferredPhaseLeaseReleaseOperationId = null;
-      }
-      return;
-    }
-    throw new Error(`Phase lease release failed: ${outcome.status}`);
-  }
-  async function releaseOrDeferPhaseLease(operationId: string): Promise<void> {
-    if (session.getPhaseLeaseRunState() === "running") {
-      deferredPhaseLeaseReleaseOperationId = operationId;
-      return;
-    }
-    await releaseCurrentPhaseLease(operationId);
-  }
-  /**
-   * Run boundary: move the Notes phase link onto the current session after a
-   * mid-run compaction (the compaction event moved only the lease, so the
-   * agent's held Notes revision stayed valid). No-op without a compaction.
-   */
-  async function catchUpCompactedPhaseLink(): Promise<void> {
-    try {
-      await phaseBinding.handOffCompactedSession(session);
-    } catch (error) {
-      captureSidecarError(error, "app-sidecar.phase-link-catch-up");
-    }
-  }
-  async function settleDeferredPhaseLeaseRelease(): Promise<boolean> {
-    const operationId = deferredPhaseLeaseReleaseOperationId;
-    if (!operationId) return false;
-    await releaseCurrentPhaseLease(operationId);
-    deferredPhaseLeaseReleaseOperationId = null;
-    return true;
-  }
+  const phaseLeaseRuntime = createAppSidecarPhaseLeaseRuntime({
+    cwd,
+    getSession: () => session,
+    phaseBinding,
+    notesRepository,
+    durableRoadmapExecution,
+    broadcast,
+  });
+  const {
+    releaseCurrentPhaseLease,
+    releaseOrDeferPhaseLease,
+    catchUpCompactedPhaseLink,
+    settleDeferredPhaseLeaseRelease,
+    renewCurrentPhaseLease,
+  } = phaseLeaseRuntime;
   const roadmapToolHost = new AppSidecarRoadmapToolHost({
     cwd,
     repository: notesRepository,
@@ -2695,73 +2531,7 @@ async function createSession(
       },
     },
   );
-  async function renewCurrentPhaseLease(operationId: string): Promise<void> {
-    const marker = session.getRoadmapPhaseLeaseMarker();
-    const active = session.getActivePhaseContext();
-    if (!marker || !active) return;
-    const loaded = await notesRepository.load(cwd);
-    if (loaded.status !== "ok") throw new Error("Project Notes unavailable for lease renewal.");
-    const outcome = await phaseBinding.lease(
-      {
-        version: 2,
-        action: "renew",
-        phaseId: marker.phaseId,
-        expectedProjectKey: loaded.snapshot.projectKey,
-        expectedRevision: loaded.snapshot.revision,
-        planId: marker.planId,
-        operationId: `${operationId}:${marker.leaseId}`,
-        lease: { leaseId: marker.leaseId, fence: marker.fence },
-        confirmTakeover: false,
-        takeoverReason: null,
-        predecessorProof: null,
-      },
-      session,
-    );
-    if (outcome.status === "renewed" || outcome.status === "duplicate") return;
-    if (outcome.status === "phase-lease-lost") {
-      recordRoadmapDurabilityDiagnostic("phase-lease-lost");
-      await session.clearActivePhaseContext("phase-rebound");
-    }
-    throw new Error(`Phase lease renewal failed: ${outcome.status}`);
-  }
-
-  const phaseLeaseHeartbeat = durableRoadmapExecution
-    ? setInterval(() => {
-        const marker = session.getRoadmapPhaseLeaseMarker();
-        const active = session.getActivePhaseContext();
-        if (!marker || !active) return;
-        void notesRepository
-          .load(cwd)
-          .then(async (loaded) => {
-            if (loaded.status !== "ok") return;
-            const outcome = await phaseBinding.lease(
-              {
-                version: 2,
-                action: "renew",
-                phaseId: marker.phaseId,
-                expectedProjectKey: loaded.snapshot.projectKey,
-                expectedRevision: loaded.snapshot.revision,
-                planId: marker.planId,
-                operationId: `heartbeat:${marker.leaseId}:${randomUUID()}`,
-                lease: { leaseId: marker.leaseId, fence: marker.fence },
-                confirmTakeover: false,
-                takeoverReason: null,
-                predecessorProof: null,
-              },
-              session,
-            );
-            if (outcome.status === "phase-lease-lost") {
-              recordRoadmapDurabilityDiagnostic("phase-lease-lost");
-              await session.clearActivePhaseContext("phase-rebound");
-              broadcast("error", {
-                message: "Roadmap phase lease lost; this session is now read-only.",
-              });
-            }
-          })
-          .catch((error) => captureSidecarError(error, "app-sidecar.phase-lease-heartbeat"));
-      }, PHASE_LEASE_RENEW_INTERVAL_MS)
-    : null;
-  phaseLeaseHeartbeat?.unref();
+  phaseLeaseRuntime.startHeartbeat();
   const cancelledRunEndGenerations = new Set<number>();
   let pendingCancelDrain: { generation: number; text: string } | null = null;
   // Bumped by /cancel — a run whose cancel generation changed mid-flight was
@@ -4008,9 +3778,9 @@ async function createSession(
     const completionHint =
       `\n\n---\nWhen you have fully completed this task, call the tasks tool to mark it done:\n` +
       `tasks({ action: "done", id: "${shortId}" })`;
-    let succeeded = false;
     // A throw before the outcome is known means the turn itself failed.
-    let blockReason: KnownProjectTaskBlockReason = "run-failed";
+    let settlement: TaskRunSettlement = { kind: "blocked", reason: "run-failed" };
+    let finalStatus: ProjectTaskStatus | null;
     taskTurnActive = true;
     try {
       const outcome = await runUserTurn(
@@ -4029,26 +3799,33 @@ async function createSession(
               ? "plan-checkpoint"
               : outcome === "run-failed"
                 ? "run-failed"
-                : outcome !== "all-clear" && outcome !== "ignored" && outcome !== "no-review"
-                  ? "review-failed"
-                  : // Only steering entries the run never consumed mean the task
-                    // missed user input. Deferred prompts (sent while busy) are
-                    // promised to run afterward in FIFO order, so they must not
-                    // turn a successful task into a block; runTasks drains them
-                    // between tasks instead.
-                    session.getSteeringQueuedCount() !== 0
-                    ? "queued-messages"
-                    : null;
-      succeeded = reason === null;
-      if (reason !== null) blockReason = reason;
-      return succeeded;
+                : // Ken handed the work to a person: not a failed review.
+                  outcome === "human"
+                  ? "needs-review"
+                  : outcome !== "all-clear" && outcome !== "ignored" && outcome !== "no-review"
+                    ? "review-failed"
+                    : // Only steering entries the run never consumed mean the task
+                      // missed user input. Deferred prompts (sent while busy) are
+                      // promised to run afterward in FIFO order, so they must not
+                      // turn a successful task into a block; runTasks drains them
+                      // between tasks instead.
+                      session.getSteeringQueuedCount() !== 0
+                      ? "queued-messages"
+                      : null;
+      settlement =
+        reason === null
+          ? { kind: "succeeded", reviewCleared: outcome === "all-clear" }
+          : { kind: "blocked", reason };
     } finally {
       taskTurnActive = false;
       // Agent-marked completion stays provisional through work AND review.
       // Unresolved work remains retryable rather than disappearing on /tasks.
-      finalizeTaskRun(cwd, task.id, succeeded, blockReason);
+      finalStatus = finalizeTaskRun(cwd, task.id, settlement);
       broadcast("tasks_list", { tasks: pruneDoneTasksSync(cwd) });
     }
+    // Run-all advances only past a settled-done task (or one removed mid-run);
+    // a success without completion evidence ends blocked and pauses the batch.
+    return settlement.kind === "succeeded" && finalStatus !== "blocked";
   }
 
   async function runTasks(startId: string | null, all: boolean): Promise<void> {
@@ -4504,6 +4281,24 @@ async function createSession(
     broadcast,
     runAgent: (label, run, reviewPending) => runAgent(label, run, reviewPending),
   };
+  const roadmapSessionRoutes = createAppSidecarRoadmapSessionRoutes({
+    cwd,
+    logicalSessionId: opts.id,
+    host,
+    mode,
+    nativeAuthorityToken,
+    getSession: () => session,
+    phaseBinding,
+    notes,
+    reminders,
+    roadmapDraftDecisions,
+    startRoadmapPhase: (...args) => startRoadmapPhase(...args),
+  });
+  const localSessionRoutes = createAppSidecarLocalSessionRoutes({
+    getSession: () => session,
+    decisionSummaryService,
+    continuationSession,
+  });
 
   // OPTIONS/CORS preflight is handled at the daemon level before delegation.
   function handle(
@@ -4513,99 +4308,7 @@ async function createSession(
     method: string,
   ): void {
     if (handleGoalRoutes(goalRouteCtx, req, res, url, method)) return;
-    if (isPhaseBindingRoute(method, url)) {
-      if (mode !== "code") {
-        json(res, 403, { status: "coding-mode-required" });
-        return;
-      }
-      void readJsonBody(req, 64 * 1024)
-        .then((body) => {
-          const request = parsePhaseBindingBody(body);
-          if (!request) {
-            json(res, 400, { status: "invalid-request" });
-            return;
-          }
-          const binding =
-            request.version === 3
-              ? phaseBinding.reconcilePhaseExecution(request, session)
-              : request.version === 2
-                ? phaseBinding.lease(request, session)
-                : phaseBinding.bind(request, session);
-          return binding.then((outcome) => {
-            json(res, phaseBindingHttpStatus(outcome), outcome);
-          });
-        })
-        .catch((error) => {
-          if (error instanceof AppSidecarJsonBodyError) {
-            json(res, error.kind === "too-large" ? 413 : 400, { status: "invalid-request" });
-            return;
-          }
-          captureSidecarError(error, "app-sidecar.phase-binding");
-          json(res, 500, { status: "failed" });
-        });
-      return;
-    }
-
-    const sessionState = session.getState();
-    if (
-      notes.handle(
-        req,
-        res,
-        {
-          cwd,
-          logicalSessionId: opts.id,
-          currentSession: {
-            sessionId: sessionState.sessionId,
-            sessionPath: sessionState.sessionPath,
-          },
-          activePhaseContext: session.getActivePhaseContext(),
-        },
-        url,
-        method,
-      )
-    ) {
-      return;
-    }
-    if (reminders.handle(req, res, { id: opts.id, cwd }, url, method)) return;
-
-    const draftRoute = parseRoadmapPhaseDraftRoute(method, url);
-    if (draftRoute.status === "invalid-path") {
-      json(res, 400, { error: "invalid draft id" });
-      return;
-    }
-    if (draftRoute.status === "matched") {
-      if (draftRoute.route.action === "pending") {
-        json(res, 200, { status: "ok", draft: roadmapDraftDecisions.pending(cwd) });
-        return;
-      }
-      if (draftRoute.route.action === "approve") {
-        void roadmapDraftDecisions
-          .approve(cwd, draftRoute.route.draftId)
-          .then((result) => json(res, roadmapPhaseDraftApprovalHttpStatus(result), result))
-          .catch((error) => {
-            captureSidecarError(error, "app-sidecar.roadmap-draft.approve");
-            json(res, 500, { status: "storage-failed", message: "phase creation failed" });
-          });
-        return;
-      }
-      const draftId = draftRoute.route.draftId;
-      void readBody(req, res)
-        .then(async (raw) => {
-          if (raw === null) return;
-          const parsed = parseRoadmapPhaseDraftRejectBody(raw);
-          if (parsed.status === "invalid") {
-            json(res, 422, { error: parsed.message });
-            return;
-          }
-          const result = await roadmapDraftDecisions.reject(cwd, draftId, parsed.feedback);
-          json(res, roadmapPhaseDraftRejectionHttpStatus(result), result);
-        })
-        .catch((error) => {
-          captureSidecarError(error, "app-sidecar.roadmap-draft.reject");
-          json(res, 500, { error: "phase rejection failed" });
-        });
-      return;
-    }
+    if (roadmapSessionRoutes.handleNotesRoutes(req, res, url, method)) return;
 
     if (method === "GET" && url === "/state") {
       json(res, 200, stateSnapshot());
@@ -4879,6 +4582,46 @@ async function createSession(
         },
         (message) => log("ERROR", "app-sidecar", "discoverProjects failed", { message }),
       ).then(({ status, body }) => json(res, status, body));
+      return;
+    }
+
+    // Rename a session row: { cwd, chatAgent?, sessionPath, title }. The path
+    // must be a native row of that same listing, so the webview cannot name
+    // an arbitrary file to append to.
+    if (method === "POST" && url === "/sessions/title") {
+      void readBody(req, res).then(async (raw) => {
+        if (raw === null) return;
+        let body: { cwd?: unknown; chatAgent?: unknown; sessionPath?: unknown; title?: unknown };
+        try {
+          body = JSON.parse(raw) as typeof body;
+        } catch {
+          json(res, 400, { error: "invalid JSON body" });
+          return;
+        }
+        if (typeof body.cwd !== "string" || !body.cwd || typeof body.sessionPath !== "string") {
+          json(res, 400, { error: "cwd and sessionPath are required" });
+          return;
+        }
+        try {
+          const result = await renameSidecarSession({
+            cwd: body.cwd,
+            requestedAgent: typeof body.chatAgent === "string" ? body.chatAgent : null,
+            sessionPath: body.sessionPath,
+            title: body.title,
+            coderSessionsDir: paths.sessionsDir,
+            options: { cache: sessionReadCache },
+            renameLive: renameLiveSession,
+            saveLabel: (target, title) =>
+              new SessionManager(paths.sessionsDir).appendLabel(target, title),
+          });
+          if (result.ok) json(res, 200, { title: result.title });
+          else json(res, result.status, { error: result.error });
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          log("ERROR", "app-sidecar", "renameSidecarSession failed", { message });
+          json(res, 500, { error: message });
+        }
+      });
       return;
     }
 
@@ -5367,98 +5110,7 @@ async function createSession(
       return;
     }
 
-    if (method === "POST" && url === "/decision-summary") {
-      void readCappedBody(req, res, DECISION_SUMMARY_CONTEXT_MAX_BYTES)
-        .then(async (raw) => {
-          if (raw === null) return;
-          const response = await handleDecisionSummaryRequest(raw, session, decisionSummaryService);
-          json(res, response.status, response.body);
-        })
-        .catch((error) => {
-          captureSidecarError(error, "app-sidecar.decision-summary.route");
-          json(res, 500, { error: "decision summary unavailable" });
-        });
-      return;
-    }
-
-    if (method === "POST" && url === "/continuation-handoff") {
-      void readBody(req, res)
-        .then(async (raw) => {
-          if (raw === null) return;
-          let nextInstruction: string;
-          try {
-            const body = JSON.parse(raw) as { nextInstruction?: unknown };
-            nextInstruction = typeof body.nextInstruction === "string" ? body.nextInstruction : "";
-          } catch {
-            json(res, 400, { error: "invalid JSON body" });
-            return;
-          }
-          if (!nextInstruction.trim()) {
-            json(res, 400, { error: "empty next instruction" });
-            return;
-          }
-          if (nextInstruction.length > CONTINUATION_HANDOFF_LIMITS.nextInstructionChars) {
-            json(res, 413, { error: "next instruction is too long" });
-            return;
-          }
-          try {
-            const prepared = await continuationSession.prepare(nextInstruction);
-            json(res, 200, prepared);
-          } catch (error) {
-            captureSidecarError(error, "app-sidecar.continuation-handoff");
-            json(res, 502, {
-              error: error instanceof Error ? error.message : "continuation handoff failed",
-            });
-          }
-        })
-        .catch((error) => {
-          captureSidecarError(error, "app-sidecar.continuation-handoff.route");
-          json(res, 500, { error: "continuation handoff failed" });
-        });
-      return;
-    }
-
-    if (method === "POST" && url === "/continuation-commit") {
-      void readBody(req, res)
-        .then(async (raw) => {
-          if (raw === null) return;
-          let body: unknown;
-          try {
-            body = JSON.parse(raw);
-          } catch {
-            body = null;
-          }
-          const request = parseContinuationCommitRequest(body);
-          if (!request) {
-            json(res, 400, {
-              operationId: "",
-              preparedId: "",
-              outcome: "rejected",
-              accepted: false,
-              resetAttempted: false,
-              error: "invalid_continuation_commit",
-              message: "Expected preparedId, operationId and optional profile only.",
-            } satisfies ContinuationCommitResponse);
-            return;
-          }
-          const result = await continuationSession.commit(request);
-          json(res, result.status, result.body);
-        })
-        .catch((error) => {
-          captureSidecarError(error, "app-sidecar.continuation-commit");
-          if (!res.headersSent)
-            json(res, 500, {
-              operationId: "",
-              preparedId: "",
-              outcome: "outcome-unknown",
-              accepted: null,
-              resetAttempted: true,
-              error: "continuation_outcome_unknown",
-              message: "Inspect the current session. Do not automatically reset or resend.",
-            } satisfies ContinuationCommitResponse);
-        });
-      return;
-    }
+    if (localSessionRoutes.handleSessionToolRoutes(req, res, url, method)) return;
 
     if (method === "POST" && url === "/prompt") {
       const conflict = planGateConflict();
@@ -5576,7 +5228,14 @@ async function createSession(
                       provider: active.provider,
                       model: active.model,
                       signal: abort.signal,
-                      ask: asks.park,
+                      // Same deadline policy as the main agent's ask_user: a
+                      // user-started execution waits for the user; only an
+                      // unattended run (or a Ken-sent prompt) keeps the deadline.
+                      ask: (request) =>
+                        asks.park(
+                          request,
+                          askUserParkOptions(unattendedAskRun() || meta?.kenSent === true),
+                        ),
                       cancelQuestions: () => asks.cancelAll(),
                       progress: (text) => broadcast("text_delta", { text }),
                     });
@@ -5915,6 +5574,8 @@ async function createSession(
     }
 
     if (method === "GET" && url === "/tasks") {
+      // Settle runs a closed app/daemon/CLI left behind; live runs are skipped.
+      recoverAbandonedTaskRunsSync(cwd);
       json(res, 200, { tasks: pruneDoneTasksSync(cwd) });
       return;
     }
@@ -6512,52 +6173,7 @@ async function createSession(
       return;
     }
 
-    const advancementRoute = parsePhaseAdvancementStartRoute(method, url);
-    if (advancementRoute) {
-      if (!hasDaemonAuth(req, nativeAuthorityToken)) {
-        req.resume();
-        json(res, 401, { error: "native human authority required" });
-        return;
-      }
-      void (async () => {
-        try {
-          const body = parsePhaseAdvancementStartBody(await readJsonBody(req, 8_192));
-          if (!body) {
-            json(res, 400, { error: "invalid Start next phase confirmation" });
-            return;
-          }
-          await startRoadmapPhase(
-            body.nextPhaseId,
-            (status, responseBody) => json(res, status, responseBody),
-            { checkpointId: advancementRoute.checkpointId, ...body },
-          );
-        } catch (error) {
-          if (error instanceof AppSidecarJsonBodyError) {
-            json(res, error.kind === "too-large" ? 413 : 400, {
-              error: `JSON request body ${error.kind}`,
-            });
-            return;
-          }
-          captureSidecarError(error, "app-sidecar.phase.advancement-confirmation");
-          json(res, 500, { error: "Start next phase failed" });
-        }
-      })();
-      return;
-    }
-
-    if (
-      handlePhaseStartRoute({
-        method,
-        url,
-        host,
-        respond: (status, body) => json(res, status, body),
-        start: (phaseId) => {
-          void startRoadmapPhase(phaseId, (status, body) => json(res, status, body));
-        },
-      })
-    ) {
-      return;
-    }
+    if (roadmapSessionRoutes.handlePhaseStartRoutes(req, res, url, method)) return;
 
     if (method === "POST" && url === "/new-session") {
       const conflict = planGateConflict();
@@ -7577,6 +7193,7 @@ async function createSession(
     kenAutoAbort.abort();
     await kenSession?.dispose().catch(() => {});
     await kenAutoSession?.dispose().catch(() => {});
+    phaseLeaseRuntime.stopHeartbeat();
     const disposalLease = session.getRoadmapPhaseLeaseMarker();
     await session
       .dispose(

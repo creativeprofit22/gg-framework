@@ -41,7 +41,6 @@ import type {
   DesktopContextSnapshot,
   PendingPlanReview,
   PlanAcceptResult,
-  PlanMutationFailure,
   PlanRevisionResult,
   ProjectTask as SharedProjectTask,
   SlashCommandListing,
@@ -66,7 +65,7 @@ import {
   isUserPhaseStatusOverrideOutcome,
   isUserPhaseStatusOverrideRequest,
 } from "@kenkaiiii/gg-core/project-notes";
-import { createSafeTauriUnlisten, type SafeTauriUnlisten } from "./tauri-listener";
+import type { SafeTauriUnlisten } from "./tauri-listener";
 import { normalizeRoadmapPhaseDraft } from "./roadmap-phase-draft-state";
 import {
   isPhaseRunCancellationResult,
@@ -92,27 +91,64 @@ import {
 } from "./notes-types";
 export { isPhaseLaunchErrorEvent } from "./notes-types";
 export type { PhaseLaunchErrorEvent, PhaseLaunchErrorCode } from "./notes-types";
+import { listenAppWindow } from "./agent-window-listener";
+import { isRecord } from "./agent-record";
+import {
+  asPlanMutationError,
+  requirePlanAcceptResult,
+  requirePlanRevisionResult,
+} from "./agent-plan-mutation";
+import {
+  requireContinuationCommitResponse,
+  requireContinuationHandoffResponse,
+} from "./agent-continuation";
+import {
+  asNewSessionError,
+  requireNewSessionResult,
+  type NewSessionResult,
+} from "./agent-new-session";
+export {
+  checkLocalPatchedUpdate,
+  getVerifiedDecisions,
+  listenLocalPatchedUpdate,
+  startLocalPatchedUpdate,
+} from "./agent-local-update";
+export type {
+  DecisionOutcome,
+  LocalPatchedUpdateEvent,
+  LocalPatchedUpdateStatus,
+  LocalPatchedUpdateStatusOrigin,
+  VerifiedDecisionRecord,
+} from "./agent-local-update";
+export { PlanMutationError } from "./agent-plan-mutation";
+export {
+  requireContinuationAcceptedEvent,
+  requireContinuationCommitResponse,
+  requireContinuationHandoffResponse,
+} from "./agent-continuation";
+export {
+  AzureConnectionCommandError,
+  asAzureCommandError,
+  getAzureConnectionStatus,
+  removeAzureConnection,
+  saveAzureConnection,
+} from "./agent-azure-connection";
+export type {
+  AzureConnectionErrorField,
+  AzureConnectionSource,
+  AzureConnectionStatus,
+  SaveAzureConnection,
+} from "./agent-azure-connection";
+export { NewSessionError } from "./agent-new-session";
+export type { NewSessionFailureKind, NewSessionResult } from "./agent-new-session";
+export { PaneCopyError, copiedPaneRestoreTarget, copyPaneToNewWindow } from "./agent-pane-copy";
+export type { PaneCopyResult } from "./agent-pane-copy";
 
 // Per-window event bus. The Rust side emits agent traffic with `emit_to` the
 // specific window label, so each window must listen on ITS OWN webview target —
 // a global `listen` (target "Any") would never receive window-scoped events.
 // This is what keeps multiple project windows fully isolated.
 const appWindow = getCurrentWebviewWindow();
-
-// appWindow.listen lifecycle map:
-// - local-patched-update, model, tray, and window-order listeners follow
-//   their owning React effect;
-// - readiness listeners live only until waitForPaneReady settles;
-// - each pane client owns one agent-pane-ready listener for its subscription;
-// - agent-event is intentionally window-lifetime and fans out synchronously.
-// Every listener that can be released receives the same guarded cleanup here.
-async function listenAppWindow<T>(
-  eventName: string,
-  handler: (event: { payload: T }) => void,
-): Promise<SafeTauriUnlisten> {
-  const unlisten = await appWindow.listen<T>(eventName, handler);
-  return createSafeTauriUnlisten(unlisten, eventName);
-}
 
 /** This webview's window label (`main` for the first window, `project-N` for
  *  windows opened via the Windows button). */
@@ -223,136 +259,6 @@ export type {
   PhaseCompletionUnmetGateCode,
 } from "./phase-completion-events";
 
-export interface LocalPatchedUpdateEvent {
-  type: "started" | "line" | "completed" | "error";
-  message?: string;
-  line?: string;
-  stream?: "stdout" | "stderr";
-  exitCode?: number | null;
-  /** Windows completed events report the validated installer handoff outcome. */
-  disposition?: "install-scheduled" | "existing-and-verified";
-  /** Non-Windows completed events supply installerPath/opened instead of disposition. */
-  installerPath?: string | null;
-  /** Non-Windows result: whether the installer, its folder, or neither was opened. */
-  opened?: "installer" | "folder" | "none";
-}
-
-export type LocalPatchedUpdateStatusOrigin = "fresh" | "cached" | "unavailable";
-
-export type DecisionOutcome = "kept-local" | "adopted-upstream" | "combined" | "unresolved";
-
-export interface VerifiedDecisionRecord {
-  id: string;
-  date: string;
-  summary: {
-    text: string;
-    source: "agent" | "fallback";
-    generatedAt: string;
-  };
-  verification: { workflowVerified: true; checks?: "passed" | "not-recorded" };
-  decisions: Array<{
-    area: string;
-    outcome: DecisionOutcome;
-    files: Array<{ path: string }>;
-  }>;
-}
-
-const DECISION_OUTCOMES: DecisionOutcome[] = [
-  "kept-local",
-  "adopted-upstream",
-  "combined",
-  "unresolved",
-];
-
-function isVerifiedDecisionRecord(value: unknown): value is VerifiedDecisionRecord {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const record = value as Partial<VerifiedDecisionRecord>;
-  const summary = record.summary;
-  const summaryCharacters = typeof summary?.text === "string" ? Array.from(summary.text) : [];
-  const summaryLength = summaryCharacters.length;
-  const validSummary =
-    !!summary &&
-    Object.keys(summary).length === 3 &&
-    summaryLength >= 40 &&
-    summaryLength <= 500 &&
-    summary.text.trim() === summary.text &&
-    !summaryCharacters.some((character) => {
-      const code = character.charCodeAt(0);
-      return code < 32 || code === 127;
-    }) &&
-    !summary.text.includes("```") &&
-    (summary.source === "agent" || summary.source === "fallback") &&
-    typeof summary.generatedAt === "string" &&
-    Number.isFinite(Date.parse(summary.generatedAt));
-  return (
-    typeof record.id === "string" &&
-    validSummary &&
-    /^\d{4}-\d{2}-\d{2}$/.test(record.date ?? "") &&
-    record.verification?.workflowVerified === true &&
-    (!Object.prototype.hasOwnProperty.call(record.verification, "checks") ||
-      record.verification.checks === "passed" ||
-      record.verification.checks === "not-recorded") &&
-    Array.isArray(record.decisions) &&
-    record.decisions.every(
-      (decision) =>
-        typeof decision?.area === "string" &&
-        DECISION_OUTCOMES.includes(decision.outcome) &&
-        Array.isArray(decision.files) &&
-        decision.files.every((file) => typeof file?.path === "string"),
-    )
-  );
-}
-
-export async function getVerifiedDecisions(repoRoot: string): Promise<VerifiedDecisionRecord[]> {
-  const records = await invoke<unknown>("app_verified_decisions", { repoRoot });
-  if (!Array.isArray(records) || !records.every(isVerifiedDecisionRecord)) {
-    throw new Error("invalid decisions response");
-  }
-  return records;
-}
-
-export interface LocalPatchedUpdateStatus {
-  available: boolean;
-  currentSourceSha: string;
-  upstreamIntegrated: boolean;
-  origin: LocalPatchedUpdateStatusOrigin;
-}
-
-export async function checkLocalPatchedUpdate(
-  repoRoot: string,
-  builtGitSha: string,
-): Promise<LocalPatchedUpdateStatus> {
-  const status = await invoke<LocalPatchedUpdateStatus>("app_local_patched_update_status", {
-    repoRoot,
-    builtGitSha,
-  });
-  if (
-    !status ||
-    typeof status.available !== "boolean" ||
-    typeof status.currentSourceSha !== "string" ||
-    typeof status.upstreamIntegrated !== "boolean" ||
-    !["fresh", "cached", "unavailable"].includes(status.origin)
-  ) {
-    throw new Error("invalid local update response");
-  }
-  return status;
-}
-
-export async function startLocalPatchedUpdate(
-  repoRoot: string,
-  summarizeDecisions = false,
-): Promise<void> {
-  await invoke("app_local_patched_update_start", { repoRoot, summarizeDecisions });
-}
-
-export async function listenLocalPatchedUpdate(
-  onEvent: (event: LocalPatchedUpdateEvent) => void,
-): Promise<SafeTauriUnlisten> {
-  return listenAppWindow<LocalPatchedUpdateEvent>("local-patched-update", (event) => {
-    onEvent(event.payload);
-  });
-}
-
 /** Subscribe this window to a secret-free model-catalog invalidation. */
 export async function onModelsChanged(onChange: () => void): Promise<SafeTauriUnlisten> {
   return listenAppWindow("agent-models-changed", () => onChange());
@@ -448,122 +354,6 @@ export interface JiwaSnapshot {
   jiwa: JiwaEntry[];
   softLimit: number;
   hardLimit: number;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function parsePendingPlanReview(value: unknown): PendingPlanReview | null | undefined {
-  if (value === null) return null;
-  if (!isRecord(value)) return undefined;
-  if (
-    typeof value.checkpointId !== "string" ||
-    !Number.isSafeInteger(value.generation) ||
-    (value.generation as number) < 1 ||
-    typeof value.planPath !== "string" ||
-    typeof value.content !== "string" ||
-    typeof value.contentHash !== "string" ||
-    (value.state !== "pending-review" && value.state !== "revision-requested") ||
-    (value.reviewStatus !== "unreviewed" && value.reviewStatus !== "ready") ||
-    (value.feedback !== null && typeof value.feedback !== "string")
-  ) {
-    return undefined;
-  }
-  return value as unknown as PendingPlanReview;
-}
-
-function planMutationMessage(payload: PlanMutationFailure, fallback: string): string {
-  const detail = payload.message?.trim();
-  const guidance = payload.guidance?.trim();
-  if (detail && guidance) return `${detail} ${guidance}`;
-  if (detail) return detail;
-  if (guidance) return guidance;
-  switch (payload.error) {
-    case "stale-plan-checkpoint":
-      return "The plan changed before this action completed. Review the latest checkpoint and try again.";
-    case "session_busy":
-      return "The session is busy. Wait for the active run to finish, then try again.";
-    case "session_mutation_in_progress":
-      return "Another session change is still completing. Wait a moment, then try again.";
-    case "cannot accept a plan while the agent is running":
-      return "The agent is still running. Wait for it to finish, then approve the plan.";
-    case "invalid plan approval body":
-    case "invalid plan revision body":
-      return "The plan request was rejected as invalid. Reload the pane before trying again.";
-    default:
-      return payload.error?.trim() || fallback;
-  }
-}
-
-/** Typed plan mutation rejection with any authoritative recovery checkpoint attached. */
-export class PlanMutationError extends Error {
-  readonly pendingPlanReview: PendingPlanReview | null | undefined;
-
-  constructor(
-    message: string,
-    readonly payload: PlanMutationFailure,
-  ) {
-    super(message);
-    this.name = "PlanMutationError";
-    this.pendingPlanReview = Object.prototype.hasOwnProperty.call(payload, "pendingPlanReview")
-      ? payload.pendingPlanReview
-      : undefined;
-  }
-}
-
-function asPlanMutationError(error: unknown, fallback: string): PlanMutationError {
-  if (error instanceof PlanMutationError) return error;
-  let candidate: unknown = error;
-  const serialized =
-    typeof error === "string" ? error : error instanceof Error ? error.message : null;
-  if (serialized !== null) {
-    try {
-      candidate = JSON.parse(serialized);
-    } catch {
-      candidate = error;
-    }
-  }
-  if (isRecord(candidate)) {
-    const payload = candidate as unknown as PlanMutationFailure;
-    if (Object.prototype.hasOwnProperty.call(candidate, "pendingPlanReview")) {
-      const pendingPlanReview = parsePendingPlanReview(candidate.pendingPlanReview);
-      if (pendingPlanReview !== undefined) payload.pendingPlanReview = pendingPlanReview;
-      else delete payload.pendingPlanReview;
-    }
-    return new PlanMutationError(planMutationMessage(payload, fallback), payload);
-  }
-  const message = error instanceof Error ? error.message : fallback;
-  return new PlanMutationError(message || fallback, { error: message || fallback });
-}
-
-function requirePlanAcceptResult(value: unknown): PlanAcceptResult {
-  if (!isRecord(value)) throw new Error("invalid plan acceptance response");
-  const planTotal = value.planTotal;
-  const operationId = value.operationId;
-  if (
-    value.ok !== true ||
-    typeof planTotal !== "number" ||
-    !Number.isSafeInteger(planTotal) ||
-    planTotal < 0 ||
-    typeof operationId !== "string" ||
-    operationId.length === 0
-  ) {
-    throw new Error("invalid plan acceptance response");
-  }
-  return { ok: true, planTotal, operationId };
-}
-
-function requirePlanRevisionResult(value: unknown): PlanRevisionResult {
-  if (
-    !isRecord(value) ||
-    value.ok !== true ||
-    typeof value.operationId !== "string" ||
-    value.operationId.length === 0
-  ) {
-    throw new Error("invalid plan revision response");
-  }
-  return { ok: true, operationId: value.operationId };
 }
 
 /** Title-bar progress only; never substitutes for the agent's verification gate. */
@@ -1184,109 +974,6 @@ export type {
   ContinuationDestination,
 };
 
-const CONTINUATION_HANDOFF_PROMPT_MAX_CHARS = 24_000;
-
-export function requireContinuationHandoffResponse(value: unknown): ContinuationHandoffResponse {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw new Error("invalid continuation-handoff response");
-  }
-  const response = value as Record<string, unknown>;
-  // Native HTTP forwarding can return an error body instead of rejecting IPC.
-  if (nonemptyString(response.error)) {
-    throw new Error(nonemptyString(response.message) ? response.message : response.error);
-  }
-  if (
-    !nonemptyString(response.preparedId) ||
-    !recordValue(response.source) ||
-    !nonemptyString(response.source.conversationId) ||
-    !nonemptyString(response.source.sessionId) ||
-    !(response.source.leafId === null || nonemptyString(response.source.leafId)) ||
-    !nonemptyString(response.source.fingerprint) ||
-    typeof response.expiresAt !== "number" ||
-    !Number.isFinite(response.expiresAt) ||
-    response.version !== 1 ||
-    typeof response.prompt !== "string" ||
-    !response.prompt.trim() ||
-    response.prompt.length > CONTINUATION_HANDOFF_PROMPT_MAX_CHARS
-  ) {
-    throw new Error("invalid continuation-handoff response");
-  }
-  return response as unknown as ContinuationPrepareResponse;
-}
-
-function recordValue(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-function nonemptyString(value: unknown): value is string {
-  return typeof value === "string" && value.trim().length > 0;
-}
-function validDestination(value: unknown): value is ContinuationDestination {
-  return (
-    recordValue(value) &&
-    nonemptyString(value.conversationId) &&
-    nonemptyString(value.sessionId) &&
-    (value.profile === "stable" || value.profile === "experimental")
-  );
-}
-export function requireContinuationAcceptedEvent(value: unknown): ContinuationAcceptedEvent {
-  if (
-    !recordValue(value) ||
-    !nonemptyString(value.operationId) ||
-    !nonemptyString(value.preparedId) ||
-    !validDestination(value.destination) ||
-    !nonemptyString(value.acceptedMessageId) ||
-    !nonemptyString(value.prompt) ||
-    value.kenSent !== true
-  )
-    throw new Error("invalid continuation accepted event");
-  return value as unknown as ContinuationAcceptedEvent;
-}
-export function requireContinuationCommitResponse(
-  value: unknown,
-  request: ContinuationCommitRequest,
-): ContinuationCommitResponse {
-  if (
-    !recordValue(value) ||
-    value.operationId !== request.operationId ||
-    value.preparedId !== request.preparedId ||
-    typeof value.resetAttempted !== "boolean" ||
-    (value.destination !== undefined && !validDestination(value.destination)) ||
-    (value.selectedProfile !== undefined &&
-      value.selectedProfile !== "stable" &&
-      value.selectedProfile !== "experimental") ||
-    ["recoveryPrompt", "error", "message", "acceptedMessageId"].some(
-      (key) => value[key] !== undefined && !nonemptyString(value[key]),
-    )
-  ) {
-    throw new Error("invalid continuation commit response");
-  }
-  const accepted =
-    value.outcome === "accepted" &&
-    value.accepted === true &&
-    value.resetAttempted === true &&
-    validDestination(value.destination) &&
-    (!request.profile || value.destination.profile === request.profile) &&
-    nonemptyString(value.acceptedMessageId);
-  const rejected =
-    value.outcome === "rejected" &&
-    value.accepted === false &&
-    value.resetAttempted === false &&
-    value.destination === undefined &&
-    value.acceptedMessageId === undefined;
-  const partial =
-    value.outcome === "partial" &&
-    (value.accepted === false || value.accepted === null) &&
-    value.resetAttempted === true &&
-    value.acceptedMessageId === undefined;
-  const unknown =
-    value.outcome === "outcome-unknown" &&
-    value.accepted === null &&
-    value.acceptedMessageId === undefined;
-  if (!(accepted || rejected || partial || unknown))
-    throw new Error("inconsistent continuation commit response");
-  return value as unknown as ContinuationCommitResponse;
-}
-
 export class PromptSubmissionError extends Error {
   readonly category: "rejected" | "unknown";
   readonly code?: string;
@@ -1865,187 +1552,6 @@ export async function answerAskUser(
 export async function authLogout(provider: string, method?: AuthMethod): Promise<void> {
   if (provider === "qwen-cloud") throw new Error("Use the native Qwen Cloud connection form.");
   await invoke("app_auth_logout", { provider, method });
-}
-
-export type AzureConnectionSource = "secure" | "environment" | "none";
-export type AzureConnectionErrorField = "endpoint" | "deployment" | "apiKey";
-
-export interface AzureConnectionStatus {
-  configured: boolean;
-  source: AzureConnectionSource;
-  endpoint: string | null;
-  deployment: string | null;
-  endpointSummary: string | null;
-  deploymentSummary: string | null;
-  hasStoredKey: boolean;
-}
-
-export interface SaveAzureConnection {
-  endpoint: string;
-  deployment: string;
-  /** Blank preserves the existing operating-system vault entry. */
-  apiKey?: string;
-}
-
-/** A secret-free, UI-safe Azure command failure. */
-export class AzureConnectionCommandError extends Error {
-  constructor(
-    message: string,
-    readonly code: string,
-    readonly field: AzureConnectionErrorField | null = null,
-  ) {
-    super(message);
-    this.name = "AzureConnectionCommandError";
-  }
-}
-
-const AZURE_ERROR_MESSAGES: Readonly<Record<string, string>> = {
-  active_runs: "Finish or cancel every active run before changing the Azure connection.",
-  access_forbidden: "This API key cannot access the Azure deployment.",
-  api_key_required: "Enter an Azure OpenAI API key.",
-  azure_unavailable: "Azure is unavailable right now. Try again shortly.",
-  connection_remove_recovery_failed:
-    "Azure removal could not be completed safely. Reconnect Azure before using it.",
-  connection_rollback_failed:
-    "The previous Azure credential could not be restored. Reconnect Azure before using it.",
-  deployment_not_found: "The endpoint or deployment could not be found.",
-  invalid_api_key: "The Azure OpenAI API key is invalid.",
-  invalid_deployment: "Enter a valid Azure deployment name.",
-  invalid_endpoint: "Enter a valid HTTPS Azure resource endpoint.",
-  metadata_remove_failed: "The Azure connection could not be removed. It remains active.",
-  metadata_save_failed:
-    "The Azure connection could not be saved. The previous connection remains active.",
-  metadata_unavailable: "The saved Azure connection details could not be read. Try again.",
-  models_refresh_failed:
-    "The Azure connection changed, but models did not refresh. Restart gg-app to apply it.",
-  models_refresh_unavailable: "Models could not refresh. Try again after the agent is ready.",
-  secure_storage_remove_failed:
-    "The credential vault rejected removal. The Azure connection remains active.",
-  secure_storage_save_failed:
-    "The API key could not be saved in the operating-system credential vault.",
-  secure_storage_unavailable:
-    "The Azure connection could not be read. Unlock the operating-system credential vault and try again.",
-  throttled: "Azure rate-limited the validation request. Try again shortly.",
-  validation_failed: "Azure could not validate this connection. Check the details and try again.",
-  validation_network_error:
-    "Azure could not be reached. Check the endpoint and network connection.",
-  validation_timeout: "Azure validation timed out. Check the endpoint and try again.",
-  validation_unavailable: "Azure validation is unavailable. Try again shortly.",
-};
-
-const AZURE_ERROR_FIELDS: Readonly<Partial<Record<string, AzureConnectionErrorField>>> = {
-  api_key_required: "apiKey",
-  invalid_api_key: "apiKey",
-  invalid_deployment: "deployment",
-  invalid_endpoint: "endpoint",
-};
-
-export function asAzureCommandError(error: unknown, fallback: string): AzureConnectionCommandError {
-  let payload: unknown = error;
-  if (typeof error === "string" && error.trimStart().startsWith("{")) {
-    try {
-      payload = JSON.parse(error);
-    } catch {
-      payload = null;
-    }
-  }
-  if (typeof payload === "object" && payload !== null) {
-    const candidate = payload as { code?: unknown; field?: unknown };
-    const candidateCode = typeof candidate.code === "string" ? candidate.code : "";
-    const code = Object.prototype.hasOwnProperty.call(AZURE_ERROR_MESSAGES, candidateCode)
-      ? candidateCode
-      : "unknown";
-    const expectedField = AZURE_ERROR_FIELDS[code] ?? null;
-    const field = candidate.field === expectedField ? expectedField : null;
-    return new AzureConnectionCommandError(
-      code === "unknown" ? fallback : AZURE_ERROR_MESSAGES[code],
-      code,
-      field,
-    );
-  }
-  return new AzureConnectionCommandError(fallback, "unknown");
-}
-
-export async function getAzureConnectionStatus(): Promise<AzureConnectionStatus> {
-  try {
-    return await invoke<AzureConnectionStatus>("azure_connection_status");
-  } catch (error) {
-    throw asAzureCommandError(error, "Azure connection status could not be loaded. Try again.");
-  }
-}
-
-export async function saveAzureConnection(
-  connection: SaveAzureConnection,
-): Promise<AzureConnectionStatus> {
-  try {
-    return await invoke<AzureConnectionStatus>("azure_connection_save", { connection });
-  } catch (error) {
-    throw asAzureCommandError(error, "The Azure connection could not be saved. Try again.");
-  }
-}
-
-export async function removeAzureConnection(): Promise<AzureConnectionStatus> {
-  try {
-    return await invoke<AzureConnectionStatus>("azure_connection_remove");
-  } catch (error) {
-    throw asAzureCommandError(error, "The Azure connection could not be removed. Try again.");
-  }
-}
-
-/** Successful fresh-session creation, correlated with its reset event. */
-export interface NewSessionResult {
-  operationId: string;
-}
-
-export type NewSessionFailureKind = "creation-rejected" | "outcome-unknown";
-
-/** Typed distinction between an HTTP rejection and an indeterminate transport outcome. */
-export class NewSessionError extends Error {
-  constructor(
-    readonly kind: NewSessionFailureKind,
-    message: string,
-    readonly status?: number,
-  ) {
-    super(message);
-    this.name = "NewSessionError";
-  }
-}
-
-function asNewSessionError(error: unknown): NewSessionError {
-  let candidate: unknown = error;
-  if (typeof error === "string") {
-    try {
-      candidate = JSON.parse(error);
-    } catch {
-      candidate = null;
-    }
-  }
-  if (typeof candidate === "object" && candidate !== null) {
-    const value = candidate as { kind?: unknown; message?: unknown; status?: unknown };
-    if (
-      (value.kind === "creation-rejected" || value.kind === "outcome-unknown") &&
-      typeof value.message === "string"
-    ) {
-      return new NewSessionError(
-        value.kind,
-        value.message,
-        typeof value.status === "number" ? value.status : undefined,
-      );
-    }
-  }
-  const message = error instanceof Error ? error.message : String(error);
-  return new NewSessionError("outcome-unknown", message);
-}
-
-function requireNewSessionResult(value: unknown): NewSessionResult {
-  const operationId =
-    typeof value === "object" && value !== null
-      ? (value as { operationId?: unknown }).operationId
-      : undefined;
-  if (typeof operationId !== "string" || operationId.length === 0) {
-    throw new Error("invalid new-session response: missing operationId");
-  }
-  return { operationId };
 }
 
 /** Start a fresh session (clears history) for this window's current project. */
@@ -2681,6 +2187,25 @@ export async function listSessions(
 }
 
 /**
+ * Rename one of a project's GG Coder sessions. Resolves to the name as saved
+ * (whitespace collapsed); throws with the daemon's reason on failure.
+ */
+export async function renameSession(
+  cwd: string,
+  sessionPath: string,
+  title: string,
+): Promise<string> {
+  const res = await invoke<{ title?: unknown }>("agent_rename_session", {
+    paneId: "primary",
+    cwd,
+    chatAgent: null,
+    sessionPath,
+    title,
+  });
+  return typeof res.title === "string" ? res.title : title;
+}
+
+/**
  * Re-point this window's agent at a workspace: respawns the sidecar at `cwd`,
  * optionally resuming `sessionPath`. The caller re-runs the ready flow after.
  */
@@ -2705,64 +2230,6 @@ export interface RestoreTarget {
   chatAgent?: ChatAgentId;
   cwd: string;
   sessionPath: string | null;
-}
-
-export interface PaneCopyResult {
-  windowLabel: string;
-  reusedWindow: boolean;
-}
-
-interface PreparedPaneCopy extends PaneCopyResult {
-  copyId: string;
-}
-
-export class PaneCopyError extends Error {
-  constructor(
-    message: string,
-    /** null when preparation failed before there was anything to roll back. */
-    readonly rollbackSucceeded: boolean | null,
-  ) {
-    super(message);
-    this.name = "PaneCopyError";
-  }
-}
-
-/**
- * Copy one pane into a new native window without changing its source ownership.
- * Rust derives the source owner from this webview, reserves the destination,
- * starts a separate daemon session, and rolls the reservation back on failure.
- */
-export async function copyPaneToNewWindow(paneId: string): Promise<PaneCopyResult> {
-  const copyId =
-    globalThis.crypto?.randomUUID?.() ??
-    `copy-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  let prepared: PreparedPaneCopy | null = null;
-  try {
-    prepared = await invoke<PreparedPaneCopy>("agent_pane_copy", { paneId, copyId });
-    return await invoke<PaneCopyResult>("agent_pane_copy_startup", { copyId });
-  } catch (error) {
-    let rollbackSucceeded: boolean | null = null;
-    if (prepared) {
-      try {
-        await invoke("agent_pane_copy_rollback", { copyId });
-        rollbackSucceeded = true;
-      } catch (rollbackError) {
-        await logError(`agent_pane_copy_rollback failed: ${String(rollbackError)}`);
-      }
-    }
-    const suffix = rollbackSucceeded ? "" : " (rollback also failed)";
-    throw new PaneCopyError(`${String(error)}${suffix}`, rollbackSucceeded);
-  }
-}
-
-/** Consume the startup target only when this is an extracted-pane window. */
-export async function copiedPaneRestoreTarget(): Promise<RestoreTarget | null> {
-  try {
-    return await invoke<RestoreTarget | null>("agent_pane_copy_restore");
-  } catch (error) {
-    await logError(`agent_pane_copy_restore failed: ${String(error)}`);
-    return null;
-  }
 }
 
 /**
@@ -3505,6 +2972,7 @@ export interface PaneAgentClient extends NotesClient {
   listProjects(): Promise<DiscoveredProject[]>;
   searchFiles(query: string): Promise<FileHit[]>;
   listSessions(cwd: string, chatAgent?: ChatAgentId | "all" | "motion"): Promise<RecentSession[]>;
+  renameSession(cwd: string, sessionPath: string, title: string): Promise<string>;
   getTelegramStatus(): Promise<TelegramStatus>;
   saveTelegramConfig(botToken: string, userId: string): Promise<void>;
   getServeStatus(): Promise<ServeStatus>;
@@ -4082,6 +3550,15 @@ export function createPaneAgentClient(paneId: string): PaneAgentClient {
         chatAgent: chatAgent ?? null,
       });
       return Array.isArray(response.sessions) ? response.sessions : [];
+    },
+    async renameSession(cwd, sessionPath, title) {
+      const response = await call<{ title?: unknown }>("agent_rename_session", {
+        cwd,
+        chatAgent: null,
+        sessionPath,
+        title,
+      });
+      return typeof response.title === "string" ? response.title : title;
     },
     async getTelegramStatus() {
       try {

@@ -8,6 +8,7 @@ import {
 } from "@phosphor-icons/react";
 import type { RoadmapPhaseDraft } from "@kenkaiiii/gg-core/roadmap-workflow";
 import { openReferenceUrl } from "./notes-open-source";
+import { RoadmapPhaseEditReview } from "./RoadmapPhaseEditReview";
 
 interface RoadmapPhaseDraftReviewModalProps {
   draft: RoadmapPhaseDraft | null;
@@ -29,6 +30,18 @@ export function RoadmapPhaseDraftReviewModal({
   onReject,
 }: RoadmapPhaseDraftReviewModalProps) {
   if (!draft || !open) return null;
+  if ("kind" in draft) {
+    return (
+      <RoadmapPhaseEditReview
+        draft={draft}
+        decision={decision}
+        error={error}
+        announcement={announcement}
+        onApprove={onApprove}
+        onReject={onReject}
+      />
+    );
+  }
   const deciding = decision !== "idle";
   const stale = draft.status === "stale";
   const references = draft.references ?? [];

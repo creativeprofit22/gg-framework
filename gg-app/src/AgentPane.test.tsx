@@ -301,13 +301,13 @@ vi.mock("./agent", async (importOriginal) => {
   };
 });
 
+import { AgentPane } from "./AgentPane";
+import { noInputSlashSubmissionError } from "./slash-input-policy";
 import {
-  AgentPane,
-  noInputSlashSubmissionError,
   preferredRoadmapPhaseSession,
   resolveRoadmapPhaseResume,
   resolveRoadmapPhaseResumeFromNotes,
-} from "./AgentPane";
+} from "./roadmap-phase-resume";
 import { PlanMutationError, PromptSubmissionError } from "./agent";
 import type { Item, PaneInputActions, PaneSnapshot } from "./AgentPane";
 import type {
@@ -555,6 +555,7 @@ function client(paneId: string, generation: number): PaneAgentClient {
     listProjects: vi.fn(),
     searchFiles: vi.fn(async () => []),
     listSessions: vi.fn(),
+    renameSession: vi.fn(),
     getTelegramStatus: vi.fn(),
     saveTelegramConfig: vi.fn(),
     getServeStatus: vi.fn(),
@@ -3816,6 +3817,47 @@ describe("AgentPane lifecycle", () => {
     expect(
       screen.getByRole("button", { name: "Review Roadmap draft with 1 proposed phase" }),
     ).toBeTruthy();
+  });
+
+  it("labels and applies a pending Roadmap phase edit from the review dock", async () => {
+    const pane = client("pane-chat-phase-edit", 7);
+    vi.mocked(pane.getRoadmapPhaseDraft).mockResolvedValue({
+      kind: "edit",
+      id: "draft-edit",
+      projectKey: "/work",
+      basedOnRevision: 12,
+      createdAt: "2026-08-05T12:00:00.000Z",
+      createdBySessionId: "session-1",
+      summary: "Clarify the approval phase",
+      phaseId: "phase-approval",
+      phaseTitle: "Approval UI",
+      basedOnUpdatedAt: "2026-08-04T12:00:00.000Z",
+      changes: [{ field: "goal", before: "", after: "Require an explicit decision." }],
+      status: "pending",
+    });
+    vi.mocked(pane.approveRoadmapPhaseDraft).mockResolvedValue({
+      status: "edited",
+      revision: 13,
+      phaseId: "phase-approval",
+    });
+
+    render(<AgentPane client={pane} target={chatTarget} workspaceOwnsSessionLifecycle />);
+    const trigger = await screen.findByRole("button", {
+      name: "Review Roadmap phase edit with 1 changed field",
+    });
+    fireEvent.click(trigger);
+    expect(screen.getByRole("region", { name: "Review Roadmap phase edit" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /Roadmap phase edit.*Collapse/ })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Apply edit" }));
+    await waitFor(() => expect(pane.approveRoadmapPhaseDraft).toHaveBeenCalledWith("draft-edit"));
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", { name: "Review Roadmap phase edit with 1 changed field" }),
+      ).toBeNull(),
+    );
+    expect(pane.rejectRoadmapPhaseDraft).not.toHaveBeenCalled();
+    expect(pane.startPhase).not.toHaveBeenCalled();
   });
 
   it("discovers /research and carries its submission into pending draft review", async () => {
@@ -7787,6 +7829,36 @@ describe("command palette (Ctrl/Cmd+K)", () => {
   function pressCtrlK(): void {
     fireEvent.keyDown(window, { key: "k", ctrlKey: true });
   }
+
+  it("pages the focused pane's transcript with Page Up / Page Down from the composer", async () => {
+    const { input, view } = await renderPane([]);
+    const transcript = view.container.querySelector<HTMLDivElement>(".transcript");
+    if (!transcript) throw new Error("transcript missing");
+    const scrollBy = vi.fn();
+    transcript.scrollBy = scrollBy as typeof transcript.scrollBy;
+    Object.defineProperty(transcript, "clientHeight", { configurable: true, value: 800 });
+    Object.defineProperty(transcript, "scrollHeight", { configurable: true, value: 4000 });
+    const up = fireEvent.keyDown(input, { key: "PageUp" });
+    const down = fireEvent.keyDown(input, { key: "PageDown" });
+    // fireEvent returns false once the handler has claimed the key.
+    expect([up, down]).toEqual([false, false]);
+    expect(scrollBy.mock.calls.map(([options]) => (options as ScrollToOptions).top)).toEqual([
+      -700, 700,
+    ]);
+    // Shift+Page keys still select text in the composer.
+    fireEvent.keyDown(input, { key: "PageUp", shiftKey: true });
+    expect(scrollBy).toHaveBeenCalledTimes(2);
+  });
+
+  it("leaves Page Up / Page Down alone in an unfocused pane", async () => {
+    const { input, view } = await renderPane([], { focused: false });
+    const transcript = view.container.querySelector<HTMLDivElement>(".transcript");
+    if (!transcript) throw new Error("transcript missing");
+    const scrollBy = vi.fn();
+    transcript.scrollBy = scrollBy as typeof transcript.scrollBy;
+    expect(fireEvent.keyDown(input, { key: "PageDown" })).toBe(true);
+    expect(scrollBy).not.toHaveBeenCalled();
+  });
 
   it("opens only collection commands, grouped, and fills the chat box on Enter", async () => {
     const { pane, input } = await renderPane(tagged);

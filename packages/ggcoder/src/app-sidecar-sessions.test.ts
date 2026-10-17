@@ -1,10 +1,14 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { chatAgentSessionsDir } from "./chat-agents/index.js";
-import { listSidecarSessions } from "./app-sidecar-sessions.js";
+import {
+  listSidecarSessions,
+  normalizeSessionTitle,
+  renameSidecarSession,
+} from "./app-sidecar-sessions.js";
 import { motionSessionsDir } from "./motion-agent/motion-agent.js";
 import { encodeCwd } from "./core/encode-cwd.js";
 import { archiveColdSession, archiveSessionPath } from "./core/session-storage.js";
@@ -211,6 +215,109 @@ describe("gg-app sidecar session listings", () => {
       homeDir: home,
     });
     expect(chatSessions.some((session) => session.source === "claude-code")).toBe(false);
+  });
+
+  describe("renaming", () => {
+    const saveWith =
+      (manager: SessionManager) =>
+      (target: string, title: string): Promise<void> =>
+        manager.appendLabel(target, title);
+
+    it("names an idle session without moving it in the list or changing its history", async () => {
+      await writeSessions(coderSessionsDir, cwd, "coding", 2);
+      const before = await listSidecarSessions(cwd, null, coderSessionsDir);
+      const older = before[1];
+      expect(older?.id).toBe("coding-0");
+      const mtimeBefore = (await fs.stat(older!.path)).mtimeMs;
+      const manager = new SessionManager(coderSessionsDir);
+
+      const result = await renameSidecarSession({
+        cwd,
+        requestedAgent: null,
+        sessionPath: older!.path,
+        title: "  Fix\nthe   login bug ",
+        coderSessionsDir,
+        renameLive: async () => false,
+        saveLabel: saveWith(manager),
+      });
+
+      expect(result).toEqual({ ok: true, title: "Fix the login bug" });
+      const after = await listSidecarSessions(cwd, null, coderSessionsDir);
+      expect(after.map((session) => session.id)).toEqual(["coding-1", "coding-0"]);
+      expect(after[1]).toMatchObject({ preview: "Fix the login bug", messageCount: 1 });
+      expect((await fs.stat(older!.path)).mtimeMs).toBe(mtimeBefore);
+      const loaded = await manager.load(older!.path);
+      expect(manager.getMessages(loaded!.entries, loaded!.header.leafId)).toHaveLength(1);
+    });
+
+    it("lets an open pane save the name instead of writing the file twice", async () => {
+      await writeSessions(coderSessionsDir, cwd, "coding", 1);
+      const [row] = await listSidecarSessions(cwd, null, coderSessionsDir);
+      const renameLive = vi.fn(async () => true);
+      const saveLabel = vi.fn(async () => {});
+
+      const result = await renameSidecarSession({
+        cwd,
+        requestedAgent: null,
+        sessionPath: row!.path,
+        title: "Release prep",
+        coderSessionsDir,
+        renameLive,
+        saveLabel,
+      });
+
+      expect(result.ok).toBe(true);
+      expect(renameLive).toHaveBeenCalledWith(row!.path, "Release prep");
+      expect(saveLabel).not.toHaveBeenCalled();
+    });
+
+    it("refuses paths that are not native rows of this project's list", async () => {
+      const home = path.join(tmp, "home");
+      const transcript = await writeClaudeTranscript(home, cwd, "cc-rename", "Foreign prompt.");
+      const otherCwd = path.join(tmp, "other-project");
+      await writeSessions(coderSessionsDir, otherCwd, "other", 1);
+      const otherPath = path.join(coderSessionsDir, encodeCwd(otherCwd), "other-0.jsonl");
+      const otherBytes = await fs.readFile(otherPath, "utf-8");
+      const saveLabel = vi.fn(async () => {});
+
+      for (const sessionPath of [transcript, otherPath, path.join(tmp, "anything.jsonl")]) {
+        const result = await renameSidecarSession({
+          cwd,
+          requestedAgent: null,
+          sessionPath,
+          title: "Nope",
+          coderSessionsDir,
+          options: { homeDir: home },
+          renameLive: async () => false,
+          saveLabel,
+        });
+        expect(result).toMatchObject({ ok: false, status: 404 });
+      }
+      expect(saveLabel).not.toHaveBeenCalled();
+      expect(await fs.readFile(otherPath, "utf-8")).toBe(otherBytes);
+    });
+
+    it("rejects empty and over-long names before touching the file", async () => {
+      await writeSessions(coderSessionsDir, cwd, "coding", 1);
+      const [row] = await listSidecarSessions(cwd, null, coderSessionsDir);
+      const saveLabel = vi.fn(async () => {});
+
+      for (const title of ["   ", "x".repeat(81), 42]) {
+        const result = await renameSidecarSession({
+          cwd,
+          requestedAgent: null,
+          sessionPath: row!.path,
+          title,
+          coderSessionsDir,
+          renameLive: async () => false,
+          saveLabel,
+        });
+        expect(result).toMatchObject({ ok: false, status: 400 });
+      }
+      expect(saveLabel).not.toHaveBeenCalled();
+      expect(normalizeSessionTitle("a\u0000b\tc")).toBe("a b c");
+      expect(normalizeSessionTitle("x".repeat(80))).toHaveLength(80);
+    });
   });
 
   it("lists archived coding and chat sessions once despite their redirect counterparts", async () => {

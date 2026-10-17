@@ -1,12 +1,13 @@
-import { Fragment, useEffect, useId, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import { open as openFolderDialog } from "@tauri-apps/plugin-dialog";
-import { XIcon } from "@phosphor-icons/react";
+import { PencilSimpleIcon, XIcon } from "@phosphor-icons/react";
 import { theme } from "./theme";
 import {
   waitForReady,
   listProjects,
   setProjectHidden,
   listSessions,
+  renameSession as renameSessionTitle,
   importTranscript,
   getSettings,
   saveSettings,
@@ -47,6 +48,17 @@ function projectPathKey(projectPath: string): string {
   return windowsPath ? normalized.toLowerCase() : normalized;
 }
 
+/** Matches the daemon's cap on saved session names. */
+const SESSION_TITLE_MAX_LENGTH = 80;
+
+/** The one session row being renamed: what has been typed, and how saving went. */
+interface RenameDraft {
+  id: string;
+  draft: string;
+  saving: boolean;
+  error: FailureCopy | null;
+}
+
 /** A failed open, split into what the user reads and what support needs. */
 interface ResumeFailure extends FailureCopy {
   /** What to reopen. Data, not a closure, so Retry runs this render's `busy` guard. */
@@ -71,6 +83,8 @@ interface Props {
   waitForCatalogReady?: () => Promise<unknown>;
   discoverProjects?: () => Promise<DiscoveredProject[]>;
   discoverSessions?: (cwd: string) => Promise<RecentSession[]>;
+  /** Save a session's new name; resolves to the name as stored. */
+  renameSession?: (cwd: string, sessionPath: string, title: string) => Promise<string>;
   bindProject: (cwd: string, sessionPath?: string) => Promise<unknown>;
   saveProjectsRoot?: (projectsRoot: string) => Promise<unknown>;
   refreshSignal?: number;
@@ -96,6 +110,7 @@ export function ProjectPicker({
   waitForCatalogReady = waitForReady,
   discoverProjects = listProjects,
   discoverSessions = listSessions,
+  renameSession = renameSessionTitle,
   bindProject,
   saveProjectsRoot = saveSettings,
   refreshSignal = 0,
@@ -151,6 +166,18 @@ export function ProjectPicker({
   const [projectsRoot, setProjectsRoot] = useState("");
   const [showNew, setShowNew] = useState(false);
   const [query, setQuery] = useState("");
+  const [renaming, setRenaming] = useState<RenameDraft | null>(null);
+  const renameIdPrefix = useId();
+  // The row whose Rename button takes focus back once its editor has closed.
+  const [refocusRenameIndex, setRefocusRenameIndex] = useState<number | null>(null);
+
+  // After the commit that removes the editor, not on an animation frame: a
+  // hidden or minimised window may never paint, which left focus on <body>.
+  useEffect(() => {
+    if (refocusRenameIndex === null || renaming) return;
+    document.getElementById(`${renameIdPrefix}-rename-${refocusRenameIndex}`)?.focus();
+    setRefocusRenameIndex(null);
+  }, [refocusRenameIndex, renaming, renameIdPrefix]);
 
   const q = query.trim().toLowerCase();
   const filteredProjects = q
@@ -233,6 +260,57 @@ export function ProjectPicker({
   function openProject(project: DiscoveredProject): void {
     setSelected(project);
     setResumeError(null);
+    setRenaming(null);
+  }
+
+  /** Keyboard focus returns to the row's Rename button once the editor closes. */
+  function renameButtonId(index: number): string {
+    return `${renameIdPrefix}-rename-${index}`;
+  }
+
+  function startRename(session: RecentSession): void {
+    if (busy) return;
+    setRenaming({ id: session.id, draft: session.preview, saving: false, error: null });
+  }
+
+  function closeRename(index: number): void {
+    setRenaming(null);
+    setRefocusRenameIndex(index);
+  }
+
+  /**
+   * Save the typed name. The row shows it at once and the list then refreshes
+   * quietly, so it picks up the daemon's copy. A failure keeps the editor open
+   * with what was typed, so Save simply tries again.
+   */
+  function saveRename(cwd: string, session: RecentSession, index: number): void {
+    if (!renaming || renaming.id !== session.id || renaming.saving) return;
+    const title = renaming.draft.replace(/\s+/g, " ").trim();
+    if (!title) return;
+    if (title === session.preview) {
+      closeRename(index);
+      return;
+    }
+    setRenaming({ ...renaming, saving: true, error: null });
+    void renameSession(cwd, session.path, title)
+      .then((saved) => {
+        sessionList.setItems((items) =>
+          items.map((item) => (item.id === session.id ? { ...item, preview: saved } : item)),
+        );
+        closeRename(index);
+        sessionList.reload();
+      })
+      .catch((reason: unknown) => {
+        setRenaming((current) =>
+          current?.id === session.id
+            ? {
+                ...current,
+                saving: false,
+                error: describeActionFailure("rename this session", reason),
+              }
+            : current,
+        );
+      });
   }
 
   /**
@@ -372,7 +450,13 @@ export function ProjectPicker({
         {/* The page's own controls share the list's column; window controls stay at the edge. */}
         <div className="picker-head-main" data-tauri-drag-region>
           {selected ? (
-            <BackButton label="All projects" onClick={() => setSelected(null)} />
+            <BackButton
+              label="All projects"
+              onClick={() => {
+                setSelected(null);
+                setRenaming(null);
+              }}
+            />
           ) : onClose ? (
             <BackButton label="Back" onClick={onClose} />
           ) : null}
@@ -569,44 +653,122 @@ export function ProjectPicker({
           )}
           {!sessionsLoading && sessions.length > 0 && (
             <div className="picker-reveal">
-              {sessions.map((s) => (
-                <Fragment key={s.id}>
-                  <button
-                    className="picker-item"
-                    disabled={busy}
-                    aria-describedby={
-                      failedRowShown && s.id === failedRowId ? resumeErrorId : undefined
-                    }
-                    onClick={() => chooseSession(selected.path, s)}
-                    title={
-                      isForeignSession(s)
-                        ? `From ${sourceStyle(s.source ?? "").label} — opens as a ${PRODUCT_DISPLAY_NAME} session`
-                        : undefined
-                    }
-                  >
-                    <span className="picker-row">
-                      <span className="picker-name picker-preview" style={{ color: theme.text }}>
-                        {s.preview || "(no preview)"}
-                      </span>
-                      <Badge>{s.lastActiveDisplay}</Badge>
-                    </span>
-                    <span className="picker-meta" style={{ color: theme.textMuted }}>
-                      {isForeignSession(s) && (
-                        <Badge
-                          className="picker-source-tag"
-                          color={sourceStyle(s.source ?? "").color}
+              {sessions.map((s, index) => {
+                const editing = renaming?.id === s.id ? renaming : null;
+                const renameErrorId = `${renameIdPrefix}-rename-error-${index}`;
+                return (
+                  <div key={s.id} className="picker-item-wrap picker-session-wrap">
+                    {editing ? (
+                      <form
+                        className="picker-rename-form"
+                        onSubmit={(event) => {
+                          event.preventDefault();
+                          saveRename(selected.path, s, index);
+                        }}
+                      >
+                        <input
+                          className="picker-search picker-rename-input"
+                          type="text"
+                          aria-label="Session name"
+                          aria-describedby={editing.error ? renameErrorId : undefined}
+                          maxLength={SESSION_TITLE_MAX_LENGTH}
+                          value={editing.draft}
+                          readOnly={editing.saving}
+                          autoFocus
+                          onFocus={(event) => event.currentTarget.select()}
+                          onChange={(event) => {
+                            const draft = event.target.value;
+                            setRenaming((current) =>
+                              current?.id === s.id ? { ...current, draft } : current,
+                            );
+                          }}
+                          onKeyDown={(event) => {
+                            if (event.key !== "Escape") return;
+                            event.preventDefault();
+                            event.stopPropagation();
+                            if (!editing.saving) closeRename(index);
+                          }}
+                        />
+                        <button
+                          type="button"
+                          className="btn btn-ghost btn-sm"
+                          disabled={editing.saving}
+                          onClick={() => closeRename(index)}
                         >
-                          {sourceStyle(s.source ?? "").label}
-                        </Badge>
-                      )}
-                      {s.model && <Badge className="picker-model-tag">{s.model}</Badge>}
-                      <Badge>{`${s.messageCount} msgs`}</Badge>
-                    </span>
-                    {s.lastReply && <span className="picker-snippet">{s.lastReply}</span>}
-                  </button>
-                  {failedRowShown && s.id === failedRowId && resumeErrorBlock}
-                </Fragment>
-              ))}
+                          Cancel
+                        </button>
+                        <button
+                          type="submit"
+                          className="btn btn-primary btn-sm"
+                          disabled={editing.saving || !editing.draft.trim()}
+                        >
+                          {editing.saving ? "Saving\u2026" : "Save"}
+                        </button>
+                      </form>
+                    ) : (
+                      <button
+                        className="picker-item"
+                        disabled={busy}
+                        aria-describedby={
+                          failedRowShown && s.id === failedRowId ? resumeErrorId : undefined
+                        }
+                        onClick={() => chooseSession(selected.path, s)}
+                        title={
+                          isForeignSession(s)
+                            ? `From ${sourceStyle(s.source ?? "").label} — opens as a ${PRODUCT_DISPLAY_NAME} session`
+                            : undefined
+                        }
+                      >
+                        <span className="picker-row">
+                          <span
+                            className="picker-name picker-preview"
+                            style={{ color: theme.text }}
+                          >
+                            {s.preview || "(no preview)"}
+                          </span>
+                          <Badge>{s.lastActiveDisplay}</Badge>
+                        </span>
+                        <span className="picker-meta" style={{ color: theme.textMuted }}>
+                          {isForeignSession(s) && (
+                            <Badge
+                              className="picker-source-tag"
+                              color={sourceStyle(s.source ?? "").color}
+                            >
+                              {sourceStyle(s.source ?? "").label}
+                            </Badge>
+                          )}
+                          {s.model && <Badge className="picker-model-tag">{s.model}</Badge>}
+                          <Badge>{`${s.messageCount} msgs`}</Badge>
+                        </span>
+                        {s.lastReply && <span className="picker-snippet">{s.lastReply}</span>}
+                      </button>
+                    )}
+                    {failedRowShown && s.id === failedRowId && resumeErrorBlock}
+                    {editing?.error && (
+                      <PickerError
+                        id={renameErrorId}
+                        summary={editing.error.summary}
+                        detail={editing.error.detail}
+                      />
+                    )}
+                    {/* Another tool's transcript is not ours to rename. After
+                        the row in the DOM, so Tab reaches a row, then its Rename. */}
+                    {!isForeignSession(s) && !editing && (
+                      <button
+                        type="button"
+                        id={renameButtonId(index)}
+                        className="picker-hide picker-rename"
+                        aria-label={`Rename ${s.preview || "session"}`}
+                        title="Rename"
+                        disabled={busy}
+                        onClick={() => startRename(s)}
+                      >
+                        <PencilSimpleIcon size={12} weight="bold" aria-hidden="true" />
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           )}
         </div>

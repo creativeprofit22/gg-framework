@@ -835,19 +835,35 @@ pub(crate) fn has_exact_keys(
     object.len() == expected.len() && expected.iter().all(|key| object.contains_key(*key))
 }
 
-pub(crate) fn normalized_bounded_string(
+/// Mirrors gg-core `normalizeRoadmapWorkflowText`: NFC, LF line endings, trimmed.
+pub(crate) fn normalized_roadmap_text(value: Option<&serde_json::Value>) -> Option<String> {
+    let normalized_nfc = value?.as_str()?.nfc().collect::<String>();
+    let normalized_lines = normalized_nfc.replace("\r\n", "\n").replace('\r', "\n");
+    Some(normalized_lines.trim().to_string())
+}
+
+/// Mirrors gg-core roadmap-workflow `normalizedBoundedString`, which bounds normalized text by
+/// Unicode code points (`Array.from(value).length`), not UTF-16 units.
+pub(crate) fn normalized_bounded_code_points(
     value: Option<&serde_json::Value>,
     max_length: usize,
 ) -> Option<String> {
-    let candidate = value?.as_str()?;
-    let normalized_nfc = candidate.nfc().collect::<String>();
-    let normalized_lines = normalized_nfc.replace("\r\n", "\n").replace('\r', "\n");
-    let normalized = normalized_lines.trim();
-    // Match the shared TypeScript contract's UTF-16 length bounds.
-    let length = normalized.encode_utf16().count();
+    let normalized = normalized_roadmap_text(value)?;
     (1..=max_length)
-        .contains(&length)
-        .then(|| normalized.to_string())
+        .contains(&normalized.chars().count())
+        .then_some(normalized)
+}
+
+/// Draft reference metadata must also pass gg-core `validateNotesReferenceProjection`, whose
+/// UTF-16 `.length` bound is stricter than the code-point bound checked before it.
+pub(crate) fn normalized_bounded_utf16(
+    value: Option<&serde_json::Value>,
+    max_length: usize,
+) -> Option<String> {
+    let normalized = normalized_roadmap_text(value)?;
+    (1..=max_length)
+        .contains(&normalized.encode_utf16().count())
+        .then_some(normalized)
 }
 
 // Reference fields were absent in legacy drafts. Keep exact-key validation for both forms.
@@ -907,13 +923,13 @@ pub(crate) fn roadmap_draft_reference(value: &serde_json::Value) -> Option<(Stri
     ) {
         return None;
     }
-    let id = normalized_bounded_string(object.get("id"), 512)?;
-    let provider = normalized_bounded_string(object.get("provider"), 4_096)?.to_lowercase();
-    let owner = normalized_bounded_string(object.get("owner"), 4_096)?;
-    let repo = normalized_bounded_string(object.get("repo"), 4_096)?;
+    let id = normalized_bounded_code_points(object.get("id"), 512)?;
+    let provider = normalized_bounded_utf16(object.get("provider"), 4_096)?.to_lowercase();
+    let owner = normalized_bounded_utf16(object.get("owner"), 4_096)?;
+    let repo = normalized_bounded_utf16(object.get("repo"), 4_096)?;
     for field in ["tool", "revision", "path", "query", "anchor"] {
         if !object.get(field)?.is_null() {
-            normalized_bounded_string(object.get(field), 4_096)?;
+            normalized_bounded_utf16(object.get(field), 4_096)?;
         }
     }
     let relevance = object.get("relevance")?.as_str()?.nfc().collect::<String>();
@@ -927,7 +943,7 @@ pub(crate) fn roadmap_draft_reference(value: &serde_json::Value) -> Option<(Stri
     {
         return None;
     }
-    let canonical_url = normalized_bounded_string(object.get("canonicalUrl"), 2_048)?;
+    let canonical_url = normalized_bounded_utf16(object.get("canonicalUrl"), 2_048)?;
     let mut url = reqwest::Url::parse(&canonical_url).ok()?;
     if !matches!(url.scheme(), "http" | "https")
         || url.host_str().is_none()
@@ -1008,10 +1024,10 @@ pub(crate) fn is_roadmap_draft_phase(value: &serde_json::Value) -> Option<String
         return None;
     }
 
-    let phase_id = normalized_bounded_string(object.get("phaseId"), 512)?;
-    normalized_bounded_string(object.get("title"), 200)?;
-    normalized_bounded_string(object.get("goal"), 4_096)?;
-    normalized_bounded_string(object.get("sourcePrompt"), 16_384)?;
+    let phase_id = normalized_bounded_code_points(object.get("phaseId"), 512)?;
+    normalized_bounded_code_points(object.get("title"), 200)?;
+    normalized_bounded_code_points(object.get("goal"), 4_096)?;
+    normalized_bounded_code_points(object.get("sourcePrompt"), 16_384)?;
 
     let done_when = object.get("doneWhen")?.as_array()?;
     if !(1..=ROADMAP_PHASE_DONE_WHEN_MAX_ITEMS).contains(&done_when.len()) {
@@ -1019,7 +1035,7 @@ pub(crate) fn is_roadmap_draft_phase(value: &serde_json::Value) -> Option<String
     }
     let mut criteria = HashSet::new();
     for criterion in done_when {
-        let normalized = normalized_bounded_string(Some(criterion), 1_024)?;
+        let normalized = normalized_bounded_code_points(Some(criterion), 1_024)?;
         if !criteria.insert(normalized) {
             return None;
         }
@@ -1028,10 +1044,142 @@ pub(crate) fn is_roadmap_draft_phase(value: &serde_json::Value) -> Option<String
     Some(phase_id)
 }
 
+pub(crate) const ROADMAP_PHASE_EDIT_DRAFT_KEYS: [&str; 12] = [
+    "kind",
+    "id",
+    "projectKey",
+    "basedOnRevision",
+    "createdAt",
+    "createdBySessionId",
+    "summary",
+    "phaseId",
+    "phaseTitle",
+    "basedOnUpdatedAt",
+    "changes",
+    "status",
+];
+
+/// Canonical field order shared with gg-core `ROADMAP_PHASE_EDIT_FIELDS`.
+pub(crate) const ROADMAP_PHASE_EDIT_FIELDS: [&str; 4] =
+    ["title", "goal", "doneWhen", "sourcePrompt"];
+
+pub(crate) const ROADMAP_PHASE_EDIT_BEFORE_MAX_LENGTH: usize = 65_536;
+
+pub(crate) const ROADMAP_PHASE_EDIT_BEFORE_DONE_WHEN_MAX_ITEMS: usize = 200;
+
+/// `before` values are copied verbatim from Notes: bounded by code points, may be empty.
+pub(crate) fn roadmap_edit_before_string(value: Option<&serde_json::Value>) -> Option<&str> {
+    value
+        .and_then(serde_json::Value::as_str)
+        .filter(|candidate| candidate.chars().count() <= ROADMAP_PHASE_EDIT_BEFORE_MAX_LENGTH)
+}
+
+pub(crate) fn roadmap_edit_before_list(value: Option<&serde_json::Value>) -> Option<Vec<&str>> {
+    let items = value?.as_array()?;
+    if items.len() > ROADMAP_PHASE_EDIT_BEFORE_DONE_WHEN_MAX_ITEMS {
+        return None;
+    }
+    items
+        .iter()
+        .map(|item| roadmap_edit_before_string(Some(item)))
+        .collect()
+}
+
+/// Validates the proposed `doneWhen` list with the same bounds as add drafts.
+pub(crate) fn roadmap_edit_done_when(value: Option<&serde_json::Value>) -> Option<Vec<String>> {
+    let items = value?.as_array()?;
+    if !(1..=ROADMAP_PHASE_DONE_WHEN_MAX_ITEMS).contains(&items.len()) {
+        return None;
+    }
+    let mut seen = HashSet::new();
+    let mut criteria = Vec::with_capacity(items.len());
+    for item in items {
+        let normalized = normalized_bounded_code_points(Some(item), 1_024)?;
+        if !seen.insert(normalized.clone()) {
+            return None;
+        }
+        criteria.push(normalized);
+    }
+    Some(criteria)
+}
+
+/// Returns the canonical index of a valid field change, mirroring gg-core `validateFieldChange`.
+pub(crate) fn roadmap_edit_field_change(value: &serde_json::Value) -> Option<usize> {
+    let object = value.as_object()?;
+    if !has_exact_keys(object, &["field", "before", "after"]) {
+        return None;
+    }
+    let field = object.get("field")?.as_str()?;
+    let index = ROADMAP_PHASE_EDIT_FIELDS
+        .iter()
+        .position(|candidate| *candidate == field)?;
+    if field == "doneWhen" {
+        let before = roadmap_edit_before_list(object.get("before"))?;
+        let after = roadmap_edit_done_when(object.get("after"))?;
+        let unchanged = before.len() == after.len()
+            && before
+                .iter()
+                .zip(after.iter())
+                .all(|(left, right)| *left == right);
+        return (!unchanged).then_some(index);
+    }
+    let before = roadmap_edit_before_string(object.get("before"))?;
+    let max_length = match field {
+        "title" => 200,
+        "goal" => 4_096,
+        _ => 16_384,
+    };
+    let after = normalized_bounded_code_points(object.get("after"), max_length)?;
+    (before != after).then_some(index)
+}
+
+pub(crate) fn is_roadmap_phase_edit_draft(
+    object: &serde_json::Map<String, serde_json::Value>,
+) -> bool {
+    if !has_exact_keys(object, &ROADMAP_PHASE_EDIT_DRAFT_KEYS)
+        || object.get("kind").and_then(serde_json::Value::as_str) != Some("edit")
+        || !matches!(
+            object.get("status").and_then(serde_json::Value::as_str),
+            Some("pending" | "stale")
+        )
+        || normalized_bounded_code_points(object.get("id"), 512).is_none()
+        || normalized_bounded_code_points(object.get("projectKey"), 4_096).is_none()
+        || !is_non_negative_integer(object.get("basedOnRevision"))
+        || !is_roadmap_timestamp(object.get("createdAt"))
+        || normalized_bounded_code_points(object.get("createdBySessionId"), 512).is_none()
+        || normalized_bounded_code_points(object.get("summary"), 4_096).is_none()
+        || normalized_bounded_code_points(object.get("phaseId"), 512).is_none()
+        || roadmap_edit_before_string(object.get("phaseTitle")).is_none()
+        || !is_roadmap_timestamp(object.get("basedOnUpdatedAt"))
+    {
+        return false;
+    }
+    let Some(changes) = object.get("changes").and_then(serde_json::Value::as_array) else {
+        return false;
+    };
+    if !(1..=ROADMAP_PHASE_EDIT_FIELDS.len()).contains(&changes.len()) {
+        return false;
+    }
+    let mut previous: Option<usize> = None;
+    for change in changes {
+        let Some(index) = roadmap_edit_field_change(change) else {
+            return false;
+        };
+        if previous.is_some_and(|previous| index <= previous) {
+            return false;
+        }
+        previous = Some(index);
+    }
+    true
+}
+
 pub(crate) fn is_roadmap_phase_draft(value: &serde_json::Value) -> bool {
     let Some(object) = value.as_object() else {
         return false;
     };
+    if object.contains_key("kind") {
+        return is_roadmap_phase_edit_draft(object);
+    }
     if !has_required_and_optional_keys(
         object,
         &ROADMAP_PHASE_DRAFT_KEYS,
@@ -1039,23 +1187,26 @@ pub(crate) fn is_roadmap_phase_draft(value: &serde_json::Value) -> bool {
     ) || !matches!(
         object.get("status").and_then(serde_json::Value::as_str),
         Some("pending" | "stale")
-    ) || normalized_bounded_string(object.get("id"), 512).is_none()
-        || normalized_bounded_string(object.get("projectKey"), 4_096).is_none()
+    ) || normalized_bounded_code_points(object.get("id"), 512).is_none()
+        || normalized_bounded_code_points(object.get("projectKey"), 4_096).is_none()
         || !is_non_negative_integer(object.get("basedOnRevision"))
         || !object
             .get("createdAt")
             .and_then(serde_json::Value::as_str)
             .is_some_and(|timestamp| chrono::DateTime::parse_from_rfc3339(timestamp).is_ok())
-        || normalized_bounded_string(object.get("createdBySessionId"), 512).is_none()
-        || normalized_bounded_string(object.get("summary"), 4_096).is_none()
+        || normalized_bounded_code_points(object.get("createdBySessionId"), 512).is_none()
+        || normalized_bounded_code_points(object.get("summary"), 4_096).is_none()
     {
         return false;
     }
     match object.get("sourcesNotCited") {
         None | Some(serde_json::Value::Null) => {}
         value => {
-            if normalized_bounded_string(value, ROADMAP_PHASE_DRAFT_SOURCES_NOT_CITED_MAX_LENGTH)
-                .is_none()
+            if normalized_bounded_code_points(
+                value,
+                ROADMAP_PHASE_DRAFT_SOURCES_NOT_CITED_MAX_LENGTH,
+            )
+            .is_none()
             {
                 return false;
             }
@@ -1099,7 +1250,7 @@ pub(crate) fn is_roadmap_phase_draft(value: &serde_json::Value) -> bool {
         }
         let mut seen = HashSet::new();
         for link in links {
-            let Some(id) = normalized_bounded_string(Some(link), 128) else {
+            let Some(id) = normalized_bounded_code_points(Some(link), 128) else {
                 return false;
             };
             if !reference_ids.contains(&id) || !seen.insert(id.clone()) {
@@ -1146,6 +1297,18 @@ pub(crate) fn is_roadmap_phase_draft_approval_outcome(
                                 .iter()
                                 .all(|id| id.as_str().is_some_and(|id| !id.is_empty()))
                     })
+        }
+        "edited" => {
+            is_non_negative_integer(value.get("revision"))
+                && is_non_empty_string(value.get("phaseId"))
+        }
+        "phase-changed" => is_non_empty_string(value.get("phaseId")),
+        "phase-not-editable" => {
+            is_non_empty_string(value.get("phaseId"))
+                && matches!(
+                    value.get("reason").and_then(serde_json::Value::as_str),
+                    Some("missing" | "deleted" | "done" | "archived")
+                )
         }
         "already-decided" => has_decision(value),
         "stale-revision" => {
@@ -2163,6 +2326,206 @@ mod tests {
                     RoadmapPhaseDraftResponseKind::Approve,
                 ),
                 Err("invalid roadmap phase-draft response".to_string())
+            );
+        }
+    }
+
+    fn pending_roadmap_edit_draft() -> serde_json::Value {
+        serde_json::json!({
+            "status": "ok",
+            "draft": {
+                "kind": "edit",
+                "id": "draft-edit-1",
+                "projectKey": "/work/project",
+                "basedOnRevision": 4,
+                "createdAt": "2026-01-01T00:00:00.000Z",
+                "createdBySessionId": "session-1",
+                "summary": "Clarify the validation phase",
+                "phaseId": "phase-1",
+                "phaseTitle": "Implement validation",
+                "basedOnUpdatedAt": "2025-12-31T00:00:00.000Z",
+                "changes": [
+                    { "field": "goal", "before": "", "after": "Keep the native boundary aligned." },
+                    {
+                        "field": "doneWhen",
+                        "before": ["Complete drafts pass"],
+                        "after": ["Complete drafts pass", "Edit drafts pass"],
+                    },
+                ],
+                "status": "pending",
+            },
+        })
+    }
+
+    #[test]
+    fn roadmap_phase_edit_draft_proxy_accepts_well_formed_edit_drafts() {
+        let pending = pending_roadmap_edit_draft();
+        assert!(normalize_roadmap_phase_draft_response(
+            reqwest::StatusCode::OK,
+            &pending.to_string(),
+            RoadmapPhaseDraftResponseKind::Get,
+        )
+        .is_ok());
+
+        let mut stale = pending.clone();
+        stale["draft"]["status"] = serde_json::json!("stale");
+        assert!(normalize_roadmap_phase_draft_response(
+            reqwest::StatusCode::OK,
+            &stale.to_string(),
+            RoadmapPhaseDraftResponseKind::Get,
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn roadmap_phase_edit_draft_proxy_rejects_malformed_edit_drafts() {
+        let pending = pending_roadmap_edit_draft();
+        let mutate = |apply: &dyn Fn(&mut serde_json::Value)| {
+            let mut draft = pending.clone();
+            apply(&mut draft["draft"]);
+            draft
+        };
+        let malformed = [
+            mutate(&|draft| draft["kind"] = serde_json::json!("create")),
+            mutate(&|draft| draft["extra"] = serde_json::json!(true)),
+            mutate(&|draft| {
+                draft.as_object_mut().unwrap().remove("phaseTitle");
+            }),
+            mutate(&|draft| draft["phases"] = serde_json::json!([])),
+            mutate(&|draft| draft["basedOnUpdatedAt"] = serde_json::json!("yesterday")),
+            mutate(&|draft| draft["changes"] = serde_json::json!([])),
+            mutate(&|draft| draft["changes"][0]["field"] = serde_json::json!("status")),
+            mutate(&|draft| draft["changes"][0]["extra"] = serde_json::json!(true)),
+            // `after` must change the field.
+            mutate(&|draft| {
+                draft["changes"][0] =
+                    serde_json::json!({ "field": "goal", "before": "Same", "after": " Same " })
+            }),
+            mutate(&|draft| {
+                draft["changes"][1]["after"] = serde_json::json!(["Complete drafts pass"])
+            }),
+            // `after` uses add-draft bounds.
+            mutate(&|draft| draft["changes"][0]["after"] = serde_json::json!("x".repeat(4_097))),
+            mutate(&|draft| draft["changes"][0]["after"] = serde_json::json!(" \n ")),
+            mutate(&|draft| draft["changes"][1]["after"] = serde_json::json!([])),
+            mutate(&|draft| draft["changes"][1]["after"] = serde_json::json!(["a", " a "])),
+            // `before` is loose but bounded.
+            mutate(&|draft| draft["changes"][0]["before"] = serde_json::json!("x".repeat(65_537))),
+            mutate(&|draft| draft["changes"][1]["before"] = serde_json::json!("not a list")),
+            // Fields are unique and canonically ordered.
+            mutate(&|draft| {
+                let changes = draft["changes"].as_array_mut().unwrap();
+                changes.reverse();
+            }),
+            mutate(&|draft| {
+                let first = draft["changes"][0].clone();
+                draft["changes"][1] = first;
+            }),
+        ];
+        for value in malformed {
+            assert_eq!(
+                normalize_roadmap_phase_draft_response(
+                    reqwest::StatusCode::OK,
+                    &value.to_string(),
+                    RoadmapPhaseDraftResponseKind::Get,
+                ),
+                Err("invalid roadmap phase-draft response".to_string()),
+                "accepted malformed edit draft: {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn roadmap_phase_draft_proxy_bounds_text_by_code_points_like_gg_core() {
+        // Astral characters are one code point but two UTF-16 units; gg-core counts code points.
+        let get = |value: &serde_json::Value| {
+            normalize_roadmap_phase_draft_response(
+                reqwest::StatusCode::OK,
+                &value.to_string(),
+                RoadmapPhaseDraftResponseKind::Get,
+            )
+        };
+        let invalid = Err("invalid roadmap phase-draft response".to_string());
+
+        let edit_with_title = |title: String| {
+            let mut draft = pending_roadmap_edit_draft();
+            draft["draft"]["changes"] = serde_json::json!([
+                { "field": "title", "before": "Implement validation", "after": title },
+            ]);
+            draft
+        };
+        assert!(get(&edit_with_title("😀".repeat(200))).is_ok());
+        assert_eq!(get(&edit_with_title("😀".repeat(201))), invalid);
+
+        let create_with_title = |title: String| {
+            serde_json::json!({
+                "status": "ok",
+                "draft": {
+                    "id": "draft-1",
+                    "projectKey": "/work/project",
+                    "basedOnRevision": 1,
+                    "createdAt": "2026-01-01T00:00:00.000Z",
+                    "createdBySessionId": "session-1",
+                    "summary": "One phase",
+                    "phases": [{
+                        "phaseId": "phase-1",
+                        "title": title,
+                        "goal": "Keep the native boundary aligned with the shared contract.",
+                        "doneWhen": ["Astral titles hydrate"],
+                        "sourcePrompt": "Validate pending Roadmap phase drafts.",
+                    }],
+                    "status": "pending",
+                },
+            })
+        };
+        assert!(get(&create_with_title("😀".repeat(200))).is_ok());
+        assert_eq!(get(&create_with_title("😀".repeat(201))), invalid);
+    }
+
+    #[test]
+    fn roadmap_phase_edit_draft_proxy_preserves_typed_edit_outcomes() {
+        let cases = [
+            (
+                reqwest::StatusCode::OK,
+                r#"{"status":"edited","revision":5,"phaseId":"phase-1"}"#,
+                "edited",
+            ),
+            (
+                reqwest::StatusCode::CONFLICT,
+                r#"{"status":"phase-changed","phaseId":"phase-1"}"#,
+                "phase-changed",
+            ),
+            (
+                reqwest::StatusCode::CONFLICT,
+                r#"{"status":"phase-not-editable","phaseId":"phase-1","reason":"done"}"#,
+                "phase-not-editable",
+            ),
+        ];
+        for (http_status, body, outcome) in cases {
+            let value = normalize_roadmap_phase_draft_response(
+                http_status,
+                body,
+                RoadmapPhaseDraftResponseKind::Approve,
+            )
+            .unwrap();
+            assert_eq!(value["status"], outcome);
+        }
+
+        for body in [
+            r#"{"status":"edited","revision":5}"#,
+            r#"{"status":"edited","revision":-1,"phaseId":"phase-1"}"#,
+            r#"{"status":"phase-changed","phaseId":""}"#,
+            r#"{"status":"phase-not-editable","phaseId":"phase-1","reason":"locked"}"#,
+            r#"{"status":"phase-not-editable","phaseId":"phase-1"}"#,
+        ] {
+            assert_eq!(
+                normalize_roadmap_phase_draft_response(
+                    reqwest::StatusCode::OK,
+                    body,
+                    RoadmapPhaseDraftResponseKind::Approve,
+                ),
+                Err("invalid roadmap phase-draft response".to_string()),
+                "accepted malformed outcome: {body}"
             );
         }
     }

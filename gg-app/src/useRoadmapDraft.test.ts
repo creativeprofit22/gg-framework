@@ -70,6 +70,35 @@ describe("useRoadmapDraft", () => {
     await waitFor(() => expect(onApproved).toHaveBeenCalledOnce());
   });
 
+  it("notifies the caller when approval edits a phase", async () => {
+    const onApproved = vi.fn();
+    const editDraft = {
+      kind: "edit" as const,
+      id: "d2",
+      projectKey: "/work",
+      basedOnRevision: 1,
+      createdAt: "2026-08-05T12:00:00.000Z",
+      createdBySessionId: "s1",
+      summary: "Edit",
+      phaseId: "p1",
+      phaseTitle: "Phase",
+      basedOnUpdatedAt: "2026-08-04T12:00:00.000Z",
+      changes: [{ field: "title" as const, before: "Phase", after: "Renamed phase" }],
+      status: "pending" as const,
+    };
+    const c = client(vi.fn().mockResolvedValue(editDraft));
+    vi.mocked(c.approveRoadmapPhaseDraft).mockResolvedValueOnce({
+      status: "edited",
+      revision: 2,
+      phaseId: "p1",
+    });
+    const hook = renderHook(() => useRoadmapDraft(c, "one", true, onApproved));
+    await waitFor(() => expect(hook.result.current.state.draft).toEqual(editDraft));
+    act(() => hook.result.current.approve());
+    await waitFor(() => expect(onApproved).toHaveBeenCalledOnce());
+    expect(hook.result.current.state.draft).toBeNull();
+  });
+
   it("ignores an old decision after a different draft arrives", async () => {
     const decision = deferred<unknown>();
     const c = client();

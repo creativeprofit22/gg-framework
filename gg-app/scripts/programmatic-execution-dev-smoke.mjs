@@ -244,10 +244,11 @@ async function run() {
       RUSTUP_HOME: process.env.RUSTUP_HOME ?? join(process.env.USERPROFILE ?? "", ".rustup") });
     console.log(`Fixture evidence: ${paths.audit}`);
     if (discoveryOnly) json(join(paths.audit, "discovery-source.json"), Object.fromEntries([
-      "packages/ggcoder/src/core/agent-session.ts", "packages/ggcoder/src/app-sidecar-programmatic-chat.ts",
+      "packages/ggcoder/src/core/agent-session.ts", "packages/ggcoder/src/core/agent-session-programmatic.ts",
+      "packages/ggcoder/src/core/agent-session-tool-guard.ts", "packages/ggcoder/src/app-sidecar-programmatic-chat.ts",
       "packages/ggcoder/src/app-sidecar.ts", "packages/ggcoder/dist/app-sidecar-programmatic-chat.js",
       "packages/ggcoder/dist/app-sidecar.js", "gg-app/src-tauri/src/lib.rs", "gg-app/src/agent.ts",
-      "gg-app/src/AgentPane.tsx", "gg-app/src/programmatic-chat-state.ts", "gg-app/src/programmatic-discovery-state.ts",
+      "gg-app/src/AgentPane.tsx", "gg-app/src/useProgrammaticChat.ts", "gg-app/src/programmatic-chat-state.ts", "gg-app/src/programmatic-discovery-state.ts",
       "gg-app/src/ProgrammaticDiscovery.tsx", "gg-app/scripts/programmatic-discovery-smoke.mjs",
       "gg-app/scripts/programmatic-discovery-observer.mjs", "gg-app/scripts/programmatic-execution-dev-smoke.mjs",
     ].map((file) => [file, createHash("sha256").update(readFileSync(join(workspace, file))).digest("hex")])));

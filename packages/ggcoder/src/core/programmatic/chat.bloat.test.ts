@@ -53,17 +53,19 @@ describe("embedded chat touched-files bloat guard", () => {
   });
   it("shares narrow host history persistence without adding a second terminal store", async () => {
     const read = (file: string) => fs.readFile(new URL(file, import.meta.url), "utf8");
-    const [host, terminal, session] = await Promise.all([
+    const [host, terminal, session, sessionProgrammatic] = await Promise.all([
       read("./assessment-history.ts"),
       read("../../ui/hooks/useAgentLoop.ts"),
       read("../agent-session.ts"),
+      read("../agent-session-programmatic.ts"),
     ]);
     expect(Buffer.byteLength(host)).toBeLessThan(5_000);
     expect(host).not.toMatch(
       /\b(?:writeFile|rename|withFileLock|fetch|setInterval|spawn|exec|runAgentLoop|runProgrammaticScan)\s*\(/,
     );
     expect(host.match(/await updateRecommendationHistory\(/g)).toHaveLength(1);
-    for (const source of [terminal, session]) {
+    expect(session).not.toContain("updateRecommendationHistory(");
+    for (const source of [terminal, sessionProgrammatic]) {
       expect(source).toContain("await captureAssessmentHistoryPolicy(");
       expect(source).toContain("await saveAssessmentHistory(");
       expect(source).not.toContain("updateRecommendationHistory(");
@@ -136,6 +138,7 @@ describe("embedded chat touched-files bloat guard", () => {
       client,
       native,
       assessmentComponent,
+      programmaticHook,
     ] = await Promise.all([
       read("../../app-sidecar-programmatic-chat.ts"),
       read("./lifecycle.ts"),
@@ -147,6 +150,7 @@ describe("embedded chat touched-files bloat guard", () => {
       read("../../../../../gg-app/src/agent.ts"),
       read("../../../../../gg-app/src-tauri/src/commands/agent.rs"),
       read("../../../../../gg-app/src/ProgrammaticAssessment.tsx"),
+      read("../../../../../gg-app/src/useProgrammaticChat.ts"),
     ]);
     const setupProjection = await read("../../app-sidecar-programmatic-projection.ts");
     expect(adapter).toContain("projectProgrammaticSetup(proposal, handle)");
@@ -173,8 +177,12 @@ describe("embedded chat touched-files bloat guard", () => {
     expect(component).toContain('from "./Badge"');
     expect(component).not.toMatch(/from ["'](?!react|\.\/|@kenkaiiii\/gg-core)[^"']+["']/);
     expect(pane.match(/<ProgrammaticChat\b/g)).toHaveLength(1);
-    expect(pane).toContain("client.sendPrompt(text)");
-    expect(pane).toContain("programmaticOwner.current");
+    expect(pane).toContain("useProgrammaticChatActions(");
+    expect(programmaticHook).toContain("client.sendPrompt(text)");
+    expect(programmaticHook).toContain("programmaticOwnerRef.current");
+    expect(programmaticHook).not.toMatch(
+      /\b(?:fetch|setInterval|WebSocket|EventSource)\s*\(|localStorage|sessionStorage/,
+    );
     expect(events).toContain("onProgrammaticActivity");
     expect(client).toContain('"agent_programmatic"');
     expect(native.match(/async fn agent_programmatic\(/g)).toHaveLength(1);

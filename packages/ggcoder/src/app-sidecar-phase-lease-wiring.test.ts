@@ -28,7 +28,14 @@ import {
  * unit tests (which construct their own options) would still pass.
  */
 
-const APP_SIDECAR = new URL("./app-sidecar.ts", import.meta.url);
+// The daemon wiring spans app-sidecar.ts and its fork-owned modules beside it.
+const APP_SIDECAR_SOURCES = [
+  "./app-sidecar.ts",
+  "./app-sidecar-roadmap-daemon.ts",
+  "./app-sidecar-phase-lease-runtime.ts",
+  "./app-sidecar-roadmap-session-routes.ts",
+  "./app-sidecar-local-session-routes.ts",
+].map((relative) => new URL(relative, import.meta.url));
 const sessionA = { sessionId: "session-a", sessionPath: "/sessions/a.jsonl" };
 const sessionB = { sessionId: "session-b", sessionPath: "/sessions/b.jsonl" };
 const sessionC = { sessionId: "session-c", sessionPath: "/sessions/c.jsonl" };
@@ -185,7 +192,7 @@ describe("daemon phase-lease wiring (regression: orphaned leases after compactio
   beforeAll(async () => {
     const source = ts.createSourceFile(
       "app-sidecar.ts",
-      await fs.readFile(APP_SIDECAR, "utf8"),
+      (await Promise.all(APP_SIDECAR_SOURCES.map((file) => fs.readFile(file, "utf8")))).join("\n"),
       ts.ScriptTarget.Latest,
       true,
     );

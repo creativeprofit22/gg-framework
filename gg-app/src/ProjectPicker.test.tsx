@@ -26,6 +26,7 @@ vi.mock("./agent", () => ({
   importTranscript: vi.fn(),
   listProjects: vi.fn(),
   listSessions: vi.fn(),
+  renameSession: vi.fn(),
   saveSettings: vi.fn(),
   setProjectHidden: vi.fn(),
   waitForReady: vi.fn(),
@@ -443,6 +444,96 @@ describe("ProjectPicker session list", () => {
     expect(row?.getAttribute("aria-describedby")).toBe(alert.id);
     const otherRow = screen.getByText("Two").closest("button");
     expect(otherRow?.hasAttribute("aria-describedby")).toBe(false);
+  });
+
+  it("renames a native session in place and keeps the new name on the row", async () => {
+    // The daemon stores the name, so the quiet refresh after saving lists it too.
+    const renameSession = vi.fn(async (_cwd: string, _path: string, title: string) => {
+      listSessionsMock.mockResolvedValue([{ ...NATIVE_SESSION, preview: title }]);
+      return title;
+    });
+    getSettingsMock.mockResolvedValue({ projectsRoot: "/Users/dev", configured: true });
+    waitForReadyMock.mockResolvedValue();
+    listProjectsMock.mockResolvedValue([PROJECT]);
+    listSessionsMock.mockResolvedValue([NATIVE_SESSION]);
+    render(
+      <ProjectPicker
+        onChosen={vi.fn()}
+        bindProject={bindProjectMock}
+        renameSession={renameSession}
+        initialProjectPath={PROJECT.path}
+      />,
+    );
+    await screen.findByText(NATIVE_SESSION.preview);
+
+    fireEvent.click(screen.getByRole("button", { name: `Rename ${NATIVE_SESSION.preview}` }));
+    const input = screen.getByRole("textbox", { name: "Session name" }) as HTMLInputElement;
+    expect(input.value).toBe(NATIVE_SESSION.preview);
+    fireEvent.change(input, { target: { value: "  Fix   the login bug " } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() =>
+      expect(renameSession).toHaveBeenCalledWith(
+        PROJECT.path,
+        NATIVE_SESSION.path,
+        "Fix the login bug",
+      ),
+    );
+    expect(await screen.findByText("Fix the login bug")).toBeDefined();
+    expect(screen.queryByRole("textbox", { name: "Session name" })).toBeNull();
+    // Keyboard users land back on the row they renamed, without waiting for a paint.
+    await waitFor(() =>
+      expect(document.activeElement?.getAttribute("aria-label")).toBe("Rename Fix the login bug"),
+    );
+    await waitFor(() => expect(listSessionsMock).toHaveBeenCalledTimes(2));
+    expect(screen.getByText("Fix the login bug")).toBeDefined();
+    // Renaming never opens the session.
+    expect(bindProjectMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps the editor open with the typed name when a rename fails, and Escape cancels", async () => {
+    const renameSession = vi.fn(async () => {
+      throw new Error("That session is no longer in this project's list.");
+    });
+    getSettingsMock.mockResolvedValue({ projectsRoot: "/Users/dev", configured: true });
+    waitForReadyMock.mockResolvedValue();
+    listProjectsMock.mockResolvedValue([PROJECT]);
+    listSessionsMock.mockResolvedValue([NATIVE_SESSION]);
+    render(
+      <ProjectPicker
+        onChosen={vi.fn()}
+        bindProject={bindProjectMock}
+        renameSession={renameSession}
+        initialProjectPath={PROJECT.path}
+      />,
+    );
+    await screen.findByText(NATIVE_SESSION.preview);
+
+    fireEvent.click(screen.getByRole("button", { name: `Rename ${NATIVE_SESSION.preview}` }));
+    const input = screen.getByRole("textbox", { name: "Session name" }) as HTMLInputElement;
+    fireEvent.change(input, { target: { value: "Release prep" } });
+    fireEvent.submit(input.closest("form") as HTMLFormElement);
+
+    const alert = await screen.findByRole("alert");
+    expect(
+      within(alert).getByText("Couldn’t rename this session. Please try again."),
+    ).toBeDefined();
+    expect(input.value).toBe("Release prep");
+    expect(input.getAttribute("aria-describedby")).toBe(alert.id);
+
+    fireEvent.keyDown(input, { key: "Escape" });
+    expect(screen.queryByRole("textbox", { name: "Session name" })).toBeNull();
+    expect(screen.getByText(NATIVE_SESSION.preview)).toBeDefined();
+    expect(document.activeElement?.getAttribute("aria-label")).toBe(
+      `Rename ${NATIVE_SESSION.preview}`,
+    );
+  });
+
+  it("offers no rename for another tool's transcript", async () => {
+    await renderSessionList([NATIVE_SESSION, FOREIGN_SESSION]);
+
+    expect(screen.getByRole("button", { name: `Rename ${NATIVE_SESSION.preview}` })).toBeDefined();
+    expect(screen.queryByRole("button", { name: `Rename ${FOREIGN_SESSION.preview}` })).toBeNull();
   });
 
   it("keeps a new-session failure above the list", async () => {

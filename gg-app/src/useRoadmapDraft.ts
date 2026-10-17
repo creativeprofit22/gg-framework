@@ -108,7 +108,8 @@ export function useRoadmapDraft(
           if (decision === "approving") {
             const result = await client.approveRoadmapPhaseDraft(draftId);
             if (isCurrent()) dispatch({ type: "approval-result", result });
-            if (generation.active && result.status === "created") onApprovedRef.current?.();
+            if (generation.active && (result.status === "created" || result.status === "edited"))
+              onApprovedRef.current?.();
           } else {
             const result = await client.rejectRoadmapPhaseDraft(draftId);
             if (isCurrent()) dispatch({ type: "rejection-result", result });

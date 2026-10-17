@@ -3,7 +3,10 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import type { RoadmapPhaseDraft } from "@kenkaiiii/gg-core/roadmap-workflow";
+import type {
+  RoadmapPhaseCreateDraft,
+  RoadmapPhaseEditDraft,
+} from "@kenkaiiii/gg-core/roadmap-workflow";
 import {
   ProjectNotesRepository,
   applyNotesPhaseDeletion,
@@ -158,7 +161,7 @@ function approvedPhaseDraft(
   cwd: string,
   basedOnRevision: number,
   phaseIds: string[] = ["approved-phase-1", "approved-phase-2"],
-): RoadmapPhaseDraft {
+): RoadmapPhaseCreateDraft {
   return {
     id: "draft-1",
     projectKey: canonicalProjectKey(cwd),
@@ -180,7 +183,10 @@ function approvedPhaseDraft(
   };
 }
 
-function approvedPhaseDraftWithReference(cwd: string, basedOnRevision: number): RoadmapPhaseDraft {
+function approvedPhaseDraftWithReference(
+  cwd: string,
+  basedOnRevision: number,
+): RoadmapPhaseCreateDraft {
   const draft = approvedPhaseDraft(cwd, basedOnRevision);
   draft.references = [
     {
@@ -4225,6 +4231,213 @@ describe("ProjectNotesRepository approved phase creation", () => {
       status: "ok",
       snapshot: { revision: 1, document: { phases: [{ id: "phase-1" }] } },
     });
+  });
+});
+
+function approvedPhaseEditDraft(cwd: string, basedOnRevision: number): RoadmapPhaseEditDraft {
+  return {
+    kind: "edit",
+    id: "edit-draft-1",
+    projectKey: canonicalProjectKey(cwd),
+    basedOnRevision,
+    createdAt: NOW,
+    createdBySessionId: "session-draft",
+    summary: "Clarify the schema phase",
+    phaseId: "phase-1",
+    phaseTitle: "Add authoritative schema",
+    basedOnUpdatedAt: NOW,
+    changes: [
+      { field: "title", before: "Add authoritative schema", after: "Add the authoritative schema" },
+      {
+        field: "doneWhen",
+        before: ["Round-trip passes", "Malformed data is rejected"],
+        after: ["Round-trip passes", "Malformed data is rejected with a path"],
+      },
+    ],
+    status: "pending",
+  };
+}
+
+const EDIT_LATER = "2026-07-26T08:00:00.000Z";
+
+async function readNotesFiles(paths: { primary: string; backup: string }): Promise<string[]> {
+  return Promise.all([fs.readFile(paths.primary, "utf8"), fs.readFile(paths.backup, "utf8")]);
+}
+
+describe("ProjectNotesRepository approved phase edit", () => {
+  it("commits only the approved fields in one revision and leaves other phases untouched", async () => {
+    const cwd = "/work/approved-phase-edit";
+    const repository = new ProjectNotesRepository(await tempAgentDir());
+    const initial = notes("edit baseline");
+    await repository.migrate(cwd, initial);
+
+    await expect(
+      repository.applyApprovedPhaseEdit(cwd, approvedPhaseEditDraft(cwd, 1), EDIT_LATER),
+    ).resolves.toEqual({ status: "edited", revision: 2, phaseId: "phase-1" });
+
+    const loaded = await repository.load(cwd);
+    if (loaded.status !== "ok") throw new Error("expected Notes to load");
+    expect(loaded.snapshot.revision).toBe(2);
+    expect(loaded.snapshot.document.phases).toEqual([
+      {
+        ...initial.phases[0]!,
+        title: "Add the authoritative schema",
+        doneWhen: ["Round-trip passes", "Malformed data is rejected with a path"],
+        updatedAt: EDIT_LATER,
+      },
+    ]);
+    expect(loaded.snapshot.document.updatedAt).toBe(EDIT_LATER);
+    expect(loaded.snapshot.document.references).toEqual(initial.references);
+  });
+
+  it("still applies after an unrelated revision bump and keeps the other phases intact", async () => {
+    const cwd = "/work/approved-phase-edit-unrelated";
+    const repository = new ProjectNotesRepository(await tempAgentDir());
+    await repository.migrate(cwd, notes("unrelated baseline"));
+    await expect(
+      repository.createApprovedPhases(cwd, approvedPhaseDraft(cwd, 1)),
+    ).resolves.toMatchObject({ status: "created", revision: 2 });
+    const before = await repository.load(cwd);
+    if (before.status !== "ok") throw new Error("expected Notes to load");
+
+    await expect(
+      repository.applyApprovedPhaseEdit(cwd, approvedPhaseEditDraft(cwd, 1), EDIT_LATER),
+    ).resolves.toEqual({ status: "edited", revision: 3, phaseId: "phase-1" });
+
+    const after = await repository.load(cwd);
+    if (after.status !== "ok") throw new Error("expected Notes to load");
+    expect(after.snapshot.document.phases.slice(1)).toEqual(
+      before.snapshot.document.phases.slice(1),
+    );
+    expect(after.snapshot.document.phases[0]!.title).toBe("Add the authoritative schema");
+  });
+
+  it("refuses with phase-changed after a UI save to the target phase and writes nothing", async () => {
+    const cwd = "/work/approved-phase-edit-changed";
+    const repository = new ProjectNotesRepository(await tempAgentDir());
+    const initial = notes("changed baseline");
+    await repository.migrate(cwd, initial);
+    const uiEdited = structuredClone(initial);
+    uiEdited.phases[0]!.goal = "Persist structured roadmap data safely";
+    uiEdited.phases[0]!.updatedAt = EDIT_LATER;
+    uiEdited.updatedAt = EDIT_LATER;
+    await expect(repository.save(cwd, 1, uiEdited)).resolves.toMatchObject({ status: "ok" });
+    const paths = repository.paths(cwd);
+    const filesBefore = await readNotesFiles(paths);
+
+    await expect(
+      repository.applyApprovedPhaseEdit(cwd, approvedPhaseEditDraft(cwd, 1), EDIT_LATER),
+    ).resolves.toEqual({ status: "phase-changed", phaseId: "phase-1" });
+    expect(await readNotesFiles(paths)).toEqual(filesBefore);
+  });
+
+  it.each([
+    [
+      "done",
+      (document: NotesDocumentV3) => {
+        const phase = document.phases[0]!;
+        phase.status = "done";
+        phase.session = null;
+        phase.completedAt = NOW;
+        phase.overrides.status = { value: "done", source: "user", updatedAt: NOW };
+        phase.lifecycleEvents = [
+          {
+            id: "manual-done",
+            fromStatus: "in-progress",
+            toStatus: "done",
+            source: "user",
+            timestamp: NOW,
+            reason: null,
+            kind: "other",
+          },
+        ];
+      },
+    ],
+    [
+      "archived",
+      (document: NotesDocumentV3) => {
+        document.phases[0]!.archivedAt = NOW;
+      },
+    ],
+  ] as const)("refuses a %s phase without writing", async (reason, prepare) => {
+    const cwd = `/work/approved-phase-edit-${reason}`;
+    const repository = new ProjectNotesRepository(await tempAgentDir());
+    const document = notes(`${reason} baseline`);
+    prepare(document);
+    await expect(repository.migrate(cwd, document)).resolves.toMatchObject({ status: "ok" });
+    const paths = repository.paths(cwd);
+    const filesBefore = await readNotesFiles(paths);
+
+    await expect(
+      repository.applyApprovedPhaseEdit(cwd, approvedPhaseEditDraft(cwd, 1), EDIT_LATER),
+    ).resolves.toEqual({ status: "phase-not-editable", phaseId: "phase-1", reason });
+    expect(await readNotesFiles(paths)).toEqual(filesBefore);
+  });
+
+  it("refuses a deleted phase without writing", async () => {
+    const cwd = "/work/approved-phase-edit-deleted";
+    const repository = new ProjectNotesRepository(await tempAgentDir());
+    const document = notes("deleted baseline");
+    document.phases[0]!.session = null;
+    document.phases[0]!.reminder = null;
+    await repository.migrate(cwd, document);
+    const deleted = await repository.mutatePhaseDeletion(
+      cwd,
+      {
+        version: 1,
+        action: "delete",
+        operationId: "delete-edit-target",
+        phaseId: "phase-1",
+        expectedProjectKey: canonicalProjectKey(cwd),
+        expectedRevision: 1,
+        expectedGeneration: 0,
+      },
+      async () => null,
+      EDIT_LATER,
+    );
+    expect(deleted).toMatchObject({ status: "committed" });
+    const paths = repository.paths(cwd);
+    const filesBefore = await readNotesFiles(paths);
+
+    await expect(
+      repository.applyApprovedPhaseEdit(cwd, approvedPhaseEditDraft(cwd, 1), EDIT_LATER),
+    ).resolves.toEqual({ status: "phase-not-editable", phaseId: "phase-1", reason: "deleted" });
+    expect(await readNotesFiles(paths)).toEqual(filesBefore);
+  });
+
+  it("rejects create drafts, invalid edit drafts, and foreign projects without writing", async () => {
+    const cwd = "/work/approved-phase-edit-invalid";
+    const repository = new ProjectNotesRepository(await tempAgentDir());
+    await repository.migrate(cwd, notes("invalid baseline"));
+    const paths = repository.paths(cwd);
+    const filesBefore = await readNotesFiles(paths);
+    const unchanged = approvedPhaseEditDraft(cwd, 1);
+    unchanged.changes = [{ field: "goal", before: "Same", after: "Same" }];
+
+    await expect(
+      repository.applyApprovedPhaseEdit(cwd, unchanged, EDIT_LATER),
+    ).resolves.toMatchObject({ status: "invalid-proposal" });
+    await expect(
+      repository.applyApprovedPhaseEdit(
+        cwd,
+        approvedPhaseDraft(cwd, 1) as unknown as RoadmapPhaseEditDraft,
+        EDIT_LATER,
+      ),
+    ).resolves.toMatchObject({ status: "invalid-proposal" });
+    await expect(
+      repository.applyApprovedPhaseEdit(
+        cwd,
+        approvedPhaseEditDraft("/work/elsewhere", 1),
+        EDIT_LATER,
+      ),
+    ).resolves.toEqual({ status: "proposal-project-mismatch" });
+    await expect(
+      repository.createApprovedPhases(
+        cwd,
+        approvedPhaseEditDraft(cwd, 1) as unknown as RoadmapPhaseCreateDraft,
+      ),
+    ).resolves.toMatchObject({ status: "invalid-proposal" });
+    expect(await readNotesFiles(paths)).toEqual(filesBefore);
   });
 });
 

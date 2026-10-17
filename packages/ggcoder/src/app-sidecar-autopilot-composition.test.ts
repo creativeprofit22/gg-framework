@@ -82,6 +82,7 @@ async function pane(
   const events = vi.fn();
   const review = vi.fn(async () => "all-clear" as const);
   const programmaticChat = { dispose: vi.fn((): void => {}) };
+  const phaseLeaseRuntime = { stopHeartbeat: vi.fn((): void => {}) };
   const context = vm.createContext({
     mode,
     cwd,
@@ -119,7 +120,7 @@ async function pane(
     // Repo polls are daemon-wide shared subscriptions (upstream repo-polls).
     dirtySub: { unsubscribe: () => {} },
     gitHubCountsSub: undefined,
-    phaseLeaseHeartbeat: null,
+    phaseLeaseRuntime,
     ciPoll: { unsubscribe: () => {} },
     healthPoll: { unsubscribe: () => {} },
     // Upstream 0.87.1 dispose: abort owned work + cancel HF pull, goal-aware repo watch.
@@ -186,6 +187,7 @@ async function pane(
     session,
     review,
     programmaticChat,
+    phaseLeaseRuntime,
     toggle: (enabled: boolean) =>
       new Promise((resolve) => api.request({ body: JSON.stringify({ enabled }) }, { resolve })),
     turn: () => runUserTurn(api.userTurnDeps, "Implement change", prompt, false),
@@ -230,8 +232,10 @@ describe("live project Autopilot session composition", () => {
     await a.toggle(false);
     expect(b.stateSnapshot().autopilot).toBe(false);
     expect(b.programmaticChat.dispose).not.toHaveBeenCalled();
+    expect(b.phaseLeaseRuntime.stopHeartbeat).not.toHaveBeenCalled();
     await b.dispose();
     expect(b.programmaticChat.dispose).toHaveBeenCalledExactlyOnceWith();
+    expect(b.phaseLeaseRuntime.stopHeartbeat).toHaveBeenCalledExactlyOnceWith();
     const count = b.events.mock.calls.length;
     await a.toggle(true);
     expect(b.events).toHaveBeenCalledTimes(count);
@@ -259,6 +263,7 @@ describe("live project Autopilot session composition", () => {
     await Promise.all([a.dispose(), other.dispose(), chat.dispose(), late.dispose()]);
     for (const current of [a, b, other, chat, late]) {
       expect(current.programmaticChat.dispose).toHaveBeenCalledExactlyOnceWith();
+      expect(current.phaseLeaseRuntime.stopHeartbeat).toHaveBeenCalledExactlyOnceWith();
     }
   });
 
@@ -273,7 +278,9 @@ describe("live project Autopilot session composition", () => {
     await current.toggle(false);
     expect(current.stateSnapshot().autopilot).toBe(false);
     expect(current.programmaticChat.dispose).not.toHaveBeenCalled();
+    expect(current.phaseLeaseRuntime.stopHeartbeat).not.toHaveBeenCalled();
     await current.dispose();
     expect(current.programmaticChat.dispose).toHaveBeenCalledExactlyOnceWith();
+    expect(current.phaseLeaseRuntime.stopHeartbeat).toHaveBeenCalledExactlyOnceWith();
   });
 });

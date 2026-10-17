@@ -50,6 +50,19 @@ describe("Roadmap draft route protocol", () => {
     expect(
       roadmapPhaseDraftApprovalHttpStatus({ status: "created", revision: 2, phaseIds: ["p"] }),
     ).toBe(200);
+    expect(
+      roadmapPhaseDraftApprovalHttpStatus({ status: "edited", revision: 2, phaseId: "p" }),
+    ).toBe(200);
+    expect(roadmapPhaseDraftApprovalHttpStatus({ status: "phase-changed", phaseId: "p" })).toBe(
+      409,
+    );
+    expect(
+      roadmapPhaseDraftApprovalHttpStatus({
+        status: "phase-not-editable",
+        phaseId: "p",
+        reason: "done",
+      }),
+    ).toBe(409);
     expect(roadmapPhaseDraftApprovalHttpStatus({ status: "proposal-not-found" })).toBe(404);
     expect(
       roadmapPhaseDraftApprovalHttpStatus({

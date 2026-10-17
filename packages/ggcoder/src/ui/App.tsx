@@ -3,7 +3,7 @@ import { Box, useStdout } from "ink";
 import { useTerminalSize } from "./hooks/useTerminalSize.js";
 import { useChatLayoutMeasurements } from "./hooks/useChatLayoutMeasurements.js";
 import { useTaskPickerController } from "./hooks/useTaskPickerController.js";
-import { admitTerminalTask } from "./task-execution.js";
+import { admitTerminalTask, settleTerminalTask } from "./task-execution.js";
 import { useModeState } from "./hooks/useModeState.js";
 import { useSessionPersistence } from "./hooks/useSessionPersistence.js";
 import { useContextCompaction } from "./hooks/useContextCompaction.js";
@@ -96,7 +96,7 @@ import {
   splitAssistantStreamingText,
   estimateRenderedRows,
 } from "./utils/assistant-stream-split.js";
-import { getNextRunnableTask } from "../core/tasks-store.js";
+import { getNextRunnableTask, type TaskRunSettlement } from "../core/tasks-store.js";
 import type { TerminalHistoryPrinter } from "./terminal-history.js";
 import { buildUserContentWithAttachments } from "./prompt-routing.js";
 import { submitPromptCommand } from "./submit-prompt-command.js";
@@ -331,6 +331,7 @@ export interface AppProps {
     isAgentRunning?: boolean;
     pendingResetUI?: boolean;
     runAllTasks?: boolean;
+    runningTaskId?: string;
     planMode?: boolean;
     sessionStats?: SessionStats;
     idealReviewEnabled?: boolean;
@@ -474,6 +475,31 @@ export function App(props: AppProps) {
     (title: string, prompt: string, taskId: string, unattended: boolean) => void
   >(() => {});
   const cwdRef = useRef(props.cwd);
+  // Task run owned by this terminal. Backed by sessionStore when present so the
+  // id survives the resetUI remount that actually runs the task prompt.
+  const runningTaskRef = useRef<{ runningTaskId?: string }>(props.sessionStore ?? {});
+  const stopRunAllTasks = useCallback(() => {
+    runAllTasksRef.current = false;
+    if (props.sessionStore) props.sessionStore.runAllTasks = false;
+    setRunAllTasks(false);
+  }, [props.sessionStore]);
+  // Settle the running task like the desktop runner and pause Run All on a
+  // blocked task. Returns undefined when no task run is active.
+  const settleRunningTask = useCallback(
+    (settlement: TaskRunSettlement, taskId = runningTaskRef.current.runningTaskId) => {
+      if (taskId === undefined) return undefined;
+      if (runningTaskRef.current.runningTaskId === taskId) {
+        runningTaskRef.current.runningTaskId = undefined;
+      }
+      const mayAdvance = settleTerminalTask(cwdRef.current, taskId, settlement);
+      if (!mayAdvance && runAllTasksRef.current) {
+        stopRunAllTasks();
+        log("INFO", "tasks", "Run-all paused on blocked task", { taskId });
+      }
+      return mayAdvance;
+    },
+    [stopRunAllTasks],
+  );
   // The project root is fixed for the session's lifetime, so this never changes.
   const displayedCwd = props.cwd;
   // /rewind overlay: holds the checkpoint list while the picker is open.
@@ -1671,6 +1697,9 @@ export function App(props: AppProps) {
             });
           }
 
+          // Settle the task run first: without completion evidence it ends
+          // blocked (not-marked-done) and Run All pauses on it.
+          settleRunningTask({ kind: "succeeded", reviewCleared: false });
           // Run-all: auto-start the next runnable task after a short delay.
           if (runAllTasksRef.current) {
             setTimeout(() => {
@@ -1686,10 +1715,11 @@ export function App(props: AppProps) {
             }, 500);
           }
         },
-        [],
+        [settleRunningTask],
       ),
       onAborted: useCallback(() => {
         log("WARN", "agent", "Agent run aborted by user");
+        settleRunningTask({ kind: "blocked", reason: "cancelled" });
         setDoneStatus(null);
         setLiveItems((prev) => {
           const next = prev.map((item): CompletedItem => {
@@ -1733,7 +1763,7 @@ export function App(props: AppProps) {
           });
           return [...next, { kind: "stopped", text: "Request was stopped.", id: getId() }];
         });
-      }, []),
+      }, [settleRunningTask]),
       onQueuedStart: useCallback(
         (content: UserContent) => {
           // When a queued message starts processing, show it as a UserItem
@@ -1914,7 +1944,10 @@ export function App(props: AppProps) {
         { kind: "info", text: action.infoText as string, id: getId() },
       ]);
     }
+    // Captured now: onDone's fallback clears the slot before a failure surfaces.
+    const runTaskId = runningTaskRef.current.runningTaskId;
     void agentLoop.run(action.prompt, { unattended: action.unattended }).catch((err: unknown) => {
+      settleRunningTask({ kind: "blocked", reason: "run-failed" }, runTaskId);
       if (action.unattended) {
         runAllTasksRef.current = false;
         if (sessionStore) sessionStore.runAllTasks = false;
@@ -2578,6 +2611,7 @@ export function App(props: AppProps) {
         setLiveItems((prev) => [...prev, toErrorItem(error, getId())]);
         return;
       }
+      runningTaskRef.current.runningTaskId = taskId;
       const taskCwd = cwdRef.current;
       const shortId = taskId.slice(0, 8);
       const completionHint =
@@ -2640,12 +2674,14 @@ export function App(props: AppProps) {
           }
           await agentLoop.run(fullPrompt, { unattended });
         } catch (err) {
+          // A failed run overrides any settlement onDone's fallback made first.
+          settleRunningTask({ kind: "blocked", reason: "run-failed" }, taskId);
           if (agentLoop.isRunning) agentLoop.reset();
           setLiveItems((prev) => [...prev, toErrorItem(err, getId())]);
         }
       })();
     },
-    [agentLoop, currentModel, currentProvider, props],
+    [agentLoop, currentModel, currentProvider, props, settleRunningTask],
   );
   // Keep the ref in sync so stale closures (task picker, onDone run-all) can
   // start a task without being recreated each render.

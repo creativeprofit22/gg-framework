@@ -287,7 +287,7 @@ export async function runDiscoverySmoke({ client, click, waitFor, requests, inpu
   );
   assert.equal(
     await client.evaluate(
-      `document.querySelector('.programmatic-chat')?.textContent.includes('Setup is read-only; deterministic checks were not run.')`,
+      `document.querySelector('.programmatic-chat')?.textContent.includes('Setup is read-only; saved checks were not run.')`,
     ),
     true,
   );

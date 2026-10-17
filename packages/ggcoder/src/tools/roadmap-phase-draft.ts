@@ -120,7 +120,7 @@ const roadmapPhaseDraftInputSchema: JsonSchema = {
   additionalProperties: false,
 };
 
-function boundedText(maxLength: number, label: string) {
+export function boundedText(maxLength: number, label: string) {
   return z
     .string()
     .transform(normalizeRoadmapWorkflowText)
@@ -131,7 +131,7 @@ function boundedText(maxLength: number, label: string) {
     );
 }
 
-const DoneWhen = z
+export const DoneWhen = z
   .array(boundedText(ROADMAP_PHASE_DONE_WHEN_ITEM_MAX_LENGTH, "Completion criterion"))
   .min(1)
   .max(ROADMAP_PHASE_DONE_WHEN_MAX_ITEMS)

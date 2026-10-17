@@ -127,8 +127,17 @@ async function harness(provider = "anthropic") {
     markTaskInProgress: (_cwd: string, id: string) => {
       tasks[Number(id)] = "in-progress";
     },
-    finalizeTaskRun: (_cwd: string, id: string, success: boolean) => {
-      tasks[Number(id)] = success ? "done" : "blocked";
+    // Mirrors tasks-store finalizeTaskRun: done only with completion evidence.
+    finalizeTaskRun: (
+      _cwd: string,
+      id: string,
+      settlement: { kind: "succeeded"; reviewCleared: boolean } | { kind: "blocked" },
+    ) => {
+      const index = Number(id);
+      const done =
+        settlement.kind === "succeeded" && (tasks[index] === "done" || settlement.reviewCleared);
+      tasks[index] = done ? "done" : "blocked";
+      return tasks[index];
     },
     pruneDoneTasksSync: () => tasks,
     AppSidecarPlanGate,
@@ -472,7 +481,7 @@ describe("task route admission", () => {
 
   it("refuses a task whose status is not manually runnable", async () => {
     const h = await harness();
-    h.context.finalizeTaskRun("project", "0", true); // status → done
+    h.context.finalizeTaskRun("project", "0", { kind: "succeeded", reviewCleared: true }); // status → done
     expect(await h.request(false, "0")).toBe(409);
     expect(h.lastBody()?.error).toBe("task_not_runnable");
     expect(h.runTaskById).not.toHaveBeenCalled();

@@ -479,6 +479,27 @@ describe("useAgentEvents", () => {
       ),
     );
     expect(deps.onRoadmapPhaseDraftRefresh).toHaveBeenCalledTimes(2);
+    act(() =>
+      hook.result.current.handleEvent(
+        ev("tool_call_start", { toolCallId: "edit", name: "roadmap_phase_edit", args: {} }),
+      ),
+    );
+    act(() =>
+      hook.result.current.handleEvent(
+        ev("tool_call_end", { toolCallId: "edit", result: "proposal-pending" }),
+      ),
+    );
+    expect(deps.onRoadmapPhaseDraftRefresh).toHaveBeenCalledTimes(3);
+    act(() =>
+      hook.result.current.handleEvent(
+        ev("tool_call_end", {
+          toolCallId: "unknown-edit",
+          name: "roadmap_phase_edit",
+          result: "edited",
+        }),
+      ),
+    );
+    expect(deps.onRoadmapPhaseDraftRefresh).toHaveBeenCalledTimes(3);
   });
   it("invalidates opportunities from tool activity without trusting tool output as state", () => {
     const { hook, deps } = setup();

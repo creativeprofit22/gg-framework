@@ -79,9 +79,12 @@ import {
 } from "@kenkaiiii/gg-core/project-notes";
 export * from "@kenkaiiii/gg-core/project-notes";
 import {
-  validateRoadmapPhaseDraft,
-  type RoadmapPhaseDraft,
+  applyRoadmapPhaseEdit,
+  validateRoadmapPhaseCreateDraft,
+  validateRoadmapPhaseEditDraft,
+  type RoadmapPhaseCreateDraft,
   type RoadmapPhaseDraftApprovalResult,
+  type RoadmapPhaseEditDraft,
 } from "@kenkaiiii/gg-core/roadmap-workflow";
 
 export interface StoredProjectNotesV1 {
@@ -1301,6 +1304,24 @@ function validateGenericSaveAdvancementAuthority(
   return null;
 }
 
+/** Authority checks shared by generic UI saves and approved phase edits, in fixed order. */
+function validateGenericSaveTransition(
+  previous: NotesDocumentV3,
+  next: NotesDocumentV3,
+): NotesValidationError | null {
+  return (
+    validateGenericSaveDeletionAuthority(previous, next) ??
+    validateImmutableReferenceCapturedAt(previous, next) ??
+    validateAppendOnlyLifecycleEvents(previous, next) ??
+    validateAppendOnlyRoadmapEvents(previous, next) ??
+    validateGenericSaveEventSuffixes(previous, next) ??
+    validateGenericSaveCompletionAuthority(previous, next) ??
+    validateGenericSavePendingLifecycleAuthority(previous, next) ??
+    validateGenericSaveReminderAuthority(previous, next) ??
+    validateGenericSaveAdvancementAuthority(previous, next)
+  );
+}
+
 function phaseLaunchContext(
   document: NotesDocumentV3,
   phase: NotesPhase,
@@ -1473,57 +1494,11 @@ export class ProjectNotesRepository {
       if (current.envelope.revision !== expectedRevision) {
         return { status: "conflict", snapshot: toSnapshot(current.envelope) };
       }
-      const deletionAuthorityError = validateGenericSaveDeletionAuthority(
+      const transitionError = validateGenericSaveTransition(
         current.envelope.document,
         validated.document,
       );
-      if (deletionAuthorityError) return { status: "invalid", error: deletionAuthorityError };
-      const capturedAtError = validateImmutableReferenceCapturedAt(
-        current.envelope.document,
-        validated.document,
-      );
-      if (capturedAtError) return { status: "invalid", error: capturedAtError };
-      const appendOnlyError = validateAppendOnlyLifecycleEvents(
-        current.envelope.document,
-        validated.document,
-      );
-      if (appendOnlyError) return { status: "invalid", error: appendOnlyError };
-      const roadmapAppendOnlyError = validateAppendOnlyRoadmapEvents(
-        current.envelope.document,
-        validated.document,
-      );
-      if (roadmapAppendOnlyError) return { status: "invalid", error: roadmapAppendOnlyError };
-      const eventAuthorityError = validateGenericSaveEventSuffixes(
-        current.envelope.document,
-        validated.document,
-      );
-      if (eventAuthorityError) return { status: "invalid", error: eventAuthorityError };
-      const completionAuthorityError = validateGenericSaveCompletionAuthority(
-        current.envelope.document,
-        validated.document,
-      );
-      if (completionAuthorityError) {
-        return { status: "invalid", error: completionAuthorityError };
-      }
-      const pendingLifecycleAuthorityError = validateGenericSavePendingLifecycleAuthority(
-        current.envelope.document,
-        validated.document,
-      );
-      if (pendingLifecycleAuthorityError) {
-        return { status: "invalid", error: pendingLifecycleAuthorityError };
-      }
-      const reminderAuthorityError = validateGenericSaveReminderAuthority(
-        current.envelope.document,
-        validated.document,
-      );
-      if (reminderAuthorityError) return { status: "invalid", error: reminderAuthorityError };
-      const advancementAuthorityError = validateGenericSaveAdvancementAuthority(
-        current.envelope.document,
-        validated.document,
-      );
-      if (advancementAuthorityError) {
-        return { status: "invalid", error: advancementAuthorityError };
-      }
+      if (transitionError) return { status: "invalid", error: transitionError };
 
       const next: StoredProjectNotes = {
         storeVersion: current.envelope.storeVersion,
@@ -1661,9 +1636,9 @@ export class ProjectNotesRepository {
 
   async createApprovedPhases(
     cwd: string,
-    request: RoadmapPhaseDraft,
+    request: RoadmapPhaseCreateDraft,
   ): Promise<RoadmapPhaseDraftApprovalResult> {
-    const validated = validateRoadmapPhaseDraft(request);
+    const validated = validateRoadmapPhaseCreateDraft(request);
     if (!validated.ok) {
       return {
         status: "invalid-proposal",
@@ -1771,6 +1746,67 @@ export class ProjectNotesRepository {
         revision: next.revision,
         phaseIds: phases.map((phase) => phase.id),
       };
+    });
+
+    if (outcome.status === "missing") return { status: "notes-missing" };
+    if (outcome.status === "corrupt") return { status: "notes-corrupt" };
+    if (outcome.status === "unsupported")
+      return { status: "storage-failed", message: outcome.message };
+    return outcome;
+  }
+
+  /**
+   * Commits a user-approved phase edit through the same authority checks as a generic UI save.
+   * Unrelated Notes revisions do not invalidate the edit; any change to the target phase does.
+   */
+  async applyApprovedPhaseEdit(
+    cwd: string,
+    request: RoadmapPhaseEditDraft,
+    timestamp = new Date().toISOString(),
+  ): Promise<RoadmapPhaseDraftApprovalResult> {
+    const validated = validateRoadmapPhaseEditDraft(request);
+    if (!validated.ok) {
+      return {
+        status: "invalid-proposal",
+        message: `${validated.error.path}: ${validated.error.message}`,
+      };
+    }
+    const draft = validated.value;
+    if (canonicalProjectKey(draft.projectKey) !== canonicalProjectKey(cwd)) {
+      return { status: "proposal-project-mismatch" };
+    }
+
+    const outcome = await this.withLockedCurrent<
+      | Extract<RoadmapPhaseDraftApprovalResult, { status: "edited" }>
+      | Extract<RoadmapPhaseDraftApprovalResult, { status: "phase-changed" }>
+      | Extract<RoadmapPhaseDraftApprovalResult, { status: "phase-not-editable" }>
+      | Extract<RoadmapPhaseDraftApprovalResult, { status: "invalid-proposal" }>
+    >(cwd, async (paths, current) => {
+      // Re-check under the lock: the phase may have changed since the draft was proposed.
+      const applied = applyRoadmapPhaseEdit(current.document, draft, timestamp);
+      if (applied.status !== "ok") return applied;
+      const validatedDocument = coerceNotesDocumentV3(applied.document);
+      if (!validatedDocument.ok) {
+        return {
+          status: "invalid-proposal",
+          message: `${validatedDocument.error.path}: ${validatedDocument.error.message}`,
+        };
+      }
+      const transitionError = validateGenericSaveTransition(
+        current.document,
+        validatedDocument.document,
+      );
+      if (transitionError) {
+        return {
+          status: "invalid-proposal",
+          message: `${transitionError.path}: ${transitionError.message}`,
+        };
+      }
+      const next = await this.commitDocument(paths, current, validatedDocument.document, {
+        validationMode: "trusted",
+        context: "Approved phase edit commit",
+      });
+      return { status: "edited", revision: next.revision, phaseId: draft.phaseId };
     });
 
     if (outcome.status === "missing") return { status: "notes-missing" };

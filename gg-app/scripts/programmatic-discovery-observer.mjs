@@ -13,7 +13,7 @@ export async function observeDiscoveryHandoff(client) {
       '{ boundary: "ipc", response, nativeGeneration: before.generation }',
     ],
     [
-      "/src/AgentPane.tsx",
+      "/src/useProgrammaticChat.ts",
       "const response = await client.programmatic(active)",
       'active.action === "review-candidate"',
       '{ boundary: "pane", response, generation, epoch, current: current() }',
@@ -33,7 +33,7 @@ export async function observeDiscoveryHandoff(client) {
     assert.equal(matches.length, 1, `One current transformed observation site: ${path}`);
     const { breakpointId, locations } = await client.send("Debugger.setBreakpointByUrl", {
       urlRegex: `${path.replaceAll(".", "\\.")}(?:\\?.*)?$`,
-      lineNumber: matches[0] + (path === "/src/AgentPane.tsx" ? 1 : 0),
+      lineNumber: matches[0] + (path === "/src/useProgrammaticChat.ts" ? 1 : 0),
       condition: `(${guard}) && window.fixtureDiscoveryTrace.length < 20 && (window.fixtureDiscoveryTrace.push(JSON.parse(JSON.stringify(${value}))), false)`,
     });
     assert.ok(locations.length > 0, `Loaded native observation site: ${path}`);

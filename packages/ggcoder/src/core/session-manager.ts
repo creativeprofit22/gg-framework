@@ -1550,6 +1550,28 @@ export class SessionManager {
     }
   }
 
+  /**
+   * Name a session: append a label entry, which session listings and resume
+   * read (last one wins) ahead of the first prompt. Unlike `appendEntry`, a
+   * failure throws so a rename never reports success without being saved.
+   * The file's mtime is restored afterwards: naming a session is not activity,
+   * and listings sort by mtime, so a rename must not move it to the top.
+   */
+  async appendLabel(sessionPath: string, label: string): Promise<void> {
+    const entry: LabelEntry = {
+      type: "label",
+      id: crypto.randomUUID(),
+      parentId: null,
+      timestamp: new Date().toISOString(),
+      label,
+    };
+    await this.withSessionMutationLock(sessionPath, async (writablePath) => {
+      const before = await fs.stat(writablePath);
+      await this.appendEntryUnlocked(writablePath, entry, true);
+      await fs.utimes(writablePath, before.atime, before.mtime);
+    });
+  }
+
   async appendRequiredEntry(sessionPath: string, entry: SessionEntry): Promise<void> {
     const requiredCustomKinds = new Set([
       ACTIVE_PHASE_CONTEXT_CLEAR_KIND,

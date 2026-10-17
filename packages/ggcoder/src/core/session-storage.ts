@@ -66,6 +66,15 @@ export function plainSessionPath(filePath: string): string {
   return filePath.endsWith(SESSION_ARCHIVE_SUFFIX) ? filePath.slice(0, -3) : filePath;
 }
 
+/** Whether two paths name the same transcript, plain or archived, in any Windows casing. */
+export function sameSessionFile(left: string, right: string): boolean {
+  const key = (filePath: string): string => {
+    const resolved = path.resolve(plainSessionPath(filePath));
+    return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+  };
+  return key(left) === key(right);
+}
+
 export function archiveSessionPath(filePath: string): string {
   const plain = plainSessionPath(filePath);
   return `${plain}.gz`;

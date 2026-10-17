@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup } from "@testing-library/react";
 import { RoadmapPhaseDraftReviewModal } from "./RoadmapPhaseDraftReviewModal";
@@ -185,6 +185,104 @@ describe("RoadmapPhaseDraftReviewModal", () => {
     ).toBe(true);
     expect(
       (screen.getByRole("button", { name: "Reject draft" }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+  });
+});
+
+const editDraft = {
+  kind: "edit" as const,
+  id: "draft-edit-1",
+  projectKey: "/work",
+  basedOnRevision: 14,
+  createdAt: "2026-08-05T12:00:00.000Z",
+  createdBySessionId: "session-1",
+  summary: "Tighten the approval phase criteria.",
+  phaseId: "phase-approval",
+  phaseTitle: "Approval UI",
+  basedOnUpdatedAt: "2026-08-04T12:00:00.000Z",
+  changes: [
+    { field: "goal" as const, before: "", after: "Require an explicit decision." },
+    {
+      field: "doneWhen" as const,
+      before: ["Reject leaves Notes unchanged", "Looks fine"],
+      after: ["Reject leaves Notes unchanged", "Stale edits cannot apply"],
+    },
+  ],
+  status: "pending" as const,
+};
+
+describe("RoadmapPhaseDraftReviewModal phase edits", () => {
+  it("shows only the changed fields as labelled before and after values", () => {
+    renderModal({ draft: editDraft, announcement: "A Roadmap phase edit is ready for review." });
+
+    expect(screen.getByRole("region", { name: "Review Roadmap phase edit" })).toBeTruthy();
+    expect(screen.getByText("Edit proposed from Project Notes revision 14")).toBeTruthy();
+    expect(
+      screen.getByText(/1 phase · 2 changed fields · Nothing changes until you approve/),
+    ).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Approval UI" })).toBeTruthy();
+
+    const fields = within(screen.getByRole("list", { name: "Changed fields" }))
+      .getAllByRole("heading")
+      .map((heading) => heading.textContent);
+    expect(fields).toEqual(["Goal", "Done when"]);
+    expect(screen.queryByRole("heading", { name: "Title" })).toBeNull();
+    expect(screen.queryByRole("heading", { name: "Saved phase prompt" })).toBeNull();
+
+    expect(screen.getAllByText("Before")).toHaveLength(2);
+    expect(screen.getAllByText("After")).toHaveLength(2);
+    expect(screen.getByText("Empty")).toBeTruthy();
+    expect(screen.getByText("Require an explicit decision.")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Create/ })).toBeNull();
+  });
+
+  it("tags removed and added completion criteria in text, not only colour", () => {
+    renderModal({ draft: editDraft });
+
+    const removed = screen.getByText("Looks fine").closest("li");
+    const added = screen.getByText("Stale edits cannot apply").closest("li");
+    expect(removed?.textContent).toContain("Removed");
+    expect(added?.textContent).toContain("Added");
+    for (const kept of screen.getAllByText("Reject leaves Notes unchanged")) {
+      const item = kept.closest("li");
+      expect(item?.textContent).not.toContain("Removed");
+      expect(item?.textContent).not.toContain("Added");
+    }
+  });
+
+  it("offers explicit apply and reject handlers", () => {
+    const props = renderModal({ draft: editDraft });
+
+    fireEvent.click(screen.getByRole("button", { name: "Apply edit" }));
+    fireEvent.click(screen.getByRole("button", { name: "Reject edit" }));
+
+    expect(props.onApprove).toHaveBeenCalledOnce();
+    expect(props.onReject).toHaveBeenCalledOnce();
+  });
+
+  it("disables applying a stale edit but keeps it reviewable and rejectable", () => {
+    renderModal({ draft: { ...editDraft, status: "stale" } });
+
+    const alert = screen.getByRole("alert").textContent ?? "";
+    expect(alert).toContain("This edit is out of date.");
+    expect(alert).toContain("Nothing was saved.");
+    expect((screen.getByRole("button", { name: "Apply edit" }) as HTMLButtonElement).disabled).toBe(
+      true,
+    );
+    expect(
+      (screen.getByRole("button", { name: "Reject edit" }) as HTMLButtonElement).disabled,
+    ).toBe(false);
+    expect(screen.getByText("Stale edits cannot apply")).toBeTruthy();
+  });
+
+  it("disables both decisions while one native call is pending", () => {
+    renderModal({ draft: editDraft, decision: "approving" });
+
+    expect(
+      (screen.getByRole("button", { name: "Applying edit…" }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+    expect(
+      (screen.getByRole("button", { name: "Reject edit" }) as HTMLButtonElement).disabled,
     ).toBe(true);
   });
 });

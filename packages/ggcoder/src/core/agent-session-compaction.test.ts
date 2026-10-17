@@ -9,7 +9,8 @@ import type * as GgAgentModule from "@kenkaiiii/gg-agent";
 import { MODELS } from "./model-registry.js";
 import { estimateConversationTokens } from "./compaction/token-estimator.js";
 import type * as McpModule from "./mcp/index.js";
-import { approvedPlanContentHash } from "./session-manager.js";
+import { approvedPlanContentHash, type SessionManager } from "./session-manager.js";
+import { sameSessionFile } from "./session-storage.js";
 import { useFakeHome } from "../test-support/fake-home.js";
 import { canonicalProjectKey } from "@kenkaiiii/gg-core/project-notes";
 
@@ -496,6 +497,63 @@ describe("AgentSession compaction persistence", () => {
     await reopened.loadSession(after.sessionPath!);
     expect(reopened.getRoadmapPhaseLeaseMarker()).toEqual(marker);
     await reopened.dispose();
+  }, 60_000);
+
+  it("keeps a rename made while a compaction checkpoint is being created (regression)", async () => {
+    // The checkpoint captured the old preview before awaiting its file, and the
+    // label went to the predecessor, so listings reverted to the old name.
+    shouldCompactMock.mockReturnValue(false);
+    compactMock.mockResolvedValue(
+      compactionResult([
+        { role: "system", content: "worker system prompt" },
+        { role: "user", content: "[session compacted] Summary of earlier work." },
+      ]),
+    );
+    agentLoopMock.mockImplementation(async function* (messages: Message[]) {
+      messages.push({ role: "assistant", content: "working on it" });
+      yield { type: "agent_done" };
+    });
+
+    const { AgentSession } = await import("./agent-session.js");
+    const { listRecentSessions } = await import("./project-discovery.js");
+    const session = new AgentSession({
+      provider: "anthropic",
+      model: "claude-test",
+      cwd: tmpProject,
+      systemPrompt: "worker system prompt",
+    });
+    await session.initialize();
+    await session.prompt("Do the task.");
+    const preCompactPath = session.getState().sessionPath;
+
+    const manager = (session as unknown as { sessionManager: SessionManager }).sessionManager;
+    const realCreate = manager.create.bind(manager);
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let createStarted: () => void = () => {};
+    const started = new Promise<void>((resolve) => {
+      createStarted = resolve;
+    });
+    vi.spyOn(manager, "create").mockImplementationOnce(async (...args) => {
+      createStarted();
+      await gate;
+      return realCreate(...args);
+    });
+
+    const compacting = session.compact();
+    await started;
+    const renaming = session.renameSession("New name", true);
+    release();
+    await Promise.all([compacting, renaming]);
+    const postCompactPath = session.getState().sessionPath;
+    await session.dispose();
+
+    expect(postCompactPath).not.toBe(preCompactPath);
+    const rows = await listRecentSessions(tmpProject, 10);
+    const checkpoint = rows.find((row) => sameSessionFile(row.path, postCompactPath ?? ""));
+    expect(checkpoint?.preview).toBe("New name");
   }, 60_000);
 
   it("drops compaction lineage when the session switches to a new conversation", async () => {

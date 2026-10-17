@@ -12,6 +12,7 @@ import {
   type RecentSession,
   type SessionReadCache,
 } from "./core/project-discovery.js";
+import { sameSessionFile } from "./core/session-storage.js";
 import { MOTION_SESSIONS_QUERY, motionSessionsDir } from "./motion-agent/motion-agent.js";
 
 /** Keep deep coding histories visible in the project picker without an unbounded scan. */
@@ -87,6 +88,80 @@ export async function listSidecarSessions(
     .sort((left, right) => right.mtime - left.mtime)
     .slice(0, CHAT_SESSION_LIMIT)
     .map(({ session }) => session);
+}
+
+/** Longest saved session name; listings and resume read labels up to this length. */
+export const SESSION_TITLE_MAX_LENGTH = 80;
+
+/**
+ * A session name as the user typed it, or null when it is empty or too long.
+ * Line breaks, tabs and other control characters collapse to single spaces,
+ * because the name is shown on one line everywhere it appears.
+ */
+export function normalizeSessionTitle(raw: unknown): string | null {
+  if (typeof raw !== "string") return null;
+  const title = raw.replace(/[\s\p{Cc}]+/gu, " ").trim();
+  if (!title || title.length > SESSION_TITLE_MAX_LENGTH) return null;
+  return title;
+}
+
+export interface RenameSidecarSessionInput {
+  cwd: string;
+  /** The same listing selector as `listSidecarSessions`. */
+  requestedAgent: string | null;
+  sessionPath: string;
+  title: unknown;
+  coderSessionsDir: string;
+  options?: ListSidecarSessionsOptions;
+  /**
+   * Rename the session in every live pane persisting to `sessionPath`, saving
+   * it once. False when no pane has it open, so the caller saves the file.
+   */
+  renameLive: (sessionPath: string, title: string) => Promise<boolean>;
+  /** Save the name to an idle session file. */
+  saveLabel: (sessionPath: string, title: string) => Promise<void>;
+}
+
+export type RenameSidecarSessionResult =
+  { ok: true; title: string } | { ok: false; status: 400 | 404; error: string };
+
+/**
+ * Rename one GG Coder session. The webview only names a path, so the path is
+ * accepted only when it is a native row of this very listing: anything else
+ * (another project's file, a Claude Code or Codex transcript, an arbitrary
+ * path) is refused before any write.
+ */
+export async function renameSidecarSession(
+  input: RenameSidecarSessionInput,
+): Promise<RenameSidecarSessionResult> {
+  const title = normalizeSessionTitle(input.title);
+  if (!title) {
+    return {
+      ok: false,
+      status: 400,
+      error: `Session names need 1 to ${SESSION_TITLE_MAX_LENGTH} characters.`,
+    };
+  }
+  const rows = await listSidecarSessions(
+    input.cwd,
+    input.requestedAgent,
+    input.coderSessionsDir,
+    input.options,
+  );
+  const row = rows.find(
+    (session) =>
+      (session.source === undefined || session.source === "ggcoder") &&
+      sameSessionFile(session.path, input.sessionPath),
+  );
+  if (!row) {
+    return {
+      ok: false,
+      status: 404,
+      error: "That session is no longer in this project's list.",
+    };
+  }
+  if (!(await input.renameLive(row.path, title))) await input.saveLabel(row.path, title);
+  return { ok: true, title };
 }
 
 /**

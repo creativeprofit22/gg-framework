@@ -1,6 +1,7 @@
 import type { ProjectNotesSnapshot } from "@kenkaiiii/gg-core/project-notes";
 import {
   ROADMAP_DRAFT_FEEDBACK_MAX_LENGTH,
+  isRoadmapPhaseEditDraft,
   normalizeRoadmapWorkflowText,
   type RoadmapPhaseDraftApprovalResult,
   type RoadmapPhaseDraftRejectionResult,
@@ -11,7 +12,10 @@ import type { AppSidecarRoadmapReconciliationCoordinator } from "./app-sidecar-r
 
 export interface AppSidecarRoadmapDraftDecisionServiceDependencies {
   drafts: AppSidecarRoadmapDraftCoordinator;
-  repository: Pick<ProjectNotesRepository, "createApprovedPhases" | "load">;
+  repository: Pick<
+    ProjectNotesRepository,
+    "applyApprovedPhaseEdit" | "createApprovedPhases" | "load"
+  >;
   reconciliations: AppSidecarRoadmapReconciliationCoordinator;
   onCommittedSnapshot: (snapshot: ProjectNotesSnapshot) => void;
 }
@@ -27,17 +31,23 @@ export class AppSidecarRoadmapDraftDecisionService {
   async approve(cwd: string, draftId: string): Promise<RoadmapPhaseDraftApprovalResult> {
     let committedSnapshot: ProjectNotesSnapshot | null = null;
     const result = await this.dependencies.drafts.approve(cwd, draftId, async (draft) => {
-      const lease = this.dependencies.reconciliations.tryAcquire(cwd, "phase-create");
+      const edit = isRoadmapPhaseEditDraft(draft);
+      const lease = this.dependencies.reconciliations.tryAcquire(
+        cwd,
+        edit ? "phase-edit" : "phase-create",
+      );
       if (!lease) return { status: "reconciliation-in-progress" };
       try {
-        const creation = await this.dependencies.repository.createApprovedPhases(cwd, draft);
-        if (creation.status === "created") {
+        const outcome = edit
+          ? await this.dependencies.repository.applyApprovedPhaseEdit(cwd, draft)
+          : await this.dependencies.repository.createApprovedPhases(cwd, draft);
+        if (outcome.status === "created" || outcome.status === "edited") {
           const loaded = await this.dependencies.repository.load(cwd);
-          if (loaded.status === "ok" && loaded.snapshot.revision >= creation.revision) {
+          if (loaded.status === "ok" && loaded.snapshot.revision >= outcome.revision) {
             committedSnapshot = loaded.snapshot;
           }
         }
-        return creation;
+        return outcome;
       } catch (error) {
         return {
           status: "storage-failed",
@@ -130,11 +140,14 @@ export function roadmapPhaseDraftApprovalHttpStatus(
 ): number {
   switch (result.status) {
     case "created":
+    case "edited":
     case "already-decided":
       return 200;
     case "proposal-not-found":
       return 404;
     case "stale-revision":
+    case "phase-changed":
+    case "phase-not-editable":
     case "proposal-project-mismatch":
     case "reconciliation-in-progress":
       return 409;

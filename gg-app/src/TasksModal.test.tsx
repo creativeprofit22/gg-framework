@@ -174,6 +174,37 @@ describe("TasksModal", () => {
     expect(line.style.color).toBe(expected.style.color);
   });
 
+  it("labels a task Autopilot handed back as needing review, not plain blocked", () => {
+    renderModal([
+      {
+        ...taskWithStatus("blocked"),
+        lastOutcome: { reason: "needs-review", at: "2026-10-17T00:00:00.000Z" },
+      },
+    ]);
+    expect(screen.queryByText("blocked")).toBeNull();
+    const expected = document.createElement("span");
+    expected.style.color = theme.warning;
+    expect(screen.getByText("needs review").style.color).toBe(expected.style.color);
+    // Still retryable: eligibility follows the stored status.
+    expect(screen.getByRole("button", { name: `Retry: ${TITLE}` })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: `Inspect task: ${TITLE}` }));
+    expect(screen.getByText("needs review")).toBeTruthy();
+    expect(screen.getByText(/Last run stopped: Autopilot handed the work to you/u)).toBeTruthy();
+  });
+
+  it.each([
+    ["not-marked-done", /ended without the task being marked done/u],
+    ["interrupted", /GG Coder closed before the run finished/u],
+  ])("explains a %s block", (reason, sentence) => {
+    renderModal([
+      { ...taskWithStatus("blocked"), lastOutcome: { reason, at: "2026-10-17T00:00:00.000Z" } },
+    ]);
+    expect(screen.getByText("blocked")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: `Inspect task: ${TITLE}` }));
+    expect(screen.getByText(sentence)).toBeTruthy();
+  });
+
   it.each([
     ["no recorded outcome", undefined],
     ["an unknown future reason", { reason: "paused-by-policy", at: "2026-09-05T00:00:00.000Z" }],

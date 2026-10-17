@@ -202,8 +202,11 @@ export const PHASE_LEASE_REGRESSION_GATE = Object.freeze([
     marker: "carries the Roadmap phase lease marker into the compaction checkpoint (regression)",
   }),
   // Exercises the daemon's own wiring (orphan-recovery predicate and the
-  // compaction_end hand-off) compiled from app-sidecar.ts, which the unit
-  // tests above cannot see because they construct their own options.
+  // compaction_end hand-off) compiled from app-sidecar.ts and the fork-owned
+  // modules read by readAppSidecarSources() (APP_SIDECAR_SOURCES below); the
+  // lease repository and its hasLiveLocalSession predicate are built in
+  // app-sidecar-roadmap-daemon.ts. The unit tests above cannot see this wiring
+  // because they construct their own options.
   Object.freeze({
     file: "src/app-sidecar-phase-lease-wiring.test.ts",
     marker: "daemon phase-lease wiring (regression: orphaned leases after compaction)",
@@ -403,6 +406,22 @@ export function readIdentityRustShell(srcTauri) {
   ).join("\n");
 }
 
+// The daemon source checked by static guards: app-sidecar.ts plus the fork-owned
+// modules its Local Fork wiring was extracted into.
+const APP_SIDECAR_SOURCES = [
+  "app-sidecar.ts",
+  "app-sidecar-roadmap-daemon.ts",
+  "app-sidecar-phase-lease-runtime.ts",
+  "app-sidecar-roadmap-session-routes.ts",
+  "app-sidecar-local-session-routes.ts",
+];
+
+export function readAppSidecarSources(ggcoderRoot) {
+  return APP_SIDECAR_SOURCES.map((file) =>
+    readFileSync(join(ggcoderRoot, "src", file), "utf8"),
+  ).join("\n");
+}
+
 export function assertIdentityDataRootWiring({ corePaths, sidecarPaths, appSidecar, rustShell }) {
   const requirements = [
     [corePaths.includes("process.env.GG_AGENT_DIR"), "gg-core must read GG_AGENT_DIR"],
@@ -578,10 +597,7 @@ async function main() {
       join(repoRoot, "packages", "ggcoder", "src", "app-sidecar-paths.ts"),
       "utf8",
     ),
-    appSidecar: readFileSync(
-      join(repoRoot, "packages", "ggcoder", "src", "app-sidecar.ts"),
-      "utf8",
-    ),
+    appSidecar: readAppSidecarSources(join(repoRoot, "packages", "ggcoder")),
     rustShell: readIdentityRustShell(srcTauri),
   });
 

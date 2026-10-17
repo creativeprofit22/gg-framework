@@ -7,14 +7,23 @@ import {
   ROADMAP_PHASE_SOURCE_PROMPT_MAX_LENGTH,
   ROADMAP_PHASE_TITLE_MAX_LENGTH,
   ROADMAP_PROPOSED_PHASES_MAX_ITEMS,
+  ROADMAP_PHASE_EDIT_BEFORE_MAX_LENGTH,
+  applyRoadmapPhaseEdit,
+  buildRoadmapPhaseEditChanges,
+  classifyRoadmapPhaseEditability,
   isRoadmapInspectionOutcome,
   isRoadmapPhaseDraft,
   isRoadmapPhaseDraftApprovalResult,
   isRoadmapPhaseDraftRejectionResult,
+  isRoadmapPhaseEditDraft,
   normalizeRoadmapWorkflowText,
+  validateRoadmapPhaseDraft,
   validateRoadmapPhaseDraftRequest,
+  validateRoadmapPhaseEditRequest,
   type RoadmapPhaseDraftRequest,
+  type RoadmapPhaseEditDraft,
 } from "./roadmap-workflow.js";
+import { validateNotesDocumentV3, type NotesDocumentV3, type NotesPhase } from "./project-notes.js";
 
 function request(): RoadmapPhaseDraftRequest {
   return {
@@ -131,6 +140,19 @@ describe("Roadmap inspection verification", () => {
     expect(
       isRoadmapInspectionOutcome(inspectionWithVerification({ ...verificationReport, ...invalid })),
     ).toBe(false);
+  });
+
+  it("accepts an optional phase sourcePrompt string and rejects other phase keys", () => {
+    const withPhase = (extra: Record<string, unknown>) => {
+      const outcome = inspectionWithVerification(null);
+      outcome.inspection.phases[0] = { ...outcome.inspection.phases[0]!, ...extra };
+      return outcome;
+    };
+    expect(isRoadmapInspectionOutcome(withPhase({ sourcePrompt: "Full saved prompt" }))).toBe(true);
+    expect(isRoadmapInspectionOutcome(withPhase({ sourcePrompt: "" }))).toBe(true);
+    expect(isRoadmapInspectionOutcome(withPhase({ sourcePrompt: 42 }))).toBe(false);
+    expect(isRoadmapInspectionOutcome(withPhase({ sourcePrompt: undefined }))).toBe(false);
+    expect(isRoadmapInspectionOutcome(withPhase({ sessionPath: "/hidden" }))).toBe(false);
   });
 
   it("rejects missing fields and partial legacy upgrades", () => {
@@ -448,5 +470,311 @@ describe("Roadmap workflow protocol", () => {
     expect(isRoadmapPhaseDraftRejectionResult({ status: "rejected", feedback: "hidden" })).toBe(
       false,
     );
+  });
+});
+
+function notesPhase(overrides: Partial<NotesPhase> = {}): NotesPhase {
+  return {
+    id: "phase-1",
+    title: "Proposal protocol",
+    goal: "Share a bounded flat proposal contract.",
+    doneWhen: ["Strict runtime validation passes"],
+    order: 0,
+    status: "not-started",
+    sourcePrompt: "Implement only the shared proposal protocol.",
+    referenceIds: [],
+    session: null,
+    reminder: null,
+    attentionReason: null,
+    createdAt: "2026-08-05T10:00:00.000Z",
+    updatedAt: "2026-08-05T11:00:00.000Z",
+    completedAt: null,
+    archivedAt: null,
+    overrides: { status: null, referenceIds: null },
+    pendingAutomaticLifecycleTransition: null,
+    lifecycleEvents: [],
+    roadmapEvents: [],
+    ...overrides,
+  };
+}
+
+function notesDocument(phases: NotesPhase[]): NotesDocumentV3 {
+  return {
+    version: 3,
+    reference: "",
+    currentFocus: "",
+    tasks: [],
+    handoff: { text: "", updatedAt: null, readAt: null },
+    updatedAt: "2026-08-05T11:00:00.000Z",
+    legacyImportedAt: null,
+    phases,
+    references: [],
+  };
+}
+
+function editDraft(overrides: Partial<RoadmapPhaseEditDraft> = {}): RoadmapPhaseEditDraft {
+  return {
+    kind: "edit",
+    id: "draft-edit-1",
+    projectKey: "c:/work",
+    basedOnRevision: 7,
+    createdAt: "2026-08-05T12:00:00.000Z",
+    createdBySessionId: "session-1",
+    summary: "Clarify the protocol phase",
+    phaseId: "phase-1",
+    phaseTitle: "Proposal protocol",
+    basedOnUpdatedAt: "2026-08-05T11:00:00.000Z",
+    changes: [
+      { field: "goal", before: "Share a bounded flat proposal contract.", after: "Share it." },
+      {
+        field: "doneWhen",
+        before: ["Strict runtime validation passes"],
+        after: ["Strict runtime validation passes", "Edits are reviewed"],
+      },
+    ],
+    status: "pending",
+    ...overrides,
+  };
+}
+
+describe("Roadmap phase edit protocol", () => {
+  it("accepts and normalizes an edit request with at least one field", () => {
+    expect(
+      validateRoadmapPhaseEditRequest({
+        expectedRevision: 7,
+        summary: "  Reword  ",
+        phaseId: "phase-1",
+        title: "  Cafe\u0301  ",
+      }),
+    ).toEqual({
+      ok: true,
+      value: { expectedRevision: 7, summary: "Reword", phaseId: "phase-1", title: "Café" },
+    });
+    expect(
+      validateRoadmapPhaseEditRequest({ expectedRevision: 7, summary: "Reword", phaseId: "p" }),
+    ).toMatchObject({ ok: false, error: { path: "$" } });
+    expect(
+      validateRoadmapPhaseEditRequest({
+        expectedRevision: 7,
+        summary: "Reword",
+        phaseId: "p",
+        title: "x",
+        referenceKeys: [],
+      }),
+    ).toMatchObject({ ok: false, error: { path: "$" } });
+  });
+
+  it.each([
+    ["title", ROADMAP_PHASE_TITLE_MAX_LENGTH],
+    ["goal", ROADMAP_PHASE_GOAL_MAX_LENGTH],
+    ["sourcePrompt", ROADMAP_PHASE_SOURCE_PROMPT_MAX_LENGTH],
+  ] as const)("applies add-draft %s limits to edit requests", (field, maximum) => {
+    const base = { expectedRevision: 1, summary: "Edit", phaseId: "phase-1" };
+    expect(validateRoadmapPhaseEditRequest({ ...base, [field]: "x".repeat(maximum) }).ok).toBe(
+      true,
+    );
+    expect(
+      validateRoadmapPhaseEditRequest({ ...base, [field]: "x".repeat(maximum + 1) }),
+    ).toMatchObject({ ok: false, error: { path: field } });
+    expect(validateRoadmapPhaseEditRequest({ ...base, [field]: "  " }).ok).toBe(false);
+  });
+
+  it("applies add-draft completion-criterion limits to edit requests", () => {
+    const base = { expectedRevision: 1, summary: "Edit", phaseId: "phase-1" };
+    for (const doneWhen of [
+      [],
+      Array.from({ length: ROADMAP_PHASE_DONE_WHEN_MAX_ITEMS + 1 }, (_, i) => `c${i}`),
+      ["x".repeat(ROADMAP_PHASE_DONE_WHEN_ITEM_MAX_LENGTH + 1)],
+      ["Café", "Cafe\u0301"],
+    ]) {
+      expect(validateRoadmapPhaseEditRequest({ ...base, doneWhen }).ok).toBe(false);
+    }
+  });
+
+  it("builds only changed fields in canonical order", () => {
+    const phase = notesPhase();
+    expect(
+      buildRoadmapPhaseEditChanges(phase, {
+        expectedRevision: 1,
+        summary: "Edit",
+        phaseId: phase.id,
+        sourcePrompt: "New prompt",
+        doneWhen: [...phase.doneWhen],
+        title: phase.title,
+        goal: "New goal",
+      }),
+    ).toEqual([
+      { field: "goal", before: phase.goal, after: "New goal" },
+      { field: "sourcePrompt", before: phase.sourcePrompt, after: "New prompt" },
+    ]);
+    expect(
+      buildRoadmapPhaseEditChanges(phase, {
+        expectedRevision: 1,
+        summary: "Edit",
+        phaseId: phase.id,
+        title: phase.title,
+      }),
+    ).toEqual([]);
+  });
+
+  it("strictly validates edit drafts and keeps legacy create drafts valid", () => {
+    expect(isRoadmapPhaseDraft(editDraft())).toBe(true);
+    const valid = validateRoadmapPhaseDraft(editDraft());
+    expect(valid.ok && isRoadmapPhaseEditDraft(valid.value)).toBe(true);
+    // Notes may hold empty goals; `before` is loose, `after` uses add-draft limits.
+    expect(
+      isRoadmapPhaseDraft(editDraft({ changes: [{ field: "goal", before: "", after: "Goal" }] })),
+    ).toBe(true);
+    expect(
+      isRoadmapPhaseDraft(
+        editDraft({
+          changes: [
+            {
+              field: "goal",
+              before: "x".repeat(ROADMAP_PHASE_EDIT_BEFORE_MAX_LENGTH),
+              after: "Goal",
+            },
+          ],
+        }),
+      ),
+    ).toBe(true);
+
+    for (const invalid of [
+      editDraft({ changes: [] }),
+      editDraft({ changes: [{ field: "goal", before: "Same", after: "Same" }] }),
+      editDraft({ changes: [{ field: "goal", before: "Old", after: "" }] }),
+      editDraft({
+        changes: [{ field: "title", before: "Old", after: "x".repeat(201) }],
+      }),
+      editDraft({
+        changes: [{ field: "doneWhen", before: ["a"], after: ["a"] }],
+      }),
+      editDraft({
+        changes: [
+          { field: "sourcePrompt", before: "a", after: "b" },
+          { field: "title", before: "a", after: "b" },
+        ],
+      }),
+      editDraft({
+        changes: [
+          { field: "goal", before: "a", after: "b" },
+          { field: "goal", before: "a", after: "c" },
+        ],
+      }),
+      editDraft({ basedOnUpdatedAt: "not-a-date" }),
+      { ...editDraft(), phases: [] },
+      { ...editDraft(), status: "approved" },
+    ]) {
+      expect(isRoadmapPhaseDraft(invalid)).toBe(false);
+    }
+
+    const legacy = {
+      id: "draft-1",
+      projectKey: "c:/work",
+      basedOnRevision: 7,
+      createdAt: "2026-08-05T12:00:00.000Z",
+      createdBySessionId: "session-1",
+      summary: request().summary,
+      references: [],
+      phases: [{ phaseId: "phase-1", ...request().phases[0], referenceIds: [] }],
+      status: "pending",
+    };
+    const legacyResult = validateRoadmapPhaseDraft(legacy);
+    expect(legacyResult.ok && !isRoadmapPhaseEditDraft(legacyResult.value)).toBe(true);
+    expect(isRoadmapPhaseDraft({ ...legacy, kind: "create" })).toBe(false);
+  });
+
+  it("classifies non-editable phases", () => {
+    expect(classifyRoadmapPhaseEditability(undefined)).toBe("missing");
+    expect(
+      classifyRoadmapPhaseEditability(
+        notesPhase({ deletion: { version: 1, currentDeletionId: "deletion-1", events: [] } }),
+      ),
+    ).toBe("deleted");
+    expect(classifyRoadmapPhaseEditability(notesPhase({ status: "done" }))).toBe("done");
+    expect(
+      classifyRoadmapPhaseEditability(notesPhase({ archivedAt: "2026-08-05T12:00:00.000Z" })),
+    ).toBe("archived");
+    expect(
+      classifyRoadmapPhaseEditability(
+        notesPhase({ deletion: { version: 1, currentDeletionId: null, events: [] } }),
+      ),
+    ).toBeNull();
+    expect(classifyRoadmapPhaseEditability(notesPhase({ status: "in-progress" }))).toBeNull();
+  });
+
+  it("applies an edit to one phase with a strictly later timestamp", () => {
+    const other = notesPhase({ id: "phase-2", order: 1, title: "Other" });
+    const document = notesDocument([notesPhase(), other]);
+    const result = applyRoadmapPhaseEdit(document, editDraft(), "2026-08-05T13:00:00.000Z");
+    expect(result.status).toBe("ok");
+    if (result.status !== "ok") return;
+    expect(result.document.phases[0]).toEqual({
+      ...notesPhase(),
+      goal: "Share it.",
+      doneWhen: ["Strict runtime validation passes", "Edits are reviewed"],
+      updatedAt: "2026-08-05T13:00:00.000Z",
+    });
+    expect(result.document.phases[1]).toEqual(other);
+    expect(result.document.updatedAt).toBe("2026-08-05T13:00:00.000Z");
+    expect(validateNotesDocumentV3(result.document).ok).toBe(true);
+    // The input document is not mutated.
+    expect(document.phases[0]).toEqual(notesPhase());
+
+    const skewed = applyRoadmapPhaseEdit(document, editDraft(), "2026-08-05T10:00:00.000Z");
+    expect(skewed.status === "ok" && skewed.document.phases[0]?.updatedAt).toBe(
+      "2026-08-05T11:00:00.001Z",
+    );
+  });
+
+  it("refuses edits when the target phase changed or is no longer editable", () => {
+    const at = "2026-08-05T13:00:00.000Z";
+    expect(
+      applyRoadmapPhaseEdit(
+        notesDocument([notesPhase({ updatedAt: "2026-08-05T11:30:00.000Z" })]),
+        editDraft(),
+        at,
+      ),
+    ).toEqual({ status: "phase-changed", phaseId: "phase-1" });
+    expect(
+      applyRoadmapPhaseEdit(notesDocument([notesPhase({ goal: "Edited in UI" })]), editDraft(), at),
+    ).toEqual({ status: "phase-changed", phaseId: "phase-1" });
+    expect(
+      applyRoadmapPhaseEdit(notesDocument([notesPhase({ status: "done" })]), editDraft(), at),
+    ).toEqual({ status: "phase-not-editable", phaseId: "phase-1", reason: "done" });
+    expect(applyRoadmapPhaseEdit(notesDocument([]), editDraft(), at)).toEqual({
+      status: "phase-not-editable",
+      phaseId: "phase-1",
+      reason: "missing",
+    });
+  });
+
+  it("accepts the edit approval outcomes and rejects malformed ones", () => {
+    expect(
+      isRoadmapPhaseDraftApprovalResult({ status: "edited", revision: 8, phaseId: "p1" }),
+    ).toBe(true);
+    expect(isRoadmapPhaseDraftApprovalResult({ status: "phase-changed", phaseId: "p1" })).toBe(
+      true,
+    );
+    expect(
+      isRoadmapPhaseDraftApprovalResult({
+        status: "phase-not-editable",
+        phaseId: "p1",
+        reason: "archived",
+      }),
+    ).toBe(true);
+    expect(isRoadmapPhaseDraftApprovalResult({ status: "edited", revision: 8, phaseId: "" })).toBe(
+      false,
+    );
+    expect(
+      isRoadmapPhaseDraftApprovalResult({
+        status: "phase-not-editable",
+        phaseId: "p1",
+        reason: "locked",
+      }),
+    ).toBe(false);
+    expect(
+      isRoadmapPhaseDraftApprovalResult({ status: "phase-changed", phaseId: "p1", extra: 1 }),
+    ).toBe(false);
   });
 });

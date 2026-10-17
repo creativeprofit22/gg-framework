@@ -15,6 +15,7 @@ import {
   missingPhaseLeaseRegressionGuards,
   PHASE_LEASE_REGRESSION_GATE,
   phaseLeaseRegressionGateArgs,
+  readAppSidecarSources,
   releaseNotesEnvelope,
   runWithCargoTomlRestored,
   tauriBuildArgs,
@@ -404,7 +405,7 @@ describe("Roadmap phase-lease regression build gate", () => {
     expect(PHASE_LEASE_REGRESSION_GATE.map(({ file }) => file)).toContain(
       "src/app-sidecar-phase-lease-wiring.test.ts",
     );
-    const sidecar = readFileSync(join(ggcoderRoot, "src", "app-sidecar.ts"), "utf8");
+    const sidecar = readAppSidecarSources(ggcoderRoot);
     const construction = sidecar.slice(sidecar.indexOf("new RoadmapPhaseLeaseRepository("));
     expect(construction.slice(0, construction.indexOf("});"))).toMatch(
       /hasLiveLocalSession:[\s\S]*hasLivePhaseLeaseSession\(/,

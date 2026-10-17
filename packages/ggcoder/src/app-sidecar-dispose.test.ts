@@ -41,4 +41,12 @@ describe("session dispose stops the window's work", () => {
     expect(abort).toBeLessThan(teardown);
     expect(pull).toBeLessThan(teardown);
   });
+
+  it("stops the phase-lease heartbeat before tearing down the session", async () => {
+    const body = disposeBody(await fs.readFile(SIDECAR, "utf8"));
+    const stop = body.indexOf("phaseLeaseRuntime.stopHeartbeat()");
+    const teardown = body.search(/session\s*\.dispose\(/);
+    expect(stop, "dispose must stop the phase-lease heartbeat").toBeGreaterThan(-1);
+    expect(stop).toBeLessThan(teardown);
+  });
 });

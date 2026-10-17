@@ -4,6 +4,7 @@ import {
   deleteTaskSync,
   getNextRunnableTask,
   loadTasksSync,
+  recoverAbandonedTaskRunsSync,
   type TaskRecord,
 } from "../../core/tasks-store.js";
 
@@ -39,13 +40,14 @@ export function useTaskPickerController({
   const refresh = useCallback(() => setTasks(loadTasksSync(displayedCwd)), [displayedCwd]);
   const close = useCallback(() => setOpen(false), []);
 
+  // Opening the picker settles runs a closed app/daemon/CLI left behind.
   const openPicker = useCallback(() => {
-    setTasks(loadTasksSync(displayedCwd));
+    setTasks(recoverAbandonedTaskRunsSync(displayedCwd));
     setOpen(true);
   }, [displayedCwd]);
 
   const toggle = useCallback(() => {
-    setTasks(loadTasksSync(displayedCwd));
+    setTasks(recoverAbandonedTaskRunsSync(displayedCwd));
     setOpen((current) => !current);
   }, [displayedCwd]);
 

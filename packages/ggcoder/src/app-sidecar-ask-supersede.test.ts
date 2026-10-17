@@ -318,6 +318,66 @@ describe("a typed prompt supersedes a parked question", () => {
     expect(source).toContain("deferredAsks: asks.deferredRequests");
   });
 
+  it("waits on the user in a human-driven run; only a real unattended run gets the deadline", async () => {
+    const source = await fs.readFile(APP_SIDECAR, "utf8");
+    const wiring = routeBlock(source, "const unattendedAskRun = (): boolean =>");
+    // Autopilot switched on is not unattended; only Ken's running cycle is.
+    expect(wiring).not.toContain("isAutopilotEnabled");
+    expect(wiring).toContain("autopilotRunActive: autopilotActive");
+    expect(wiring).toContain("taskRunAll");
+    expect(wiring).toContain("scheduledRunActive");
+    expect(source).toContain("timeoutMs: () => askSoftDeadlineMs(unattendedAskRun()),");
+    expect(source).toContain("asks.park(request, askUserParkOptions(unattendedAskRun()))");
+    // The flag Ken's cycle sets is the one the policy reads.
+    const cycle = routeBlock(source, "async function runAutopilotCycle(");
+    expect(cycle).toContain("autopilotActive = true;");
+
+    // Behaviour: a parked no-deadline ask outlives any timer, Stop releases it
+    // (still answerable), and a typed prompt releases it too.
+    vi.useFakeTimers();
+    try {
+      const broadcast = vi.fn<(prompt: AskUserPrompt) => void>();
+      const asks = createAskUserBridge({
+        broadcast,
+        timeoutMs: 1000,
+        onLateAnswer: () => {},
+      });
+      const tool = createAskUserTool((request) => asks.park(request, { noDeadline: true }));
+      const call = () =>
+        tool.execute(
+          {
+            questions: [{ id: "q", question: "Ship it?", kind: "confirm", detail: "Ready." }],
+          },
+          { signal: new AbortController().signal, toolCallId: "t", onUpdate: () => {} } as never,
+        ) as Promise<string>;
+      const stopped = call();
+      await vi.advanceTimersByTimeAsync(60 * 60_000);
+      expect(asks.pendingCount).toBe(1);
+      asks.deferAll();
+      expect(await stopped).toContain("No answer yet");
+      expect(asks.pendingCount).toBe(0);
+      expect(asks.deferredRequests[0]?.noDeadline).toBe(true);
+
+      const superseded = call();
+      await vi.advanceTimersByTimeAsync(60 * 60_000);
+      expect(asks.pendingCount).toBe(1);
+      asks.cancelAll({ action: "cancel", superseded: true });
+      expect(await superseded).toContain("sent their own message instead");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("applies the same deadline policy to programmatic execution questions", async () => {
+    const source = await fs.readFile(APP_SIDECAR, "utf8");
+    const execute = routeBlock(source, "const result = await executeProgrammaticOpportunity(");
+    // A bare `asks.park` would fall back to the bridge's soft deadline and tell
+    // the model to guess in a human-driven run.
+    expect(execute).not.toMatch(/ask:\s*asks\.park\s*,/);
+    expect(execute).toContain("askUserParkOptions(unattendedAskRun() || meta?.kenSent === true)");
+    expect(execute).toContain("cancelQuestions: () => asks.cancelAll(),");
+  });
+
   it("reports steers=true for a pending question and false for a deferred-only one", async () => {
     const asks = createAskUserBridge({ broadcast: () => {}, onLateAnswer: () => {} });
     const parked = asks.park({

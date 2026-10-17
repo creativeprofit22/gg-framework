@@ -67,6 +67,40 @@ const roadmapDraft = {
   status: "pending",
 };
 
+// Changes title, goal and Done when so the review shows text, wrapped text and
+// Added/Removed criteria tags at every viewport.
+const roadmapEditDraft = {
+  kind: "edit",
+  id: "fixture-edit-draft",
+  projectKey: CWD,
+  basedOnRevision: 3,
+  createdAt: "2026-10-14T12:00:00.000Z",
+  createdBySessionId: "fixture-session",
+  summary: "Narrow the fictional checkout retry phase to the payment step.",
+  phaseId: "fixture-phase",
+  phaseTitle: "Ship fictional checkout retry",
+  basedOnUpdatedAt: "2026-10-14T11:00:00.000Z",
+  changes: [
+    {
+      field: "title",
+      before: "Ship fictional checkout retry",
+      after: "Ship fictional payment retry",
+    },
+    {
+      field: "goal",
+      before: "Deliver the fictional workflow after approval.",
+      after:
+        "Retry only the fictional payment step, so a declined card can be resubmitted without rebuilding the whole basket.",
+    },
+    {
+      field: "doneWhen",
+      before: ["The fictional workflow is available", "Retries are logged"],
+      after: ["Retries are logged", "A declined fictional card can be resubmitted once"],
+    },
+  ],
+  status: "pending",
+};
+
 const updateMetadata = {
   rid: 1,
   currentVersion: "0.91.1",
@@ -82,6 +116,11 @@ export const scenarios = [
     name: "pending-reviews",
     roadmap: { status: "ok", draft: roadmapDraft },
     update: true,
+  },
+  {
+    name: "pending-roadmap-edit",
+    roadmap: { status: "ok", draft: roadmapEditDraft },
+    update: false,
   },
   {
     name: "roadmap-refresh-error",
@@ -293,6 +332,34 @@ async function verifyPendingReviews(page, prefix, evidence) {
   );
 }
 
+async function verifyPendingRoadmapEdit(page, prefix, evidence) {
+  const roadmapTrigger = page.locator('.review-dock [data-review-trigger="roadmap"]');
+  await check(evidence, `${prefix} edit trigger`, () =>
+    assertControlReachable(roadmapTrigger, `${prefix} edit trigger`),
+  );
+  await roadmapTrigger.click({ timeout: 3_000 }).catch(() => roadmapTrigger.press("Enter"));
+  const review = page.locator(".review-dock .roadmap-edit-review");
+  await review.waitFor({ state: "visible", timeout: 3_000 }).catch(() => {});
+  await settleReviews(page);
+  await check(evidence, `${prefix} edit field labels`, async () => {
+    const labels = await review.locator(".roadmap-edit-field h4").allTextContents();
+    assert.deepEqual(labels, ["Title", "Goal", "Done when"]);
+    const tags = await review.locator(".roadmap-edit-tag").allTextContents();
+    assert.deepEqual(tags, ["Removed", "Added"]);
+  });
+  await check(evidence, `${prefix} Reject edit`, () =>
+    assertControlReachable(review.locator(".roadmap-draft-reject"), `${prefix} Reject edit`),
+  );
+  await check(evidence, `${prefix} Apply edit`, () =>
+    assertControlReachable(review.locator(".roadmap-draft-create"), `${prefix} Apply edit`),
+  );
+  await check(evidence, `${prefix} expanded edit vs deck`, () =>
+    assertNoOverlap(page, ".review-dock", ".dock .deck", `${prefix} edit expanded`),
+  );
+  // Leave the Done when diff in view so screenshots show Before/After and the tags.
+  await review.locator(".roadmap-edit-field").last().scrollIntoViewIfNeeded();
+}
+
 async function verifyRefreshError(page, prefix, evidence) {
   const retry = page.getByRole("button", { name: "Retry Roadmap review", exact: true });
   await retry.waitFor({ state: "attached", timeout: 5_000 }).catch(() => {});
@@ -321,6 +388,8 @@ export async function runReviewDockVisibilityFixture({
           const prefix = `${scenario.name} ${viewport.width}×${viewport.height}`;
           if (scenario.name === "pending-reviews")
             await verifyPendingReviews(page, prefix, evidence);
+          else if (scenario.name === "pending-roadmap-edit")
+            await verifyPendingRoadmapEdit(page, prefix, evidence);
           else await verifyRefreshError(page, prefix, evidence);
           if (screenshot) {
             const output = resolve(outputDir, `review-dock-${scenario.name}-${viewport.name}.png`);

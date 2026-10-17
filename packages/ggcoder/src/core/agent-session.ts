@@ -1,10 +1,6 @@
 import { nativeDevAuthFile } from "../app-sidecar-native-auth.js";
 import { assertProviderExecutionAllowed, runUnattended } from "./provider-execution-policy.js";
 import {
-  isProgrammaticAssessment,
-  type ProgrammaticAssessment,
-} from "@kenkaiiii/gg-core/programmatic-assessment-contract";
-import {
   agentLoop,
   isAbortError,
   isUsageLimitError,
@@ -28,7 +24,7 @@ import {
   type ToolCall,
   type ToolResult,
 } from "@kenkaiiii/gg-ai";
-import { EventBus, type BusEventMap, type McpToolEventIdentity } from "./event-bus.js";
+import { EventBus, type McpToolEventIdentity } from "./event-bus.js";
 import { flagUntrustedToolResult } from "./injection-detect.js";
 import {
   parseContinuationReviewRecord,
@@ -61,35 +57,18 @@ import {
 } from "./command-discovery.js";
 import {
   buildProgrammaticAdvisoryContext,
-  buildProgrammaticAssessmentContext,
   parseProgrammaticAssessmentInput,
   renderProgrammaticAdvisoryContext,
 } from "./programmatic/advisory-context.js";
-import {
-  recheckAssessmentEvidence,
-  type AssessmentEvidenceAuthorization,
-} from "./programmatic/assessment-evidence.js";
-import {
-  AdvisoryEvidence,
-  type ProgrammaticAdvisoryTurn,
-  ADVISORY_READ_TOOLS,
-} from "./programmatic/advisory.js";
-import {
-  DiscoveryReviewBoundary,
-  discoveryEvidencePaths,
-  discoveryReviewPrompt,
-} from "./programmatic/discovery-review.js";
+import { AdvisoryEvidence, type ProgrammaticAdvisoryTurn } from "./programmatic/advisory.js";
+import type { DiscoveryReviewBoundary } from "./programmatic/discovery-review.js";
 import type {
   DiscoveryReviewRequest,
   DiscoveryReview,
 } from "@kenkaiiii/gg-core/programmatic-recommendation-contract";
-import { readRecommendationHistory } from "./programmatic/recommendation-history.js";
-import { recommendationDetail } from "./programmatic/recommendations.js";
-import { createCommandInformationTool } from "../tools/command-information.js";
-import { createProgrammaticAdvisoryResultTool } from "../tools/programmatic-advisory-result.js";
 import { expandPromptCommand } from "./prompt-command-expansion.js";
 import { SettingsManager } from "./settings-manager.js";
-import { AuthStorage, NotLoggedInError } from "./auth-storage.js";
+import { AuthStorage } from "./auth-storage.js";
 import {
   dualAuthProvider,
   parseReferencedFiles,
@@ -105,7 +84,6 @@ import {
   KEN_TURN_CUSTOM_KIND,
   AUTOPILOT_MARKER_CUSTOM_KIND,
   APP_MARKER_CUSTOM_KIND,
-  approvedPlanContentHash,
   type ApprovedPlanConsumptionInput,
   type ApprovedPlanConsumptionRecord,
   type MessageEntry,
@@ -161,15 +139,8 @@ import {
 } from "../tools/index.js";
 import { partitionToolsByTier } from "../tools/tool-tiers.js";
 import type { CommandCreationReviewer } from "./programmatic/command-creation.js";
-import {
-  ProgrammaticAssessmentCoordinator,
-  type ProgrammaticAssessmentOutcome,
-} from "./programmatic/assessment.js";
-import {
-  captureAssessmentHistoryPolicy,
-  saveAssessmentHistory,
-} from "./programmatic/assessment-history.js";
-import { ProgrammaticSetupInspection } from "./programmatic/setup-inspection.js";
+import type { ProgrammaticAssessmentOutcome } from "./programmatic/assessment.js";
+import type { ProgrammaticSetupInspection } from "./programmatic/setup-inspection.js";
 import type { DirectCommandExecutor } from "./programmatic/execution.js";
 import type { BackgroundProcess } from "./process-manager.js";
 import type { DebugManager } from "../tools/debug.js";
@@ -195,7 +166,7 @@ import { MCPClientManager, getAllMcpServers } from "./mcp/index.js";
 import type { MCPElicitHandler } from "./mcp/index.js";
 import type { MCPServerConfig } from "./mcp/types.js";
 import type { SharedMcpClientLease, SharedMcpClientPool } from "./mcp/shared-client-pool.js";
-import { claimAdvisoryTool, executeAdvisoryTool } from "./programmatic/advisory-tools.js";
+import { guardSessionTool, type SessionToolGuardHost } from "./agent-session-tool-guard.js";
 import { clampMcpToolDescription, DeferredToolCatalog } from "./mcp/deferred-catalog.js";
 import {
   CONTEXT_LIMITS,
@@ -274,19 +245,39 @@ import {
 } from "./verification-evidence.js";
 
 import { findUserSessionPrompt, getUserSessionPrompt } from "./session-preview.js";
+import { sameSessionFile } from "./session-storage.js";
 import { normalizeMessageImages } from "./message-images.js";
 import {
-  ACTIVE_PHASE_CONTEXT_CLEAR_KIND,
-  ACTIVE_PHASE_CONTEXT_KIND,
-  ROADMAP_PHASE_LEASE_KIND,
-  parseActivePhaseContext,
-  parseRoadmapPhaseLeaseMarker,
   renderActivePhasePackage,
   type ActivePhaseContextClearReason,
   type ActivePhaseContextV1,
   type ActivePhaseExecutionStage,
   type RoadmapPhaseLeaseMarkerV1,
 } from "../phase-context.js";
+import {
+  clearActivePhaseContext,
+  ensureActivePhaseSessionMetadata,
+  rePersistActivePhaseContext,
+  rePersistRoadmapPhaseLeaseMarker,
+  restorePlanStateFromActivePhase,
+  setActivePhaseContext,
+  setRoadmapPhaseLeaseMarker,
+  updateActivePhaseStage,
+  type SessionPhaseContextHost,
+} from "./agent-session-phase-context.js";
+import {
+  completeApprovedPlanConsumption,
+  hydrateCanonicalApprovedPlan,
+  markApprovedPlanImplementationPromptStarted,
+  persistApprovedPlanConsumption,
+  runApprovedPlanImplementation,
+  type SessionApprovedPlanHost,
+} from "./agent-session-approved-plan.js";
+import {
+  assessProgrammatic,
+  reviewDiscoveryCandidate,
+  type SessionProgrammaticHost,
+} from "./agent-session-programmatic.js";
 import { loadStreamRules } from "./stream-rules.js";
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
@@ -2100,122 +2091,13 @@ export class AgentSession {
     records: NonNullable<ProgrammaticAssessmentOutcome["discoveryRecords"]>;
   } | null = null;
 
-  async reviewDiscoveryCandidate(request: DiscoveryReviewRequest): Promise<DiscoveryReview> {
-    const owner = this.sessionId,
-      sequence = this.assessmentSequence;
-    const allowed = () =>
-      this.sessionId === owner &&
-      this.assessmentSequence === sequence &&
-      !this.opts.signal?.aborted &&
-      !this.planModeRef.current &&
-      !this.opts.transient &&
-      !this.opts.allowedTools &&
-      !this.opts.subagentWorker &&
-      this.opts.agentContext !== "none" &&
-      this.opts.coderSlashCommands !== false;
-    if (
-      !allowed() ||
-      this.assessmentActive ||
-      this.advisoryTurn ||
-      this.setupInspection ||
-      this.discoveryReview
-    )
-      throw new Error("Candidate review requires an idle Code session outside plan mode.");
-    if (request.source === "history") {
-      const loaded = await readRecommendationHistory(this.cwd, { signal: this.opts.signal });
-      const candidate =
-        "history" in loaded
-          ? recommendationDetail(loaded.history, request.candidateId, 0)?.discovery
-          : undefined;
-      if (
-        !allowed() ||
-        !candidate ||
-        candidate.assessmentId !== request.assessmentId ||
-        candidate.revision !== request.expectedRevision
-      )
-        throw new Error("Historical candidate changed or is unavailable. Reload history.");
-      return {
-        status: "reinspection-required",
-        candidate,
-        summary:
-          "Historical evidence cannot restore review authority. Discover opportunities again to obtain current evidence before preparing a proposal.",
-      };
-    }
-    const current = this.discoveryCandidates;
-    const record = current?.records.find(
-      ({ display }) =>
-        display.candidateId === request.candidateId &&
-        display.assessmentId === request.assessmentId &&
-        display.revision === request.expectedRevision,
-    );
-    if (!record || current?.owner !== owner || current.sequence !== sequence)
-      throw new Error(
-        "Candidate evidence is previous or belongs to another session. Discover opportunities again.",
-      );
-    const candidate = record.display;
-    if (!candidate.nextStep.available)
-      return { status: "unsupported", candidate, summary: candidate.nextStep.reason };
-    const paths = discoveryEvidencePaths(
-      this.advisoryEvidence.list(),
-      record.recommendation.evidence.items.flatMap((item) =>
-        "source" in item ? [item.source] : [],
-      ),
-    );
-    const boundary = new DiscoveryReviewBoundary(
-      candidate,
-      paths,
-      record.recommendation.choice,
-      (text) => this.commandCreation?.inspectionEvidence(text),
-    );
-    this.discoveryReview = boundary;
-    const promoted = new Set<string>();
-    try {
-      for (const [name, tool] of this.deferredBuiltinTools)
-        if (
-          boundary.allows(name) &&
-          !this.registeredTools.has(name) &&
-          this.isToolCapabilityAllowed(name)
-        ) {
-          this.registeredTools.set(name, this.guardRegisteredTool(tool));
-          promoted.add(name);
-        }
-      this.reconcileRegisteredTools();
-      if (
-        !this.tools.some((tool) => tool.name === "read") ||
-        !this.tools.some((tool) => tool.name === "command_information")
-      )
-        throw new Error(
-          "Current permissions do not allow the required local and catalog inspection.",
-        );
-      this.commandCreation?.cancel();
-      await this.acceptPromptTemplate(
-        discoveryReviewPrompt(candidate),
-        { source: "human", kind: "prompt", visibility: "transcript" },
-        {},
-      );
-      if (!allowed() || this.discoveryReview !== boundary || !boundary.active)
-        throw new Error("Candidate review owner changed or was cancelled.");
-      return {
-        status: boundary.prepared ? "prepared" : "reinspection-required",
-        candidate,
-        summary: boundary.prepared
-          ? "Read-only review is in the transcript. No command was created or run; later changes require separate exact review and approval."
-          : "Review did not establish current local evidence, command resolution or a complete inspected proposal as required for this choice. No actionable proposal is available; retry inspection explicitly.",
-      };
-    } catch (error) {
-      this.commandCreation?.cancel();
-      throw error;
-    } finally {
-      boundary.close();
-      this.discoveryReview = undefined;
-      for (const name of promoted) this.registeredTools.delete(name);
-      this.reconcileRegisteredTools();
-    }
+  reviewDiscoveryCandidate(request: DiscoveryReviewRequest): Promise<DiscoveryReview> {
+    return reviewDiscoveryCandidate(this.programmaticHost(), request);
   }
 
   /** Shared host entry for slash commands and desktop callbacks under their existing run claim.
    * Publishes display-only status, independently of transcript and exact setup ownership. */
-  async assessProgrammatic(
+  assessProgrammatic(
     mode: "setup" | "configured",
     focus?: string,
     provenance: MessageProvenance = { source: "human", kind: "prompt", visibility: "transcript" },
@@ -2226,345 +2108,84 @@ export class AgentSession {
       assessmentRequestId?: string;
     } = {},
   ): Promise<ProgrammaticAssessmentOutcome & { setupFacts?: unknown; scanFacts?: unknown }> {
-    if (this.assessmentActive || this.advisoryTurn || this.setupInspection || this.discoveryReview)
-      throw new Error("An assessment or review is already active.");
-    this.assessmentActive = true;
-    const { conversationId, sessionId } = this.getConversationIdentity();
-    const identity = {
-      conversationId,
-      sessionId,
-      sequence: ++this.assessmentSequence,
-      ...(options.assessmentRequestId ? { requestId: options.assessmentRequestId } : {}),
-    };
-    const signal = this.opts.signal;
-    // Transient internal sessions have no desktop conversation identity.
-    const publish = (event: BusEventMap["programmatic_assessment"]) => {
-      if (conversationId && sessionId) this.eventBus.emit("programmatic_assessment", event);
-    };
-    const host = { id: crypto.randomUUID(), startedAt: new Date().toISOString() };
-    const owner = this.sessionId;
-    const allowed = () =>
-      !options.disableTools &&
-      !this.planModeRef.current &&
-      !this.opts.transient &&
-      !this.opts.allowedTools &&
-      !this.opts.subagentWorker &&
-      this.opts.agentContext !== "none" &&
-      this.opts.coderSlashCommands !== false &&
-      this.sessionId === owner &&
-      this.assessmentSequence === identity.sequence &&
-      !signal?.aborted &&
-      this.isToolCapabilityAllowed("programmatic_scan") &&
-      !this.unavailableToolNames.has("programmatic_scan");
-    publish({ ...identity, phase: "started" });
-    const historyPolicy = await captureAssessmentHistoryPolicy(this.cwd, mode);
-    try {
-      const outcome = await this.runProgrammaticAssessment(mode, focus, provenance, options, host);
-      // Retain transient accepted candidates independently of history consent or save outcome.
-      if (
-        this.sessionId === owner &&
-        this.assessmentSequence === identity.sequence &&
-        outcome.discoveryRecords
-      )
-        this.discoveryCandidates = {
-          owner,
-          sequence: identity.sequence,
-          records: outcome.discoveryRecords,
-        };
-      outcome.assessment.history = await saveAssessmentHistory(
-        this.cwd,
-        outcome,
-        host,
-        historyPolicy,
-        {
-          signal,
-          assertCurrent: () => {
-            if (!allowed()) throw new Error("Assessment owner changed before rename.");
-          },
-          validateBeforeSave: async () => {
-            await this.opts.validateToolExecution?.();
-          },
-          onFileMutated: (relative) => {
-            this.hookFileEditCounts.set(relative, (this.hookFileEditCounts.get(relative) ?? 0) + 1);
-          },
-        },
-      );
-      if (conversationId && sessionId) outcome.assessment.lifecycle = identity;
-      if (!isProgrammaticAssessment(outcome.assessment))
-        throw new Error("Invalid host assessment projection.");
-      publish({ ...identity, phase: "completed", assessment: outcome.assessment });
-      return outcome;
-    } catch (error) {
-      if (this.discoveryCandidates?.sequence === identity.sequence) this.discoveryCandidates = null;
-      const assessment: ProgrammaticAssessment = {
-        version: 1,
-        mode,
-        status: signal?.aborted ? "cancelled" : "unavailable",
-        summary: "The assessment did not finish. No approval is implied.",
-        limitations: ["The host could not complete this assessment; no retry was attempted."],
-        coverage: [],
-        observations: [],
-        history:
-          mode === "setup"
-            ? { status: "setup-not-saved" }
-            : !historyPolicy.profileDigest && !historyPolicy.unavailable
-              ? { status: "disabled" }
-              : {
-                  status: "unsaved",
-                  assessmentId: host.id,
-                  reason:
-                    "The host did not reach an authorized history save; existing history was retained.",
-                },
-        deterministic:
-          mode === "setup"
-            ? { status: "not-run", reason: "setup" }
-            : {
-                status: signal?.aborted ? "cancelled" : "unavailable",
-                reason: "No counted deterministic result is available.",
-              },
-      };
-      if (conversationId && sessionId) assessment.lifecycle = identity;
-      publish({ ...identity, phase: "completed", assessment });
-      throw error;
-    } finally {
-      this.assessmentActive = false;
-    }
+    return assessProgrammatic(this.programmaticHost(), mode, focus, provenance, options);
   }
 
-  private async runProgrammaticAssessment(
-    mode: "setup" | "configured",
-    focus: string | undefined,
-    provenance: MessageProvenance,
-    options: { disableTools?: boolean; onAccepted?: () => void | Promise<void>; meta?: PromptMeta },
-    host: { id: string; startedAt: string },
-  ): Promise<ProgrammaticAssessmentOutcome & { setupFacts?: unknown; scanFacts?: unknown }> {
-    const input = parseProgrammaticAssessmentInput(focus ?? "");
-    if (!input.success) throw new Error("Invalid assessment focus.");
-    if (mode === "configured") {
-      const guidance = programmaticReadinessGuidance(await this.readProgrammaticReadiness());
-      if (guidance) throw new Error(guidance);
-    }
-    const signal = this.opts.signal ?? new AbortController().signal;
-    const discovery = await discoverCommands(this.cwd, {
-      workspaceActions: this.opts.workspaceCommands,
-      workspaceCaseInsensitive: this.opts.workspaceCommandCaseInsensitive,
-      registryActions:
-        this.opts.advertiseRegistryCommands === false
-          ? []
-          : registryCommandListings(this.slashCommands.getAll()),
-      readReadiness: () => this.readProgrammaticReadiness(),
-    });
-    const evidenceAuthorization: AssessmentEvidenceAuthorization = {
-      isAllowed: ({ name }) =>
-        !options.disableTools &&
-        !signal.aborted &&
-        !this.unavailableToolNames.has(name) &&
-        this.isToolCapabilityAllowed(name),
-      authorize: async (request) => {
-        if (!evidenceAuthorization.isAllowed(request)) return false;
-        try {
-          if (
-            this.opts.approveToolExecution &&
-            !(await this.opts.approveToolExecution(request.name, request.args, signal))
-          )
-            return false;
-          if (!evidenceAuthorization.isAllowed(request)) return false;
-          await this.opts.validateToolExecution?.();
-          return evidenceAuthorization.isAllowed(request);
-        } catch {
-          signal.throwIfAborted();
-          return false;
-        }
+  private programmaticHost(): SessionProgrammaticHost {
+    return {
+      tools: {
+        registered: () => this.registeredTools,
+        deferred: () => this.deferredBuiltinTools,
+        list: () => this.tools,
+        guard: (tool) => this.guardRegisteredTool(tool),
+        reconcile: () => this.reconcileRegisteredTools(),
+        isCapabilityAllowed: (name) => this.isToolCapabilityAllowed(name),
+        unavailable: () => this.unavailableToolNames,
+        supports: (name, args) => this.supportsToolCall(name, args),
+        register: (tool) => this.registerTool(tool),
+        searchedPromoted: () => this.searchedPromotedBuiltinNames,
+        capabilityPromoted: () => this.capabilityPromotedBuiltinNames,
+      },
+      boundaries: {
+        advisoryTurn: () => this.advisoryTurn,
+        setAdvisoryTurn: (turn) => {
+          this.advisoryTurn = turn;
+        },
+        setupInspection: () => this.setupInspection,
+        setSetupInspection: (inspection) => {
+          this.setupInspection = inspection;
+        },
+        discoveryReview: () => this.discoveryReview,
+        setDiscoveryReview: (review) => {
+          this.discoveryReview = review;
+        },
+        advisoryEvidence: () => this.advisoryEvidence,
+        setAdvisoryEvidence: (evidence) => {
+          this.advisoryEvidence = evidence;
+        },
+        setPendingAdvisoryPresentation: (presentation) => {
+          this.pendingAdvisoryPresentation = presentation;
+        },
+        programmaticProfile: () => this.programmaticProfile,
+        commandCreation: () => this.commandCreation,
+      },
+      assessment: {
+        active: () => this.assessmentActive,
+        setActive: (active) => {
+          this.assessmentActive = active;
+        },
+        sequence: () => this.assessmentSequence,
+        nextSequence: () => ++this.assessmentSequence,
+        candidates: () => this.discoveryCandidates,
+        setCandidates: (candidates) => {
+          this.discoveryCandidates = candidates;
+        },
+      },
+      session: {
+        sessionId: () => this.sessionId,
+        cwd: () => this.cwd,
+        options: () => this.opts,
+        planMode: () => this.planModeRef.current,
+        conversationIdentity: () => this.getConversationIdentity(),
+        eventBus: () => this.eventBus,
+        readReadiness: () => this.readProgrammaticReadiness(),
+        slashCommands: () => this.slashCommands,
+        hookText: () => this.hookText,
+        hookToolCallCount: () => this.hookToolCalls.size,
+        hookFileEditCounts: () => this.hookFileEditCounts,
+      },
+      transcript: {
+        acceptPromptTemplate: (content, provenance, options) =>
+          this.acceptPromptTemplate(content, provenance, options),
+        expandResolvedPromptCommand: (prompt, args) =>
+          this.expandResolvedPromptCommand(prompt, args),
+        messages: () => this.messages,
+        persistMessage: (message) => this.persistMessage(message),
+        setLastPersistedIndex: (index) => {
+          this.lastPersistedIndex = index;
+        },
       },
     };
-    const context = await buildProgrammaticAssessmentContext(input.data, discovery, this.cwd, {
-      signal,
-      authorization: evidenceAuthorization,
-    }).catch((error: unknown) => {
-      if (!signal.aborted) throw error;
-      return buildProgrammaticAdvisoryContext(input.data, discovery);
-    });
-    const promoted = new Set<string>();
-    const previousResult = this.registeredTools.get("programmatic_advisory_result");
-    let setupFacts: unknown;
-    let scanFacts: unknown;
-    let coordinator: ProgrammaticAssessmentCoordinator | undefined;
-    try {
-      for (const name of [...ADVISORY_READ_TOOLS, "programmatic_profile"]) {
-        const deferred = this.deferredBuiltinTools.get(name);
-        if (deferred && !this.registeredTools.has(name) && this.isToolCapabilityAllowed(name)) {
-          this.registeredTools.set(name, this.guardRegisteredTool(deferred));
-          promoted.add(name);
-        }
-      }
-      this.reconcileRegisteredTools();
-      coordinator = new ProgrammaticAssessmentCoordinator(this.cwd, context, () => this.tools, {
-        mode,
-        scanAvailable: !options.disableTools && this.supportsToolCall("programmatic_scan", {}),
-      });
-      const turn = coordinator.scope.turn;
-      // Retain session-owned receipts across assessments, never initial samples.
-      for (const receipt of this.advisoryEvidence.list()) turn.evidence.retain(receipt);
-      this.advisoryEvidence = turn.evidence;
-      this.advisoryTurn = turn;
-      if (mode === "setup") {
-        this.programmaticProfile?.cancel();
-        this.setupInspection = new ProgrammaticSetupInspection(true);
-      }
-      const information = createCommandInformationTool(this.cwd, {
-        workspaceActions: this.opts.workspaceCommands,
-        workspaceCaseInsensitive: this.opts.workspaceCommandCaseInsensitive,
-        registryActions:
-          this.opts.advertiseRegistryCommands === false
-            ? []
-            : registryCommandListings(this.slashCommands.getAll()),
-        readReadiness: () => this.readProgrammaticReadiness(),
-      });
-      const freshInformation: typeof information = {
-        ...information,
-        execute: async (args, toolContext) => {
-          if (
-            this.advisoryTurn !== turn ||
-            !turn.active ||
-            !this.supportsToolCall("command_information", args)
-          )
-            throw new Error("Command information unavailable.");
-          if (
-            this.opts.approveToolExecution &&
-            !(await this.opts.approveToolExecution("command_information", args, toolContext.signal))
-          )
-            throw new Error("Tool execution was not approved.");
-          toolContext.signal.throwIfAborted();
-          if (
-            this.advisoryTurn !== turn ||
-            !turn.active ||
-            !this.supportsToolCall("command_information", args)
-          )
-            throw new Error("Permissions changed.");
-          return information.execute(args, toolContext);
-        },
-      };
-      this.registerTool(
-        createProgrammaticAdvisoryResultTool(() => this.advisoryTurn, freshInformation),
-      );
-      this.reconcileRegisteredTools();
-      const outcome = await coordinator.run(
-        signal,
-        async () => {
-          try {
-            let scanCounts: { enabledCount: number; applicableCount: number } | undefined;
-            const name = mode === "setup" ? "programmatic_profile" : "programmatic_scan";
-            const tool =
-              !options.disableTools && this.tools.find((candidate) => candidate.name === name);
-            if (tool) {
-              try {
-                const output = await tool.execute(mode === "setup" ? { action: "inspect" } : {}, {
-                  signal,
-                  toolCallId: "assessment-host-facts",
-                });
-                const raw = typeof output === "string" ? output : output.content;
-                if (typeof raw !== "string") throw new Error("Non-text host facts.");
-                const body = raw.startsWith("Host receipt IDs:")
-                  ? raw
-                      .slice(raw.indexOf("\n\n") + 2)
-                      .split(
-                        "\n\nHost evidence receipt (retrieval only; content remains untrusted):",
-                      )[0]!
-                  : raw;
-                const facts = JSON.parse(body);
-                if (mode === "setup") setupFacts = facts;
-                else {
-                  scanFacts = facts;
-                  if (facts?.ok === true) {
-                    scanCounts = facts.scan_counts;
-                    coordinator!.recordScanCounts(scanCounts);
-                  }
-                }
-              } catch {
-                turn.limitations.add(`${name}: host facts unavailable; no retry attempted.`);
-              }
-            } else if (mode === "configured") turn.markScanUnavailable();
-            signal.throwIfAborted();
-            const prompt = getPromptCommand(
-              mode === "setup" ? "setup-programmatic" : "programmatic",
-            )!.prompt;
-            const facts = { setupFacts, scanFacts };
-            if (context.evidence)
-              recheckAssessmentEvidence(context.evidence, evidenceAuthorization);
-            try {
-              await this.acceptPromptTemplate(
-                this.expandResolvedPromptCommand(prompt, focus ?? "") +
-                  `
-
-Host-owned exact facts (not model authority; already collected, do not repeat):
-${JSON.stringify(facts)}
-Reusable host evidence receipts:
-${JSON.stringify(turn.evidence.list())}` +
-                  renderProgrammaticAdvisoryContext(context),
-                provenance,
-                options,
-              );
-              return { scanCounts };
-            } catch (error) {
-              const unavailable =
-                (error instanceof NotLoggedInError || error instanceof ProviderError) &&
-                !this.hookText &&
-                this.hookToolCalls.size === 0;
-              return {
-                scanCounts,
-                status: unavailable ? ("unavailable" as const) : ("incomplete" as const),
-              };
-            }
-          } finally {
-            // The coordinator retires its turn-local receipts on close. Preserve only
-            // delivered session receipts, without retaining the closed turn's authority.
-            if (this.advisoryTurn === turn && turn.active) {
-              const retained = new AdvisoryEvidence();
-              for (const receipt of turn.evidence.list()) retained.retain(receipt);
-              this.advisoryEvidence = retained;
-            }
-          }
-        },
-        host,
-      );
-      if (this.advisoryTurn === turn && outcome.assessment.status !== "completed") {
-        const content = `## Recommendations — not started
-
-Assessment did not submit a validated result (interrupted, unavailable, or incomplete). Any completed deterministic scan remains separate and unchanged.`;
-        this.eventBus.emit("text_delta", {
-          text: `
-
-${content}
-`,
-        });
-        const notice: Message = { role: "assistant", content };
-        this.messages.push(notice);
-        await this.persistMessage(notice);
-        this.lastPersistedIndex = this.messages.length;
-      }
-      return {
-        ...outcome,
-        ...(setupFacts === undefined ? {} : { setupFacts }),
-        ...(scanFacts === undefined ? {} : { scanFacts }),
-      };
-    } finally {
-      coordinator?.scope.close();
-      this.advisoryTurn = undefined;
-      this.discoveryReview?.close();
-      this.discoveryCandidates = null;
-      this.setupInspection?.close();
-      this.setupInspection = undefined;
-      this.pendingAdvisoryPresentation = undefined;
-      if (previousResult) this.registeredTools.set("programmatic_advisory_result", previousResult);
-      else this.registeredTools.delete("programmatic_advisory_result");
-      for (const name of promoted)
-        if (
-          !this.searchedPromotedBuiltinNames.has(name) &&
-          !this.capabilityPromotedBuiltinNames.has(name)
-        )
-          this.registeredTools.delete(name);
-      this.reconcileRegisteredTools();
-    }
   }
 
   private expandResolvedPromptCommand(prompt: string, args: string): string {
@@ -4137,6 +3758,35 @@ ${content}
   }
 
   /**
+   * Rename this conversation. The title is saved to the current session file
+   * when `persist` is set (another pane on the same file may already have
+   * saved it) and always becomes the preview carried into later checkpoints,
+   * so compaction does not revert the name to the first prompt.
+   *
+   * The preview is set before the label is written, so a checkpoint created
+   * from here on carries the new name. A checkpoint already in flight captured
+   * the old preview, so if the session moves to a new file while the label is
+   * being written, the label is written to that file too.
+   */
+  async renameSession(title: string, persist: boolean): Promise<void> {
+    const previousPreview = this.sessionPreview;
+    this.sessionPreview = title;
+    if (!persist || this.opts.transient || !this.sessionPath) return;
+    try {
+      let labelledPath = this.sessionPath;
+      await this.sessionManager.appendLabel(labelledPath, title);
+      while (this.sessionPath && !sameSessionFile(this.sessionPath, labelledPath)) {
+        labelledPath = this.sessionPath;
+        await this.sessionManager.appendLabel(labelledPath, title);
+      }
+    } catch (error) {
+      // The rename failed: keep the old name unless a later rename replaced it.
+      if (this.sessionPreview === title) this.sessionPreview = previousPreview;
+      throw error;
+    }
+  }
+
+  /**
    * One-time move off the retired per-session Astra Fast flag. A session saved
    * with it on resumes on `gpt-6-astra-fast`, but only where the flag used to
    * apply: standard Astra through Codex OAuth, so no other pane is moved onto
@@ -5499,128 +5149,25 @@ ${content}
   }
 
   private guardRegisteredTool(tool: AgentTool): AgentTool {
-    const identity = getMcpToolIdentity(tool);
-    const guardedTool: AgentTool = {
-      ...tool,
-      onResultPrepared: (result) => {
-        this.advisoryTurn?.resultPrepared(result);
-        this.commandCreation?.verification.resultPrepared(result, tool.name);
-        tool.onResultPrepared?.(result);
-      },
-      execute: async (args, context) => {
-        const current = this.registeredTools.get(tool.name);
-        let executionTarget = tool;
-        if (current !== guardedTool) {
-          if (!identity || !current || !sameMcpToolIdentity(current, identity)) {
-            throw new Error(`${tool.name} is no longer registered.`);
-          }
-          // A provider turn may retain the cached wrapper while live discovery
-          // replaces it. Same exact source identity may follow the replacement;
-          // removal or a different identity still fails closed.
-          executionTarget = current;
-        }
-        if (this.unavailableToolNames.has(tool.name)) {
-          throw new Error(`${tool.name} is unavailable under the active host policy.`);
-        }
-        if (!this.isToolCapabilityAllowed(tool.name)) {
-          throw new Error(
-            this.toolCapabilityPolicy?.unavailableMessage(tool.name) ??
-              `${tool.name} is unavailable under the active tool capability policy.`,
-          );
-        }
-        const review = this.discoveryReview;
-        review?.claim(tool.name, args, identity !== undefined);
-        const setupInspection = this.setupInspection;
-        setupInspection?.claim(tool, args);
-        const advisory = this.advisoryTurn;
-        if (advisory) {
-          claimAdvisoryTool(advisory, tool, args, identity !== undefined);
-        }
-        let commandReceipt: string | undefined;
-        let output: Awaited<ReturnType<AgentTool["execute"]>> | undefined;
-        try {
-          output = await executeAdvisoryTool(
-            advisory,
-            this.cwd,
-            executionTarget,
-            args,
-            context,
-            async () => {
-              try {
-                if (
-                  this.opts.approveToolExecution &&
-                  !(await this.opts.approveToolExecution(tool.name, args, context.signal))
-                ) {
-                  throw new Error("Tool execution was not approved.");
-                }
-                context.signal.throwIfAborted();
-                if (
-                  this.setupInspection !== setupInspection ||
-                  (setupInspection && !setupInspection.active) ||
-                  this.advisoryTurn !== advisory ||
-                  (advisory && !advisory.active) ||
-                  this.registeredTools.get(tool.name) !== current ||
-                  !this.isToolCapabilityAllowed(tool.name) ||
-                  this.unavailableToolNames.has(tool.name)
-                )
-                  throw new Error("Tool permissions changed before execution.");
-                if (this.discoveryReview !== review || (review && !review.active))
-                  throw new Error("Candidate review owner changed.");
-                commandReceipt = await this.commandCreation?.verification.observeStart(
-                  tool.name,
-                  args,
-                  context,
-                );
-                await this.opts.validateToolExecution?.();
-                context.signal.throwIfAborted();
-                if (
-                  this.discoveryReview !== review ||
-                  (review && !review.active) ||
-                  this.setupInspection !== setupInspection ||
-                  (setupInspection && !setupInspection.active) ||
-                  this.advisoryTurn !== advisory ||
-                  this.registeredTools.get(tool.name) !== current ||
-                  !this.isToolCapabilityAllowed(tool.name) ||
-                  this.unavailableToolNames.has(tool.name)
-                )
-                  throw new Error("Tool permissions changed while observing verification inputs.");
-              } catch (error) {
-                if (advisory && tool.name === "programmatic_scan")
-                  advisory.settleScan(context.signal.aborted ? "cancelled" : "denied");
-                throw error;
-              }
-            },
-          );
-          if (review && this.discoveryReview === review && review.active && !context.signal.aborted)
-            review.observe(this.cwd, tool.name, args, output, context.toolCallId);
-          // Do not accept result evidence against content that changed while the tool ran.
-          await this.opts.validateToolExecution?.();
-        } finally {
-          await this.commandCreation?.verification.observeEnd(
-            commandReceipt,
-            output,
-            context.signal,
-          );
-        }
-        if (
-          advisory &&
-          tool.name === "programmatic_advisory_result" &&
-          advisory.submitted &&
-          this.advisoryTurn === advisory &&
-          advisory.active &&
-          !context.signal.aborted &&
-          typeof output === "string"
-        ) {
-          this.pendingAdvisoryPresentation = {
-            turn: advisory,
-            text: output,
-            signal: context.signal,
-          };
-        }
-        return output;
+    return guardSessionTool(tool, this.toolGuardHost());
+  }
+
+  private toolGuardHost(): SessionToolGuardHost {
+    return {
+      registeredTool: (name) => this.registeredTools.get(name),
+      isUnavailable: (name) => this.unavailableToolNames.has(name),
+      isCapabilityAllowed: (name) => this.isToolCapabilityAllowed(name),
+      unavailableMessage: (name) => this.toolCapabilityPolicy?.unavailableMessage(name),
+      discoveryReview: () => this.discoveryReview,
+      setupInspection: () => this.setupInspection,
+      advisoryTurn: () => this.advisoryTurn,
+      commandCreation: () => this.commandCreation,
+      cwd: () => this.cwd,
+      options: () => this.opts,
+      setPendingAdvisoryPresentation: (presentation) => {
+        this.pendingAdvisoryPresentation = presentation;
       },
     };
-    return identity ? withMcpToolIdentity(guardedTool, identity) : guardedTool;
   }
 
   private isToolCapabilityAllowed(toolName: string): boolean {
@@ -5708,60 +5255,48 @@ ${content}
     await this.rebuildSystemPromptInPlace();
   }
 
-  async persistApprovedPlanConsumption(
+  persistApprovedPlanConsumption(
     input: ApprovedPlanConsumptionInput,
   ): Promise<ApprovedPlanConsumptionRecord> {
-    if (!this.sessionPath)
-      throw new Error("Approved plan consumption requires a persistent session.");
-    if (approvedPlanContentHash(input.content) !== input.contentHash) {
-      throw new Error("Approved plan content hash does not match its captured content.");
-    }
-    const record: ApprovedPlanConsumptionRecord = {
-      version: 1,
-      ...input,
-      state: "approval-committed",
-    };
-    await this.sessionManager.appendApprovedPlanConsumptionRequired(this.sessionPath, record);
-    this.approvedPlanHydrationDeferred = false;
-    this.approvedPlanConsumption = record;
-    this.approvedPlanPhaseContext = this.activePhaseContext
-      ? structuredClone(this.activePhaseContext)
-      : undefined;
-    this.approvedPlanPath = record.approvedPlanPath;
-    await this.rebuildSystemPromptInPlace();
-    return structuredClone(record);
+    return persistApprovedPlanConsumption(this.approvedPlanHost(), input);
   }
 
-  async hydrateCanonicalApprovedPlan(
+  hydrateCanonicalApprovedPlan(
     input: Omit<ApprovedPlanConsumptionRecord, "version">,
   ): Promise<ApprovedPlanConsumptionRecord> {
-    if (!this.sessionPath) throw new Error("Cannot hydrate approved plan without a session path.");
-    if (input.state === "completed") throw new Error("Cannot hydrate a completed approved plan.");
-    if (approvedPlanContentHash(input.content) !== input.contentHash) {
-      throw new Error("Canonical approved plan content does not match its durable hash.");
-    }
-    const record: ApprovedPlanConsumptionRecord = { version: 1, ...input };
-    const current = this.approvedPlanConsumption;
-    if (
-      !current ||
-      current.checkpointId !== record.checkpointId ||
-      current.generation !== record.generation ||
-      current.content !== record.content ||
-      current.contentHash !== record.contentHash ||
-      current.state !== record.state ||
-      current.approvedPlanPath !== record.approvedPlanPath
-    ) {
-      await this.sessionManager.appendApprovedPlanConsumptionRequired(this.sessionPath, record);
-    }
-    this.approvedPlanHydrationDeferred = false;
-    this.approvedPlanConsumption = record;
-    this.approvedPlanPath = record.approvedPlanPath;
-    this.approvedPlanPhaseContext = this.activePhaseContext
-      ? structuredClone(this.activePhaseContext)
-      : undefined;
-    await this.rebuildSystemPromptInPlace();
-    this.refreshSystemPromptTail();
-    return structuredClone(record);
+    return hydrateCanonicalApprovedPlan(this.approvedPlanHost(), input);
+  }
+
+  private approvedPlanHost(): SessionApprovedPlanHost {
+    return {
+      sessionPath: () => this.sessionPath,
+      sessionManager: () => this.sessionManager,
+      approvedPlanConsumption: () => this.approvedPlanConsumption,
+      setApprovedPlanConsumption: (record) => {
+        this.approvedPlanConsumption = record;
+      },
+      setApprovedPlanPath: (planPath) => {
+        this.approvedPlanPath = planPath;
+      },
+      setApprovedPlanPhaseContext: (context) => {
+        this.approvedPlanPhaseContext = context;
+      },
+      setApprovedPlanHydrationDeferred: (deferred) => {
+        this.approvedPlanHydrationDeferred = deferred;
+      },
+      activePhaseContext: () => this.activePhaseContext,
+      messages: () => this.messages,
+      lockContextProfile: () => {
+        this.contextProfileLocked = true;
+      },
+      persistMessage: (message, required) => this.persistMessage(message, required),
+      setLastPersistedIndex: (index) => {
+        this.lastPersistedIndex = index;
+      },
+      persistedTranscriptCount: () => this.persistedTranscriptCount(),
+      rebuildSystemPromptInPlace: () => this.rebuildSystemPromptInPlace(),
+      refreshSystemPromptTail: () => this.refreshSystemPromptTail(),
+    };
   }
 
   getContinuationReviewRecord(): ContinuationReviewRecord | undefined {
@@ -5788,69 +5323,20 @@ ${content}
       : undefined;
   }
 
-  async markApprovedPlanImplementationPromptStarted(): Promise<ApprovedPlanConsumptionRecord> {
-    const current = this.approvedPlanConsumption;
-    if (!current) throw new Error("No approved plan consumption is committed.");
-    if (current.state === "implementation-prompt-started") return structuredClone(current);
-    if (!this.sessionPath)
-      throw new Error("Approved plan consumption requires a persistent session.");
-    const started: ApprovedPlanConsumptionRecord = {
-      ...current,
-      state: "implementation-prompt-started",
-    };
-    await this.sessionManager.appendApprovedPlanConsumptionRequired(this.sessionPath, started);
-    this.approvedPlanConsumption = started;
-    return structuredClone(started);
+  markApprovedPlanImplementationPromptStarted(): Promise<ApprovedPlanConsumptionRecord> {
+    return markApprovedPlanImplementationPromptStarted(this.approvedPlanHost());
   }
 
-  async completeApprovedPlanConsumption(): Promise<void> {
-    const current = this.approvedPlanConsumption;
-    if (!current) return;
-    if (!this.sessionPath)
-      throw new Error("Completing approved plan consumption requires a persistent session.");
-    const completed: ApprovedPlanConsumptionRecord = {
-      ...current,
-      state: "completed",
-    };
-    await this.sessionManager.appendApprovedPlanConsumptionRequired(this.sessionPath, completed);
-    this.approvedPlanConsumption = undefined;
-    this.approvedPlanPhaseContext = undefined;
-    this.approvedPlanPath = undefined;
-    await this.rebuildSystemPromptInPlace();
+  completeApprovedPlanConsumption(): Promise<void> {
+    return completeApprovedPlanConsumption(this.approvedPlanHost());
   }
 
-  async runApprovedPlanImplementation(
+  runApprovedPlanImplementation(
     prompt: string,
     generation: number,
     run: () => Promise<void> = () => this.runLoop(),
   ): Promise<void> {
-    const consumption = this.approvedPlanConsumption;
-    if (!consumption) throw new Error("No approved plan consumption is committed.");
-    if (consumption.state === "implementation-prompt-started") return;
-
-    const latest = this.messages.at(-1);
-    const promptAlreadyPersisted = latest?.role === "user" && latest.content === prompt;
-    if (!promptAlreadyPersisted) {
-      const userMessage: Message = {
-        role: "user",
-        content: prompt,
-        provenance: { source: "runtime", kind: "automation", visibility: "transcript" },
-      };
-      this.contextProfileLocked = true;
-      this.messages.push(userMessage);
-      await this.persistMessage(userMessage, true);
-      this.lastPersistedIndex = this.messages.length;
-    }
-    if (!this.sessionPath)
-      throw new Error("Approved plan implementation requires a persistent session.");
-    await this.sessionManager.appendRunStartedRequired(this.sessionPath, {
-      version: 1,
-      generation,
-      startedAt: new Date().toISOString(),
-      afterMessageCount: this.persistedTranscriptCount(),
-    });
-    await this.markApprovedPlanImplementationPromptStarted();
-    await run();
+    return runApprovedPlanImplementation(this.approvedPlanHost(), prompt, generation, run);
   }
 
   resumeApprovedPlanImplementation(
@@ -6204,139 +5690,66 @@ ${content}
     return this.roadmapPhaseLeaseMarker ? structuredClone(this.roadmapPhaseLeaseMarker) : undefined;
   }
 
-  async setRoadmapPhaseLeaseMarker(marker: RoadmapPhaseLeaseMarkerV1): Promise<void> {
-    const parsed = parseRoadmapPhaseLeaseMarker(marker, {
-      projectKey: canonicalProjectKey(this.cwd),
-      phaseId: this.activePhaseContext?.phase.id,
-    });
-    if (!parsed) throw new Error("Cannot persist malformed Roadmap phase lease metadata.");
-    if (!this.sessionPath) throw new Error("Roadmap phase leases require a persistent session.");
-    const entry: CustomEntry = {
-      type: "custom",
-      kind: ROADMAP_PHASE_LEASE_KIND,
-      id: crypto.randomUUID(),
-      parentId: null,
-      timestamp: new Date().toISOString(),
-      data: parsed,
-    };
-    await this.sessionManager.appendRequiredEntry(this.sessionPath, entry);
-    this.roadmapPhaseLeaseMarker = parsed;
+  setRoadmapPhaseLeaseMarker(marker: RoadmapPhaseLeaseMarkerV1): Promise<void> {
+    return setRoadmapPhaseLeaseMarker(this.phaseContextHost(), marker);
   }
 
-  private async rePersistRoadmapPhaseLeaseMarker(): Promise<void> {
-    if (!this.roadmapPhaseLeaseMarker || !this.sessionPath) return;
-    const entry: CustomEntry = {
-      type: "custom",
-      kind: ROADMAP_PHASE_LEASE_KIND,
-      id: crypto.randomUUID(),
-      parentId: null,
-      timestamp: new Date().toISOString(),
-      data: this.roadmapPhaseLeaseMarker,
-    };
-    await this.sessionManager.appendRequiredEntry(this.sessionPath, entry);
+  private rePersistRoadmapPhaseLeaseMarker(): Promise<void> {
+    return rePersistRoadmapPhaseLeaseMarker(this.phaseContextHost());
   }
 
-  async setActivePhaseContext(context: ActivePhaseContextV1 | undefined): Promise<void> {
-    if (context === undefined) {
-      await this.clearActivePhaseContext();
-      return;
-    }
-    const parsed = parseActivePhaseContext(context);
-    if (!parsed) throw new Error("Cannot activate malformed phase context.");
-    if (parsed.projectKey !== canonicalProjectKey(this.cwd)) {
-      throw new Error("Cannot activate phase context from another project.");
-    }
-    // Rendering applies the deterministic package budget before metadata is persisted.
-    const activeContext = await this.rePersistActivePhaseContext(
-      renderActivePhasePackage(parsed).context,
-    );
-    if (!activeContext) throw new Error("Cannot activate phase context without metadata.");
-    this.restorePlanStateFromActivePhase(activeContext);
-    this.refreshSystemPromptTail();
+  setActivePhaseContext(context: ActivePhaseContextV1 | undefined): Promise<void> {
+    return setActivePhaseContext(this.phaseContextHost(), context);
   }
 
-  async clearActivePhaseContext(reason: ActivePhaseContextClearReason = "cleared"): Promise<void> {
-    const phaseId = this.activePhaseContext?.phase.id ?? null;
-    if (this.sessionPath) {
-      const entry: CustomEntry = {
-        type: "custom",
-        kind: ACTIVE_PHASE_CONTEXT_CLEAR_KIND,
-        id: crypto.randomUUID(),
-        parentId: null,
-        timestamp: new Date().toISOString(),
-        data: {
-          version: 1,
-          projectKey: canonicalProjectKey(this.cwd),
-          phaseId,
-          reason,
-        },
-      };
-      await this.sessionManager.appendRequiredEntry(this.sessionPath, entry);
-    }
-    this.activePhaseContext = undefined;
-    this.roadmapPhaseLeaseMarker = undefined;
-    this.refreshSystemPromptTail();
+  clearActivePhaseContext(reason: ActivePhaseContextClearReason = "cleared"): Promise<void> {
+    return clearActivePhaseContext(this.phaseContextHost(), reason);
   }
 
-  async updateActivePhaseStage(
+  updateActivePhaseStage(
     executionStage: ActivePhaseExecutionStage,
     approvedPlanPath?: string,
   ): Promise<ActivePhaseContextV1> {
-    if (!this.activePhaseContext) throw new Error("No active phase context is bound.");
-    const activeContext = await this.rePersistActivePhaseContext({
-      ...this.activePhaseContext,
-      executionStage,
-      ...(approvedPlanPath ? { approvedPlanPath } : { approvedPlanPath: undefined }),
-    });
-    if (!activeContext) throw new Error("No active phase context is bound.");
-    this.restorePlanStateFromActivePhase(activeContext);
-    await this.rebuildSystemPromptInPlace();
-    this.refreshSystemPromptTail();
-    return structuredClone(activeContext);
+    return updateActivePhaseStage(this.phaseContextHost(), executionStage, approvedPlanPath);
   }
 
   private restorePlanStateFromActivePhase(context: ActivePhaseContextV1): void {
-    this.planModeRef.current =
-      context.executionStage === "planning" || context.executionStage === "awaiting-approval";
-    this.approvedPlanPath =
-      context.executionStage === "implementing" ? context.approvedPlanPath : undefined;
+    restorePlanStateFromActivePhase(this.phaseContextHost(), context);
   }
 
-  private async ensureActivePhaseSessionMetadata(): Promise<void> {
-    const context = this.activePhaseContext;
-    if (!context || !this.sessionPath) return;
-    if (
-      context.session.sessionId === this.sessionId &&
-      context.session.sessionPath === this.sessionPath
-    ) {
-      return;
-    }
-    await this.rePersistActivePhaseContext(context);
+  private ensureActivePhaseSessionMetadata(): Promise<void> {
+    return ensureActivePhaseSessionMetadata(this.phaseContextHost());
   }
 
-  private async rePersistActivePhaseContext(
+  private rePersistActivePhaseContext(
     context: ActivePhaseContextV1 | undefined = this.activePhaseContext,
   ): Promise<ActivePhaseContextV1 | undefined> {
-    if (!context) return undefined;
-    const synchronizedContext = this.sessionId
-      ? {
-          ...context,
-          session: { sessionId: this.sessionId, sessionPath: this.sessionPath || null },
-        }
-      : context;
-    if (this.sessionPath) {
-      const entry: CustomEntry = {
-        type: "custom",
-        kind: ACTIVE_PHASE_CONTEXT_KIND,
-        id: crypto.randomUUID(),
-        parentId: null,
-        timestamp: new Date().toISOString(),
-        data: synchronizedContext,
-      };
-      await this.sessionManager.appendRequiredEntry(this.sessionPath, entry);
-    }
-    this.activePhaseContext = synchronizedContext;
-    return synchronizedContext;
+    return rePersistActivePhaseContext(this.phaseContextHost(), context);
+  }
+
+  private phaseContextHost(): SessionPhaseContextHost {
+    return {
+      cwd: () => this.cwd,
+      sessionId: () => this.sessionId,
+      sessionPath: () => this.sessionPath,
+      sessionManager: () => this.sessionManager,
+      activePhaseContext: () => this.activePhaseContext,
+      storeActivePhaseContext: (context) => {
+        this.activePhaseContext = context;
+      },
+      leaseMarker: () => this.roadmapPhaseLeaseMarker,
+      storeLeaseMarker: (marker) => {
+        this.roadmapPhaseLeaseMarker = marker;
+      },
+      setPlanModeFlag: (planMode) => {
+        this.planModeRef.current = planMode;
+      },
+      setApprovedPlanPath: (planPath) => {
+        this.approvedPlanPath = planPath;
+      },
+      refreshSystemPromptTail: () => this.refreshSystemPromptTail(),
+      rebuildSystemPromptInPlace: () => this.rebuildSystemPromptInPlace(),
+    };
   }
 
   getTurnMetrics(): TurnMetricPayload[] {

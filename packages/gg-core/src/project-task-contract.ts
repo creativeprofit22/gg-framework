@@ -22,7 +22,9 @@ export function isManuallyRunnableTaskStatus(
 /**
  * Why the most recent run of a task ended `blocked`. Informational only: it
  * never changes `status` or run eligibility. `run-failed` covers the agent turn
- * itself erroring before any review could happen.
+ * itself erroring before any review could happen. `needs-review` means Autopilot
+ * handed the work to a person; `not-marked-done` means the run ended with no
+ * completion evidence; `interrupted` means the owning process went away mid-run.
  */
 export const PROJECT_TASK_BLOCK_REASONS = [
   "review-failed",
@@ -31,6 +33,9 @@ export const PROJECT_TASK_BLOCK_REASONS = [
   "plan-mode",
   "plan-checkpoint",
   "queued-messages",
+  "needs-review",
+  "not-marked-done",
+  "interrupted",
 ] as const;
 
 export type KnownProjectTaskBlockReason = (typeof PROJECT_TASK_BLOCK_REASONS)[number];

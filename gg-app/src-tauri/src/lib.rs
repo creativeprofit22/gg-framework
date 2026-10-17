@@ -281,6 +281,7 @@ pub fn run() {
             commands::agent_admin::agent_delete_goal,
             commands::agent_admin::agent_set_critter_model,
             commands::agent_admin::agent_sessions,
+            commands::agent_admin::agent_rename_session,
             commands::agent_admin::agent_files,
             commands::agent::agent_plugins,
             commands::agent::agent_install_plugin,

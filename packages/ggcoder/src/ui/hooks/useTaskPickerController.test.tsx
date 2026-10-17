@@ -9,7 +9,8 @@ import { stream, StreamResult, type Message, type Provider } from "@kenkaiiii/gg
 import { z } from "zod";
 import { useTaskPickerController } from "./useTaskPickerController.js";
 import { useAgentLoop, type UseAgentLoopReturn } from "./useAgentLoop.js";
-import { admitTerminalTask } from "../task-execution.js";
+import { admitTerminalTask, settleTerminalTask } from "../task-execution.js";
+import { createTasksTool } from "../../tools/tasks.js";
 import {
   createTaskRecord,
   getNextRunnableTask,
@@ -231,6 +232,113 @@ it.each<[Provider, boolean, boolean]>([
     }
   },
 );
+
+describe("terminal task run settlement", () => {
+  const replyThenFinish = (call?: { id: string; name: string; args: Record<string, unknown> }) => {
+    let requests = 0;
+    vi.mocked(stream).mockImplementation(
+      () =>
+        new StreamResult(
+          (async function* () {
+            requests++;
+            if (call && requests === 1) {
+              const toolCall = { type: "tool_call" as const, ...call };
+              yield { type: "toolcall_done", id: call.id, name: call.name, args: call.args };
+              return {
+                message: { role: "assistant", content: [toolCall] },
+                stopReason: "tool_use",
+                usage: { inputTokens: 1, outputTokens: 1 },
+              };
+            }
+            return {
+              message: { role: "assistant", content: "Finished" },
+              stopReason: "end_turn",
+              usage: { inputTokens: 1, outputTokens: 1 },
+            };
+          })(),
+        ),
+    );
+  };
+
+  // Drives the real loop and store with App's onDone wiring: settle the task,
+  // then let Run All advance only when settlement allows it.
+  async function runTask(taskCwd: string, markDone: boolean) {
+    const task = createTaskRecord("Current", "Do current");
+    const next = createTaskRecord("Next", "Do next");
+    await saveTasks(taskCwd, [task, next]);
+    admitTerminalTask("openai", taskCwd, task.id, true);
+    expect(loadTasksSync(taskCwd)[0]).toMatchObject({
+      status: "in-progress",
+      runOwnerPid: process.pid,
+    });
+    replyThenFinish(
+      markDone
+        ? { id: "mark", name: "tasks", args: { action: "done", id: task.id.slice(0, 8) } }
+        : undefined,
+    );
+    const startNext = vi.fn();
+    let loop!: UseAgentLoopReturn;
+    const messages = { current: [] as Message[] };
+    function Harness() {
+      loop = useAgentLoop(
+        messages,
+        {
+          provider: "openai",
+          model: "gpt-5",
+          apiKey: "fixture-key",
+          maxTokens: 100,
+          tools: [createTasksTool(taskCwd)],
+        },
+        {
+          onDone: () => {
+            if (settleTerminalTask(taskCwd, task.id, { kind: "succeeded", reviewCleared: false })) {
+              const runnable = getNextRunnableTask(taskCwd);
+              if (runnable) startNext(runnable.id);
+            }
+          },
+        },
+      );
+      return null;
+    }
+    const mounted = mount(<Harness />);
+    try {
+      await vi.waitFor(() => expect(loop).toBeDefined());
+      await loop.run(task.prompt, { unattended: true });
+    } finally {
+      mounted.unmount();
+    }
+    const [settled, untouched] = loadTasksSync(taskCwd);
+    return { next, settled: settled!, untouched: untouched!, startNext };
+  }
+
+  it("blocks a run the agent never marked done and pauses Run All on it", async () => {
+    const { settled, untouched, startNext } = await runTask("terminal-settle-unmarked", false);
+    expect(settled.status).toBe("blocked");
+    expect(settled.lastOutcome?.reason).toBe("not-marked-done");
+    expect(settled.runOwnerPid).toBeUndefined();
+    expect(untouched.status).toBe("pending");
+    expect(startNext).not.toHaveBeenCalled();
+  });
+
+  it("settles a run the agent marked done and lets Run All advance", async () => {
+    const { settled, next, startNext } = await runTask("terminal-settle-marked", true);
+    expect(settled.status).toBe("done");
+    expect(settled.lastOutcome).toBeUndefined();
+    expect(settled.runOwnerPid).toBeUndefined();
+    expect(startNext).toHaveBeenCalledWith(next.id);
+  });
+
+  it("App settles every terminal task run outcome", () => {
+    const app = readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
+    expect(app).toContain("runningTaskRef.current.runningTaskId = taskId");
+    expect(app).toContain('settleRunningTask({ kind: "succeeded", reviewCleared: false })');
+    expect(app).toContain('settleRunningTask({ kind: "blocked", reason: "cancelled" })');
+    expect(app).toContain('settleRunningTask({ kind: "blocked", reason: "run-failed" }, taskId)');
+    expect(app).toContain(
+      'settleRunningTask({ kind: "blocked", reason: "run-failed" }, runTaskId)',
+    );
+  });
+});
 
 // Wiring assertions complement the real hook/store tests: both App branches must
 // retain intent, and auto-advance must not mutate the queue before shared admission.

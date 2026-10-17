@@ -2,16 +2,21 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { isRoadmapInspectionOutcome } from "@kenkaiiii/gg-core/roadmap-workflow";
+import {
+  isRoadmapInspectionOutcome,
+  type RoadmapPhaseNotEditableReason,
+} from "@kenkaiiii/gg-core/roadmap-workflow";
 import { ProjectNotesRepository } from "./project-notes-repository.js";
 import type {
   NotesDocumentV3,
   NotesPhase,
   ProjectNotesLoadOutcome,
   RoadmapPhaseDraftRequest,
+  RoadmapPhaseEditRequest,
 } from "@kenkaiiii/gg-core";
 import {
   APP_SIDECAR_ROADMAP_DRAFT_SYSTEM_PROMPT,
+  APP_SIDECAR_ROADMAP_PHASE_SYSTEM_PROMPT,
   AppSidecarRoadmapDraftToolHost,
   projectRoadmapInspection,
 } from "./app-sidecar-roadmap-draft-tool-host.js";
@@ -387,6 +392,7 @@ describe("AppSidecarRoadmapDraftToolHost", () => {
     expect(value.createSessionTools().map((tool) => tool.name)).toEqual([
       "roadmap_inspect",
       "roadmap_phase_draft",
+      "roadmap_phase_edit",
     ]);
   });
 
@@ -494,9 +500,9 @@ describe("AppSidecarRoadmapDraftToolHost", () => {
         sourcesNotCited: "Corpus results only confirmed the local design.",
       }),
     ).resolves.toMatchObject({ status: "drafted" });
-    expect(drafts.pending("/work/app")?.sourcesNotCited).toBe(
-      "Corpus results only confirmed the local design.",
-    );
+    expect(drafts.pending("/work/app")).toMatchObject({
+      sourcesNotCited: "Corpus results only confirmed the local design.",
+    });
     expect(ledger.isEmpty()).toBe(true);
   });
 
@@ -507,5 +513,249 @@ describe("AppSidecarRoadmapDraftToolHost", () => {
     expect(APP_SIDECAR_ROADMAP_DRAFT_SYSTEM_PROMPT).toContain("roadmap_status");
     expect(APP_SIDECAR_ROADMAP_DRAFT_SYSTEM_PROMPT).toContain("ordinary coding requests");
     expect(APP_SIDECAR_ROADMAP_DRAFT_SYSTEM_PROMPT).toContain("proposed_references");
+  });
+});
+
+describe("roadmap_phase_edit proposals", () => {
+  const editRequest: RoadmapPhaseEditRequest = {
+    expectedRevision: 4,
+    summary: "Narrow the first phase",
+    phaseId: "phase-1",
+    goal: "Ship narrower behavior",
+  };
+  const twoPhases = (revision = 4, first: Partial<NotesPhase> = {}): ProjectNotesLoadOutcome =>
+    loaded(revision, [
+      phase({ id: "phase-1", order: 1, ...first }),
+      phase({ id: "phase-2", order: 2, title: "Second phase" }),
+    ]);
+
+  it("requires a prior inspection and creates an edit draft with only changed fields", async () => {
+    const { value, drafts } = host(async () => twoPhases());
+
+    await expect(value.proposeEdit(editRequest)).resolves.toMatchObject({
+      status: "inspection-required",
+    });
+    expect(drafts.pending("/work/app")).toBeNull();
+
+    await value.inspect();
+    await expect(
+      value.proposeEdit({ ...editRequest, title: "First phase" }),
+    ).resolves.toMatchObject({
+      status: "drafted",
+      draft: {
+        kind: "edit",
+        phaseId: "phase-1",
+        phaseTitle: "First phase",
+        basedOnRevision: 4,
+        basedOnUpdatedAt: timestamp,
+        createdBySessionId: "session-1",
+        changes: [
+          { field: "goal", before: "Ship bounded behavior", after: "Ship narrower behavior" },
+        ],
+      },
+    });
+    expect(drafts.pending("/work/app")).toMatchObject({ kind: "edit", status: "pending" });
+  });
+
+  it("rejects revision mismatches and stale Notes without drafting", async () => {
+    let revision = 4;
+    const { value, drafts } = host(async () => twoPhases(revision));
+    await value.inspect();
+
+    await expect(value.proposeEdit({ ...editRequest, expectedRevision: 3 })).resolves.toEqual({
+      status: "inspection-revision-mismatch",
+      inspectedRevision: 4,
+      requestedRevision: 3,
+    });
+
+    revision = 5;
+    await expect(value.proposeEdit(editRequest)).resolves.toEqual({
+      status: "stale-revision",
+      expectedRevision: 4,
+      currentRevision: 5,
+    });
+    // A stale revision clears the inspection, so the next attempt must re-inspect.
+    await expect(value.proposeEdit(editRequest)).resolves.toMatchObject({
+      status: "inspection-required",
+    });
+    expect(drafts.pending("/work/app")).toBeNull();
+  });
+
+  it.each<[RoadmapPhaseNotEditableReason, Partial<NotesPhase>]>([
+    ["done", { status: "done", completedAt: timestamp }],
+    ["archived", { archivedAt: timestamp }],
+    ["deleted", { deletion: { version: 1, currentDeletionId: "deletion-1", events: [] } }],
+  ])("rejects %s phases", async (reason, overrides) => {
+    const { value, drafts } = host(async () => twoPhases(4, overrides));
+    await value.inspect();
+    await expect(value.proposeEdit(editRequest)).resolves.toEqual({
+      status: "phase-not-editable",
+      phaseId: "phase-1",
+      reason,
+    });
+    expect(drafts.pending("/work/app")).toBeNull();
+  });
+
+  it("rejects missing phases and reports unchanged edits", async () => {
+    const { value, drafts } = host(async () => twoPhases());
+    await value.inspect();
+    await expect(value.proposeEdit({ ...editRequest, phaseId: "phase-404" })).resolves.toEqual({
+      status: "phase-not-editable",
+      phaseId: "phase-404",
+      reason: "missing",
+    });
+    await expect(
+      value.proposeEdit({ ...editRequest, goal: "Ship bounded behavior" }),
+    ).resolves.toEqual({ status: "no-changes", phaseId: "phase-1" });
+    expect(drafts.pending("/work/app")).toBeNull();
+  });
+
+  it("limits an active-phase inspection to edits of the active phase", async () => {
+    const { value, drafts } = host(
+      async () => twoPhases(),
+      () => "session-1",
+      () => "phase-1",
+    );
+    await value.inspect();
+    await expect(
+      value.proposeEdit({ ...editRequest, phaseId: "phase-2", goal: "Other goal" }),
+    ).resolves.toMatchObject({
+      status: "inspection-required",
+      message: expect.stringContaining('scope "roadmap"'),
+    });
+    expect(drafts.pending("/work/app")).toBeNull();
+
+    await value.inspect();
+    await expect(value.proposeEdit(editRequest)).resolves.toMatchObject({ status: "drafted" });
+  });
+
+  it("returns exactly one phase with its full sourcePrompt for a phase_id inspection", async () => {
+    const { value } = host(async () => twoPhases(4, { sourcePrompt: "Full saved prompt." }));
+    const result = await value.inspect({ phase_id: "phase-1" });
+    expect(isRoadmapInspectionOutcome(result)).toBe(true);
+    if (result.status !== "ok") throw new Error("Expected inspection");
+    expect(result.inspection.revision).toBe(4);
+    expect(result.inspection.phases).toHaveLength(1);
+    expect(result.inspection.phases[0]).toMatchObject({
+      id: "phase-1",
+      sourcePrompt: "Full saved prompt.",
+    });
+
+    // Default inspections stay lean.
+    expect(JSON.stringify(await value.inspect())).not.toContain("sourcePrompt");
+  });
+
+  it.each<[string, Partial<NotesPhase>]>([
+    ["phase-404", {}],
+    ["phase-1", { deletion: { version: 1, currentDeletionId: "deletion-1", events: [] } }],
+  ])("returns no phases for an unknown or deleted phase_id %s", async (phaseId, first) => {
+    const { value } = host(async () => twoPhases(4, first));
+    await expect(value.inspect({ phase_id: phaseId })).resolves.toMatchObject({
+      status: "ok",
+      inspection: { revision: 4, phases: [] },
+    });
+  });
+
+  it("accepts an edit only for the phase a phase_id inspection covered", async () => {
+    const { value, drafts } = host(async () => twoPhases());
+    await value.inspect({ phase_id: "phase-1" });
+    await expect(
+      value.proposeEdit({ ...editRequest, phaseId: "phase-2", goal: "Other goal" }),
+    ).resolves.toEqual({
+      status: "inspection-required",
+      message:
+        "The last inspection covered a different phase. Call roadmap_inspect with this phase_id, then retry with its revision.",
+    });
+    expect(drafts.pending("/work/app")).toBeNull();
+
+    await value.inspect({ phase_id: "phase-1" });
+    await expect(
+      value.proposeEdit({ ...editRequest, sourcePrompt: "Rewritten prompt." }),
+    ).resolves.toMatchObject({
+      status: "drafted",
+      draft: {
+        phaseId: "phase-1",
+        changes: expect.arrayContaining([
+          {
+            field: "sourcePrompt",
+            before: "Implement the first phase.",
+            after: "Rewritten prompt.",
+          },
+        ]),
+      },
+    });
+  });
+
+  it("refuses to draft new phases after a phase_id inspection", async () => {
+    const { value, drafts } = host(async () => loaded(4));
+    await value.inspect({ phase_id: "phase-1" });
+    await expect(value.draft(request)).resolves.toEqual({
+      status: "inspection-required",
+      message:
+        'Drafting needs every current phase. Call roadmap_inspect with scope "roadmap", then retry with its revision.',
+    });
+    expect(drafts.pending("/work/app")).toBeNull();
+  });
+
+  it("still needs a full inspection to edit a non-active phase in a bound session", async () => {
+    const { value, drafts } = host(
+      async () => twoPhases(),
+      () => "session-1",
+      () => "phase-1",
+    );
+    const inspected = await value.inspect({ phase_id: "phase-2" });
+    if (inspected.status !== "ok") throw new Error("Expected inspection");
+    expect(inspected.inspection.phases.map((candidate) => candidate.id)).toEqual(["phase-2"]);
+    await expect(
+      value.proposeEdit({ ...editRequest, phaseId: "phase-2", goal: "Other goal" }),
+    ).resolves.toMatchObject({
+      status: "inspection-required",
+      message: expect.stringContaining('scope "roadmap"'),
+    });
+    expect(drafts.pending("/work/app")).toBeNull();
+
+    await value.inspect({ phase_id: "phase-1" });
+    await expect(value.proposeEdit(editRequest)).resolves.toMatchObject({ status: "drafted" });
+  });
+
+  it("tells both edit surfaces to inspect by phase_id before changing sourcePrompt", () => {
+    expect(APP_SIDECAR_ROADMAP_DRAFT_SYSTEM_PROMPT).toContain(
+      "To change sourcePrompt, first call roadmap_inspect with that phase_id",
+    );
+    const edit = host(async () => twoPhases())
+      .value.createSessionTools()
+      .find((tool) => tool.name === "roadmap_phase_edit");
+    expect(edit?.description).toContain(
+      "To change sourcePrompt, first call roadmap_inspect with that phase_id",
+    );
+  });
+
+  it("returns the existing draft ID when a proposal is already pending", async () => {
+    const { value } = host(async () => twoPhases());
+    await value.inspect();
+    const first = await value.proposeEdit(editRequest);
+    if (first.status !== "drafted") throw new Error("expected a drafted edit");
+    await expect(value.proposeEdit({ ...editRequest, title: "Renamed phase" })).resolves.toEqual({
+      status: "proposal-pending",
+      draftId: first.draft.id,
+    });
+  });
+
+  it("names the edit tool and its boundaries in both system prompts", () => {
+    for (const prompt of [
+      APP_SIDECAR_ROADMAP_DRAFT_SYSTEM_PROMPT,
+      APP_SIDECAR_ROADMAP_PHASE_SYSTEM_PROMPT,
+    ]) {
+      expect(prompt).toContain("roadmap_phase_edit");
+      expect(prompt).toContain("only the changed fields");
+      expect(prompt).toContain("Never loosen completion criteria");
+      expect(prompt).toContain("approval is pending");
+    }
+    expect(APP_SIDECAR_ROADMAP_DRAFT_SYSTEM_PROMPT).toContain(
+      "Never delete and redraft, or add a duplicate phase",
+    );
+    expect(APP_SIDECAR_ROADMAP_DRAFT_SYSTEM_PROMPT).toContain(
+      "Done, archived, and deleted phases cannot be edited",
+    );
   });
 });

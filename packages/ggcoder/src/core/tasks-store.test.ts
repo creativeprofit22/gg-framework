@@ -19,8 +19,10 @@ import {
   createTaskRecord,
   deleteTaskSync,
   loadTasksSync,
+  markTaskInProgress,
   mutateTasks,
   mutateTasksSync,
+  recoverAbandonedTaskRunsSync,
   saveTasks,
   type TaskRecord,
 } from "./tasks-store.js";
@@ -91,6 +93,63 @@ describe("tasks-store single-writer mutations", () => {
     // and no staged temp file is left behind.
     expect(JSON.parse(readFileSync(join(dir, "tasks.json"), "utf-8"))).toHaveLength(2);
     expect(readdirSync(dir).filter((name) => name.includes(".tmp-"))).toEqual([]);
+  });
+});
+
+describe("tasks-store abandoned-run recovery", () => {
+  it("records which process owns a run", async () => {
+    const owned = record("owned");
+    const cwd = await project("owner", [owned]);
+    markTaskInProgress(cwd, owned.id, true);
+    expect(loadTasksSync(cwd)[0]).toMatchObject({
+      status: "in-progress",
+      completionPending: true,
+      runOwnerPid: process.pid,
+    });
+  });
+
+  it("settles runs whose owner is gone and leaves live runs alone", async () => {
+    const interrupted: TaskRecord = {
+      ...record("interrupted"),
+      status: "done", // The agent marked it done, then the app closed mid-review.
+      completionPending: true,
+      runOwnerPid: 111,
+    };
+    const live: TaskRecord = {
+      ...record("live"),
+      status: "in-progress",
+      completionPending: true,
+      runOwnerPid: 222,
+    };
+    const legacy: TaskRecord = { ...record("legacy"), status: "in-progress" }; // No owner recorded.
+    const pending = record("pending");
+    const finished: TaskRecord = { ...record("finished"), status: "done" };
+    const cwd = await project("recovery", [interrupted, live, legacy, pending, finished]);
+
+    const tasks = recoverAbandonedTaskRunsSync(cwd, (pid) => pid === 222);
+
+    expect(tasks).toEqual(loadTasksSync(cwd)); // Returned list is what was persisted.
+    const byTitle = new Map(tasks.map((task) => [task.title, task]));
+    expect(byTitle.get("interrupted")).toMatchObject({
+      status: "blocked",
+      lastOutcome: { reason: "interrupted" },
+    });
+    expect(byTitle.get("interrupted")).not.toHaveProperty("completionPending");
+    expect(byTitle.get("interrupted")).not.toHaveProperty("runOwnerPid");
+    expect(byTitle.get("legacy")).toMatchObject({
+      status: "blocked",
+      lastOutcome: { reason: "not-marked-done", at: expect.any(String) },
+    });
+    expect(byTitle.get("live")).toEqual(live);
+    expect(byTitle.get("pending")).toEqual(pending);
+    expect(byTitle.get("finished")).toEqual(finished);
+  });
+
+  it("leaves the file untouched when nothing is abandoned", async () => {
+    const cwd = await project("nothing-abandoned", [record("idle")]);
+    const before = readFileSync(join(projectDirFor(cwd), "tasks.json"), "utf-8");
+    recoverAbandonedTaskRunsSync(cwd, () => false);
+    expect(readFileSync(join(projectDirFor(cwd), "tasks.json"), "utf-8")).toBe(before);
   });
 });
 

@@ -68,6 +68,8 @@ async function taskRunnerHarness(
     deferredQueued?: boolean;
     provider?: "anthropic" | "qwen-cloud";
     reviewerProvider?: "anthropic" | "qwen-cloud";
+    /** False models an agent that finishes without calling tasks done. */
+    markDone?: boolean;
   } = {},
 ) {
   const source = await readFile(new URL("./app-sidecar.ts", import.meta.url), "utf8");
@@ -137,7 +139,7 @@ async function taskRunnerHarness(
     cancelled = cancelledDuringRun;
     if (options.deferredQueued && prompt.mock.calls.length === 1) deferredQueue = 1;
     const current = tasks.find((candidate) => candidate.status === "in-progress");
-    if (current) current.status = "done";
+    if (current && options.markDone !== false) current.status = "done";
     if (options.plan === "submitted") await context.planGate.submit("plan.md", "Draft plan");
     if (options.plan === "drafting") planMode = true;
     if (
@@ -399,7 +401,7 @@ describe("app sidecar task runner", () => {
     {
       name: "a HUMAN verdict",
       options: { verdict: { kind: "human", reason: "Choose" } },
-      reason: "review-failed",
+      reason: "needs-review",
     },
     { name: "a plan-mode interruption", options: { plan: "drafting" }, reason: "plan-mode" },
     {
@@ -436,7 +438,9 @@ describe("app sidecar task runner", () => {
     vi.mocked(readFileSync).mockReturnValue(
       JSON.stringify([
         {
-          ...task("first", "in-progress"),
+          ...task("first", "done"),
+          completionPending: true,
+          runOwnerPid: 1234,
           lastOutcome: { reason: "plan-mode", at: "2026-09-04T00:00:00.000Z" },
         },
       ]),
@@ -445,10 +449,42 @@ describe("app sidecar task runner", () => {
     vi.mocked(writeFileSync).mockImplementation((_path, data) => {
       written = JSON.parse(String(data));
     });
-    finalizeTaskRun("project", "first", true);
+    expect(finalizeTaskRun("project", "first", { kind: "succeeded", reviewCleared: false })).toBe(
+      "done",
+    );
     expect(written[0]).not.toHaveProperty("lastOutcome");
-    expect(written[0].status).toBe("in-progress");
+    expect(written[0]).not.toHaveProperty("completionPending");
+    expect(written[0]).not.toHaveProperty("runOwnerPid");
+    expect(written[0].status).toBe("done");
   });
+
+  it("completes a task the agent never marked done once review clears the work", async () => {
+    const runner = await taskRunnerHarness(true, false, { markDone: false });
+    await runner.runTasks("first", true);
+    expect(runner.newSession).toHaveBeenCalledTimes(2);
+    expect(runner.getTasks()).toEqual([]);
+  });
+
+  it.each([
+    { name: "Autopilot is off", enabled: false, options: {} },
+    { name: "review ignored the turn", enabled: true, options: { verdict: { kind: "ignore" } } },
+  ] satisfies Array<{
+    name: string;
+    enabled: boolean;
+    options: Parameters<typeof taskRunnerHarness>[2];
+  }>)(
+    "blocks a task the agent never marked done when $name, instead of leaving it running",
+    async ({ enabled, options }) => {
+      const runner = await taskRunnerHarness(enabled, false, { ...options, markDone: false });
+      await runner.runTasks("first", true);
+      expect(runner.newSession).toHaveBeenCalledOnce(); // Run All pauses; no retry loop.
+      expect(runner.getTasks()).toMatchObject([
+        { id: "first", status: "blocked", lastOutcome: { reason: "not-marked-done" } },
+        { id: "second", status: "pending" },
+      ]);
+      expect(runner.getTasks()[0]).not.toHaveProperty("completionPending");
+    },
+  );
 
   it.each(["initial", "injected", "review"] as const)(
     "pauses after %s failure",

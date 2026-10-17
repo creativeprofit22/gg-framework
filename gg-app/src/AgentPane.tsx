@@ -17,7 +17,6 @@ import {
   useId,
   useLayoutEffect,
   useMemo,
-  useReducer,
   useRef,
   useState,
   type SetStateAction,
@@ -36,13 +35,10 @@ import { parseProjectHealth } from "./project-health";
 import { activeChatErrorId, readChatError, type ChatErrorItem } from "./chat-error";
 import { usePaneSwapViewState, type RegisterPaneSwapViewState } from "./usePaneSwapViewState";
 import { ActionMetal } from "./ActionMetal";
-import {
-  isValidProgrammaticFocus,
-  PROGRAMMATIC_FOCUS_GUIDANCE,
-} from "@kenkaiiii/gg-core/slash-command-contract";
 import { menuCommands, paletteCommands } from "./menu-commands";
 import { CommandPalette } from "./CommandPalette";
 import { autosizeComposer } from "./composer-autosize";
+import { pageKeyDirection, shouldPageTranscript, transcriptPageStep } from "./transcript-page-keys";
 import { pinAfterScroll, pinAfterWheel } from "./transcript-pin";
 import {
   COMPACT_IDLE_PLACEHOLDER,
@@ -52,20 +48,8 @@ import {
   type FieldTextBox,
 } from "./composer-placeholder";
 import { ProgrammaticChat, ProgrammaticExecutionEvidenceView } from "./ProgrammaticChat";
+import type { ProgrammaticExecutionEvidence } from "@kenkaiiii/gg-core/programmatic-chat-contract";
 import {
-  initialProgrammaticChatState,
-  programmaticChatReducer,
-  canRunProgrammaticSelection,
-  canScanProgrammatic,
-  canReviewProgrammaticCandidate,
-} from "./programmatic-chat-state";
-import type {
-  ProgrammaticChatRequest,
-  ProgrammaticExecutionEvidence,
-} from "@kenkaiiii/gg-core/programmatic-chat-contract";
-import type { ProgrammaticAssessmentEvent } from "@kenkaiiii/gg-core/programmatic-assessment-contract";
-import {
-  requireContinuationAcceptedEvent,
   PromptSubmissionError,
   type ContinuationCommitRequest,
   type ContinuationDestination,
@@ -172,12 +156,6 @@ import { ReferencedFiles, appendReferencedFiles, parseReferencedFiles } from "./
 import { TasksModal, type TasksLoadState } from "./TasksModal";
 import { ChecklistScreen, type ChecklistLoad, type ChecklistNotice } from "./ChecklistScreen";
 import { ProjectNotes, type ProjectNotesPromptActions } from "./ProjectNotes";
-import type {
-  NotesPromptSaveResult,
-  NotesSessionLink,
-  NotesValidationError,
-  PhaseStartResult,
-} from "./notes-types";
 import { MemoryModal } from "./MemoryModal";
 import { ShimmerText } from "./ShimmerText";
 import { WakeScreen } from "./WakeScreen";
@@ -185,7 +163,11 @@ import { MotionStarters } from "./MotionStarters";
 import { ComposerStarters } from "./ComposerStarters";
 import { CHAT_STARTERS, CODE_STARTERS, TASKS_DRAFT_PROMPT } from "./session-starters";
 import { ConfirmModal } from "./ConfirmModal";
-import { LocalUpdateSummaryOption } from "./LocalUpdateSummaryOption";
+import {
+  ContinuationConfirmationModal,
+  type ContinuationConfirmationState,
+} from "./ContinuationConfirmationModal";
+import { LocalUpdateConfirmModal } from "./LocalUpdateConfirmModal";
 import { InitGitModal } from "./InitGitModal";
 import { PlanModeLogo } from "./PlanModeLogo";
 import { KenPowerBanner } from "./KenPowerBanner";
@@ -230,12 +212,7 @@ import {
   MENTOR_HANDLE_ALTERNATION,
   PRODUCT_DISPLAY_NAME,
 } from "./brand";
-import {
-  LOCAL_UPDATE_CONFIRMATION_CONFIRM_LABEL,
-  LOCAL_UPDATE_CONFIRMATION_MESSAGE,
-  LOCAL_UPDATE_CONFIRMATION_TITLE,
-  shouldConfirmLocalUpdate,
-} from "./local-update-confirmation";
+import { shouldConfirmLocalUpdate } from "./local-update-confirmation";
 import { recoverPromptLabel } from "./prompt-labels";
 import { playSound } from "./sounds";
 import { segmentDoneMarkers, hasDoneMarker, countPlanSteps } from "./plan-steps";
@@ -267,6 +244,7 @@ import { toast } from "./toast";
 import { fileToPending, toWire, attachmentToPending, type PendingAttachment } from "./attachments";
 import { RoadmapPhaseDraftReviewModal } from "./RoadmapPhaseDraftReviewModal";
 import { useRoadmapDraft } from "./useRoadmapDraft";
+import { describeRoadmapDraft } from "./roadmap-phase-draft-state";
 import { basename } from "./tool-format";
 import {
   deriveKenPromptTitle,
@@ -275,92 +253,27 @@ import {
   type KenPromptActionResult,
   type KenPromptSavePreview,
 } from "./ken-prompt-actions";
+import {
+  AMBIGUOUS_NEW_SESSION_MESSAGE,
+  AUTOPILOT_NEW_SESSION_RETRY_MESSAGE,
+  LocalSessionMutationBusyError,
+  notesPromptActionResult,
+  taskErrorMessage,
+} from "./agent-pane-session-errors";
+import { noInputSlashSubmissionError, slashCommandForInput } from "./slash-input-policy";
+import { useSessionResetCoordinator } from "./useSessionResetCoordinator";
+import { useProgrammaticChatActions, useProgrammaticChatState } from "./useProgrammaticChat";
+import { useKenPromptActions } from "./useKenPromptActions";
+import { useRoadmapPhaseActions } from "./useRoadmapPhaseActions";
 import "./App.css";
+// Local Fork-owned sheets split out of App.css; they must load directly after it, in this order.
+import "./WorkspaceShell.css";
+import "./NotesRoadmap.css";
+import "./LocalUpdateSummaryOption.css";
 // Liquid glass layer from upstream. Delete this line to revert.
 import "./glass.css";
 
 const BUILD_IDENTITY = formatBuildIdentity();
-const SESSION_RESET_TIMEOUT_MS = 8_000;
-const AUTOPILOT_NEW_SESSION_RETRY_MESSAGE =
-  "Ken is reviewing this session. Wait for the review to finish or cancel it, then try again.";
-const AMBIGUOUS_NEW_SESSION_MESSAGE =
-  "Couldn’t confirm which session is active. Reopen this project before sending the prompt.";
-
-class SessionResetConfirmationTimeoutError extends Error {
-  constructor(readonly operationId: string) {
-    super("Timed out waiting for the matching new-session confirmation.");
-    this.name = "SessionResetConfirmationTimeoutError";
-  }
-}
-
-class LocalSessionMutationBusyError extends Error {
-  constructor() {
-    super("A session change is already in progress.");
-    this.name = "LocalSessionMutationBusyError";
-  }
-}
-
-function isNotesRequestBodyTooLarge(error: NotesValidationError | undefined): boolean {
-  return error?.path === "$" && /^notes request body exceeds \d+ bytes$/.test(error.message.trim());
-}
-
-function taskErrorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
-function notesPromptActionResult(
-  result: NotesPromptSaveResult,
-  latestPreview?: KenPromptSavePreview,
-): KenPromptActionResult {
-  if (result.status === "committed") {
-    return { status: "saved", phaseId: result.phaseId, title: result.title };
-  }
-  if (result.status === "replacement-conflict") {
-    return {
-      status: "failed",
-      action: "commit-save",
-      message: `${result.title} changed in another window. Review the latest destination before replacing it.`,
-      preview: latestPreview,
-    };
-  }
-  if (result.status === "missing-phase") {
-    return {
-      status: "failed",
-      action: "commit-save",
-      message: "That phase was removed in another window. Choose another destination.",
-      preview: latestPreview,
-    };
-  }
-  if (result.status === "archived-phase") {
-    return {
-      status: "failed",
-      action: "commit-save",
-      message: `${result.title} was archived in another window. Restore it or choose another destination.`,
-      preview: latestPreview,
-    };
-  }
-  if (result.reason === "invalid") {
-    const message = isNotesRequestBodyTooLarge(result.error)
-      ? "Project Notes is too large to save. Shorten the saved prompt or Notes document, then try again."
-      : result.error
-        ? `Project Notes rejected this save (${result.error.path}: ${result.error.message}). Review the Notes content and try again.`
-        : "Project Notes rejected this prompt. Review the title and try again.";
-    return { status: "failed", action: "commit-save", message, preview: latestPreview };
-  }
-  const messages = {
-    missing: "Project Notes storage is missing. Reopen the project and try again.",
-    corrupt: "Project Notes are unreadable. Repair or restore project storage first.",
-    unavailable: "Project Notes are unavailable. Check the sidecar and try again.",
-    storage: "Local Notes storage failed. Free space and try again.",
-  } as const;
-  return {
-    status: "failed",
-    action: "commit-save",
-    message: messages[result.reason],
-    preview: latestPreview,
-  };
-}
-
 // Mentor-handle patterns, built from brand.ts so renames stay in sync.
 // Case-insensitive with a word boundary so `@kennedy.ts` still picks files.
 function ggModelRole(mode: WorkspaceMode): string {
@@ -566,46 +479,6 @@ const nextId = (): number => ++idSeq;
 // BLACK_CIRCLE — ⏺ on mac (matches the TUI figure).
 const DOT = "\u23FA";
 
-function slashCommandForInput(
-  input: string,
-  commands: SlashCommand[],
-): { command: SlashCommand; args: string } | null {
-  const match = /^\s*\/([^\s]+)(?:\s+([\s\S]*))?$/.exec(input);
-  if (!match) return null;
-  const command = commands.find(
-    (candidate) => candidate.name === match[1] || candidate.aliases.includes(match[1]!),
-  );
-  return command ? { command, args: match[2]?.trim() ?? "" } : null;
-}
-
-export function noInputSlashSubmissionError(
-  input: string,
-  commands: SlashCommand[],
-  attachmentCount: number,
-  referencedFileCount: number,
-): string | null {
-  const match = slashCommandForInput(input, commands);
-  if (!match) return null;
-  const blocked = [
-    match.args && match.command.input.text === "none" ? "additional text" : null,
-    match.command.input.references === "none" &&
-    (referencedFileCount > 0 || parseReferencedFiles(input.trim()).files.length > 0)
-      ? "file references"
-      : null,
-    attachmentCount > 0 && match.command.input.attachments === "none" ? "attachments" : null,
-  ].filter((kind): kind is string => kind !== null);
-  if (blocked.length > 0)
-    return `/${match.command.name} does not accept ${blocked.join(", ")}. Remove them and send the command again.`;
-  if (
-    match.command.source === "built-in" &&
-    match.command.name === "programmatic" &&
-    match.args &&
-    !isValidProgrammaticFocus(match.args)
-  )
-    return PROGRAMMATIC_FOCUS_GUIDANCE;
-  return null;
-}
-
 function hasDraggedFiles(dataTransfer: DataTransfer | null): boolean {
   return Array.from(dataTransfer?.types ?? []).includes("Files");
 }
@@ -674,52 +547,6 @@ export interface AgentPaneProps {
   generation?: number | null;
   onGenerationChange?: (generation: number) => void;
   onLifecycleError?: (error: unknown) => void;
-}
-
-export function preferredRoadmapPhaseSession(
-  phase:
-    | {
-        session: NotesSessionLink | null;
-        execution?: { lastSession: NotesSessionLink | null } | null;
-      }
-    | undefined,
-  compatibilitySession: NotesSessionLink,
-): NotesSessionLink {
-  return phase?.execution?.lastSession ?? phase?.session ?? compatibilitySession;
-}
-
-export function resolveRoadmapPhaseResume(
-  phase:
-    | {
-        session: NotesSessionLink | null;
-        execution?: { state?: string; lastSession: NotesSessionLink | null } | null;
-      }
-    | undefined,
-  compatibilitySession: NotesSessionLink,
-): { status: "blocked"; message: string } | { status: "ready"; session: NotesSessionLink } {
-  return { status: "ready", session: preferredRoadmapPhaseSession(phase, compatibilitySession) };
-}
-
-export async function resolveRoadmapPhaseResumeFromNotes(
-  client: Pick<PaneAgentClient, "getNotes">,
-  phaseId: string,
-  compatibilitySession: NotesSessionLink,
-): Promise<ReturnType<typeof resolveRoadmapPhaseResume>> {
-  try {
-    const opened = await client.getNotes();
-    return opened.status === "ok"
-      ? resolveRoadmapPhaseResume(
-          opened.snapshot.document.phases.find((phase) => phase.id === phaseId),
-          compatibilitySession,
-        )
-      : resolveRoadmapPhaseResume(undefined, compatibilitySession);
-  } catch {
-    return {
-      status: "blocked",
-      message:
-        "Couldn’t verify whether this phase needs reconciliation. Open Project Notes and retry Resume.",
-    };
-  }
 }
 
 export function AgentPane(props: AgentPaneProps): React.ReactElement {
@@ -1247,13 +1074,8 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   const appliedContinuationMessagesRef = useRef(new Set<string>());
   const continuationResetsRef = useRef(new Set<string>());
   const retiredConversationIdsRef = useRef(new Set<string>());
-  const [continuationConfirmation, setContinuationConfirmation] = useState<{
-    prompt: string;
-    profile: "stable" | "experimental" | null;
-    busy: boolean;
-    error?: string;
-    retry?: boolean;
-  } | null>(null);
+  const [continuationConfirmation, setContinuationConfirmation] =
+    useState<ContinuationConfirmationState | null>(null);
   const continuationConfirmationRef = useRef<
     ((choice: { profile: "stable" | "experimental" | null } | null) => void) | null
   >(null);
@@ -2116,162 +1938,30 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     if (props.focused && !props.preserveWorkspaceFocus?.()) inputRef.current?.focus();
   }, [props.focused, props.preserveWorkspaceFocus]);
 
-  const registerSessionResetOperationWaiter = useCallback((operationId: string) => {
-    if (observedSessionResetOperationsRef.current.delete(operationId)) {
-      return Promise.resolve();
-    }
-    return new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        if (!sessionResetOperationWaitersRef.current.delete(operationId)) return;
-        reject(new SessionResetConfirmationTimeoutError(operationId));
-      }, SESSION_RESET_TIMEOUT_MS);
-      sessionResetOperationWaitersRef.current.set(operationId, { resolve, reject, timeout });
-    });
-  }, []);
-
-  const shouldApplySessionReset = useCallback((data: Record<string, unknown>): boolean => {
-    const operationId = typeof data.operationId === "string" ? data.operationId : undefined;
-    const conversationId =
-      typeof data.conversationId === "string" ? data.conversationId : undefined;
-    const sessionId = typeof data.sessionId === "string" ? data.sessionId : undefined;
-    if (operationId && recoveredSessionResetOperationRef.current === operationId) return false;
-    const unresolved = unresolvedSessionResetRef.current;
-    if (
-      unresolved &&
-      (unresolved.generation !== generationRef.current ||
-        (unresolved.operationId === null
-          ? !sessionMutationLockRef.current
-          : operationId !== unresolved.operationId) ||
-        !operationId ||
-        !conversationId ||
-        !sessionId ||
-        conversationId === stateRef.current?.conversationId)
-    )
-      return false;
-    if (operationId && continuationResetsRef.current.has(operationId)) return false;
-    if (conversationId && retiredConversationIdsRef.current.has(conversationId)) return false;
-    const attempt = continuationAttemptRef.current;
-    if (sessionMutationLockRef.current && attempt && operationId !== attempt.request.operationId)
-      return false;
-    if (attempt && operationId === attempt.request.operationId) {
-      if (
-        !conversationId ||
-        !sessionId ||
-        conversationId === attempt.prepared.source.conversationId
-      )
-        return false;
-      if (
-        attempt.destination &&
-        (attempt.destination.conversationId !== conversationId ||
-          attempt.destination.sessionId !== sessionId)
-      )
-        return false;
-      continuationResetsRef.current.add(operationId);
-      if (continuationResetsRef.current.size > 32)
-        continuationResetsRef.current.delete(continuationResetsRef.current.values().next().value!);
-      attempt.destination = {
-        conversationId,
-        sessionId,
-        profile: attempt.request.profile ?? stateRef.current?.openAICodexContextProfile ?? "stable",
-      };
-    }
-    if (conversationId && sessionId) {
-      const previous = stateRef.current;
-      if (previous?.conversationId && previous.conversationId !== conversationId) {
-        retiredConversationIdsRef.current.add(previous.conversationId);
-        if (retiredConversationIdsRef.current.size > 32)
-          retiredConversationIdsRef.current.delete(
-            retiredConversationIdsRef.current.values().next().value!,
-          );
-      }
-      if (previous) stateRef.current = { ...previous, conversationId, sessionId };
-      setState((current) => (current ? { ...current, conversationId, sessionId } : current));
-    }
-    return true;
-  }, []);
-
-  const onContinuationAccepted = useCallback((data: unknown) => {
-    let event;
-    try {
-      event = requireContinuationAcceptedEvent(data);
-    } catch {
-      return;
-    }
-    const attempt = continuationAttemptRef.current;
-    const current = stateRef.current;
-    if (
-      !attempt ||
-      event.operationId !== attempt.request.operationId ||
-      event.preparedId !== attempt.request.preparedId ||
-      current?.conversationId !== event.destination.conversationId ||
-      current.sessionId !== event.destination.sessionId ||
-      !continuationResetsRef.current.has(event.operationId) ||
-      (attempt.request.profile && attempt.request.profile !== event.destination.profile) ||
-      (attempt.acceptedMessageId && attempt.acceptedMessageId !== event.acceptedMessageId) ||
-      event.prompt !== attempt.prepared.prompt
-    )
-      return;
-    attempt.destination = event.destination;
-    attempt.acceptedMessageId = event.acceptedMessageId;
-    const key = `${event.destination.conversationId}:${event.acceptedMessageId}`;
-    if (appliedContinuationMessagesRef.current.has(key)) return;
-    appliedContinuationMessagesRef.current.add(key);
-    if (appliedContinuationMessagesRef.current.size > 32)
-      appliedContinuationMessagesRef.current.delete(
-        appliedContinuationMessagesRef.current.values().next().value!,
-      );
-    setItems((currentItems) => [
-      ...currentItems,
-      {
-        kind: "user",
-        id: nextId(),
-        text: attempt.prepared.prompt,
-        kenSent: true,
-        acceptedMessageId: event.acceptedMessageId,
-      },
-    ]);
-  }, []);
-
-  const onAuthoritativeSessionReset = useCallback((operationId?: string) => {
-    // Resets can replace a conversation without changing the native generation
-    // or hydration epoch, and older reset events need not carry an operation id.
-    promptSessionResetEpochRef.current += 1;
-    promptSubmissionPendingRef.current = null;
-    kenCurrentSubmissionRef.current = null;
-    if (!operationId) return;
-    const unresolved = unresolvedSessionResetRef.current;
-    if (
-      unresolved?.operationId === operationId &&
-      unresolved.generation === generationRef.current
-    ) {
-      unresolvedSessionResetRef.current = null;
-    }
-    recoveredSessionResetOperationRef.current = operationId;
-    const waiter = sessionResetOperationWaitersRef.current.get(operationId);
-    if (waiter) {
-      sessionResetOperationWaitersRef.current.delete(operationId);
-      clearTimeout(waiter.timeout);
-      waiter.resolve();
-      return;
-    }
-    observedSessionResetOperationsRef.current.add(operationId);
-    if (observedSessionResetOperationsRef.current.size > 32) {
-      const oldest = observedSessionResetOperationsRef.current.values().next().value;
-      if (oldest) observedSessionResetOperationsRef.current.delete(oldest);
-    }
-  }, []);
-
-  useEffect(
-    () => () => {
-      for (const waiter of sessionResetOperationWaitersRef.current.values()) {
-        clearTimeout(waiter.timeout);
-        waiter.reject(new Error("The pane closed before the new session was confirmed."));
-      }
-      sessionResetOperationWaitersRef.current.clear();
-      observedSessionResetOperationsRef.current.clear();
-    },
-    [],
-  );
+  const {
+    registerSessionResetOperationWaiter,
+    shouldApplySessionReset,
+    onContinuationAccepted,
+    onAuthoritativeSessionReset,
+  } = useSessionResetCoordinator({
+    observedSessionResetOperationsRef,
+    sessionResetOperationWaitersRef,
+    recoveredSessionResetOperationRef,
+    unresolvedSessionResetRef,
+    generationRef,
+    sessionMutationLockRef,
+    stateRef,
+    continuationResetsRef,
+    retiredConversationIdsRef,
+    continuationAttemptRef,
+    appliedContinuationMessagesRef,
+    promptSessionResetEpochRef,
+    promptSubmissionPendingRef,
+    kenCurrentSubmissionRef,
+    setState,
+    setItems,
+    nextId,
+  });
 
   const {
     state: roadmapDraftState,
@@ -2297,54 +1987,22 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   // state (its render + other handlers use it) and passes the setters +
   // cross-cutting refs in. App consumes `handleEvent` (for the SSE subscription)
   // and the two helpers it still calls directly (`pushItem`, `endStreamingText`).
-  const programmaticGeneration = `${paneId}:${generationRef.current}:${promptSessionResetEpochRef.current}:${state?.cwd}:${state?.conversationId}:${state?.sessionId}:${workspaceMode}`;
-  const [programmaticOpen, setProgrammaticOpen] = useState(false);
-  const [programmatic, dispatchProgrammatic] = useReducer(
-    programmaticChatReducer,
+  const programmaticChat = useProgrammaticChatState({
+    paneId,
+    generationRef,
+    promptSessionResetEpochRef,
+    state,
+    workspaceMode,
+  });
+  const {
     programmaticGeneration,
-    initialProgrammaticChatState,
-  );
-  const programmaticRef = useRef(programmatic);
-  programmaticRef.current = programmatic;
-  const programmaticTargetRef = useRef(programmaticGeneration);
-  programmaticTargetRef.current = programmaticGeneration;
-  const programmaticEpoch = useRef(0);
-  const programmaticOwner = useRef<number | null>(null);
-  const programmaticRefreshPending = useRef(false);
-  const [programmaticInvalidation, invalidateProgrammatic] = useReducer(
-    (value: number) => value + 1,
-    0,
-  );
-  const onProgrammaticAssessment = useCallback(
-    (event: ProgrammaticAssessmentEvent) => {
-      if (workspaceMode !== "code") return;
-      dispatchProgrammatic({
-        type: "assessment",
-        generation: programmaticTargetRef.current,
-        event,
-      });
-      setProgrammaticOpen(true);
-      // A button request owns its exact response until it settles. Its normal
-      // run-end refresh is already deferred; do not schedule a competing report.
-      if (programmaticOwner.current === null) invalidateProgrammatic();
-    },
-    [workspaceMode],
-  );
-  const onProgrammaticActivity = useCallback(
-    (open: boolean) => {
-      if (workspaceMode !== "code") return;
-      if (open) setProgrammaticOpen(true);
-      invalidateProgrammatic();
-    },
-    [workspaceMode],
-  );
-  useEffect(() => {
-    programmaticEpoch.current++;
-    programmaticOwner.current = null;
-    programmaticRefreshPending.current = false;
-    dispatchProgrammatic({ type: "reset", generation: programmaticGeneration });
-    setProgrammaticOpen(false);
-  }, [programmaticGeneration]);
+    programmaticOpen,
+    setProgrammaticOpen,
+    programmatic,
+    dispatchProgrammatic,
+    onProgrammaticAssessment,
+    onProgrammaticActivity,
+  } = programmaticChat;
 
   // A goal cut off by a daemon restart carries on (pane-scoped).
   const resumeCutOffGoal = useCallback(() => {
@@ -2415,191 +2073,25 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       onRunEnd: recordGoalRun,
     });
 
-  const programmaticBusy = running || planGateBusy || autopilotReviewing || kenRunning;
-  const releaseProgrammaticOwner = (owner: number, current: boolean): void => {
-    if (programmaticOwner.current !== owner) return;
-    programmaticOwner.current = null;
-    const pending = programmaticRefreshPending.current;
-    programmaticRefreshPending.current = false;
-    if (current && pending) invalidateProgrammatic();
-  };
-  const performProgrammatic = async (request: ProgrammaticChatRequest): Promise<void> => {
-    if (
-      ["inspect-setup", "discover", "review-candidate"].includes(request.action) &&
-      stateRef.current?.planMode
-    )
-      return;
-    const selection = programmaticRef.current;
-    if (
-      request.action === "approve-setup" &&
-      (!selection.proposalApprovable ||
-        selection.proposal?.handle !== request.proposalHandle ||
-        selection.reconcile ||
-        selection.operation !== null)
-    )
-      return;
-    if (request.action === "scan" && !canScanProgrammatic(selection)) return;
-    if (
-      request.action === "review-candidate" &&
-      (!canReviewProgrammaticCandidate(selection) ||
-        request.source !== "current" ||
-        request.candidateId !== selection.candidateDetail?.candidateId ||
-        request.assessmentId !== selection.candidateDetail.assessmentId ||
-        request.expectedRevision !== selection.candidateDetail.revision)
-    )
-      return;
-    if (
-      request.action === "dismiss" &&
-      (selection.detail?.summary.actions?.dismiss.available !== true ||
-        selection.detail.summary.id !== request.id ||
-        selection.detailSnapshot !== request.snapshot ||
-        selection.report?.snapshot !== request.snapshot)
-    )
-      return;
-    if (
-      workspaceMode !== "code" ||
-      !hydrated ||
-      programmaticBusy ||
-      programmaticOwner.current !== null
-    )
-      return;
-    const generation = programmaticTargetRef.current;
-    const owner = ++programmaticEpoch.current;
-    const lifecycle = lifecycleEpochRef.current;
-    programmaticOwner.current = owner;
-    const current = () =>
-      mountedRef.current &&
-      lifecycleEpochRef.current === lifecycle &&
-      programmaticTargetRef.current === generation &&
-      programmaticOwner.current === owner;
-    let pending: ProgrammaticChatRequest | null = request;
-    try {
-      while (pending && current()) {
-        const active: ProgrammaticChatRequest = { ...pending };
-        const epoch = ++programmaticEpoch.current;
-        const requestId =
-          active.action === "discover" ||
-          active.action === "inspect-setup" ||
-          active.action === "scan"
-            ? (active.requestId = crypto.randomUUID())
-            : undefined;
-        const { sessionId, conversationId } = stateRef.current ?? {};
-        const assessmentRequest =
-          requestId && sessionId && conversationId
-            ? { requestId, sessionId, conversationId }
-            : undefined;
-        dispatchProgrammatic({
-          type: "start",
-          generation,
-          epoch,
-          operation: active.action,
-          assessmentRequest,
-        });
-        const response = await client.programmatic(active);
-        if (!current()) return;
-        dispatchProgrammatic({ type: "response", generation, epoch, response });
-        if (!response.ok) return;
-        // Provider-backed setup emits run_end before its native response settles.
-        // Its exact proposal is newer than that queued report refresh; retain it
-        // until an explicit refresh or a subsequent independent run invalidates it.
-        if (active.action === "inspect-setup") programmaticRefreshPending.current = false;
-        pending = null;
-        if (["approve-setup", "scan", "dismiss"].includes(active.action))
-          pending = {
-            version: 1,
-            action: "report",
-            offset: programmaticRef.current.report?.offset ?? 0,
-          };
-        else if (active.action === "report" && programmaticRef.current.selectedId)
-          pending = { version: 1, action: "detail", id: programmaticRef.current.selectedId };
-      }
-    } catch {
-      if (current())
-        dispatchProgrammatic({
-          type: "error",
-          generation,
-          epoch: programmaticEpoch.current,
-          error: "The request failed. Reload results to check what happened before trying again.",
-          reconcile: [
-            "approve-setup",
-            "scan",
-            "dismiss",
-            "history-apply",
-            "review-candidate",
-          ].includes(request.action),
-        });
-    } finally {
-      // The dedicated approval endpoint does not emit a normal agent run_end.
-      // A lost response can still follow a successful save, so refresh on either outcome.
-      if (current() && request.action === "approve-setup") void refreshCommands();
-      releaseProgrammaticOwner(owner, current());
-    }
-  };
-  const programmaticRefreshRef = useRef(performProgrammatic);
-  programmaticRefreshRef.current = performProgrammatic;
-  useEffect(() => {
-    if (programmaticOpen && workspaceMode === "code" && hydrated && !programmaticBusy) {
-      if (programmaticOwner.current !== null) {
-        programmaticRefreshPending.current = true;
-        return;
-      }
-      void programmaticRefreshRef.current({
-        version: 1,
-        action: "report",
-        offset: programmaticRef.current.report?.offset ?? 0,
-      });
-    }
-  }, [
-    programmaticOpen,
-    programmaticInvalidation,
-    workspaceMode,
-    hydrated,
-    hydrateNonce,
-    programmaticBusy,
-  ]);
-  const runSelectedProgrammatic = async (): Promise<void> => {
-    if (
-      workspaceMode !== "code" ||
-      state?.planMode ||
-      programmaticBusy ||
-      programmaticOwner.current !== null ||
-      !canRunProgrammaticSelection(programmaticRef.current)
-    )
-      return;
-    const selected = programmaticRef.current;
-    const text = `/programmatic-run ${selected.selectedId} ${selected.report!.fingerprint}`;
-    const generation = programmaticTargetRef.current;
-    const epoch = ++programmaticEpoch.current;
-    const lifecycle = lifecycleEpochRef.current;
-    programmaticOwner.current = epoch;
-    dispatchProgrammatic({ type: "start", generation, epoch, operation: "run" });
-    const current = () =>
-      mountedRef.current &&
-      lifecycleEpochRef.current === lifecycle &&
-      programmaticTargetRef.current === generation &&
-      programmaticOwner.current === epoch;
-    try {
-      const submission = await client.sendPrompt(text);
-      if (!current()) return;
-      if (submission.queued) throw new Error("Opportunity run unexpectedly queued");
-      acceptSubmission({ kind: "user", id: nextId(), text, command: true }, submission);
-      dispatchProgrammatic({ type: "run-accepted", generation, epoch });
-    } catch (error) {
-      const rejected = error instanceof PromptSubmissionError && error.category === "rejected";
-      if (current())
-        dispatchProgrammatic({
-          type: "error",
-          generation,
-          epoch,
-          error: rejected
-            ? `Run rejected: ${error.message}`
-            : "We could not confirm whether the task started. Reload results before trying again.",
-          reconcile: !rejected,
-        });
-    } finally {
-      releaseProgrammaticOwner(epoch, current());
-    }
-  };
+  const { programmaticBusy, performProgrammatic, runSelectedProgrammatic } =
+    useProgrammaticChatActions({
+      chat: programmaticChat,
+      client,
+      workspaceMode,
+      hydrated,
+      hydrateNonce,
+      running,
+      planGateBusy,
+      autopilotReviewing,
+      kenRunning,
+      planMode: state?.planMode,
+      stateRef,
+      lifecycleEpochRef,
+      mountedRef,
+      refreshCommands,
+      acceptSubmission,
+      nextId,
+    });
 
   const handleEventRef = useRef(handleEvent);
   handleEventRef.current = handleEvent;
@@ -3725,6 +3217,36 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     document.addEventListener("focusin", dropHiddenFocus);
     return () => document.removeEventListener("focusin", dropHiddenFocus);
   }, [goalWorldOpen]);
+  // Page Up / Page Down page the focused pane's transcript, even from the
+  // composer (rules in transcript-page-keys.ts).
+  useEffect(() => {
+    if (!paneKeyFocus || goalWorldOpen) return;
+    const onKey = (e: KeyboardEvent): void => {
+      const direction = pageKeyDirection(e);
+      const el = scrollRef.current;
+      if (direction === null || !el) return;
+      const pane = el.closest(".agent-pane");
+      if (!pane || !shouldPageTranscript(e.target, pane, inputRef.current)) return;
+      if (document.querySelector('[role="dialog"][aria-modal="true"]')) return;
+      e.preventDefault();
+      // The transcript's scroll padding reserves the title bar and dock overlays.
+      const style = getComputedStyle(el);
+      const top = Number.parseFloat(style.scrollPaddingTop) || 0;
+      const bottom = Number.parseFloat(style.scrollPaddingBottom) || 0;
+      const delta = direction * transcriptPageStep(el.clientHeight, top, bottom);
+      // Like a wheel, un-pin before the scroll so a streaming commit can't snap it back.
+      stickToBottomRef.current = pinAfterWheel(
+        stickToBottomRef.current,
+        { deltaX: 0, deltaY: delta, ctrlKey: false },
+        el,
+      );
+      const instant =
+        e.repeat || window.matchMedia?.("(prefers-reduced-motion: reduce)").matches === true;
+      el.scrollBy({ top: delta, behavior: instant ? "instant" : "smooth" });
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [paneKeyFocus, goalWorldOpen]);
   const goalWorkers = useMemo(
     () => (activeGoalId ? collectFloorAgents(critterGroups) : []),
     [activeGoalId, critterGroups],
@@ -3916,213 +3438,34 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     [],
   );
 
-  const createAuthoritativeNewSession = useCallback(async (): Promise<string> => {
-    if (running) throw new LocalSessionMutationBusyError();
-    if (autopilotReviewing) throw new Error(AUTOPILOT_NEW_SESSION_RETRY_MESSAGE);
-    if (newSessionBusy || sessionMutationLockRef.current) {
-      throw new LocalSessionMutationBusyError();
-    }
-    if (unresolvedSessionResetRef.current) {
-      throw new SessionResetConfirmationTimeoutError(
-        unresolvedSessionResetRef.current.operationId ?? "",
-      );
-    }
-    sessionMutationLockRef.current = true;
-    setNewSessionBusy(true);
-    const pending = { generation: generationRef.current, operationId: null as string | null };
-    unresolvedSessionResetRef.current = pending;
-    try {
-      const generation = pending.generation;
-      const { operationId } = await newSession();
-      pending.operationId = operationId;
-      await waitForReady();
-      try {
-        await registerSessionResetOperationWaiter(operationId);
-      } catch (error) {
-        if (!(error instanceof SessionResetConfirmationTimeoutError)) throw error;
-        // Recover only this completed operation, never retry the destructive reset.
-        let timer: ReturnType<typeof setTimeout> | undefined;
-        const snapshot = await Promise.race([
-          getState().catch(() => null),
-          new Promise<null>((resolve) => {
-            timer = setTimeout(() => resolve(null), SESSION_RESET_TIMEOUT_MS);
-          }),
-        ]).finally(() => clearTimeout(timer));
-        if (generationRef.current !== generation) throw error;
-        // The real event may have arrived while the state read was in flight.
-        if (!observedSessionResetOperationsRef.current.delete(operationId)) {
-          const receipt = snapshot?.lastNewSessionReset;
-          if (
-            !snapshot ||
-            receipt?.operationId !== operationId ||
-            typeof receipt.conversationId !== "string" ||
-            !receipt.conversationId ||
-            typeof receipt.sessionId !== "string" ||
-            !receipt.sessionId ||
-            receipt.conversationId !== snapshot.conversationId ||
-            receipt.sessionId !== snapshot.sessionId ||
-            retiredConversationIdsRef.current.has(receipt.conversationId)
-          ) {
-            throw error;
-          }
-          handleEvent({ type: "session_reset", data: { ...receipt, kenState: snapshot.kenState } });
-          if (!observedSessionResetOperationsRef.current.delete(operationId)) throw error;
-          recoveredSessionResetOperationRef.current = operationId;
-          stateRef.current = snapshot;
-          setState(snapshot);
-        }
-      }
-      if (generationRef.current !== generation)
-        throw new SessionResetConfirmationTimeoutError(operationId);
-      if (unresolvedSessionResetRef.current === pending) unresolvedSessionResetRef.current = null;
-      recoveredSessionResetOperationRef.current = operationId;
-      return operationId;
-    } catch (error) {
-      if (
-        error instanceof NewSessionError &&
-        error.kind === "creation-rejected" &&
-        unresolvedSessionResetRef.current === pending
-      ) {
-        unresolvedSessionResetRef.current = null;
-      }
-      throw error;
-    } finally {
-      sessionMutationLockRef.current = false;
-      setNewSessionBusy(false);
-    }
-  }, [
-    autopilotReviewing,
-    newSession,
-    newSessionBusy,
-    getState,
-    handleEvent,
-    registerSessionResetOperationWaiter,
-    running,
-    waitForReady,
-  ]);
-
-  const restorePromptToComposer = useCallback((prompt: string) => {
-    setInput(prompt);
-    requestAnimationFrame(() => {
-      inputRef.current?.focus();
-      inputRef.current?.setSelectionRange(prompt.length, prompt.length);
-    });
-  }, []);
-
-  const commitPreparedContinuation = useCallback(
-    async (ownsLock = false): Promise<KenPromptActionResult> => {
-      const attempt = continuationAttemptRef.current;
-      if (blockUnconfirmedSession() || !attempt || (!ownsLock && sessionMutationLockRef.current))
-        return { status: "cancelled" };
-      sessionMutationLockRef.current = true;
-      setNewSessionBusy(true);
-      setContinuationConfirmation((current) =>
-        current ? { ...current, busy: true, error: undefined } : current,
-      );
-      // Attach the rejection handler immediately: an HTTP request may outlive the reset timeout.
-      const reset = registerSessionResetOperationWaiter(attempt.request.operationId).then(
-        () => true,
-        () => false,
-      );
-      const recover = (message: string, retry: boolean): KenPromptActionResult => {
-        restorePromptToComposer(attempt.prepared.prompt);
-        setContinuationConfirmation((current) =>
-          current ? { ...current, busy: false, retry, error: message } : current,
-        );
-        return {
-          status: "failed",
-          action: "send-fresh",
-          message,
-          recoverPrompt: attempt.prepared.prompt,
-        };
-      };
-      let receiptAccepted = false;
-      try {
-        const receipt = await commitContinuation(attempt.request);
-        receiptAccepted = receipt.outcome === "accepted";
-        if (receipt.outcome !== "accepted") {
-          const acceptance = attempt.acceptedMessageId
-            ? "Acceptance was observed in the session event."
-            : receipt.accepted === false
-              ? "No continuation was accepted."
-              : "Acceptance is unknown. Do not resend the composer automatically.";
-          const actualMode = receipt.destination
-            ? ` Reported destination context mode: ${receipt.destination.profile}.`
-            : "";
-          return recover(
-            `${receipt.message ?? receipt.error ?? receipt.outcome}. ${acceptance} ${receipt.resetAttempted ? "A destination reset was attempted; inspect the active session." : "No destination reset was attempted."}${actualMode}`,
-            receipt.outcome === "outcome-unknown",
-          );
-        }
-        const destination = receipt.destination;
-        if (
-          attempt.destination &&
-          (attempt.destination.conversationId !== destination.conversationId ||
-            attempt.destination.sessionId !== destination.sessionId)
-        ) {
-          return recover(
-            "The server reports acceptance in a different destination than the observed reset. Inspect Sessions; no additional local message was added.",
-            false,
-          );
-        }
-        attempt.destination = destination;
-        await waitForReady();
-        const resetObserved =
-          continuationResetsRef.current.has(attempt.request.operationId) || (await reset);
-        const current = await getState();
-        if (
-          !resetObserved ||
-          current.conversationId !== destination.conversationId ||
-          current.sessionId !== destination.sessionId ||
-          current.openAICodexContextProfile !== destination.profile ||
-          (attempt.request.profile && attempt.request.profile !== destination.profile) ||
-          (attempt.acceptedMessageId && attempt.acceptedMessageId !== receipt.acceptedMessageId)
-        ) {
-          return recover(
-            "The server accepted the continuation, but the active destination could not be verified. No additional local message was added. Inspect Sessions before taking further action.",
-            false,
-          );
-        }
-        // SSE owns insertion; a late receipt must not append a user bubble after assistant deltas.
-        if (!attempt.acceptedMessageId)
-          return recover(
-            "The server accepted the continuation, but its transcript event was not observed. No local message was added. Refresh or inspect the destination session; do not resend the composer.",
-            false,
-          );
-        setContinuationConfirmation(null);
-        return { status: "sent", session: "fresh" };
-      } catch {
-        if (receiptAccepted) {
-          return recover(
-            "The server accepted the continuation, but refreshing the destination failed. Inspect Sessions; do not resend the composer. No additional local message was added.",
-            false,
-          );
-        }
-        return recover(
-          attempt.acceptedMessageId
-            ? "The continuation was accepted in the session event, but its receipt was not received. Check outcome to retrieve the same operation receipt; do not resend the composer."
-            : "The commit outcome is unknown. Check outcome retries only this same operation; do not resend the composer.",
-          true,
-        );
-      } finally {
-        const waiter = sessionResetOperationWaitersRef.current.get(attempt.request.operationId);
-        if (waiter) {
-          clearTimeout(waiter.timeout);
-          sessionResetOperationWaitersRef.current.delete(attempt.request.operationId);
-          waiter.resolve();
-        }
-        sessionMutationLockRef.current = false;
-        setNewSessionBusy(false);
-      }
-    },
-    [
-      commitContinuation,
+  const { createAuthoritativeNewSession, restorePromptToComposer, commitPreparedContinuation } =
+    useKenPromptActions({
+      running,
+      autopilotReviewing,
+      newSessionBusy,
+      setNewSessionBusy,
+      sessionMutationLockRef,
+      unresolvedSessionResetRef,
+      generationRef,
+      observedSessionResetOperationsRef,
+      recoveredSessionResetOperationRef,
+      retiredConversationIdsRef,
+      stateRef,
+      setState,
+      continuationAttemptRef,
+      continuationResetsRef,
+      sessionResetOperationWaitersRef,
+      setContinuationConfirmation,
+      setInput,
+      inputRef,
+      newSession,
       getState,
-      registerSessionResetOperationWaiter,
-      restorePromptToComposer,
+      commitContinuation,
       waitForReady,
-    ],
-  );
+      handleEvent,
+      blockUnconfirmedSession,
+      registerSessionResetOperationWaiter,
+    });
 
   const dispatchKenPromptAction = useCallback(
     async (action: KenPromptAction): Promise<KenPromptActionResult> => {
@@ -5037,58 +4380,18 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     handlePickerChosen();
   }, [handlePickerChosen]);
 
-  const startRoadmapPhase = useCallback(
-    async (phaseId: string): Promise<PhaseStartResult> => {
-      if (state?.mode !== "code") {
-        return {
-          status: "failed",
-          code: "coding-mode-required",
-          operationId: null,
-          message: "Roadmap phases can only start in coding mode.",
-        };
-      }
-      if (blockUnconfirmedSession() || running || autopilotReviewing || newSessionBusy) {
-        return {
-          status: "failed",
-          code: "session-busy",
-          operationId: null,
-          message: "Wait for the current run or Autopilot review to finish.",
-        };
-      }
-      return client.startPhase(phaseId);
-    },
-    [autopilotReviewing, client, newSessionBusy, running, state?.mode],
-  );
-
-  const resumeRoadmapPhase = useCallback(
-    async (phaseId: string, link: NotesSessionLink): Promise<void> => {
-      if (running || autopilotReviewing || newSessionBusy) {
-        throw new Error("Wait for the current run or Autopilot review to finish.");
-      }
-      const currentCwd = stateRef.current?.cwd;
-      if (!currentCwd) throw new Error("The project session is not ready.");
-      const resolution = await resolveRoadmapPhaseResumeFromNotes(client, phaseId, link);
-      if (resolution.status === "blocked") throw new Error(resolution.message);
-      link = resolution.session;
-      if (link.sessionPath === null) {
-        const recovered = await startRoadmapPhase(phaseId);
-        if (recovered.status === "failed") throw new Error(recovered.message);
-        if (recovered.status === "accepted") return;
-        link = recovered.session;
-      }
-      if (link.sessionPath === null) {
-        throw new Error("This phase has no resumable session file.");
-      }
-      const nextGeneration = await client.selectWorkspace(
-        { mode: "code", cwd: currentCwd, sessionPath: link.sessionPath },
-        generationRef.current ?? 0,
-      );
-      adoptGeneration(nextGeneration);
-      // onProjectChosen owns the single readiness + hydration pass for this session.
-      onProjectChosen();
-    },
-    [adoptGeneration, autopilotReviewing, client, newSessionBusy, running, startRoadmapPhase],
-  );
+  const { startRoadmapPhase, resumeRoadmapPhase } = useRoadmapPhaseActions({
+    state,
+    stateRef,
+    generationRef,
+    client,
+    running,
+    autopilotReviewing,
+    newSessionBusy,
+    blockUnconfirmedSession,
+    adoptGeneration,
+    onProjectChosen,
+  });
 
   useEffect(() => {
     onSnapshot?.({
@@ -5243,6 +4546,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
             waitForCatalogReady={catalogClient.waitForReady}
             discoverProjects={catalogClient.listProjects}
             discoverSessions={catalogClient.listSessions}
+            renameSession={catalogClient.renameSession}
             bindProject={bindPickerProject}
             refreshSignal={homeRefreshSignal}
             showWindowControls={kind === "primary"}
@@ -5298,6 +4602,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
           <ProjectPicker
             initialProjectPath={state?.cwd ?? null}
             discoverProjects={catalogClient.listProjects}
+            renameSession={catalogClient.renameSession}
             bindProject={bindPickerProject}
             {...pickerProps}
           />
@@ -5349,12 +4654,15 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       ),
     });
 
-  if (roadmapDraftState.draft)
+  const roadmapDraftDescription = roadmapDraftState.draft
+    ? describeRoadmapDraft(roadmapDraftState.draft)
+    : null;
+  if (roadmapDraftState.draft && roadmapDraftDescription)
     reviewItems.push({
       id: "roadmap",
       identity: `${state?.sessionId}:${roadmapDraftState.draft.id}`,
-      label: "Roadmap draft",
-      summary: `${roadmapDraftState.draft.phases.length} proposed phases · ${roadmapDraftState.draft.status === "stale" ? "Out of date" : "Approval required"}`,
+      label: roadmapDraftDescription.label,
+      summary: roadmapDraftDescription.summary,
       content: (
         <RoadmapPhaseDraftReviewModal
           draft={roadmapDraftState.draft}
@@ -5368,19 +4676,19 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       ),
     });
 
-  const roadmapDraftTrigger = roadmapDraftState.draft ? (
+  const roadmapDraftTrigger = roadmapDraftDescription ? (
     <button
       type="button"
       className="btn btn-sm btn-ghost roadmap-draft-trigger"
       onClick={() => setExpandedReview("roadmap")}
       title="Review pending Roadmap draft"
-      aria-label={`Review Roadmap draft with ${roadmapDraftState.draft.phases.length} proposed ${roadmapDraftState.draft.phases.length === 1 ? "phase" : "phases"}`}
+      aria-label={roadmapDraftDescription.triggerLabel}
       aria-expanded={expandedReview === "roadmap"}
     >
       <GitBranchIcon size={13} aria-hidden="true" />
       <span>Review draft</span>
       <span className="roadmap-draft-trigger-count" aria-hidden="true">
-        {roadmapDraftState.draft.phases.length}
+        {roadmapDraftDescription.count}
       </span>
     </button>
   ) : null;
@@ -6419,103 +5727,20 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       )}
 
       {props.focused !== false && showLocalUpdateConfirm && (
-        <ConfirmModal
-          title={LOCAL_UPDATE_CONFIRMATION_TITLE}
-          message={LOCAL_UPDATE_CONFIRMATION_MESSAGE}
-          confirmLabel={LOCAL_UPDATE_CONFIRMATION_CONFIRM_LABEL}
-          content={
-            <LocalUpdateSummaryOption
-              checked={summarizeDecisions}
-              onChange={setSummarizeDecisions}
-            />
-          }
-          onConfirm={() => {
-            setShowLocalUpdateConfirm(false);
-            void appUpdate.install({ summarizeDecisions });
-            setSummarizeDecisions(false);
-          }}
-          onClose={() => {
-            setShowLocalUpdateConfirm(false);
-            setSummarizeDecisions(false);
-          }}
+        <LocalUpdateConfirmModal
+          summarizeDecisions={summarizeDecisions}
+          setSummarizeDecisions={setSummarizeDecisions}
+          setShowLocalUpdateConfirm={setShowLocalUpdateConfirm}
+          install={appUpdate.install}
         />
       )}
 
       {continuationConfirmation && (
-        <ConfirmModal
-          title="Continue in a new session"
-          className="continuation-confirmation"
-          message={
-            continuationConfirmation.error ??
-            "Start a fresh conversation with this exact instruction and a continuation handoff? Your current conversation is saved in Sessions."
-          }
-          confirmLabel={
-            continuationConfirmation.error
-              ? continuationConfirmation.retry
-                ? "Check outcome"
-                : "Close"
-              : "Continue"
-          }
-          busy={continuationConfirmation.busy}
-          content={
-            <>
-              <pre
-                style={{
-                  whiteSpace: "pre-wrap",
-                  overflowWrap: "anywhere",
-                  maxHeight: "35vh",
-                  overflow: "auto",
-                }}
-                aria-label="Selected continuation prompt"
-              >
-                {continuationConfirmation.prompt}
-              </pre>
-              {continuationConfirmation.profile !== null && (
-                <label>
-                  Destination context mode
-                  <select
-                    aria-label="Destination context mode"
-                    value={continuationConfirmation.profile}
-                    disabled={continuationConfirmation.busy || !!continuationConfirmation.error}
-                    onChange={(event) => {
-                      const profile = event.target.value;
-                      if (profile === "stable" || profile === "experimental") {
-                        setContinuationConfirmation((current) =>
-                          current ? { ...current, profile } : current,
-                        );
-                      }
-                    }}
-                  >
-                    <option value="stable">Stable · 272K</option>
-                    <option value="experimental">Experimental · 872K</option>
-                  </select>
-                </label>
-              )}
-            </>
-          }
-          onConfirm={() => {
-            if (continuationConfirmation.error) {
-              if (continuationConfirmation.retry) {
-                void commitPreparedContinuation();
-                return;
-              }
-              setContinuationConfirmation(null);
-              return;
-            }
-            const resolve = continuationConfirmationRef.current;
-            if (!resolve) return;
-            continuationConfirmationRef.current = null;
-            setContinuationConfirmation((current) =>
-              current ? { ...current, busy: true } : current,
-            );
-            resolve({ profile: continuationConfirmation.profile });
-          }}
-          onClose={() => {
-            if (continuationConfirmation.busy) return;
-            continuationConfirmationRef.current?.(null);
-            continuationConfirmationRef.current = null;
-            setContinuationConfirmation(null);
-          }}
+        <ContinuationConfirmationModal
+          continuationConfirmation={continuationConfirmation}
+          setContinuationConfirmation={setContinuationConfirmation}
+          continuationConfirmationRef={continuationConfirmationRef}
+          commitPreparedContinuation={commitPreparedContinuation}
         />
       )}
 

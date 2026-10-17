@@ -1,11 +1,20 @@
 import { randomUUID } from "node:crypto";
-import { canonicalProjectKey } from "@kenkaiiii/gg-core/project-notes";
+import { canonicalProjectKey, type NotesPhase } from "@kenkaiiii/gg-core/project-notes";
 import {
+  buildRoadmapPhaseEditChanges,
+  classifyRoadmapPhaseEditability,
+  isRoadmapPhaseEditDraft,
+  validateRoadmapPhaseEditDraft,
   validateRoadmapPhaseDraftRequest,
+  validateRoadmapPhaseEditRequest,
+  type RoadmapPhaseCreateDraft,
   type RoadmapPhaseDraft,
   type RoadmapPhaseDraftApprovalResult,
   type RoadmapPhaseDraftRejectionResult,
   type RoadmapPhaseDraftRequest,
+  type RoadmapPhaseEditDraft,
+  type RoadmapPhaseEditRequest,
+  type RoadmapPhaseNotEditableReason,
 } from "@kenkaiiii/gg-core/roadmap-workflow";
 
 export interface RoadmapPhaseDraftCreateRequest {
@@ -15,9 +24,23 @@ export interface RoadmapPhaseDraftCreateRequest {
 }
 
 export type RoadmapPhaseDraftCreateResult =
-  | { status: "drafted"; draft: RoadmapPhaseDraft }
+  | { status: "drafted"; draft: RoadmapPhaseCreateDraft }
   | { status: "proposal-pending"; draft: RoadmapPhaseDraft }
   | { status: "invalid-proposal"; path: string; message: string };
+
+export interface RoadmapPhaseEditDraftCreateRequest {
+  cwd: string;
+  sessionId: string;
+  request: RoadmapPhaseEditRequest;
+  /** The target phase as read from the inspected Notes revision. */
+  phase: NotesPhase;
+}
+
+export type RoadmapPhaseEditDraftCreateResult =
+  | { status: "drafted"; draft: RoadmapPhaseEditDraft }
+  | Exclude<RoadmapPhaseDraftCreateResult, { status: "drafted" }>
+  | { status: "phase-not-editable"; phaseId: string; reason: RoadmapPhaseNotEditableReason }
+  | { status: "no-changes"; phaseId: string };
 
 export interface AppSidecarRoadmapDraftCoordinatorOptions {
   createId?: () => string;
@@ -30,7 +53,7 @@ type DecisionTombstone =
   | {
       projectKey: string;
       decision: "approved";
-      result: Extract<RoadmapPhaseDraftApprovalResult, { status: "created" }>;
+      result: Extract<RoadmapPhaseDraftApprovalResult, { status: "created" | "edited" }>;
     }
   | {
       projectKey: string;
@@ -94,7 +117,7 @@ export class AppSidecarRoadmapDraftCoordinator {
       ...phase,
       referenceIds: (referenceKeys ?? []).map((key) => referenceIdsByKey.get(key)!),
     }));
-    const draft: RoadmapPhaseDraft = {
+    const draft: RoadmapPhaseCreateDraft = {
       id: draftId,
       projectKey,
       basedOnRevision: validated.value.expectedRevision,
@@ -106,10 +129,71 @@ export class AppSidecarRoadmapDraftCoordinator {
       sourcesNotCited: validated.value.sourcesNotCited ?? null,
       status: "pending",
     };
+    this.store(projectKey, draft);
+    return { status: "drafted", draft: cloneCreateDraft(draft) };
+  }
+
+  /** Proposes changed fields of one existing phase; shares the one-pending-per-project slot. */
+  createEdit(input: RoadmapPhaseEditDraftCreateRequest): RoadmapPhaseEditDraftCreateResult {
+    const validated = validateRoadmapPhaseEditRequest(input.request);
+    if (!validated.ok) {
+      return {
+        status: "invalid-proposal",
+        path: validated.error.path,
+        message: validated.error.message,
+      };
+    }
+    const request = validated.value;
+    if (input.phase.id !== request.phaseId) {
+      return {
+        status: "invalid-proposal",
+        path: "phaseId",
+        message: "expected the inspected phase to match the requested phase ID",
+      };
+    }
+    const projectKey = canonicalProjectKey(input.cwd);
+    const existing = this.pendingByProject.get(projectKey);
+    if (existing) {
+      this.emit(projectKey, existing);
+      return { status: "proposal-pending", draft: cloneDraft(existing)! };
+    }
+    const reason = classifyRoadmapPhaseEditability(input.phase);
+    if (reason !== null) {
+      return { status: "phase-not-editable", phaseId: request.phaseId, reason };
+    }
+    const changes = buildRoadmapPhaseEditChanges(input.phase, request);
+    if (changes.length === 0) return { status: "no-changes", phaseId: request.phaseId };
+
+    const candidate: RoadmapPhaseEditDraft = {
+      kind: "edit",
+      id: this.createId(),
+      projectKey,
+      basedOnRevision: request.expectedRevision,
+      createdAt: this.now(),
+      createdBySessionId: input.sessionId,
+      summary: request.summary,
+      phaseId: request.phaseId,
+      phaseTitle: input.phase.title,
+      basedOnUpdatedAt: input.phase.updatedAt,
+      changes,
+      status: "pending",
+    };
+    const checked = validateRoadmapPhaseEditDraft(candidate);
+    if (!checked.ok) {
+      return {
+        status: "invalid-proposal",
+        path: checked.error.path,
+        message: checked.error.message,
+      };
+    }
+    this.store(projectKey, checked.value);
+    return { status: "drafted", draft: cloneEditDraft(checked.value) };
+  }
+
+  private store(projectKey: string, draft: RoadmapPhaseDraft): void {
     this.pendingByProject.set(projectKey, draft);
     this.projectByDraftId.set(draft.id, projectKey);
     this.emit(projectKey, draft);
-    return { status: "drafted", draft: cloneDraft(draft)! };
   }
 
   async approve(
@@ -184,11 +268,15 @@ export class AppSidecarRoadmapDraftCoordinator {
     commit: (draft: RoadmapPhaseDraft) => Promise<RoadmapPhaseDraftApprovalResult>,
   ): Promise<RoadmapPhaseDraftApprovalResult> {
     const result = await commit(cloneDraft(draft)!);
-    if (result.status === "created") {
+    if (result.status === "created" || result.status === "edited") {
       this.removePending(draft);
       this.rememberDecision(draft.id, { projectKey, decision: "approved", result });
       this.emit(projectKey, null);
-    } else if (result.status === "stale-revision") {
+    } else if (
+      result.status === "stale-revision" ||
+      result.status === "phase-changed" ||
+      result.status === "phase-not-editable"
+    ) {
       const current = this.pendingByProject.get(projectKey);
       if (current?.id === draft.id && current.status !== "stale") {
         const stale = { ...current, status: "stale" as const };
@@ -246,9 +334,10 @@ function alreadyDecidedApproval(
   projectKey: string,
 ): RoadmapPhaseDraftApprovalResult {
   if (decision.projectKey !== projectKey) return { status: "proposal-project-mismatch" };
-  return decision.decision === "approved"
+  if (decision.decision !== "approved") return { status: "already-decided", decision: "rejected" };
+  return decision.result.status === "created"
     ? { ...decision.result, phaseIds: [...decision.result.phaseIds] }
-    : { status: "already-decided", decision: "rejected" };
+    : { ...decision.result };
 }
 
 function alreadyDecidedRejection(
@@ -263,6 +352,21 @@ function alreadyDecidedRejection(
 
 function cloneDraft(draft: RoadmapPhaseDraft | null): RoadmapPhaseDraft | null {
   if (!draft) return null;
+  return isRoadmapPhaseEditDraft(draft) ? cloneEditDraft(draft) : cloneCreateDraft(draft);
+}
+
+function cloneEditDraft(draft: RoadmapPhaseEditDraft): RoadmapPhaseEditDraft {
+  return {
+    ...draft,
+    changes: draft.changes.map((change) =>
+      change.field === "doneWhen"
+        ? { ...change, before: [...change.before], after: [...change.after] }
+        : { ...change },
+    ),
+  };
+}
+
+function cloneCreateDraft(draft: RoadmapPhaseCreateDraft): RoadmapPhaseCreateDraft {
   return {
     ...draft,
     references: draft.references.map((reference) => ({

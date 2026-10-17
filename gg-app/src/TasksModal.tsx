@@ -81,6 +81,12 @@ const OUTCOME_SENTENCE: Partial<Record<string, string>> = {
     "Last run stopped: a plan is waiting for your approval or revision, so the task was not finished. Resolve the plan before retrying.",
   "queued-messages":
     "Last run stopped: messages were queued during the run. Send or cancel them before retrying.",
+  "needs-review":
+    "Last run stopped: Autopilot handed the work to you. Check the session, then retry or delete the task.",
+  "not-marked-done":
+    "Last run stopped: it ended without the task being marked done. Check the work, then retry or delete the task.",
+  interrupted:
+    "Last run stopped: GG Coder closed before the run finished. Check the work, then retry or delete the task.",
 };
 
 function outcomeSentence(task: ProjectTask): string | null {
@@ -88,8 +94,14 @@ function outcomeSentence(task: ProjectTask): string | null {
   return reason === undefined ? null : (OUTCOME_SENTENCE[reason] ?? null);
 }
 
-function statusStyle(status: ProjectTask["status"]): { label: string; color: string } {
-  return STATUS_STYLE[status] ?? UNKNOWN_STATUS_STYLE;
+const NEEDS_REVIEW_STYLE = { label: "needs review", color: theme.warning };
+
+/** A block that waits on the user reads as such, not as a plain "blocked". */
+function statusStyle(task: ProjectTask): { label: string; color: string } {
+  if (task.status === "blocked" && task.lastOutcome?.reason === "needs-review") {
+    return NEEDS_REVIEW_STYLE;
+  }
+  return STATUS_STYLE[task.status] ?? UNKNOWN_STATUS_STYLE;
 }
 
 function statusGlyph(status: ProjectTask["status"]): string {
@@ -341,7 +353,7 @@ export function TasksModal({
   }
 
   if (selectedTask) {
-    const status = statusStyle(selectedTask.status);
+    const status = statusStyle(selectedTask);
     const created = formatCreatedAt(selectedTask.createdAt);
     const outcome = outcomeSentence(selectedTask);
     return (
@@ -405,7 +417,7 @@ export function TasksModal({
       )}
       <div className="tasks-list" ref={listRef}>
         {tasks.map((task) => {
-          const status = statusStyle(task.status);
+          const status = statusStyle(task);
           const isDone = task.status === "done";
           return (
             <div

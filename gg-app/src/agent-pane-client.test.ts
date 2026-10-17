@@ -370,6 +370,7 @@ describe("pane agent client", () => {
     await c.listProjects();
     await c.searchFiles("q");
     await c.listSessions("/work", "all");
+    await c.renameSession("/work", "/sessions/s.jsonl", "Login fix");
     await c.getTelegramStatus();
     await c.saveTelegramConfig("token", "1");
     await c.getServeStatus();
@@ -407,6 +408,13 @@ describe("pane agent client", () => {
       paneId: "right",
       cwd: "/work",
       chatAgent: "all",
+    });
+    expect(invoke).toHaveBeenCalledWith("agent_rename_session", {
+      paneId: "right",
+      cwd: "/work",
+      chatAgent: null,
+      sessionPath: "/sessions/s.jsonl",
+      title: "Login fix",
     });
   });
 
@@ -553,6 +561,57 @@ describe("pane agent client", () => {
 
     invoke.mockResolvedValueOnce({ status: "created", revision: 4, phaseIds: [] });
     await expect(client.approveRoadmapPhaseDraft("draft/1")).rejects.toThrow(
+      "invalid Roadmap draft approval response",
+    );
+  });
+
+  it("passes Roadmap phase edit drafts and typed edit outcomes through the pane client", async () => {
+    const draft = {
+      kind: "edit",
+      id: "draft-edit-1",
+      projectKey: "/work",
+      basedOnRevision: 3,
+      createdAt: "2026-08-05T12:00:00.000Z",
+      createdBySessionId: "session-1",
+      summary: "Clarify one phase",
+      phaseId: "phase-1",
+      phaseTitle: "Approval UI",
+      basedOnUpdatedAt: "2026-08-04T12:00:00.000Z",
+      changes: [{ field: "goal", before: "", after: "Require an explicit decision." }],
+      status: "pending",
+    };
+    invoke.mockImplementation(async (command: string) => {
+      if (command === "agent_roadmap_phase_draft_get") return { status: "ok", draft };
+      if (command === "agent_roadmap_phase_draft_approve") {
+        return { status: "edited", revision: 4, phaseId: "phase-1" };
+      }
+      return {};
+    });
+    const client = createPaneAgentClient("right");
+
+    await expect(client.getRoadmapPhaseDraft()).resolves.toEqual(draft);
+    await expect(client.approveRoadmapPhaseDraft("draft-edit-1")).resolves.toEqual({
+      status: "edited",
+      revision: 4,
+      phaseId: "phase-1",
+    });
+    invoke.mockResolvedValueOnce({
+      status: "phase-not-editable",
+      phaseId: "phase-1",
+      reason: "done",
+    });
+    await expect(client.approveRoadmapPhaseDraft("draft-edit-1")).resolves.toEqual({
+      status: "phase-not-editable",
+      phaseId: "phase-1",
+      reason: "done",
+    });
+    invoke.mockResolvedValueOnce({ status: "phase-changed", phaseId: "phase-1" });
+    await expect(client.approveRoadmapPhaseDraft("draft-edit-1")).resolves.toEqual({
+      status: "phase-changed",
+      phaseId: "phase-1",
+    });
+    invoke.mockResolvedValueOnce({ status: "phase-not-editable", phaseId: "phase-1", reason: "x" });
+    await expect(client.approveRoadmapPhaseDraft("draft-edit-1")).rejects.toThrow(
       "invalid Roadmap draft approval response",
     );
   });

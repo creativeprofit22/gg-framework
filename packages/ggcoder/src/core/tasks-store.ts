@@ -18,6 +18,7 @@ import {
   isRunnableTaskStatus,
   type KnownProjectTaskBlockReason,
   type ProjectTask,
+  type ProjectTaskStatus,
 } from "@kenkaiiii/gg-core";
 
 const TASKS_BASE = join(homedir(), ".gg-tasks", "projects");
@@ -28,7 +29,17 @@ export interface TaskRecord extends ProjectTask {
   details?: string;
   /** Desktop task completion is provisional until its user-turn/review settles. */
   completionPending?: boolean;
+  /** Process running this task, so a later process can tell a live run from an abandoned one. */
+  runOwnerPid?: number;
 }
+
+/**
+ * How the runner settled a task run. A successful run still needs completion
+ * evidence (see `finalizeTaskRun`); a blocked run records why when known.
+ */
+export type TaskRunSettlement =
+  | { kind: "succeeded"; reviewCleared: boolean }
+  | { kind: "blocked"; reason?: KnownProjectTaskBlockReason };
 
 export interface RunnableTaskInfo {
   id: string;
@@ -271,37 +282,93 @@ export function pruneDoneTasksSync(cwd: string): TaskRecord[] {
   });
 }
 
-export function markTaskInProgress(cwd: string, taskId: string, completionPending = false): void {
+export function markTaskInProgress(
+  cwd: string,
+  taskId: string,
+  completionPending = false,
+  ownerPid = process.pid,
+): void {
   mutateTasksSync(cwd, (tasks) => {
     if (tasks.length === 0) return null;
     return tasks.map((task) =>
-      task.id === taskId ? { ...task, status: "in-progress" as const, completionPending } : task,
+      task.id === taskId
+        ? { ...task, status: "in-progress" as const, completionPending, runOwnerPid: ownerPid }
+        : task,
     );
   });
 }
 
 /**
  * Release provisional completion only after orchestration has explicitly
- * settled. A blocked run records why (`lastOutcome`); a successful run clears it.
+ * settled, and return the task's final status (null when it was removed during
+ * the run). A successful run ends `done` only with completion evidence: the
+ * agent marked it done, or Autopilot review cleared the work against the task
+ * prompt. Without either it is blocked as `not-marked-done`, so it stays visible
+ * and retryable instead of sitting "in progress" forever. A blocked run records
+ * why (`lastOutcome`); a done run clears any stale reason.
  */
 export function finalizeTaskRun(
   cwd: string,
   taskId: string,
-  succeeded: boolean,
-  blockReason?: KnownProjectTaskBlockReason,
-): void {
+  settlement: TaskRunSettlement,
+): ProjectTaskStatus | null {
+  const settled: { status: ProjectTaskStatus | null } = { status: null };
   mutateTasksSync(cwd, (tasks) => {
     const task = tasks.find((candidate) => candidate.id === taskId);
     if (!task) return null; // Respect an explicit removal during the run.
-    if (succeeded) {
+    if (settlement.kind === "succeeded" && (task.status === "done" || settlement.reviewCleared)) {
+      task.status = "done";
       delete task.lastOutcome;
     } else {
+      const reason = settlement.kind === "succeeded" ? "not-marked-done" : settlement.reason;
       task.status = "blocked";
-      if (blockReason) task.lastOutcome = { reason: blockReason, at: new Date().toISOString() };
+      if (reason) task.lastOutcome = { reason, at: new Date().toISOString() };
       else delete task.lastOutcome; // Unknown cause: never show a stale reason.
     }
     delete task.completionPending;
+    delete task.runOwnerPid;
+    settled.status = task.status;
     return tasks;
+  });
+  return settled.status;
+}
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0); // Signal 0 only probes; it never touches the process.
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === "EPERM"; // Exists, owned by someone else.
+  }
+}
+
+/**
+ * Settle runs whose owning process is gone: the app, daemon or CLI closed
+ * mid-run, or a run ended without anything settling it. Each becomes blocked
+ * (and so retryable) with the reason it was left unsettled. Runs owned by a
+ * live process, including this one, are left alone; records written before
+ * owners were tracked have no owner and count as abandoned.
+ */
+export function recoverAbandonedTaskRunsSync(
+  cwd: string,
+  isAlive: (pid: number) => boolean = isProcessAlive,
+): TaskRecord[] {
+  return mutateTasksSync(cwd, (tasks) => {
+    let changed = false;
+    const at = new Date().toISOString();
+    for (const task of tasks) {
+      if (!task.completionPending && task.status !== "in-progress") continue;
+      if (task.runOwnerPid !== undefined && isAlive(task.runOwnerPid)) continue;
+      task.lastOutcome = {
+        reason: task.completionPending ? "interrupted" : "not-marked-done",
+        at,
+      };
+      task.status = "blocked";
+      delete task.completionPending;
+      delete task.runOwnerPid;
+      changed = true;
+    }
+    return changed ? tasks : null;
   });
 }
 

@@ -1,4 +1,5 @@
 import {
+  isNotesPhasePresent,
   isNotesPhaseStatus,
   isNotesReviewDecision,
   isNotesRoadmapReviewer,
@@ -9,6 +10,8 @@ import {
   canonicalReferenceIdentity,
   normalizeCanonicalUrl,
   validateNotesReferenceProjection,
+  type NotesDocumentV3,
+  type NotesPhase,
   type NotesPhaseStatus,
   type NotesReferenceProjection,
   type NotesReviewDecision,
@@ -70,6 +73,8 @@ export interface RoadmapInspectionPhase {
   latestVerification: RoadmapInspectionVerificationSummary | null;
   latestReview: RoadmapInspectionReviewSummary | null;
   hasUserStatusOverride: boolean;
+  /** Full saved prompt; present only in a single-phase (`phase_id`) inspection. */
+  sourcePrompt?: string;
 }
 
 export interface RoadmapInspection {
@@ -110,7 +115,8 @@ export interface RoadmapDraftPhase extends Omit<RoadmapProposedPhase, "reference
   referenceIds: string[];
 }
 
-export interface RoadmapPhaseDraft {
+/** A pending proposal to add new phases. The wire shape has no `kind` key (legacy-compatible). */
+export interface RoadmapPhaseCreateDraft {
   id: string;
   projectKey: string;
   basedOnRevision: number;
@@ -124,8 +130,60 @@ export interface RoadmapPhaseDraft {
   status: "pending" | "stale";
 }
 
+/** Phase fields an edit proposal may change, in canonical order. */
+export const ROADMAP_PHASE_EDIT_FIELDS = ["title", "goal", "doneWhen", "sourcePrompt"] as const;
+export type RoadmapPhaseEditField = (typeof ROADMAP_PHASE_EDIT_FIELDS)[number];
+/** Loose bounds for `before` values copied from Notes, which the UI may save outside draft limits. */
+export const ROADMAP_PHASE_EDIT_BEFORE_MAX_LENGTH = 65_536;
+export const ROADMAP_PHASE_EDIT_BEFORE_DONE_WHEN_MAX_ITEMS = 200;
+
+export type RoadmapPhaseFieldChange =
+  | { field: "title" | "goal" | "sourcePrompt"; before: string; after: string }
+  | { field: "doneWhen"; before: string[]; after: string[] };
+
+/** A pending proposal to change fields of one existing phase. */
+export interface RoadmapPhaseEditDraft {
+  kind: "edit";
+  id: string;
+  projectKey: string;
+  basedOnRevision: number;
+  createdAt: string;
+  createdBySessionId: string;
+  summary: string;
+  phaseId: string;
+  /** The phase title when the edit was proposed, for display only. */
+  phaseTitle: string;
+  /** The target phase's `updatedAt` when proposed; any later phase change makes the edit stale. */
+  basedOnUpdatedAt: string;
+  /** 1..4 changes with unique fields in canonical order. */
+  changes: RoadmapPhaseFieldChange[];
+  status: "pending" | "stale";
+}
+
+export type RoadmapPhaseDraft = RoadmapPhaseCreateDraft | RoadmapPhaseEditDraft;
+
+export interface RoadmapPhaseEditRequest {
+  expectedRevision: number;
+  summary: string;
+  phaseId: string;
+  title?: string;
+  goal?: string;
+  doneWhen?: string[];
+  sourcePrompt?: string;
+}
+
+export type RoadmapPhaseNotEditableReason = "missing" | "deleted" | "done" | "archived";
+
+export type RoadmapPhaseEditApplication =
+  | { status: "ok"; document: NotesDocumentV3 }
+  | { status: "phase-changed"; phaseId: string }
+  | { status: "phase-not-editable"; phaseId: string; reason: RoadmapPhaseNotEditableReason };
+
 export type RoadmapPhaseDraftApprovalResult =
   | { status: "created"; revision: number; phaseIds: string[] }
+  | { status: "edited"; revision: number; phaseId: string }
+  | { status: "phase-changed"; phaseId: string }
+  | { status: "phase-not-editable"; phaseId: string; reason: RoadmapPhaseNotEditableReason }
   | { status: "already-decided"; decision: "approved" | "rejected" }
   | { status: "stale-revision"; expectedRevision: number; currentRevision: number }
   | { status: "proposal-not-found" }
@@ -188,6 +246,22 @@ const DRAFT_REFERENCE_PROPOSAL_KEYS = [
   "referenceKey",
   ...REFERENCE_PROJECTION_KEYS.filter((key) => key !== "id"),
 ] as const;
+const EDIT_REQUEST_BASE_KEYS = ["expectedRevision", "summary", "phaseId"] as const;
+const EDIT_DRAFT_KEYS = [
+  "kind",
+  "id",
+  "projectKey",
+  "basedOnRevision",
+  "createdAt",
+  "createdBySessionId",
+  "summary",
+  "phaseId",
+  "phaseTitle",
+  "basedOnUpdatedAt",
+  "changes",
+  "status",
+] as const;
+const FIELD_CHANGE_KEYS = ["field", "before", "after"] as const;
 
 /** Normalizes wire text before length checks and persistence. */
 export function normalizeRoadmapWorkflowText(value: string): string {
@@ -264,9 +338,215 @@ export function isRoadmapPhaseDraftRequest(value: unknown): value is RoadmapPhas
   return validateRoadmapPhaseDraftRequest(value).ok;
 }
 
+/** Validates either draft kind; drafts without `kind: "edit"` are create drafts. */
 export function validateRoadmapPhaseDraft(
   value: unknown,
 ): RoadmapWorkflowValidationResult<RoadmapPhaseDraft> {
+  if (isRecord(value) && value.kind === "edit") return validateRoadmapPhaseEditDraft(value);
+  return validateRoadmapPhaseCreateDraft(value);
+}
+
+export function isRoadmapPhaseDraft(value: unknown): value is RoadmapPhaseDraft {
+  return validateRoadmapPhaseDraft(value).ok;
+}
+
+export function isRoadmapPhaseEditDraft(value: RoadmapPhaseDraft): value is RoadmapPhaseEditDraft {
+  return "kind" in value && value.kind === "edit";
+}
+
+export function validateRoadmapPhaseEditRequest(
+  value: unknown,
+): RoadmapWorkflowValidationResult<RoadmapPhaseEditRequest> {
+  if (!isRecordWithKeys(value, EDIT_REQUEST_BASE_KEYS, ROADMAP_PHASE_EDIT_FIELDS)) {
+    return invalid(
+      "$",
+      `expected ${EDIT_REQUEST_BASE_KEYS.join(", ")} and optionally ${ROADMAP_PHASE_EDIT_FIELDS.join(", ")}`,
+    );
+  }
+  if (!isNonNegativeInteger(value.expectedRevision)) {
+    return invalid("expectedRevision", "expected a non-negative integer");
+  }
+  const summary = normalizedBoundedString(
+    value.summary,
+    ROADMAP_PHASE_DRAFT_SUMMARY_MAX_LENGTH,
+    "summary",
+  );
+  if (!summary.ok) return summary;
+  const phaseId = boundedIdentifier(value.phaseId, "phaseId");
+  if (!phaseId.ok) return phaseId;
+  if (ROADMAP_PHASE_EDIT_FIELDS.every((field) => value[field] === undefined)) {
+    return invalid("$", `expected at least one of: ${ROADMAP_PHASE_EDIT_FIELDS.join(", ")}`);
+  }
+  const request: RoadmapPhaseEditRequest = {
+    expectedRevision: value.expectedRevision,
+    summary: summary.value,
+    phaseId: phaseId.value,
+  };
+  if (value.title !== undefined) {
+    const title = validatePhaseTitle(value.title, "title");
+    if (!title.ok) return title;
+    request.title = title.value;
+  }
+  if (value.goal !== undefined) {
+    const goal = validatePhaseGoal(value.goal, "goal");
+    if (!goal.ok) return goal;
+    request.goal = goal.value;
+  }
+  if (value.doneWhen !== undefined) {
+    const doneWhen = validatePhaseDoneWhen(value.doneWhen, "doneWhen");
+    if (!doneWhen.ok) return doneWhen;
+    request.doneWhen = doneWhen.value;
+  }
+  if (value.sourcePrompt !== undefined) {
+    const sourcePrompt = validatePhaseSourcePrompt(value.sourcePrompt, "sourcePrompt");
+    if (!sourcePrompt.ok) return sourcePrompt;
+    request.sourcePrompt = sourcePrompt.value;
+  }
+  return { ok: true, value: request };
+}
+
+export function validateRoadmapPhaseEditDraft(
+  value: unknown,
+): RoadmapWorkflowValidationResult<RoadmapPhaseEditDraft> {
+  if (!isRecordWithExactKeys(value, EDIT_DRAFT_KEYS)) {
+    return invalid("$", `expected exactly: ${EDIT_DRAFT_KEYS.join(", ")}`);
+  }
+  if (value.kind !== "edit") return invalid("kind", 'expected "edit"');
+  const id = boundedIdentifier(value.id, "id");
+  if (!id.ok) return id;
+  const projectKey = normalizedBoundedString(value.projectKey, 4_096, "projectKey");
+  if (!projectKey.ok) return projectKey;
+  if (!isNonNegativeInteger(value.basedOnRevision)) {
+    return invalid("basedOnRevision", "expected a non-negative integer");
+  }
+  if (!isIsoTimestamp(value.createdAt)) return invalid("createdAt", "expected an ISO timestamp");
+  const sessionId = boundedIdentifier(value.createdBySessionId, "createdBySessionId");
+  if (!sessionId.ok) return sessionId;
+  const summary = normalizedBoundedString(
+    value.summary,
+    ROADMAP_PHASE_DRAFT_SUMMARY_MAX_LENGTH,
+    "summary",
+  );
+  if (!summary.ok) return summary;
+  const phaseId = boundedIdentifier(value.phaseId, "phaseId");
+  if (!phaseId.ok) return phaseId;
+  const phaseTitle = looseBeforeString(value.phaseTitle, "phaseTitle");
+  if (!phaseTitle.ok) return phaseTitle;
+  if (!isIsoTimestamp(value.basedOnUpdatedAt)) {
+    return invalid("basedOnUpdatedAt", "expected an ISO timestamp");
+  }
+  if (value.status !== "pending" && value.status !== "stale") {
+    return invalid("status", 'expected "pending" or "stale"');
+  }
+  if (
+    !Array.isArray(value.changes) ||
+    value.changes.length < 1 ||
+    value.changes.length > ROADMAP_PHASE_EDIT_FIELDS.length
+  ) {
+    return invalid("changes", `expected 1..${ROADMAP_PHASE_EDIT_FIELDS.length} field changes`);
+  }
+  const changes: RoadmapPhaseFieldChange[] = [];
+  let previousFieldIndex = -1;
+  for (let index = 0; index < value.changes.length; index += 1) {
+    const change = validateFieldChange(value.changes[index], `changes[${index}]`);
+    if (!change.ok) return change;
+    const fieldIndex = ROADMAP_PHASE_EDIT_FIELDS.indexOf(change.value.field);
+    if (fieldIndex <= previousFieldIndex) {
+      return invalid(`changes[${index}].field`, "expected unique fields in canonical order");
+    }
+    previousFieldIndex = fieldIndex;
+    changes.push(change.value);
+  }
+  return {
+    ok: true,
+    value: {
+      kind: "edit",
+      id: id.value,
+      projectKey: projectKey.value,
+      basedOnRevision: value.basedOnRevision,
+      createdAt: value.createdAt,
+      createdBySessionId: sessionId.value,
+      summary: summary.value,
+      phaseId: phaseId.value,
+      phaseTitle: phaseTitle.value,
+      basedOnUpdatedAt: value.basedOnUpdatedAt,
+      changes,
+      status: value.status,
+    },
+  };
+}
+
+/** Returns why a phase cannot be edited, or null when it is editable. */
+export function classifyRoadmapPhaseEditability(
+  phase: Pick<NotesPhase, "deletion" | "status" | "archivedAt"> | undefined,
+): RoadmapPhaseNotEditableReason | null {
+  if (!phase) return "missing";
+  if (!isNotesPhasePresent(phase)) return "deleted";
+  if (phase.status === "done") return "done";
+  if (phase.archivedAt !== null) return "archived";
+  return null;
+}
+
+/** Lists only the requested fields whose (already validated) value differs from the phase. */
+export function buildRoadmapPhaseEditChanges(
+  phase: Pick<NotesPhase, RoadmapPhaseEditField>,
+  request: RoadmapPhaseEditRequest,
+): RoadmapPhaseFieldChange[] {
+  const changes: RoadmapPhaseFieldChange[] = [];
+  for (const field of ROADMAP_PHASE_EDIT_FIELDS) {
+    if (field === "doneWhen") {
+      const after = request.doneWhen;
+      if (after !== undefined && !stringArraysEqual(phase.doneWhen, after)) {
+        changes.push({ field, before: [...phase.doneWhen], after: [...after] });
+      }
+      continue;
+    }
+    const after = request[field];
+    if (after !== undefined && after !== phase[field]) {
+      changes.push({ field, before: phase[field], after });
+    }
+  }
+  return changes;
+}
+
+/**
+ * Applies an approved edit when the target phase is still editable and unchanged since the
+ * proposal. The new `updatedAt` is forced strictly later than the phase's previous value.
+ */
+export function applyRoadmapPhaseEdit(
+  document: NotesDocumentV3,
+  draft: RoadmapPhaseEditDraft,
+  timestamp: string,
+): RoadmapPhaseEditApplication {
+  const index = document.phases.findIndex((candidate) => candidate.id === draft.phaseId);
+  const phase = document.phases[index];
+  const reason = classifyRoadmapPhaseEditability(phase);
+  if (reason !== null || !phase) {
+    return { status: "phase-not-editable", phaseId: draft.phaseId, reason: reason ?? "missing" };
+  }
+  const unchanged =
+    phase.updatedAt === draft.basedOnUpdatedAt &&
+    draft.changes.every((change) =>
+      change.field === "doneWhen"
+        ? stringArraysEqual(phase.doneWhen, change.before)
+        : phase[change.field] === change.before,
+    );
+  if (!unchanged) return { status: "phase-changed", phaseId: draft.phaseId };
+
+  const updatedAt = strictlyLaterTimestamp(timestamp, phase.updatedAt);
+  const nextPhase: NotesPhase = { ...phase, updatedAt };
+  for (const change of draft.changes) {
+    if (change.field === "doneWhen") nextPhase.doneWhen = [...change.after];
+    else nextPhase[change.field] = change.after;
+  }
+  const phases = [...document.phases];
+  phases[index] = nextPhase;
+  return { status: "ok", document: { ...document, phases, updatedAt } };
+}
+
+export function validateRoadmapPhaseCreateDraft(
+  value: unknown,
+): RoadmapWorkflowValidationResult<RoadmapPhaseCreateDraft> {
   if (!isRecordWithKeys(value, DRAFT_BASE_KEYS, DRAFT_OPTIONAL_KEYS)) {
     return invalid("$", `expected exactly: ${DRAFT_KEYS.join(", ")}`);
   }
@@ -361,10 +641,6 @@ export function validateRoadmapPhaseDraft(
   };
 }
 
-export function isRoadmapPhaseDraft(value: unknown): value is RoadmapPhaseDraft {
-  return validateRoadmapPhaseDraft(value).ok;
-}
-
 export function isRoadmapInspectionOutcome(value: unknown): value is RoadmapInspectionOutcome {
   if (!isRecord(value) || typeof value.status !== "string") return false;
   if (value.status === "unsupported") return isProjectNotesUnsupportedFormat(value);
@@ -411,6 +687,20 @@ export function isRoadmapPhaseDraftApprovalResult(
         value.phaseIds.length > 0 &&
         value.phaseIds.every(isNonEmptyString) &&
         new Set(value.phaseIds).size === value.phaseIds.length
+      );
+    case "edited":
+      return (
+        isRecordWithExactKeys(value, ["status", "revision", "phaseId"]) &&
+        isNonNegativeInteger(value.revision) &&
+        isNonEmptyString(value.phaseId)
+      );
+    case "phase-changed":
+      return isRecordWithExactKeys(value, ["status", "phaseId"]) && isNonEmptyString(value.phaseId);
+    case "phase-not-editable":
+      return (
+        isRecordWithExactKeys(value, ["status", "phaseId", "reason"]) &&
+        isNonEmptyString(value.phaseId) &&
+        isNotEditableReason(value.reason)
       );
     case "already-decided":
       return isRecordWithExactKeys(value, ["status", "decision"]) && isDecision(value.decision);
@@ -652,72 +942,174 @@ function validateProposedPhaseRecord(
   value: Record<string, unknown>,
   path: string,
 ): RoadmapWorkflowValidationResult<RoadmapProposedPhase> {
-  const title = normalizedBoundedString(
-    value.title,
-    ROADMAP_PHASE_TITLE_MAX_LENGTH,
-    `${path}.title`,
-  );
+  const title = validatePhaseTitle(value.title, `${path}.title`);
   if (!title.ok) return title;
-  const goal = normalizedBoundedString(value.goal, ROADMAP_PHASE_GOAL_MAX_LENGTH, `${path}.goal`);
+  const goal = validatePhaseGoal(value.goal, `${path}.goal`);
   if (!goal.ok) return goal;
-  const sourcePrompt = normalizedBoundedString(
-    value.sourcePrompt,
-    ROADMAP_PHASE_SOURCE_PROMPT_MAX_LENGTH,
-    `${path}.sourcePrompt`,
-  );
+  const sourcePrompt = validatePhaseSourcePrompt(value.sourcePrompt, `${path}.sourcePrompt`);
   if (!sourcePrompt.ok) return sourcePrompt;
+  const doneWhen = validatePhaseDoneWhen(value.doneWhen, `${path}.doneWhen`);
+  if (!doneWhen.ok) return doneWhen;
+  return {
+    ok: true,
+    value: {
+      title: title.value,
+      goal: goal.value,
+      doneWhen: doneWhen.value,
+      sourcePrompt: sourcePrompt.value,
+    },
+  };
+}
+
+function validatePhaseTitle(value: unknown, path: string): RoadmapWorkflowValidationResult<string> {
+  return normalizedBoundedString(value, ROADMAP_PHASE_TITLE_MAX_LENGTH, path);
+}
+
+function validatePhaseGoal(value: unknown, path: string): RoadmapWorkflowValidationResult<string> {
+  return normalizedBoundedString(value, ROADMAP_PHASE_GOAL_MAX_LENGTH, path);
+}
+
+function validatePhaseSourcePrompt(
+  value: unknown,
+  path: string,
+): RoadmapWorkflowValidationResult<string> {
+  return normalizedBoundedString(value, ROADMAP_PHASE_SOURCE_PROMPT_MAX_LENGTH, path);
+}
+
+function validatePhaseDoneWhen(
+  value: unknown,
+  path: string,
+): RoadmapWorkflowValidationResult<string[]> {
   if (
-    !Array.isArray(value.doneWhen) ||
-    value.doneWhen.length < 1 ||
-    value.doneWhen.length > ROADMAP_PHASE_DONE_WHEN_MAX_ITEMS
+    !Array.isArray(value) ||
+    value.length < 1 ||
+    value.length > ROADMAP_PHASE_DONE_WHEN_MAX_ITEMS
   ) {
-    return invalid(
-      `${path}.doneWhen`,
-      `expected 1..${ROADMAP_PHASE_DONE_WHEN_MAX_ITEMS} completion criteria`,
-    );
+    return invalid(path, `expected 1..${ROADMAP_PHASE_DONE_WHEN_MAX_ITEMS} completion criteria`);
   }
   const seen = new Set<string>();
   const doneWhen: string[] = [];
-  for (let index = 0; index < value.doneWhen.length; index += 1) {
+  for (let index = 0; index < value.length; index += 1) {
     const item = normalizedBoundedString(
-      value.doneWhen[index],
+      value[index],
       ROADMAP_PHASE_DONE_WHEN_ITEM_MAX_LENGTH,
-      `${path}.doneWhen[${index}]`,
+      `${path}[${index}]`,
     );
     if (!item.ok) return item;
     if (seen.has(item.value)) {
-      return invalid(`${path}.doneWhen[${index}]`, "expected a unique completion criterion");
+      return invalid(`${path}[${index}]`, "expected a unique completion criterion");
     }
     seen.add(item.value);
     doneWhen.push(item.value);
   }
-  return {
-    ok: true,
-    value: { title: title.value, goal: goal.value, doneWhen, sourcePrompt: sourcePrompt.value },
-  };
+  return { ok: true, value: doneWhen };
+}
+
+function validateFieldChange(
+  value: unknown,
+  path: string,
+): RoadmapWorkflowValidationResult<RoadmapPhaseFieldChange> {
+  if (!isRecordWithExactKeys(value, FIELD_CHANGE_KEYS)) {
+    return invalid(path, `expected exactly: ${FIELD_CHANGE_KEYS.join(", ")}`);
+  }
+  const field = value.field;
+  if (field === "doneWhen") {
+    const before = looseBeforeList(value.before, `${path}.before`);
+    if (!before.ok) return before;
+    const after = validatePhaseDoneWhen(value.after, `${path}.after`);
+    if (!after.ok) return after;
+    if (stringArraysEqual(before.value, after.value)) {
+      return invalid(`${path}.after`, "expected a value different from before");
+    }
+    return { ok: true, value: { field, before: before.value, after: after.value } };
+  }
+  if (field !== "title" && field !== "goal" && field !== "sourcePrompt") {
+    return invalid(`${path}.field`, `expected one of: ${ROADMAP_PHASE_EDIT_FIELDS.join(", ")}`);
+  }
+  const before = looseBeforeString(value.before, `${path}.before`);
+  if (!before.ok) return before;
+  const after =
+    field === "title"
+      ? validatePhaseTitle(value.after, `${path}.after`)
+      : field === "goal"
+        ? validatePhaseGoal(value.after, `${path}.after`)
+        : validatePhaseSourcePrompt(value.after, `${path}.after`);
+  if (!after.ok) return after;
+  if (before.value === after.value) {
+    return invalid(`${path}.after`, "expected a value different from before");
+  }
+  return { ok: true, value: { field, before: before.value, after: after.value } };
+}
+
+/** `before` values are copied verbatim from Notes: bounded, never normalized, may be empty. */
+function looseBeforeString(value: unknown, path: string): RoadmapWorkflowValidationResult<string> {
+  if (
+    typeof value !== "string" ||
+    Array.from(value).length > ROADMAP_PHASE_EDIT_BEFORE_MAX_LENGTH
+  ) {
+    return invalid(
+      path,
+      `expected a string of up to ${ROADMAP_PHASE_EDIT_BEFORE_MAX_LENGTH} characters`,
+    );
+  }
+  return { ok: true, value };
+}
+
+function looseBeforeList(value: unknown, path: string): RoadmapWorkflowValidationResult<string[]> {
+  if (!Array.isArray(value) || value.length > ROADMAP_PHASE_EDIT_BEFORE_DONE_WHEN_MAX_ITEMS) {
+    return invalid(path, `expected up to ${ROADMAP_PHASE_EDIT_BEFORE_DONE_WHEN_MAX_ITEMS} items`);
+  }
+  const items: string[] = [];
+  for (let index = 0; index < value.length; index += 1) {
+    const item = looseBeforeString(value[index], `${path}[${index}]`);
+    if (!item.ok) return item;
+    items.push(item.value);
+  }
+  return { ok: true, value: items };
+}
+
+function stringArraysEqual(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((item, index) => item === right[index]);
+}
+
+function strictlyLaterTimestamp(candidate: string, previous: string): string {
+  const candidateMs = Date.parse(candidate);
+  if (Number.isNaN(candidateMs)) throw new Error("applyRoadmapPhaseEdit: invalid timestamp");
+  const previousMs = Date.parse(previous);
+  if (Number.isNaN(previousMs) || candidateMs > previousMs) return candidate;
+  return new Date(previousMs + 1).toISOString();
+}
+
+function isNotEditableReason(value: unknown): value is RoadmapPhaseNotEditableReason {
+  return value === "missing" || value === "deleted" || value === "done" || value === "archived";
 }
 
 function isRoadmapInspectionPhase(value: unknown): value is RoadmapInspectionPhase {
   if (
-    !isRecordWithExactKeys(value, [
-      "id",
-      "title",
-      "goal",
-      "doneWhen",
-      "order",
-      "status",
-      "archivedAt",
-      "hasBoundSession",
-      "latestProgress",
-      "latestBlocker",
-      "latestVerification",
-      "latestReview",
-      "hasUserStatusOverride",
-    ])
+    !isRecordWithKeys(
+      value,
+      [
+        "id",
+        "title",
+        "goal",
+        "doneWhen",
+        "order",
+        "status",
+        "archivedAt",
+        "hasBoundSession",
+        "latestProgress",
+        "latestBlocker",
+        "latestVerification",
+        "latestReview",
+        "hasUserStatusOverride",
+      ],
+      ["sourcePrompt"],
+    )
   ) {
     return false;
   }
   return (
+    (!Object.hasOwn(value, "sourcePrompt") || typeof value.sourcePrompt === "string") &&
     isNonEmptyString(value.id) &&
     isNonEmptyString(value.title) &&
     isNonEmptyString(value.goal) &&

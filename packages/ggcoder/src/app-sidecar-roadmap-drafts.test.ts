@@ -1,5 +1,53 @@
 import { describe, expect, it, vi } from "vitest";
+import type { NotesPhase } from "@kenkaiiii/gg-core/project-notes";
+import {
+  isRoadmapPhaseEditDraft,
+  type RoadmapPhaseCreateDraft,
+} from "@kenkaiiii/gg-core/roadmap-workflow";
 import { AppSidecarRoadmapDraftCoordinator } from "./app-sidecar-roadmap-drafts.js";
+
+function pendingCreate(
+  value: AppSidecarRoadmapDraftCoordinator,
+  cwd: string,
+): RoadmapPhaseCreateDraft | null {
+  const draft = value.pending(cwd);
+  if (draft && isRoadmapPhaseEditDraft(draft)) throw new Error("expected a create draft");
+  return draft;
+}
+
+function phase(overrides: Partial<NotesPhase> = {}): NotesPhase {
+  return {
+    id: "phase-1",
+    title: "Backend",
+    goal: "Create bounded backend support.",
+    doneWhen: ["Backend tests pass"],
+    order: 0,
+    status: "not-started",
+    sourcePrompt: "Implement the backend phase only.",
+    referenceIds: [],
+    session: null,
+    reminder: null,
+    attentionReason: null,
+    createdAt: "2026-08-01T12:00:00.000Z",
+    updatedAt: "2026-08-02T12:00:00.000Z",
+    completedAt: null,
+    archivedAt: null,
+    overrides: { status: null, referenceIds: null },
+    pendingAutomaticLifecycleTransition: null,
+    lifecycleEvents: [],
+    roadmapEvents: [],
+    ...overrides,
+  };
+}
+
+const editRequest = {
+  expectedRevision: 3,
+  summary: "Clarify the backend phase",
+  phaseId: "phase-1",
+  title: "Backend",
+  goal: "Create bounded, validated backend support.",
+  doneWhen: ["Backend tests pass", "Malformed input is rejected"],
+};
 
 function coordinator(onChange = vi.fn()) {
   let sequence = 0;
@@ -62,7 +110,9 @@ describe("AppSidecarRoadmapDraftCoordinator", () => {
     expect(created.draft.references).toEqual([]);
     expect(created.draft.phases.map((phase) => phase.referenceIds)).toEqual([[], []]);
     created.draft.phases[0]!.doneWhen.push("mutated");
-    expect(value.pending("c:/work/app")?.phases[0]!.doneWhen).toEqual(["Backend tests pass"]);
+    expect(pendingCreate(value, "c:/work/app")?.phases[0]!.doneWhen).toEqual([
+      "Backend tests pass",
+    ]);
   });
 
   it("generates reference IDs before phase IDs and deep-clones multi-phase links", () => {
@@ -104,11 +154,11 @@ describe("AppSidecarRoadmapDraftCoordinator", () => {
     if (created.status !== "drafted") throw new Error("expected draft");
     created.draft.references[0]!.range!.startLine = 99;
     created.draft.phases[0]!.referenceIds.push("mutated");
-    expect(value.pending("/work/app")?.references[0]!.range!.startLine).toBe(1);
-    expect(value.pending("/work/app")?.phases[0]!.referenceIds).toEqual(["id-2"]);
+    expect(pendingCreate(value, "/work/app")?.references[0]!.range!.startLine).toBe(1);
+    expect(pendingCreate(value, "/work/app")?.phases[0]!.referenceIds).toEqual(["id-2"]);
     const emitted = onChange.mock.calls[0]![1]!;
     emitted.references[0].range.startLine = 88;
-    expect(value.pending("/work/app")?.references[0]!.range!.startLine).toBe(1);
+    expect(pendingCreate(value, "/work/app")?.references[0]!.range!.startLine).toBe(1);
   });
 
   it("does not replace an unseen same-project proposal", () => {
@@ -226,6 +276,199 @@ describe("AppSidecarRoadmapDraftCoordinator", () => {
       status: "rejected",
     });
     expect(value.pending("/work/one")).toBeNull();
+  });
+
+  it("creates an edit draft holding only the changed fields and emits defensive copies", () => {
+    const { value, onChange } = coordinator();
+    const created = value.createEdit({
+      cwd: "C:\\Work\\App",
+      sessionId: "session-1",
+      request: editRequest,
+      phase: phase(),
+    });
+
+    expect(created).toEqual({
+      status: "drafted",
+      draft: {
+        kind: "edit",
+        id: "id-1",
+        projectKey: "c:/work/app",
+        basedOnRevision: 3,
+        createdAt: "2026-08-05T12:00:00.000Z",
+        createdBySessionId: "session-1",
+        summary: "Clarify the backend phase",
+        phaseId: "phase-1",
+        phaseTitle: "Backend",
+        basedOnUpdatedAt: "2026-08-02T12:00:00.000Z",
+        changes: [
+          {
+            field: "goal",
+            before: "Create bounded backend support.",
+            after: "Create bounded, validated backend support.",
+          },
+          {
+            field: "doneWhen",
+            before: ["Backend tests pass"],
+            after: ["Backend tests pass", "Malformed input is rejected"],
+          },
+        ],
+        status: "pending",
+      },
+    });
+    expect(onChange).toHaveBeenCalledOnce();
+    if (created.status !== "drafted") throw new Error("expected draft");
+    const change = created.draft.changes[1]!;
+    if (change.field !== "doneWhen") throw new Error("expected doneWhen change");
+    change.after.push("mutated");
+    expect(value.pending("c:/work/app")).toMatchObject({
+      changes: [
+        { field: "goal" },
+        { after: ["Backend tests pass", "Malformed input is rejected"] },
+      ],
+    });
+  });
+
+  it("shares the one-pending slot between create and edit drafts", () => {
+    const { value, onChange } = coordinator();
+    const createdPhases = value.create({ cwd: "/work/app", sessionId: "s1", request });
+    if (createdPhases.status !== "drafted") throw new Error("expected draft");
+    onChange.mockClear();
+    expect(
+      value.createEdit({ cwd: "/work/app", sessionId: "s2", request: editRequest, phase: phase() }),
+    ).toEqual({ status: "proposal-pending", draft: createdPhases.draft });
+    expect(onChange).toHaveBeenCalledExactlyOnceWith("/work/app", createdPhases.draft);
+
+    const other = coordinator();
+    const edit = other.value.createEdit({
+      cwd: "/work/app",
+      sessionId: "s1",
+      request: editRequest,
+      phase: phase(),
+    });
+    if (edit.status !== "drafted") throw new Error("expected edit draft");
+    expect(other.value.create({ cwd: "/work/app", sessionId: "s2", request })).toEqual({
+      status: "proposal-pending",
+      draft: edit.draft,
+    });
+  });
+
+  it.each([
+    ["done", { status: "done" as const, completedAt: "2026-08-03T12:00:00.000Z" }],
+    ["archived", { archivedAt: "2026-08-03T12:00:00.000Z" }],
+  ] as const)("refuses to draft an edit for a %s phase", (reason, overrides) => {
+    const { value, onChange } = coordinator();
+    expect(
+      value.createEdit({
+        cwd: "/work/app",
+        sessionId: "s1",
+        request: editRequest,
+        phase: phase(overrides),
+      }),
+    ).toEqual({ status: "phase-not-editable", phaseId: "phase-1", reason });
+    expect(value.pending("/work/app")).toBeNull();
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it("returns no-changes, or invalid-proposal for bad input, without publishing", () => {
+    const { value, onChange } = coordinator();
+    expect(
+      value.createEdit({
+        cwd: "/work/app",
+        sessionId: "s1",
+        request: {
+          expectedRevision: 3,
+          summary: "Same",
+          phaseId: "phase-1",
+          title: " Backend ",
+          doneWhen: ["Backend tests pass"],
+        },
+        phase: phase(),
+      }),
+    ).toEqual({ status: "no-changes", phaseId: "phase-1" });
+    expect(
+      value.createEdit({
+        cwd: "/work/app",
+        sessionId: "s1",
+        request: { expectedRevision: 3, summary: "Nothing", phaseId: "phase-1" },
+        phase: phase(),
+      }),
+    ).toMatchObject({ status: "invalid-proposal", path: "$" });
+    expect(
+      value.createEdit({
+        cwd: "/work/app",
+        sessionId: "s1",
+        request: editRequest,
+        phase: phase({ id: "phase-2" }),
+      }),
+    ).toMatchObject({ status: "invalid-proposal", path: "phaseId" });
+    expect(value.pending("/work/app")).toBeNull();
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it("records an edited approval tombstone and replays it idempotently", async () => {
+    const { value, onChange } = coordinator();
+    const created = value.createEdit({
+      cwd: "/work/app",
+      sessionId: "s1",
+      request: editRequest,
+      phase: phase(),
+    });
+    if (created.status !== "drafted") throw new Error("expected draft");
+    const commit = vi.fn(async () => ({
+      status: "edited" as const,
+      revision: 4,
+      phaseId: "phase-1",
+    }));
+
+    await expect(value.approve("/work/app", created.draft.id, commit)).resolves.toEqual({
+      status: "edited",
+      revision: 4,
+      phaseId: "phase-1",
+    });
+    expect(commit).toHaveBeenCalledExactlyOnceWith(created.draft);
+    await expect(value.approve("/work/app", created.draft.id, commit)).resolves.toEqual({
+      status: "edited",
+      revision: 4,
+      phaseId: "phase-1",
+    });
+    await expect(value.reject("/work/app", created.draft.id)).resolves.toEqual({
+      status: "already-decided",
+      decision: "approved",
+    });
+    expect(commit).toHaveBeenCalledOnce();
+    expect(value.pending("/work/app")).toBeNull();
+    expect(onChange).toHaveBeenLastCalledWith("/work/app", null);
+  });
+
+  it.each([
+    { status: "phase-changed" as const, phaseId: "phase-1" },
+    { status: "phase-not-editable" as const, phaseId: "phase-1", reason: "deleted" as const },
+  ])("marks an edit draft stale on $status and keeps it rejectable", async (outcome) => {
+    const { value, onChange } = coordinator();
+    const created = value.createEdit({
+      cwd: "/work/app",
+      sessionId: "s1",
+      request: editRequest,
+      phase: phase(),
+    });
+    if (created.status !== "drafted") throw new Error("expected draft");
+
+    await expect(
+      value.approve("/work/app", created.draft.id, async () => outcome),
+    ).resolves.toEqual(outcome);
+    expect(value.pending("/work/app")).toMatchObject({
+      id: created.draft.id,
+      kind: "edit",
+      status: "stale",
+    });
+    expect(onChange).toHaveBeenLastCalledWith(
+      "/work/app",
+      expect.objectContaining({ kind: "edit", status: "stale" }),
+    );
+    await expect(
+      value.reject("/work/app", created.draft.id, "Re-read the phase first"),
+    ).resolves.toEqual({ status: "rejected" });
+    expect(value.pending("/work/app")).toBeNull();
   });
 
   it("rejects invalid input without publishing or writing anything", () => {

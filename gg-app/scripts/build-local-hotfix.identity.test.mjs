@@ -9,6 +9,7 @@ import {
   INSTALLED_SMOKE_TAURI_CONFIG,
   LOCAL_FORK_IDENTITY,
   LOCAL_TAURI_CONFIG,
+  readAppSidecarSources,
   readIdentityRustShell,
 } from "./build-local-hotfix.mjs";
 
@@ -30,7 +31,7 @@ const identityDataSources = {
     join(repoRoot, "packages", "ggcoder", "src", "app-sidecar-paths.ts"),
     "utf8",
   ),
-  appSidecar: readFileSync(join(repoRoot, "packages", "ggcoder", "src", "app-sidecar.ts"), "utf8"),
+  appSidecar: readAppSidecarSources(join(repoRoot, "packages", "ggcoder")),
   rustShell: readIdentityRustShell(srcTauri),
 };
 

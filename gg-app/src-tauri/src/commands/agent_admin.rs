@@ -756,6 +756,35 @@ pub(crate) async fn agent_sessions(
     Ok(body)
 }
 
+/// Proxy: rename one session row in a project's list. The sidecar accepts the
+/// path only when it is a native row of that same listing.
+#[tauri::command]
+pub(crate) async fn agent_rename_session(
+    webview: WebviewWindow,
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
+    cwd: String,
+    chat_agent: Option<String>,
+    session_path: String,
+    title: String,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
+    let res = client
+        .post(format!("{}/sessions/title", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
+        .json(&serde_json::json!({
+            "cwd": cwd,
+            "chatAgent": chat_agent,
+            "sessionPath": session_path,
+            "title": title,
+        }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    json_or_error(res, "failed to rename session").await
+}
+
 /// Proxy: search project files for the chat input's `@` picker. Empty `query`
 /// returns the most-recently-modified files; a query returns fuzzy matches.
 #[tauri::command]

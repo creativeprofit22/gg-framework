@@ -86,6 +86,8 @@ const astraState = {
   provider: "openai",
   model: "gpt-6-astra",
   accountId: "fixture-account",
+  // Eligibility fails closed when absent; the daemon grants it for an eligible account.
+  openAICodexContextProfileEligibility: { canChange: true },
   thinkingLevel: "low",
   supportedThinkingLevels: ["low", "medium", "high", "xhigh", "max"],
 };
@@ -145,6 +147,23 @@ export const astraVisualScenarios = [
     controls: "enabled",
   },
 ];
+
+// Upstream 0.91 moved the Astra context selector, Fast switch, build identity and
+// context meter out of the removed footer into the deck's "⋯ More" panel. Open it
+// (idempotently) before any assertion that needs those controls.
+export async function ensureMoreOpen(page, scope = page) {
+  const panel = scope.locator('.deck-pad[aria-label="More"]');
+  if (await panel.count()) return panel;
+  const more = scope.locator('.deck button[aria-label="More"]').first();
+  await more.click();
+  // An unfocused split pane may spend the first click on pane focus.
+  if (!(await panel.count())) {
+    await page.waitForTimeout(200);
+    if (!(await panel.count())) await more.click();
+  }
+  await panel.waitFor({ timeout: 5_000 });
+  return panel;
+}
 
 export async function assertAstraVisualState(page, scenario) {
   const identity = page.locator(".footer-custom-build");
@@ -687,6 +706,10 @@ const shots = [
       agent_pane_status: { paneId: "primary", generation: 1, ready: true },
     },
     settle: 700,
+    // The meter, build identity and Astra controls live in the deck's More panel.
+    play: async (page) => {
+      await ensureMoreOpen(page);
+    },
     verify: (page) => assertAstraVisualState(page, scenario),
   })),
   // NOTE: no model-picker shot. On macOS `ModelSelect` renders a native <select>

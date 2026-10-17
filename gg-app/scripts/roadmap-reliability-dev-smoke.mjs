@@ -872,6 +872,12 @@ async function openFixturePhase(client, paneIndex) {
   await waitFor("Notes dialog", () =>
     client.evaluate("Boolean(document.querySelector('.notes-modal'))"),
   );
+  // Notes content loads lazily inside the dialog shell, so the tab appears after `.notes-modal`.
+  await waitFor("enabled Notes Roadmap tab", () =>
+    client.evaluate(
+      `(() => { const tab = document.querySelector("#notes-tab-roadmap"); return Boolean(tab && !tab.disabled); })()`,
+    ),
+  );
   await client.evaluate(`document.querySelector("#notes-tab-roadmap").click()`);
   await waitFor("fixture Roadmap phase", () =>
     client.evaluate(

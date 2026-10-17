@@ -160,6 +160,36 @@ export async function measureReviewDockIsolation(client, { capture = async () =>
       })()`);
       await settle();
       for (const review of ["plan", "roadmap"]) {
+        // The context meter renders only inside the Deck "More" panel (DeckMenu extras).
+        // Read it there, then close the panel so the review geometry below is measured
+        // with the composer in place, exactly as before.
+        const toggleMore = (open) =>
+          client.evaluate(`(() => {
+            const key = document.querySelectorAll('.agent-pane')[0]?.querySelector('.more-key');
+            if (!key) throw new Error('Missing Deck More key');
+            if ((key.getAttribute('aria-expanded') === 'true') !== ${open}) key.click();
+            return true;
+          })()`);
+        await toggleMore(true);
+        await settle();
+        const contextMeter = await client.evaluate(`(() => {
+          const pane = document.querySelectorAll('.agent-pane')[0];
+          const meter = pane.querySelector('.ctx-meter[role="meter"]');
+          const value = meter?.getAttribute('aria-valuenow');
+          const label = meter?.querySelector('.ctx-meter-label')?.textContent;
+          const accessibleLabel = meter?.getAttribute('aria-label');
+          if (value == null || value.trim() === '' || !Number.isFinite(Number(value)) || Number(value) < 0 || Number(value) > 100) throw new Error('Context meter value is not finite and in range');
+          if (!label || !accessibleLabel || /NaN/.test(label + accessibleLabel)) throw new Error('Invalid context meter label');
+          return { value: Number(value), label, accessibleLabel };
+        })()`);
+        await toggleMore(false);
+        await settle();
+        if (
+          await client.evaluate(
+            "document.querySelectorAll('.agent-pane')[0].querySelector('.more-key').getAttribute('aria-expanded') === 'true'",
+          )
+        )
+          throw new Error("Deck More panel did not close before review measurement");
         await client.evaluate(`(() => {
           const pane = document.querySelectorAll('.agent-pane')[0];
           const chat = pane.querySelector('.transcript');
@@ -174,13 +204,7 @@ export async function measureReviewDockIsolation(client, { capture = async () =>
           const pane = panes[0], dock = pane.querySelector('.review-dock');
           const chat = pane.querySelector('.transcript'), composer = pane.querySelector('.inputwrap');
           if (!dock || !chat || !composer) throw new Error('Missing review layout elements');
-          const meter = pane.querySelector('.ctx-meter[role="meter"]');
-          const value = meter?.getAttribute('aria-valuenow');
-          const label = meter?.querySelector('.ctx-meter-label')?.textContent;
-          const accessibleLabel = meter?.getAttribute('aria-label');
-          if (value == null || value.trim() === '' || !Number.isFinite(Number(value)) || Number(value) < 0 || Number(value) > 100) throw new Error('Context meter value is not finite and in range');
-          if (!label || !accessibleLabel || /NaN/.test(label + accessibleLabel)) throw new Error('Invalid context meter label');
-          const contextMeter = { value: Number(value), label, accessibleLabel };
+          const contextMeter = ${JSON.stringify(contextMeter)};
           const reviewControls = ['plan', 'roadmap'].map(name => Boolean(dock.querySelector('[data-review-trigger="' + name + '"]')));
           const approvalGated = pane.querySelector('textarea.input')?.disabled === true;
           if (!reviewControls.every(Boolean) || !approvalGated) throw new Error('Review controls or approval gate lost');

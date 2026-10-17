@@ -6,6 +6,7 @@ import { chromium } from "playwright";
 import {
   astraVisualScenarios,
   assertAstraVisualState,
+  ensureMoreOpen,
   initScript,
   requireVisualFixtureUrl,
   responses,
@@ -373,23 +374,6 @@ async function verifyPromptControls(page, width, mode, screenshot, outputDir, sc
     screenshots.push(output);
   }
   return { width, mode, failures };
-}
-
-// Upstream 0.91 moved the Astra context selector, Fast switch, build identity and
-// context meter out of the removed footer into the deck's "⋯ More" panel. Open it
-// (idempotently) before any assertion that needs those controls.
-async function ensureMoreOpen(page, scope = page) {
-  const panel = scope.locator('.deck-pad[aria-label="More"]');
-  if (await panel.count()) return panel;
-  const more = scope.locator('.deck button[aria-label="More"]').first();
-  await more.click();
-  // An unfocused split pane may spend the first click on pane focus.
-  if (!(await panel.count())) {
-    await page.waitForTimeout(200);
-    if (!(await panel.count())) await more.click();
-  }
-  await panel.waitFor({ timeout: 5_000 });
-  return panel;
 }
 
 // The More panel overlays the transcript; close it before checking transcript

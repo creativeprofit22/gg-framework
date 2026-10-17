@@ -152,6 +152,11 @@ export interface AskUserRequest {
 }
 export interface AskUserPrompt extends AskUserRequest {
   id: string;
+  /**
+   * Asked in a human-driven run: no soft deadline, the agent waits for the
+   * answer. Even after a Stop the card never says the agent stopped waiting.
+   */
+  noDeadline?: boolean;
 }
 
 // Bound admission, not a truncated projection: every live question must fit in ready.
@@ -168,6 +173,7 @@ export function isAskUserPrompt(value: unknown): value is AskUserPrompt {
     !askRecord(value) ||
     !askText(value.id, 1) ||
     value.id.length > 256 ||
+    (value.noDeadline !== undefined && typeof value.noDeadline !== "boolean") ||
     !Array.isArray(value.questions) ||
     value.questions.length < 1 ||
     value.questions.length > 5

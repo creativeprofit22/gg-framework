@@ -2,7 +2,6 @@ import { z } from "zod";
 import type { AgentTool } from "@kenkaiiii/gg-agent";
 import {
   ASK_USER_INTERRUPTED_TEXT,
-  ASK_USER_TIMEOUT_MS,
   formatAskResult,
   type AskQuestion,
   type AskUserRequest,
@@ -95,10 +94,11 @@ export function createAskUserTool(ask: AskUserHandler): AgentTool<typeof AskUser
     parameters: AskUserParams,
     // The turn is blocked on a human; nothing else in the batch may run first.
     executionMode: "sequential",
-    // The host's soft deadline is the real bound (it returns "no answer yet"
-    // and keeps the question open). Without this the loop's 5-min default
-    // would abort the call while the user is still reading the question.
-    timeoutMs: ASK_USER_TIMEOUT_MS + 30_000,
+    // The host owns the deadline: none in a human-driven run (the call waits
+    // for the user), a soft one in unattended runs that returns "no answer
+    // yet" and keeps the question open. Zero opts out of the loop's 5-min
+    // default, which would otherwise fire while the user is still deciding.
+    timeoutMs: 0,
     // A question cut off by Stop has no side effect to be unsure about. The
     // generic "outcome UNKNOWN — it may have completed" told the model the user
     // might have answered, when the answer can only ever arrive through here.

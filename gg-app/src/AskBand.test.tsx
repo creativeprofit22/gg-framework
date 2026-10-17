@@ -1048,6 +1048,31 @@ describe("AskBand", () => {
     fireEvent.click(screen.getByRole("button", { name: /Yes/ }));
     expect(onAnswer).toHaveBeenCalledWith({ flag: "Yes" });
   });
+
+  it("never shows the stopped-waiting note for a human-driven (no-deadline) question", () => {
+    const onAnswer = vi.fn();
+    render(
+      <AskBand
+        prompt={{
+          ...prompt({
+            id: "flag",
+            question: "Flip the flag?",
+            kind: "confirm",
+            options: [{ label: "Yes" }, { label: "No" }],
+          }),
+          noDeadline: true,
+        }}
+        // Deferred by a Stop: still answerable, but the agent never gave up waiting.
+        deferred
+        onAnswer={onAnswer}
+        onTypeInstead={onTypeInstead}
+      />,
+    );
+    expect(screen.queryByText(/stopped waiting/)).toBeNull();
+    expect(screen.queryByRole("status")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /Yes/ }));
+    expect(onAnswer).toHaveBeenCalledWith({ flag: "Yes" });
+  });
 });
 
 describe("markAskDeferred / closeAsks", () => {

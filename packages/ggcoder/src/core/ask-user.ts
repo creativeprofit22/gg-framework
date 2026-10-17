@@ -16,21 +16,27 @@ export type {
 import type { AskQuestion } from "@kenkaiiii/gg-core/desktop-session-ux";
 
 /**
- * Soft deadline for an `ask_user` call when someone is likely watching (a
- * plain interactive run). Past it the tool stops blocking: the agent proceeds
- * on its best guess while the question stays answerable in the app.
+ * Deadline for host review questions (command creation/setup approvals) in a
+ * human-driven run; past it the review is cancelled (fail closed). An
+ * interactive `ask_user` question has no deadline at all — see
+ * `askUserParkOptions`.
  */
 export const ASK_USER_INTERACTIVE_DEADLINE_MS = 10 * 60_000;
 
 /**
- * Soft deadline when nobody is watching — autopilot (Ken), task run-all
- * sweeps and scheduled prompts. Short, so an unattended run does not stall.
+ * Soft deadline when nobody is watching — an active Autopilot (Ken) cycle,
+ * task Run All sweeps and scheduled prompts. Short, so an unattended run does
+ * not stall: past it the agent proceeds on its best guess while the question
+ * stays answerable in the app.
  */
 export const ASK_USER_UNATTENDED_DEADLINE_MS = 2 * 60_000;
 
 /**
- * The longest an `ask_user` call can block (the largest soft deadline). The
- * tool's own execution timeout is derived from this.
+ * The longest a deadline-bound question can block (the largest soft
+ * deadline): host review questions and unattended asks. It is the loop-timeout
+ * base for the programmatic-command and programmatic-profile tools. It does
+ * not cap `ask_user` in a human-driven run, which has no deadline — see
+ * `askUserParkOptions`.
  */
 export const ASK_USER_TIMEOUT_MS = Math.max(
   ASK_USER_INTERACTIVE_DEADLINE_MS,
@@ -40,6 +46,34 @@ export const ASK_USER_TIMEOUT_MS = Math.max(
 /** Pick the soft deadline for a run, by whether a human is likely watching. */
 export function askSoftDeadlineMs(unattended: boolean): number {
   return unattended ? ASK_USER_UNATTENDED_DEADLINE_MS : ASK_USER_INTERACTIVE_DEADLINE_MS;
+}
+
+/** What is driving the run right now, as far as questions are concerned. */
+export interface AskRunState {
+  /** An Autopilot (Ken) review→prompt cycle is actually running. */
+  autopilotRunActive: boolean;
+  /** A task Run All sweep is running. */
+  taskRunAll: boolean;
+  /** A scheduled prompt is running. */
+  scheduledRunActive: boolean;
+}
+
+/**
+ * Whether nobody is likely watching the run. Autopilot merely being switched
+ * on does not count: the user's own turn is still human-driven — only the
+ * cycle Ken drives afterwards (`autopilotRunActive`) is unattended.
+ */
+export function isUnattendedAskRun(state: AskRunState): boolean {
+  return state.autopilotRunActive || state.taskRunAll || state.scheduledRunActive;
+}
+
+/**
+ * How an `ask_user` call parks. Unattended: the soft deadline applies and the
+ * agent proceeds on its best guess. Human-driven: no deadline — the call
+ * blocks until the user answers, supersedes it with a message, or stops the run.
+ */
+export function askUserParkOptions(unattended: boolean): AskParkOptions {
+  return unattended ? {} : { noDeadline: true };
 }
 
 /**
@@ -127,6 +161,11 @@ export interface AskUserBridge {
 export interface AskParkOptions {
   /** Allow this question to outlive its soft deadline (default: true when late answers are deliverable). */
   defer?: boolean;
+  /**
+   * No soft deadline: block until answered, cancelled or the run stops. The
+   * prompt is marked `noDeadline` so the card never says the agent stopped waiting.
+   */
+  noDeadline?: boolean;
 }
 
 export interface AskUserBridgeOptions {
@@ -158,7 +197,8 @@ export function createAskUserBridge(opts: AskUserBridgeOptions): AskUserBridge {
     {
       prompt: AskUserPrompt;
       resolve: (result: AskUserResult) => void;
-      timer: ReturnType<typeof setTimeout>;
+      /** Absent for a `noDeadline` question. */
+      timer: ReturnType<typeof setTimeout> | undefined;
       defer: boolean;
     }
   >();
@@ -216,17 +256,23 @@ export function createAskUserBridge(opts: AskUserBridgeOptions): AskUserBridge {
         // A newer question supersedes any older one still waiting past its
         // deadline: the agent has moved on to a new decision point.
         closeDeferred();
-        const prompt: AskUserPrompt = { ...detached, id: `${idPrefix}-${++seq}` };
-        const timer = setTimeout(() => {
-          if (!pending.has(prompt.id)) return;
-          opts.onTimeout?.(prompt, deferrable);
-          if (!deferrable) {
-            release(prompt.id, { action: "cancel" });
-            return;
-          }
-          defer(prompt);
-        }, deadline());
-        timer.unref?.();
+        const prompt: AskUserPrompt = {
+          ...detached,
+          id: `${idPrefix}-${++seq}`,
+          ...(options?.noDeadline ? { noDeadline: true } : {}),
+        };
+        const timer = options?.noDeadline
+          ? undefined
+          : setTimeout(() => {
+              if (!pending.has(prompt.id)) return;
+              opts.onTimeout?.(prompt, deferrable);
+              if (!deferrable) {
+                release(prompt.id, { action: "cancel" });
+                return;
+              }
+              defer(prompt);
+            }, deadline());
+        timer?.unref?.();
         pending.set(prompt.id, { prompt, resolve, timer, defer: deferrable });
         opts.broadcast(prompt);
       });

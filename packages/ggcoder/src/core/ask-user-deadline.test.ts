@@ -4,9 +4,12 @@ import {
   ASK_USER_INTERACTIVE_DEADLINE_MS,
   ASK_USER_UNATTENDED_DEADLINE_MS,
   askSoftDeadlineMs,
+  askUserParkOptions,
   createAskUserBridge,
   deliverLateAnswer,
   formatLateAnswer,
+  isUnattendedAskRun,
+  type AskRunState,
   type AskUserPrompt,
   type LateAskAnswer,
 } from "./ask-user.js";
@@ -221,6 +224,95 @@ describe("ask_user soft deadline", () => {
   it("uses 2 minutes unattended and 10 minutes interactive", () => {
     expect(askSoftDeadlineMs(true)).toBe(2 * 60_000);
     expect(askSoftDeadlineMs(false)).toBe(10 * 60_000);
+  });
+});
+
+/**
+ * The sidecar's `ask_user` wiring: deadline from `askSoftDeadlineMs`, park
+ * options from `askUserParkOptions`, both keyed on `isUnattendedAskRun`.
+ */
+function sidecarHarness(state: AskRunState) {
+  const broadcast = vi.fn<(prompt: AskUserPrompt) => void>();
+  const onLateAnswer = vi.fn<(late: LateAskAnswer) => void>();
+  const unattended = () => isUnattendedAskRun(state);
+  const bridge = createAskUserBridge({
+    broadcast,
+    timeoutMs: () => askSoftDeadlineMs(unattended()),
+    onLateAnswer,
+  });
+  const tool = createAskUserTool((request) =>
+    bridge.park(request, askUserParkOptions(unattended())),
+  );
+  const call = (): Promise<string> =>
+    tool.execute(
+      { questions: [{ id: "q", question: "Ship it?", kind: "confirm", detail: "Ready." }] },
+      { signal: new AbortController().signal, toolCallId: "t1", onUpdate: () => {} } as never,
+    ) as Promise<string>;
+  return { bridge, broadcast, call, onLateAnswer };
+}
+
+const interactiveRun: AskRunState = {
+  autopilotRunActive: false,
+  taskRunAll: false,
+  scheduledRunActive: false,
+};
+
+describe("ask_user in human-driven vs unattended runs", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("blocks with no deadline in a human-driven run, even with Autopilot switched on", async () => {
+    // Autopilot switched on but no Ken cycle running: the user's own turn.
+    // The toggle is not an input to isUnattendedAskRun at all.
+    const { bridge, broadcast, call } = sidecarHarness(interactiveRun);
+    expect(askUserParkOptions(false)).toEqual({ noDeadline: true });
+    const settled = vi.fn();
+    const result = call().then(settled);
+    await vi.advanceTimersByTimeAsync(ASK_USER_UNATTENDED_DEADLINE_MS + 1);
+    await vi.advanceTimersByTimeAsync(ASK_USER_INTERACTIVE_DEADLINE_MS + 1);
+    await vi.advanceTimersByTimeAsync(24 * 60 * 60_000);
+    expect(settled).not.toHaveBeenCalled();
+    expect(bridge.pendingCount).toBe(1);
+    expect(bridge.deferredCount).toBe(0);
+    const prompt = broadcast.mock.calls[0]?.[0];
+    expect(prompt?.noDeadline).toBe(true);
+    expect(bridge.settle(prompt?.id ?? "", { action: "answer", answers: { q: "Yes" } })).toBe(true);
+    await result;
+    expect(settled).toHaveBeenCalledWith("The user answered:\n\nShip it?\n→ Yes");
+  });
+
+  it.each([
+    ["an active Autopilot cycle", { ...interactiveRun, autopilotRunActive: true }],
+    ["task Run All", { ...interactiveRun, taskRunAll: true }],
+    ["a scheduled run", { ...interactiveRun, scheduledRunActive: true }],
+  ])("defers at 2 minutes in %s", async (_label, state) => {
+    const { bridge, broadcast, call } = sidecarHarness(state);
+    const result = call();
+    await vi.advanceTimersByTimeAsync(ASK_USER_UNATTENDED_DEADLINE_MS - 1);
+    expect(bridge.pendingCount).toBe(1);
+    await vi.advanceTimersByTimeAsync(2);
+    await expect(result).resolves.toBe(ASK_DEFERRED_RESULT);
+    expect(bridge.deferredCount).toBe(1);
+    expect(broadcast.mock.calls[0]?.[0].noDeadline).toBeUndefined();
+  });
+
+  it("releases a blocked human-driven ask on interrupt and keeps it answerable", async () => {
+    const { bridge, broadcast, call, onLateAnswer } = sidecarHarness(interactiveRun);
+    const result = call();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(bridge.pendingCount).toBe(1);
+    // What abortOwnedWork does on Stop.
+    bridge.deferAll();
+    await expect(result).resolves.toBe(ASK_DEFERRED_RESULT);
+    expect(bridge.pendingCount).toBe(0);
+    expect(bridge.deferredRequests).toEqual([broadcast.mock.calls[0]?.[0]]);
+    const id = broadcast.mock.calls[0]?.[0].id ?? "";
+    expect(bridge.settle(id, { action: "answer", answers: { q: "No" } })).toBe(true);
+    expect(onLateAnswer).toHaveBeenCalledTimes(1);
   });
 });
 

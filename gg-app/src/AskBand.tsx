@@ -470,7 +470,9 @@ export function AskBand({
       data-ask-prompt={prompt.id}
     >
       {/* A status note about the run, set apart from the question below it. */}
-      {deferred && (
+      {/* A human-driven run's question has no deadline: the agent never stops
+          waiting on its own, so the note would be false there. */}
+      {deferred && prompt.noDeadline !== true && (
         <p className="ask-deferred-note" role="status">
           The agent stopped waiting — your answer will still be sent
         </p>

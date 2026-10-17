@@ -319,8 +319,9 @@ export interface AcpModeOptions {
   /** `~/.gg` by default; where goals (`goals/`) and sessions live. */
   agentDir?: string;
   /**
-   * `ask_user` soft deadline (default: the desktop's interactive 10 min). Past
-   * it the model hears "no answer yet" and the client's question stays open.
+   * `ask_user` soft deadline (default: 10 min, `ASK_USER_INTERACTIVE_DEADLINE_MS`).
+   * Past it the model hears "no answer yet" and the client's question stays
+   * open. The desktop app instead waits indefinitely in human-driven runs.
    */
   askUserDeadlineMs?: number;
   /**

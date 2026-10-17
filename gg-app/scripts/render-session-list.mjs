@@ -1,6 +1,6 @@
 /**
  * Render the ProjectPicker's session list to a static HTML file using the REAL
- * `App.css` + `appearance.css` (imported in that order by main.tsx), so the
+ * `App.css`, its Local Fork sheets and `appearance.css` (imported in that order by main.tsx), so the
  * source badge can be verified visually in either theme without needing the
  * native window (synthetic clicks into a Tauri webview require macOS
  * Accessibility permission, which CI and agents do not have).
@@ -17,7 +17,15 @@ import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const src = (file) => readFileSync(join(here, "..", "src", file), "utf-8");
-const css = `${src("App.css")}\n${src("appearance.css")}`;
+const css = [
+  "App.css",
+  "WorkspaceShell.css",
+  "NotesRoadmap.css",
+  "LocalUpdateSummaryOption.css",
+  "appearance.css",
+]
+  .map(src)
+  .join("\n");
 
 const args = process.argv.slice(2);
 let theme = "dark";

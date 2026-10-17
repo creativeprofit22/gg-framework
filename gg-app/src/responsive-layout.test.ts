@@ -2,7 +2,12 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { resolvePxTokens } from "./test-support/resolve-css-tokens";
 
-const appCss = resolvePxTokens(readFileSync(new URL("./App.css", import.meta.url), "utf8"));
+// App.css plus the Local Fork sheets imported directly after it, in cascade order.
+const appCss = resolvePxTokens(
+  ["./App.css", "./WorkspaceShell.css", "./NotesRoadmap.css", "./LocalUpdateSummaryOption.css"]
+    .map((path) => readFileSync(new URL(path, import.meta.url), "utf8"))
+    .join("\n"),
+);
 const glassCss = readFileSync(new URL("./glass.css", import.meta.url), "utf8");
 const appearanceCss = readFileSync(new URL("./appearance.css", import.meta.url), "utf8");
 const asciiLogoSource = readFileSync(new URL("./AsciiLogo.tsx", import.meta.url), "utf8");

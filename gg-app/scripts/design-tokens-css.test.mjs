@@ -7,6 +7,9 @@ import { describe, expect, it } from "vitest";
 // to tokens was pixel-identical, not a redesign.
 const FILES = [
   "App.css",
+  "WorkspaceShell.css",
+  "NotesRoadmap.css",
+  "LocalUpdateSummaryOption.css",
   "Deck.css",
   "ChecklistScreen.css",
   "ChatErrorNotice.css",

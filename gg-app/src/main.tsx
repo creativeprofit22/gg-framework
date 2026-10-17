@@ -14,6 +14,10 @@ import { installMotionAttribute } from "./window-motion";
 import { appearance } from "./appearance";
 import { startNativeAppearance } from "./appearance-native";
 import "./App.css";
+// Local Fork-owned sheets split out of App.css; they must load directly after it, in this order.
+import "./WorkspaceShell.css";
+import "./NotesRoadmap.css";
+import "./LocalUpdateSummaryOption.css";
 import "./appearance.css";
 
 // Apply saved document-wide preferences before either React entry renders.

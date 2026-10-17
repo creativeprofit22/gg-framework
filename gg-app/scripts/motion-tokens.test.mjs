@@ -6,7 +6,15 @@ import { describe, expect, it } from "vitest";
 // and every script timer that waits on CSS motion stays equal to its token.
 // Animations are out of scope for the easing check on purpose: most are long
 // background loops (breathing, weather) that deliberately use keyword curves.
-const FILES = ["App.css", "Deck.css", "ChecklistScreen.css", "ChatErrorNotice.css"];
+const FILES = [
+  "App.css",
+  "WorkspaceShell.css",
+  "NotesRoadmap.css",
+  "LocalUpdateSummaryOption.css",
+  "Deck.css",
+  "ChecklistScreen.css",
+  "ChatErrorNotice.css",
+];
 const read = (path) => readFileSync(new URL(path, import.meta.url), "utf8");
 const sheets = FILES.map((name) => ({
   name,

@@ -1,7 +1,10 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
-const appCss = readFileSync("src/App.css", "utf8");
+// App.css plus the Local Fork sheets imported directly after it, in cascade order.
+const appCss = ["App.css", "WorkspaceShell.css", "NotesRoadmap.css", "LocalUpdateSummaryOption.css"]
+  .map((name) => readFileSync(`src/${name}`, "utf8"))
+  .join("\n");
 
 // Font sizes come from upstream's shared --fs-* scale (the fork's duplicate
 // --font-size-* scale was folded into it); line heights and weights stay fork tokens.

@@ -102,7 +102,7 @@ do not establish rendered readiness.
 ### Cascade, locations, and triggers
 
 Read `gg-app/src/App.css` before adding rules; preserve its cascade and reuse its
-plain-CSS tokens. Components and colocated tests live in `gg-app/src`; assets follow
+plain-CSS tokens. App.css (tokens, shared system, upstream rules) is followed by the Local Fork sheets `WorkspaceShell.css` → `NotesRoadmap.css` → `LocalUpdateSummaryOption.css` (imported in `main.tsx` and `AgentPane.tsx`); fork-only workspace, pane, Notes or Roadmap rules go there, not App.css. Components and colocated tests live in `gg-app/src`; assets follow
 existing `gg-app/public` or `gg-app/src/assets` conventions. Settled design decisions
 belong in the style pack; external provenance belongs in `.gg/sources.md` when needed.
 Reference/asset artifacts are created only for approved lane work.

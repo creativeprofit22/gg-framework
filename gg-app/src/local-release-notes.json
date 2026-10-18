@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "date": "2026-10-17",
-  "label": "Upstream 0.93.3, with renamable sessions and no surprise bills",
+  "label": "Upstream 0.93.4, with renamable sessions and no surprise bills",
   "sections": [
     {
       "title": "Your workspace",
@@ -13,15 +13,17 @@
       ]
     },
     {
-      "title": "Also from upstream 0.93.3",
+      "title": "Also from upstream 0.93.4",
       "items": [
+        "Long jobs no longer die at the `5 minute` mark. A hidden limit was cutting off big file writes and long, quiet thinking on every model, then retrying the same doomed request until it gave up. If a huge write still stalls, your agent is asked to break it into smaller pieces, and the error now says the reply stalled instead of blaming your internet.",
         "No surprise bills. `MiMo UltraSpeed` and `Claude Opus 5.5 Fast` ask before you switch to them, and paid models never sneak into Ken, helpers, restarts or your saved default.",
         "Your agent reacts the moment a build, test run or CI check fails, usually within about `2 seconds`, instead of waiting for the whole job or a timer. If something breaks after it has already finished its turn, it comes back to deal with it on its own.",
         "Answering your agent's questions feels smoother. Your pick fills in and holds for a beat before the card melts away, and number keys like `1` press just like a click. Cards with several questions have one `Send answers` button at the very bottom, and you can still send early: it shows how many you've answered and sends the rest as skipped.",
         "Million-token models keep far more of your conversation in view. `MiMo`, `DeepSeek` and `Kimi` now tidy up near `850K` tokens instead of a third of the way in, while Grok and Gemini 3.1 Pro tidy up just before their pricier long-context rates. `GPT-6 Astra` on `Experimental` still keeps its full larger window.",
         "Gemini works again for personal Google accounts. Pick `Gemini API key` next to `Sign in with Google` and paste a key from Google AI Studio. It's used first whenever it's set, and disconnecting it leaves your Google sign-in alone.",
         "Image generation works again with your ChatGPT login, on the same image service Codex uses. It can make `transparent backgrounds`, blend up to `5` reference images in one edit, tells you the size you actually got, and says plainly when your plan or daily limit is the problem. Every image that finishes is still saved if a later one fails.",
-        "Grok remembers your conversation on xAI's side now, so long chats run cheaper and snappier, and `Claude Fable 5.1` gets its full `xhigh` thinking when you ask for it."
+        "Grok got a lot sharper in long sessions. It now runs on xAI's newer `Responses API`, so it keeps its own reasoning from one step to the next instead of starting cold after every tool call, and xAI still remembers your conversation so long chats stay cheaper and snappier. Both API keys and `SuperGrok` logins get it.",
+        "`Claude Fable 5.1` gets its full `xhigh` thinking when you ask for it."
       ]
     }
   ]

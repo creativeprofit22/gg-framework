@@ -156,7 +156,7 @@ describe("What's New feeds", () => {
 
   it("keeps the latest Local Fork release notes identical to the source contract", () => {
     expect(LOCAL_CHANGELOG[0]).toEqual({
-      id: "local-2026-10-17-upstream-0933-renames-and-no-surprise-bills",
+      id: "local-2026-10-17-upstream-0934-renames-and-no-surprise-bills",
       label: localReleaseNotes.label,
       date: localReleaseNotes.date,
       items: localReleaseNotes.sections.flatMap(({ items }) => items),

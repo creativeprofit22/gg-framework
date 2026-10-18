@@ -1,9 +1,16 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 const RESPONSES_URL = "https://example.openai.azure.com/openai/v1/responses";
+
+// gg-ai's providerFetch treats whatever global fetch exists when it loads as
+// the built-in. Load it before any test stubs fetch (as the app does), so every
+// stub below is seen as a host replacement and no request reaches the network.
+beforeAll(async () => {
+  await import("@kenkaiiii/gg-ai");
+});
 const TEST_API_KEY = "azure-test-key";
 const MODEL_ID = "azure:gpt-6.1-sol";
 const DEPLOYMENT = "gpt-6.1-sol";

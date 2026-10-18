@@ -1,9 +1,16 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { expect, it, vi } from "vitest";
+import { beforeAll, expect, it, vi } from "vitest";
 import type { ModelInfo } from "@kenkaiiii/gg-core/models";
 import type { AgentSession as AgentSessionType } from "./agent-session.js";
+
+// gg-ai's providerFetch treats whatever global fetch exists when it loads as
+// the built-in. Load it before the test stubs fetch (as the app does), so the
+// stub is seen as a host replacement and no request reaches the network.
+beforeAll(async () => {
+  await import("@kenkaiiii/gg-ai");
+});
 
 it("sends an AgentSession prompt through the registered Azure OpenAI deployment", async () => {
   const home = await fs.mkdtemp(path.join(os.tmpdir(), "gg-azure-home-"));

@@ -53,10 +53,19 @@ export const CURRENT_LOCAL_RELEASE_NOTES = requireCurrentReleaseNotes(releaseNot
 /** Newest first. Maintained only by the Local Fork release flow. */
 export const LOCAL_CHANGELOG: LocalChangelogEntry[] = [
   {
-    id: "local-2026-10-15-enhancer-highlights-and-mcp-retry",
+    id: "local-2026-10-17-upstream-0933-renames-and-no-surprise-bills",
     label: CURRENT_LOCAL_RELEASE_NOTES.label,
     date: CURRENT_LOCAL_RELEASE_NOTES.date,
     items: CURRENT_LOCAL_RELEASE_NOTES.sections.flatMap(({ items }) => items),
+  },
+  {
+    id: "local-2026-10-15-enhancer-highlights-and-mcp-retry",
+    label: "Enhanced prompts keep their highlights, and stuck tools come back",
+    date: "2026-10-15",
+    items: [
+      "Tweak a prompt after `Enhance?` without losing its help. The terms it corrected stay highlighted while you edit the rest of your message, and hovering one still shows what you originally typed. Only a term you change yourself drops its highlight, since the explanation no longer fits. The highlights carry over into your sent message too.",
+      "A tool server that failed to start gets another try every time you start fresh with `New`. If it connects this time, its tools are ready in your new chat without restarting the app. Servers waiting for you to sign in are left alone until you do.",
+    ],
   },
   {
     id: "local-2026-10-15-upstream-0920-fast-models",

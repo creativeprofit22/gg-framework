@@ -6,6 +6,7 @@ import { streamAzureOpenAIResponses } from "./providers/azure-openai-responses.j
 import { streamOpenAI } from "./providers/openai.js";
 import { streamQwenCloud } from "./providers/qwen-cloud.js";
 import { streamOpenAICodex } from "./providers/openai-codex.js";
+import { streamXaiResponses } from "./providers/xai-responses.js";
 import { streamGemini } from "./providers/gemini.js";
 import { GEMINI_EMBED_BATCH_SIZE, embedGemini } from "./providers/gemini-embeddings.js";
 import {
@@ -199,13 +200,12 @@ providerRegistry.register("sakana", {
 });
 
 providerRegistry.register("xai", {
-  // xAI's public API (console.x.ai key) is OpenAI-compatible — ride the Chat
-  // Completions transport like Moonshot/DeepSeek. Grok reasoning models take
-  // top-level `reasoning_effort` (low/medium/high/xhigh), which the shared thinking
-  // path already sends.
+  // Both Grok routes ride xAI's Responses API (see providers/xai-responses.ts):
+  // Chat Completions is deprecated for Grok reasoning models and can't carry
+  // the encrypted reasoning that keeps long tool loops coherent.
   //
   // Subscription OAuth (SuperGrok / X Premium) routes to the Grok CLI chat proxy
-  // instead, which speaks the same Chat Completions wire but gates on Grok-CLI
+  // instead, which serves the same `/v1/responses` surface but gates on Grok-CLI
   // client identity. Inject those headers centrally here — exactly as the Kimi
   // endpoint above — so EVERY stream (agent loop, compaction, title-gen,
   // sub-agents) is accepted rather than depending on each call site to thread
@@ -221,7 +221,7 @@ providerRegistry.register("xai", {
           ...options.defaultHeaders,
         }
       : options.defaultHeaders;
-    return streamOpenAI({ ...options, baseUrl, defaultHeaders });
+    return streamXaiResponses({ ...options, baseUrl, defaultHeaders });
   },
 });
 

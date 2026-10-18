@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { formatChatError } from "./chat-error.js";
-import { GGAIError, ProviderError, VideoUnsupportedError } from "./errors.js";
+import {
+  GGAIError,
+  ProviderError,
+  ResponseStalledError,
+  VideoUnsupportedError,
+  formatError,
+} from "./errors.js";
 
 describe("formatChatError", () => {
   it.each([
@@ -143,5 +149,28 @@ describe("formatChatError", () => {
     const video = formatChatError(new VideoUnsupportedError());
     expect(video.reason).toBe("capability");
     expect(video.guidance).toBe("Choose a model that supports video.");
+  });
+
+  // The provider was reachable — every attempt connected — so the network
+  // headline sent users to debug a connection that worked.
+  it("names a stalled response instead of an unreachable provider", () => {
+    const stalled = formatChatError(
+      new ResponseStalledError("stopped mid-response", { inToolCall: true }),
+    );
+    expect(stalled).toMatchObject({
+      reason: "network",
+      headline: "The response kept stalling",
+      guidance: "Ask for the change in smaller pieces, then try again.",
+    });
+    expect(
+      formatChatError(new ResponseStalledError("stopped", { inToolCall: false })).guidance,
+    ).toBe("Try again, or choose another model if it keeps happening.");
+    expect(formatChatError(new GGAIError("fetch failed", { source: "network" })).headline).toBe(
+      "Couldn’t reach the provider",
+    );
+    // The CLI/TUI formats with formatError and must not blame the network either.
+    expect(
+      formatError(new ResponseStalledError("stopped", { inToolCall: false })).headline,
+    ).not.toMatch(/reach/i);
   });
 });

@@ -3,6 +3,7 @@ import {
   stream,
   EventStream,
   GGAIError,
+  ResponseStalledError,
   type Message,
   type ToolCall,
   type ToolResult,
@@ -638,6 +639,16 @@ export async function* agentLoop(
   let overloadRetries = 0;
   let emptyResponseRetries = 0;
   let stallRetries = 0;
+  // Set once per logical turn when a stall killed a long-running tool call,
+  // so the replay asks for smaller pieces instead of regenerating the same
+  // oversized call (which dies the same way every time).
+  let splitToolCallHintAdded = false;
+  // Sticky across the stall retries of one logical turn: any attempt died while
+  // a tool call's input was still open. Feeds the exhausted-retries error.
+  let stalledInToolCall = false;
+  // Sticky across the same retries: some attempt received provider events, so
+  // the provider was reachable and the replies just never finished.
+  let stalledAfterConnecting = false;
   let runawayToolcallRetries = 0;
   let overflowCompactionAttempts = 0;
   let toolResultTruncationAttempted = false;
@@ -676,6 +687,12 @@ export async function* agentLoop(
     "[Your previous response was cut off by a connection failure. The text " +
     "above is what was already delivered to the user. Continue exactly from " +
     "where it stopped — do not repeat or restart it.]";
+  const SPLIT_TOOL_CALL_PROMPT =
+    "[Your previous response was cut off while you were still writing a tool " +
+    "call's arguments, after minutes without data from the provider. None of " +
+    "that call was applied. Do not resend it as one large call: split the " +
+    "work into smaller pieces (e.g. a shorter first version, then further " +
+    "edits, or one file per call).]";
   // Bounded auto-continue after the model hits its output-token limit
   // (stopReason "max_tokens" with no tool calls). The assistant partial is
   // already in history, so the continuation resumes exactly where the output
@@ -759,8 +776,14 @@ export async function* agentLoop(
   // accounts or network paths repeatedly trip the 45s first-event / 90s hard
   // caps even though the model is still working. Once output starts flowing,
   // the normal mid-stream timeout takes over.
+  // xAI is in this set unconditionally: Grok 4.7 cannot disable reasoning, so
+  // even a thinking-off turn reasons first, and whether reasoning summaries
+  // stream while it does is not guaranteed on every route (the subscription
+  // CLI proxy is undocumented). xAI asks clients to allow >=900s per request.
   const usesSilentReasoningBudget =
-    options.provider === "sakana" || (options.provider === "openai" && options.thinking != null);
+    options.provider === "sakana" ||
+    options.provider === "xai" ||
+    (options.provider === "openai" && options.thinking != null);
   // A local backend (llama.cpp, vLLM, Ollama, LM Studio) can prefill a large
   // prompt for minutes before its first token. Aborting there guarantees a
   // retry that prefills from cold again, so the first-event watchdog is off for
@@ -1120,7 +1143,13 @@ export async function* agentLoop(
           }
           // Track thinking events — extends idle timeout and hard timeout
           // so reasoning models aren't killed during thinking→output transition.
-          if (event.type === "thinking_delta" && !hasReceivedThinking) {
+          // Hidden reasoning (thinking display off on a model that always
+          // reasons) arrives as a flagged keepalive; it needs the same budget.
+          if (
+            (event.type === "thinking_delta" ||
+              (event.type === "keepalive" && event.reasoning === true)) &&
+            !hasReceivedThinking
+          ) {
             hasReceivedThinking = true;
             // Extend the hard timeout now that we know the model is reasoning
             if (hardTimer) clearTimeout(hardTimer);
@@ -1527,6 +1556,12 @@ export async function* agentLoop(
         const socketDrop = isTransportFailure(err);
         const transportFailure =
           (idleTimedOut || malformed || socketDrop) && !options.signal?.aborted;
+        const attemptMs = Date.now() - streamCallStart;
+        if (transportFailure && toolInputOpen) stalledInToolCall = true;
+        // The provider answered and then went quiet — as opposed to never
+        // answering at all. Non-streamed attempts carry no events, so this
+        // stays sticky from the streamed attempts that preceded them.
+        if (transportFailure && streamEventCount > 0) stalledAfterConnecting = true;
         if (transportFailure && stallRetries < MAX_STALL_RETRIES) {
           stallRetries++;
           const cause = malformed
@@ -1568,6 +1603,24 @@ export async function* agentLoop(
             });
             preservedChars = attemptText.length;
           }
+          // A tool call that stayed open for minutes before the stream died is
+          // almost always one oversized write: the replay regenerates the same
+          // call and hits the same wall. Ask for smaller pieces, once per turn.
+          // The partial call was never added to history, so only the hint lands.
+          let splitHint = false;
+          if (toolInputOpen && attemptMs >= VISIBLE_STALL_AFTER_MS && !splitToolCallHintAdded) {
+            splitToolCallHintAdded = true;
+            splitHint = true;
+            messages.push({
+              role: "user" as const,
+              content: SPLIT_TOOL_CALL_PROMPT,
+              provenance: {
+                source: "runtime" as const,
+                kind: "continuation" as const,
+                visibility: "hidden" as const,
+              },
+            });
+          }
           diag("retry", {
             reason: cause,
             attempt: stallRetries,
@@ -1576,6 +1629,7 @@ export async function* agentLoop(
             events: streamEventCount,
             nonStreaming: useNonStreamingFallback,
             preservedChars,
+            splitHint,
           });
           yield {
             type: "retry" as const,
@@ -1608,9 +1662,28 @@ export async function* agentLoop(
             eventTypes: eventTypeCounts,
             lastEventType,
             sinceLastEventMs: Date.now() - lastEventTime,
-            attemptDurationMs: Date.now() - streamCallStart,
+            attemptDurationMs: attemptMs,
             maxConsumerLagMs,
+            stalledAfterConnecting,
+            stalledInToolCall,
           });
+          if (stalledAfterConnecting) {
+            yield {
+              type: "error" as const,
+              error: new ResponseStalledError(
+                `The provider stopped sending data before the response finished, ` +
+                  `${MAX_STALL_RETRIES} automatic retries in a row. Your conversation is preserved.`,
+                {
+                  inToolCall: stalledInToolCall,
+                  hint: stalledInToolCall
+                    ? "The model was writing one very large tool call each time. Ask it to make the change in smaller pieces (shorter files or several edits), then retry."
+                    : "Retry once. If it keeps happening, choose another model or lower the thinking level, and disable any VPN or proxy that may buffer streamed responses.",
+                  cause: err,
+                },
+              ),
+            };
+            break;
+          }
           yield {
             type: "error" as const,
             error: new GGAIError(
@@ -1670,6 +1743,9 @@ export async function* agentLoop(
 
       overloadRetries = 0;
       stallRetries = 0;
+      splitToolCallHintAdded = false;
+      stalledInToolCall = false;
+      stalledAfterConnecting = false;
       runawayToolcallRetries = 0;
 
       // Detect empty/degenerate responses — the API occasionally returns 0 tokens

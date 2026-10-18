@@ -117,6 +117,12 @@ export interface ServerToolResult {
 export interface RawContent {
   type: "raw";
   data: Record<string, unknown>;
+  /**
+   * Which transport and model produced an opaque block whose replay is only
+   * valid there (e.g. `"xai:grok-4.7"` for Grok's encrypted reasoning). Never
+   * sent on the wire. Absent on blocks from before this field existed.
+   */
+  origin?: string;
 }
 
 export type ContentPart =
@@ -255,6 +261,12 @@ export interface ServerToolResultEvent {
 
 export interface KeepaliveEvent {
   type: "keepalive";
+  /**
+   * The model is reasoning, but the reasoning is hidden from the UI (thinking
+   * display off on a model that always reasons). Watchdogs treat it like a
+   * thinking delta; nothing is rendered.
+   */
+  reasoning?: true;
 }
 
 export type StreamEvent =

@@ -1010,6 +1010,24 @@ describe("streamOpenAI reasoning-field detection", () => {
     resetReasoningFieldCache();
   });
 
+  // Always-reasoning models (MiMo, Grok) stream reasoning even with thinking
+  // off. Hiding it from the UI must not hide it from the agent loop's
+  // watchdog, or a long think reads as a dead connection and is aborted.
+  it("yields a keepalive for hidden reasoning when thinking is off", async () => {
+    createMock.mockResolvedValueOnce(reasoningStream("reasoning_content"));
+    const result = streamOpenAI({
+      provider: "xiaomi",
+      model: "mimo-test",
+      baseUrl: "https://mimo.test/v1",
+      messages: [{ role: "user", content: "hi" }],
+      apiKey: "test-key",
+    });
+    const types: string[] = [];
+    for await (const event of result) types.push(event.type);
+    expect(types[0]).toBe("keepalive");
+    expect(types).not.toContain("thinking_delta");
+  });
+
   it.each(["reasoning_content", "reasoning", "reasoning_text"])(
     "yields thinking for a `%s` delta and echoes the same field back",
     async (field) => {

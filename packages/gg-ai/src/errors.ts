@@ -96,6 +96,24 @@ export class VideoUnsupportedError extends GGAIError {
   }
 }
 
+/**
+ * Every automatic retry connected to the provider but the reply never finished:
+ * the provider went silent mid-response (or the full non-streamed reply never
+ * arrived in time). Distinct from "couldn't reach the provider" — the network
+ * worked, the response was too slow or too large to complete.
+ * `inToolCall` is set when the replies kept dying while the model was still
+ * writing a tool call's arguments, which is almost always one oversized write.
+ */
+export class ResponseStalledError extends GGAIError {
+  readonly inToolCall: boolean;
+
+  constructor(message: string, options: { inToolCall: boolean; hint?: string; cause?: unknown }) {
+    super(message, { source: "network", hint: options.hint, cause: options.cause });
+    this.name = "ResponseStalledError";
+    this.inToolCall = options.inToolCall;
+  }
+}
+
 export class ProviderError extends GGAIError {
   readonly provider: string;
   readonly statusCode?: number;
@@ -349,6 +367,15 @@ export function formatError(err: unknown): FormattedError {
     };
   }
 
+  if (err instanceof ResponseStalledError) {
+    // Connected, but the reply never finished — not an unreachable provider.
+    return {
+      headline: "The response kept stalling before it finished.",
+      source: err.source,
+      message: err.message,
+      guidance: err.hint ?? "Retry once. If it keeps happening, choose another model.",
+    };
+  }
   if (err instanceof GGAIError) {
     return finaliseBySource(err.source, err.message, err.requestId, err.hint);
   }

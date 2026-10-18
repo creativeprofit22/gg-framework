@@ -15,6 +15,7 @@ import { downgradeUnsupportedImages, downgradeUnsupportedVideos } from "./transf
 import { resolveToolSchema } from "../utils/zod-to-json-schema.js";
 import { isJsonObject } from "../utils/json.js";
 import { readSseStream } from "../utils/sse.js";
+import { providerFetch } from "../utils/provider-fetch.js";
 import { getEnvironment } from "../utils/env.js";
 import { mergeProviderOptions } from "../utils/provider-options.js";
 
@@ -721,7 +722,9 @@ async function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 
 async function fetchCodeAssist(plan: GeminiRequestPlan, options: StreamOptions): Promise<Response> {
   try {
-    const fetchImpl = options.fetch ?? globalThis.fetch;
+    // An injected fetch (tests, custom runtimes) still wins; the default is
+    // upstream's providerFetch, which lifts undici's 300s header/body caps.
+    const fetchImpl = options.fetch ?? providerFetch;
     const response = await fetchImpl(plan.url, {
       method: "POST",
       headers: plan.headers,

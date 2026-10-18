@@ -1,5 +1,14 @@
 # @kenkaiiii/ggcoder
 
+## 5.83.3
+
+### Patch Changes
+
+- Fix provider requests dying at Node's 300s fetch cap (all providers now run on a transport with a 30-minute backstop), ask the model to split oversized tool calls after a stall, report exhausted stalls as `ResponseStalledError` instead of a network failure, keep hidden reasoning on always-reasoning models from tripping the stall watchdog, and move Grok to xAI's Responses API with encrypted reasoning replayed across turns.
+  - @kenkaiiii/gg-ai@5.83.3
+  - @kenkaiiii/gg-agent@5.83.3
+  - @kenkaiiii/gg-core@5.83.3
+
 ## 5.83.2
 
 ### Patch Changes

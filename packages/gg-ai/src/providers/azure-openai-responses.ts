@@ -8,6 +8,7 @@ import type {
   Usage,
 } from "../types.js";
 import { StreamResult } from "../utils/event-stream.js";
+import { providerFetch } from "../utils/provider-fetch.js";
 import { isJsonObject } from "../utils/json.js";
 import {
   parseEncryptedReasoningPart,
@@ -77,7 +78,8 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
   const apiKey = requireOption(options.apiKey, "apiKey");
   const model = requireOption(options.model, "model");
   const url = parseResponsesUrl(requireOption(options.baseUrl, "baseUrl"));
-  const fetchImpl = options.fetch ?? globalThis.fetch;
+  // Default transport lifts undici's 300s header/body caps (see provider-fetch.ts).
+  const fetchImpl = options.fetch ?? providerFetch;
 
   const { system, input } = serializeResponsesInput(options.messages, {
     serializeRawAssistantPart: serializeEncryptedReasoningItem,
@@ -320,7 +322,8 @@ async function* runNonStreaming(
   const apiKey = requireOption(options.apiKey, "apiKey");
   const model = requireOption(options.model, "model");
   const url = parseResponsesUrl(requireOption(options.baseUrl, "baseUrl"));
-  const fetchImpl = options.fetch ?? globalThis.fetch;
+  // Default transport lifts undici's 300s header/body caps (see provider-fetch.ts).
+  const fetchImpl = options.fetch ?? providerFetch;
 
   const { system, input } = serializeResponsesInput(options.messages, {
     serializeRawAssistantPart: serializeEncryptedReasoningItem,

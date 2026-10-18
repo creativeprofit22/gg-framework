@@ -187,6 +187,10 @@ export function serializeResponsesInput(
 
       for (const part of message.content) {
         if (part.type === "raw") {
+          // Origin-stamped blocks (e.g. Grok's encrypted reasoning) replay only
+          // on the transport that produced them; Codex and Azure would reject
+          // them after a mid-session model switch. Their own items are unstamped.
+          if (part.origin !== undefined) continue;
           const serialized = adapter.serializeRawAssistantPart?.(part.data);
           if (serialized !== undefined) input.push(serialized);
         } else if (part.type === "text") {

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { z } from "zod";
-import { GGAIError, ProviderError } from "@kenkaiiii/gg-ai";
+import { GGAIError, ProviderError, ResponseStalledError, formatChatError } from "@kenkaiiii/gg-ai";
 import {
   agentLoop,
   setStreamDiagnostic,
@@ -1211,6 +1211,94 @@ describe("agentLoop", () => {
     }
   }, 30_000);
 
+  // Grok's Chat Completions stream carries no reasoning tokens, and Grok 4.7
+  // reasons even with thinking off — so a normal coding turn was silent past
+  // the 45s first-event / 90s hard caps and got aborted and replayed forever.
+  it.each([{ thinking: "high" as const }, { thinking: undefined }])(
+    "lets Grok reason silently past the normal first-event caps (thinking=$thinking)",
+    async ({ thinking }) => {
+      vi.useFakeTimers();
+      mockStream.mockImplementation((opts: StreamOptions) => {
+        return {
+          [Symbol.asyncIterator]: async function* () {
+            await new Promise<void>((resolve, reject) => {
+              const timer = setTimeout(resolve, 240_000);
+              opts.signal?.addEventListener(
+                "abort",
+                () => {
+                  clearTimeout(timer);
+                  reject(Object.assign(new Error("aborted"), { name: "AbortError" }));
+                },
+                { once: true },
+              );
+            });
+            yield { type: "text_delta" as const, text: "Done." };
+          },
+          response: Promise.resolve(makeResponse("Done.")),
+        } as unknown as ReturnType<typeof stream>;
+      });
+
+      const loopPromise = collectLoop(
+        [
+          { role: "system", content: "sys" },
+          { role: "user", content: "fix the bug" },
+        ],
+        { provider: "xai", model: "grok-4.7", ...(thinking ? { thinking } : {}) },
+      );
+      await vi.advanceTimersByTimeAsync(241_000);
+      const { events } = await loopPromise;
+      vi.useRealTimers();
+
+      expect(mockStream).toHaveBeenCalledTimes(1);
+      expect(events.some((event) => event.type === "retry")).toBe(false);
+      expect(events.some((event) => event.type === "agent_done")).toBe(true);
+    },
+  );
+
+  // Thinking display off on a model that always reasons (MiMo, Codex lite):
+  // the provider flags hidden reasoning on its keepalives. Without honouring
+  // the flag, the 90s pre-output hard cap killed every long think.
+  it("gives hidden reasoning the thinking budget, not the 90s pre-output cap", async () => {
+    vi.useFakeTimers();
+    mockStream.mockImplementation((opts: StreamOptions) => {
+      return {
+        [Symbol.asyncIterator]: async function* () {
+          for (let i = 0; i < 6; i++) {
+            yield { type: "keepalive" as const, reasoning: true as const };
+            await new Promise<void>((resolve, reject) => {
+              const timer = setTimeout(resolve, 30_000);
+              opts.signal?.addEventListener(
+                "abort",
+                () => {
+                  clearTimeout(timer);
+                  reject(Object.assign(new Error("aborted"), { name: "AbortError" }));
+                },
+                { once: true },
+              );
+            });
+          }
+          yield { type: "text_delta" as const, text: "Done." };
+        },
+        response: Promise.resolve(makeResponse("Done.")),
+      } as unknown as ReturnType<typeof stream>;
+    });
+
+    const loopPromise = collectLoop(
+      [
+        { role: "system", content: "sys" },
+        { role: "user", content: "go" },
+      ],
+      { provider: "xiaomi", model: "mimo-test" },
+    );
+    await vi.advanceTimersByTimeAsync(181_000);
+    const { events } = await loopPromise;
+    vi.useRealTimers();
+
+    expect(mockStream).toHaveBeenCalledTimes(1);
+    expect(events.some((event) => event.type === "retry")).toBe(false);
+    expect(events.some((event) => event.type === "agent_done")).toBe(true);
+  });
+
   it.each([
     {
       name: "a pause inside an open tool call",
@@ -1469,6 +1557,67 @@ describe("agentLoop", () => {
     expect((terminal.error as GGAIError).source).toBe("network");
     expect((terminal.error as GGAIError).hint).toContain("VPN or proxy");
     expect(terminal.error.message).toContain("after 5 automatic retries");
+  }, 30_000);
+
+  // Regression for the 2026-10-17 incident: Opus thought, opened one very large
+  // `bash` write, then went silent for 5min mid tool input. Every replay
+  // regenerated the same oversized call and died the same way, and after six
+  // ~5min attempts the app said "Couldn't reach the provider" although every
+  // attempt had connected and streamed.
+  it("asks for smaller pieces after a long open tool call stalls, and reports a stall", async () => {
+    vi.useFakeTimers();
+    const capturedMessages: Message[][] = [];
+    mockStream.mockImplementation((opts: StreamOptions) => {
+      capturedMessages.push([...opts.messages]);
+      const abortPromise = new Promise<never>((_, reject) => {
+        opts.signal?.addEventListener(
+          "abort",
+          () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })),
+          { once: true },
+        );
+      });
+      abortPromise.catch(() => {});
+      const streaming = opts.streaming !== false;
+      return {
+        [Symbol.asyncIterator]: async function* () {
+          if (streaming) {
+            yield { type: "thinking_delta" as const, text: "" };
+            yield { type: "toolcall_delta" as const, id: "t1", name: "bash", argsJson: '{"c":"' };
+          }
+          await abortPromise;
+        },
+        response: abortPromise,
+      } as unknown as ReturnType<typeof stream>;
+    });
+
+    const loopPromise = collectLoop(
+      [
+        { role: "system", content: "sys" },
+        { role: "user", content: "write the variations board" },
+      ],
+      { provider: "anthropic", model: "test", thinking: "high" },
+    );
+    for (let i = 0; i < 25; i++) await vi.advanceTimersByTimeAsync(310_000);
+    const { events } = await loopPromise;
+    vi.useRealTimers();
+
+    const isSplitHint = (m: Message) =>
+      m.role === "user" &&
+      typeof m.content === "string" &&
+      m.content.includes("split the work into smaller pieces");
+    expect(capturedMessages.length).toBe(6);
+    // The first replay already carries the hint, and it is added only once.
+    expect(capturedMessages[0]?.some(isSplitHint)).toBe(false);
+    expect(capturedMessages[1]?.at(-1)).toSatisfy(isSplitHint);
+    expect(capturedMessages[5]?.filter(isSplitHint)).toHaveLength(1);
+
+    const terminal = events.find((event) => event.type === "error");
+    if (terminal?.type !== "error") throw new Error("expected terminal error");
+    expect(terminal.error).toBeInstanceOf(ResponseStalledError);
+    expect((terminal.error as ResponseStalledError).inToolCall).toBe(true);
+    const formatted = formatChatError(terminal.error);
+    expect(formatted.headline).toBe("The response kept stalling");
+    expect(formatted.headline).not.toContain("reach");
   }, 30_000);
 
   it("automatically replays a turn after a runaway tool-call stream", async () => {

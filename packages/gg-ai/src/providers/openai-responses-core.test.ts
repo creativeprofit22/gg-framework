@@ -129,6 +129,29 @@ describe("provider-neutral Responses parsing", () => {
     expect(serializeEncryptedReasoningItem({ ...reasoning, encrypted_content: 1 })).toBeUndefined();
   });
 
+  it("drops another transport's origin-stamped reasoning after a model switch", () => {
+    const own = { type: "reasoning", id: "rs_own", encrypted_content: "codex", summary: [] };
+    const grok = { type: "reasoning", id: "rs_grok", encrypted_content: "xai", summary: [] };
+    const serialized = serializeResponsesInput(
+      [
+        { role: "user", content: "hi" },
+        {
+          role: "assistant",
+          content: [
+            { type: "raw", data: grok, origin: "xai:grok-4.7" },
+            { type: "raw", data: own },
+            { type: "text", text: "done" },
+          ],
+        },
+      ],
+      { serializeRawAssistantPart: serializeEncryptedReasoningItem },
+    );
+    // Codex and Azure share this serializer; Grok's encrypted reasoning would
+    // be rejected there, while their own unstamped items still replay.
+    expect(serialized.input).toContainEqual(own);
+    expect(serialized.input).not.toContainEqual(grok);
+  });
+
   it("serializes Zod tool declarations with explicit transport strictness", () => {
     const tools = serializeResponsesTools(
       [

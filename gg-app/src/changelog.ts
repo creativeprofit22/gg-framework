@@ -22,6 +22,14 @@ export interface ChangelogEntry {
 /** Newest first. Prepended by the `/release` flow. */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.93.4",
+    date: "2026-10-17",
+    items: [
+      "Long jobs no longer die at the `5 minute` mark. A hidden limit was killing big file writes and long, quiet thinking on every model, then retrying the same doomed request until it gave up, so I ripped it out. If a giant write still stalls, I tell your agent to break it into smaller pieces, and the error now says the reply stalled instead of blaming your internet.",
+      "Grok just got a lot sharper in long sessions. I moved it onto xAI's newer `Responses API`, so it keeps its own reasoning from one step to the next instead of starting cold after every tool call, on both API keys and `SuperGrok` logins.",
+    ],
+  },
+  {
     version: "0.93.3",
     date: "2026-10-17",
     items: [

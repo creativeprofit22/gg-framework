@@ -40,6 +40,7 @@ import {
 } from "./reasoning-field.js";
 import { parseToolArguments } from "../utils/json.js";
 import { getEnvironment } from "../utils/env.js";
+import { PROVIDER_TRANSPORT_TIMEOUT_MS, providerFetch } from "../utils/provider-fetch.js";
 
 // Kimi K3's declared effort rungs (server-validated; anything else 400s).
 // Official alias mapping from Moonshot's K3 third-party-tools docs:
@@ -166,7 +167,8 @@ export function setOpenAIClientCacheKeyRuntimeForTests(runtime: OpenAIClientCach
   openAIClientCacheKeyRuntimeOverride = runtime;
 }
 
-async function createClient(options: StreamOptions): Promise<OpenAI> {
+/** Shared with xai-responses.ts (upstream 0.93.4), which awaits the fork's cached client. */
+export async function createClient(options: StreamOptions): Promise<OpenAI> {
   // A custom fetch can carry runtime-specific state and must never reuse a client.
   if (options.fetch) {
     return new OpenAI({
@@ -186,6 +188,8 @@ async function createClient(options: StreamOptions): Promise<OpenAI> {
   const client = new OpenAI({
     apiKey: options.apiKey,
     ...(options.baseUrl ? { baseURL: options.baseUrl } : {}),
+    // Default transport lifts undici's 300s header/body caps (see provider-fetch.ts).
+    fetch: options.fetch ?? providerFetch,
     ...(options.defaultHeaders ? { defaultHeaders: options.defaultHeaders } : {}),
   });
 
@@ -445,21 +449,6 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
     fs.chmodSync(requestLogPath, 0o600);
   }
 
-  // xAI caches per server: x-grok-conv-id routes one conversation's requests to
-  // the same server, so its cached prefix is actually reused. Without it Grok
-  // "often" bills full input price on a cache-cold server (docs.x.ai Grok 4.7
-  // guide; Chat Completions uses this header, prompt_cache_key is the
-  // Responses API's). Sent per request, not on the shared client, so sessions
-  // reuse one client.
-  const requestHeaders =
-    options.provider === "xai"
-      ? {
-          headers: {
-            "x-grok-conv-id": normalizePromptCacheKey(options.promptCacheKey ?? "ggcoder"),
-          },
-        }
-      : {};
-
   // Non-streaming fallback: issue a single request/response and synthesize
   // stream events from the final ChatCompletion. Used by the agent loop after
   // the streaming transport has stalled repeatedly -- flipping to a plain
@@ -468,7 +457,9 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
     try {
       const completion = (await client.chat.completions.create(requestParams, {
         signal: options.signal ?? undefined,
-        ...requestHeaders,
+        // The whole reply arrives in one response, so the SDK's 10min default
+        // would undercut the agent loop's 15min thinking cap for this call.
+        timeout: PROVIDER_TRANSPORT_TIMEOUT_MS,
       })) as OpenAI.ChatCompletion;
       yield* synthesizeEventsFromCompletion(completion, !!options.thinking, endpointKey);
       return completionToResponse(completion, endpointKey);
@@ -481,7 +472,6 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
   try {
     stream = (await client.chat.completions.create(requestParams, {
       signal: options.signal ?? undefined,
-      ...requestHeaders,
     })) as AsyncIterable<OpenAI.ChatCompletionChunk>;
   } catch (err) {
     throw toError(err, providerName);
@@ -538,6 +528,11 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
         thinkingAccum += reasoning.text;
         if (options.thinking) {
           yield { type: "thinking_delta", text: reasoning.text };
+        } else {
+          // Hidden reasoning is still proof of life. Without this, a model
+          // that always reasons (MiMo, Grok) looks silent to the agent loop's
+          // first-event watchdog while it thinks, and gets aborted mid-turn.
+          yield { type: "keepalive", reasoning: true };
         }
       }
 
@@ -864,7 +859,7 @@ function classifyOpenAICompatLimit(args: {
   return null;
 }
 
-function toError(err: unknown, provider: string = "openai"): ProviderError {
+export function toError(err: unknown, provider: string = "openai"): ProviderError {
   // Already classified (e.g. an in-stream gateway error frame). Re-wrapping via
   // the generic Error branch below would discard statusCode/resetsAt and demote
   // a 429 to an unclassified failure.

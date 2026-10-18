@@ -145,7 +145,12 @@ export function ModelSelect({
   // (it's the user's own machine, not an account, and its length depends on what
   // they've pulled). A flat list of 40+ models across a dozen vendors is
   // unreadable; the vendor is the first thing you scan for.
-  const groups = groupByProvider(models);
+  // This compact picker has no "spend real money" confirmation step, so it never
+  // offers a paid model (Claude fast mode) unless it's already the current one.
+  // Switching onto one goes through the deck's model panel, which asks first.
+  const groups = groupByProvider(
+    models.filter((model) => model.billing?.paid !== true || model.id === currentModel),
+  );
   const activeLocal = models.find((model) => model.id === currentModel && model.local);
   // Which machine/server is answering matters when a local model is active.
   const triggerTitle =
@@ -261,12 +266,14 @@ export function ModelSelect({
         title={
           toolless
             ? `${model.name} has no tool calling, so it can't run the agent`
-            : model.endpoint
-              ? `${model.endpoint} · ${model.id}`
-              : `${model.provider} · ${model.id}`
+            : model.billing
+              ? `${model.provider} · ${model.id} · ${model.billing.detail}`
+              : model.endpoint
+                ? `${model.endpoint} · ${model.id}`
+                : `${model.provider} · ${model.id}`
         }
       >
-        {model.name}
+        {model.billing ? `${model.name} · ${model.billing.label}` : model.name}
       </button>
     );
   }
@@ -311,7 +318,11 @@ export function ModelSelect({
                   value={model.id}
                   disabled={model.supportsTools === false}
                 >
-                  {model.supportsTools === false ? `${model.name} — no tool calling` : model.name}
+                  {model.supportsTools === false
+                    ? `${model.name} — no tool calling`
+                    : model.billing
+                      ? `${model.name} · ${model.billing.label}`
+                      : model.name}
                 </option>
               ))}
             </optgroup>

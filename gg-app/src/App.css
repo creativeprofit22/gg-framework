@@ -287,7 +287,9 @@
   --dur-dissolve: 340ms;
   /* Composer strips and chip bars (attachments, mentions, queued message, cache
      notice) growing open and folding shut. --dur-strip-out is mirrored by
-     EXIT_MS in AttachmentBar, ReferencedFiles, QueuedBar and CacheExpiryNotice. */
+     EXIT_MS in AttachmentBar, ReferencedFiles, QueuedBar and CacheExpiryNotice,
+     and also times an answered ask_user card dissolving out (AskBand's EXIT_MS),
+     so everything in the chat column leaves at one speed. */
   --dur-strip-in: 260ms;
   --dur-strip-out: 220ms;
   /* Toasts rising in and dropping out. --dur-toast-out is Toaster's EXIT_MS. */
@@ -298,6 +300,10 @@
   /* The plan review dissolving out. PlanReviewModal's EXIT_FALLBACK_MS must
      stay longer than this so `animationend` normally wins. */
   --dur-plan-out: 300ms;
+  /* An ask_user band settling: the chosen row holds its fill for one beat so
+     the pick is seen, before the card dissolves out over --dur-strip-out.
+     AskBand's HOLD_MS mirrors it. */
+  --dur-ask-hold: 160ms;
   /* One breath of something live and working (a goal's working count, its
      "Running now" pill), with the shared `live-breathe` keyframes. */
   --dur-breathe: 1.8s;
@@ -14369,19 +14375,34 @@ select {
   padding: 9px var(--space-6);
   background: var(--surface-3);
   border-color: var(--border-strong);
+  /* The shared button timing: quick in, slower out (see .btn). */
   transition:
-    background var(--t-fast),
-    border-color var(--t-fast),
-    color var(--t-fast);
+    background-color var(--t-out),
+    border-color var(--t-out),
+    color var(--t-out),
+    box-shadow var(--t-out);
+}
+.ask-options .btn:hover:not(:disabled),
+.ask-options .btn:active:not(:disabled),
+.ask-options .btn[data-key-press] {
+  transition:
+    background-color var(--t-in),
+    border-color var(--t-in),
+    color var(--t-in),
+    box-shadow var(--t-in);
 }
 .ask-options .btn:hover:not(:disabled) {
   background: color-mix(in srgb, var(--primary) 10%, var(--surface-3));
   border-color: color-mix(in srgb, var(--primary) 42%, transparent);
 }
-/* Pressed: the option dips back toward its resting fill so the click is
-   confirmed even when the answer re-renders the band immediately. */
-.ask-options .btn:active:not(:disabled) {
+/* Pressed, by pointer or by its number key (`data-key-press`, set by AskBand
+   for one --dur-press beat, since a scripted click never matches :active).
+   A full-width row dips like the other wide rows (0.99), not the 0.96 of a
+   compact button, or its edges visibly lurch. */
+.ask-options .btn:active:not(:disabled),
+.ask-options .btn[data-key-press] {
   background: color-mix(in srgb, var(--primary) 16%, var(--surface-3));
+  scale: 0.99;
 }
 .ask-options .btn:focus-visible {
   outline: 2px solid var(--primary);
@@ -14400,6 +14421,22 @@ select {
 .ask-options .btn.btn-primary:hover:not(:disabled) {
   background: var(--primary-fill-hi);
   border-color: transparent;
+}
+/* The pick that finishes the band: the chosen row keeps its fill for one
+   --dur-ask-hold beat (so the choice is seen landing), then the card dissolves
+   out and the answer arrives as the user bubble at the end of the chat.
+   AskBand waits HOLD_MS + EXIT_MS before sending. The exit is `dissolve-in`
+   run backwards (same opacity and 6px blur, no scale), since the answered
+   bubble arrives with `dissolve-in` itself: one dissolve out, one back in. */
+@keyframes ask-band-out {
+  to {
+    opacity: 0;
+    filter: blur(6px);
+  }
+}
+.ask-band.is-committing {
+  pointer-events: none;
+  animation: ask-band-out var(--dur-strip-out) var(--ease-in) var(--dur-ask-hold) forwards;
 }
 /* The lead slot (keycap or checkbox) and the badge sit on the label's FIRST
    line, not centred against a two-line block, so they align with the text they
@@ -14467,6 +14504,24 @@ select {
   line-height: 1;
   color: var(--text-muted);
 }
+/* The keycap and checkbox recolour with the row they sit in, on the row's own
+   timing (slow out at rest, quick in under the pointer or a key), instead of
+   snapping ahead of the fill or settling at a different speed. */
+.ask-options .ask-num,
+.ask-options .ask-box {
+  transition:
+    background-color var(--t-out),
+    border-color var(--t-out),
+    color var(--t-out);
+}
+.ask-options .btn:hover:not(:disabled) :is(.ask-num, .ask-box),
+.ask-options .btn:active:not(:disabled) :is(.ask-num, .ask-box),
+.ask-options .btn[data-key-press] :is(.ask-num, .ask-box) {
+  transition:
+    background-color var(--t-in),
+    border-color var(--t-in),
+    color var(--t-in);
+}
 .btn-primary .ask-num {
   border-color: color-mix(in srgb, var(--on-primary-fill) 30%, transparent);
   color: color-mix(in srgb, var(--on-primary-fill) 70%, var(--primary));
@@ -14533,6 +14588,16 @@ select {
 @media (prefers-reduced-motion: reduce) {
   .ask-answered-bubble.is-live .shimmer-text {
     animation: none;
+  }
+  /* Like every other dissolve in the app, reduced motion swaps the blur for a
+     plain fade rather than dropping the exit; the held fill is colour, so the
+     beat stays. */
+  .ask-band.is-committing {
+    animation-name: fade-out;
+  }
+  .ask-options .btn:active:not(:disabled),
+  .ask-options .btn[data-key-press] {
+    scale: none;
   }
 }
 /* A band of several questions can always be sent as it stands, so an optional

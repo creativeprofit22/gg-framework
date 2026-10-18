@@ -26,6 +26,7 @@ import { getSafeToolEnv } from "./safe-env.js";
 import { resolveShell, type ResolveShellOpts } from "../core/shell.js";
 import { PersistentShell } from "../core/persistent-shell.js";
 import { isReadOnlyCommand, sleepOnlySeconds } from "./read-only-bash.js";
+import { backgroundWatchWarnings } from "./background-watch-lint.js";
 import { isPlanModeActive, planModeRestriction } from "../core/runtime-mode.js";
 import { isCatastrophicCommand } from "../core/workspace-guard.js";
 import { checkDestructiveGit } from "../core/destructive-git-guard.js";
@@ -769,7 +770,7 @@ async function renderStructuredForegroundResult(
         `Still running after ${formatDuration(outcome.elapsedMs)} — moved to background task ${id} ` +
         `(not killed). It is still stopped automatically after a long stretch with no output ` +
         `or at the hard time limit. Call task_output with id="${id}" and wait_ms; it returns ` +
-        `the moment the command exits. Output so far:\n${output}\n\n${diagnostics}`,
+        `the moment the command exits or prints a failure. Output so far:\n${output}\n\n${diagnostics}`,
       details,
     };
   }
@@ -1061,6 +1062,7 @@ export function createBashTool(
         }
         if (context.signal.aborted) return CANCELLED_BEFORE_START;
         const result = await processManager.start(command, cwd, launch, wakeRules);
+        const watchWarnings = backgroundWatchWarnings(command);
         return (
           `Background process started.\n` +
           `ID: ${result.id}\n` +
@@ -1079,7 +1081,8 @@ export function createBashTool(
               : `Wake conditions were NOT armed: this session has no notification path, so nothing will wake you automatically. Poll task_output periodically instead.\n`
             : "") +
           `Use task_output with id="${result.id}" to read output, ` +
-          `task_send to type input/answer prompts, task_stop to stop it.`
+          `task_send to type input/answer prompts, task_stop to stop it.` +
+          watchWarnings.map((warning) => `\nWarning: ${warning}`).join("")
         );
       }
 

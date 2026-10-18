@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { Provider, ThinkingLevel } from "@kenkaiiii/gg-ai";
 import { AgentHomeClient, type AgentSession as AHSession } from "@kenkaiiii/agent-home-sdk";
-import { AgentSession } from "../core/agent-session.js";
+import { AgentSession, paidModelRefusal } from "../core/agent-session.js";
 import { isAbortError } from "@kenkaiiii/gg-agent";
 import chalk from "chalk";
 import { formatUserError } from "../utils/error-handler.js";
@@ -310,6 +310,10 @@ export async function runAgentHomeMode(options: AgentHomeModeOptions): Promise<v
         return;
       }
       const selected = pendingModels[num - 1]!;
+      if (selected.billing?.paid) {
+        reply(stream, paidModelRefusal(selected.name), isNewSession, targetSessionId);
+        return;
+      }
       const state = await getOrCreateSession(targetSessionId);
       await state.session.switchModel(selected.provider, selected.id);
       pushSessions();
@@ -407,6 +411,10 @@ export async function runAgentHomeMode(options: AgentHomeModeOptions): Promise<v
           const num = parseInt(args, 10);
           if (!isNaN(num) && num >= 1 && num <= MODELS.length) {
             const selected = MODELS[num - 1]!;
+            if (selected.billing?.paid) {
+              reply(stream, paidModelRefusal(selected.name), isNewSession, targetSessionId);
+              return;
+            }
             const s = await getOrCreateSession(targetSessionId);
             await s.session.switchModel(selected.provider, selected.id);
             pushSessions();
@@ -419,6 +427,10 @@ export async function runAgentHomeMode(options: AgentHomeModeOptions): Promise<v
             (m) => m.name.toLowerCase().includes(lower) || m.id.toLowerCase().includes(lower),
           );
           if (match) {
+            if (match.billing?.paid) {
+              reply(stream, paidModelRefusal(match.name), isNewSession, targetSessionId);
+              return;
+            }
             const s = await getOrCreateSession(targetSessionId);
             await s.session.switchModel(match.provider, match.id);
             pushSessions();

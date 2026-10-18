@@ -36,6 +36,34 @@ describe("formatChatError", () => {
     expect(expired.guidance).toBe("Wait a moment before trying again.");
   });
 
+  it.each([
+    {
+      message: "Fast mode unavailable (out_of_credits): Your Claude usage credits have run out.",
+      reason: "billing",
+      headline: "Your Claude usage credits have run out",
+      guidance: /Add funds or turn on auto-reload/,
+    },
+    {
+      message:
+        "Fast mode unavailable (overage_not_provisioned): Claude usage credits are turned off.",
+      reason: "model_access",
+      headline: "Claude usage credits are turned off",
+      guidance: /Turn usage credits on at claude\.ai\/settings\/usage/,
+    },
+    {
+      message: "rate_limit_error: Usage credits are required for fast mode.",
+      reason: "billing",
+      headline: "Fast mode needs Claude usage credits",
+      guidance: /Check usage credits/,
+    },
+  ])("tells a fast-mode refusal its cause, not to wait: $headline", (row) => {
+    const error = formatChatError(new ProviderError("anthropic", row.message, { statusCode: 429 }));
+    expect(error.reason).toBe(row.reason);
+    expect(error.headline).toBe(row.headline);
+    expect(error.guidance).toMatch(row.guidance);
+    expect(error.guidance).toMatch(/Claude Opus 5\.5 \(standard speed\)/);
+  });
+
   it("does not tell an empty balance to wait for a subscription reset", () => {
     const error = formatChatError(
       new ProviderError("openai", "usage limit reached: insufficient credits", { statusCode: 429 }),

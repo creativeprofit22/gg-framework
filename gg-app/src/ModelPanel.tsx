@@ -42,6 +42,12 @@ interface Option {
   provider: string;
   disabled: boolean;
   hint?: string;
+  /** Picking this model spends real money (Claude fast mode). */
+  paid?: boolean;
+  /** What it bills, shown in the confirmation before it's switched to. */
+  billingDetail?: string;
+  /** The model sessions go back to when this paid one is not carried over. */
+  standardName?: string;
   contextWindow?: number;
 }
 
@@ -89,7 +95,7 @@ export function ModelPanel({
   models: readonly ModelOption[];
   modelsFailed: boolean;
   running: boolean;
-  onSelectModel: (modelId: string) => void;
+  onSelectModel: (modelId: string, options?: { confirmPaid?: boolean }) => void;
   second: SecondAgent | null;
   onClose: () => void;
 }): React.ReactElement {
@@ -99,6 +105,9 @@ export function ModelPanel({
   // null: rest on the current model; a number once the user moves or types.
   const [active, setActive] = useState<number | null>(null);
   const [thinkingError, setThinkingError] = useState<string | null>(null);
+  // A real-money model waiting on the user's explicit yes. Picking it never
+  // switches by itself: the panel asks first, with Cancel as the default.
+  const [pendingPaid, setPendingPaid] = useState<Option | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const listId = useId();
@@ -128,14 +137,30 @@ export function ModelPanel({
     for (const group of searchModels(models, query)) {
       out.push({
         label: group.label,
-        options: group.models.map((model) => ({
-          id: model.id,
-          name: model.name,
-          provider: providerLabel(model.provider),
-          disabled: model.supportsTools === false,
-          hint: model.supportsTools === false ? "no tool calling" : undefined,
-          contextWindow: model.contextWindow,
-        })),
+        options: group.models.map((model) => {
+          // Ken and Goal workers run unwatched in the background, so a model
+          // that spends real money is main-chat only (the sidecar enforces it).
+          const paidForSecond = forSecond && model.billing?.paid === true;
+          return {
+            id: model.id,
+            name: model.name,
+            provider: providerLabel(model.provider),
+            disabled: model.supportsTools === false || paidForSecond,
+            // Fast modes change what the user pays, so the row says so up front.
+            hint:
+              model.supportsTools === false
+                ? "no tool calling"
+                : paidForSecond
+                  ? "main chat only"
+                  : model.billing?.label,
+            paid: model.billing?.paid,
+            billingDetail: model.billing?.detail,
+            standardName: model.billing?.standardModel
+              ? modelDisplayName(models, model.billing.standardModel)
+              : undefined,
+            contextWindow: model.contextWindow,
+          };
+        }),
       });
     }
     return out;
@@ -160,9 +185,25 @@ export function ModelPanel({
 
   function choose(option: Option | undefined): void {
     if (!option || option.disabled || locked) return;
+    if (!forSecond && option.paid && option.id !== currentId) {
+      setPendingPaid(option);
+      return;
+    }
     if (forSecond) second.onSelect(option.id === FOLLOW_ID ? null : option.id);
     else onSelectModel(option.id);
     onClose();
+  }
+
+  function confirmPaid(option: Option): void {
+    setPendingPaid(null);
+    if (locked) return;
+    onSelectModel(option.id, { confirmPaid: true });
+    onClose();
+  }
+
+  function cancelPaid(): void {
+    setPendingPaid(null);
+    requestAnimationFrame(() => inputRef.current?.focus({ preventScroll: true }));
   }
 
   function onKeyDown(event: React.KeyboardEvent<HTMLInputElement>): void {
@@ -184,6 +225,8 @@ export function ModelPanel({
 
   const levels = state?.supportedThinkingLevels ?? [];
   const level = state?.thinkingLevel ?? null;
+  // The chosen model's cost note stays visible while the picker is open.
+  const currentBilling = models.find((model) => model.id === currentId)?.billing;
   let index = 0;
 
   return (
@@ -271,6 +314,18 @@ export function ModelPanel({
           Couldn't change thinking: {thinkingError}
         </p>
       )}
+      {pendingPaid && (
+        <PaidConfirm
+          option={pendingPaid}
+          onConfirm={() => confirmPaid(pendingPaid)}
+          onCancel={cancelPaid}
+        />
+      )}
+      {currentBilling && !pendingPaid && (
+        <p className="deck-note" data-paid={currentBilling.paid || undefined}>
+          {currentBilling.detail}
+        </p>
+      )}
       {locked && (
         <p className="deck-note">
           Can't switch models while the agent is working. Stop it or wait.
@@ -286,6 +341,7 @@ export function ModelPanel({
       <div
         ref={listRef}
         id={listId}
+        hidden={pendingPaid !== null}
         className="deck-list model-list"
         role="listbox"
         aria-label={forSecond ? `${second.name}'s model` : "GG's model"}
@@ -318,7 +374,7 @@ export function ModelPanel({
                       <Highlighted name={option.name} query={query} />
                     </span>
                     {/* Always present so the context size keeps to the right edge. */}
-                    <span className="opt-sub">
+                    <span className="opt-sub" data-paid={option.paid || undefined}>
                       {searching || option.hint ? (option.hint ?? option.provider) : ""}
                     </span>
                     <span className="opt-end">{contextLabel(option.contextWindow)}</span>
@@ -334,7 +390,7 @@ export function ModelPanel({
           </p>
         )}
       </div>
-      <label className="deck-field">
+      <label className="deck-field" hidden={pendingPaid !== null}>
         <Icon name="search" size={15} />
         <input
           ref={inputRef}
@@ -359,6 +415,56 @@ export function ModelPanel({
           ↑↓ ↵
         </span>
       </label>
+    </div>
+  );
+}
+
+/**
+ * The explicit "this spends real money" step before switching to a paid model.
+ * Inline, not a modal: it replaces the list until the user answers, keeps
+ * Cancel focused so Enter never pays by accident, and Escape backs out.
+ */
+function PaidConfirm({
+  option,
+  onConfirm,
+  onCancel,
+}: {
+  option: Option;
+  onConfirm: () => void;
+  onCancel: () => void;
+}): React.ReactElement {
+  const titleId = useId();
+  return (
+    <div
+      className="paid-confirm"
+      role="group"
+      aria-labelledby={titleId}
+      onKeyDown={(event) => {
+        if (event.key !== "Escape") return;
+        event.preventDefault();
+        event.stopPropagation();
+        onCancel();
+      }}
+    >
+      <p className="deck-note" data-paid>
+        <strong id={titleId}>{option.name} spends real money.</strong> {option.billingDetail}
+      </p>
+      <p className="deck-note">
+        It stays on for this session only. New sessions, restarts and new windows go back to{" "}
+        {option.standardName || "a standard model"}, and Ken and helper agents never use it.
+      </p>
+      <div className="deck-prow">
+        <span className="deck-spacer" />
+        <div className="key-group">
+          {/* Cancel takes focus: the safe answer is the default one. */}
+          <button type="button" className="key key-sm" autoFocus onClick={onCancel}>
+            Cancel
+          </button>
+          <button type="button" className="key key-sm paid-confirm-yes" onClick={onConfirm}>
+            Use it and pay
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

@@ -68,4 +68,39 @@ describe("xai provider transport", () => {
     // The proxy routes by override header, so the model must travel in it.
     expect(headers["x-grok-model-override"]).toBe("grok-4.5");
   });
+
+  it("sends the session's cache key as x-grok-conv-id on every request", async () => {
+    const { stream } = await import("../stream.js");
+    createMock.mockClear();
+    createMock.mockResolvedValueOnce(emptyStream());
+    for await (const _event of stream({
+      provider: "xai",
+      model: "grok-4.7",
+      messages: [{ role: "user", content: "hi" }],
+      apiKey: "tok" + "en",
+      promptCacheKey: "ggcoder:session-1",
+    })) {
+      /* consume */
+    }
+    // xAI caches per server; this header keeps a conversation on one server.
+    const requestOptions = createMock.mock.lastCall?.[1] as { headers?: Record<string, string> };
+    expect(requestOptions.headers?.["x-grok-conv-id"]).toBe("ggcoder:session-1");
+  });
+
+  it("does not send x-grok-conv-id to other OpenAI-compatible providers", async () => {
+    const { stream } = await import("../stream.js");
+    createMock.mockClear();
+    createMock.mockResolvedValueOnce(emptyStream());
+    for await (const _event of stream({
+      provider: "deepseek",
+      model: "deepseek-v4-pro",
+      messages: [{ role: "user", content: "hi" }],
+      apiKey: "tok" + "en",
+      promptCacheKey: "ggcoder:session-1",
+    })) {
+      /* consume */
+    }
+    const requestOptions = createMock.mock.lastCall?.[1] as { headers?: Record<string, string> };
+    expect(requestOptions.headers?.["x-grok-conv-id"]).toBeUndefined();
+  });
 });

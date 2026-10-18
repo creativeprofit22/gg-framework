@@ -26,7 +26,7 @@ import { discoverSkills } from "./core/skills.js";
 import path from "node:path";
 import fs from "node:fs/promises";
 import { shouldCompact, compact } from "./core/compaction/compactor.js";
-import { getContextWindow } from "./core/model-registry.js";
+import { getAuthStorageKeys, getContextWindow } from "./core/model-registry.js";
 import { resolveCompactionPolicy } from "./core/compaction/policy.js";
 
 export async function runInteractive(config: CliConfig): Promise<void> {
@@ -110,7 +110,9 @@ export async function runInteractive(config: CliConfig): Promise<void> {
   // Auto-compact on load if the restored session exceeds the context window.
   // Without this, huge sessions (1M+ tokens) get loaded into memory and OOM.
   if (messages.length > 1) {
-    const creds = await authStorage.resolveCredentials(provider);
+    const creds = await authStorage.resolveCredentials(provider, {
+      storageKeys: getAuthStorageKeys(provider, model),
+    });
     const contextWindow = getContextWindow(model, { provider, accountId: creds.accountId });
     const policy = resolveCompactionPolicy({
       provider,
@@ -203,7 +205,11 @@ export async function runInteractive(config: CliConfig): Promise<void> {
     try {
       stdout.write("\n");
 
-      const creds = await authStorage.resolveCredentials(provider);
+      // The model's credential order (Gemini: API key, then Google sign-in;
+      // MiMo: Token Plan, then API Credits) — same as AgentSession.
+      const creds = await authStorage.resolveCredentials(provider, {
+        storageKeys: getAuthStorageKeys(provider, model),
+      });
       const generator = agentLoop(messages, {
         provider,
         model,

@@ -3,7 +3,12 @@
 // so the desktop app and the terminal stay in lockstep. The app fetches this
 // (plus live connection status) from the sidecar's /auth/status endpoint.
 
-import { XIAOMI_CREDITS_KEY, dualAuthProvider } from "./auth-storage.js";
+import {
+  GEMINI_API_KEY,
+  GEMINI_API_KEY_BASE_URL,
+  XIAOMI_CREDITS_KEY,
+  dualAuthProvider,
+} from "./auth-storage.js";
 
 export type AuthMethod = "oauth" | "apikey";
 
@@ -97,9 +102,28 @@ export const AUTH_PROVIDERS: AuthProviderMeta[] = [
   {
     value: "gemini",
     label: "Gemini",
-    description:
-      "Gemini 3.8 Flash, 3.5 Flash Lite, 3.7 Flash, 3.1 Flash Lite, 3.5 Flash, 3.1 Pro (Preview)",
-    methods: ["oauth"],
+    description: "Gemini 3.8 Flash, 3.5 Flash Lite, 3.1 Flash Lite, 3.5 Flash, 3.1 Pro (Preview)",
+    methods: ["oauth", "apikey"],
+    apiKeyLabel: "Gemini",
+    apiKeyBaseUrl: GEMINI_API_KEY_BASE_URL,
+    // Stored under its own key so it never overwrites the `gemini` OAuth login.
+    apiKeyVariants: [
+      { key: GEMINI_API_KEY, label: "Google AI Studio", baseUrl: GEMINI_API_KEY_BASE_URL },
+    ],
+    methodDetails: {
+      oauth: {
+        method: "oauth",
+        label: "Sign in with Google",
+        billing: "Gemini Code Assist Standard or Enterprise licence.",
+        when: "Personal Google accounts are no longer served here (Google ended it on June 18, 2026).",
+      },
+      apikey: {
+        method: "apikey",
+        label: "Gemini API key",
+        billing: "Pay-per-token from a Google AI Studio key.",
+        when: "Used first whenever it is set.",
+      },
+    },
   },
   {
     value: "xai",
@@ -252,6 +276,11 @@ export function describeAuthMethods(provider: string): AuthMethodMeta[] {
  * gg-core (`DUAL_AUTH_PROVIDERS`) — it is the user-facing description of it.
  */
 export function authPriorityNote(provider: string): string | undefined {
+  // Gemini resolves the other way round (model registry `authStorageKeys`):
+  // Code Assist OAuth refuses personal accounts, so a key the user added wins.
+  if (provider === "gemini") {
+    return "Uses the Gemini API key first when one is set; otherwise the Google sign-in.";
+  }
   const dual = dualAuthProvider(provider);
   if (!dual) return undefined;
   return `Uses ${dual.oauthLabel} first; the ${dual.apiKeyLabel} takes over when it runs out, then switches back.`;

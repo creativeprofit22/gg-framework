@@ -322,6 +322,19 @@ describe("pane agent client", () => {
     expect(logError).toHaveBeenCalledWith("agent_prewarm failed: Error: sidecar unavailable");
   });
 
+  it("only confirms a paid model switch when the caller passes the user's explicit yes", async () => {
+    const c = createPaneAgentClient("right");
+    await c.switchModel("claude-opus-5-5-fast");
+    await c.switchModel("claude-opus-5-5-fast", { confirmPaid: true });
+    expect(invoke.mock.calls).toEqual([
+      [
+        "agent_switch_model",
+        { paneId: "right", model: "claude-opus-5-5-fast", confirmPaid: false },
+      ],
+      ["agent_switch_model", { paneId: "right", model: "claude-opus-5-5-fast", confirmPaid: true }],
+    ]);
+  });
+
   it("routes the current IPC surface with the complete pane argument matrix", async () => {
     const c = createPaneAgentClient("right");
     await c.getState();

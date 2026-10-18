@@ -33,6 +33,13 @@ import {
   rejectsForcedToolChoice,
 } from "./transform.js";
 import { isJsonObject } from "../utils/json.js";
+import {
+  FAST_MODE_REJECTION_HEADER,
+  describeFastModeRejection,
+  fastModeRejectionMessage,
+  parseFastModeRejection,
+  type FastModeRejection,
+} from "../fast-mode.js";
 
 /**
  * Client cache — avoids re-instantiating the SDK on every stream() call.
@@ -516,7 +523,7 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
       yield* synthesizeEventsFromMessage(message);
       return messageToResponse(message);
     } catch (err) {
-      throw toError(err);
+      throw toError(err, { fastMode: useFastMode });
     }
   }
 
@@ -807,7 +814,7 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
       }
     }
   } catch (err) {
-    throw toError(err);
+    throw toError(err, { fastMode: useFastMode });
   }
 
   // Race-condition safety: if the SDK's stream ended (or error'd) before the
@@ -972,9 +979,21 @@ function messageToResponse(message: Anthropic.Message): StreamResponse {
   };
 }
 
-/** Anthropic's refusal of a fast-mode request from a subscription without usage credits. */
-function isFastModeCreditsMessage(message: string): boolean {
-  return /usage credits are required for fast mode/i.test(message);
+/**
+ * A fast-mode request Anthropic refused because usage credits couldn't pay for
+ * it: the overage-disabled-reason header on a fast 429, or the fast-mode body
+ * text on any request. Undefined for every other error.
+ */
+function readFastModeRejection(
+  err: InstanceType<typeof Anthropic.APIError>,
+  message: string,
+  fastMode: boolean,
+): FastModeRejection | undefined {
+  const reason = readHeader(err.headers, FAST_MODE_REJECTION_HEADER);
+  if (fastMode && err.status === 429 && reason) return describeFastModeRejection(reason);
+  const fromBody = parseFastModeRejection(message);
+  if (!fromBody) return undefined;
+  return reason ? describeFastModeRejection(reason) : fromBody;
 }
 
 /**
@@ -996,7 +1015,7 @@ function readUnifiedRateLimit(headers: unknown): { rejected: boolean; resetsAt?:
   return { rejected: status === "rejected", ...(resetsAt ? { resetsAt } : {}) };
 }
 
-function toError(err: unknown): ProviderError {
+function toError(err: unknown, context?: { fastMode?: boolean }): ProviderError {
   // Already normalized (e.g. the truncated-tool-JSON guard in runStream throws a
   // ProviderError whose cause is the SyntaxError). Pass it through untouched so
   // its statusCode and cause chain survive for agent-loop's retry classifiers
@@ -1043,23 +1062,28 @@ function toError(err: unknown): ProviderError {
         ? `${bodyType}: ${bodyMessage}`
         : (bodyMessage ?? fallbackMessage);
 
+    // Fast mode on a Claude subscription bills usage credits only. When it
+    // can't, Anthropic answers 429 with a generic body and the real reason in
+    // the overage-disabled-reason header (no credits, credits off, spend cap,
+    // org policy). It also carries a far-off unified reset, so it must be read
+    // before the plan-limit check below or it shows as "usage limit reached".
+    // The header can also accompany plain plan-limit 429s, so only trust it on
+    // a fast request; the body wording is fast-mode specific either way.
+    const fastRejection = readFastModeRejection(err, message, context?.fastMode === true);
+    if (fastRejection) {
+      return new ProviderError("anthropic", fastModeRejectionMessage(fastRejection), {
+        statusCode: err.status,
+        ...(requestId ? { requestId } : {}),
+        hint: fastRejection.guidance,
+        cause: err,
+      });
+    }
+
     // Subscription (OAuth) usage-window exhaustion. Anthropic returns 429 with
     // the unified rate-limit headers; a "rejected" status — or a reset stamp
     // meaningfully in the future — means the plan's usage is spent, not a
     // transient per-minute throttle. Stamp a canonical message so downstream
     // retry logic stops instead of burning minutes retrying.
-    // Fast mode on a Claude subscription bills usage credits only. Without them
-    // Anthropic answers 429 "Usage credits are required for fast mode." with the
-    // unified headers set, which must not read as the plan's usage running out.
-    // The shared billing markers keep the agent loop from retrying it.
-    if (isFastModeCreditsMessage(message)) {
-      return new ProviderError("anthropic", message, {
-        statusCode: err.status,
-        ...(requestId ? { requestId } : {}),
-        hint: "Fast mode bills Claude usage credits, not your plan. Turn them on at claude.ai/settings/usage, or switch to Claude Opus 5.5 (standard speed) in the model selector.",
-        cause: err,
-      });
-    }
     if (err.status === 429) {
       const limit = readUnifiedRateLimit(err.headers);
       const farOff = limit.resetsAt != null && limit.resetsAt * 1000 - Date.now() > 60_000;

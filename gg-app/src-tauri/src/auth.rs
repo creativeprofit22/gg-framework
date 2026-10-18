@@ -142,14 +142,36 @@ pub(crate) const AUTH_PROVIDERS: &[ProviderMeta] = &[
         value: "gemini",
         label: "Gemini",
         description:
-            "Gemini 3.8 Flash, 3.5 Flash Lite, 3.7 Flash, 3.1 Flash Lite, 3.5 Flash, 3.1 Pro (Preview)",
-        methods: &["oauth"],
+            "Gemini 3.8 Flash, 3.5 Flash Lite, 3.1 Flash Lite, 3.5 Flash, 3.1 Pro (Preview)",
+        // Google sign-in (Code Assist, stored under `gemini`) or an AI Studio
+        // key stored under its own `gemini-api` key — mirrors gg-core's
+        // AUTH_PROVIDERS. Not a dual-auth provider: the API key is used first.
+        methods: &["oauth", "apikey"],
         oauth_key: None,
         oauth_label: None,
-        method_details: &[],
-        api_key_label: None,
-        api_key_base_url: None,
-        api_key_variants: &[],
+        method_details: &[
+            MethodDetail {
+                method: "oauth",
+                label: "Sign in with Google",
+                billing: "Gemini Code Assist Standard or Enterprise licence.",
+                when: "Personal Google accounts are no longer served here (Google ended it on June 18, 2026).",
+                requires: None,
+            },
+            MethodDetail {
+                method: "apikey",
+                label: "Gemini API key",
+                billing: "Pay-per-token from a Google AI Studio key.",
+                when: "Used first whenever it is set.",
+                requires: None,
+            },
+        ],
+        api_key_label: Some("Gemini"),
+        api_key_base_url: Some("https://generativelanguage.googleapis.com/v1beta"),
+        api_key_variants: &[ApiKeyVariant {
+            key: "gemini-api",
+            label: "Google AI Studio",
+            base_url: Some("https://generativelanguage.googleapis.com/v1beta"),
+        }],
     },
     ProviderMeta {
         value: "xai",
@@ -363,7 +385,13 @@ pub(crate) fn auth_provider_status(
         if !p.methods.contains(&"apikey") {
             return false;
         }
-        has_key(p.value) || p.api_key_variants.iter().any(|v| has_key(v.key))
+        // With variants, the variant keys are the API-key keys: the provider id
+        // may hold something else (Gemini keeps its OAuth login there).
+        if p.api_key_variants.is_empty() {
+            has_key(p.value)
+        } else {
+            p.api_key_variants.iter().any(|v| has_key(v.key))
+        }
     };
     // OAuth credential present. Dual-auth providers keep it under a distinct key;
     // OAuth-only providers store it under the provider id itself.
@@ -411,7 +439,11 @@ pub(crate) fn auth_provider_status(
                 }
                 _ => None,
             };
-            let active_method = if oauth {
+            // Gemini resolves its API key first (gg-core model registry
+            // authStorageKeys); every other provider prefers OAuth.
+            let active_method = if p.value == "gemini" && api_key {
+                Some("apikey")
+            } else if oauth {
                 if sidelined_until.is_some() {
                     Some("apikey")
                 } else {
@@ -457,8 +489,13 @@ pub(crate) fn auth_provider_status(
                 obj["methodGuidance"] = serde_json::json!(guidance);
             }
             // Only a provider with two methods has a priority to explain. Keep the
-            // wording in sync with gg-core's DUAL_AUTH_PROVIDERS resolution order.
-            if let (Some(oauth_label), Some(key_label)) = (p.oauth_label, p.api_key_label) {
+            // wording in sync with gg-core's DUAL_AUTH_PROVIDERS resolution order
+            // (and authPriorityNote, which words Gemini's key-first order).
+            if p.value == "gemini" {
+                obj["priorityNote"] = serde_json::json!(
+                    "Uses the Gemini API key first when one is set; otherwise the Google sign-in."
+                );
+            } else if let (Some(oauth_label), Some(key_label)) = (p.oauth_label, p.api_key_label) {
                 obj["priorityNote"] = serde_json::json!(format!(
                     "Uses {oauth_label} first; the {key_label} API key takes over when it runs out, then switches back."
                 ));
@@ -590,8 +627,15 @@ pub(crate) fn apply_logout(
         }
         if method != Some("oauth") {
             // Covers single-credential providers and a dual provider's API key,
-            // plus every extra variant key (currently only Xiaomi's).
-            map.remove(provider);
+            // plus every variant key (Xiaomi's two, Gemini's one). A provider
+            // that also signs in with OAuth under its own id (Gemini) keeps
+            // that key when only the API key is removed.
+            let oauth_under_provider_id = meta
+                .map(|m| m.methods.contains(&"oauth") && m.oauth_key.is_none())
+                .unwrap_or(false);
+            if !(oauth_under_provider_id && method == Some("apikey")) {
+                map.remove(provider);
+            }
             if let Some(meta) = meta {
                 for v in meta.api_key_variants {
                     map.remove(v.key);
@@ -967,6 +1011,38 @@ mod tests {
         let out = apply_logout(Some(existing), "anthropic", Some("oauth")).unwrap();
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert!(v.get("anthropic").is_none());
+    }
+
+    #[test]
+    fn apply_logout_gemini_methods_are_separate() {
+        // Gemini's Google sign-in lives under `gemini`, its AI Studio key under
+        // `gemini-api`: removing one must keep the other.
+        let existing = r#"{ "gemini": { "accessToken": "o", "refreshToken": "r", "expiresAt": 1 }, "gemini-api": { "accessToken": "k", "refreshToken": "", "expiresAt": 1 } }"#;
+        let key_only = apply_logout(Some(existing), "gemini", Some("apikey")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&key_only).unwrap();
+        assert!(v.get("gemini").is_some());
+        assert!(v.get("gemini-api").is_none());
+
+        let oauth_only = apply_logout(Some(existing), "gemini", Some("oauth")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&oauth_only).unwrap();
+        assert!(v.get("gemini").is_none());
+        assert!(v.get("gemini-api").is_some());
+
+        let both = apply_logout(Some(existing), "gemini", None).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&both).unwrap();
+        assert!(v.get("gemini").is_none());
+        assert!(v.get("gemini-api").is_none());
+    }
+
+    #[test]
+    fn resolve_apikey_target_gemini_never_overwrites_the_oauth_login() {
+        assert_eq!(
+            resolve_apikey_target("gemini", None),
+            Some((
+                "gemini-api".to_string(),
+                Some("https://generativelanguage.googleapis.com/v1beta")
+            )),
+        );
     }
 
     #[test]

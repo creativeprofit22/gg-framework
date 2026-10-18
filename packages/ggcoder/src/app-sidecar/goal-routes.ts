@@ -201,6 +201,13 @@ export function handleGoalRoutes(
             json(res, 400, { error: `Connect ${target.provider} first to use ${target.name}.` });
             return;
           }
+          // Workers run in parallel and unwatched; real-money spend multiplies.
+          if (target.billing?.paid) {
+            json(res, 400, {
+              error: `${target.name} spends real money, so it's only for your main chat. Pick another model for the workers.`,
+            });
+            return;
+          }
           pick = { provider: target.provider, model: target.id };
         }
         const updated = await setGoalCritterModel(goal.dir, pick);

@@ -84,7 +84,7 @@ export interface DeckProps {
   contextPct: number;
   models: readonly ModelOption[];
   modelsFailed: boolean;
-  onSelectModel: (modelId: string) => void;
+  onSelectModel: (modelId: string, options?: { confirmPaid?: boolean }) => void;
   /** Ken (code) or the critters (Goal); null in chat and motion. */
   second: SecondAgent | null;
   tasks: BackgroundTask[];
@@ -243,6 +243,10 @@ function Rail({
   const runningTasks = tasks.filter(isBackgroundTaskRunning).length;
   const levels = state?.supportedThinkingLevels ?? [];
   const modelName = modelDisplayName(models, state?.model);
+  // A model that spends real money (Claude fast mode) says so on the rail, not
+  // just in the picker, for as long as it's active.
+  const modelBilling = models.find((model) => model.id === state?.model)?.billing;
+  const paid = modelBilling?.paid === true;
   const hot = contextPct >= 80;
 
   return (
@@ -329,13 +333,19 @@ function Rail({
             ? modelsFailed
               ? "Couldn't load models from the agent. Reopen the project to try again."
               : "No models available yet — still connecting to the agent"
-            : `${state?.model ? modelName : "Model"}${levels.length ? ` · thinking ${thinkingLabel(state?.thinkingLevel).toLowerCase()}` : ""}${second ? ` · ${second.name}: ${second.following ? `follows ${second.followLabel}` : modelDisplayName(models, second.model)}` : ""}`
+            : `${state?.model ? modelName : "Model"}${levels.length ? ` · thinking ${thinkingLabel(state?.thinkingLevel).toLowerCase()}` : ""}${modelBilling ? ` · ${modelBilling.detail}` : ""}${second ? ` · ${second.name}: ${second.following ? `follows ${second.followLabel}` : modelDisplayName(models, second.model)}` : ""}`
         }
-        aria-label={`Model ${modelName}${levels.length ? `, thinking ${thinkingLabel(state?.thinkingLevel)}` : ""}. Change`}
+        aria-label={`Model ${modelName}${levels.length ? `, thinking ${thinkingLabel(state?.thinkingLevel)}` : ""}${paid ? `, ${modelBilling?.label}` : ""}. Change`}
+        data-paid={paid || undefined}
         {...key("model")}
       >
         <ThinkingDots levels={levels} level={state?.thinkingLevel} />
         <span className="well trunc">{modelName}</span>
+        {paid && (
+          <span className="rail-label model-cost" aria-hidden="true">
+            paid
+          </span>
+        )}
       </button>
     </div>
   );

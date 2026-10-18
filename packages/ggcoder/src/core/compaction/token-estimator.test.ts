@@ -326,4 +326,23 @@ describe("calibrateEstimatorFromUsage", () => {
     calibrateEstimatorFromUsage(history, { inputTokens: 100, outputTokens: 0 });
     expect(getCalibratedRatio()).toBeNull();
   });
+
+  it("counts the tool definitions the provider also counted", () => {
+    // A short history whose request also carried ~16k chars of tool schemas:
+    // 12k chars of messages against 7.5k provider tokens. Without the schema
+    // chars the observation reads 1.6 (clamped to 2.0) and drags the shared
+    // ratio down for every session; with them it reads the real 3.73.
+    resetCalibration();
+    const history: Message[] = [{ role: "user", content: "a".repeat(12_000) }];
+    const usage: Usage = { inputTokens: 7_500, outputTokens: 0 };
+    calibrateEstimatorFromUsage(history, usage);
+    const biased = getCalibratedRatio() ?? 0;
+
+    resetCalibration();
+    calibrateEstimatorFromUsage(history, usage, 16_000);
+    const counted = getCalibratedRatio() ?? 0;
+
+    expect(biased).toBeLessThan(3.0);
+    expect(counted).toBeGreaterThan(3.2); // moved toward 3.73, not toward the 2.0 floor
+  });
 });

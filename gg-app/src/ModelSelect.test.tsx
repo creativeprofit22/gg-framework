@@ -58,6 +58,62 @@ describe("ModelSelect — compact recovery action", () => {
   });
 });
 
+describe("ModelSelect — models that change what you pay", () => {
+  const paid: ModelOption = {
+    id: "claude-opus-5-5-fast",
+    name: "Claude Opus 5.5 Fast",
+    provider: "anthropic",
+    billing: {
+      label: "bills usage credits",
+      detail: "Fast mode bills your Claude usage credits, never your plan's included usage.",
+      paid: true,
+    },
+  };
+  const planFast: ModelOption = {
+    id: "gpt-6-luna-fast",
+    name: "GPT-6 Luna Fast",
+    provider: "openai",
+    billing: { label: "2.5x plan usage", detail: "Uses plan limits at 2.5x.", paid: false },
+  };
+
+  it.each([true, false])(
+    "never offers a real-money model it can't confirm, but labels plan-usage tiers (native=%s)",
+    (native) => {
+      supportsNativeMock.mockReturnValue(native);
+      render(
+        <ModelSelect
+          models={[...MODELS, paid, planFast]}
+          currentModel="claude-sonnet-5"
+          onSelect={vi.fn()}
+          title="Switch model"
+          label="Choose model"
+        />,
+      );
+      if (!native) fireEvent.click(screen.getByRole("button", { name: "Choose model" }));
+      const role = native ? "option" : "menuitemradio";
+      expect(screen.queryByRole(role, { name: /Claude Opus 5\.5 Fast/ })).toBeNull();
+      expect(screen.getByRole(role, { name: "GPT-6 Luna Fast · 2.5x plan usage" })).toBeTruthy();
+    },
+  );
+
+  it("still shows a real-money model that is already the current one", () => {
+    supportsNativeMock.mockReturnValue(false);
+    render(
+      <ModelSelect
+        models={[...MODELS, paid]}
+        currentModel="claude-opus-5-5-fast"
+        onSelect={vi.fn()}
+        title="Switch model"
+        label="Choose model"
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Choose model" }));
+    expect(
+      screen.getByRole("menuitemradio", { name: "Claude Opus 5.5 Fast · bills usage credits" }),
+    ).toBeTruthy();
+  });
+});
+
 describe("ModelSelect — native popup", () => {
   it("groups every provider under its own label, local last", () => {
     supportsNativeMock.mockReturnValue(true);

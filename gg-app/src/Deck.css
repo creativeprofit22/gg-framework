@@ -708,6 +708,24 @@
 .model-key .well {
   min-width: 0;
 }
+/* Real-money models (Claude fast mode) wear the same amber as a nearly full
+   context: worth noticing, not an error. */
+.model-key .model-cost,
+.opt-sub[data-paid],
+.deck-note[data-paid] {
+  color: var(--warning);
+}
+.paid-confirm .deck-note + .deck-note {
+  padding-top: 0;
+}
+.paid-confirm-yes {
+  color: var(--warning);
+}
+.model-key .model-cost {
+  flex: none;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+}
 .onair-key .eq {
   display: inline-flex;
   align-items: flex-end;

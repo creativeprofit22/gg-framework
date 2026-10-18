@@ -5,7 +5,7 @@ import { createInterface } from "node:readline";
 import { statSync } from "node:fs";
 import path from "node:path";
 import type { Message, Provider, ThinkingLevel } from "@kenkaiiii/gg-ai";
-import { getAppPaths } from "@kenkaiiii/gg-core";
+import { getAppPaths, withoutPaidTier } from "@kenkaiiii/gg-core";
 import { mcpServersForAgent, type AgentDefinition } from "./agents.js";
 import { SubAgentStore, type PersistedSubAgentRecord } from "./subagent-store.js";
 import { SessionManager } from "./session-manager.js";
@@ -376,7 +376,7 @@ export class SubAgentManager {
       `Child agent "${adopted.task_name}" (${adopted.agent_id}) finished during a parent ` +
         `restart and its result was recovered (${record.status}). ` +
         `Collect the full output with wait_agent agent_ids ["${adopted.agent_id}"].`,
-      { terminal: true },
+      { terminal: true, urgent: true },
     );
   }
 
@@ -447,7 +447,8 @@ export class SubAgentManager {
       pick?.model ?? parentModel,
       parentThinkingLevel,
     );
-    const model = overrides?.model ?? base.model;
+    // Same rule as selectSubAgent: a harness override can't put a worker on a paid tier.
+    const model = withoutPaidTier(overrides?.model ?? base.model);
     const selection = {
       agentDef: base.agentDef,
       provider: base.provider,
@@ -1018,7 +1019,7 @@ export class SubAgentManager {
         `${worker.turn_count} turn(s)${digest ? `: ${digest}` : ""}. ` +
         `${worker.acceptance ? `Acceptance checks: ${worker.acceptance}. ` : ""}` +
         `Collect its full output with wait_agent agent_ids ["${worker.agent_id}"].`,
-      { terminal: true },
+      { terminal: true, urgent: true },
     );
   }
 

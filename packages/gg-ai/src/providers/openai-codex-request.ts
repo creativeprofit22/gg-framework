@@ -9,8 +9,10 @@ import { toCodexReasoningEffort } from "./transform.js";
 // 2026-09-30). Below the gate it answers "The '<model>' model is not supported
 // when using Codex with a ChatGPT account". Track the latest openai/codex
 // `rust-v*` release when adding a model, and check that model's live listing.
-// 0.161.0 = latest `rust-v0.161.0` release (2026-10-07).
-const CODEX_CLIENT_VERSION = "0.161.0";
+// 0.161.0 = latest `rust-v0.161.0` release (2026-10-07). Exported so every
+// other caller of the ChatGPT Codex backend (ggcoder's generate_image) sends
+// the same client identity as chat.
+export const CODEX_CLIENT_VERSION = "0.161.0";
 
 // GPT-6 point releases (gpt-6.1-sol) keep the dotted version in the id, so a
 // bare `gpt-6-` prefix would miss them. This is the model family Codex CLI

@@ -63,10 +63,22 @@ export async function runUserTurn(
   }
 }
 
+export interface StrandedQueueDrain {
+  (): Promise<void>;
+  /**
+   * True while a drain owns the queue, including the gaps between queued turns
+   * where no run is in flight. Unprompted runs (idle wake) must treat this as busy.
+   */
+  active(): boolean;
+}
+
 /** Coordinate the cycle's scheduled drain with the user-turn ownership barrier. */
-export function createStrandedQueueDrain(blocked: () => boolean, drain: () => Promise<void>) {
+export function createStrandedQueueDrain(
+  blocked: () => boolean,
+  drain: () => Promise<void>,
+): StrandedQueueDrain {
   let activeDrain: Promise<void> | undefined;
-  return (): Promise<void> => {
+  const run = (): Promise<void> => {
     if (activeDrain) return activeDrain;
     if (blocked()) return Promise.resolve();
     // Publish ownership before executing the drain, including synchronous re-entry.
@@ -77,6 +89,7 @@ export function createStrandedQueueDrain(blocked: () => boolean, drain: () => Pr
       });
     return activeDrain;
   };
+  return Object.assign(run, { active: () => activeDrain !== undefined });
 }
 
 /** Production continuation composition, kept importable without daemon bootstrap. */

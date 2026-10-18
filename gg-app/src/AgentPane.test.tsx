@@ -2404,8 +2404,9 @@ describe("AgentPane question acknowledgement", () => {
           ],
         }),
       );
+      // Picks are sent from the band's foot (upstream 0.93.1), so ticking and
+      // unticking leaves the multi-select cleared rather than confirmed.
       fireEvent.click(await screen.findByRole("button", { name: "Typecheck" }));
-      fireEvent.click(screen.getByRole("button", { name: "Confirm 1 selected" }));
       // Capture the second question's composer target before reopening the first.
       if (source === "typed") fireEvent.keyDown(document, { key: "C" });
       fireEvent.click(screen.getByRole("button", { name: "Typecheck" }));
@@ -2426,7 +2427,7 @@ describe("AgentPane question acknowledgement", () => {
       );
       fireEvent.click(screen.getByRole("button", { name: "Tests" }));
       expect(pane.answerAskUser).not.toHaveBeenCalled();
-      fireEvent.click(screen.getByRole("button", { name: "Confirm 1 selected" }));
+      fireEvent.click(screen.getByRole("button", { name: "Send answers" }));
       expect(pane.answerAskUser).toHaveBeenCalledExactlyOnceWith("ask-clear", "answer", {
         checks: ["Tests"],
         then: "Continue",

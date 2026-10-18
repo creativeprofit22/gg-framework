@@ -1,23 +1,27 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import os from "node:os";
 import path from "node:path";
-import { mkdtemp, rm, readFile, writeFile, mkdir, readdir } from "node:fs/promises";
-import type { StructuredToolResult, ToolContext } from "@kenkaiiii/gg-agent";
-import type { GenerateImageAuth } from "./generate-image.js";
-import { z } from "zod";
 import { createHash, randomUUID } from "node:crypto";
+import { mkdtemp, rm, readFile, writeFile, mkdir } from "node:fs/promises";
+import { z } from "zod";
+import type { StructuredToolResult, ToolContext } from "@kenkaiiii/gg-agent";
+import { agentLoop } from "@kenkaiiii/gg-agent";
+import { stream, StreamResult, type Message } from "@kenkaiiii/gg-ai";
+import type * as GgAi from "@kenkaiiii/gg-ai";
+import type { GenerateImageAuth } from "./generate-image.js";
+import { extractToolImagePaths } from "../core/session-history.js";
 import { SessionManager } from "../core/session-manager.js";
 import { restoreToolImages } from "../app-sidecar-image-history.js";
-import { resolveToolSchema, stream, StreamResult, type Message } from "@kenkaiiii/gg-ai";
-import type * as GgAi from "@kenkaiiii/gg-ai";
-import { agentLoop } from "@kenkaiiii/gg-agent";
 
 vi.mock("@kenkaiiii/gg-ai", async (importOriginal) => ({
   ...(await importOriginal<typeof GgAi>()),
   stream: vi.fn(),
 }));
 
-/** Exercise the real normalization, emitted event, and saved conversation result. */
+/**
+ * Run a tool result through the real agent loop and return the text saved to
+ * the conversation, asserting it is recorded as an error everywhere.
+ */
 async function failureText(raw: string | StructuredToolResult): Promise<string> {
   vi.mocked(stream).mockReturnValueOnce(
     new StreamResult(
@@ -52,15 +56,23 @@ async function failureText(raw: string | StructuredToolResult): Promise<string> 
     if (event.type !== "tool_call_end") continue;
     ended = true;
     expect(event.isError).toBe(true);
-    expect(event.result).not.toContain("sk-image-fixture-secret-1234567890");
   }
   expect(ended).toBe(true);
   const results = messages.flatMap((message) => (message.role === "tool" ? message.content : []));
   expect(results).toHaveLength(1);
   expect(results[0]).toMatchObject({ toolCallId: "image", isError: true });
-  expect(typeof results[0]!.content).toBe("string");
-  expect(results[0]!.content).not.toContain("sk-image-fixture-secret-1234567890");
-  return results[0]!.content as string;
+  const content = results[0]?.content;
+  if (typeof content !== "string") throw new Error("Expected a text failure result");
+  return content;
+}
+
+/** The text of a failed tool result, asserting it is flagged as an error. */
+function errorText(result: string | StructuredToolResult): string {
+  expect(result).toMatchObject({ isError: true });
+  if (!isStructured(result) || typeof result.content !== "string") {
+    throw new Error("Expected a structured text error");
+  }
+  return result.content;
 }
 
 // A real, decodable 1×1 PNG so sharp (shrinkToFit / downscaleForPreview) works.
@@ -102,41 +114,23 @@ function noAuth(): GenerateImageAuth & { hasProviderAuth(p: string): Promise<boo
   };
 }
 
-/**
- * Build a fake SSE stream that emits a response.output_item.done event with
- * image_generation_call result data, mimicking the Codex responses endpoint.
- */
-function makeImageSSEResponse(b64Images: string[], status = 200): Response {
-  const events: string[] = [
-    `data: ${JSON.stringify({ type: "response.created" })}`,
-    `data: ${JSON.stringify({ type: "response.in_progress" })}`,
-  ];
-  for (const b64 of b64Images) {
-    events.push(
-      `data: ${JSON.stringify({
-        type: "response.output_item.done",
-        item: {
-          type: "image_generation_call",
-          status: "completed",
-          result: b64,
-        },
-      })}`,
-    );
-  }
-  events.push(`data: ${JSON.stringify({ type: "response.completed" })}`);
-  events.push("data: [DONE]");
-  const sseBody = events.join("\n\n") + "\n\n";
-  const encoder = new TextEncoder();
-  const stream = new ReadableStream({
-    start(controller) {
-      controller.enqueue(encoder.encode(sseBody));
-      controller.close();
-    },
-  });
-  return new Response(stream, {
-    status,
-    headers: { "Content-Type": "text/event-stream" },
-  });
+/** A Codex image endpoint reply (`codex/images/generations` or `/edits`). */
+function makeImageResponse(b64Images: string[], status = 200, size?: string): Response {
+  return new Response(
+    JSON.stringify({
+      created: 1,
+      ...(size ? { size } : {}),
+      data: b64Images.map((b64_json) => ({ b64_json })),
+      output_format: "png",
+    }),
+    { status, headers: { "Content-Type": "application/json" } },
+  );
+}
+
+/** An unsigned JWT-shaped token whose auth claim carries `plan`. */
+function tokenForPlan(plan: string): string {
+  const part = (value: object): string => Buffer.from(JSON.stringify(value)).toString("base64url");
+  return `${part({ alg: "none" })}.${part({ "https://api.openai.com/auth": { chatgpt_plan_type: plan } })}.sig`;
 }
 
 let tmpDir: string;
@@ -145,7 +139,6 @@ let originalFetch: typeof globalThis.fetch;
 beforeEach(async () => {
   tmpDir = await mkdtemp(path.join(os.tmpdir(), "ggcoder-genimg-"));
   originalFetch = globalThis.fetch;
-  globalThis.fetch = vi.fn().mockRejectedValue(new Error("Unexpected offline fixture request"));
 });
 
 afterEach(async () => {
@@ -155,43 +148,6 @@ afterEach(async () => {
 });
 
 describe("generate_image param schema", () => {
-  it("pins the public sizing limitation in the tool description and provider schema", async () => {
-    const { createGenerateImageTool } = await import("./generate-image.js");
-    const tool = createGenerateImageTool(tmpDir, fakeAuth());
-    expect(tool.description).toBe(
-      "Generate or edit images using OpenAI's GPT Image 2.5 models: Flare (default, fast) " +
-        "or Sunburst (precise editing). Transparent backgrounds are currently unsupported " +
-        "through this tool. Works even when a different " +
-        "chat provider is active — only requires OpenAI to be connected. Only use this tool when " +
-        "the user explicitly asks to create, generate, or edit an image. Pass `image` with a " +
-        "file path to edit an existing image (e.g. a previously generated one or a user attachment). " +
-        "Use `out_path` to save to a specific location (defaults to .gg/generated/). " +
-        "Requested dimensions are forwarded to the image service, but actual dimensions and shape may differ. " +
-        "Originals are never silently resized; mismatches are warned.",
-    );
-    expect(resolveToolSchema(tool)).toMatchObject({
-      properties: {
-        background: {
-          type: "string",
-          enum: ["opaque", "auto"],
-          description:
-            "Background type (default auto). Use auto or opaque. Transparent is currently " +
-            "unsupported by the connected ChatGPT/Codex backend for both models and will " +
-            "be rejected locally. Do not retry transparent requests or switch models to bypass this.",
-        },
-        size: {
-          type: "string",
-          description:
-            "Requested resolution, forwarded to the image service; exact output dimensions are not guaranteed. " +
-            "Actual dimensions and shape may differ. Originals are never silently resized; mismatches are warned. " +
-            "Request sizes with both edges multiples of 16px, max edge ≤3840px, " +
-            "long:short ratio ≤3:1, total pixels 655,360–8,294,400. " +
-            "Popular: 1024x1024, 1536x1024, 1024x1536, 2048x2048. Default: auto.",
-        },
-      },
-    });
-  });
-
   it("requires prompt and accepts optional params", async () => {
     const { createGenerateImageTool } = await import("./generate-image.js");
     const tool = createGenerateImageTool(tmpDir, fakeAuth());
@@ -209,20 +165,14 @@ describe("generate_image param schema", () => {
         out_path: "out.png",
       }).success,
     ).toBe(true);
-    expect(tool.description).toContain("Transparent backgrounds are currently unsupported");
-    expect(schema.shape.background.description).toContain("Do not retry transparent requests");
-    // Public calls reject transparency; stale direct calls still get actionable errors.
-    for (const model of ["gpt-image-2.5-flare", "gpt-image-2.5-sunburst"]) {
-      for (const background of ["opaque", "auto"]) {
-        expect(schema.safeParse({ prompt: "x", model, background }).success).toBe(true);
-      }
-      expect(schema.safeParse({ prompt: "x", model, background: "transparent" }).success).toBe(
-        false,
-      );
-    }
-    for (const model of ["gpt-image-2", "gpt-image-2.5", "unknown"]) {
-      expect(schema.safeParse({ prompt: "x", model }).success).toBe(false);
-    }
+    // Codex sends only opaque or transparent; transparency is supported.
+    expect(schema.safeParse({ prompt: "x", background: "transparent" }).success).toBe(true);
+    expect(schema.safeParse({ prompt: "x", background: "auto" }).success).toBe(false);
+    // No model choice: Codex pins the image model, so the schema offers none.
+    expect("model" in schema.shape).toBe(false);
+    // Codex's MAX_EDIT_IMAGES.
+    expect(schema.safeParse({ prompt: "x", images: ["a.png"] }).success).toBe(true);
+    expect(schema.safeParse({ prompt: "x", images: Array(6).fill("a.png") }).success).toBe(false);
     // Invalid quality rejected.
     expect(schema.safeParse({ prompt: "x", quality: "ultra" }).success).toBe(false);
     // n out of range.
@@ -231,8 +181,8 @@ describe("generate_image param schema", () => {
 });
 
 describe("generate_image — generation (no image input)", () => {
-  it("calls the Codex responses endpoint and returns structured image result", async () => {
-    const fetchMock = vi.fn().mockResolvedValue(makeImageSSEResponse([TINY_PNG_B64]));
+  it("calls Codex's image endpoint directly and returns structured image result", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(makeImageResponse([TINY_PNG_B64]));
     globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
 
     const { createGenerateImageTool } = await import("./generate-image.js");
@@ -241,41 +191,42 @@ describe("generate_image — generation (no image input)", () => {
 
     expect(fetchMock).toHaveBeenCalledOnce();
     const [url, init] = fetchMock.mock.calls[0]!;
-    expect(url).toBe("https://chatgpt.com/backend-api/codex/responses");
+    // Regression: this went through `codex/responses` with a retired chat
+    // model (gpt-5.5) driving a hosted tool, which the backend rejected.
+    expect(url).toBe("https://chatgpt.com/backend-api/codex/images/generations");
     expect(init?.method).toBe("POST");
     const headers = init?.headers as Record<string, string>;
     expect(headers["Authorization"]).toBe("Bearer test-token");
     expect(headers["chatgpt-account-id"]).toBe("acct-123");
+    // The same Codex client identity chat sends; the backend gates on it.
+    const { CODEX_CLIENT_VERSION } = await import("@kenkaiiii/gg-ai");
+    expect(CODEX_CLIENT_VERSION).toMatch(/^\d+\.\d+\.\d+$/);
+    expect(headers["originator"]).toBe("codex_cli_rs");
+    expect(headers["version"]).toBe(CODEX_CLIENT_VERSION);
+    expect(headers["User-Agent"]).toMatch(new RegExp(`^codex_cli_rs/${CODEX_CLIENT_VERSION} `));
 
-    // The body should have image_generation tool with action: "generate"
-    const body = JSON.parse(init?.body as string);
-    expect(body.model).toBe("gpt-6-astra");
-    expect(body.stream).toBe(true);
-    expect(body.parallel_tool_calls).toBe(false);
-    expect(body.reasoning).toEqual({ effort: "low", summary: "auto", context: "all_turns" });
-    expect(headers.originator).toBe("codex_cli_rs");
-    expect(headers.version).toBe("0.161.0");
-    expect(headers["User-Agent"]).toBe("codex_cli_rs/0.161.0");
-    expect(headers).not.toHaveProperty("X-OpenAI-Internal-Codex-Responses-Lite");
-    const { codexRequestProfile } = await import("@kenkaiiii/gg-ai");
-    expect(
-      codexRequestProfile("gpt-6-astra", "low").headers["X-OpenAI-Internal-Codex-Responses-Lite"],
-    ).toBe("true");
-    expect(body.tools[0].type).toBe("image_generation");
-    expect(body.tools[0].model).toBe("gpt-image-2.5-flare");
-    expect(body.tools[0].action).toBe("generate");
+    // One id per tool call, as Codex sends per turn.
+    expect(headers["x-codex-image-turn-id"]).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    );
 
-    // The prompt should be in the input content
-    const inputContent = body.input[0].content;
-    expect(inputContent[0].type).toBe("input_text");
-    expect(inputContent[0].text).toBe("a cat sitting on a desk");
+    // Exactly the body openai/codex asserts in app-server/tests/suite/v2/
+    // imagegen_extension.rs: no chat model, no stream, no hosted tool.
+    expect(JSON.parse(init?.body as string)).toEqual({
+      prompt: "a cat sitting on a desk",
+      background: "opaque",
+      model: "gpt-image-2",
+      quality: "auto",
+      size: "auto",
+    });
 
     expect(isStructured(result)).toBe(true);
     if (!isStructured(result)) return;
     const blocks = Array.isArray(result.content) ? result.content : [];
     const texts = blocks.filter((c) => c.type === "text");
     const images = blocks.filter((c) => c.type === "image");
-    expect(texts.length).toBe(1);
+    // The path summary, then the size report.
+    expect(texts.length).toBe(2);
     expect(images.length).toBe(1);
     // Should have imagePreviews in details.
     const details = result.details as { imagePreviews?: unknown[] };
@@ -283,35 +234,29 @@ describe("generate_image — generation (no image input)", () => {
     expect(details!.imagePreviews!.length).toBe(1);
   });
 
-  it.each([
-    ["gpt-image-2.5-flare", "opaque"],
-    ["gpt-image-2.5-flare", "auto"],
-    ["gpt-image-2.5-sunburst", "opaque"],
-    ["gpt-image-2.5-sunburst", "auto"],
-  ] as const)(
-    "forwards explicit model %s and supported background %s",
-    async (model, background) => {
-      const fetchMock = vi.fn().mockResolvedValue(makeImageSSEResponse([TINY_PNG_B64]));
-      globalThis.fetch = fetchMock;
-      const { createGenerateImageTool } = await import("./generate-image.js");
-      const tool = createGenerateImageTool(tmpDir, fakeAuth());
-      const result = await tool.execute({ prompt: "a logo", model, background }, ctx());
+  it("forwards a transparent background with the size and quality asked for", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(makeImageResponse([TINY_PNG_B64]));
+    globalThis.fetch = fetchMock;
+    const { createGenerateImageTool } = await import("./generate-image.js");
+    const tool = createGenerateImageTool(tmpDir, fakeAuth());
+    const result = await tool.execute(
+      { prompt: "a logo", background: "transparent", size: "1536x1024", quality: "high" },
+      ctx(),
+    );
 
-      expect(fetchMock).toHaveBeenCalledOnce();
-      const body = JSON.parse(fetchMock.mock.calls[0]![1].body);
-      expect(body.model).toBe("gpt-6-astra");
-      expect(body.tools[0]).toMatchObject({
-        model,
-        action: "generate",
-        background,
-        output_format: "png",
-      });
-      expect(isStructured(result)).toBe(true);
-    },
-  );
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(JSON.parse(fetchMock.mock.calls[0]![1].body)).toEqual({
+      prompt: "a logo",
+      background: "transparent",
+      model: "gpt-image-2",
+      quality: "high",
+      size: "1536x1024",
+    });
+    expect(isStructured(result)).toBe(true);
+  });
 
-  it("generates multiple images without sending unsupported tool n", async () => {
-    const fetchMock = vi.fn().mockImplementation(async () => makeImageSSEResponse([TINY_PNG_B64]));
+  it("generates multiple images with one request each, never sending n", async () => {
+    const fetchMock = vi.fn().mockImplementation(async () => makeImageResponse([TINY_PNG_B64]));
     globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
 
     const { createGenerateImageTool } = await import("./generate-image.js");
@@ -321,14 +266,515 @@ describe("generate_image — generation (no image input)", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
     for (const [, init] of fetchMock.mock.calls) {
       const body = JSON.parse(init?.body as string);
-      expect(body.tools[0].n).toBeUndefined();
-      expect(body.tools[0].model).toBe("gpt-image-2.5-flare");
+      expect(body.n).toBeUndefined();
+      expect(body.model).toBe("gpt-image-2");
     }
+    // Both images belong to the same tool call.
+    const turnIds = fetchMock.mock.calls.map(
+      ([, init]) => (init?.headers as Record<string, string>)["x-codex-image-turn-id"],
+    );
+    expect(turnIds[0]).toBeTruthy();
+    expect(turnIds[1]).toBe(turnIds[0]);
     expect(isStructured(result)).toBe(true);
     if (!isStructured(result)) return;
     const details = result.details as { imagePreviews?: unknown[] };
     expect(details.imagePreviews).toHaveLength(2);
   });
+
+  it("saves the image to out_path when provided", async () => {
+    globalThis.fetch = vi
+      .fn()
+      .mockResolvedValue(makeImageResponse([TINY_PNG_B64])) as unknown as typeof globalThis.fetch;
+
+    const { createGenerateImageTool } = await import("./generate-image.js");
+    const outPath = path.join(tmpDir, "custom.png");
+    const tool = createGenerateImageTool(tmpDir, fakeAuth());
+    await tool.execute({ prompt: "a logo", out_path: outPath }, ctx());
+
+    const saved = await readFile(outPath);
+    expect(saved.length).toBe(TINY_PNG.length);
+  });
+
+  it("re-encodes the endpoint's PNG when another format is asked for", async () => {
+    // TINY_PNG only has to survive the best-effort preview helpers; conversion
+    // decodes for real, so this needs a PNG libvips can read.
+    const { default: sharp } = await import("sharp");
+    const png = await sharp({
+      create: { width: 2, height: 2, channels: 3, background: { r: 255, g: 0, b: 0 } },
+    })
+      .png()
+      .toBuffer();
+    globalThis.fetch = vi
+      .fn()
+      .mockResolvedValue(
+        makeImageResponse([png.toString("base64")]),
+      ) as unknown as typeof globalThis.fetch;
+
+    const { createGenerateImageTool } = await import("./generate-image.js");
+    const outPath = path.join(tmpDir, "custom.webp");
+    const tool = createGenerateImageTool(tmpDir, fakeAuth());
+    await tool.execute({ prompt: "a logo", out_path: outPath, output_format: "webp" }, ctx());
+
+    const saved = await readFile(outPath);
+    // RIFF....WEBP, not the PNG bytes saved under a .webp name.
+    expect(saved.subarray(0, 4).toString("ascii")).toBe("RIFF");
+    expect(saved.subarray(8, 12).toString("ascii")).toBe("WEBP");
+  });
+});
+
+/** A real PNG of the given size with an alpha channel at 253 (as a user saw live). */
+async function transparentPng(width: number, height: number): Promise<Buffer> {
+  const { default: sharp } = await import("sharp");
+  const pixels = Buffer.alloc(width * height * 4);
+  for (let i = 0; i < pixels.length; i += 4) {
+    pixels[i] = 20;
+    pixels[i + 1] = 120;
+    pixels[i + 2] = 220;
+    pixels[i + 3] = 253;
+  }
+  return sharp(pixels, { raw: { width, height, channels: 4 } })
+    .png()
+    .toBuffer();
+}
+
+function textBlocks(result: string | StructuredToolResult): string[] {
+  if (!isStructured(result) || !Array.isArray(result.content)) return [];
+  return result.content.flatMap((c) => (c.type === "text" ? [c.text] : []));
+}
+
+describe("generate_image — delivered size", () => {
+  it("reports a smaller size than requested, saving the native file with no resize or retry", async () => {
+    // Live report: 2048x2048 asked for on a transparent edit, 1254x1254 saved,
+    // and the tool said nothing.
+    const png = await transparentPng(1254, 1254);
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(makeImageResponse([png.toString("base64")], 200, "1254x1254"));
+    globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
+    const refPath = path.join(tmpDir, "turntable.png");
+    await writeFile(refPath, png);
+    const outPath = path.join(tmpDir, "edited.png");
+
+    const { createGenerateImageTool } = await import("./generate-image.js");
+    const tool = createGenerateImageTool(tmpDir, fakeAuth());
+    const result = await tool.execute(
+      {
+        prompt: "cut out the turntable",
+        image: refPath,
+        size: "2048x2048",
+        background: "transparent",
+        out_path: outPath,
+      },
+      ctx(),
+    );
+
+    // One request: a mismatch never triggers another chargeable render.
+    expect(fetchMock).toHaveBeenCalledOnce();
+    const [summary, size] = textBlocks(result);
+    // The path line is untouched, so restored history still finds the file.
+    expect(summary).toBe(`Generated image → ${outPath}`);
+    expect(extractToolImagePaths(summary ?? "")).toEqual([outPath]);
+    expect(size).toContain("Size mismatch: requested 2048x2048, but OpenAI returned 1254x1254.");
+    expect(size).toContain("no resizing");
+
+    // The master file is OpenAI's PNG byte for byte: native size, alpha intact.
+    const saved = await readFile(outPath);
+    expect(saved.equals(png)).toBe(true);
+    const { default: sharp } = await import("sharp");
+    const meta = await sharp(saved).metadata();
+    expect([meta.width, meta.height, meta.hasAlpha]).toEqual([1254, 1254, true]);
+
+    // Only the preview is downscaled, never the saved file.
+    if (!isStructured(result)) return;
+    const preview = (result.details as { imagePreviews: Array<{ base64: string }> })
+      .imagePreviews[0];
+    const previewMeta = await sharp(Buffer.from(preview?.base64 ?? "", "base64")).metadata();
+    expect(previewMeta.width).toBeLessThan(1254);
+    expect(previewMeta.hasAlpha).toBe(true);
+  });
+
+  it("confirms the size when the request was honoured", async () => {
+    const png = await transparentPng(1024, 1024);
+    globalThis.fetch = vi
+      .fn()
+      .mockResolvedValue(
+        makeImageResponse([png.toString("base64")]),
+      ) as unknown as typeof globalThis.fetch;
+    const { createGenerateImageTool } = await import("./generate-image.js");
+    const tool = createGenerateImageTool(tmpDir, fakeAuth());
+    const result = await tool.execute({ prompt: "an icon", size: "1024x1024" }, ctx());
+    expect(textBlocks(result)[1]).toBe("Size: 1024x1024, as requested.");
+  });
+
+  it("reports the size OpenAI chose when none was requested", async () => {
+    const png = await transparentPng(1536, 1024);
+    globalThis.fetch = vi
+      .fn()
+      .mockResolvedValue(
+        makeImageResponse([png.toString("base64")]),
+      ) as unknown as typeof globalThis.fetch;
+    const { createGenerateImageTool } = await import("./generate-image.js");
+    const tool = createGenerateImageTool(tmpDir, fakeAuth());
+    const result = await tool.execute({ prompt: "a banner" }, ctx());
+    expect(textBlocks(result)[1]).toBe("Size: 1536x1024 (size auto, chosen by OpenAI).");
+  });
+});
+
+describe("generate_image — retries (Codex's policy)", () => {
+  /** Retry seams with no real waiting: records each wait, jitter factor exactly 1. */
+  function instantRetry(now = 0) {
+    const waits: number[] = [];
+    return {
+      waits,
+      deps: {
+        sleep: async (ms: number) => {
+          waits.push(ms);
+        },
+        random: () => 0.5,
+        now: () => now,
+      },
+    };
+  }
+
+  const serverError = (status: number, headers?: Record<string, string>): Response =>
+    new Response(JSON.stringify({ detail: "upstream hiccup" }), { status, headers });
+
+  it("retries a 5xx with Codex's backoff, then succeeds", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(serverError(502))
+      .mockResolvedValueOnce(serverError(503))
+      .mockResolvedValueOnce(makeImageResponse([TINY_PNG_B64]));
+    globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
+    const { waits, deps } = instantRetry();
+    const { createGenerateImageTool } = await import("./generate-image.js");
+    const tool = createGenerateImageTool(tmpDir, fakeAuth(), deps);
+
+    const result = await tool.execute({ prompt: "a cat" }, ctx());
+    expect(isStructured(result)).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(waits).toEqual([200, 400]);
+    // Every attempt is the same request.
+    const bodies = fetchMock.mock.calls.map(([, init]) => (init as RequestInit).body);
+    expect(new Set(bodies).size).toBe(1);
+  });
+
+  it("gives up after 4 retries (5 attempts) and says so", async () => {
+    const fetchMock = vi.fn().mockImplementation(async () => serverError(500));
+    globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
+    const { waits, deps } = instantRetry();
+    const { createGenerateImageTool } = await import("./generate-image.js");
+    const tool = createGenerateImageTool(tmpDir, fakeAuth(), deps);
+
+    const result = await tool.execute({ prompt: "a cat" }, ctx());
+    expect(fetchMock).toHaveBeenCalledTimes(5);
+    expect(waits).toEqual([200, 400, 800, 1600]);
+    expect(await failureText(result)).toContain(
+      "OpenAI Image API (500) after 5 attempts: upstream hiccup",
+    );
+  });
+
+  it("retries a dropped connection", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockRejectedValueOnce(new TypeError("fetch failed"))
+      .mockResolvedValueOnce(makeImageResponse([TINY_PNG_B64]));
+    globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
+    const { waits, deps } = instantRetry();
+    const { createGenerateImageTool } = await import("./generate-image.js");
+    const tool = createGenerateImageTool(tmpDir, fakeAuth(), deps);
+
+    expect(isStructured(await tool.execute({ prompt: "a cat" }, ctx()))).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(waits).toEqual([200]);
+  });
+
+  it.each([400, 403, 429])("never retries a %d", async (status) => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(new Response(JSON.stringify({ detail: "no" }), { status }));
+    globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
+    const { waits, deps } = instantRetry();
+    const { createGenerateImageTool } = await import("./generate-image.js");
+    const tool = createGenerateImageTool(tmpDir, fakeAuth(), deps);
+
+    await tool.execute({ prompt: "a cat" }, ctx());
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(waits).toEqual([]);
+  });
+
+  it("waits as long as Retry-After says, in seconds or as an HTTP date", async () => {
+    const now = Date.parse("2026-10-17T00:00:00Z");
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(serverError(503, { "retry-after": "3" }))
+      .mockResolvedValueOnce(serverError(503, { "retry-after": "Sat, 17 Oct 2026 00:00:07 GMT" }))
+      .mockResolvedValueOnce(makeImageResponse([TINY_PNG_B64]));
+    globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
+    const { waits, deps } = instantRetry(now);
+    const { createGenerateImageTool } = await import("./generate-image.js");
+    const tool = createGenerateImageTool(tmpDir, fakeAuth(), deps);
+
+    await tool.execute({ prompt: "a cat" }, ctx());
+    expect(waits).toEqual([3000, 7000]);
+  });
+
+  it("stops without another request when the run is cancelled mid-wait", async () => {
+    const fetchMock = vi.fn().mockImplementation(async () => serverError(502));
+    globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
+    const controller = new AbortController();
+    const { createGenerateImageTool } = await import("./generate-image.js");
+    const tool = createGenerateImageTool(tmpDir, fakeAuth(), {
+      sleep: async (_ms, signal) => {
+        controller.abort();
+        throw signal.reason;
+      },
+    });
+
+    const result = await tool.execute({ prompt: "a cat" }, ctx(controller.signal));
+    expect(result).toEqual({ content: "Image generation aborted.", isError: true });
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it("jitters the backoff by at most 10% either way", async () => {
+    const { retryDelayMs } = await import("./generate-image.js");
+    const at = (random: number): number =>
+      retryDelayMs(3, null, { random: () => random, now: () => 0 });
+    expect(at(0)).toBe(720);
+    expect(at(0.999999)).toBe(879);
+  });
+});
+
+describe("sizeReport", () => {
+  it("names each image when a batch came back at different sizes", async () => {
+    const { sizeReport } = await import("./generate-image.js");
+    const text = sizeReport(
+      "2048x2048",
+      ["a.png", "b.png"],
+      [
+        { width: 2048, height: 2048 },
+        { width: 1254, height: 1254 },
+      ],
+      [undefined, undefined],
+    );
+    expect(text).toContain(
+      "requested 2048x2048, but OpenAI returned a.png: 2048x2048, b.png: 1254x1254",
+    );
+  });
+
+  it("adds the response's own size claim when it disagrees with the pixels", async () => {
+    const { sizeReport } = await import("./generate-image.js");
+    expect(
+      sizeReport("2048x2048", ["a.png"], [{ width: 1254, height: 1254 }], ["2048x2048"]),
+    ).toContain("OpenAI's response reported 2048x2048.");
+  });
+
+  it("says so when the saved image cannot be measured", async () => {
+    const { sizeReport } = await import("./generate-image.js");
+    expect(sizeReport("2048x2048", ["a.png"], [null], [undefined])).toBe(
+      "Requested 2048x2048, but the saved image could not be measured to confirm its size.",
+    );
+  });
+});
+
+describe("generate_image — edit (with image input)", () => {
+  it("sends the reference image to the edits endpoint as a data URL", async () => {
+    const refPath = path.join(tmpDir, "input.png");
+    await mkdir(path.dirname(refPath), { recursive: true });
+    await writeFile(refPath, TINY_PNG);
+
+    const fetchMock = vi.fn().mockResolvedValue(makeImageResponse([TINY_PNG_B64]));
+    globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
+
+    const { createGenerateImageTool } = await import("./generate-image.js");
+    const tool = createGenerateImageTool(tmpDir, fakeAuth());
+    const result = await tool.execute(
+      { prompt: "make the background darker", image: refPath },
+      ctx(),
+    );
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+    const [url] = fetchMock.mock.calls[0]!;
+    expect(url).toBe("https://chatgpt.com/backend-api/codex/images/edits");
+    expect(JSON.parse(fetchMock.mock.calls[0]![1].body)).toEqual({
+      images: [{ image_url: `data:image/png;base64,${TINY_PNG_B64}` }],
+      prompt: "make the background darker",
+      background: "opaque",
+      model: "gpt-image-2",
+      quality: "auto",
+      size: "auto",
+    });
+    expect(isStructured(result)).toBe(true);
+  });
+
+  it("sends several references in order, each with its own media type", async () => {
+    const subject = path.join(tmpDir, "subject.png");
+    const style = path.join(tmpDir, "style.jpg");
+    await writeFile(subject, TINY_PNG);
+    await writeFile(style, TINY_PNG);
+    const fetchMock = vi.fn().mockResolvedValue(makeImageResponse([TINY_PNG_B64]));
+    globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
+
+    const { createGenerateImageTool } = await import("./generate-image.js");
+    const tool = createGenerateImageTool(tmpDir, fakeAuth());
+    await tool.execute(
+      { prompt: "paint the subject in this style", images: [subject, style] },
+      ctx(),
+    );
+
+    const body = JSON.parse(fetchMock.mock.calls[0]![1].body);
+    expect(body.images.map((i: { image_url: string }) => i.image_url.split(";")[0])).toEqual([
+      "data:image/png",
+      "data:image/jpeg",
+    ]);
+  });
+
+  it("refuses image and images together, and unsupported reference types, without a request", async () => {
+    const fetchMock = vi.fn();
+    globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
+    const { createGenerateImageTool } = await import("./generate-image.js");
+    const tool = createGenerateImageTool(tmpDir, fakeAuth());
+
+    expect(
+      errorText(await tool.execute({ prompt: "x", image: "a.png", images: ["b.png"] }, ctx())),
+    ).toContain("not both");
+    expect(errorText(await tool.execute({ prompt: "x", image: "notes.txt" }, ctx()))).toContain(
+      "only PNG, JPEG, GIF, WebP and BMP",
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("returns a helpful error when the image path does not exist", async () => {
+    const { createGenerateImageTool } = await import("./generate-image.js");
+    const tool = createGenerateImageTool(tmpDir, fakeAuth());
+    const result = await tool.execute(
+      { prompt: "edit this", image: path.join(tmpDir, "nonexistent.png") },
+      ctx(),
+    );
+    expect(await failureText(result)).toContain("Could not read");
+  });
+});
+
+describe("generate_image — error handling", () => {
+  it("refuses a transparent JPEG before spending any quota", async () => {
+    const fetchMock = vi.fn();
+    globalThis.fetch = fetchMock;
+    const auth = fakeAuth();
+    const credentials = vi.spyOn(auth, "resolveCredentials");
+    const { createGenerateImageTool } = await import("./generate-image.js");
+    const tool = createGenerateImageTool(tmpDir, auth);
+    const result = await tool.execute(
+      { prompt: "a logo", background: "transparent", output_format: "jpeg" },
+      ctx(),
+    );
+    const text = errorText(result);
+    expect(text).toContain("JPEG cannot store transparency");
+    expect(text).toContain("No request was sent");
+    expect(credentials).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("explains a used-up image quota with its reset time and stops the batch", async () => {
+    // The 429 shape openai/codex's usage-limit test replays.
+    const resetAt = 1_786_150_800;
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          error: {
+            type: "usage_limit_reached",
+            message: "image limit reached",
+            resets_at: resetAt,
+            plan_type: "plus",
+          },
+        }),
+        { status: 429 },
+      ),
+    );
+    globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
+    const { createGenerateImageTool } = await import("./generate-image.js");
+    const tool = createGenerateImageTool(tmpDir, fakeAuth());
+    const result = await tool.execute({ prompt: "a cat", n: 3 }, ctx());
+    const text = await failureText(result);
+    expect(text).toContain("reached its image generation limit");
+    expect(text).toContain(new Date(resetAt * 1000).toISOString());
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it("returns a user-facing message when OpenAI is not connected", async () => {
+    const { createGenerateImageTool } = await import("./generate-image.js");
+    const tool = createGenerateImageTool(tmpDir, noAuth());
+    const result = await tool.execute({ prompt: "a cat" }, ctx());
+    expect(await failureText(result)).toContain("not connected");
+  });
+
+  it("returns a user-facing message on API error (non-200)", async () => {
+    globalThis.fetch = vi
+      .fn()
+      .mockResolvedValue(
+        new Response(JSON.stringify({ detail: "content moderation blocked" }), { status: 400 }),
+      ) as unknown as typeof globalThis.fetch;
+
+    const { createGenerateImageTool } = await import("./generate-image.js");
+    const tool = createGenerateImageTool(tmpDir, fakeAuth());
+    const result = await tool.execute({ prompt: "blocked content" }, ctx());
+    const text = await failureText(result);
+    expect(text).toContain("failed");
+    expect(text).toContain("moderation");
+  });
+
+  it.each([
+    ["free", "not included with a free ChatGPT plan"],
+    ["plus", "does not appear to include image generation"],
+  ])("explains a 403 on a %s plan instead of echoing Forbidden", async (plan, expected) => {
+    // A free ChatGPT login gets a bare `{"detail":"Forbidden"}` for every image
+    // request (seen live, 2026-10-17).
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(new Response(JSON.stringify({ detail: "Forbidden" }), { status: 403 }));
+    globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
+    const auth: GenerateImageAuth = {
+      async resolveCredentials() {
+        return { accessToken: tokenForPlan(plan), accountId: "acct-123" };
+      },
+    };
+
+    const { createGenerateImageTool } = await import("./generate-image.js");
+    const tool = createGenerateImageTool(tmpDir, auth);
+    const result = await tool.execute({ prompt: "a cat", n: 3 }, ctx());
+    const text = errorText(result);
+    expect(text).toContain(expected);
+    expect(text).toContain("will not help");
+    // A refused account stops at the first request rather than burning n.
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it("returns empty-results message when API succeeds but returns no image data", async () => {
+    globalThis.fetch = vi
+      .fn()
+      .mockResolvedValue(makeImageResponse([])) as unknown as typeof globalThis.fetch;
+
+    const { createGenerateImageTool } = await import("./generate-image.js");
+    const tool = createGenerateImageTool(tmpDir, fakeAuth());
+    const result = await tool.execute({ prompt: "something" }, ctx());
+    expect(await failureText(result)).toContain("no results");
+  });
+
+  it("respects abort signal before making the API call", async () => {
+    const ac = new AbortController();
+    ac.abort();
+    const { createGenerateImageTool } = await import("./generate-image.js");
+    const tool = createGenerateImageTool(tmpDir, fakeAuth());
+    const result = await tool.execute({ prompt: "a cat" }, ctx(ac.signal));
+    expect(await failureText(result)).toContain("aborted");
+  });
+});
+
+describe("generate_image — saved originals survive failures (Local Fork)", () => {
+  const sha = (bytes: Buffer): string => createHash("sha256").update(bytes).digest("hex");
+  const joinedText = (result: StructuredToolResult): string =>
+    typeof result.content === "string"
+      ? result.content
+      : result.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n");
 
   it.each(["HTTP400", "EEXIST", "empty"] as const)(
     "preserves completed originals after a later %s failure",
@@ -339,15 +785,15 @@ describe("generate_image — generation (no image input)", () => {
       if (failure === "EEXIST") await writeFile(collision, existing);
       const fetchMock = vi
         .fn()
-        .mockResolvedValueOnce(makeImageSSEResponse([TINY_PNG_B64]))
+        .mockResolvedValueOnce(makeImageResponse([TINY_PNG_B64]))
         .mockImplementationOnce(async () => {
           // Persistence must happen before the next provider request begins.
           expect(await readFile(first)).toEqual(TINY_PNG);
           return failure === "HTTP400"
             ? new Response(JSON.stringify({ detail: "unsupported request" }), { status: 400 })
-            : makeImageSSEResponse(failure === "empty" ? [] : [TINY_PNG_B64]);
+            : makeImageResponse(failure === "empty" ? [] : [TINY_PNG_B64]);
         });
-      globalThis.fetch = fetchMock;
+      globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
       const { createGenerateImageTool } = await import("./generate-image.js");
       const result = await createGenerateImageTool(tmpDir, fakeAuth()).execute(
         { prompt: "two icons", n: 2, out_path: path.join(tmpDir, "batch.png"), size: "1024x1024" },
@@ -362,21 +808,14 @@ describe("generate_image — generation (no image input)", () => {
         requestedCount: 2,
         savedCount: 1,
         savedPaths: [first],
-        sizing: [{ path: first, actual: "1x1", status: "mismatched" }],
       });
-      const text =
-        typeof result.content === "string"
-          ? result.content
-          : result.content
-              .filter((part) => part.type === "text")
-              .map((part) => part.text)
-              .join("\n");
+      const text = joinedText(result);
       expect(text).toContain("Partial completion: saved 1 of 2");
       expect(text).toContain(first);
       expect(text).toContain(
-        failure === "HTTP400" ? "400" : failure === "EEXIST" ? "EEXIST" : "no image results",
+        failure === "HTTP400" ? "400" : failure === "EEXIST" ? "EEXIST" : "no results",
       );
-      expect(text).toContain("Exact-size verification failed");
+      expect(text).toContain("Size mismatch: requested 1024x1024, but OpenAI returned 1x1.");
       expect(text).toContain("No retry or fallback");
       expect(result.imageResult?.images.map((image) => image.path)).toEqual([first]);
       expect(
@@ -390,13 +829,13 @@ describe("generate_image — generation (no image input)", () => {
     const first = path.join(tmpDir, "cancel_0.png");
     const fetchMock = vi
       .fn()
-      .mockResolvedValueOnce(makeImageSSEResponse([TINY_PNG_B64]))
+      .mockResolvedValueOnce(makeImageResponse([TINY_PNG_B64]))
       .mockImplementationOnce(async () => {
         expect(await readFile(first)).toEqual(TINY_PNG);
         controller.abort();
         throw controller.signal.reason;
       });
-    globalThis.fetch = fetchMock;
+    globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
     const { createGenerateImageTool } = await import("./generate-image.js");
     const result = await createGenerateImageTool(tmpDir, fakeAuth()).execute(
       { prompt: "two icons", n: 2, out_path: path.join(tmpDir, "cancel.png") },
@@ -410,11 +849,7 @@ describe("generate_image — generation (no image input)", () => {
       savedPaths: [first],
       failure: "Image generation aborted.",
     });
-    expect(
-      createHash("sha256")
-        .update(await readFile(first))
-        .digest("hex"),
-    ).toBe(createHash("sha256").update(TINY_PNG).digest("hex"));
+    expect(sha(await readFile(first))).toBe(sha(TINY_PNG));
     expect(result.imageResult?.images.map((image) => image.path)).toEqual([first]);
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
@@ -424,8 +859,8 @@ describe("generate_image — generation (no image input)", () => {
     vi.spyOn(images, "downscaleForPreview").mockRejectedValueOnce(
       new Error("offline preview failure"),
     );
-    const fetchMock = vi.fn().mockImplementation(async () => makeImageSSEResponse([TINY_PNG_B64]));
-    globalThis.fetch = fetchMock;
+    const fetchMock = vi.fn().mockImplementation(async () => makeImageResponse([TINY_PNG_B64]));
+    globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
     const { createGenerateImageTool } = await import("./generate-image.js");
     const result = await createGenerateImageTool(tmpDir, fakeAuth()).execute(
       { prompt: "two icons", n: 2, out_path: path.join(tmpDir, "preview.png") },
@@ -442,30 +877,41 @@ describe("generate_image — generation (no image input)", () => {
     expect(text).toContain("No retry or fallback");
     for (const file of paths) {
       expect(text).toContain(file);
-      expect(
-        createHash("sha256")
-          .update(await readFile(file))
-          .digest("hex"),
-      ).toBe(createHash("sha256").update(TINY_PNG).digest("hex"));
+      expect(sha(await readFile(file))).toBe(sha(TINY_PNG));
     }
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("never overwrites an existing file, including the image being edited", async () => {
+    const source = path.join(tmpDir, "source.png");
+    await writeFile(source, TINY_PNG);
+    globalThis.fetch = vi
+      .fn()
+      .mockResolvedValue(makeImageResponse([TINY_PNG_B64])) as unknown as typeof globalThis.fetch;
+    const { createGenerateImageTool } = await import("./generate-image.js");
+    const result = await createGenerateImageTool(tmpDir, fakeAuth()).execute(
+      { prompt: "edit", image: source, out_path: source },
+      ctx(),
+    );
+    expect(await failureText(result)).toContain("EEXIST");
+    expect(sha(await readFile(source))).toBe(sha(TINY_PNG));
   });
 
   it("round-trips two distinct originals with spaces and commas through the agent and session storage", async () => {
     const { default: sharp } = await import("sharp");
     const originals = await Promise.all(
       ["red", "blue"].map((background) =>
-        sharp({
-          create: { width: 8, height: 8, channels: 3, background },
-        })
+        sharp({ create: { width: 8, height: 8, channels: 3, background } })
           .png()
           .toBuffer(),
       ),
     );
     globalThis.fetch = vi
       .fn()
-      .mockResolvedValueOnce(makeImageSSEResponse([originals[0]!.toString("base64")]))
-      .mockResolvedValueOnce(makeImageSSEResponse([originals[1]!.toString("base64")]));
+      .mockResolvedValueOnce(makeImageResponse([originals[0]?.toString("base64") ?? ""]))
+      .mockResolvedValueOnce(
+        makeImageResponse([originals[1]?.toString("base64") ?? ""]),
+      ) as unknown as typeof globalThis.fetch;
     const { createGenerateImageTool } = await import("./generate-image.js");
     const outPath = path.join(tmpDir, "my images, originals", "two colours, original.png");
     vi.mocked(stream).mockReturnValueOnce(
@@ -501,15 +947,13 @@ describe("generate_image — generation (no image input)", () => {
     }
     const result = messages.flatMap((message) =>
       message.role === "tool" ? message.content : [],
-    )[0]!;
+    )[0];
+    if (!result) throw new Error("Expected a tool result");
     expect(result.isError).not.toBe(true);
     expect(result.imageResult?.images).toHaveLength(2);
-    expect(
-      Array.isArray(result.content) && result.content.filter((block) => block.type === "image"),
-    ).toHaveLength(1);
     const paths = [0, 1].map((i) => outPath.replace(/\.png$/, `_${i}.png`));
     expect(result.imageResult?.images.map((image) => image.path)).toEqual(paths);
-    const hashes = originals.map((bytes) => createHash("sha256").update(bytes).digest("hex"));
+    const hashes = originals.map(sha);
     expect(hashes[0]).not.toBe(hashes[1]);
     const manager = new SessionManager(path.join(tmpDir, "sessions"));
     const saved = await manager.create(tmpDir, "openai", "offline");
@@ -524,332 +968,18 @@ describe("generate_image — generation (no image input)", () => {
       const loaded = await new SessionManager(path.join(tmpDir, "sessions")).load(saved.path);
       const restored = loaded.entries.flatMap((entry) =>
         entry.type === "message" && entry.message.role === "tool" ? entry.message.content : [],
-      )[0]!;
-      const images = await restoreToolImages(restored);
-      expect(images.map((image) => image.path)).toEqual(paths);
-      expect(images.map((image) => image.src)).toEqual(
-        result.imageResult!.images.map((image) => `data:${image.mediaType};base64,${image.data}`),
+      )[0];
+      if (!restored) throw new Error("Expected a restored tool result");
+      const restoredImages = await restoreToolImages(restored);
+      expect(restoredImages.map((image) => image.path)).toEqual(paths);
+      expect(restoredImages.map((image) => image.src)).toEqual(
+        (result.imageResult?.images ?? []).map(
+          (image) => `data:${image.mediaType};base64,${image.data}`,
+        ),
       );
       for (const [i, originalPath] of paths.entries()) {
-        expect(
-          createHash("sha256")
-            .update(await readFile(originalPath))
-            .digest("hex"),
-        ).toBe(hashes[i]);
+        expect(sha(await readFile(originalPath))).toBe(hashes[i]);
       }
     }
-  });
-
-  it("saves the image to out_path when provided", async () => {
-    globalThis.fetch = vi
-      .fn()
-      .mockResolvedValue(
-        makeImageSSEResponse([TINY_PNG_B64]),
-      ) as unknown as typeof globalThis.fetch;
-
-    const { createGenerateImageTool } = await import("./generate-image.js");
-    const outPath = path.join(tmpDir, "custom.png");
-    const tool = createGenerateImageTool(tmpDir, fakeAuth());
-    await tool.execute({ prompt: "a logo", out_path: outPath }, ctx());
-
-    const saved = await readFile(outPath);
-    expect(saved.length).toBe(TINY_PNG.length);
-  });
-});
-
-describe("generate_image — edit (with image input)", () => {
-  it.each([undefined, "gpt-image-2.5-flare", "gpt-image-2.5-sunburst"] as const)(
-    "includes the reference image and sets action to edit with model %s",
-    async (model) => {
-      const refPath = path.join(tmpDir, "input.png");
-      await mkdir(path.dirname(refPath), { recursive: true });
-      await writeFile(refPath, TINY_PNG);
-
-      const fetchMock = vi.fn().mockResolvedValue(makeImageSSEResponse([TINY_PNG_B64]));
-      globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
-
-      const { createGenerateImageTool } = await import("./generate-image.js");
-      const tool = createGenerateImageTool(tmpDir, fakeAuth());
-      const result = await tool.execute(
-        { prompt: "make the background darker", image: refPath, model },
-        ctx(),
-      );
-
-      expect(fetchMock).toHaveBeenCalledOnce();
-      const [url] = fetchMock.mock.calls[0]!;
-      expect(url).toBe("https://chatgpt.com/backend-api/codex/responses");
-
-      const body = JSON.parse(fetchMock.mock.calls[0]![1].body);
-      expect(body.tools[0].action).toBe("edit");
-      expect(body.model).toBe("gpt-6-astra");
-      expect(fetchMock.mock.calls[0]![1].headers).not.toHaveProperty(
-        "X-OpenAI-Internal-Codex-Responses-Lite",
-      );
-      expect(body.tools[0].model).toBe(model ?? "gpt-image-2.5-flare");
-
-      // The input should have both text and input_image
-      const inputContent = body.input[0].content;
-      expect(inputContent).toHaveLength(2);
-      expect(inputContent[0].type).toBe("input_text");
-      expect(inputContent[1].type).toBe("input_image");
-      expect(inputContent[1].image_url).toContain("data:image/png;base64,");
-
-      expect(isStructured(result)).toBe(true);
-    },
-  );
-
-  it("returns a helpful error when the image path does not exist", async () => {
-    const { createGenerateImageTool } = await import("./generate-image.js");
-    const tool = createGenerateImageTool(tmpDir, fakeAuth());
-    const result = await tool.execute(
-      { prompt: "edit this", image: path.join(tmpDir, "nonexistent.png") },
-      ctx(),
-    );
-    expect(result).toMatchObject({ isError: true });
-    expect(await failureText(result)).toContain("Could not read");
-  });
-});
-
-describe("generate_image — error handling", () => {
-  it.each([undefined, "gpt-image-2.5-flare", "gpt-image-2.5-sunburst"] as const)(
-    "rejects stale transparent requests for %s before credentials or provider usage",
-    async (model) => {
-      const fetchMock = vi.fn();
-      globalThis.fetch = fetchMock;
-      const { createGenerateImageTool } = await import("./generate-image.js");
-      const auth = fakeAuth();
-      const credentials = vi.spyOn(auth, "resolveCredentials");
-      const tool = createGenerateImageTool(tmpDir, auth);
-      for (const output_format of [undefined, "png", "webp", "jpeg"]) {
-        for (const image of [undefined, "nonexistent-reference.png"]) {
-          for (let attempt = 0; attempt < 2; attempt++) {
-            // Serialized stale input deliberately bypasses the current public schema.
-            const args = JSON.parse(
-              JSON.stringify({
-                prompt: "a logo",
-                model,
-                background: "transparent",
-                output_format,
-                image,
-              }),
-            );
-            const result = await tool.execute(args, ctx());
-            expect(await failureText(result)).toBe(
-              "Transparent backgrounds are currently unsupported by the connected ChatGPT/Codex " +
-                "image backend for both Flare and Sunburst, including PNG and WebP output. " +
-                "No request was sent. Do not retry with another model or format. " +
-                "Explain this limitation to the user; do not silently substitute an opaque background.",
-            );
-          }
-        }
-      }
-      expect(credentials).not.toHaveBeenCalled();
-      expect(fetchMock).not.toHaveBeenCalled();
-      expect(await readdir(tmpDir)).toEqual([]);
-    },
-  );
-
-  it.each([
-    [1024, 1024, "matched"],
-    [1536, 1024, "mismatched"],
-    [1254, 1254, "mismatched"],
-  ] as const)("reports original %ix%i dimensions honestly (%s)", async (width, height, status) => {
-    const { default: sharp } = await import("sharp");
-    const bytes = await sharp({ create: { width, height, channels: 3, background: "red" } })
-      .png()
-      .toBuffer();
-    const fetchMock = vi.fn().mockResolvedValue(makeImageSSEResponse([bytes.toString("base64")]));
-    globalThis.fetch = fetchMock;
-    const { createGenerateImageTool } = await import("./generate-image.js");
-    const out = path.join(tmpDir, "dimensions.png");
-    const result = await createGenerateImageTool(tmpDir, fakeAuth()).execute(
-      { prompt: "a square", size: "1024x1024", out_path: out },
-      ctx(),
-    );
-    if (!isStructured(result)) throw new Error("Expected saved image result");
-    expect(result.isError).not.toBe(true);
-    expect(await readFile(out)).toEqual(bytes);
-    expect(result.details).toMatchObject({
-      sizing: [{ path: out, requested: "1024x1024", actual: `${width}x${height}`, status }],
-    });
-    if (typeof result.content === "string") throw new Error("Expected image content array");
-    const text = result.content
-      .filter((part) => part.type === "text")
-      .map((part) => part.text)
-      .join("\n");
-    expect(text).toContain(`Requested: 1024x1024; actual: ${width}x${height}`);
-    if (status === "mismatched") {
-      expect(text).toContain("WARNING: Image saved, requested dimensions not met");
-      expect(text).toContain("Exact-size verification failed");
-      expect(text).not.toContain("Requested dimensions matched");
-    } else {
-      expect(text).toContain("Requested dimensions matched");
-      expect(text).not.toContain("WARNING");
-    }
-    expect(fetchMock).toHaveBeenCalledOnce();
-    expect(JSON.parse(fetchMock.mock.calls[0]![1].body).tools[0].size).toBe("1024x1024");
-  });
-
-  it("returns a user-facing message when OpenAI is not connected", async () => {
-    const { createGenerateImageTool } = await import("./generate-image.js");
-    const tool = createGenerateImageTool(tmpDir, noAuth());
-    const result = await tool.execute({ prompt: "a cat" }, ctx());
-    expect(result).toMatchObject({ isError: true });
-    expect(await failureText(result)).toContain("not connected");
-    expect(globalThis.fetch).not.toHaveBeenCalled();
-  });
-
-  it("returns a user-facing message on API error (non-200)", async () => {
-    globalThis.fetch = vi.fn().mockResolvedValue(
-      new Response(
-        JSON.stringify({
-          detail: "content moderation blocked; sk-image-fixture-secret-1234567890",
-        }),
-        { status: 400 },
-      ),
-    ) as unknown as typeof globalThis.fetch;
-
-    const { createGenerateImageTool } = await import("./generate-image.js");
-    const tool = createGenerateImageTool(tmpDir, fakeAuth());
-    const result = await tool.execute({ prompt: "blocked content" }, ctx());
-    expect(result).toMatchObject({ isError: true });
-    expect(await failureText(result)).toContain("failed");
-    expect(await failureText(result)).toContain("moderation");
-    expect(await failureText(result)).toContain("[REDACTED]");
-    expect(globalThis.fetch).toHaveBeenCalledOnce();
-  });
-
-  it("returns empty-results message when API succeeds but returns no image data", async () => {
-    // SSE stream with no image_generation_call events
-    globalThis.fetch = vi
-      .fn()
-      .mockResolvedValue(makeImageSSEResponse([])) as unknown as typeof globalThis.fetch;
-
-    const { createGenerateImageTool } = await import("./generate-image.js");
-    const tool = createGenerateImageTool(tmpDir, fakeAuth());
-    const result = await tool.execute({ prompt: "something" }, ctx());
-    expect(result).toMatchObject({ isError: true });
-    expect(await failureText(result)).toBe(
-      "Image generation returned no image results from GPT-6 Astra. No fallback model was used.",
-    );
-    expect(await failureText(result)).not.toContain("moderation");
-    expect(globalThis.fetch).toHaveBeenCalledOnce();
-  });
-
-  it.each([
-    [
-      "response.failed",
-      { type: "response.failed", response: { error: { message: "Unsupported Astra image tool" } } },
-      "Unsupported Astra image tool",
-    ],
-    ["response.incomplete", { type: "response.incomplete" }, "incomplete"],
-    ["error", { type: "error", message: "quota exceeded" }, "quota exceeded"],
-    [
-      "outer substitution",
-      { type: "response.completed", response: { model: "gpt-5.5" } },
-      "substitution",
-    ],
-    [
-      "inner substitution",
-      {
-        type: "response.output_item.done",
-        item: {
-          type: "image_generation_call",
-          model: "gpt-image-2",
-          status: "completed",
-          result: TINY_PNG_B64,
-        },
-      },
-      "substitution",
-    ],
-  ])("rejects %s without fallback", async (_name, event, expected) => {
-    const fetchMock = vi.fn().mockResolvedValue(new Response(`data: ${JSON.stringify(event)}\n\n`));
-    globalThis.fetch = fetchMock;
-    const { createGenerateImageTool } = await import("./generate-image.js");
-    const result = await createGenerateImageTool(tmpDir, fakeAuth()).execute(
-      { prompt: "a square" },
-      ctx(),
-    );
-    expect(await failureText(result)).toContain(expected);
-    expect(fetchMock).toHaveBeenCalledOnce();
-    expect(JSON.parse(fetchMock.mock.calls[0]![1].body).model).toBe("gpt-6-astra");
-    expect(await readdir(tmpDir)).toEqual([]);
-  });
-
-  it("rejects malformed and truncated streams rather than reporting moderation", async () => {
-    const { createGenerateImageTool } = await import("./generate-image.js");
-    for (const data of [
-      "data: {broken}\n\n",
-      `data: ${JSON.stringify({ type: "response.output_item.done", item: { type: "image_generation_call", status: "completed", result: TINY_PNG_B64 } })}\n\n`,
-    ]) {
-      const fetchMock = vi.fn().mockResolvedValue(new Response(data));
-      globalThis.fetch = fetchMock;
-      const result = await createGenerateImageTool(tmpDir, fakeAuth()).execute(
-        { prompt: "a square" },
-        ctx(),
-      );
-      expect(await failureText(result)).toContain("failed");
-      expect(await failureText(result)).not.toContain("moderation");
-      expect(fetchMock).toHaveBeenCalledOnce();
-      expect(await readdir(tmpDir)).toEqual([]);
-    }
-  });
-
-  it("accepts fragmented events and an unterminated final completion event", async () => {
-    const data = await makeImageSSEResponse([TINY_PNG_B64]).text();
-    const bytes = new TextEncoder().encode(data.replace(/\n\ndata: \[DONE\]\n\n$/, ""));
-    globalThis.fetch = vi.fn().mockResolvedValue(
-      new Response(
-        new ReadableStream({
-          start(controller) {
-            for (let i = 0; i < bytes.length; i += 7) controller.enqueue(bytes.slice(i, i + 7));
-            controller.close();
-          },
-        }),
-      ),
-    );
-    const { createGenerateImageTool } = await import("./generate-image.js");
-    expect(
-      isStructured(
-        await createGenerateImageTool(tmpDir, fakeAuth()).execute({ prompt: "a square" }, ctx()),
-      ),
-    ).toBe(true);
-  });
-
-  it("rejects stream cancellation and never overwrites the input image", async () => {
-    const source = path.join(tmpDir, "source.png");
-    await writeFile(source, Buffer.from(TINY_PNG_B64, "base64"));
-    const { createGenerateImageTool } = await import("./generate-image.js");
-    globalThis.fetch = vi.fn().mockResolvedValue(makeImageSSEResponse([TINY_PNG_B64]));
-    const result = await createGenerateImageTool(tmpDir, fakeAuth()).execute(
-      { prompt: "edit", image: source, out_path: source },
-      ctx(),
-    );
-    expect(await failureText(result)).toContain("EEXIST");
-    expect((await readFile(source)).toString("base64")).toBe(TINY_PNG_B64);
-    const abort = new AbortController();
-    globalThis.fetch = vi.fn().mockImplementation(async () => {
-      abort.abort();
-      return makeImageSSEResponse([TINY_PNG_B64]);
-    });
-    expect(
-      await failureText(
-        await createGenerateImageTool(tmpDir, fakeAuth()).execute(
-          { prompt: "a square" },
-          ctx(abort.signal),
-        ),
-      ),
-    ).toContain("aborted");
-  });
-
-  it("respects abort signal before making the API call", async () => {
-    const ac = new AbortController();
-    ac.abort();
-    const { createGenerateImageTool } = await import("./generate-image.js");
-    const tool = createGenerateImageTool(tmpDir, fakeAuth());
-    const result = await tool.execute({ prompt: "a cat" }, ctx(ac.signal));
-    expect(result).toMatchObject({ isError: true });
-    expect(await failureText(result)).toContain("aborted");
-    expect(globalThis.fetch).not.toHaveBeenCalled();
   });
 });

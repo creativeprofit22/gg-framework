@@ -445,6 +445,21 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
     fs.chmodSync(requestLogPath, 0o600);
   }
 
+  // xAI caches per server: x-grok-conv-id routes one conversation's requests to
+  // the same server, so its cached prefix is actually reused. Without it Grok
+  // "often" bills full input price on a cache-cold server (docs.x.ai Grok 4.7
+  // guide; Chat Completions uses this header, prompt_cache_key is the
+  // Responses API's). Sent per request, not on the shared client, so sessions
+  // reuse one client.
+  const requestHeaders =
+    options.provider === "xai"
+      ? {
+          headers: {
+            "x-grok-conv-id": normalizePromptCacheKey(options.promptCacheKey ?? "ggcoder"),
+          },
+        }
+      : {};
+
   // Non-streaming fallback: issue a single request/response and synthesize
   // stream events from the final ChatCompletion. Used by the agent loop after
   // the streaming transport has stalled repeatedly -- flipping to a plain
@@ -453,6 +468,7 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
     try {
       const completion = (await client.chat.completions.create(requestParams, {
         signal: options.signal ?? undefined,
+        ...requestHeaders,
       })) as OpenAI.ChatCompletion;
       yield* synthesizeEventsFromCompletion(completion, !!options.thinking, endpointKey);
       return completionToResponse(completion, endpointKey);
@@ -465,6 +481,7 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
   try {
     stream = (await client.chat.completions.create(requestParams, {
       signal: options.signal ?? undefined,
+      ...requestHeaders,
     })) as AsyncIterable<OpenAI.ChatCompletionChunk>;
   } catch (err) {
     throw toError(err, providerName);

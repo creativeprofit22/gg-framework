@@ -25,8 +25,11 @@ export interface BackgroundProcess {
   exitCode: number | null;
   signal: NodeJS.Signals | null;
   lastReadOffset: number | null;
-  /** Unread one-shot wake, retained even if it fired before task_output waited. */
-  wakeReason?: "pattern" | "silence";
+  /** Unread wake, retained even if it fired before task_output waited. */
+  wakeReason?: WakeReason;
+  /** Log offset the wake is about. A read that reaches it consumes the wake;
+   *  one that started earlier does not (the wake fired mid-read). */
+  wakeOffset?: number;
   /** Last observed retained-log size, used by completion gates and notifications. */
   logSize: number;
   /** Why the manager stopped an adopted command on its own; null otherwise. */
@@ -120,6 +123,99 @@ const CHECKPOINT_TAIL_CHARS = 320;
 export const MAX_PROCESS_WAIT_MS = 600_000;
 /** Chars of the matched log line carried in a pattern-wake notification. */
 const WAKE_LINE_CHARS = 200;
+/**
+ * Most new log bytes one wake tick scans. A process that floods its log faster
+ * than this between ticks only has its latest output checked — that is where a
+ * fresh failure or readiness line is.
+ */
+const WAKE_SCAN_MAX_BYTES = 1024 * 1024;
+
+/** ANSI escape sequences: SGR colours, cursor movement, OSC titles/links. */
+// eslint-disable-next-line no-control-regex -- matching terminal escapes is the point
+const ANSI_ESCAPE = /\u001b\[[0-?]*[ -/]*[@-~]|\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)/g;
+
+/**
+ * Remove terminal colour and cursor codes. Test runners and CLIs colour their
+ * output, and a code can sit inside the very word a wake looks for:
+ * `\e[31mFAIL\e[0mED` never matches /FAILED/ until it is stripped.
+ */
+export function stripAnsi(text: string): string {
+  return text.replace(ANSI_ESCAPE, "");
+}
+
+/**
+ * Lines that mean "something failed" in the tools agents actually run in the
+ * background. Each one is anchored to a shape a tool prints, NOT a bare word:
+ * "error" or "failed" alone shows up in plenty of healthy output (file names,
+ * "0 failed", log levels), and a wake that cries wolf trains the agent to
+ * ignore it.
+ */
+const FAILURE_LINE_PATTERNS: readonly RegExp[] = [
+  // vitest / jest file results, pytest FAILED lines, go "FAIL\tpkg".
+  /^\s*FAIL(?:ED)?\b(?!\s*[:=]?\s*0\b)/,
+  // go test.
+  /^\s*--- FAIL:/,
+  // Summaries: vitest "Tests  2 failed | 8 passed", jest "Tests: 2 failed",
+  // pytest "==== 2 failed, 8 passed ====", mocha "2 failing".
+  /^\s*(?:Tests?:?|Test Files|=+)\s.*\b[1-9]\d* failed\b/,
+  /^\s*[1-9]\d* failing\b/,
+  // vitest's failed-test marker, esbuild's "✘ [ERROR]", Playwright's list
+  // reporter ("  ✘    5 e2e/a.spec.ts:9:5 › …", several spaces).
+  /^\s*[✗✘×]\s+\S/,
+  // TypeScript.
+  /\berror TS\d{3,5}:/,
+  // rustc / cargo.
+  /^error(?:\[E\d{4}\])?: \S/,
+  // npm / pnpm / yarn.
+  /^npm ERR! /,
+  /\bERR_PNPM_[A-Z_]+\b/,
+  /\bELIFECYCLE\b.*\bfailed\b/i,
+  // Python, Rust panics.
+  /^Traceback \(most recent call last\):/,
+  /\bpanicked at\b/,
+  // Uncaught JS errors at the start of a line ("TypeError: x is undefined").
+  /^\s*(?:Uncaught |Unhandled )?[A-Z][A-Za-z]*Error: \S/,
+  // Bundlers and build tools.
+  /^\s*BUILD FAILED\b/,
+  /\bBuild failed with \d+ errors?\b/,
+  // GitHub Actions log lines, and `gh run watch`'s failed-job row:
+  // "X test (windows-latest) in 3m2s (ID 123)".
+  /^##\[error\]/,
+  /\bProcess completed with exit code [1-9]\d*\b/,
+  /^X .+ \(ID \d+\)\s*$/,
+];
+
+/**
+ * The first line in `text` that looks like a tool reporting a failure, ANSI
+ * codes stripped, or undefined. Exported for tests.
+ */
+export function findFailureLine(text: string): string | undefined {
+  for (const raw of stripAnsi(text).split(/\r?\n|\r/)) {
+    if (raw.length > 4096) continue; // A minified blob, not a status line.
+    if (FAILURE_LINE_PATTERNS.some((pattern) => pattern.test(raw))) return raw;
+  }
+  return undefined;
+}
+
+/**
+ * The line holding the first match of `pattern` that ends inside `fresh`, where
+ * `seen` is overlap already scanned on an earlier tick. Matching across the
+ * boundary still counts (a line split between ticks), but a match lying wholly
+ * inside `seen` was already reported and must not fire again.
+ */
+function findFreshMatchLine(pattern: RegExp, seen: string, fresh: string): string | undefined {
+  const text = seen + fresh;
+  const boundary = seen.length;
+  const flags = pattern.flags.includes("g") ? pattern.flags : `${pattern.flags}g`;
+  for (const match of text.matchAll(new RegExp(pattern.source, flags))) {
+    const end = match.index + match[0].length;
+    if (end <= boundary && !(match[0].length === 0 && match.index >= boundary)) continue;
+    const lineStart = text.lastIndexOf("\n", match.index - 1) + 1;
+    const lineEnd = text.indexOf("\n", match.index);
+    return text.slice(lineStart, lineEnd === -1 ? undefined : lineEnd) || match[0];
+  }
+  return undefined;
+}
 
 /** One log line, whitespace-collapsed and tail-bounded — never the raw log. */
 function boundedLine(text: string): string {
@@ -138,22 +234,42 @@ function boundedLine(text: string): string {
  * or re-reading generic progress checkpoints hoping to spot the signal.
  */
 export interface WakeRules {
-  /** Wake the moment new log output matches this regex. One-shot. */
+  /** Wake whenever new log output matches this regex — every new match, not
+   *  just the first, so a dev server that breaks again after a fix is seen. */
   pattern?: RegExp;
   /** Wake when the process is still running but has logged nothing for this
    *  many milliseconds (a stalled build/hang detector). One-shot. */
   silenceMs?: number;
 }
 
+/** Why a wake fired. `failure` is the built-in detector, armed on every task. */
+export type WakeReason = "pattern" | "silence" | "failure";
+
+/** How a blocking wait on one background task ended. */
+export type WaitOutcome = "exited" | "timeout" | "unknown" | WakeReason | "other";
+
+export interface WaitResult {
+  reason: WaitOutcome;
+  /** For `other`: the notification about a different task that ended the wait. */
+  detail?: string;
+}
+
 interface WakeState {
   rules: WakeRules;
   /** Log offset already scanned for `pattern`; new bytes only. */
   scanOffset: number;
+  /** Log offset already scanned for failures; always a line boundary. */
+  failureOffset: number;
   /** Log size at the last tick that saw growth; drives the silence rule. */
   lastSize: number;
   lastGrowthAt: number;
-  matched: boolean;
   silenceFired: boolean;
+  /** The built-in failure detector is one-shot per task: the first failure is
+   *  the news; a run with fifty failing tests must not wake fifty times. */
+  failureFired: boolean;
+  /** The line the model's pattern last fired on (bounded), so a failure found
+   *  on that same line extends the pattern notice instead of replacing it. */
+  lastPatternLine?: string;
 }
 
 function tailDigest(text: string): string {
@@ -274,6 +390,9 @@ export class ProcessManager {
   private readonly lifecycle: ProcessLifecycleAdapter;
   private readonly createLogStream: (logFile: string) => Writable;
   private readonly options: ProcessManagerOptions;
+  /** Processes the agent or host is deliberately stopping: their non-zero exit
+   *  is the stop working, not news, so it must not raise an urgent alert. */
+  private stopping = new Set<string>();
 
   constructor(options?: ProcessManagerOptions);
   constructor(
@@ -384,6 +503,8 @@ export class ProcessManager {
   private notifyExit(proc: BackgroundProcess): void {
     const queue = this.options.notifications;
     if (!queue) return;
+    // A failed exit is news the agent must act on; a deliberate stop is not.
+    const urgent = proc.exitCode !== 0 && !this.stopping.has(proc.id);
     void (async () => {
       const size = proc.logSize;
       const tail = size > 0 ? await this.readTail(proc.logFile, size) : "";
@@ -397,7 +518,7 @@ export class ProcessManager {
           `after ${formatElapsed(this.now() - proc.startedAt)}` +
           `${tail ? `. Last output: ${tail}` : ""}. ` +
           `Read it with task_output id="${proc.id}".`,
-        { terminal: true },
+        { terminal: true, urgent },
       );
     })();
   }
@@ -419,34 +540,49 @@ export class ProcessManager {
   }
 
   /** Read the bytes of a log in `[start, end)` without loading the file. */
-  private async readRange(logFile: string, start: number, end: number): Promise<string> {
+  private async readBytes(logFile: string, start: number, end: number): Promise<Buffer> {
     try {
       const fh = await fsp.open(logFile, "r");
       try {
         const buf = Buffer.alloc(Math.max(0, end - start));
         const { bytesRead } = await fh.read(buf, 0, buf.length, start);
-        return buf.subarray(0, bytesRead).toString("utf-8");
+        return buf.subarray(0, bytesRead);
       } finally {
         await fh.close();
       }
     } catch {
-      return "";
+      return Buffer.alloc(0);
     }
   }
 
-  /** Arm one-shot model-declared match and silence notifications. */
-  private armWakeWatcher(proc: BackgroundProcess, rules: WakeRules): boolean {
-    if (!this.options.notifications) return false;
+  /**
+   * Wake watcher, evaluated every {@link WAKE_INTERVAL_MS}. Always runs the
+   * built-in failure detector (one-shot), plus the model's declared rules when
+   * a notification queue can deliver them: `pattern` fires on every new match,
+   * `silenceMs` once. It retires on exit, or once nothing is left that could
+   * still fire. Unlike the progress watcher it never backs off — a late match
+   * on a quiet dev server is precisely the point.
+   *
+   * Returns whether the model's declared rules were armed. Without a queue they
+   * are not (nothing could deliver them), but failure detection still releases
+   * a blocking `task_output` wait directly.
+   */
+  private armWakeWatcher(proc: BackgroundProcess, requested?: WakeRules): boolean {
+    const wantsRules = Boolean(requested && (requested.pattern || requested.silenceMs));
+    const rulesArmed = wantsRules && this.options.notifications !== undefined;
     const state: WakeState = {
-      rules,
+      rules: rulesArmed && requested ? requested : {},
       scanOffset: 0,
+      failureOffset: 0,
       lastSize: 0,
       lastGrowthAt: proc.startedAt,
-      matched: false,
       silenceFired: false,
+      failureFired: false,
     };
     this.wakeStates.set(proc.id, state);
-    const patternSource = rules.pattern?.source ?? "";
+    const patternSource = state.rules.pattern?.source ?? "";
+    // Re-scan a little before the last offset so a match straddling the tick
+    // boundary is still seen; the offset only ever advances to full size.
     const overlap = Math.min(256, patternSource.length + 16);
     const tick = (): void => {
       const timer = setTimeout(() => {
@@ -455,9 +591,11 @@ export class ProcessManager {
             this.disposeWakeWatcher(proc.id);
             return;
           }
+          // A pattern can always match again, so it keeps the watcher alive.
           const done =
-            (!state.rules.pattern || state.matched) &&
-            (!state.rules.silenceMs || state.silenceFired);
+            !state.rules.pattern &&
+            (!state.rules.silenceMs || state.silenceFired) &&
+            state.failureFired;
           if (done) {
             this.disposeWakeWatcher(proc.id);
             return;
@@ -469,7 +607,14 @@ export class ProcessManager {
       this.wakeWatchers.set(proc.id, timer);
     };
     tick();
-    return true;
+    return rulesArmed;
+  }
+
+  /** Record a wake on the process and release anyone blocked waiting on it. */
+  private fireWake(proc: BackgroundProcess, reason: WakeReason, offset: number): void {
+    proc.wakeReason = reason;
+    proc.wakeOffset = offset;
+    this.children.get(proc.id)?.emit("gg:wake", reason);
   }
 
   private async evaluateWakeRules(
@@ -478,27 +623,32 @@ export class ProcessManager {
     overlap: number,
   ): Promise<void> {
     const queue = this.options.notifications;
-    if (!queue) return;
     const size = await this.refreshLogSize(proc);
+    const gone = (): boolean => proc.exitCode !== null || !this.wakeStates.has(proc.id);
+
     if (size > state.lastSize) {
       state.lastSize = size;
       state.lastGrowthAt = this.now();
     }
     const { pattern, silenceMs } = state.rules;
-    if (pattern && !state.matched && size > state.scanOffset) {
-      const start = Math.max(0, state.scanOffset - overlap);
-      const chunk = await this.readRange(proc.logFile, start, size);
-      if (proc.exitCode !== null || !this.wakeStates.has(proc.id)) return;
-      state.scanOffset = size;
-      const match = pattern.exec(chunk);
-      if (match) {
-        state.matched = true;
+    if (pattern && queue && size > state.scanOffset) {
+      let start = Math.max(0, state.scanOffset - overlap);
+      if (size - start > WAKE_SCAN_MAX_BYTES) start = size - WAKE_SCAN_MAX_BYTES;
+      const buf = await this.readBytes(proc.logFile, start, size);
+      if (gone()) return;
+      const boundary = Math.max(0, Math.min(buf.length, state.scanOffset - start));
+      state.scanOffset = Math.max(state.scanOffset, start + buf.length);
+      const line = findFreshMatchLine(
+        pattern,
+        stripAnsi(buf.subarray(0, boundary).toString("utf-8")),
+        stripAnsi(buf.subarray(boundary).toString("utf-8")),
+      );
+      if (line !== undefined) {
+        state.lastPatternLine = boundedLine(line);
+        // The declared signal outranks generic progress: retire the progress
+        // watcher so its next tick cannot supersede this notification in the
+        // latest-only queue. Exit notifications come from the exit handler.
         this.disposeProgressWatcher(proc.id);
-        const line =
-          chunk
-            .slice(Math.max(0, match.index - WAKE_LINE_CHARS))
-            .split("\n")
-            .find((candidate) => pattern.test(candidate)) ?? match[0];
         queue.enqueue(
           "process",
           proc.id,
@@ -506,11 +656,57 @@ export class ProcessManager {
             `pattern /${pattern.source}/: ${boundedLine(line)}. Still running — ` +
             `task_output id="${proc.id}" for full context.`,
         );
-        proc.wakeReason = "pattern";
-        this.children.get(proc.id)?.emit("gg:wake", proc.wakeReason);
+        this.fireWake(proc, "pattern", state.scanOffset);
+      }
+    }
+
+    if (!state.failureFired && size > state.failureOffset) {
+      let start = state.failureOffset;
+      if (size - start > WAKE_SCAN_MAX_BYTES) start = size - WAKE_SCAN_MAX_BYTES;
+      const buf = await this.readBytes(proc.logFile, start, size);
+      if (gone()) return;
+      // Whole lines only: a line still being written is re-read next tick, so
+      // "FAI" + "LED" across two writes is still one failure line.
+      const lastNewline = buf.lastIndexOf(0x0a);
+      if (lastNewline >= 0) {
+        state.failureOffset = start + lastNewline + 1;
+        // Lines the agent has already read (task_output ran while this tick
+        // was reading) are not news; waking for them replays a seen failure.
+        const readTo = (proc.lastReadOffset ?? 0) - start;
+        const unreadStart = readTo <= 0 ? 0 : buf.lastIndexOf(0x0a, readTo - 1) + 1;
+        const line =
+          unreadStart >= lastNewline
+            ? undefined
+            : findFailureLine(buf.subarray(unreadStart, lastNewline).toString("utf-8"));
+        if (line !== undefined) {
+          state.failureFired = true;
+          this.disposeProgressWatcher(proc.id);
+          // The queue keeps one entry per task, so this notice replaces any
+          // pattern notice still pending. When both fired on the same line, say
+          // both: the agent asked for that pattern by name.
+          const shown = boundedLine(line);
+          const what =
+            pattern && state.lastPatternLine === shown
+              ? `produced output matching your wake pattern /${pattern.source}/ that also looks like a failure`
+              : "printed what looks like a failure";
+          queue?.enqueue(
+            "process",
+            proc.id,
+            `Background process ${proc.id} (${proc.command}) ${what}: ` +
+              `${shown}. Still running — read it with task_output id="${proc.id}", ` +
+              `then fix the cause, stop it, or keep waiting if the failure is expected.`,
+            { urgent: true },
+          );
+          this.fireWake(proc, "failure", state.failureOffset);
+        }
+      } else if (buf.length >= WAKE_SCAN_MAX_BYTES) {
+        // One enormous unterminated line (a progress bar redrawn with \r):
+        // skip it rather than re-reading a megabyte every tick.
+        state.failureOffset = start + buf.length;
       }
     }
     if (
+      queue &&
       silenceMs &&
       !state.silenceFired &&
       proc.exitCode === null &&
@@ -519,7 +715,7 @@ export class ProcessManager {
       state.silenceFired = true;
       this.disposeProgressWatcher(proc.id);
       const tail = await this.readTail(proc.logFile, size);
-      if (proc.exitCode !== null || !this.wakeStates.has(proc.id)) return;
+      if (gone()) return;
       queue.enqueue(
         "process",
         proc.id,
@@ -528,8 +724,7 @@ export class ProcessManager {
           `${tail ? `. Last output: ${tail}` : " (no output so far)"}. ` +
           `Check task_output id="${proc.id}" and decide whether to wait, send input, or stop it.`,
       );
-      proc.wakeReason = "silence";
-      this.children.get(proc.id)?.emit("gg:wake", proc.wakeReason);
+      this.fireWake(proc, "silence", size);
     }
   }
 
@@ -872,9 +1067,10 @@ export class ProcessManager {
         }
 
         const proc = tracking.register(pid, this.now());
-        const shouldArmWake =
-          !this.closing && (wake?.pattern !== undefined || wake?.silenceMs !== undefined);
-        const wakeArmed = shouldArmWake ? this.armWakeWatcher(proc, wake!) : false;
+        // Always armed: the built-in failure detector runs on every task, so a
+        // build or CI watcher that prints a failure but keeps running releases a
+        // waiting agent at once instead of at exit or the wait cap.
+        const wakeArmed = this.closing ? false : this.armWakeWatcher(proc, wake);
         startupSettled = true;
         resolve({ id, pid, logFile, wakeArmed });
       };
@@ -938,6 +1134,8 @@ export class ProcessManager {
     child.stdout?.resume();
     child.stderr?.resume();
     const proc = tracking.register(pid, startedAt);
+    // Handed-off commands get the same built-in failure detector as started ones.
+    if (!this.closing) this.armWakeWatcher(proc);
 
     // A leftover helper holding the pipes must not keep the task "running"
     // forever after the command itself exited.
@@ -1001,35 +1199,62 @@ export class ProcessManager {
     timeoutMs: number,
     signal?: AbortSignal,
     includeWake = true,
-  ): Promise<"exited" | "timeout" | "unknown" | "pattern" | "silence"> {
+  ): Promise<WaitOutcome> {
+    return (await this.waitForActivity(id, timeoutMs, signal, includeWake)).reason;
+  }
+
+  /**
+   * {@link waitForExitOrWake}, plus what ended it. Besides this task exiting or
+   * waking, the wait also ends when ANOTHER task raises an urgent notification
+   * (a different build failed, a child agent finished): the agent blocked here
+   * has no other way to learn that before its wait runs out. Terminal-only
+   * waits (`includeWake` false) observe exit alone.
+   */
+  async waitForActivity(
+    id: string,
+    timeoutMs: number,
+    signal?: AbortSignal,
+    includeWake = true,
+  ): Promise<WaitResult> {
     const proc = this.processes.get(id);
-    if (!proc) return "unknown";
+    if (!proc) return { reason: "unknown" };
     const child = this.children.get(id);
     const managedCompletion = this.completions.get(id);
-    if (proc.completedAt !== null || (!child && !managedCompletion)) return "exited";
-    if (signal?.aborted) return "timeout";
-    if (includeWake && proc.wakeReason) return proc.wakeReason;
+    if (proc.completedAt !== null || (!child && !managedCompletion)) return { reason: "exited" };
+    if (signal?.aborted) return { reason: "timeout" };
+    if (includeWake && proc.wakeReason) return { reason: proc.wakeReason };
     const bounded = Math.min(Math.max(timeoutMs, 0), MAX_PROCESS_WAIT_MS);
     return await new Promise((resolve) => {
       let settled = false;
-      const settle = (outcome: "exited" | "timeout" | "pattern" | "silence"): void => {
+      let unsubscribe: (() => void) | undefined;
+      const settle = (result: WaitResult): void => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
         child?.off("close", onClose);
         child?.off("gg:wake", onWake);
         signal?.removeEventListener("abort", onAbort);
-        resolve(outcome);
+        unsubscribe?.();
+        resolve(result);
       };
-      const onClose = (): void => settle("exited");
-      const onWake = (reason: "pattern" | "silence"): void => settle(reason);
-      const onAbort = (): void => settle("timeout");
-      const timer = setTimeout(() => settle("timeout"), bounded);
+      const onClose = (): void => settle({ reason: "exited" });
+      const onWake = (reason: WakeReason): void => settle({ reason });
+      // Give up the wait when the caller is cancelled; the process itself is
+      // left running — this only ends our observation of it.
+      const onAbort = (): void => settle({ reason: "timeout" });
+      const timer = setTimeout(() => settle({ reason: "timeout" }), bounded);
       timer.unref?.();
       if (managedCompletion) void managedCompletion.then(onClose);
-      else child!.once("close", onClose);
+      else child?.once("close", onClose);
       if (includeWake) child?.once("gg:wake", onWake);
       signal?.addEventListener("abort", onAbort, { once: true });
+      // This task's own alerts arrive above as exit/wake; only others count here.
+      if (includeWake && !settled) {
+        unsubscribe = this.options.notifications?.onUrgent((entry) => {
+          if (entry.kind === "process" && entry.id === id) return;
+          settle({ reason: "other", detail: entry.text });
+        });
+      }
     });
   }
 
@@ -1054,7 +1279,6 @@ export class ProcessManager {
       };
     }
 
-    delete proc.wakeReason;
     const configuredReadCap = Math.floor(this.options.readCapBytes ?? DEFAULT_READ_CAP_BYTES);
     const readCap = Number.isFinite(configuredReadCap)
       ? Math.max(4, configuredReadCap)
@@ -1119,11 +1343,21 @@ export class ProcessManager {
 
       skippedBytes = isLateSnapshot ? startOffset : 0;
       remainingBytes = Math.max(0, snapshotSize - endOffset);
+      // Consume the wake only once this read covers what it is about: a wake
+      // that fired while the read was in flight, for output past it, stays.
+      if ((proc.wakeOffset ?? 0) <= endOffset) {
+        delete proc.wakeReason;
+        delete proc.wakeOffset;
+      }
     } catch {
       output = "(failed to read log file)";
       const cursor = proc.lastReadOffset ?? 0;
       startOffset = cursor;
       endOffset = cursor;
+      // Unreadable log: a wake that can never be consumed would make every
+      // later wait return at once.
+      delete proc.wakeReason;
+      delete proc.wakeOffset;
     }
 
     return {
@@ -1219,6 +1453,9 @@ export class ProcessManager {
     if (!proc) return Promise.resolve(`No background process with id "${id}"`);
 
     const child = this.children.get(id);
+    // A deliberate stop is not news. An automatic stop (stuck-command guard)
+    // is: the agent did not ask for it, so its exit stays urgent.
+    if (child && !options.automatic) this.stopping.add(id);
     const operation = child
       ? this.performStop(id, proc, child)
       : this.reportCompletedProcess(id, proc);
@@ -1365,6 +1602,7 @@ export class ProcessManager {
     for (const proc of this.processes.values()) {
       const child = this.children.get(proc.id);
       if (child) {
+        this.stopping.add(proc.id);
         this.lifecycle.killProcessTree(processTarget(proc.pid, child));
       }
       this.disposeWatcher(proc.id);
@@ -1569,6 +1807,7 @@ export class ProcessManager {
     for (const [id, proc] of this.processes) {
       if (proc.completedAt !== null && !this.children.has(id) && proc.completedAt <= cutoff) {
         this.processes.delete(id);
+        this.stopping.delete(id);
         this.disposeWatcher(id);
         this.completions.delete(id);
         this.stopOperations.delete(id);

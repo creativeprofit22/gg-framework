@@ -4,6 +4,7 @@ import type { Provider, ThinkingLevel } from "@kenkaiiii/gg-ai";
 import type { AgentDefinition } from "../core/agents.js";
 import type { AgentSession } from "../core/agent-session.js";
 import { getLowestThinkingLevel, getSupportedThinkingLevels } from "../core/thinking-level.js";
+import { withoutPaidTier } from "../core/model-registry.js";
 import { truncateTail } from "./truncate.js";
 import { getTrustedAgentEnv } from "./safe-env.js";
 import { isUnattendedExecution, UNATTENDED_AGENT_ENV } from "../core/provider-execution-policy.js";
@@ -61,7 +62,9 @@ export function selectSubAgent(
   parentThinkingLevel?: ThinkingLevel,
 ): SubAgentSelection {
   const agentDef = resolveAgentDefinition(agents, requestedName);
-  const model = resolveAgentModel(agentDef, parentModel);
+  // Children never run on a paid tier: one opted-in parent would otherwise
+  // multiply real-money spend across every agent it starts.
+  const model = withoutPaidTier(resolveAgentModel(agentDef, parentModel));
   return {
     agentDef,
     provider,

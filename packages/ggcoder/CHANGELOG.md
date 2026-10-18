@@ -1,5 +1,35 @@
 # @kenkaiiii/ggcoder
 
+## 5.83.2
+
+### Patch Changes
+
+- `generate_image` now reports the size it actually delivered. The ChatGPT image backend can return a smaller image than requested (2048x2048 came back as 1254x1254), so the result states the real dimensions and warns plainly on a mismatch instead of reading as a clean success. The file is still saved exactly as OpenAI sent it, with no resizing and no repeat request. Image requests also follow the Codex CLI's retry policy: up to 4 retries with backoff (or the server's `Retry-After`) on server errors and dropped connections, and never on a usage limit or other client error, so no extra quota is spent.
+  - @kenkaiiii/gg-ai@5.83.2
+  - @kenkaiiii/gg-agent@5.83.2
+  - @kenkaiiii/gg-core@5.83.2
+
+## 5.83.1
+
+### Patch Changes
+
+- Fix `generate_image`, which failed for every ChatGPT login because it drove image generation through the retired `gpt-5.5` chat model. It now calls Codex's own image endpoints (`codex/images/generations` and `codex/images/edits`) with the same request shape and client headers as the Codex CLI, supports transparent backgrounds and up to five edit references, and explains a refused account (free ChatGPT plans get a 403) or a used-up image quota instead of passing through a bare HTTP error.
+  - @kenkaiiii/gg-ai@5.83.1
+  - @kenkaiiii/gg-agent@5.83.1
+  - @kenkaiiii/gg-core@5.83.1
+
+## 5.83.0
+
+### Minor Changes
+
+- Gemini API key login for accounts Code Assist no longer serves, per-provider compaction triggers from sourced evidence (MiMo, DeepSeek, Kimi and Qwen use their full windows; price-line caps for Grok, GPT-6, Gemini 3.1 Pro and MiniMax), the agent wakes on background failures instead of waiting for exit or a timeout, MiMo UltraSpeed needs paid-model confirmation, Grok sends x-grok-conv-id for prompt-cache hits, and Fable xhigh, Kimi K2.7 output caps and Gemini licence errors are fixed.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.83.0
+- @kenkaiiii/gg-agent@5.83.0
+- @kenkaiiii/gg-core@5.83.0
+
 ## 5.82.0
 
 ### Minor Changes

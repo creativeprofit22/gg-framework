@@ -201,7 +201,7 @@ providerRegistry.register("sakana", {
 providerRegistry.register("xai", {
   // xAI's public API (console.x.ai key) is OpenAI-compatible — ride the Chat
   // Completions transport like Moonshot/DeepSeek. Grok reasoning models take
-  // top-level `reasoning_effort` (low/medium/high), which the shared thinking
+  // top-level `reasoning_effort` (low/medium/high/xhigh), which the shared thinking
   // path already sends.
   //
   // Subscription OAuth (SuperGrok / X Premium) routes to the Grok CLI chat proxy

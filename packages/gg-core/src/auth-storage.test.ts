@@ -4,6 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import {
   AuthStorage,
+  GEMINI_API_KEY,
+  GEMINI_API_KEY_BASE_URL,
   MOONSHOT_OAUTH_KEY,
   NotLoggedInError,
   XAI_OAUTH_KEY,
@@ -15,6 +17,11 @@ import {
 
 const refreshOpenAIToken = vi.hoisted(() => vi.fn());
 vi.mock("./oauth/openai.js", () => ({ refreshOpenAIToken }));
+const refreshGeminiToken = vi.hoisted(() => vi.fn());
+vi.mock("./oauth/gemini.js", async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  refreshGeminiToken,
+}));
 const refreshKimiToken = vi.hoisted(() => vi.fn());
 vi.mock("./oauth/kimi.js", async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
@@ -335,6 +342,43 @@ describe("AuthStorage — Xiaomi dual credential (Token Plan vs. API Credits)", 
 
     expect(refreshKimiToken).toHaveBeenCalledTimes(1);
     expect(creds.accessToken).toBe("fresh");
+  });
+
+  it("uses a Gemini API key first, and still refreshes the Google sign-in when it is the only one", async () => {
+    const keys = [GEMINI_API_KEY, "gemini"];
+    const both = await makeStorage();
+    await both.setCredentials("gemini", oauthCreds("oauth-token"));
+    await both.setCredentials(GEMINI_API_KEY, {
+      accessToken: "aistudio-key",
+      refreshToken: "",
+      expiresAt: Date.now() + 1_000_000,
+      baseUrl: GEMINI_API_KEY_BASE_URL,
+    });
+    const picked = await both.resolveCredentials("gemini", { storageKeys: keys });
+    // The key carries the public API base URL — the transport routes on it.
+    expect(picked).toMatchObject({ accessToken: "aistudio-key", baseUrl: GEMINI_API_KEY_BASE_URL });
+    expect(await both.hasProviderAuth("gemini")).toBe(true);
+
+    // OAuth only, and expired: reached through the list, it must still refresh.
+    const oauthOnly = await makeStorage();
+    await oauthOnly.setCredentials("gemini", {
+      accessToken: "stale",
+      refreshToken: "g-refresh",
+      expiresAt: Date.now() - 1_000,
+    });
+    refreshGeminiToken.mockResolvedValueOnce({
+      accessToken: "fresh",
+      refreshToken: "g-refresh-2",
+      expiresAt: Date.now() + 1_000_000,
+    });
+    const refreshed = await oauthOnly.resolveCredentials("gemini", { storageKeys: keys });
+    expect(refreshGeminiToken).toHaveBeenCalledTimes(1);
+    expect(refreshed.accessToken).toBe("fresh");
+
+    // API key only satisfies hasProviderAuth too.
+    const keyOnly = await makeStorage();
+    await keyOnly.setCredentials(GEMINI_API_KEY, oauthCreds("k", ""));
+    expect(await keyOnly.hasProviderAuth("gemini")).toBe(true);
   });
 
   it("resolveCredentials prefers the first storageKey, falling back to the next when only that's configured", async () => {

@@ -7,7 +7,7 @@ import {
   type GoalRecord,
 } from "../core/goals-store.js";
 import { collectProjectContext } from "../system-prompt.js";
-import { getModel } from "../core/model-registry.js";
+import { getModel, withoutPaidTier } from "../core/model-registry.js";
 import type { ChildModelPick } from "../core/subagent-manager.js";
 import { holdGoalRun } from "../core/goal-run-marker.js";
 import { GOAL_TEAM } from "./goal-team.js";
@@ -128,7 +128,8 @@ export function goalCritterPick(record: GoalRecord | undefined): ChildModelPick 
   if (!pick) return undefined;
   const model = getModel(pick.model);
   if (!model || model.provider !== pick.provider) return undefined;
-  return { provider: model.provider, model: model.id };
+  // Workers run in parallel; a paid tier would multiply real-money spend.
+  return { provider: model.provider, model: withoutPaidTier(model.id) };
 }
 
 /** GG Goals' full prompt body: identity first, then this goal's brief. */

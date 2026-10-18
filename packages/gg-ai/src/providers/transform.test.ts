@@ -959,18 +959,24 @@ describe("toAnthropicThinking", () => {
     });
   });
 
-  it.each(["claude-sonnet-5-5", "claude-sonnet-5.5", "claude-haiku-5-5", "claude-haiku-5.5"])(
-    "passes every adaptive effort through for %s",
-    (model) => {
-      for (const level of ["low", "medium", "high", "xhigh", "max"] as const) {
-        expect(toAnthropicThinking(level, MAX_TOKENS, model)).toEqual({
-          thinking: { type: "adaptive", display: "omitted" },
-          maxTokens: MAX_TOKENS,
-          outputConfig: { effort: level },
-        });
-      }
-    },
-  );
+  it.each([
+    "claude-sonnet-5-5",
+    "claude-sonnet-5.5",
+    "claude-haiku-5-5",
+    "claude-haiku-5.5",
+    // Fable/Mythos 5.x accept xhigh (platform.claude.com effort docs); it used
+    // to be clamped to high.
+    "claude-fable-5-1",
+    "claude-mythos-5-1",
+  ])("passes every adaptive effort through for %s", (model) => {
+    for (const level of ["low", "medium", "high", "xhigh", "max"] as const) {
+      expect(toAnthropicThinking(level, MAX_TOKENS, model)).toEqual({
+        thinking: { type: "adaptive", display: "omitted" },
+        maxTokens: MAX_TOKENS,
+        outputConfig: { effort: level },
+      });
+    }
+  });
 
   it("clamps xhigh to high on adaptive Anthropic models that do not support xhigh", () => {
     expect(toAnthropicThinking("xhigh", MAX_TOKENS, "claude-sonnet-5").outputConfig).toEqual({
@@ -981,13 +987,14 @@ describe("toAnthropicThinking", () => {
     });
   });
 
-  it("treats the Fable and Mythos line as adaptive thinking models (max, xhigh clamps to high)", () => {
+  it("treats the Fable and Mythos line as adaptive thinking models with xhigh and max", () => {
+    // Anthropic's effort docs list xhigh and max on Fable 5 / 5.1 and Mythos 5.
     for (const model of ["claude-fable-5-1", "claude-fable-5", "claude-mythos-5"]) {
       const result = toAnthropicThinking("max", MAX_TOKENS, model);
       expect(result.outputConfig).toEqual({ effort: "max" });
       expect((result.thinking as { type: string }).type).toBe("adaptive");
       expect(toAnthropicThinking("xhigh", MAX_TOKENS, model).outputConfig).toEqual({
-        effort: "high",
+        effort: "xhigh",
       });
     }
   });

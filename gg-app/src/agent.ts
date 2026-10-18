@@ -621,6 +621,12 @@ export interface ModelOption {
   /** False when the local server didn't report a real context length (we guessed). */
   contextWindowKnown?: boolean;
   supportsThinking?: boolean;
+  /**
+   * Set when picking this model changes what the user pays (fast modes,
+   * MiMo UltraSpeed). `paid` means real money, never the plan;
+   * `standardModel` is what replaces it wherever it isn't carried over.
+   */
+  billing?: { label: string; detail: string; paid: boolean; standardModel?: string };
 }
 
 export type SlashCommand = SlashCommandListing;
@@ -1779,11 +1785,17 @@ export async function listModels(): Promise<ModelOption[] | null> {
  * rather than as a thrown IPC error — so unpack it here and let the caller
  * surface it.
  */
-export async function switchModel(model: string): Promise<SwitchModelResult | { error: string }> {
+export async function switchModel(
+  model: string,
+  options: { confirmPaid?: boolean } = {},
+): Promise<SwitchModelResult | { error: string }> {
   try {
+    // `confirmPaid` is only ever set from the explicit "spend real money"
+    // confirmation; the sidecar refuses a paid model without it.
     const response = await invoke<SwitchModelResult & { error?: string }>("agent_switch_model", {
       paneId: "primary",
       model,
+      confirmPaid: options.confirmPaid === true,
     });
     if (response.error) {
       await logError(`agent_switch_model refused: ${response.error}`);
@@ -2962,7 +2974,10 @@ export interface PaneAgentClient extends NotesClient {
   listCommandCatalog?(): Promise<CommandCatalog | null>;
   /** `null` = the fetch failed (keep the current list); `[]` is a real empty catalog. */
   listModels(): Promise<ModelOption[] | null>;
-  switchModel(model: string): Promise<SwitchModelResult | { error: string }>;
+  switchModel(
+    model: string,
+    options?: { confirmPaid?: boolean },
+  ): Promise<SwitchModelResult | { error: string }>;
   setOpenAICodexContextProfile(
     profile: OpenAICodexContextProfile,
   ): Promise<ContextProfileSelection>;
@@ -3513,10 +3528,13 @@ export function createPaneAgentClient(paneId: string): PaneAgentClient {
         return null;
       }
     },
-    async switchModel(model) {
+    async switchModel(model, options = {}) {
       try {
+        // `confirmPaid` is only ever set from the explicit "spend real money"
+        // confirmation; the sidecar refuses a paid model without it.
         const response = await call<SwitchModelResult & { error?: string }>("agent_switch_model", {
           model,
+          confirmPaid: options.confirmPaid === true,
         });
         return response.error ? { error: response.error } : response;
       } catch (error) {

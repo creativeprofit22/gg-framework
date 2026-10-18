@@ -124,6 +124,18 @@ export function providerStorageKeys(provider: string): string[] {
 export const XIAOMI_CREDITS_KEY = "xiaomi-credits";
 
 /**
+ * Storage key for a Gemini API key (Google AI Studio, billed per token), served
+ * by the public Gemini API at {@link GEMINI_API_KEY_BASE_URL}. Kept distinct from
+ * the `gemini` entry, which holds the Code Assist OAuth login: Google stopped
+ * serving Code Assist to personal accounts on 2026-06-18, so an API key is how
+ * those accounts reach Gemini at all, and a licensed account may hold both.
+ */
+export const GEMINI_API_KEY = "gemini-api";
+
+/** Public Gemini API (AI Studio key). The transport routes on this base URL. */
+export const GEMINI_API_KEY_BASE_URL = "https://generativelanguage.googleapis.com/v1beta";
+
+/**
  * Prefix for local-endpoint credentials (`local:ollama`, `local:lmstudio`, …).
  * One entry per endpoint, each carrying that endpoint's `baseUrl`, so the
  * existing `resolveCredentials({ storageKeys })` override resolves a local model
@@ -287,6 +299,9 @@ export class AuthStorage {
     }
     if (provider === "xiaomi") {
       return Boolean(this.data["xiaomi"] || this.data[XIAOMI_CREDITS_KEY]);
+    }
+    if (provider === "gemini") {
+      return Boolean(this.data["gemini"] || this.data[GEMINI_API_KEY]);
     }
     // `local` has no single credential — any configured endpoint counts.
     if (provider === "local") {
@@ -594,6 +609,15 @@ export class AuthStorage {
         // a possibly expired token.
         if (key !== provider && dualAuthProviderByOAuthKey(key)) {
           return await this.resolveCredentials(key, {
+            ...(opts.forceRefresh ? { forceRefresh: true } : {}),
+            ...(opts.rejectedToken !== undefined ? { rejectedToken: opts.rejectedToken } : {}),
+          });
+        }
+        // The provider's own key in an ordered list (Gemini: API key first,
+        // then the `gemini` Code Assist OAuth login) may be a refreshable OAuth
+        // credential — resolve it through the normal path so it refreshes.
+        if (key === provider) {
+          return await this.resolveCredentials(provider, {
             ...(opts.forceRefresh ? { forceRefresh: true } : {}),
             ...(opts.rejectedToken !== undefined ? { rejectedToken: opts.rejectedToken } : {}),
           });

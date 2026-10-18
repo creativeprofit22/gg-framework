@@ -22,6 +22,39 @@ export interface ChangelogEntry {
 /** Newest first. Prepended by the `/release` flow. */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.93.3",
+    date: "2026-10-17",
+    items: [
+      "Image generation now tells you the size you actually got. If you ask for `2048x2048` and OpenAI sends back something smaller, you hear about it right away, and your file stays exactly as it arrived with no sneaky resizing and no extra charge. A brief hiccup on OpenAI's side is also retried automatically, so fewer images fail on you.",
+    ],
+  },
+  {
+    version: "0.93.2",
+    date: "2026-10-17",
+    items: [
+      "Image generation is back. I rebuilt it on the same image service Codex itself uses, so creating and editing pictures with your ChatGPT login works again. It also does `transparent backgrounds` now, can blend up to `5` reference images in one edit, and tells you straight up when your plan or daily limit is the problem instead of showing a cryptic error.",
+    ],
+  },
+  {
+    version: "0.93.1",
+    date: "2026-10-17",
+    items: [
+      "Answering your agent's questions feels buttery now. When you pick an answer it fills in and holds for a beat, then the card melts away and your answer lands at the bottom of the chat. Pressing a number key like `1` gives the same satisfying press as a click.",
+      "Questions with several answers to tick are no longer a scavenger hunt. I put a single `Send answers` button at the very bottom of the card, and it counts down how many questions are left, so it's always clear what happens next.",
+    ],
+  },
+  {
+    version: "0.93.0",
+    date: "2026-10-16",
+    items: [
+      "Your million-token models finally get their whole memory back. I tuned when each model tidies up its conversation from real evidence, so `MiMo`, `DeepSeek`, `Kimi` and `Qwen` now keep up to `850K` tokens in view instead of forgetting at a third of the way. Grok, GPT-6 and Gemini 3.1 Pro tidy up just before their pricier long-context rates kick in, so you never pay double without knowing.",
+      "Gemini works again for personal Google accounts. Google stopped serving them through sign-in, so I added a `Gemini API key` option right next to it. Paste a key from Google AI Studio and every Gemini model is back, and if your sign-in can't reach Gemini I now tell you exactly why instead of sending you to a model that fails the same way.",
+      "Your agent reacts the moment a build, test run or CI check fails. It used to sit there until the whole job finished or a timer ran out. Now it jumps on the failure line in about `2 seconds`, and if something breaks after it already finished, it comes back to deal with it on its own.",
+      "No surprise bills. `MiMo UltraSpeed` now asks before you switch to it, just like Claude fast mode, and paid models never sneak into helpers, restarts or your saved default.",
+      "Grok remembers your conversation on xAI's side now, so long chats run cheaper and snappier, and `Claude Fable 5.1` finally gets its full `xhigh` thinking when you ask for it.",
+    ],
+  },
+  {
     version: "0.92.0",
     date: "2026-10-15",
     items: [

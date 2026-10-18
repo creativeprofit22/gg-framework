@@ -12,6 +12,7 @@ import {
 } from "@kenkaiiii/gg-agent";
 import {
   ProviderError,
+  resolveToolSchema,
   stream,
   type Message,
   type MessageProvenance,
@@ -236,7 +237,12 @@ import {
   type SemanticLoopVerdict,
 } from "./semantic-loop-check.js";
 import { buildEnvDeltaMessage, buildLanguageUpdateMessage } from "./env-delta.js";
-import { wrapSteeringText, buildNotificationSteeringText, STEERING_PREFIX } from "./steering.js";
+import {
+  wrapSteeringText,
+  buildNotificationSteeringText,
+  buildIdleWakeNotificationText,
+  STEERING_PREFIX,
+} from "./steering.js";
 import { AgentNotificationQueue } from "./agent-notifications.js";
 import {
   SessionVerificationEvidenceLedger,
@@ -293,6 +299,65 @@ import { ResearchSourceLedger } from "./research-sources.js";
 const TURN_EXTENSION_MAX_FAILURE_RATIO = 0.5;
 /** Compaction rotations remembered for phase-lease hand-off between renewals. */
 const COMPACTION_PREDECESSOR_LIMIT = 32;
+
+// ── Output cap ─────────────────────────────────────────────
+
+/**
+ * The output cap to send on a request. A model's output ceiling can equal its
+ * whole window (Kimi K2.7 Code: 262,144 of 262,144), and providers that count
+ * prompt + max_tokens against the window reject every request with a real
+ * prompt. Cap it at the room the model's TOTAL window leaves once the context
+ * reaches this session's compaction trigger — the largest prompt it lets build
+ * up. The total window, not the route's: the ChatGPT/Codex route's 272K
+ * window is an input budget, and GPT-6's 128K output sits outside it.
+ */
+export function outputCapForRequest(options: {
+  provider: Provider;
+  model: string;
+  maxTokens: number;
+  threshold: number;
+  accountId?: string;
+}): number {
+  const totalWindow = getContextWindow(options.model, { provider: options.provider });
+  const { targetTokens } = resolveCompactionPolicy({
+    provider: options.provider,
+    model: options.model,
+    contextWindow: getContextWindow(options.model, {
+      provider: options.provider,
+      accountId: options.accountId,
+    }),
+    threshold: options.threshold,
+    accountId: options.accountId,
+  });
+  const room = totalWindow - targetTokens;
+  return room > 0 ? Math.min(options.maxTokens, room) : options.maxTokens;
+}
+
+// ── Paid models ────────────────────────────────────────────
+
+/**
+ * Reply for chat bridges (Telegram, agent home) that have no confirmation step.
+ * Generic on purpose: every paid model (Claude fast mode, MiMo UltraSpeed) is
+ * refused here, so the reason must not name one of them.
+ */
+export function paidModelRefusal(modelName: string): string {
+  return `${modelName} spends real money, so it can't be switched to from chat. Switch to it in the GG Coder app or CLI, where you confirm it.`;
+}
+
+/**
+ * Thrown by {@link AgentSession.switchModel} when the target model spends real
+ * money and the caller didn't pass the user's explicit confirmation.
+ */
+export class PaidModelConfirmationError extends Error {
+  readonly modelName: string;
+  readonly detail: string;
+  constructor(modelName: string, detail: string) {
+    super(`${modelName} spends real money. ${detail} Confirm before switching to it.`);
+    this.name = "PaidModelConfirmationError";
+    this.modelName = modelName;
+    this.detail = detail;
+  }
+}
 
 // ── Options ────────────────────────────────────────────────
 
@@ -798,6 +863,8 @@ export class AgentSession {
   private deferredCompactionPending = false;
   /** Latest provider count, anchored to the assistant response it measured. */
   private providerContext: { usage: Usage; anchor: Message } | null = null;
+  /** See {@link toolDefinitionChars}. */
+  private toolCharsCache: { count: number; chars: number } | null = null;
   private originalRequest = "";
   // Messages queued by the user while a run is in flight. Drained at the
   // mid-loop steering boundary (user steering wins over the hooks), mirroring
@@ -814,6 +881,8 @@ export class AgentSession {
   /** Serializes {@link queuePrompt} so entries are queued in arrival order. */
   private queuePromptChain: Promise<unknown> = Promise.resolve();
   private queueSeq = 0;
+  /** Monotonic count of human-originated prompts; idle-wake budgets reset on it. */
+  private humanPromptSeq = 0;
   /** Instant interrupt: the running loop's preempt listeners, fired on queueMessage. */
   private steeringListeners = new Set<() => void>();
   private processManager?: ProcessManager;
@@ -1002,6 +1071,17 @@ export class AgentSession {
         : this.opts.maxTokens;
     }
     return modelInfo?.maxOutputTokens ?? 16384;
+  }
+
+  /** {@link outputCapForRequest} for this session's live model and settings. */
+  private requestMaxTokens(accountId?: string): number {
+    return outputCapForRequest({
+      provider: this.provider,
+      model: this.model,
+      maxTokens: this.maxTokens,
+      threshold: this.settingsManager.get("compactThreshold"),
+      accountId,
+    });
   }
 
   async initialize(): Promise<void> {
@@ -2260,6 +2340,7 @@ export class AgentSession {
   ): Promise<void> {
     if (!content.trim()) return;
     this.prewarmController?.abort();
+    if (provenance.source === "human") this.humanPromptSeq += 1;
     await this.settlePostTurnCompaction();
     await this.adoptDeferredCheckpointBeforePrompt();
     const slash = await this.resolveSlashInput(content);
@@ -2322,6 +2403,7 @@ export class AgentSession {
       return;
     }
     this.prewarmController?.abort();
+    this.humanPromptSeq += 1;
     await this.settlePostTurnCompaction();
     const parts = this.buildAttachmentParts(text, attachments);
     if (parts.length === 0)
@@ -3222,7 +3304,10 @@ export class AgentSession {
 
     // Reset self-correction hook state for this run; pin the latest user message
     // as the verbatim original request for post-compaction re-grounding.
-    const lastUser = [...this.messages].reverse().find((m) => m.role === "user");
+    // A status update that started an idle-wake run is not the user's request.
+    const lastUser = [...this.messages]
+      .reverse()
+      .find((m) => m.role === "user" && m.provenance?.kind !== "notification");
     this.resetHookState(requestTextForRegrounding(lastUser));
 
     // Resolve OAuth credentials and run agent loop.
@@ -3332,7 +3417,7 @@ export class AgentSession {
         model: resolveTransportModel(this.provider, this.model),
         tools: options.disableTools ? [] : this.tools,
         webSearch: !options.disableTools,
-        maxTokens: this.maxTokens,
+        maxTokens: this.requestMaxTokens(accountId),
         maxTurns: this.opts.maxTurns,
         maxTurnExtensions: this.opts.maxTurnExtensions,
         // Plan mode caps effort at medium (Codex `plan_mode_reasoning_effort`
@@ -3455,8 +3540,16 @@ export class AgentSession {
             if (anchor?.role === "assistant") {
               this.providerContext = { usage: { ...transformOpts.usage }, anchor };
               // Feed the authoritative usage back into the token estimator so
-              // char-based estimates track this session's real tokenizer.
-              calibrateEstimatorFromUsage(messages.slice(0, anchorIndex), transformOpts.usage);
+              // char-based estimates track this session's real tokenizer. The
+              // provider's count includes the tool definitions sent with the
+              // request, so their characters must be counted too — without
+              // them a short history reads as ~2 chars/token and drags the
+              // shared ratio down for every session in the process.
+              calibrateEstimatorFromUsage(
+                messages.slice(0, anchorIndex),
+                transformOpts.usage,
+                options.disableTools ? 0 : this.toolDefinitionChars(),
+              );
             }
           }
 
@@ -3509,12 +3602,13 @@ export class AgentSession {
                   compactedToolCalls: String(pruneResult.compactedToolCalls),
                   freedTokens: String(pruneResult.freedTokens),
                 });
-                // The turn's own usage also counted the pruned content — estimate
-                // the (now smaller) history so the freed tokens actually defer
-                // the LLM compaction.
-                activeTokens = calculateActiveContextTokens(messages, {
-                  pendingMessages: transformOpts.pendingMessages,
-                });
+                // The measured size counted the pruned content, so take the
+                // freed tokens off it. Never swap the provider's count for a
+                // whole-history estimate here: that estimate rides a shared
+                // chars-per-token ratio, and it once read a 234K-token MiMo
+                // context (23% of 1M) as ~400K and compacted it against a 340K
+                // trigger.
+                activeTokens = Math.max(0, activeTokens - pruneResult.freedTokens);
               }
             }
 
@@ -3810,7 +3904,21 @@ export class AgentSession {
     });
   }
 
-  async switchModel(provider: string, model: string): Promise<void> {
+  /**
+   * Switch the session's model. A model that spends real money (Claude fast
+   * mode bills usage credits) is refused unless `confirmPaid` carries the
+   * user's explicit yes, so no caller can switch onto one by accident: every
+   * path (app, CLI, editors, chat bridges, RPC) fails closed by default.
+   */
+  async switchModel(
+    provider: string,
+    model: string,
+    options: { confirmPaid?: boolean } = {},
+  ): Promise<void> {
+    const target = getModel(model);
+    if (target?.billing?.paid && options.confirmPaid !== true && model !== this.model) {
+      throw new PaidModelConfirmationError(target.name, target.billing.detail);
+    }
     // The model-switch note is appended to `this.messages`; settle any
     // background compaction first so the note cannot be swapped out.
     await this.settlePostTurnCompaction();
@@ -5031,6 +5139,75 @@ export class AgentSession {
     this.notifications.enqueue("goal", id, text, { terminal: true });
   }
 
+  /**
+   * Observe urgent background alerts — a background task failed or exited
+   * non-zero, or a child agent finished — as they are queued. Hosts use this to
+   * wake an idle session (see {@link continueFromNotifications}); a live run
+   * already receives them at its next steering boundary. Returns unsubscribe.
+   */
+  onBackgroundAlert(listener: () => void): () => void {
+    return this.notifications.onUrgent(() => listener());
+  }
+
+  /**
+   * Characters of the tool definitions sent with every request (name,
+   * description, JSON schema), for estimator calibration. Cached by tool count:
+   * the tool array is append-only.
+   */
+  private toolDefinitionChars(): number {
+    if (this.toolCharsCache?.count === this.tools.length) return this.toolCharsCache.chars;
+    let chars = 0;
+    for (const tool of this.tools) {
+      chars += tool.name.length + tool.description.length;
+      try {
+        chars += JSON.stringify(resolveToolSchema(tool)).length;
+      } catch {
+        // A schema that cannot be serialized is not sent either.
+      }
+    }
+    this.toolCharsCache = { count: this.tools.length, chars };
+    return chars;
+  }
+
+  /** True while an urgent background alert is waiting to be delivered. */
+  hasPendingBackgroundAlert(): boolean {
+    return this.notifications.hasUrgent();
+  }
+
+  /** Monotonic count of human-originated prompts this session has run. */
+  getHumanPromptSeq(): number {
+    return this.humanPromptSeq;
+  }
+
+  /**
+   * Start a run from pending background notifications, for a session that had
+   * already finished its turn. The notifications become one hidden runtime
+   * message (never shown as something the user typed), and the agent decides
+   * whether they need action. Returns false, starting nothing, when no urgent
+   * alert is pending — a live run may have delivered it in the meantime.
+   */
+  async continueFromNotifications(): Promise<boolean> {
+    if (!this.notifications.hasUrgent()) return false;
+    this.prewarmController?.abort();
+    await this.settlePostTurnCompaction();
+    await this.adoptDeferredCheckpointBeforePrompt();
+    const notified = this.notifications.drain();
+    if (notified.length === 0) return false;
+    const message: Message = {
+      role: "user",
+      content: buildIdleWakeNotificationText(notified.map((entry) => entry.text)),
+      provenance: { source: "runtime", kind: "notification", visibility: "hidden" },
+    };
+    log("INFO", "notifications", "Starting a run from background alerts", {
+      count: String(notified.length),
+    });
+    this.messages.push(message);
+    await this.persistMessage(message);
+    this.lastPersistedIndex = this.messages.length;
+    await this.runLoop();
+    return true;
+  }
+
   /** This session's sub-agents (workers), newest-state, including ones restored after a restart. */
   listSubAgents(): SubAgentSnapshot[] {
     return this.subAgentManager?.list() ?? [];
@@ -6091,9 +6268,17 @@ export class AgentSession {
     if (!text.trim()) return { enhanced: text, segments: [{ kind: "text", text }] };
     // Keep credentials and settings on the model selected at click time, even
     // if the user switches models while credential resolution is pending.
-    const { provider, model, thinkingLevel, maxTokens, baseUrl } = this;
+    const { provider, model, thinkingLevel, maxTokens: requestedMaxTokens, baseUrl } = this;
+    const threshold = this.settingsManager.get("compactThreshold");
     const creds = await this.resolveRunCredentials(provider, {
       storageKeys: this.currentAuthStorageKeys(),
+    });
+    const maxTokens = outputCapForRequest({
+      provider,
+      model,
+      maxTokens: requestedMaxTokens,
+      threshold,
+      accountId: creds.accountId,
     });
     // Cheap, best-effort stack detection from the project root so terminology is
     // idiomatic to the user's stack. Never throws (returns "" on any failure).
@@ -6211,7 +6396,7 @@ export class AgentSession {
         messages,
         tools: this.tools,
         webSearch: true,
-        maxTokens: this.maxTokens,
+        maxTokens: this.requestMaxTokens(creds.accountId),
         thinking: this.planModeRef.current
           ? clampThinkingForPlanMode(this.thinkingLevel)
           : this.thinkingLevel,
@@ -6725,7 +6910,7 @@ export class AgentSession {
 
   private createSlashCommandContext(): SlashCommandContext {
     return {
-      switchModel: (provider, model) => this.switchModel(provider, model),
+      switchModel: (provider, model, options) => this.switchModel(provider, model, options),
       compact: (focus?: string) => this.compact(undefined, "manual", focus),
       newSession: () => this.newSession(),
       listSessions: async () => {

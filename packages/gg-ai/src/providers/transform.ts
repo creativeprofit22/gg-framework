@@ -1078,10 +1078,13 @@ export function toAnthropicThinking(
     // Adaptive thinking — model decides when/how much to think.
     // budget_tokens is deprecated on Opus 5.x / 4.8 / 4.7 / 4.6 and Sonnet 5.x.
     // Anthropic's output_config.effort accepts low, medium, high, xhigh, and max.
-    // xhigh is supported by Opus 5.x / 4.8 / 4.7, Sonnet 5.5 and Haiku 5.5;
-    // all support max.
+    // xhigh is supported by Fable/Mythos 5.x, Opus 5.x / 4.8 / 4.7, Sonnet 5.5
+    // and Haiku 5.5; all support max (platform.claude.com effort docs).
     let effort: string = level;
-    if (effort === "xhigh" && !/opus-5|opus-4-8|opus-4-7|sonnet-5[-.]5|haiku-5[-.]5/.test(model)) {
+    if (
+      effort === "xhigh" &&
+      !/fable-5|mythos-5|opus-5|opus-4-8|opus-4-7|sonnet-5[-.]5|haiku-5[-.]5/.test(model)
+    ) {
       effort = "high";
     }
     return {

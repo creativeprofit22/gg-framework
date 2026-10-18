@@ -1252,4 +1252,27 @@ describe("production continuation review startup", () => {
       await tick();
     }
   });
+
+  it("reports the stranded-queue drain active between queued turns, so idle wake stays out", async () => {
+    const gap = deferred();
+    const drain = createStrandedQueueDrain(
+      () => false,
+      () => gap.promise,
+    );
+    expect(drain.active()).toBe(false);
+    const run = drain();
+    // No run is in flight while the drain waits between queued turns; only
+    // the drain's own flag marks the session busy for an unprompted run.
+    expect(drain.active()).toBe(true);
+    expect(drain()).toBe(run);
+    gap.resolve();
+    await run;
+    expect(drain.active()).toBe(false);
+
+    const blockedDrain = vi.fn(async () => {});
+    const blocked = createStrandedQueueDrain(() => true, blockedDrain);
+    await blocked();
+    expect(blocked.active()).toBe(false);
+    expect(blockedDrain).not.toHaveBeenCalled();
+  });
 });

@@ -107,6 +107,7 @@ import {
   getDefaultThinkingLevel,
   getModel,
   getModelsForProvider,
+  isPaidModel,
   type OpenAICodexContextProfile,
 } from "./core/model-registry.js";
 import { MCPClientManager, getAllMcpServers } from "./core/mcp/index.js";
@@ -621,9 +622,9 @@ async function runInkTUI(opts: {
   // The model a provider should actually boot with, given which storage keys
   // resolved: prefer the provider's default model, but for a provider like
   // Xiaomi that splits credentials across models, fall back to whichever
-  // model's specific storage key DID resolve (e.g. a user who configured only
-  // API Credits, no Token Plan, must still land on mimo-v2.6-pro-ultraspeed,
-  // not get treated as logged out of Xiaomi entirely).
+  // model's specific storage key DID resolve, so a user with only one of the
+  // keys is not treated as logged out entirely. Never a paid model: a fallback
+  // the user didn't pick must not start spending real money.
   const resolvedKeyFor = (p: Provider, modelId: string): string | undefined =>
     getAuthStorageKeys(p, modelId).find((key) => credentialsByProvider[key]);
   const modelResolves = (p: Provider, modelId: string): boolean =>
@@ -631,7 +632,7 @@ async function runInkTUI(opts: {
   const resolvableModelFor = (p: Provider): string | undefined => {
     const def = getDefaultModel(p).id;
     if (modelResolves(p, def)) return def;
-    return getModelsForProvider(p).find((m) => modelResolves(p, m.id))?.id;
+    return getModelsForProvider(p).find((m) => !isPaidModel(m.id) && modelResolves(p, m.id))?.id;
   };
 
   // Fall back if the preferred provider/model didn't resolve. The settings
@@ -643,8 +644,8 @@ async function runInkTUI(opts: {
     if (opts.modelWasExplicit) {
       throw new Error(`No usable credentials are available for model "${model}".`);
     }
-    // Same provider, different model first — e.g. Xiaomi Credits-only users
-    // land on mimo-v2.6-pro-ultraspeed instead of bouncing to another provider.
+    // Same provider, different model first, instead of bouncing to another
+    // provider when only one of its credential keys resolved.
     const sameProviderModel = resolvableModelFor(provider);
     if (sameProviderModel) {
       model = sameProviderModel;

@@ -126,6 +126,8 @@ async function pane(
     // Upstream 0.87.1 dispose: abort owned work + cancel HF pull, goal-aware repo watch.
     abortOwnedWork: () => {},
     cancelHfPull: () => false,
+    // Upstream 0.93.0 idle wake for background failures; dispose tears it down.
+    idleWake: null,
     // Ordinary (non-goal) project session: the snapshot's goal is null.
     goal: null,
     goalStatePayload: () => null,

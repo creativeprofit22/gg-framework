@@ -111,6 +111,9 @@ const MIRRORS = [
   ["EnhanceDissolve.tsx", "DISSOLVE_MS", "--dur-enhance-dissolve", "equal"],
   // Fork: the docked PlanReviewModal unmounts without a JS exit timer, so there
   // is no EXIT_FALLBACK_MS to mirror --dur-plan-out.
+  ["AskBand.tsx", "HOLD_MS", "--dur-ask-hold", "equal"],
+  ["AskBand.tsx", "EXIT_MS", "--dur-strip-out", "equal"],
+  ["AskBand.tsx", "KEY_PRESS_MS", "--dur-press", "equal"],
   ["animated-height.ts", "DURATION_MS", "--dur-row", "equal"],
   ["animated-height.ts", "EASING", "--ease-out", "equal"],
   ["chat-layout-motion.ts", "DURATION_MS", "--dur-row", "equal"],

@@ -14,6 +14,8 @@
  *     → This is a GG Coder bug — please report it.
  */
 
+import { parseFastModeRejection } from "./fast-mode.js";
+
 export type ErrorSource = "provider" | "ggcoder" | "network" | "auth" | "capability";
 
 /**
@@ -193,8 +195,9 @@ export function isHardBillingMessage(message: string): boolean {
     lower.includes("recharge") ||
     lower.includes("balance is too low") ||
     lower.includes("out of credits") ||
-    // Anthropic fast mode on a subscription without usage credits turned on.
+    // Anthropic fast mode when usage credits can't pay (see fast-mode.ts).
     lower.includes("usage credits are required") ||
+    lower.includes("fast mode unavailable") ||
     lower.includes("arrears") ||
     lower.includes("arrearage") ||
     lower.includes("token quota") ||
@@ -299,6 +302,21 @@ export function formatError(err: unknown): FormattedError {
         ...(err.requestId ? { requestId: err.requestId } : {}),
         guidance:
           "Request access via your Anthropic account team (see platform.claude.com/docs/en/about-claude/models/overview), or switch to Claude Fable 5.1 via the model selector — same underlying model, generally available.",
+      };
+    }
+    // Fast mode rejections must never read as the plan's usage running out:
+    // they bill usage credits, which is real money the user controls.
+    const fastRejection =
+      err.provider === "anthropic" ? parseFastModeRejection(err.message) : undefined;
+    if (fastRejection) {
+      return {
+        headline: `${fastRejection.headline}.`,
+        source: "provider",
+        message: cleanMessage,
+        provider: err.provider,
+        statusCode: err.statusCode,
+        ...(err.requestId ? { requestId: err.requestId } : {}),
+        guidance: fastRejection.guidance,
       };
     }
     if (isUsageLimitError(err)) {

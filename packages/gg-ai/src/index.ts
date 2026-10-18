@@ -1,8 +1,13 @@
 // Core entry point
 export { stream, localWireModelId } from "./stream.js";
 export { codexRequestProfile } from "./providers/openai-codex-request.js";
-export { FAST_MODE_SUFFIX, resolveFastModeModel } from "./fast-mode.js";
-export type { FastModeResolution } from "./fast-mode.js";
+export {
+  FAST_MODE_SUFFIX,
+  describeFastModeRejection,
+  parseFastModeRejection,
+  resolveFastModeModel,
+} from "./fast-mode.js";
+export type { FastModeRejection, FastModeResolution } from "./fast-mode.js";
 
 // Preparatory provider policy (does not register a provider)
 export * from "./qwen-cloud-policy.js";
@@ -125,7 +130,7 @@ export type { ToolCallNameRule } from "./providers/transform.js";
 export { continuesTurn, opensTurn } from "./utils/turn-continuation.js";
 
 // Codex model family served with the Responses-Lite request shape
-export { usesResponsesLite } from "./providers/openai-codex-request.js";
+export { CODEX_CLIENT_VERSION, usesResponsesLite } from "./providers/openai-codex-request.js";
 
 // Cache pre-warming (Anthropic — fires a max_tokens:1 warm-up to prime the KV cache)
 export { prewarmAnthropicCache } from "./providers/anthropic.js";

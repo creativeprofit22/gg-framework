@@ -819,7 +819,9 @@ describe("AskBand", () => {
 
   it("reopens a cleared multi-select and submits only reconfirmed visible answers", () => {
     const submit = vi.fn();
-    let retained: Record<string, string | string[]> = {};
+    // Starts with the multi-select already confirmed: picks are now sent from
+    // the band's foot, so a confirmed multi is one answered earlier or restored.
+    let retained: Record<string, string | string[]> = { checks: ["Typecheck"] };
     const p = prompt(
       {
         id: "checks",
@@ -851,9 +853,7 @@ describe("AskBand", () => {
       );
     }
     render(<Controlled />);
-    fireEvent.click(screen.getByRole("button", { name: "Typecheck" }));
-    fireEvent.click(screen.getByRole("button", { name: "Confirm 1 selected" }));
-    expect(retained).toEqual({ checks: ["Typecheck"] });
+    expect(screen.getByRole("button", { name: "Typecheck" })).toHaveProperty("ariaPressed", "true");
     fireEvent.click(screen.getByRole("button", { name: "Typecheck" }));
     expect(screen.getByRole("button", { name: "Typecheck" })).toHaveProperty(
       "ariaPressed",
@@ -862,17 +862,15 @@ describe("AskBand", () => {
     fireEvent.click(screen.getByRole("button", { name: /Continue/ }));
     expect(submit).not.toHaveBeenCalled();
     expect(retained).toEqual({ then: "Continue" });
-    expect(screen.getByRole("button", { name: "Choose at least one" })).toHaveProperty(
-      "disabled",
-      true,
-    );
+    // The cleared multi reads as unanswered, so the foot does not count it.
+    expect(screen.getByText("1 of 2 answered — the rest are sent as skipped")).toBeTruthy();
     fireEvent.keyDown(document, { key: "m" });
     expect(onTypeInstead).toHaveBeenLastCalledWith("checks", "m");
     fireEvent.keyDown(document, { key: "2" });
     expect(retained).toEqual({ then: "Continue" });
     fireEvent.click(screen.getByRole("button", { name: "Tests" }));
     expect(submit).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole("button", { name: "Confirm 1 selected" }));
+    fireEvent.click(screen.getByRole("button", { name: "Send answers" }));
     expect(submit).toHaveBeenCalledExactlyOnceWith({ checks: ["Tests"], then: "Continue" });
   });
 
@@ -917,6 +915,96 @@ describe("AskBand", () => {
     expect(onAnswer).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "Confirm 2 selected" }));
     expect(onAnswer).toHaveBeenCalledWith({ checks: ["Typecheck", "Build"] });
+  });
+
+  it("puts the multi-select's send at the foot of the band, after every question", () => {
+    // Live bug: in a band of several questions the confirm sat under the
+    // multi-select itself (question 2 of 4), so after answering the rest
+    // nothing happened until the user found it mid-card.
+    const sent: Record<string, string | string[]>[] = [];
+    function Controlled(): React.ReactElement {
+      const [answers, setAnswers] = useState<Record<string, string | string[]>>({});
+      const p = prompt(
+        { id: "a", question: "A?", kind: "choice", options: [{ label: "A1" }, { label: "A2" }] },
+        {
+          id: "checks",
+          question: "Which checks?",
+          kind: "multi",
+          options: [{ label: "Typecheck" }, { label: "Tests" }],
+        },
+        { id: "c", question: "C?", kind: "choice", options: [{ label: "C1" }, { label: "C2" }] },
+      );
+      return (
+        <AskBand
+          prompt={p}
+          answers={answers}
+          onAnswer={(delta) => {
+            const merged = mergeAskAnswers(answers, delta, p.questions);
+            if (merged.complete) sent.push(merged.answers);
+            setAnswers(merged.answers);
+          }}
+          onTypeInstead={onTypeInstead}
+        />
+      );
+    }
+    render(<Controlled />);
+
+    // One send button, and it is the band's last element, outside every question.
+    const foot = document.querySelector(".ask-band > .ask-foot");
+    expect(foot).toBeTruthy();
+    expect(foot?.nextElementSibling).toBeNull();
+    expect(document.querySelector(".ask-subq .ask-foot")).toBeNull();
+    // Fork: a band of several questions can be sent partly answered, so the
+    // send names no count; the note beside it says how many are still open.
+    expect(screen.getByRole("button", { name: "Send answers" })).toHaveProperty("disabled", true);
+    expect(screen.getByText("0 of 3 answered — the rest are sent as skipped")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "A1" }));
+    fireEvent.click(screen.getByRole("button", { name: /Tests/ }));
+    // Ticking a box hands the number keys on to the next open question.
+    fireEvent.keyDown(document, { key: "2" });
+    expect(sent).toEqual([]);
+
+    fireEvent.click(screen.getByRole("button", { name: "Send answers" }));
+    expect(sent).toEqual([{ a: "A1", checks: ["Tests"], c: "C2" }]);
+  });
+
+  it("holds the pick that completes the band for a beat before sending it", () => {
+    vi.useFakeTimers();
+    const animate = vi.fn();
+    Object.defineProperty(Element.prototype, "animate", { value: animate, configurable: true });
+    try {
+      const onAnswer = vi.fn();
+      render(
+        <AskBand
+          prompt={prompt({
+            id: "flag",
+            question: "Flip the flag?",
+            kind: "confirm",
+            options: [{ label: "Yes" }, { label: "No" }],
+          })}
+          onAnswer={onAnswer}
+          onTypeInstead={onTypeInstead}
+        />,
+      );
+      fireEvent.click(screen.getByRole("button", { name: "No" }));
+      // The chosen row fills and the card starts leaving; nothing is sent yet.
+      expect(onAnswer).not.toHaveBeenCalled();
+      expect(document.querySelector(".ask-band.is-committing")).toBeTruthy();
+      expect(screen.getByRole("button", { name: "No", hidden: true }).className).toContain(
+        "btn-primary",
+      );
+      // A second pick mid-beat cannot change the answer.
+      fireEvent.click(screen.getByRole("button", { name: "Yes", hidden: true }));
+      vi.advanceTimersByTime(379);
+      expect(onAnswer).not.toHaveBeenCalled();
+      vi.advanceTimersByTime(1);
+      expect(onAnswer).toHaveBeenCalledTimes(1);
+      expect(onAnswer).toHaveBeenCalledWith({ flag: "No" });
+    } finally {
+      Reflect.deleteProperty(Element.prototype, "animate");
+      vi.useRealTimers();
+    }
   });
 
   it("aims the number keys at the first question still unanswered", () => {

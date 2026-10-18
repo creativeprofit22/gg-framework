@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { getContextWindow, MODELS } from "../model-registry.js";
 import {
   DEFAULT_COMPACTION_THRESHOLD,
   resolveCompactionPolicy,
@@ -33,11 +34,37 @@ describe("resolveCompactionPolicy", () => {
       approvedPlanPath: "/tmp/plan.md",
     });
 
-    expect(api.targetTokens).toBe(840_000);
+    // Both routes land on 0.8 × 272K: the API key's 1.05M window is capped at
+    // OpenAI's 272K price line, the Codex route already passes 272K.
+    expect(api.targetTokens).toBe(217_600);
     expect(codex.targetTokens).toBe(217_600);
     expect(codex.policyKey).not.toBe(api.policyKey);
     expect(codex.policyKey).toContain("codex_oauth");
     expect(codex.policyKey).toContain("/tmp/plan.md");
+  });
+
+  it("keeps the explicit Experimental Astra window on Codex OAuth while the API key stays capped", () => {
+    // Local Fork regression: upstream's 272K OpenAI price-line cap must not
+    // silently turn the user's Experimental (872K) choice back into Stable.
+    const experimental = getContextWindow("gpt-6-astra", {
+      provider: "openai",
+      accountId: "account",
+      openAICodexContextProfile: "experimental",
+    });
+    expect(experimental).toBe(872_000);
+    const oauth = resolveCompactionPolicy({
+      provider: "openai",
+      model: "gpt-6-astra",
+      contextWindow: experimental,
+      accountId: "account",
+    });
+    const apiKey = resolveCompactionPolicy({
+      provider: "openai",
+      model: "gpt-6-astra",
+      contextWindow: 1_050_000,
+    });
+    expect(oauth.targetTokens).toBe(741_200); // 0.85 × 872K
+    expect(apiKey.targetTokens).toBe(231_200); // 0.85 × 272K price line
   });
 
   it("caps GLM's trigger window on a latency budget despite the 1M advertised window", () => {
@@ -76,11 +103,10 @@ describe("resolveCompactionPolicy", () => {
     expect(policy.targetTokens).toBe(88_000); // 0.5 × 176K
   });
 
-  it("leaves measured-healthy providers on the advertised window", () => {
-    // anthropic: explicit cache_control breakpoints; openai: measured flat
-    // TTFT at 237K (sidecar audit). Both keep their full windows.
-    expect(resolveLatencyWindowCap("anthropic")).toBeUndefined();
-    expect(resolveLatencyWindowCap("openai")).toBeUndefined();
+  it("leaves providers with evidence of healthy caching on the advertised window", () => {
+    for (const provider of ["anthropic", "deepseek", "moonshot", "xiaomi", "openrouter"] as const) {
+      expect(resolveLatencyWindowCap(provider), provider).toBeUndefined();
+    }
     const policy = resolveCompactionPolicy({
       provider: "anthropic",
       model: "claude-test",
@@ -90,19 +116,63 @@ describe("resolveCompactionPolicy", () => {
     expect(policy.targetTokens).toBe(160_000);
   });
 
-  it("applies the conservative default cap to UNMEASURED providers with mega-windows", () => {
-    // Any model a user picks that we have no cache evidence for gets the
-    // default ceiling — this is deliberately not GLM-only.
-    expect(resolveLatencyWindowCap("gemini")).toBe(400_000);
-    expect(resolveLatencyWindowCap("minimax")).toBe(400_000);
-    expect(resolveLatencyWindowCap("xiaomi")).toBe(400_000);
-
+  it("applies the conservative default cap only to providers with no evidence", () => {
+    for (const provider of ["sakana", "huggingface"] as const) {
+      expect(resolveLatencyWindowCap(provider), provider).toBe(400_000);
+    }
     const policy = resolveCompactionPolicy({
-      provider: "gemini",
-      model: "gemini-3.8-flash",
-      contextWindow: 1_048_576,
+      provider: "sakana",
+      model: "fugu",
+      contextWindow: 1_000_000,
     });
     expect(policy.targetTokens).toBe(340_000); // 0.85 × 400K default cap
+  });
+
+  it("caps where evidence says to: input limits, price tiers, the vendor's own agent", () => {
+    // MiniMax-M3 doubles its price past 512K input.
+    expect(
+      resolveCompactionPolicy({
+        provider: "minimax",
+        model: "MiniMax-M3",
+        contextWindow: 1_000_000,
+      }).targetTokens,
+    ).toBe(435_200);
+    // Gemini CLI compresses at 50% of 1,048,576 on the same Code Assist route.
+    expect(
+      resolveCompactionPolicy({
+        provider: "gemini",
+        model: "gemini-3.8-flash",
+        contextWindow: 1_048_576,
+      }).targetTokens,
+    ).toBe(523_600);
+    // Price lines that reprice the whole request: Grok at 200K, GPT-6 at 272K.
+    expect(
+      resolveCompactionPolicy({ provider: "xai", model: "grok-4.7", contextWindow: 500_000 })
+        .targetTokens,
+    ).toBe(170_000);
+    expect(
+      resolveCompactionPolicy({
+        provider: "openai",
+        model: "gpt-6.1-sol",
+        contextWindow: 1_050_000,
+      }).targetTokens,
+    ).toBe(231_200);
+    // Gemini 3.1 Pro's own price line (200K) wins over the provider's 616K cap.
+    expect(
+      resolveCompactionPolicy({
+        provider: "gemini",
+        model: "gemini-3.1-pro-preview",
+        contextWindow: 1_048_576,
+      }).targetTokens,
+    ).toBe(170_000);
+    // MiMo: measured healthy caching — the 1M window is used, not 34% of it.
+    expect(
+      resolveCompactionPolicy({
+        provider: "xiaomi",
+        model: "mimo-v2.6-pro",
+        contextWindow: 1_000_000,
+      }).targetTokens,
+    ).toBe(850_000);
   });
 
   it("never raises a trigger the provider's real window keeps lower", () => {
@@ -114,5 +184,30 @@ describe("resolveCompactionPolicy", () => {
       threshold: 0.8,
     });
     expect(policy.targetTokens).toBe(209_716); // 0.8 × 262,144 — unchanged
+  });
+
+  it("gives every registered model a trigger inside its window, from a sourced rule", () => {
+    // Providers verified to have NO evidence either way. Adding a provider
+    // means adding a sourced rule to policy.ts, or listing it here on purpose.
+    // qwen-cloud (Local Fork, Token Plan credits): its docs establish only the
+    // 1M windows, with no caching or long-context pricing evidence either way.
+    const unverified = new Set(["sakana", "huggingface", "qwen-cloud"]);
+    for (const model of MODELS) {
+      const contextWindow = getContextWindow(model.id, { provider: model.provider });
+      const { targetTokens } = resolveCompactionPolicy({
+        provider: model.provider,
+        model: model.id,
+        contextWindow,
+      });
+      expect(targetTokens, model.id).toBeLessThan(contextWindow);
+      // Catches a mistyped cap; GLM's measured 176K cap sits at 15% of 1M.
+      expect(targetTokens, model.id).toBeGreaterThan(contextWindow * 0.1);
+      if (!unverified.has(model.provider)) {
+        expect(
+          resolveLatencyWindowCap(model.provider),
+          `${model.provider} has a sourced rule`,
+        ).not.toBe(400_000);
+      }
+    }
   });
 });

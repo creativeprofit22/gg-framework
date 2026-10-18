@@ -1,10 +1,18 @@
+import { randomUUID } from "node:crypto";
+import os from "node:os";
 import path from "node:path";
 import { mkdir, writeFile, readFile } from "node:fs/promises";
 import { z } from "zod";
-import { codexRequestProfile } from "@kenkaiiii/gg-ai";
+import { CODEX_CLIENT_VERSION } from "@kenkaiiii/gg-ai";
 import type { AgentTool, StructuredToolResult, ToolContext } from "@kenkaiiii/gg-agent";
 import { resolvePath } from "./path-utils.js";
-import { downscaleForPreview, shrinkToFit } from "../utils/image.js";
+import {
+  IMAGE_MEDIA_TYPES,
+  convertImageFormat,
+  downscaleForPreview,
+  imageDimensions,
+  shrinkToFit,
+} from "../utils/image.js";
 
 /**
  * Structural subset of AuthStorage the tool needs at execute time. Using a
@@ -20,42 +28,122 @@ export type GenerateImageAuth = {
 };
 
 /**
- * The Codex backend endpoint — the SAME endpoint our OpenAI Codex streaming
- * provider uses for chat. ChatGPT OAuth tokens (from auth.openai.com PKCE flow)
- * are rejected by api.openai.com/v1/images/* (missing `api.model.images.request`
- * scope), but they work here. Image generation is done via the Responses API's
- * built-in `image_generation` tool, with the image model selected on that tool.
+ * Codex's own image endpoints, called the way the Codex CLI's image extension
+ * calls them (openai/codex `ext/image-generation/src/tool.rs` +
+ * `codex-api/src/endpoint/images.rs`, checked 2026-10-17 at 592964c0): a plain
+ * JSON POST to `images/generations` or `images/edits` under the ChatGPT Codex
+ * backend with `{ prompt, background, model, quality, size }` (edits add
+ * `images: [{ image_url }]`), answered with `data[].b64_json` PNG. ChatGPT OAuth tokens (auth.openai.com PKCE)
+ * are rejected by api.openai.com/v1/images/* (missing the
+ * `api.model.images.request` scope), but they work here.
+ *
+ * This used to go through `codex/responses` with a chat model driving the
+ * hosted `image_generation` tool. That broke twice over: the driving model
+ * (`gpt-5.5`) was retired, and the current Codex models are code-mode only,
+ * so they ignore the hosted tool and answer in text.
  */
-const CODEX_ENDPOINT = "https://chatgpt.com/backend-api/codex/responses";
-/** Model that supports the image_generation Responses API tool. */
-const IMAGE_GEN_MODEL = "gpt-6-astra";
+const CODEX_IMAGES_BASE = "https://chatgpt.com/backend-api/codex/images";
+/** The endpoint always answers in PNG; other formats are re-encoded locally. */
+const RESPONSE_FORMAT = "png";
+/**
+ * Codex's `IMAGE_MODEL`. Codex sends this fixed id on every request; the
+ * backend picks the generator, so there is no model choice to offer.
+ */
+const IMAGE_MODEL = "gpt-image-2";
+/** Codex's `MAX_EDIT_IMAGES`: an edit takes one to five reference images. */
+const MAX_EDIT_IMAGES = 5;
+/**
+ * Codex's retry policy for image requests (codex-client `retry.rs`
+ * `run_with_retry`, with the provider's `DEFAULT_REQUEST_MAX_RETRIES` = 4 and a
+ * 200ms base delay): up to 4 retries (5 attempts) on a 5xx or a failed
+ * connection, never on a 4xx such as 429. The wait honours `Retry-After`;
+ * otherwise it doubles from 200ms with ±10% jitter (200, 400, 800, 1600ms).
+ */
+const MAX_RETRIES = 4;
+const RETRY_BASE_DELAY_MS = 200;
+
+/** Timing seams for the retry policy, so tests can check the exact waits. */
+export type ImageRetryDeps = {
+  /** Wait `ms`, rejecting early when `signal` aborts. */
+  sleep: (ms: number, signal: AbortSignal) => Promise<void>;
+  /** Uniform in [0, 1): the jitter source. */
+  random: () => number;
+  /** Wall-clock ms, for an HTTP-date `Retry-After`. */
+  now: () => number;
+};
+
+function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      reject(signal.reason);
+      return;
+    }
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      reject(signal.reason);
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+const DEFAULT_RETRY_DEPS: ImageRetryDeps = {
+  sleep: abortableSleep,
+  random: Math.random,
+  now: Date.now,
+};
+
+/**
+ * Wait before retry number `retry` (1-based), as Codex computes it: the
+ * server's `Retry-After` (whole seconds or an HTTP date) when present,
+ * otherwise exponential backoff from 200ms with ±10% jitter.
+ */
+export function retryDelayMs(
+  retry: number,
+  retryAfter: string | null,
+  deps: Pick<ImageRetryDeps, "random" | "now">,
+): number {
+  const value = retryAfter?.trim();
+  if (value) {
+    if (/^\d+$/.test(value)) return Number(value) * 1000;
+    const date = Date.parse(value);
+    if (Number.isFinite(date)) return Math.max(0, date - deps.now());
+  }
+  const jitter = 0.9 + deps.random() * 0.2;
+  return Math.floor(RETRY_BASE_DELAY_MS * 2 ** (retry - 1) * jitter);
+}
 
 const GenerateImageParams = z.object({
   prompt: z.string().describe("Text description of the image to generate or the edit to apply"),
-  model: z
-    .enum(["gpt-image-2.5-flare", "gpt-image-2.5-sunburst"])
-    .optional()
-    .describe(
-      "Image model. Default: gpt-image-2.5-flare for fast, high-quality generation. " +
-        "Use gpt-image-2.5-sunburst when editing precision matters most.",
-    ),
   image: z
     .string()
     .optional()
     .describe(
       "Path to an existing image file to edit (use the path returned by a previous " +
         "generate_image call, or a user-attached image path). When omitted, a new " +
-        "image is generated from scratch.",
+        "image is generated from scratch. Use `images` instead for several references.",
+    ),
+  images: z
+    .array(z.string())
+    .min(1)
+    .max(MAX_EDIT_IMAGES)
+    .optional()
+    .describe(
+      `Up to ${MAX_EDIT_IMAGES} image paths to edit from or combine (for example a subject ` +
+        "and a style reference). Do not pass both `image` and `images`.",
     ),
   size: z
     .string()
     .optional()
     .describe(
-      "Requested resolution, forwarded to the image service; exact output dimensions are not guaranteed. " +
-        "Actual dimensions and shape may differ. Originals are never silently resized; mismatches are warned. " +
-        "Request sizes with both edges multiples of 16px, max edge ≤3840px, " +
-        "long:short ratio ≤3:1, total pixels 655,360–8,294,400. " +
-        "Popular: 1024x1024, 1536x1024, 1024x1536, 2048x2048. Default: auto.",
+      "Output resolution: `auto` (default) or WIDTHxHEIGHT with both edges multiples of " +
+        "16px, max edge 3840px, long:short ratio at most 3:1, and 655,360 to 8,294,400 " +
+        "total pixels. Common: 1024x1024, 1536x1024, 1024x1536. The ChatGPT image backend " +
+        "does not guarantee the requested size and may return a smaller image; the result " +
+        "always reports the size actually delivered.",
     ),
   quality: z
     .enum(["low", "medium", "high", "auto"])
@@ -82,12 +170,12 @@ const GenerateImageParams = z.object({
     .optional()
     .describe("Output file format (default png)"),
   background: z
-    .enum(["opaque", "auto"])
+    .enum(["opaque", "transparent"])
     .optional()
     .describe(
-      "Background type (default auto). Use auto or opaque. Transparent is currently " +
-        "unsupported by the connected ChatGPT/Codex backend for both models and will " +
-        "be rejected locally. Do not retry transparent requests or switch models to bypass this.",
+      "Use 'transparent' when the request calls for a transparent background, including " +
+        "background removal or a cutout (png or webp output). Default: opaque. For edits, " +
+        "keep existing transparency unless the user asks to change it.",
     ),
 });
 
@@ -109,34 +197,35 @@ function mediaTypeFor(format: string): string {
 export function createGenerateImageTool(
   cwd: string,
   auth: GenerateImageAuth,
+  retryDeps: Partial<ImageRetryDeps> = {},
 ): AgentTool<typeof GenerateImageParams> {
+  const retry: ImageRetryDeps = { ...DEFAULT_RETRY_DEPS, ...retryDeps };
   return {
     name: "generate_image",
     description:
-      "Generate or edit images using OpenAI's GPT Image 2.5 models: Flare (default, fast) " +
-      "or Sunburst (precise editing). Transparent backgrounds are currently unsupported " +
-      "through this tool. Works even when a different " +
-      "chat provider is active — only requires OpenAI to be connected. Only use this tool when " +
-      "the user explicitly asks to create, generate, or edit an image. Pass `image` with a " +
-      "file path to edit an existing image (e.g. a previously generated one or a user attachment). " +
-      "Use `out_path` to save to a specific location (defaults to .gg/generated/). " +
-      "Requested dimensions are forwarded to the image service, but actual dimensions and shape may differ. " +
-      "Originals are never silently resized; mismatches are warned.",
+      "Generate or edit images with OpenAI's image generation, the same service Codex uses " +
+      "with a ChatGPT login. Works even when a different chat provider is active; only " +
+      "requires OpenAI to be connected. Only use this tool when the user explicitly asks to " +
+      "create, generate, or edit an image. Pass `image` (or up to five `images`) to edit " +
+      "existing files, such as a previous result or a user attachment. Set `background` to " +
+      "'transparent' for cutouts and transparent artwork. Generation can take a minute or " +
+      "more. Use `out_path` to save to a specific location (defaults to .gg/generated/).",
     parameters: GenerateImageParams,
     async execute(args: GenerateImageArgs, context: ToolContext): Promise<StructuredToolResult> {
-      if (context.signal.aborted)
-        return { content: "Image generation aborted before start.", isError: true };
-      // Stale callers can bypass the public schema; reject before credential refresh or provider usage.
-      const background: unknown = args.background;
-      if (background === "transparent") {
-        return {
-          content:
-            "Transparent backgrounds are currently unsupported by the connected ChatGPT/Codex " +
-            "image backend for both Flare and Sunburst, including PNG and WebP output. " +
-            "No request was sent. Do not retry with another model or format. " +
-            "Explain this limitation to the user; do not silently substitute an opaque background.",
-          isError: true,
-        };
+      // Every failure is an explicit tool error so the agent loop, emitted
+      // events and saved history all record it as one.
+      const fail = (content: string): StructuredToolResult => ({ content, isError: true });
+      if (context.signal.aborted) return fail("Image generation aborted before start.");
+      // JPEG has no alpha channel: a transparent result saved as JPEG would
+      // silently come back opaque, after spending the user's image quota.
+      if (args.background === "transparent" && args.output_format === "jpeg") {
+        return fail(
+          "Transparent backgrounds need png or webp output; JPEG cannot store transparency. " +
+            "No request was sent. Use output_format png or webp.",
+        );
+      }
+      if (args.image && args.images) {
+        return fail("Pass either `image` or `images`, not both. No request was sent.");
       }
 
       // Resolve OpenAI credentials at execution time (lazy — token refresh
@@ -148,12 +237,10 @@ export function createGenerateImageTool(
         token = creds.accessToken;
         accountId = creds.accountId;
       } catch {
-        return {
-          content:
-            "OpenAI is not connected. The user needs to connect their OpenAI account " +
+        return fail(
+          "OpenAI is not connected. The user needs to connect their OpenAI account " +
             "to use image generation.",
-          isError: true,
-        };
+        );
       }
 
       const outputFormat = args.output_format ?? "png";
@@ -164,102 +251,93 @@ export function createGenerateImageTool(
 
       const requestedCount = args.n ?? 1;
       const savedPaths: string[] = [];
-      const sizing: Array<{
-        path: string;
-        requested: string;
-        actual: string | null;
-        status: "matched" | "mismatched" | "not-requested" | "unverified";
-      }> = [];
+      const imageBuffers: Buffer[] = [];
+      // The size OpenAI's response says it produced, per image (when given).
+      const reportedSizes: Array<string | undefined> = [];
       let failure: string | undefined;
-      const completionReport = () =>
+      const completionReport = (): string =>
         `Partial completion: saved ${savedPaths.length} of ${requestedCount} requested images.\n` +
         `Saved originals: ${savedPaths.join(", ")}\nFailure: ${failure}\n` +
         "No retry or fallback was attempted; saved originals were not overwritten. " +
         "Resolve the reported error before requesting only the missing images with a new output path.";
-      const sizeReport = () =>
-        sizing
-          .map((item) => {
-            const dimensions = `Requested: ${item.requested}; actual: ${item.actual ?? "unknown"}.`;
-            if (item.status === "mismatched")
-              return `WARNING: Image saved, requested dimensions not met. ${dimensions} Original bytes preserved; no resizing applied to the saved image. Exact-size verification failed. (${item.path})`;
-            if (item.status === "unverified")
-              return `WARNING: Image saved, dimensions could not be verified. ${dimensions} (${item.path})`;
-            return `${dimensions} ${item.status === "matched" ? "Requested dimensions matched." : "No exact dimensions requested."} (${item.path})`;
-          })
-          .join("\n");
+      const measuredSizeReport = async (): Promise<string> =>
+        sizeReport(
+          args.size,
+          savedPaths,
+          await Promise.all(imageBuffers.map((buf) => imageDimensions(buf))),
+          reportedSizes,
+        );
 
       try {
-        // Build the image_generation tool definition with the requested params.
-        const imageTool: Record<string, unknown> = {
-          type: "image_generation",
-          model: args.model ?? "gpt-image-2.5-flare",
-          output_format: outputFormat,
+        // Every field Codex sends, always: it pins quality and size to "auto"
+        // and background to opaque unless transparency is asked for.
+        const request: Record<string, unknown> = {
+          prompt: args.prompt,
+          background: args.background ?? "opaque",
+          model: IMAGE_MODEL,
+          quality: args.quality ?? "auto",
+          size: args.size ?? "auto",
         };
-        if (args.size) imageTool.size = args.size;
-        if (args.quality) imageTool.quality = args.quality;
-        if (args.background) imageTool.background = args.background;
 
-        // Build the input content — prompt text, optionally with a reference image.
-        const inputContent: Array<Record<string, unknown>> = [
-          { type: "input_text", text: args.prompt },
-        ];
-
-        if (args.image) {
-          // Edit mode: read the reference image and include it as input_image.
-          const imagePath = resolvePath(cwd, args.image);
-          let fileBuffer: Buffer;
-          try {
-            fileBuffer = await readFile(imagePath);
-          } catch {
-            return {
-              content: `Could not read the image at ${args.image}. Check the path is correct.`,
-              isError: true,
-            };
+        const referencePaths = args.images ?? (args.image ? [args.image] : []);
+        if (referencePaths.length > 0) {
+          // Edit mode: each reference travels inline as a data URL of the
+          // original bytes, as Codex sends them (PromptImageMode::Original).
+          const references: Array<{ image_url: string }> = [];
+          for (const reference of referencePaths) {
+            const imagePath = resolvePath(cwd, reference);
+            const refMediaType = IMAGE_MEDIA_TYPES[path.extname(imagePath).toLowerCase()];
+            if (!refMediaType) {
+              return fail(
+                `Cannot edit ${reference}: only PNG, JPEG, GIF, WebP and BMP images are supported.`,
+              );
+            }
+            let fileBuffer: Buffer;
+            try {
+              fileBuffer = await readFile(imagePath);
+            } catch {
+              return fail(`Could not read the image at ${reference}. Check the path is correct.`);
+            }
+            references.push({
+              image_url: `data:${refMediaType};base64,${fileBuffer.toString("base64")}`,
+            });
           }
-          // The Responses API accepts images as data URLs.
-          const refMediaType =
-            imagePath.toLowerCase().endsWith(".jpg") || imagePath.toLowerCase().endsWith(".jpeg")
-              ? "image/jpeg"
-              : imagePath.toLowerCase().endsWith(".webp")
-                ? "image/webp"
-                : "image/png";
-          inputContent.push({
-            type: "input_image",
-            image_url: `data:${refMediaType};base64,${fileBuffer.toString("base64")}`,
-          });
-          imageTool.action = "edit";
-        } else {
-          imageTool.action = "generate";
+          request.images = references;
         }
+        const endpoint = `${CODEX_IMAGES_BASE}/${request.images ? "edits" : "generations"}`;
+        // One id for the whole tool call, like Codex's per-turn
+        // `x-codex-image-turn-id`, so every image of an `n` batch is grouped.
+        const turnId = randomUUID();
 
-        // Call the Codex responses endpoint (same one our Codex streaming
-        // provider uses) with the image_generation built-in tool. ChatGPT OAuth
-        // tokens work here, unlike api.openai.com/v1/images/*.
-        // The Responses image tool does not accept an `n` property. Generate
-        // multiple images with separate requests. Save each completed request
-        // before starting another so later failures cannot discard its originals.
-        const imageBuffers: Buffer[] = [];
-        const requestedPixels = /^(\d+)x(\d+)$/.exec(args.size ?? "");
+        // One request per image, like the Codex CLI. Each completed image is
+        // saved before the next request starts, so a later failure (or a
+        // cancel) keeps the originals already paid for. Files are created
+        // exclusively: an existing file, including an edit's input, is never
+        // overwritten.
         try {
           while (savedPaths.length < requestedCount) {
-            const generated = await callImageGeneration(
-              inputContent,
-              imageTool,
-              token,
-              accountId,
+            const generated = await callImageEndpoint(
+              endpoint,
+              request,
+              { token, accountId, turnId },
               context.signal,
+              retry,
             );
-            if (generated.length === 0) {
+            if (generated.images.length === 0) {
               if (savedPaths.length === 0) {
-                return {
-                  content:
-                    "Image generation returned no image results from GPT-6 Astra. No fallback model was used.",
-                  isError: true,
-                };
+                return fail(
+                  "Image generation returned no results. The prompt may have been blocked by content moderation.",
+                );
               }
-              throw new Error("Image generation returned no image results from GPT-6 Astra.");
+              throw new Error("Image generation returned no results.");
             }
-            for (const buf of generated.slice(0, requestedCount - savedPaths.length)) {
+            for (const png of generated.images.slice(0, requestedCount - savedPaths.length)) {
+              // PNG output is saved byte for byte as OpenAI sent it (alpha and
+              // all); only another format is re-encoded. Never resized.
+              const buf =
+                outputFormat === RESPONSE_FORMAT
+                  ? png
+                  : await convertImageFormat(png, outputFormat);
               const savePath =
                 requestedCount === 1 ? outPath : insertIndex(outPath, savedPaths.length);
               await mkdir(path.dirname(savePath), { recursive: true });
@@ -267,42 +345,27 @@ export function createGenerateImageTool(
               await writeFile(savePath, buf, { flag: "wx" });
               savedPaths.push(savePath);
               imageBuffers.push(buf);
-              // Inspect the saved original buffer, never a resized model/preview derivative.
-              let actual: string | null = null;
-              let status: (typeof sizing)[number]["status"] = "unverified";
-              try {
-                const { default: sharp } = await import("sharp");
-                const meta = await sharp(buf).metadata();
-                if (meta.width && meta.height) {
-                  actual = `${meta.width}x${meta.height}`;
-                  status = requestedPixels
-                    ? meta.width === Number(requestedPixels[1]) &&
-                      meta.height === Number(requestedPixels[2])
-                      ? "matched"
-                      : "mismatched"
-                    : !args.size || args.size === "auto"
-                      ? "not-requested"
-                      : "unverified";
-                }
-              } catch {
-                // Preserve valid returned bytes even when dimension inspection is unavailable.
-              }
-              sizing.push({ path: savePath, requested: args.size ?? "auto", actual, status });
+              reportedSizes.push(generated.reportedSize);
             }
           }
         } catch (err) {
           if (savedPaths.length === 0) throw err;
           failure = context.signal.aborted
             ? "Image generation aborted."
-            : err instanceof Error
-              ? err.message
-              : String(err);
+            : err instanceof ImageAccessError
+              ? imageAccessMessage(token)
+              : err instanceof ImageLimitError
+                ? imageLimitMessage(err.resetsAt)
+                : err instanceof Error
+                  ? err.message
+                  : String(err);
         }
 
         // The primary image (first) gets the full treatment: model-visible
         // image + inline preview. Additional images are previewed only.
-        const primary = imageBuffers[0]!;
-        const primaryPath = savedPaths[0]!;
+        const primary = imageBuffers[0];
+        const primaryPath = savedPaths[0];
+        if (!primary || !primaryPath) throw new Error("No saved image to preview.");
 
         // Shrink for the model (provider image limits) and a smaller copy for
         // the inline terminal/webview preview.
@@ -319,8 +382,9 @@ export function createGenerateImageTool(
 
         // Include additional images as previews too.
         for (let i = 1; i < imageBuffers.length; i++) {
-          const extraBuf = imageBuffers[i]!;
-          const extraPath = savedPaths[i]!;
+          const extraBuf = imageBuffers[i];
+          const extraPath = savedPaths[i];
+          if (!extraBuf || !extraPath) continue;
           const extraShrunk = await shrinkToFit(extraBuf, mediaType);
           const extraPreview = await downscaleForPreview(extraShrunk.buffer);
           imagePreviews.push({
@@ -335,8 +399,13 @@ export function createGenerateImageTool(
             ? `Generated image → ${primaryPath}`
             : `Generated ${savedPaths.length} images → ${savedPaths.join(", ")}`;
 
+        const sizeText = await measuredSizeReport();
+
+        // The summary stays the FIRST text block, on its own: restored history
+        // reads the image paths from exactly that line (extractToolImagePaths).
         const allContent: StructuredToolResult["content"] = [
-          { type: "text", text: `${failure ? completionReport() : summary}\n${sizeReport()}` },
+          { type: "text", text: failure ? completionReport() : summary },
+          { type: "text", text: sizeText },
           {
             type: "image",
             mediaType: detectedType,
@@ -346,18 +415,18 @@ export function createGenerateImageTool(
 
         return {
           content: allContent,
+          // Durable previews of every saved original, restored from session history.
           imageResult: {
             version: 1,
-            images: imagePreviews.map(({ base64, mediaType, path }) => ({
+            images: imagePreviews.map((preview) => ({
               type: "image",
-              data: base64,
-              mediaType,
-              path,
+              data: preview.base64,
+              mediaType: preview.mediaType,
+              path: preview.path,
             })),
           },
           details: {
             imagePreviews,
-            sizing,
             requestedCount,
             savedCount: savedPaths.length,
             savedPaths,
@@ -367,20 +436,76 @@ export function createGenerateImageTool(
         };
       } catch (err) {
         if (savedPaths.length > 0) {
+          // Originals are on disk; report them rather than losing them behind a
+          // preview failure. Nothing is retried.
           const reason = err instanceof Error ? err.message : String(err);
           failure = failure ? `${failure}; preview failed: ${reason}` : `Preview failed: ${reason}`;
           return {
-            content: `${completionReport()}\n${sizeReport()}`,
-            details: { sizing, requestedCount, savedCount: savedPaths.length, savedPaths, failure },
+            content: `${completionReport()}\n${await measuredSizeReport()}`,
+            details: { requestedCount, savedCount: savedPaths.length, savedPaths, failure },
             isError: true,
           };
         }
-        if (context.signal.aborted) return { content: "Image generation aborted.", isError: true };
+        if (context.signal.aborted) return fail("Image generation aborted.");
+        if (err instanceof ImageAccessError) return fail(imageAccessMessage(token));
+        if (err instanceof ImageLimitError) return fail(imageLimitMessage(err.resetsAt));
         const reason = err instanceof Error ? err.message : String(err);
-        return { content: `Image generation failed: ${reason}`, isError: true };
+        return fail(`Image generation failed: ${reason}`);
       }
     },
   };
+}
+
+type Dimensions = { width: number; height: number } | null;
+
+const formatDimensions = (d: { width: number; height: number }): string => `${d.width}x${d.height}`;
+
+/**
+ * Requested versus delivered size, for the agent to relay. The ChatGPT image
+ * backend can return a different size than asked (a user asked for 2048x2048
+ * and got 1254x1254), so a mismatch is reported plainly instead of the call
+ * reading as a clean success. Nothing is resized and nothing is re-requested:
+ * each request spends the user's image quota.
+ */
+export function sizeReport(
+  requested: string | undefined,
+  paths: readonly string[],
+  dimensions: readonly Dimensions[],
+  reportedSizes: ReadonlyArray<string | undefined>,
+): string {
+  const explicit = requested && requested !== "auto" ? requested : undefined;
+  const actual = dimensions.map((d) => (d ? formatDimensions(d) : undefined));
+  // What OpenAI's response claimed, when it disagrees with the pixels.
+  const claims = actual
+    .map((size, i) => {
+      const reported = reportedSizes[i];
+      return reported && size && reported !== size ? reported : undefined;
+    })
+    .filter((claim): claim is string => claim !== undefined);
+  const claimNote =
+    claims.length > 0 ? ` OpenAI's response reported ${[...new Set(claims)].join(", ")}.` : "";
+
+  if (actual.some((size) => size === undefined)) {
+    return explicit
+      ? `Requested ${explicit}, but the saved image could not be measured to confirm its size.`
+      : "The saved image could not be measured to report its size.";
+  }
+  const unique = [...new Set(actual)];
+  const delivered =
+    unique.length === 1
+      ? (unique[0] ?? "")
+      : actual.map((size, i) => `${paths[i] ?? `image ${i + 1}`}: ${size}`).join(", ");
+
+  if (!explicit) return `Size: ${delivered} (size auto, chosen by OpenAI).${claimNote}`;
+  if (unique.length === 1 && unique[0] === explicit) {
+    return `Size: ${explicit}, as requested.${claimNote}`;
+  }
+  return (
+    `Size mismatch: requested ${explicit}, but OpenAI returned ${delivered}.${claimNote} ` +
+    "The file was saved at its native size with no resizing. Tell the user. The ChatGPT " +
+    "image backend does not always honour the requested size, so asking again is unlikely " +
+    "to change it and would spend more of their image quota."
+  );
 }
 
 /** Insert a numeric index before the extension for multi-image output. */
@@ -390,150 +515,163 @@ function insertIndex(filePath: string, index: number): string {
   return `${base}_${index}${ext}`;
 }
 
+/** OpenAI refused the image request outright (HTTP 403): the account has no access. */
+class ImageAccessError extends Error {}
+
+/** The account's image quota is used up (HTTP 429 `usage_limit_reached`). */
+class ImageLimitError extends Error {
+  constructor(
+    message: string,
+    /** Unix seconds when the limit resets, when OpenAI says. */
+    readonly resetsAt: number | undefined,
+  ) {
+    super(message);
+  }
+}
+
+/** What to tell the agent when the image quota is used up. */
+function imageLimitMessage(resetsAt: number | undefined): string {
+  const when =
+    resetsAt !== undefined && Number.isFinite(resetsAt)
+      ? ` It resets at ${new Date(resetsAt * 1000).toISOString()}.`
+      : "";
+  return (
+    `This ChatGPT account has reached its image generation limit.${when} ` +
+    "Tell the user; retrying before then will not help."
+  );
+}
+
 /**
- * Call the Codex responses endpoint with the `image_generation` built-in tool.
- * Reads the SSE stream and extracts base64 image data from
- * `response.output_item.done` events where `item.type === "image_generation_call"`.
- *
- * The Codex backend requires `stream: true` and the ChatGPT OAuth token (which
- * our auth.openai.com PKCE flow produces). The top-level model orchestrates the
- * request; imageTool.model selects the GPT Image model separately.
+ * The ChatGPT plan from the access token's auth claim (`chatgpt_plan_type`), or
+ * undefined when the token is not a readable JWT. Only the plan name is read;
+ * nothing from the token is logged or returned.
  */
-async function callImageGeneration(
-  inputContent: Array<Record<string, unknown>>,
-  imageTool: Record<string, unknown>,
-  token: string,
-  accountId: string | undefined,
+function chatgptPlan(token: string): string | undefined {
+  const payload = token.split(".")[1];
+  if (!payload) return undefined;
+  try {
+    const claims = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as Record<
+      string,
+      unknown
+    >;
+    const auth = claims["https://api.openai.com/auth"];
+    if (auth && typeof auth === "object" && "chatgpt_plan_type" in auth) {
+      const plan = (auth as { chatgpt_plan_type?: unknown }).chatgpt_plan_type;
+      return typeof plan === "string" ? plan : undefined;
+    }
+  } catch {
+    // Not a JWT we can read; fall through to the generic message.
+  }
+  return undefined;
+}
+
+/**
+ * What to tell the agent when OpenAI refuses image generation for the account.
+ * A free ChatGPT plan gets a bare 403 "Forbidden" for every image request, so
+ * say that plainly instead of passing the opaque status through.
+ */
+function imageAccessMessage(token: string): string {
+  const lead =
+    chatgptPlan(token) === "free"
+      ? "Image generation is not included with a free ChatGPT plan, so OpenAI refused the request (403 Forbidden)."
+      : "OpenAI refused the image request (403 Forbidden). This ChatGPT account does not appear to include image generation in Codex.";
+  return (
+    `${lead} It needs a ChatGPT login on a paid plan that includes Codex image generation. ` +
+    "Tell the user; retrying, or changing size, quality or format, will not help."
+  );
+}
+
+/**
+ * POST one request to a Codex image endpoint and return the decoded images.
+ * Headers carry the same Codex client identity as chat (originator, user agent
+ * and `version`), since the ChatGPT backend gates features on that version.
+ */
+async function callImageEndpoint(
+  url: string,
+  request: Record<string, unknown>,
+  auth: { token: string; accountId: string | undefined; turnId: string },
   signal: AbortSignal,
-): Promise<Buffer[]> {
-  signal.throwIfAborted();
-  const profile = codexRequestProfile(IMAGE_GEN_MODEL, "low");
-  // Responses-Lite rejects hosted image tools; retain the normal chat profile unchanged.
-  delete profile.headers["X-OpenAI-Internal-Codex-Responses-Lite"];
-  const body: Record<string, unknown> = {
-    model: IMAGE_GEN_MODEL,
-    store: false,
-    stream: true,
-    instructions: "Generate the image the user requested.",
-    input: [{ role: "user", content: inputContent }],
-    tools: [imageTool],
-    tool_choice: "auto",
-    reasoning: profile.reasoning,
-    parallel_tool_calls: profile.parallelToolCalls,
-    include: ["reasoning.encrypted_content"],
-  };
-
-  const response = await fetch(CODEX_ENDPOINT, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${token}`,
-      ...(accountId ? { "chatgpt-account-id": accountId } : {}),
-      Accept: "text/event-stream",
-      ...profile.headers,
-    },
-    body: JSON.stringify(body),
-    signal,
-  });
-
-  if (!response.ok) {
-    const text = await response.text();
-    let detail = text;
+  retry: ImageRetryDeps,
+): Promise<{ images: Buffer[]; reportedSize?: string }> {
+  const body = JSON.stringify(request);
+  for (let attempt = 0; ; attempt++) {
+    let response: Response;
+    let text: string;
     try {
-      const parsed = JSON.parse(text) as { detail?: string; error?: { message?: string } };
+      response = await fetch(url, {
+        method: "POST",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${auth.token}`,
+          ...(auth.accountId ? { "chatgpt-account-id": auth.accountId } : {}),
+          originator: "codex_cli_rs",
+          "User-Agent": `codex_cli_rs/${CODEX_CLIENT_VERSION} (${os.type()} ${os.release()}; ${os.arch()})`,
+          version: CODEX_CLIENT_VERSION,
+          "x-codex-image-turn-id": auth.turnId,
+        },
+        body,
+        signal,
+      });
+      text = await response.text();
+    } catch (err) {
+      // A failed connection or a body cut off mid-read. An abort is the
+      // user stopping the run, never something to retry.
+      if (signal.aborted || attempt >= MAX_RETRIES) throw err;
+      await retry.sleep(retryDelayMs(attempt + 1, null, retry), signal);
+      continue;
+    }
+    if (response.status >= 500 && attempt < MAX_RETRIES) {
+      const wait = retryDelayMs(attempt + 1, response.headers.get("retry-after"), retry);
+      await retry.sleep(wait, signal);
+      continue;
+    }
+    return parseImageResponse(response.status, text, attempt + 1);
+  }
+}
+
+/** Turn one image endpoint reply into images, or the error it describes. */
+function parseImageResponse(
+  status: number,
+  text: string,
+  attempts: number,
+): { images: Buffer[]; reportedSize?: string } {
+  const response = { status, ok: status >= 200 && status < 300 };
+  if (response.status === 403) throw new ImageAccessError(text);
+  if (!response.ok) {
+    let detail = text;
+    let errorType: string | undefined;
+    let resetsAt: number | undefined;
+    try {
+      const parsed = JSON.parse(text) as {
+        detail?: string;
+        error?: { message?: string; type?: string; resets_at?: number };
+      };
+      errorType = parsed.error?.type;
+      resetsAt = typeof parsed.error?.resets_at === "number" ? parsed.error.resets_at : undefined;
       if (parsed.detail) detail = parsed.detail;
       else if (parsed.error?.message) detail = parsed.error.message;
     } catch {
       // Keep raw text
     }
-    throw new Error(`OpenAI Image API (${response.status}): ${detail}`);
+    if (response.status === 429 && errorType === "usage_limit_reached") {
+      throw new ImageLimitError(detail, resetsAt);
+    }
+    const tries = attempts > 1 ? ` after ${attempts} attempts` : "";
+    throw new Error(`OpenAI Image API (${response.status})${tries}: ${detail}`);
   }
 
-  if (!response.body) {
-    throw new Error("OpenAI Image API returned no response body.");
-  }
-
-  // Read the SSE stream and extract image_generation_call output items.
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  const imageBuffers: Buffer[] = [];
-
-  let completed = false;
-  const eventSchema = z.object({
-    type: z.string(),
-    message: z.string().optional(),
-    response: z
-      .object({
-        model: z.string().optional(),
-        status: z.string().optional(),
-        error: z.object({ message: z.string().optional() }).nullish(),
-      })
-      .optional(),
-    item: z
-      .object({
-        type: z.string(),
-        model: z.string().optional(),
-        status: z.string().optional(),
-        result: z.string().nullish(),
-      })
-      .optional(),
-  });
-  function consume(line: string): void {
-    if (!line.startsWith("data:")) return;
-    const data = line.slice(5).trim();
-    if (data === "[DONE]") return;
-    // Only complete lines reach JSON parsing; malformed events are not fragments.
-    const evt = eventSchema.parse(JSON.parse(data));
-    if (evt.response?.model && evt.response.model !== IMAGE_GEN_MODEL) {
-      throw new Error("Image orchestration model substitution rejected.");
-    }
-    if (
-      evt.type === "error" ||
-      evt.type === "response.failed" ||
-      evt.type === "response.incomplete" ||
-      evt.response?.error ||
-      evt.response?.status === "failed" ||
-      evt.response?.status === "incomplete"
-    ) {
-      throw new Error(
-        evt.response?.error?.message ?? evt.message ?? `Astra image request failed (${evt.type}).`,
-      );
-    }
-    if (evt.type === "response.completed") completed = true;
-    if (evt.type === "response.output_item.done" && evt.item?.type === "image_generation_call") {
-      if (evt.item.model && evt.item.model !== imageTool.model) {
-        throw new Error("Image model substitution rejected.");
-      }
-      if (evt.item.status !== "completed" || !evt.item.result) {
-        throw new Error("Image tool did not complete with a result.");
-      }
-      const image = Buffer.from(evt.item.result, "base64");
-      if (imageBuffers.length >= 4 || image.toString("base64") !== evt.item.result) {
-        throw new Error("Invalid image result data.");
-      }
-      imageBuffers.push(image);
-    }
-  }
+  let parsed: { data?: Array<{ b64_json?: unknown }>; size?: unknown };
   try {
-    while (true) {
-      signal.throwIfAborted();
-      const { done, value } = await reader.read();
-      buffer += done ? decoder.decode() : decoder.decode(value, { stream: true });
-      if (buffer.length > 128 * 1024 * 1024) throw new Error("Image stream event exceeds 128 MiB.");
-      const lines = buffer.split("\n");
-      buffer = lines.pop() ?? "";
-      for (const line of lines) consume(line);
-      if (done) {
-        if (buffer.trim()) consume(buffer);
-        break;
-      }
-    }
-    signal.throwIfAborted();
-    if (!completed) throw new Error("Astra image stream ended before response completion.");
-    return imageBuffers;
-  } finally {
-    await reader.cancel().catch(() => {});
-    reader.releaseLock();
+    parsed = JSON.parse(text) as typeof parsed;
+  } catch {
+    throw new Error("OpenAI Image API returned a response that is not JSON.");
   }
+  const images = (parsed.data ?? [])
+    .map((item) => item.b64_json)
+    .filter((b64): b64 is string => typeof b64 === "string" && b64.length > 0)
+    .map((b64) => Buffer.from(b64, "base64"));
+  // Codex's ImageResponse carries the size the backend says it produced.
+  const reportedSize = typeof parsed.size === "string" ? parsed.size : undefined;
+  return { images, ...(reportedSize ? { reportedSize } : {}) };
 }

@@ -114,11 +114,17 @@ export function measureConversationChars(messages: Message[]): {
  * its authoritative total input tokens (uncached + cache read/write). Skips
  * histories containing image/video parts.
  */
-export function calibrateEstimatorFromUsage(history: Message[], usage: Usage): void {
+export function calibrateEstimatorFromUsage(
+  history: Message[],
+  usage: Usage,
+  /** Characters the provider also counted but `history` lacks — the tool
+   *  definitions sent with the request. Omitting them biases the ratio low. */
+  extraChars = 0,
+): void {
   const { chars, hasMedia } = measureConversationChars(history);
   if (hasMedia) return;
   const totalInputTokens = usage.inputTokens + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0);
-  calibrateEstimator(chars, totalInputTokens);
+  calibrateEstimator(chars + Math.max(0, extraChars), totalInputTokens);
 }
 
 function getModelCharsPerToken(): number {

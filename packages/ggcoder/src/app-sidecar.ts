@@ -69,6 +69,7 @@ import {
   type PromptSegment,
 } from "@kenkaiiii/gg-core/desktop-session-ux";
 import { RunClaim } from "./core/run-claim.js";
+import { IdleWakeController } from "./core/idle-wake.js";
 import {
   IMPLEMENT_PLAN_PROMPT as SHARED_IMPLEMENT_PLAN_PROMPT,
   PLAN_SUBMITTED_FOR_REVIEW,
@@ -141,6 +142,7 @@ import {
 import { cleanupToolOutputs } from "./tools/overflow.js";
 import { readCappedBody } from "./utils/http-body.js";
 import {
+  GEMINI_API_KEY,
   XIAOMI_CREDITS_KEY,
   dualAuthProvider,
   discoverLocalModels,
@@ -187,6 +189,7 @@ import {
 } from "./core/extensions/plugin-bundles.js";
 import {
   getModel,
+  withoutPaidTier,
   getDefaultThinkingLevel,
   getAllModels,
   clearRuntimeModels,
@@ -2537,6 +2540,9 @@ async function createSession(
   // Bumped by /cancel — a run whose cancel generation changed mid-flight was
   // canceled and earns no XP.
   let cancelGeneration = 0;
+  // Wakes an idle session for its own failed background work; set up once the
+  // run machinery below exists. Null outside the coding agent.
+  let idleWake: IdleWakeController | null = null;
   // Autopilot (auto-review) toggle for THIS window's project. Loaded from
   // gg-app.json on boot; flipped via POST /autopilot. When on, POST /prompt runs
   // runAutopilotCycle after the user's turn settles — Ken auto-reviews the work
@@ -2765,22 +2771,27 @@ async function createSession(
     kenModelOverride = null;
   }
 
-  /** The model Ken uses next turn: the pin when set, else GG Coder's. */
+  /** The model Ken uses next turn: the pin when set, else GG Coder's. Ken never
+   *  follows GG onto a paid tier: he runs in the background, unwatched. */
   function kenCurrentModel(): { provider: Provider; model: string } {
     if (kenModelOverride) return kenModelOverride;
     const st = session.getState();
-    return { provider: st.provider, model: st.model };
+    return { provider: st.provider, model: withoutPaidTier(st.model) };
   }
 
   /** Footer payload: Ken's effective model + whether it's a pin. Merged into
    *  /state, the SSE ready frame, and every ken_model_change broadcast. */
   function kenStatePayload(): ReturnType<typeof effectiveKenModel> {
     const st = session.getState();
-    return effectiveKenModel(kenModelOverride, { provider: st.provider, model: st.model });
+    return effectiveKenModel(kenModelOverride, {
+      provider: st.provider,
+      model: withoutPaidTier(st.model),
+    });
   }
 
-  async function syncKenModel(provider: Provider, model: string): Promise<void> {
-    await kenLifecycle.syncModel({ provider, model });
+  async function syncKenModel(provider: Provider, requested: string): Promise<void> {
+    // Ken runs unattended: a paid tier is swapped for its standard model.
+    await kenLifecycle.syncModel({ provider, model: withoutPaidTier(requested) });
   }
 
   function bindKenTransitions(build: AgentSession): void {
@@ -2835,7 +2846,9 @@ async function createSession(
   let kenAutoAbort = new AbortController();
   let pendingKenAutoModel: { provider: Provider; model: string } | null = null;
 
-  async function syncKenAutoModel(provider: Provider, model: string): Promise<void> {
+  async function syncKenAutoModel(provider: Provider, requested: string): Promise<void> {
+    // The autopilot reviewer runs every turn, unwatched: never on a paid tier.
+    const model = withoutPaidTier(requested);
     if (autopilotReviewing) {
       pendingKenAutoModel = { provider, model };
       return;
@@ -2884,6 +2897,8 @@ async function createSession(
 
   function abortOwnedWork(): void {
     cancelGeneration++;
+    // Stop means "stop acting on your own" — that includes background alerts.
+    idleWake?.noteStop();
     abort.abort();
     // An MCP tool call parked on user input is not cancelled by the signal —
     // the promise lives in the bridge. Release it, or the aborted turn's tool
@@ -3869,6 +3884,48 @@ async function createSession(
     }
   }
 
+  // ── Idle wake for background alerts ────────────────────────
+  // A background task that fails, or a child agent that finishes, after the
+  // agent ended its turn would otherwise wait for the user's next message.
+  // The coding agent only: chat agents start no background work, Motion owns
+  // its own render flow, and GG Goals drives its workers itself.
+  if (mode !== "chat" && mode !== "motion" && !goal) {
+    idleWake = new IdleWakeController({
+      // The Local Fork's shared busy predicate (runs, claims, autopilot) plus
+      // the states it does not cover, rather than upstream's inline list. The
+      // queue drain holds no run claim, so between queued turns only its own
+      // flag (upstream's drainingStrandedQueue) keeps a wake from overlapping it.
+      isBusy: () =>
+        isAppSidecarSessionBusy(sessionBusyState()) ||
+        runStrandedQueue.active() ||
+        autopilotReviewing ||
+        scheduledRunActive ||
+        taskRunAll,
+      // A plan awaiting review or an active task turn blocks unprompted runs,
+      // matching the stranded-queue drain.
+      isBlocked: () => taskTurnActive || planGate.pending() !== null,
+      hasPendingAlert: () => session.hasPendingBackgroundAlert(),
+      humanPromptSeq: () => session.getHumanPromptSeq(),
+      onSkip: (reason) =>
+        log("INFO", "app-sidecar", "background alert left for the next message", { reason }),
+      start: async () => {
+        // Same race guard as POST /prompt: claim synchronously or yield.
+        if (!runClaim.claim()) return;
+        try {
+          log("INFO", "app-sidecar", "starting a run for a background alert");
+          await runAgent("Background task update", async () => {
+            await session.continueFromNotifications();
+          });
+        } finally {
+          runClaim.release();
+          // runAgent's own run-end drain is skipped while the claim is held.
+          scheduleIdleQueueDrain();
+        }
+      },
+    });
+    session.onBackgroundAlert(() => idleWake?.trigger());
+  }
+
   // ── Provider auth (login) bridge ───────────────────────────
   // OAuth login functions are interactive (open a URL, sometimes prompt for a
   // pasted code). We run one at a time and surface every step over SSE so the
@@ -3929,11 +3986,15 @@ async function createSession(
           ? ((await auth.getCredentials(oauthKey))?.usageExhaustedUntil ?? 0)
           : 0;
         const oauthSidelined = hasOAuth && Date.now() < exhaustedUntil && hasApiKey;
-        const activeMethod = connectedMethods.includes("oauth")
-          ? oauthSidelined
-            ? ("apikey" as const)
-            : ("oauth" as const)
-          : connectedMethods[0];
+        // Gemini resolves the API key first (model registry authStorageKeys).
+        const keyFirst = p.value === "gemini" && hasApiKey;
+        const activeMethod = keyFirst
+          ? ("apikey" as const)
+          : connectedMethods.includes("oauth")
+            ? oauthSidelined
+              ? ("apikey" as const)
+              : ("oauth" as const)
+            : connectedMethods[0];
 
         // `methodDetails` is the server-side lookup table behind
         // `methodGuidance` — shipping both would duplicate every string on the
@@ -5814,7 +5875,13 @@ async function createSession(
           .filter((m) => m.provider === "local" || loggedIn.includes(m.provider))
           .map((m) => {
             if (m.provider !== "local") {
-              return { id: m.id, name: m.name, provider: m.provider };
+              // `billing` flags models that change what the user pays (fast modes).
+              return {
+                id: m.id,
+                name: m.name,
+                provider: m.provider,
+                ...(m.billing ? { billing: m.billing } : {}),
+              };
             }
             const probed = findProbedModel(localProbes, m.id);
             return {
@@ -5840,8 +5907,11 @@ async function createSession(
       void readBody(req, res).then(async (raw) => {
         if (raw === null) return;
         let modelId: string;
+        let confirmPaid: boolean;
         try {
-          modelId = (JSON.parse(raw) as { model?: string }).model ?? "";
+          const body = JSON.parse(raw) as { model?: string; confirmPaid?: unknown };
+          modelId = body.model ?? "";
+          confirmPaid = body.confirmPaid === true;
         } catch {
           json(res, 400, { error: "invalid JSON body" });
           return;
@@ -5849,6 +5919,17 @@ async function createSession(
         const target = getModel(modelId);
         if (!target) {
           json(res, 404, { error: `unknown model: ${modelId}` });
+          return;
+        }
+        // A model that spends real money is never switched to implicitly: the
+        // caller must pass the user's explicit confirmation. Fails closed for
+        // every client of this route.
+        if (target.billing?.paid && !confirmPaid) {
+          json(res, 409, {
+            error: `${target.name} spends real money: ${target.billing.detail} Confirm before switching.`,
+            requiresPaidConfirmation: true,
+            billing: target.billing,
+          });
           return;
         }
         if (running) {
@@ -5862,7 +5943,7 @@ async function createSession(
             return;
           }
         }
-        await session.switchModel(target.provider, target.id);
+        await session.switchModel(target.provider, target.id, { confirmPaid });
         // Ken follows GG Coder's model only while un-pinned; a user-set Ken
         // override survives GG model switches untouched.
         if (!kenModelOverride) {
@@ -5972,6 +6053,14 @@ async function createSession(
           const target = getModel(modelId);
           if (!target) {
             json(res, 404, { error: `unknown model: ${modelId}` });
+            return;
+          }
+          // Ken and the autopilot reviewer run unwatched in the background, so
+          // they never run on a model that spends real money.
+          if (target.billing?.paid) {
+            json(res, 400, {
+              error: `${target.name} spends real money, so it's only for your main chat. Pick another model for Ken.`,
+            });
             return;
           }
           kenModelOverride = { provider: target.provider, model: target.id };
@@ -6655,8 +6744,11 @@ async function createSession(
         }
         if (logoutMethod !== "oauth") {
           // Non-dual providers store their only credential under the provider id,
-          // so this covers both them and a dual provider's API key.
-          await auth.clearCredentials(provider);
+          // so this covers both them and a dual provider's API key — except
+          // Gemini, whose provider id holds the OAuth login and whose API key
+          // lives under its own key.
+          if (provider === "gemini") await auth.clearCredentials(GEMINI_API_KEY);
+          else await auth.clearCredentials(provider);
           // Xiaomi's API Credits credential lives under a distinct key — clear it
           // too so "disconnect" fully removes both the Token Plan and Credits keys.
           if (provider === "xiaomi") await auth.clearCredentials(XIAOMI_CREDITS_KEY);
@@ -7175,6 +7267,7 @@ async function createSession(
     // started. Otherwise they keep streaming tokens and running tools on a
     // session that is being torn down.
     abortOwnedWork();
+    idleWake?.dispose();
     cancelHfPull();
     releaseRunAwake?.();
     releaseRunAwake = null;

@@ -9,8 +9,17 @@ export const smokeLabels = {
   rediscover: "Check again",
   review: "Review this task",
 };
+// Accessible name first: the composer dial's hub also renders every option
+// label as a hidden width sizer, so its textContent never equals its label.
 export const smokeButton = (label) =>
-  `Array.from(document.querySelectorAll('button')).find(b=>b.textContent.trim()===${JSON.stringify(label)})`;
+  `Array.from(document.querySelectorAll('button')).find(b=>b.getAttribute('aria-label')===${JSON.stringify(label)}||b.textContent.trim()===${JSON.stringify(label)})`;
+
+// The dial remembers its last option; a hub showing "Post-check" would send
+// /trace, /parity and /contract instead of opening Opportunities.
+export const smokeComposerActionStorageKey = "gg-composer-action";
+export const smokeDialHub = `document.querySelector('.action-dial-hub')`;
+export const smokeDialShows = (label) =>
+  `(${smokeDialHub})?.getAttribute('aria-label')===${JSON.stringify(label)}`;
 
 // Return the outermost closed ancestor, never the target summary's own disclosure.
 export function closedSmokeDisclosure(target) {

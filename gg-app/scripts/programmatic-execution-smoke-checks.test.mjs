@@ -7,6 +7,7 @@ import { initialProgrammaticChatState } from "../src/programmatic-chat-state";
 import {
   smokeLabels,
   smokeButton,
+  smokeDialShows,
   closedSmokeDisclosure,
   revealSmokeTarget,
   assessmentWorkflowStep,
@@ -198,6 +199,27 @@ it("native selectors match actual setup, current, discovery and stale UI; disclo
     expect(button(smokeLabels.review).disabled).toBe(true);
   } finally {
     cleanup();
+  }
+});
+
+it("smokeButton finds the composer dial hub by accessible name despite sizer text", () => {
+  const evaluate = (expression) => Function("document", `return (${expression})`)(document);
+  document.body.innerHTML = `
+    <div class="action-dial">
+      <button class="action-dial-hub" aria-label="Opportunities"><span aria-hidden="true"><span>Opportunities</span><span>Post-check</span><span>Opportunities</span></span></button>
+      <div role="menu"><button role="menuitemradio" aria-label="Opportunities"></button><button role="menuitemradio" aria-label="Post-check"></button></div>
+    </div>
+    <button>Review setup</button>`;
+  try {
+    const hub = document.querySelector(".action-dial-hub");
+    expect(hub.textContent.trim()).not.toBe("Opportunities");
+    expect(evaluate(smokeButton("Opportunities"))).toBe(hub);
+    expect(evaluate(smokeButton(smokeLabels.setup))?.textContent).toBe(smokeLabels.setup);
+    expect(evaluate(smokeDialShows("Opportunities"))).toBe(true);
+    hub.setAttribute("aria-label", "Post-check");
+    expect(evaluate(smokeDialShows("Opportunities"))).toBe(false); // Smokes refuse to click this hub.
+  } finally {
+    document.body.innerHTML = "";
   }
 });
 

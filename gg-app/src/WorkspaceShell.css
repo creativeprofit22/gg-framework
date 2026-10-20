@@ -789,3 +789,414 @@
     min-height: 44px;
   }
 }
+
+/* Composer "Enhance?" pill and the decorative metal rim behind it and the send
+   button. Upstream replaced the pill with a Deck key and removed these rules; the
+   fork still renders both, so they live here (restored from 818ed96b^). */
+.inputactions-trailing > .action-metal,
+.enhance-pill-host > .action-metal,
+.metal-button > .action-metal {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+.action-metal-surface {
+  border-radius: var(--radius-pill);
+}
+.inputactions-trailing:has(> .action-metal.metal-fx-root) > .icon-circle-primary,
+.enhance-pill-host:has(> .action-metal.metal-fx-root) > .enhance-pill {
+  position: relative;
+  z-index: 1;
+  background: transparent;
+  color: var(--text);
+}
+/* Pinned to the centre of the input box's top border, absolutely positioned
+   against .inputwrap so it never shifts the text, caret or box height. Always
+   mounted; `.visible` fades and slides it in and out. */
+.enhance-pill-host {
+  position: absolute;
+  top: -11px;
+  left: 50%;
+  z-index: 4;
+  display: inline-flex;
+  opacity: 0;
+  transform: translate(-50%, -4px) scale(0.96);
+  pointer-events: none;
+  transition:
+    opacity var(--t-fast),
+    transform var(--t-fast);
+}
+.enhance-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0.95px var(--space-5) 3.05px;
+  /* Plain fallback when Metal is inactive or WebGL is unavailable. */
+  background: var(--primary);
+  border: 1px solid transparent;
+  box-shadow: none;
+  border-radius: var(--radius-pill);
+  color: var(--on-primary);
+  font-family: var(--sans);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  cursor: pointer;
+}
+.enhance-pill-host.visible {
+  opacity: 1;
+  transform: translate(-50%, 0) scale(1);
+  pointer-events: auto;
+}
+.enhance-pill:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+.enhance-pill:disabled {
+  cursor: default;
+}
+.enhance-pill:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+/* Pulse only while visible, so it can't flash a hidden pill. */
+.enhance-pill-host.visible .enhance-pill.enhancing {
+  animation: enhance-pulse 1s ease-in-out infinite;
+  animation-play-state: var(--loop-play-state, running);
+}
+@keyframes enhance-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .enhance-pill-host {
+    transition: none;
+  }
+  .enhance-pill-host.visible .enhance-pill.enhancing {
+    animation: none;
+  }
+}
+@media (forced-colors: active) {
+  .enhance-pill {
+    border-color: buttontext;
+  }
+}
+
+/* ── Composer action dial (ActionDial.tsx) ──
+   One pill that runs the action it shows; holding it fans the other actions
+   out over the composer. The hub keeps the ghost button's material in both
+   themes (glass.css swaps Light); the orb carries the current action's icon and
+   the hold ring. Petals use the floating-surface material: --surface-3 in Dark,
+   frosted --glass-float in Light, like menus. Style pack §9 records the motion. */
+@property --dial-hold {
+  syntax: "<angle>";
+  inherits: false;
+  initial-value: 0deg;
+}
+.action-dial {
+  position: relative;
+  display: inline-flex;
+  flex: 0 0 auto;
+}
+.action-dial-hub {
+  gap: 7px;
+  padding-left: 3px;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
+.action-dial-hub[aria-disabled="true"] {
+  cursor: default;
+}
+.action-dial-hub[aria-disabled="true"] .action-dial-label-slot {
+  opacity: 0.55;
+}
+.action-dial-orb {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 19px;
+  height: 19px;
+  margin-block: -2px;
+  border-radius: 50%;
+  color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 16%, transparent);
+  transition:
+    color var(--t-fast),
+    background-color var(--t-fast);
+}
+/* The action's own surface is open (Opportunities): the orb lights up. */
+.action-dial-hub[aria-expanded="true"] .action-dial-orb {
+  color: var(--on-primary);
+  background: var(--primary);
+}
+.action-dial-hub[aria-expanded="true"] {
+  color: var(--text);
+}
+.action-dial-icon {
+  display: grid;
+  place-items: center;
+}
+.action-dial-icon.is-rolling {
+  animation: dial-icon-in var(--dur-dial-in) var(--ease-pop) both;
+}
+@keyframes dial-icon-in {
+  from {
+    opacity: 0;
+    rotate: -90deg;
+    scale: 0.4;
+  }
+}
+/* Hold progress: a ring sweeping round the orb for exactly the long-press
+   threshold, so the deliberate wait is visible from the first frame. */
+.action-dial-hold {
+  position: absolute;
+  inset: -3px;
+  border-radius: 50%;
+  background: conic-gradient(var(--primary) var(--dial-hold), transparent 0);
+  -webkit-mask: radial-gradient(
+    farthest-side,
+    transparent calc(100% - 2px),
+    black calc(100% - 1.5px)
+  );
+  mask: radial-gradient(farthest-side, transparent calc(100% - 2px), black calc(100% - 1.5px));
+  opacity: 0;
+  pointer-events: none;
+}
+.action-dial[data-holding] .action-dial-hold {
+  opacity: 1;
+  animation: dial-hold var(--dur-dial-hold) linear forwards;
+}
+.action-dial[data-open] .action-dial-hold {
+  --dial-hold: 360deg;
+  opacity: 0;
+  transition: opacity var(--dur-dial-out) var(--ease-in);
+}
+@keyframes dial-hold {
+  to {
+    --dial-hold: 360deg;
+  }
+}
+/* Run acknowledgement: one ring leaving the orb. */
+.action-dial-ripple {
+  position: absolute;
+  inset: 0;
+  border: 1.5px solid var(--primary);
+  border-radius: 50%;
+  pointer-events: none;
+  animation: dial-ripple var(--dur-pop-in) var(--ease-out) forwards;
+}
+@keyframes dial-ripple {
+  from {
+    opacity: 0.9;
+    scale: 0.8;
+  }
+  to {
+    opacity: 0;
+    scale: 2.4;
+  }
+}
+/* Every label stacks in one cell so the pill keeps the widest label's width
+   while the dial previews options. */
+.action-dial-label-slot {
+  display: grid;
+  overflow: hidden;
+}
+.action-dial-label-slot > * {
+  grid-area: 1 / 1;
+}
+.action-dial-sizer {
+  visibility: hidden;
+}
+.action-dial-label {
+  text-align: left;
+}
+.action-dial-label.is-rolling {
+  animation: dial-label-in var(--dur-dial-in) var(--ease-out) both;
+}
+@keyframes dial-label-in {
+  from {
+    opacity: 0;
+    translate: 0 70%;
+    filter: blur(2px);
+  }
+}
+
+/* The dial: a zero-size anchor at the hub's centre (nudged clear of the
+   composer edges by --dial-shift); petals sit at --dial-x/--dial-y from it. */
+.action-dial-ring {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  z-index: var(--z-popover);
+  width: 0;
+  height: 0;
+  translate: var(--dial-shift, 0px) 0;
+  pointer-events: none;
+}
+.action-dial-halo {
+  position: absolute;
+  top: -130px;
+  left: -82px;
+  width: 164px;
+  height: 164px;
+  border-radius: 50%;
+  background: radial-gradient(
+    closest-side,
+    color-mix(in srgb, var(--primary) 18%, transparent),
+    transparent
+  );
+  opacity: 0;
+  scale: 0.5;
+  transition:
+    opacity var(--dur-dial-out) var(--ease-in),
+    scale var(--dur-dial-out) var(--ease-in);
+}
+.action-dial[data-open] .action-dial-halo {
+  opacity: 1;
+  scale: 1;
+  transition:
+    opacity var(--dur-dial-in) var(--ease-out),
+    scale var(--dur-dial-in) var(--ease-out);
+}
+/* Opening sends one shockwave out from the hub. */
+.action-dial-wave {
+  position: absolute;
+  top: -20px;
+  left: -20px;
+  width: 40px;
+  height: 40px;
+  border: 1.5px solid color-mix(in srgb, var(--primary) 70%, transparent);
+  border-radius: 50%;
+  opacity: 0;
+}
+.action-dial[data-open] .action-dial-wave {
+  animation: dial-wave var(--dur-dissolve) var(--ease-out) forwards;
+}
+@keyframes dial-wave {
+  from {
+    opacity: 0.85;
+    scale: 0.5;
+  }
+  to {
+    opacity: 0;
+    scale: 3.6;
+  }
+}
+.action-dial-petal {
+  --petal: 36px;
+  position: absolute;
+  top: calc(var(--petal) / -2);
+  left: calc(var(--petal) / -2);
+  display: grid;
+  place-items: center;
+  width: var(--petal);
+  height: var(--petal);
+  padding: 0;
+  color: var(--text-secondary);
+  background: var(--surface-3);
+  /* Transparent so forced colours still draw the edge; the ring is a shadow. */
+  border: 1px solid transparent;
+  border-radius: 50%;
+  box-shadow:
+    0 0 0 1px var(--border-strong),
+    var(--shadow-md);
+  cursor: pointer;
+  opacity: 0;
+  visibility: hidden;
+  transform: scale(0.35);
+  /* Closing: everything folds back into the hub at once, quickly. */
+  transition:
+    transform var(--dur-dial-out) var(--ease-in),
+    opacity var(--dur-dial-out) var(--ease-in),
+    visibility 0s linear var(--dur-dial-out),
+    scale var(--t-out),
+    color var(--t-out),
+    box-shadow var(--t-out);
+}
+@media (pointer: coarse) {
+  .action-dial-petal {
+    --petal: 44px;
+  }
+}
+.action-dial[data-open] .action-dial-petal {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transform: translate(var(--dial-x), var(--dial-y)) scale(1);
+  /* Opening: petals pop out one after another and overshoot into place. */
+  transition:
+    transform var(--dur-dial-in) var(--ease-pop) calc(var(--dial-i) * var(--dur-dial-stagger)),
+    opacity var(--dur-dial-in) var(--ease-out) calc(var(--dial-i) * var(--dur-dial-stagger)),
+    visibility 0s,
+    scale var(--t-in),
+    color var(--t-in),
+    box-shadow var(--t-in);
+}
+.action-dial-petal[data-highlight] {
+  color: var(--primary);
+  scale: 1.14;
+  box-shadow:
+    0 0 0 2px var(--primary),
+    var(--shadow-md);
+}
+.action-dial-petal svg {
+  width: 16px;
+  height: 16px;
+}
+/* The action the button shows now. */
+.action-dial-petal[aria-checked="true"]::after {
+  content: "";
+  position: absolute;
+  bottom: 4px;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--primary);
+}
+.action-dial-petal:active {
+  scale: 1.04;
+}
+:where(:root[data-appearance-theme="light"]) .action-dial-petal {
+  background: var(--glass-float);
+  -webkit-backdrop-filter: var(--glass-backdrop);
+  backdrop-filter: var(--glass-backdrop);
+  box-shadow: var(--glass-surface-shadow);
+}
+:where(:root[data-appearance-theme="light"]) .action-dial-petal[data-highlight] {
+  box-shadow:
+    0 0 0 2px var(--primary),
+    var(--glass-surface-shadow);
+}
+@media (prefers-reduced-motion: reduce) {
+  /* No travel, roll or rings: petals appear in place, the hold shows as a
+     static outline, and every final state stays the same. */
+  .action-dial-petal,
+  .action-dial[data-open] .action-dial-petal,
+  .action-dial-halo,
+  .action-dial[data-open] .action-dial-halo {
+    transition-duration: 0s;
+    transition-delay: 0s;
+  }
+  .action-dial-petal[data-highlight] {
+    scale: none;
+  }
+  .action-dial[data-holding] .action-dial-hold {
+    --dial-hold: 360deg;
+    animation: none;
+  }
+  .action-dial[data-open] .action-dial-wave,
+  .action-dial-ripple {
+    display: none;
+  }
+  .action-dial-icon.is-rolling,
+  .action-dial-label.is-rolling {
+    animation: none;
+  }
+}

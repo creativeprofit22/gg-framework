@@ -121,6 +121,7 @@ const MIRRORS = [
   ["transcript-motion.ts", "EASE_OUT", "--ease-out", "equal"],
   ["transcript-motion.ts", "EASE_IN", "--ease-in", "equal"],
   ["critter-fx.ts", "POP", "--ease-pop", "equal"],
+  ["ActionDial.tsx", "HOLD_MS", "--dur-dial-hold", "equal"],
 ];
 
 describe("motion tokens", () => {

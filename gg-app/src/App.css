@@ -335,6 +335,13 @@
   /* One breath of something live and working (a goal's working count, its
      "Running now" pill), with the shared `live-breathe` keyframes. */
   --dur-breathe: 1.8s;
+  /* The composer action dial. --dur-dial-hold is the long-press that opens it
+     (ActionDial's HOLD_MS mirrors it); petals fan out over --dur-dial-in, one
+     --dur-dial-stagger apart, and fold back over --dur-dial-out. */
+  --dur-dial-hold: 320ms;
+  --dur-dial-in: 240ms;
+  --dur-dial-out: 130ms;
+  --dur-dial-stagger: 40ms;
 
   /* Keyboard focus: one ring for every control, drawn with box-shadow so it
      follows the control's radius. :focus-visible means pointer clicks never

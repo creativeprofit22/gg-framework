@@ -241,6 +241,22 @@ describe("narrow-window layout contracts", () => {
       handleLeft + 44,
     );
   });
+
+  it("styles the composer Enhance pill and pins it out of the input's text flow", () => {
+    // Regression: an upstream merge removed these rules while the fork still
+    // renders the pill, leaving a browser-default grey button in the composer.
+    expect(appCss).toMatch(
+      /^\.enhance-pill-host\s*\{[^}]*position:\s*absolute;[^}]*left:\s*50%;[^}]*pointer-events:\s*none;/m,
+    );
+    expect(appCss).toMatch(
+      /^\.enhance-pill\s*\{[^}]*background:\s*var\(--primary\);[^}]*color:\s*var\(--on-primary\);/m,
+    );
+    expect(appCss).toMatch(/^\.enhance-pill-host\.visible\s*\{[^}]*pointer-events:\s*auto;/m);
+    // The decorative metal rim sits behind its button instead of in the layout.
+    expect(appCss).toMatch(
+      /\.enhance-pill-host > \.action-metal,[\s\S]*?\{\s*position:\s*absolute;\s*inset:\s*0;/,
+    );
+  });
 });
 
 describe("glass accessibility fallback", () => {

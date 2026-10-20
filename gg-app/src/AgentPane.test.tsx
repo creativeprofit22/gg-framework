@@ -5075,6 +5075,137 @@ describe("AgentPane lifecycle", () => {
     expect(screen.getAllByRole("heading", { name: "Opportunities" })).toHaveLength(1);
   });
 
+  it("switches the action button to Post-check and sends its commands in order, stopping at a failure", async () => {
+    const pane = client("pane-post-check", 8);
+    vi.mocked(pane.listCommands).mockResolvedValue(
+      ["trace", "parity", "contract"].map((name) => ({
+        name,
+        aliases: [],
+        description: name,
+        input: { text: "optional", references: "optional", attachments: "optional" },
+        source: "custom",
+      })) as Awaited<ReturnType<PaneAgentClient["listCommands"]>>,
+    );
+    const first = deferred<{ queued: false; count: 0 }>();
+    vi.mocked(pane.sendPrompt)
+      .mockImplementationOnce(() => first.promise)
+      .mockResolvedValueOnce({ queued: true, count: 1, queueId: "q1", steers: false })
+      .mockResolvedValueOnce({ queued: true, count: 2, queueId: "q2", steers: false });
+    try {
+      render(<AgentPane client={pane} target={target} />);
+      const input = await screen.findByRole("textbox");
+      await waitFor(() => expect(pane.listCommands).toHaveBeenCalled());
+      fireEvent.change(input, { target: { value: "Keep this draft" } });
+
+      // Picking an option only switches the button.
+      const hub = screen.getByRole("button", { name: "Opportunities" });
+      fireEvent.keyDown(hub, { key: "ArrowUp" });
+      fireEvent.keyDown(hub, { key: "ArrowRight" });
+      fireEvent.keyDown(hub, { key: "Enter" });
+      fireEvent.click(hub);
+      expect(screen.getByRole("button", { name: "Post-check" })).toBe(hub);
+      expect(pane.sendPrompt).not.toHaveBeenCalled();
+      expect(pane.programmatic).not.toHaveBeenCalled();
+      await waitFor(() => expect(hub.getAttribute("aria-disabled")).toBeNull());
+
+      fireEvent.click(hub);
+      await waitFor(() => expect(pane.sendPrompt).toHaveBeenCalledTimes(1));
+      // /parity waits for /trace's receipt, so the sidecar queues them in order.
+      expect(pane.sendPrompt).toHaveBeenLastCalledWith("/trace");
+      await act(async () => first.resolve({ queued: false, count: 0 }));
+      await waitFor(() => expect(pane.sendPrompt).toHaveBeenCalledTimes(3));
+      expect(vi.mocked(pane.sendPrompt).mock.calls.map(([text]) => text)).toEqual([
+        "/trace",
+        "/parity",
+        "/contract",
+      ]);
+      expect((input as HTMLTextAreaElement).value).toBe("Keep this draft");
+      await waitFor(() => expect(hub.getAttribute("aria-disabled")).toBeNull());
+
+      // A rejected step stops the rest of the sequence.
+      vi.mocked(pane.sendPrompt)
+        .mockResolvedValueOnce({ queued: false, count: 0 })
+        .mockRejectedValueOnce(
+          new PromptSubmissionError({ code: "workflow_busy", message: "busy" }),
+        );
+      fireEvent.click(hub);
+      await waitFor(() => expect(pane.sendPrompt).toHaveBeenCalledTimes(5));
+      await waitFor(() => expect(hub.getAttribute("aria-disabled")).toBeNull());
+      expect(pane.sendPrompt).toHaveBeenCalledTimes(5);
+      expect(vi.mocked(pane.sendPrompt).mock.calls.at(-1)?.[0]).toBe("/parity");
+    } finally {
+      localStorage.removeItem("gg-composer-action");
+    }
+  });
+
+  // Regression: only a live question makes a prompt steer (sidecar
+  // promptSteersRun), so a deferred one must not block Post-check.
+  it("blocks Post-check on a live question but runs it once the question is deferred", async () => {
+    nativeMocks.realMentor = true; // Use the real event hook so ask events render cards.
+    const pane = client("pane-post-check-ask", 8);
+    const emit = liveEvents(pane);
+    vi.mocked(pane.listCommands).mockResolvedValue(
+      ["trace", "parity", "contract"].map((name) => ({
+        name,
+        aliases: [],
+        description: name,
+        input: { text: "optional", references: "optional", attachments: "optional" },
+        source: "custom",
+      })) as Awaited<ReturnType<PaneAgentClient["listCommands"]>>,
+    );
+    vi.mocked(pane.sendPrompt)
+      .mockResolvedValueOnce({ queued: false, count: 0 })
+      .mockResolvedValueOnce({ queued: true, count: 1, queueId: "q1", steers: false })
+      .mockResolvedValueOnce({ queued: true, count: 2, queueId: "q2", steers: false });
+    try {
+      render(<AgentPane client={pane} target={target} />);
+      await screen.findByRole("textbox");
+      await waitFor(() => expect(pane.listCommands).toHaveBeenCalled());
+      await waitFor(() => expect(pane.subscribe).toHaveBeenCalled());
+      const hub = screen.getByRole("button", { name: "Opportunities" });
+      fireEvent.keyDown(hub, { key: "ArrowUp" });
+      fireEvent.keyDown(hub, { key: "ArrowRight" });
+      fireEvent.keyDown(hub, { key: "Enter" });
+      fireEvent.click(hub); // The click that follows a keyboard pick is swallowed.
+      expect(screen.getByRole("button", { name: "Post-check" })).toBe(hub);
+      expect(pane.sendPrompt).not.toHaveBeenCalled();
+      await waitFor(() => expect(hub.getAttribute("aria-disabled")).toBeNull());
+
+      act(() => {
+        emit("ask_user", {
+          id: "ask-1",
+          questions: [
+            {
+              id: "approval",
+              kind: "choice",
+              question: "Allow this action?",
+              options: [{ label: "Allow action", value: "allow" }],
+            },
+          ],
+        });
+      });
+      await screen.findByRole("button", { name: /Allow action/ });
+      fireEvent.click(hub);
+      expect(nativeMocks.toast).toHaveBeenCalledWith(
+        "Answer the open question before running Post-check.",
+        "warning",
+      );
+      expect(pane.sendPrompt).not.toHaveBeenCalled();
+
+      act(() => emit("ask_user_deferred", { id: "ask-1" }));
+      nativeMocks.toast.mockClear();
+      fireEvent.click(hub);
+      await waitFor(() => expect(pane.sendPrompt).toHaveBeenCalledWith("/trace"));
+      await waitFor(() => expect(pane.sendPrompt).toHaveBeenCalledTimes(3));
+      expect(nativeMocks.toast).not.toHaveBeenCalledWith(
+        "Answer the open question before running Post-check.",
+        "warning",
+      );
+    } finally {
+      localStorage.removeItem("gg-composer-action");
+    }
+  });
+
   async function deferredOpportunityRun(
     completeBeforeReceipt = true,
     configurePane?: (pane: PaneAgentClient) => void,

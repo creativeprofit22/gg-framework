@@ -13,7 +13,7 @@ import { connectToDevWebview, createIsolatedProfile, reserveHeldTcpPort, sanitiz
 import { readProcessTable, processTreeSnapshot } from "./workspace-shell-evidence.mjs";
 import { runSmokeLifecycle, validateNativeSmokeEvidence, trackOwnedProcess, waitForLiveProcess } from "./programmatic-smoke-lifecycle.mjs";
 import { createNativeInputSmoke } from "./programmatic-native-input-smoke.mjs";
-import { smokeLabels, smokeButton, revealSmokeTarget, assessmentWorkflowStep, assessmentRequestCount, readExecutionDisplay, assertTranscriptIsolation, extendedWorkflowStep, extendedRequestCount, extendedCommandName } from "./programmatic-execution-smoke-checks.mjs";
+import { smokeLabels, smokeButton, smokeDialHub, smokeDialShows, smokeComposerActionStorageKey, revealSmokeTarget, assessmentWorkflowStep, assessmentRequestCount, readExecutionDisplay, assertTranscriptIsolation, extendedWorkflowStep, extendedRequestCount, extendedCommandName } from "./programmatic-execution-smoke-checks.mjs";
 
 import { discoveryWorkflowStep, discoveryRequestCount, runDiscoverySmoke } from "./programmatic-discovery-smoke.mjs";
 
@@ -273,6 +273,7 @@ async function run() {
     await waitFor("initial workspace persistence", () => client.evaluate(`Boolean(localStorage.getItem("gg-workspace-layout-recursive:main"))`));
     await client.evaluate(`(() => {
       localStorage.setItem("gg-workspace-layout-recursive:main", JSON.stringify({ version: 9, root: { type: "leaf", paneId: "primary" }, focusedPaneId: "primary", panes: { primary: { kind: "agent", mode: "code", cwd: ${JSON.stringify(paths.project)}, sessionPath: null } } }));
+      localStorage.removeItem(${JSON.stringify(smokeComposerActionStorageKey)}); // Dial must mount on Opportunities.
       window.fixtureBeforeReload = true;
       return true;
     })()`);
@@ -293,6 +294,10 @@ async function run() {
     await subscribeEvents();
     const input = visual ? await createNativeInputSmoke(client, native.pid, paths.audit, waitFor) : null;
     const click = async (label) => {
+      if (label === "Opportunities") {
+        await waitFor("rendered composer dial", () => client.evaluate(`!!(${smokeDialHub})`));
+        assert.equal(await client.evaluate(smokeDialShows(label)), true, "Composer dial shows Opportunities, never Post-check");
+      }
       if (input) return input.activate(input.button(label), label, label === "Approve and save setup");
       const target = smokeButton(label);
       await waitFor(`rendered ${label}`, () => client.evaluate(`!!(${target}) && !(${target}).disabled`));

@@ -221,8 +221,20 @@ import {
   PaperclipIcon,
   AtIcon,
   GitBranchIcon,
+  ListChecksIcon,
+  SparkleIcon,
   SquareIcon,
 } from "@phosphor-icons/react";
+import { ActionDial, type DialOption } from "./ActionDial";
+import {
+  COMPOSER_ACTION_IDS,
+  COMPOSER_ACTION_LABELS,
+  POST_CHECK_SEQUENCE,
+  missingSequenceCommands,
+  readComposerAction,
+  writeComposerAction,
+  type ComposerActionId,
+} from "./composer-actions";
 import { AttachmentBar } from "./AttachmentBar";
 import { AskBand } from "./AskBand";
 import {
@@ -2004,6 +2016,18 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     onProgrammaticActivity,
   } = programmaticChat;
 
+  // The composer's action button: which dial option it shows (remembered per
+  // machine), and whether a Post-check is still being handed to the sidecar.
+  const [composerAction, setComposerAction] = useState<ComposerActionId>(() =>
+    readComposerAction(typeof localStorage === "undefined" ? null : localStorage),
+  );
+  const selectComposerAction = useCallback((id: ComposerActionId) => {
+    setComposerAction(id);
+    writeComposerAction(typeof localStorage === "undefined" ? null : localStorage, id);
+  }, []);
+  const postCheckPendingRef = useRef(false);
+  const [postCheckPending, setPostCheckPending] = useState(false);
+
   // A goal cut off by a daemon restart carries on (pane-scoped).
   const resumeCutOffGoal = useCallback(() => {
     void resumeGoal(paneId).catch((e: unknown) =>
@@ -3013,18 +3037,33 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     label?: string,
     opts?: { keepInput?: boolean; onError?: (error: unknown) => void },
   ): boolean {
-    if (blockUnconfirmedSession() || sessionMutationLockRef.current) return false;
+    // The receipt promise never rejects; failures are reported inside it.
+    return dispatchText(text, label, opts) !== null;
+  }
+
+  /**
+   * `submitText`, but returns null when nothing was dispatched, or a promise of
+   * whether the host accepted the prompt (it never rejects). `followsPrompt`
+   * marks a send that trails one this render just dispatched: the run it
+   * started is not in `running` yet, so its streaming text must not be ended.
+   */
+  function dispatchText(
+    text: string,
+    label?: string,
+    opts?: { keepInput?: boolean; onError?: (error: unknown) => void; followsPrompt?: boolean },
+  ): Promise<boolean> | null {
+    if (blockUnconfirmedSession() || sessionMutationLockRef.current) return null;
     // A pending plan is the only operation that can move this session forward.
     // Do not let toolbar commands or scheduled prompts silently clear its gate.
-    if (planReview !== null) return false;
+    if (planReview !== null) return null;
     const trimmed = text.trim();
     // Mid-run this QUEUES as steering, exactly like a typed message (see
     // submit()): the sidecar injects it into the running loop. Dropping it
     // instead would be silent — the folder picker especially, which gives no
     // hint that the directory you just chose went nowhere.
     const disposition = submitDisposition(trimmed, readyRef.current, running);
-    if (disposition === "ignore") return false;
-    const queued = disposition === "queue";
+    if (disposition === "ignore") return null;
+    const queued = disposition === "queue" || opts?.followsPrompt === true;
     const supersedesQuestion = hasOpenAsk();
     // Keep approval controls and queue state unchanged until the host accepts.
     const userItem: Item = {
@@ -3037,9 +3076,9 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     const isCurrent = capturePromptSession();
     const acceptComposer = opts?.keepInput ? () => {} : captureComposerAcceptance(false);
     if (!queued) endStreamingText();
-    void sendPrompt(trimmed)
+    return sendPrompt(trimmed)
       .then((submission) => {
-        if (!isCurrent()) return;
+        if (!isCurrent()) return false;
         acceptComposer();
         if (supersedesQuestion) dismissOpenAsks();
         // Only the sidecar knows whether this reply reaches the run now or waits
@@ -3049,14 +3088,78 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
         stickToBottomRef.current = true;
         acceptSubmission(userItem, submission, steers);
         if (!submission.queued) planResumePromptRef.current = trimmed;
+        return true;
       })
-      .catch((error) => {
-        if (!isCurrent()) return;
+      .catch((error: unknown) => {
+        if (!isCurrent()) return false;
         if (opts?.onError) opts.onError(error);
         else reportPromptFailure(error);
+        return false;
       });
-    return true;
   }
+
+  /**
+   * Post-check: send each command in order, as if typed one after another.
+   * Each waits for the previous send's receipt, so the sidecar queues them in
+   * this order behind the run the first one starts. Stops at the first send
+   * that fails, or if the session changes underneath it.
+   */
+  async function runPostCheck(): Promise<void> {
+    if (postCheckPendingRef.current) return;
+    if (hasLiveAsk()) {
+      // A prompt sent now would answer the live question instead of queueing.
+      // Deferred questions don't steer (the sidecar's promptSteersRun), so the
+      // sequence runs normally and supersedes them.
+      toast("Answer the open question before running Post-check.", "warning");
+      return;
+    }
+    const isCurrent = capturePromptSession();
+    postCheckPendingRef.current = true;
+    setPostCheckPending(true);
+    try {
+      for (const [index, command] of POST_CHECK_SEQUENCE.entries()) {
+        if (!isCurrent()) return;
+        const sent = dispatchText(command, undefined, {
+          keepInput: true,
+          followsPrompt: index > 0,
+        });
+        if (sent === null || !(await sent)) return;
+      }
+    } finally {
+      postCheckPendingRef.current = false;
+      if (mountedRef.current) setPostCheckPending(false);
+    }
+  }
+  const missingPostCheckCommands = missingSequenceCommands(POST_CHECK_SEQUENCE, commands);
+  const postCheckBlocked =
+    planReview !== null
+      ? "Resolve the pending plan first"
+      : postCheckPending
+        ? "Post-check is being sent"
+        : missingPostCheckCommands.length > 0
+          ? `Needs ${missingPostCheckCommands.join(", ")}, which this project doesn't have`
+          : null;
+  // Keyed by every ComposerActionId, so an id without an entry is a type error.
+  const composerActionOptions = {
+    opportunities: {
+      label: COMPOSER_ACTION_LABELS.opportunities,
+      icon: <SparkleIcon size={12} weight="fill" />,
+      hint: programmaticOpen ? "Close Opportunities" : "Open Opportunities",
+      blocked:
+        !hydrated || programmatic.generation !== programmaticGeneration
+          ? "Opportunities are loading"
+          : null,
+      expanded: programmaticOpen,
+      run: () => setProgrammaticOpen((value) => !value),
+    },
+    "post-check": {
+      label: COMPOSER_ACTION_LABELS["post-check"],
+      icon: <ListChecksIcon size={12} weight="bold" />,
+      hint: `Run ${POST_CHECK_SEQUENCE.join(", then ")}`,
+      blocked: postCheckBlocked,
+      run: () => void runPostCheck(),
+    },
+  } satisfies Record<ComposerActionId, Omit<DialOption<ComposerActionId>, "id">>;
 
   // Scheduled prompts fire from a ticker that is set up once, so it can't close
   // over this render's `submitText`. The ref keeps the ticker pointed at the
@@ -3104,6 +3207,14 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
 
   const hasOpenAsk = useCallback((): boolean => {
     return items.some((item) => item.kind === "ask" && !item.sent && !item.cancelled);
+  }, [items]);
+
+  // Mirrors the sidecar's promptSteersRun: only a pending (non-deferred)
+  // question turns the next prompt into its answer.
+  const hasLiveAsk = useCallback((): boolean => {
+    return items.some(
+      (item) => item.kind === "ask" && !item.sent && !item.cancelled && !item.deferred,
+    );
   }, [items]);
 
   const dismissOpenAsks = useCallback((): void => {
@@ -5539,15 +5650,14 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
                       />
                     </div>
                     {workspaceMode === "code" && (
-                      <button
-                        type="button"
-                        className="btn btn-ghost btn-sm"
-                        aria-expanded={programmaticOpen}
-                        disabled={!hydrated || programmatic.generation !== programmaticGeneration}
-                        onClick={() => setProgrammaticOpen((value) => !value)}
-                      >
-                        Opportunities
-                      </button>
+                      <ActionDial<ComposerActionId>
+                        selected={composerAction}
+                        onSelect={selectComposerAction}
+                        options={COMPOSER_ACTION_IDS.map((id) => ({
+                          id,
+                          ...composerActionOptions[id],
+                        }))}
+                      />
                     )}
                     {workspaceMode === "code" && (
                       <button

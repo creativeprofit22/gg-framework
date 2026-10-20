@@ -2,44 +2,44 @@
 
 # GG Framework
 
-GG Framework is a pnpm monorepo for GG Coder: a multi-provider coding-agent runtime, CLI, and Tauri desktop application with persistent sessions, tools/MCP, and Project Notes workflows.
+pnpm monorepo for GG Coder: a multi-provider coding agent shipped as the `ggcoder` CLI and a Tauri desktop app driven by that CLI's Node daemon. This checkout is the **Local Fork** of upstream.
 
 ## Ownership
 
-- `packages/gg-ai`: provider-neutral model/message/tool schemas, provider adapters, streaming, and model metadata.
-- `packages/gg-agent`: the reusable agent loop, tool execution, compaction, subagents, and transport-independent session orchestration.
-- `packages/gg-core`: shared auth/config/path storage plus Project Notes and Roadmap contracts used across processes.
-- `packages/ggcoder`: the `ggcoder` CLI and desktop Node daemon; owns prompts, sessions, skills, MCP, tools, and app HTTP/SSE endpoints.
-- `gg-app`: React/Tauri desktop shell; TypeScript owns UI state, Rust owns native OS access and proxies the Node daemon.
-- `Matey`: a separate MCP-enabled local agent application in the same workspace.
+- `packages/gg-ai`: provider adapters and one streaming API across LLM providers.
+- `packages/gg-agent`: agent loop, tool execution, compaction, subagents.
+- `packages/gg-core`: auth/config/path storage and the cross-process contracts (Project Notes, Roadmap, slash commands, programmatic execution) exported as subpaths.
+- `packages/ggcoder`: `ggcoder` CLI plus the desktop daemon (`app-sidecar.ts` + `app-sidecar-*.ts` routes) and bundled slash-command installers under `scripts/`.
+- `gg-app`: React UI; Rust (`src-tauri`) owns native access and proxies the daemon.
+- `Matey`: unrelated Electron app sharing the workspace; it imports no framework packages.
 
 ## Architecture
 
-- The desktop webview never calls the daemon's loopback HTTP API directly: its secure Tauri origin would trigger mixed-content failures. Route commands through Rust `invoke`; Rust forwards SSE as `agent-event`.
-- Desktop windows share one Node daemon process. Each pane is a logical daemon session addressed by session ID; Rust maps pane/window state and recovers sessions after daemon respawn.
-- Desktop events are window-targeted with `emit_to`. Listen through the current webview window, not Tauri's global listener, or secondary project windows silently miss events.
-- The daemon bootstrap credential remains native-only. Rust mints logical sessions and sends both per-launch `x-gg-token` and logical `x-gg-session` headers; never expose either to webview code.
-- Cross-package behavioral contracts belong in `gg-core`; the desktop frontend imports those contracts rather than maintaining parallel response types.
+- The webview never calls the daemon's loopback HTTP API (secure Tauri origin → mixed-content failure). Go through Rust `invoke`; Rust forwards daemon SSE as `agent-event`.
+- One Node daemon serves all windows; each pane is a logical session. Rust sends per-launch `x-gg-token` plus `x-gg-session`, and respawns/recovers the daemon. Neither header may reach webview code.
+- Rust emits with `emit_to` per window. Frontend must listen via `getCurrentWebviewWindow().listen`, otherwise secondary project windows silently miss events.
+- Frontend imports response types from `@kenkaiiii/gg-core` subpaths; don't add parallel types.
 
 ## Gotchas / Invariants
 
-- `auth.json` is shared by CLI, daemon, usage pollers, and multiple app windows. Credential mutation must lock, re-read the latest file, and atomically replace it; writing a cached snapshot erases another process's login.
-- Forced OAuth refreshes must carry the rejected access token. A sibling may already have rotated the shared grant; refreshing again can revoke the new token and create a cross-process logout loop.
-- Preserve repository-wide LF checkout rules. Seeded agent fixtures are content-hashed, so CRLF conversion makes Windows fail despite unchanged text.
-- Framework build outputs are dependency-ordered: `gg-ai` → `gg-agent` → `gg-core` → `ggcoder`; build the sidecar only after those outputs exist.
-- A packaged sidecar is target-specific because it includes a staged Node runtime and native addons. Stage Node, bundle the sidecar, then smoke it on each target OS; do not reuse another OS's bundle.
-- Multi-line GitHub Actions steps must declare `shell: bash`. PowerShell otherwise reports only the final command's status on Windows and can hide earlier test/build failures.
-- Keep the Local Fork identity (`GG Coder Local Fork`, `com.ggcoder.local-fork`, `gg-coder-local-fork`) synchronized across Tauri config, Cargo, Node paths, and Rust. The isolated identity prevents local builds overwriting official app data/installations.
-- Local Fork updater artifacts and endpoints remain disabled. Upstream integration uses the guarded local-update workflow on `custom/local-customizations`; it creates recovery evidence, restores dirty files byte-for-byte, verifies identity, and never pushes unless explicitly requested.
-- `.github/ci/size-gate.mjs` accepts filters only through `--only`; a positional target is ignored and accidentally checks every artifact, including an unbuilt sidecar.
+- `auth.json` is shared by CLI, daemon, pollers and windows. Mutations lock, re-read inside the lock, then atomically replace (`gg-core/src/auth-storage.ts`); writing a cached snapshot erases another process's login.
+- Forced OAuth refresh must pass the rejected token: if disk already holds a different token, a sibling rotated it, so reuse it. Refreshing again revokes it and causes cross-process logout loops.
+- `.gitattributes` forces LF (CRLF only for `.bat/.cmd/.ps1`). Agent fixtures are SHA-256 content-hashed, so CRLF breaks Windows tests.
+- Local Fork identity (`GG Coder Local Fork`, `com.ggcoder.local-fork`, `gg-coder-local-fork`) lives in `tauri.local.conf.json` and the `build-local-hotfix.mjs` overlay, with updater artifacts/endpoints disabled. Keep base `tauri.conf.json` on upstream identity (`com.ggcoder.app`, updater on): `assertIsolatedIdentities` fails the build otherwise, and it keeps local builds from overwriting the official install.
+- Rust `reqwest` is forced onto rustls by the updater plugin's feature unification; `install_rustls_provider` (ring) must run before any client is built or it panics.
+- `// Local Fork:` comments in `daemon.rs`, `commands/agent.rs`, `auth.rs` mark fork replacements of upstream tests; keep them through upstream syncs.
+- Multi-line workflow steps need `shell: bash`; Windows PowerShell only reports the last command's status.
+- `.github/ci/size-gate.mjs` honors only `--only <artifact>` (`dist:ggcoder`, `sidecar`); positional args are ignored and every artifact gets checked.
+- Flaky-test fixes here consistently replace fixed sleeps with fake clocks/polling; on Windows a released lock dir may still be pending delete.
 
-## Unique Workflows
+## Workflows
 
-- Generated-output auditing is outside package scripts: run `node --test scripts/audit-generated.test.mjs`, then `node scripts/audit-generated.mjs --inspect`. It protects `.gg`, secrets/config, dependencies, and bundled binaries from generated cleanup.
-- Windows Phase 25 developer smoke windows start minimized. Pass `--visual` to the fixture launcher only when visible UI or focus behavior is required.
-- Desktop distribution sequence is framework builds → Node staging → sidecar bundling → bundled-runtime smoke → Tauri packaging. Windows CI additionally extracts and launches the MSI to verify the installed executable, visible window, runtime, and sidecar.
-- Public releases are tag-driven and ship Windows plus Apple Silicon macOS only. The tag must match `v<semver>`, point into `origin/main`, and have successful CI for that exact SHA.
-- Release preflight requires updater signing credentials on every platform and Apple signing/notarization credentials for macOS. macOS nested Node/native-addon binaries must be signed before Tauri assembles and notarizes the app.
+- Build order: `gg-ai` → `gg-agent` → `gg-core` → `ggcoder`, then `pnpm --filter gg-app stage:node` → `bundle:sidecar` → `node gg-app/scripts/smoke-sidecar.mjs` → Tauri build. Sidecar bundles include a staged Node + native addons, so they are per-OS.
+- Generated-output audit (outside manifests): `node --test scripts/audit-generated.test.mjs`, then `node scripts/audit-generated.mjs --inspect` (`--inspect` must be the only arg).
+- Upstream sync: `pnpm app:update:local-fixes` (`gg-app/scripts/update-with-local-fixes.mjs`); default is `--check`, never pushes without `--push`, which forbids `--no-build`/`--no-check`. Local installer: `app:build:local-patched`.
+- Dev smoke windows: `GG_APP_DEV_SMOKE_WINDOW` = `minimized|visible`. Fixture launchers start minimized; pass `--visual` only when visible UI/focus matters (`programmatic-execution-dev-smoke.mjs` asserts minimization unless `--allow-normal-window`).
+- Vite dev server is fixed at port 1420 (`strictPort`).
+- Release: push tag `vX.Y.Z[-pre]` whose commit is in `origin/main` and has green CI (`scripts/verify-release-ci.mjs`). Ships Windows + Apple Silicon macOS only; needs Tauri updater signing and Apple signing/notarization secrets; nested macOS Node/native binaries are signed before Tauri bundles. Windows CI also builds and launches the MSI.
 
 <!-- gg:init:end -->
 

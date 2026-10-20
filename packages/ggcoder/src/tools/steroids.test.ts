@@ -101,6 +101,30 @@ describe("compactRepos", () => {
     );
   });
 
+  it("does not flag a repo the background refresh recently confirmed at its indexed commit", () => {
+    const now = Date.parse("2026-09-23T00:00:00Z");
+    const row = (repo: string) => ({
+      repo,
+      commit: "abc",
+      language: "go",
+      files: 1,
+      last_commit: "2026-09-01",
+      indexed_at: "2026-09-02T00:00:00Z",
+    });
+    const json = JSON.stringify({ count: 3, repositories: [row("a/b"), row("c/d"), row("e/f")] });
+    const verified = {
+      "a/b": { commit: "abc", at: now - 86_400_000 },
+      "c/d": { commit: "old", at: now - 86_400_000 },
+      "e/f": { commit: "abc", at: now - 8 * 86_400_000 },
+    };
+    expect(compactRepos(json, now, verified)).toBe(
+      "3 repos indexed, 3 shown, 2 STALE (refresh with add before relying on them)\n" +
+        "a/b  go  1 files  2026-09-01  indexed 21d ago\n" +
+        "c/d  go  1 files  2026-09-01  indexed 21d ago STALE\n" +
+        "e/f  go  1 files  2026-09-01  indexed 21d ago STALE",
+    );
+  });
+
   it("passes non-JSON through untouched", () => {
     expect(compactRepos("not json")).toBe("not json");
   });

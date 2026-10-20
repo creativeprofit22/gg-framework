@@ -313,6 +313,7 @@ import {
 import { readFileBounded } from "./tools/operations.js";
 import { startServeMode, type ServeController } from "./modes/serve-mode.js";
 import { installSteroids, probeSteroids } from "./core/steroids.js";
+import { startSteroidsRefresh } from "./core/steroids-refresh.js";
 import { loadTelegramConfig, saveTelegramConfig, verifyBotToken } from "./core/telegram-config.js";
 import {
   addServer,
@@ -1033,6 +1034,24 @@ async function main(): Promise<void> {
     log("INFO", "app-sidecar", "daemon listening", { port: String(addr.port), host });
   });
 
+  // One daemon serves every window, so the corpus refresh runs once per app.
+  // Its state file is shared across identities (see defaultRefreshStatePath).
+  const steroidsRefresh = startSteroidsRefresh({
+    log: (level, message, data) => log(level, "app-sidecar", message, data),
+    // Re-downloads and `compact` change the corpus figures; refresh every
+    // open Steroids page, bypassing the probe cache so it isn't pre-pass data.
+    onPass: (outcome) => {
+      if (outcome.updated === 0) return;
+      void probeSteroids({ force: true })
+        .then((status) => broadcastAll("steroids_change", status))
+        .catch((err: unknown) => {
+          log("WARN", "app-sidecar", "steroids status refresh failed", {
+            error: err instanceof Error ? err.message : String(err),
+          });
+        });
+    },
+  });
+
   type ShutdownReason =
     | "configuration_refresh"
     | "SIGINT"
@@ -1065,6 +1084,7 @@ async function main(): Promise<void> {
       // teardown is still pending then, these would never be stopped.
       for (const c of sessions.values()) c.stopBackgroundProcesses();
       clearInterval(parentWatch);
+      steroidsRefresh.dispose();
       // Radio playback is app-wide (one stream across all windows), so it stops
       // at the daemon level, not per session.
       stopRadio();

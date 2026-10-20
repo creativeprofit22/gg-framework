@@ -6,6 +6,11 @@ import { execFile } from "node:child_process";
 import { z } from "zod";
 import type { AgentTool } from "@kenkaiiii/gg-agent";
 import { steroidsEnv } from "../core/steroids.js";
+import {
+  defaultRefreshStatePath,
+  readRefreshState,
+  type VerifiedHeads,
+} from "../core/steroids-refresh.js";
 
 const TIMEOUT_MS = 30_000;
 /** discover/recent hit GitHub; give them longer. */
@@ -154,7 +159,7 @@ Actions:
 - files: files indexed for one repo. repos: indexed repos, one line each (tag/limit to narrow).
 - discover: find good GitHub repos; query is 'topic:X language:Y' or 2-3 keywords, never a sentence (4+ words returns nothing). found=0: retry ONCE with 2 words or a topic: form before giving up. add=true indexes everything found (ask the user first).
 - add: index specific repos (owner/name list); the way to take a chosen subset of discover results. On an already-indexed repo, add re-fetches its latest commit.
-Freshness: \`repos\` marks rows indexed over 7 days ago as STALE. Before relying on a stale repo for an answer, refresh it with add (no need to ask — it is already in the corpus). Only indexing NEW repos needs the user's agreement.
+Freshness: \`repos\` marks rows STALE when indexed over 7 days ago and not confirmed current since. Before relying on a stale repo for an answer, refresh it with add (no need to ask — it is already in the corpus). Only indexing NEW repos needs the user's agreement.
 - recent: upstream changes in the last N hours.
 repo/language are case-insensitive; a path without globs is a prefix ('src' = 'src/**').
 \`omitted\` = cut by maxTokens (default 6000); \`more_available\` = narrow the query.
@@ -162,6 +167,7 @@ Topic not covered = corpus gap, NOT a bad query. Do not retry variants: run disc
 
 interface RepoRow {
   repo: string;
+  commit?: string;
   language?: string;
   files?: number;
   last_commit?: string;
@@ -176,7 +182,11 @@ const STALE_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
  * 400-repo corpus came back as 160 KB and blew the tool-result cap. One line
  * per repo keeps the whole list readable.
  */
-export function compactRepos(json: string, now: number = Date.now()): string {
+export function compactRepos(
+  json: string,
+  now: number = Date.now(),
+  verified: VerifiedHeads = {},
+): string {
   let parsed: { count?: number; repositories?: RepoRow[] };
   try {
     parsed = JSON.parse(json) as typeof parsed;
@@ -191,7 +201,11 @@ export function compactRepos(json: string, now: number = Date.now()): string {
     let age = "";
     if (Number.isFinite(indexed)) {
       const days = Math.max(0, Math.floor((now - indexed) / 86_400_000));
-      const isStale = now - indexed > STALE_AFTER_MS;
+      // The background refresh confirms unchanged repos without re-indexing them.
+      const check = verified[r.repo];
+      const confirmed =
+        check !== undefined && check.commit === r.commit && now - check.at <= STALE_AFTER_MS;
+      const isStale = now - indexed > STALE_AFTER_MS && !confirmed;
       if (isStale) stale++;
       age = `  indexed ${days}d ago${isStale ? " STALE" : ""}`;
     }
@@ -208,7 +222,10 @@ export function compactRepos(json: string, now: number = Date.now()): string {
 // it writes to the corpus, not the workspace, and the prompt requires user
 // approval of the repo list first. A plan needs the corpus filled to be a
 // plan from real code rather than memory.
-export function createSteroidsTool(bin: string): AgentTool<typeof SteroidsParams> {
+export function createSteroidsTool(
+  bin: string,
+  statePath: string = defaultRefreshStatePath(),
+): AgentTool<typeof SteroidsParams> {
   return {
     name: "steroids",
     description: DESCRIPTION,
@@ -255,7 +272,14 @@ export function createSteroidsTool(bin: string): AgentTool<typeof SteroidsParams
               resolve(`Error: steroids ${args.action} failed: ${line}`);
               return;
             }
-            resolve((args.action === "repos" ? compactRepos(out) : out) || "(no output)");
+            if (args.action !== "repos") {
+              resolve(out || "(no output)");
+              return;
+            }
+            // readRefreshState never rejects; a missing file means nothing confirmed.
+            void readRefreshState(statePath).then((state) =>
+              resolve(compactRepos(out, Date.now(), state.verified) || "(no output)"),
+            );
           },
         );
       });

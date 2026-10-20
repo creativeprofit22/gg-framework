@@ -344,11 +344,12 @@ describe("createRoadmapPhaseDraftTool", () => {
               goal: { maxLength: ROADMAP_PHASE_GOAL_MAX_LENGTH },
               doneWhen: { maxItems: ROADMAP_PHASE_DONE_WHEN_MAX_ITEMS },
               sourcePrompt: { maxLength: ROADMAP_PHASE_SOURCE_PROMPT_MAX_LENGTH },
+              reference_keys: { maxItems: 50 },
             },
           },
         },
         proposed_references: {
-          maxItems: 20,
+          maxItems: 50,
           items: {
             additionalProperties: false,
             properties: {

@@ -4,6 +4,7 @@ import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {
   isRoadmapInspectionOutcome,
+  isRoadmapPhaseCreateDraft,
   type RoadmapPhaseNotEditableReason,
 } from "@kenkaiiii/gg-core/roadmap-workflow";
 import { ProjectNotesRepository } from "./project-notes-repository.js";
@@ -13,6 +14,7 @@ import type {
   ProjectNotesLoadOutcome,
   RoadmapPhaseDraftRequest,
   RoadmapPhaseEditRequest,
+  RoadmapPhaseMoveRequest,
 } from "@kenkaiiii/gg-core";
 import {
   APP_SIDECAR_ROADMAP_DRAFT_SYSTEM_PROMPT,
@@ -393,6 +395,7 @@ describe("AppSidecarRoadmapDraftToolHost", () => {
       "roadmap_inspect",
       "roadmap_phase_draft",
       "roadmap_phase_edit",
+      "roadmap_phase_move",
     ]);
   });
 
@@ -757,5 +760,218 @@ describe("roadmap_phase_edit proposals", () => {
     expect(APP_SIDECAR_ROADMAP_DRAFT_SYSTEM_PROMPT).toContain(
       "Done, archived, and deleted phases cannot be edited",
     );
+  });
+});
+
+describe("roadmap_phase_move proposals and insert_before_phase_id drafts", () => {
+  const moveRequest: RoadmapPhaseMoveRequest = {
+    expectedRevision: 4,
+    summary: "Do the third phase first",
+    phaseId: "c",
+    beforePhaseId: "b",
+  };
+  const notStarted = (id: string, overrides: Partial<NotesPhase> = {}): NotesPhase =>
+    phase({
+      id,
+      title: `Phase ${id}`,
+      status: "not-started",
+      session: null,
+      overrides: { status: null, referenceIds: null },
+      roadmapEvents: [],
+      ...overrides,
+    });
+  const roadmap = (revision = 4, extra: Record<string, Partial<NotesPhase>> = {}) =>
+    loaded(
+      revision,
+      ["a", "b", "c"].map((id, order) => notStarted(id, { order, ...extra[id] })),
+    );
+
+  it("requires a full-Roadmap inspection and drafts the order before and after", async () => {
+    const { value, drafts } = host(async () => roadmap());
+    await expect(value.proposeMove(moveRequest)).resolves.toMatchObject({
+      status: "inspection-required",
+    });
+    await value.inspect();
+    await expect(value.proposeMove(moveRequest)).resolves.toMatchObject({
+      status: "drafted",
+      draft: {
+        kind: "move",
+        phaseId: "c",
+        phaseTitle: "Phase c",
+        position: "before",
+        targetPhaseId: "b",
+        targetPhaseTitle: "Phase b",
+        basedOnRevision: 4,
+        orderPreview: {
+          before: [
+            { phaseId: "a", title: "Phase a" },
+            { phaseId: "b", title: "Phase b" },
+            { phaseId: "c", title: "Phase c" },
+          ],
+          after: [
+            { phaseId: "a", title: "Phase a" },
+            { phaseId: "c", title: "Phase c" },
+            { phaseId: "b", title: "Phase b" },
+          ],
+        },
+        status: "pending",
+      },
+    });
+    expect(drafts.pending("/work/app")).toMatchObject({ kind: "move" });
+  });
+
+  it("refuses a bound session's active-phase slice", async () => {
+    const { value, drafts } = host(
+      async () => roadmap(),
+      () => "session-1",
+      () => "c",
+    );
+    await value.inspect();
+    await expect(value.proposeMove(moveRequest)).resolves.toMatchObject({
+      status: "inspection-required",
+      message: expect.stringContaining('scope "roadmap"'),
+    });
+    expect(drafts.pending("/work/app")).toBeNull();
+  });
+
+  it("rejects stale expected revisions without drafting", async () => {
+    let revision = 4;
+    const { value, drafts } = host(async () => roadmap(revision));
+    await value.inspect();
+    await expect(value.proposeMove({ ...moveRequest, expectedRevision: 3 })).resolves.toEqual({
+      status: "inspection-revision-mismatch",
+      inspectedRevision: 4,
+      requestedRevision: 3,
+    });
+    revision = 5;
+    await expect(value.proposeMove(moveRequest)).resolves.toEqual({
+      status: "stale-revision",
+      expectedRevision: 4,
+      currentRevision: 5,
+    });
+    expect(drafts.pending("/work/app")).toBeNull();
+  });
+
+  it.each<[RoadmapPhaseNotEditableReason, Partial<NotesPhase>]>([
+    ["done", { status: "done", completedAt: timestamp }],
+    ["archived", { archivedAt: timestamp }],
+    ["deleted", { deletion: { version: 1, currentDeletionId: "deletion-1", events: [] } }],
+  ])("refuses to move a %s phase", async (reason, overrides) => {
+    const { value, drafts } = host(async () => roadmap(4, { c: overrides }));
+    await value.inspect();
+    await expect(value.proposeMove(moveRequest)).resolves.toEqual({
+      status: "phase-not-movable",
+      phaseId: "c",
+      reason,
+    });
+    expect(drafts.pending("/work/app")).toBeNull();
+  });
+
+  it("refuses targets that are missing, deleted, or archived (not on this project's Roadmap)", async () => {
+    const cases: [string, Record<string, Partial<NotesPhase>>][] = [
+      ["phase-from-another-project", {}],
+      ["b", { b: { deletion: { version: 1, currentDeletionId: "d", events: [] } } }],
+      ["b", { b: { archivedAt: timestamp } }],
+    ];
+    for (const [target, extra] of cases) {
+      const { value, drafts } = host(async () => roadmap(4, extra));
+      await value.inspect();
+      await expect(value.proposeMove({ ...moveRequest, beforePhaseId: target })).resolves.toEqual({
+        status: "target-unavailable",
+        phaseId: target,
+      });
+      expect(drafts.pending("/work/app")).toBeNull();
+    }
+  });
+
+  it("refuses moving ahead of a Done phase, next to itself, and into its current position", async () => {
+    const { value, drafts } = host(async () =>
+      roadmap(4, { a: { status: "done", completedAt: timestamp } }),
+    );
+    await value.inspect();
+    await expect(value.proposeMove({ ...moveRequest, beforePhaseId: "a" })).resolves.toEqual({
+      status: "ahead-of-done-phase",
+      phaseId: "c",
+      donePhaseId: "a",
+    });
+    await expect(
+      value.proposeMove({ ...moveRequest, beforePhaseId: undefined, afterPhaseId: "b" }),
+    ).resolves.toEqual({ status: "no-changes", phaseId: "c" });
+    await expect(value.proposeMove({ ...moveRequest, beforePhaseId: "c" })).resolves.toMatchObject({
+      status: "invalid-proposal",
+      message: "a phase cannot be moved next to itself",
+    });
+    expect(drafts.pending("/work/app")).toBeNull();
+  });
+
+  it("places an inserted draft phase and records the order preview", async () => {
+    const { value } = host(async () => roadmap());
+    await value.inspect();
+    const insertRequest: RoadmapPhaseDraftRequest = {
+      ...request,
+      phases: [{ ...request.phases[0]!, insertBeforePhaseId: "b" }],
+    };
+    await expect(value.draft(insertRequest)).resolves.toMatchObject({
+      status: "drafted",
+      draft: {
+        phases: [{ insertBeforePhaseId: "b" }],
+        orderPreview: {
+          after: [{ phaseId: "a" }, { title: "Next phase" }, { phaseId: "b" }, { phaseId: "c" }],
+        },
+      },
+    });
+  });
+
+  it("drafts without insert_before_phase_id keep the legacy shape", async () => {
+    const { value } = host(async () => roadmap());
+    await value.inspect();
+    const result = await value.draft(request);
+    if (result.status !== "drafted" || !isRoadmapPhaseCreateDraft(result.draft)) {
+      throw new Error("expected a create draft");
+    }
+    expect(result.draft).not.toHaveProperty("orderPreview");
+    expect(result.draft.phases[0]).not.toHaveProperty("insertBeforePhaseId");
+  });
+
+  it("refuses inserting ahead of a Done phase or before an unknown phase", async () => {
+    const cases: [string, Record<string, Partial<NotesPhase>>][] = [
+      ["a", { b: { status: "done", completedAt: timestamp } }],
+      ["phase-404", {}],
+    ];
+    for (const [target, extra] of cases) {
+      const { value, drafts } = host(async () => roadmap(4, extra));
+      await value.inspect();
+      await expect(
+        value.draft({
+          ...request,
+          phases: [{ ...request.phases[0]!, insertBeforePhaseId: target }],
+        }),
+      ).resolves.toMatchObject({
+        status: "invalid-proposal",
+        path: "phases[0].insertBeforePhaseId",
+      });
+      expect(drafts.pending("/work/app")).toBeNull();
+    }
+  });
+
+  it("registers roadmap_phase_move and tells agents how to place and reorder phases", () => {
+    const tools = host(async () => roadmap()).value.createSessionTools();
+    const move = tools.find((tool) => tool.name === "roadmap_phase_move");
+    expect(move?.description).toContain("exactly one of before_phase_id or after_phase_id");
+    expect(move?.description).toContain("pending user approval");
+    expect(tools.find((tool) => tool.name === "roadmap_phase_draft")?.description).toContain(
+      "insert_before_phase_id",
+    );
+    expect(APP_SIDECAR_ROADMAP_DRAFT_SYSTEM_PROMPT).toContain("set its insert_before_phase_id");
+    expect(APP_SIDECAR_ROADMAP_DRAFT_SYSTEM_PROMPT).toContain(
+      "To change the order of existing phases",
+    );
+    expect(APP_SIDECAR_ROADMAP_DRAFT_SYSTEM_PROMPT).toContain(
+      "Never delete and redraft a phase to reorder it",
+    );
+    expect(APP_SIDECAR_ROADMAP_DRAFT_SYSTEM_PROMPT).toContain(
+      "After submitting a move, stop and say approval is pending",
+    );
+    expect(APP_SIDECAR_ROADMAP_PHASE_SYSTEM_PROMPT).toContain("roadmap_phase_move");
   });
 });

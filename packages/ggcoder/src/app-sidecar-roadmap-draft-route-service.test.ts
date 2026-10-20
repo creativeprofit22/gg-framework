@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { ProjectNotesSnapshot } from "@kenkaiiii/gg-core/project-notes";
+import type { NotesPhase, ProjectNotesSnapshot } from "@kenkaiiii/gg-core/project-notes";
 import type { RoadmapPhaseDraftApprovalResult } from "@kenkaiiii/gg-core/roadmap-workflow";
 import { AppSidecarRoadmapDraftDecisionService } from "./app-sidecar-roadmap-draft-route.js";
 import { AppSidecarRoadmapDraftCoordinator } from "./app-sidecar-roadmap-drafts.js";
@@ -60,6 +60,12 @@ function setup() {
       return { status: "edited", revision, phaseId: draft.phaseId };
     },
   );
+  const applyApprovedPhaseMove = vi.fn(
+    async (_cwd: string, draft: { phaseId: string }): Promise<RoadmapPhaseDraftApprovalResult> => {
+      revision += 1;
+      return { status: "moved", revision, phaseId: draft.phaseId };
+    },
+  );
   const load = vi.fn(async (cwd: string) => ({
     status: "ok" as const,
     recoveredFromBackup: false,
@@ -76,7 +82,12 @@ function setup() {
   const reconciliations = new AppSidecarRoadmapReconciliationCoordinator(() => `lease-${sequence}`);
   const service = new AppSidecarRoadmapDraftDecisionService({
     drafts,
-    repository: { applyApprovedPhaseEdit, createApprovedPhases, load } as never,
+    repository: {
+      applyApprovedPhaseEdit,
+      applyApprovedPhaseMove,
+      createApprovedPhases,
+      load,
+    } as never,
     reconciliations,
     onCommittedSnapshot: snapshots,
   });
@@ -84,6 +95,7 @@ function setup() {
     drafts,
     service,
     applyApprovedPhaseEdit,
+    applyApprovedPhaseMove,
     createApprovedPhases,
     load,
     reconciliations,
@@ -124,6 +136,38 @@ function publishEdit(drafts: AppSidecarRoadmapDraftCoordinator, cwd = "/work/app
     },
   });
   if (result.status !== "drafted") throw new Error("expected edit draft");
+  return result.draft;
+}
+
+function publishMove(drafts: AppSidecarRoadmapDraftCoordinator, cwd = "/work/app") {
+  const phase = (id: string, order: number): NotesPhase => ({
+    id,
+    title: `Phase ${id}`,
+    goal: "Goal",
+    doneWhen: ["Done"],
+    order,
+    status: "not-started",
+    sourcePrompt: "Prompt",
+    referenceIds: [],
+    session: null,
+    reminder: null,
+    attentionReason: null,
+    createdAt: "2026-08-01T12:00:00.000Z",
+    updatedAt: "2026-08-02T12:00:00.000Z",
+    completedAt: null,
+    archivedAt: null,
+    overrides: { status: null, referenceIds: null },
+    pendingAutomaticLifecycleTransition: null,
+    lifecycleEvents: [],
+    roadmapEvents: [],
+  });
+  const result = drafts.createMove({
+    cwd,
+    sessionId: "session-1",
+    request: { expectedRevision: 3, summary: "Do b first", phaseId: "b", beforePhaseId: "a" },
+    currentPhases: [phase("a", 0), phase("b", 1)],
+  });
+  if (result.status !== "drafted") throw new Error("expected move draft");
   return result.draft;
 }
 
@@ -281,6 +325,69 @@ describe("AppSidecarRoadmapDraftDecisionService", () => {
     expect(context.applyApprovedPhaseEdit).not.toHaveBeenCalled();
     expect(context.createApprovedPhases).not.toHaveBeenCalled();
     expect(context.load).not.toHaveBeenCalled();
+    expect(context.snapshots).not.toHaveBeenCalled();
+  });
+
+  it("applies an approved move once under the phase-move lease and broadcasts the snapshot", async () => {
+    const context = setup();
+    const draft = publishMove(context.drafts);
+    const commit = context.applyApprovedPhaseMove.getMockImplementation();
+    if (!commit) throw new Error("expected repository implementation");
+    let observed: string | undefined;
+    context.applyApprovedPhaseMove.mockImplementationOnce(async (cwd, proposal) => {
+      observed = context.reconciliations.owner(cwd)?.kind;
+      return commit(cwd, proposal);
+    });
+
+    await expect(context.service.approve("/work/app", draft.id)).resolves.toEqual({
+      status: "moved",
+      revision: 4,
+      phaseId: "b",
+    });
+    await expect(context.service.approve("/work/app", draft.id)).resolves.toEqual({
+      status: "moved",
+      revision: 4,
+      phaseId: "b",
+    });
+    expect(observed).toBe("phase-move");
+    expect(context.applyApprovedPhaseMove).toHaveBeenCalledExactlyOnceWith(
+      "/work/app",
+      expect.objectContaining({ kind: "move", id: draft.id, phaseId: "b", targetPhaseId: "a" }),
+    );
+    expect(context.applyApprovedPhaseEdit).not.toHaveBeenCalled();
+    expect(context.createApprovedPhases).not.toHaveBeenCalled();
+    expect(context.service.pending("/work/app")).toBeNull();
+    expect(context.snapshots).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ revision: 4 }),
+    );
+  });
+
+  it("rejects a move without reading or changing Project Notes", async () => {
+    const context = setup();
+    const draft = publishMove(context.drafts);
+
+    await expect(context.service.reject("/work/app", draft.id, "Keep the order")).resolves.toEqual({
+      status: "rejected",
+    });
+    await expect(context.service.approve("/work/app", draft.id)).resolves.toEqual({
+      status: "already-decided",
+      decision: "rejected",
+    });
+    expect(context.applyApprovedPhaseMove).not.toHaveBeenCalled();
+    expect(context.load).not.toHaveBeenCalled();
+    expect(context.snapshots).not.toHaveBeenCalled();
+  });
+
+  it("keeps a move whose Roadmap order changed visible as stale", async () => {
+    const context = setup();
+    const draft = publishMove(context.drafts);
+    context.applyApprovedPhaseMove.mockResolvedValueOnce({ status: "phase-changed", phaseId: "b" });
+
+    await expect(context.service.approve("/work/app", draft.id)).resolves.toEqual({
+      status: "phase-changed",
+      phaseId: "b",
+    });
+    expect(context.service.pending("/work/app")).toMatchObject({ kind: "move", status: "stale" });
     expect(context.snapshots).not.toHaveBeenCalled();
   });
 

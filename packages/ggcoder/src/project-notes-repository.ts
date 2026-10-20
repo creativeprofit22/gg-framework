@@ -80,11 +80,18 @@ import {
 export * from "@kenkaiiii/gg-core/project-notes";
 import {
   applyRoadmapPhaseEdit,
+  applyRoadmapPhaseMove,
+  describeRoadmapPhaseOrderRefusal,
+  insertRoadmapPhases,
+  reindexRoadmapPhaseOrder,
   validateRoadmapPhaseCreateDraft,
   validateRoadmapPhaseEditDraft,
+  validateRoadmapPhaseInsertionTarget,
+  validateRoadmapPhaseMoveDraft,
   type RoadmapPhaseCreateDraft,
   type RoadmapPhaseDraftApprovalResult,
   type RoadmapPhaseEditDraft,
+  type RoadmapPhaseMoveDraft,
 } from "@kenkaiiii/gg-core/roadmap-workflow";
 
 export interface StoredProjectNotesV1 {
@@ -1701,14 +1708,26 @@ export class ProjectNotesRepository {
         resolvedReferenceIds.set(reference.id, createdReference.id);
       }
 
-      const firstOrder =
-        document.phases.reduce((maximum, phase) => Math.max(maximum, phase.order), -1) + 1;
-      const phases: NotesPhase[] = draft.phases.map((phase, index) => ({
+      for (const phase of draft.phases) {
+        if (phase.insertBeforePhaseId === undefined) continue;
+        const refusal = validateRoadmapPhaseInsertionTarget(
+          document.phases,
+          phase.insertBeforePhaseId,
+        );
+        if (refusal) {
+          return {
+            status: "invalid-proposal",
+            message: `phases: ${describeRoadmapPhaseOrderRefusal(refusal)}`,
+          };
+        }
+      }
+      const phases: NotesPhase[] = draft.phases.map((phase) => ({
         id: phase.phaseId,
         title: phase.title,
         goal: phase.goal,
         doneWhen: [...phase.doneWhen],
-        order: firstOrder + index,
+        // Placeholder; reindexed below once every new phase is in position.
+        order: 0,
         status: "not-started",
         sourcePrompt: phase.sourcePrompt,
         referenceIds: phase.referenceIds.map((referenceId) =>
@@ -1727,7 +1746,17 @@ export class ProjectNotesRepository {
         roadmapEvents: [],
       }));
       document.references.push(...newReferences);
-      document.phases.push(...phases);
+      // Without insertBeforePhaseId every phase appends, exactly as before.
+      document.phases = reindexRoadmapPhaseOrder(
+        insertRoadmapPhases(
+          document.phases,
+          phases.map((phase, index) => ({
+            item: phase,
+            insertBeforePhaseId: draft.phases[index]!.insertBeforePhaseId,
+          })),
+          (phase) => phase.id,
+        ),
+      );
       document.updatedAt = timestamp;
 
       const notesValidation = validateNotesDocumentV3(document);
@@ -1807,6 +1836,68 @@ export class ProjectNotesRepository {
         context: "Approved phase edit commit",
       });
       return { status: "edited", revision: next.revision, phaseId: draft.phaseId };
+    });
+
+    if (outcome.status === "missing") return { status: "notes-missing" };
+    if (outcome.status === "corrupt") return { status: "notes-corrupt" };
+    if (outcome.status === "unsupported")
+      return { status: "storage-failed", message: outcome.message };
+    return outcome;
+  }
+
+  /**
+   * Commits a user-approved phase move as one atomic write (one revision bump) through the same
+   * authority checks as a generic UI save. Unrelated revisions do not invalidate the move; any
+   * change to the Roadmap order, or to a placement rule, does.
+   */
+  async applyApprovedPhaseMove(
+    cwd: string,
+    request: RoadmapPhaseMoveDraft,
+    timestamp = new Date().toISOString(),
+  ): Promise<RoadmapPhaseDraftApprovalResult> {
+    const validated = validateRoadmapPhaseMoveDraft(request);
+    if (!validated.ok) {
+      return {
+        status: "invalid-proposal",
+        message: `${validated.error.path}: ${validated.error.message}`,
+      };
+    }
+    const draft = validated.value;
+    if (canonicalProjectKey(draft.projectKey) !== canonicalProjectKey(cwd)) {
+      return { status: "proposal-project-mismatch" };
+    }
+
+    const outcome = await this.withLockedCurrent<
+      | Extract<RoadmapPhaseDraftApprovalResult, { status: "moved" }>
+      | Extract<RoadmapPhaseDraftApprovalResult, { status: "phase-changed" }>
+      | Extract<RoadmapPhaseDraftApprovalResult, { status: "phase-not-editable" }>
+      | Extract<RoadmapPhaseDraftApprovalResult, { status: "invalid-proposal" }>
+    >(cwd, async (paths, current) => {
+      // Re-check under the lock: the Roadmap may have changed since the move was proposed.
+      const applied = applyRoadmapPhaseMove(current.document, draft, timestamp);
+      if (applied.status !== "ok") return applied;
+      const validatedDocument = coerceNotesDocumentV3(applied.document);
+      if (!validatedDocument.ok) {
+        return {
+          status: "invalid-proposal",
+          message: `${validatedDocument.error.path}: ${validatedDocument.error.message}`,
+        };
+      }
+      const transitionError = validateGenericSaveTransition(
+        current.document,
+        validatedDocument.document,
+      );
+      if (transitionError) {
+        return {
+          status: "invalid-proposal",
+          message: `${transitionError.path}: ${transitionError.message}`,
+        };
+      }
+      const next = await this.commitDocument(paths, current, validatedDocument.document, {
+        validationMode: "trusted",
+        context: "Approved phase move commit",
+      });
+      return { status: "moved", revision: next.revision, phaseId: draft.phaseId };
     });
 
     if (outcome.status === "missing") return { status: "notes-missing" };

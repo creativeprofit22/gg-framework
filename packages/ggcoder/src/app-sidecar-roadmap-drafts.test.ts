@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { NotesPhase } from "@kenkaiiii/gg-core/project-notes";
 import {
-  isRoadmapPhaseEditDraft,
+  isRoadmapPhaseCreateDraft,
   type RoadmapPhaseCreateDraft,
 } from "@kenkaiiii/gg-core/roadmap-workflow";
 import { AppSidecarRoadmapDraftCoordinator } from "./app-sidecar-roadmap-drafts.js";
@@ -11,7 +11,7 @@ function pendingCreate(
   cwd: string,
 ): RoadmapPhaseCreateDraft | null {
   const draft = value.pending(cwd);
-  if (draft && isRoadmapPhaseEditDraft(draft)) throw new Error("expected a create draft");
+  if (draft && !isRoadmapPhaseCreateDraft(draft)) throw new Error("expected a create draft");
   return draft;
 }
 

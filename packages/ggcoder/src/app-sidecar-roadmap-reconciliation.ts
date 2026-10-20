@@ -5,6 +5,7 @@ export type RoadmapReconciliationKind =
   | "phase-deletion"
   | "phase-create"
   | "phase-edit"
+  | "phase-move"
   | "phase-start"
   | "status-update"
   | "implementation-checkpoint";

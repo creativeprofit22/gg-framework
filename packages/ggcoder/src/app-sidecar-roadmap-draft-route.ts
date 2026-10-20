@@ -2,6 +2,7 @@ import type { ProjectNotesSnapshot } from "@kenkaiiii/gg-core/project-notes";
 import {
   ROADMAP_DRAFT_FEEDBACK_MAX_LENGTH,
   isRoadmapPhaseEditDraft,
+  isRoadmapPhaseMoveDraft,
   normalizeRoadmapWorkflowText,
   type RoadmapPhaseDraftApprovalResult,
   type RoadmapPhaseDraftRejectionResult,
@@ -14,7 +15,7 @@ export interface AppSidecarRoadmapDraftDecisionServiceDependencies {
   drafts: AppSidecarRoadmapDraftCoordinator;
   repository: Pick<
     ProjectNotesRepository,
-    "applyApprovedPhaseEdit" | "createApprovedPhases" | "load"
+    "applyApprovedPhaseEdit" | "applyApprovedPhaseMove" | "createApprovedPhases" | "load"
   >;
   reconciliations: AppSidecarRoadmapReconciliationCoordinator;
   onCommittedSnapshot: (snapshot: ProjectNotesSnapshot) => void;
@@ -31,17 +32,24 @@ export class AppSidecarRoadmapDraftDecisionService {
   async approve(cwd: string, draftId: string): Promise<RoadmapPhaseDraftApprovalResult> {
     let committedSnapshot: ProjectNotesSnapshot | null = null;
     const result = await this.dependencies.drafts.approve(cwd, draftId, async (draft) => {
-      const edit = isRoadmapPhaseEditDraft(draft);
-      const lease = this.dependencies.reconciliations.tryAcquire(
-        cwd,
-        edit ? "phase-edit" : "phase-create",
-      );
+      const kind = isRoadmapPhaseEditDraft(draft)
+        ? "phase-edit"
+        : isRoadmapPhaseMoveDraft(draft)
+          ? "phase-move"
+          : "phase-create";
+      const lease = this.dependencies.reconciliations.tryAcquire(cwd, kind);
       if (!lease) return { status: "reconciliation-in-progress" };
       try {
-        const outcome = edit
+        const outcome = isRoadmapPhaseEditDraft(draft)
           ? await this.dependencies.repository.applyApprovedPhaseEdit(cwd, draft)
-          : await this.dependencies.repository.createApprovedPhases(cwd, draft);
-        if (outcome.status === "created" || outcome.status === "edited") {
+          : isRoadmapPhaseMoveDraft(draft)
+            ? await this.dependencies.repository.applyApprovedPhaseMove(cwd, draft)
+            : await this.dependencies.repository.createApprovedPhases(cwd, draft);
+        if (
+          outcome.status === "created" ||
+          outcome.status === "edited" ||
+          outcome.status === "moved"
+        ) {
           const loaded = await this.dependencies.repository.load(cwd);
           if (loaded.status === "ok" && loaded.snapshot.revision >= outcome.revision) {
             committedSnapshot = loaded.snapshot;
@@ -141,6 +149,7 @@ export function roadmapPhaseDraftApprovalHttpStatus(
   switch (result.status) {
     case "created":
     case "edited":
+    case "moved":
     case "already-decided":
       return 200;
     case "proposal-not-found":

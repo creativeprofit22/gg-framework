@@ -29,7 +29,6 @@ import {
 } from "./workspace-shell-evidence.mjs";
 
 import * as reviewLimits from "../../packages/gg-core/dist/roadmap-workflow.js";
-import { NOTES_ROADMAP_PROPOSALS_MAX_ITEMS } from "../../packages/gg-core/dist/project-notes.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const appDir = resolve(here, "..");
@@ -313,22 +312,25 @@ export function fixturePendingReviews(state, sessionId, interactive = false) {
       .slice(0, length)
       .trimEnd()
       .padEnd(length, ".");
-  const references = Array.from({ length: NOTES_ROADMAP_PROPOSALS_MAX_ITEMS }, (_, i) => ({
-    id: `review-reference-${i}`,
-    provider: "github",
-    tool: null,
-    canonicalUrl: `https://github.com/fixture/review/blob/main/reference-${i}.md`,
-    owner: "fixture",
-    repo: "review",
-    revision: "main",
-    path: `reference-${i}.md`,
-    range: null,
-    issue: null,
-    pullRequest: null,
-    query: null,
-    anchor: null,
-    relevance: "Reference for independent scrolling and bounded review layout",
-  }));
+  const references = Array.from(
+    { length: reviewLimits.ROADMAP_DRAFT_REFERENCES_MAX_ITEMS },
+    (_, i) => ({
+      id: `review-reference-${i}`,
+      provider: "github",
+      tool: null,
+      canonicalUrl: `https://github.com/fixture/review/blob/main/reference-${i}.md`,
+      owner: "fixture",
+      repo: "review",
+      revision: "main",
+      path: `reference-${i}.md`,
+      range: null,
+      issue: null,
+      pullRequest: null,
+      query: null,
+      anchor: null,
+      relevance: "Reference for independent scrolling and bounded review layout",
+    }),
+  );
   const reviews = {
     plan: {
       checkpointId: `review-${sessionId}`,

@@ -6,7 +6,6 @@ import {
   isNotesVerificationStatus,
   isValidNotesRoadmapEvidence,
   NOTES_ROADMAP_REASON_MAX_LENGTH,
-  NOTES_ROADMAP_PROPOSALS_MAX_ITEMS,
   canonicalReferenceIdentity,
   normalizeCanonicalUrl,
   validateNotesReferenceProjection,
@@ -30,7 +29,9 @@ export const ROADMAP_PHASE_DONE_WHEN_MAX_ITEMS = 20;
 export const ROADMAP_PHASE_DONE_WHEN_ITEM_MAX_LENGTH = 1_024;
 export const ROADMAP_PHASE_SOURCE_PROMPT_MAX_LENGTH = 16_384;
 export const ROADMAP_DRAFT_REFERENCE_KEY_MAX_LENGTH = 128;
-export const ROADMAP_DRAFT_REFERENCE_KEYS_MAX_ITEMS = 20;
+export const ROADMAP_DRAFT_REFERENCES_MAX_ITEMS = 50;
+// One phase may cite every reference in its draft.
+export const ROADMAP_DRAFT_REFERENCE_KEYS_MAX_ITEMS = ROADMAP_DRAFT_REFERENCES_MAX_ITEMS;
 export const ROADMAP_DRAFT_FEEDBACK_MAX_LENGTH = 4_096;
 
 export interface RoadmapWorkflowValidationError {
@@ -99,7 +100,40 @@ export interface RoadmapProposedPhase {
   doneWhen: string[];
   sourcePrompt: string;
   referenceKeys?: string[];
+  /** Existing Roadmap phase this new phase goes directly before; absent appends. */
+  insertBeforePhaseId?: string;
 }
+
+/** Bounds an approval card's order lists; Notes itself has no phase cap. */
+export const ROADMAP_PHASE_ORDER_PREVIEW_MAX_ITEMS = 1_000;
+
+/** One phase as shown in an approval card's order list. */
+export interface RoadmapPhaseOrderEntry {
+  phaseId: string;
+  /** Copied from Notes for display only. */
+  title: string;
+}
+
+/** Roadmap order (present, unarchived phases) before and after a proposal is applied. */
+export interface RoadmapPhaseOrderPreview {
+  before: RoadmapPhaseOrderEntry[];
+  after: RoadmapPhaseOrderEntry[];
+}
+
+export type RoadmapPhaseMovePosition = "before" | "after";
+
+export interface RoadmapPhasePlacement {
+  position: RoadmapPhaseMovePosition;
+  targetPhaseId: string;
+}
+
+/** Why a phase cannot be placed where requested. */
+export type RoadmapPhaseOrderRefusal =
+  | { reason: "phase-not-movable"; phaseId: string; notMovable: RoadmapPhaseNotEditableReason }
+  | { reason: "target-unavailable"; phaseId: string }
+  | { reason: "same-phase"; phaseId: string }
+  | { reason: "ahead-of-done"; phaseId: string; donePhaseId: string }
+  | { reason: "no-change"; phaseId: string };
 
 export interface RoadmapPhaseDraftRequest {
   expectedRevision: number;
@@ -127,6 +161,8 @@ export interface RoadmapPhaseCreateDraft {
   phases: RoadmapDraftPhase[];
   /** The drafter's reason for citing none of the external code it researched. */
   sourcesNotCited: string | null;
+  /** Present exactly when a phase sets `insertBeforePhaseId`; legacy drafts omit it. */
+  orderPreview?: RoadmapPhaseOrderPreview;
   status: "pending" | "stale";
 }
 
@@ -160,7 +196,43 @@ export interface RoadmapPhaseEditDraft {
   status: "pending" | "stale";
 }
 
-export type RoadmapPhaseDraft = RoadmapPhaseCreateDraft | RoadmapPhaseEditDraft;
+/** A pending proposal to move one existing phase next to another. */
+export interface RoadmapPhaseMoveDraft {
+  kind: "move";
+  id: string;
+  projectKey: string;
+  basedOnRevision: number;
+  createdAt: string;
+  createdBySessionId: string;
+  summary: string;
+  phaseId: string;
+  /** The moved phase's title when proposed, for display only. */
+  phaseTitle: string;
+  position: RoadmapPhaseMovePosition;
+  targetPhaseId: string;
+  /** The target phase's title when proposed, for display only. */
+  targetPhaseTitle: string;
+  /** Any Roadmap order change since the proposal makes the move stale. */
+  orderPreview: RoadmapPhaseOrderPreview;
+  status: "pending" | "stale";
+}
+
+export type RoadmapPhaseDraft =
+  RoadmapPhaseCreateDraft | RoadmapPhaseEditDraft | RoadmapPhaseMoveDraft;
+
+export interface RoadmapPhaseMoveRequest {
+  expectedRevision: number;
+  summary: string;
+  phaseId: string;
+  /** Exactly one of `beforePhaseId` and `afterPhaseId`. */
+  beforePhaseId?: string;
+  afterPhaseId?: string;
+}
+
+export type RoadmapPhaseMoveApplication =
+  | { status: "ok"; document: NotesDocumentV3 }
+  | { status: "phase-changed"; phaseId: string }
+  | { status: "phase-not-editable"; phaseId: string; reason: RoadmapPhaseNotEditableReason };
 
 export interface RoadmapPhaseEditRequest {
   expectedRevision: number;
@@ -182,6 +254,7 @@ export type RoadmapPhaseEditApplication =
 export type RoadmapPhaseDraftApprovalResult =
   | { status: "created"; revision: number; phaseIds: string[] }
   | { status: "edited"; revision: number; phaseId: string }
+  | { status: "moved"; revision: number; phaseId: string }
   | { status: "phase-changed"; phaseId: string }
   | { status: "phase-not-editable"; phaseId: string; reason: RoadmapPhaseNotEditableReason }
   | { status: "already-decided"; decision: "approved" | "rejected" }
@@ -201,9 +274,11 @@ export type RoadmapPhaseDraftRejectionResult =
   | { status: "proposal-project-mismatch" };
 
 const PROPOSED_PHASE_BASE_KEYS = ["title", "goal", "doneWhen", "sourcePrompt"] as const;
-const PROPOSED_PHASE_KEYS = [...PROPOSED_PHASE_BASE_KEYS, "referenceKeys"] as const;
+const PROPOSED_PHASE_OPTIONAL_KEYS = ["referenceKeys", "insertBeforePhaseId"] as const;
+const PROPOSED_PHASE_KEYS = [...PROPOSED_PHASE_BASE_KEYS, ...PROPOSED_PHASE_OPTIONAL_KEYS] as const;
 const DRAFT_PHASE_BASE_KEYS = ["phaseId", ...PROPOSED_PHASE_BASE_KEYS] as const;
-const DRAFT_PHASE_KEYS = [...DRAFT_PHASE_BASE_KEYS, "referenceIds"] as const;
+const DRAFT_PHASE_OPTIONAL_KEYS = ["referenceIds", "insertBeforePhaseId"] as const;
+const DRAFT_PHASE_KEYS = [...DRAFT_PHASE_BASE_KEYS, ...DRAFT_PHASE_OPTIONAL_KEYS] as const;
 const DRAFT_REQUEST_BASE_KEYS = ["expectedRevision", "summary", "phases"] as const;
 const DRAFT_REQUEST_OPTIONAL_KEYS = ["proposedReferences", "sourcesNotCited"] as const;
 const DRAFT_REQUEST_KEYS = [...DRAFT_REQUEST_BASE_KEYS, ...DRAFT_REQUEST_OPTIONAL_KEYS] as const;
@@ -218,12 +293,13 @@ const DRAFT_BASE_KEYS = [
   "phases",
   "status",
 ] as const;
-const DRAFT_OPTIONAL_KEYS = ["references", "sourcesNotCited"] as const;
+const DRAFT_OPTIONAL_KEYS = ["references", "sourcesNotCited", "orderPreview"] as const;
 const DRAFT_KEYS = [
   ...DRAFT_BASE_KEYS.slice(0, 6),
   "references",
   "phases",
   "sourcesNotCited",
+  "orderPreview",
   "status",
 ] as const;
 const REFERENCE_PROJECTION_KEYS = [
@@ -262,6 +338,26 @@ const EDIT_DRAFT_KEYS = [
   "status",
 ] as const;
 const FIELD_CHANGE_KEYS = ["field", "before", "after"] as const;
+const MOVE_REQUEST_BASE_KEYS = ["expectedRevision", "summary", "phaseId"] as const;
+const MOVE_REQUEST_PLACEMENT_KEYS = ["beforePhaseId", "afterPhaseId"] as const;
+const MOVE_DRAFT_KEYS = [
+  "kind",
+  "id",
+  "projectKey",
+  "basedOnRevision",
+  "createdAt",
+  "createdBySessionId",
+  "summary",
+  "phaseId",
+  "phaseTitle",
+  "position",
+  "targetPhaseId",
+  "targetPhaseTitle",
+  "orderPreview",
+  "status",
+] as const;
+const ORDER_PREVIEW_KEYS = ["before", "after"] as const;
+const ORDER_ENTRY_KEYS = ["phaseId", "title"] as const;
 
 /** Normalizes wire text before length checks and persistence. */
 export function normalizeRoadmapWorkflowText(value: string): string {
@@ -343,7 +439,18 @@ export function validateRoadmapPhaseDraft(
   value: unknown,
 ): RoadmapWorkflowValidationResult<RoadmapPhaseDraft> {
   if (isRecord(value) && value.kind === "edit") return validateRoadmapPhaseEditDraft(value);
+  if (isRecord(value) && value.kind === "move") return validateRoadmapPhaseMoveDraft(value);
   return validateRoadmapPhaseCreateDraft(value);
+}
+
+export function isRoadmapPhaseMoveDraft(value: RoadmapPhaseDraft): value is RoadmapPhaseMoveDraft {
+  return "kind" in value && value.kind === "move";
+}
+
+export function isRoadmapPhaseCreateDraft(
+  value: RoadmapPhaseDraft,
+): value is RoadmapPhaseCreateDraft {
+  return !("kind" in value);
 }
 
 export function isRoadmapPhaseDraft(value: unknown): value is RoadmapPhaseDraft {
@@ -544,6 +651,411 @@ export function applyRoadmapPhaseEdit(
   return { status: "ok", document: { ...document, phases, updatedAt } };
 }
 
+/** On the Roadmap: present (not deleted) and not archived. */
+export function isRoadmapPhaseOnRoadmap(
+  phase: Pick<NotesPhase, "deletion" | "archivedAt">,
+): boolean {
+  return isNotesPhasePresent(phase) && phase.archivedAt === null;
+}
+
+/** Roadmap phases in stored order (Notes keeps `order` equal to the array index). */
+export function roadmapPhaseOrderEntries(
+  phases: readonly Pick<NotesPhase, "id" | "title" | "deletion" | "archivedAt">[],
+): RoadmapPhaseOrderEntry[] {
+  return phases
+    .filter(isRoadmapPhaseOnRoadmap)
+    .map((phase) => ({ phaseId: phase.id, title: phase.title }));
+}
+
+/** Returns the first Roadmap Done phase at or after `index`, if any. */
+function doneRoadmapPhaseFrom(
+  phases: readonly Pick<NotesPhase, "id" | "status" | "deletion" | "archivedAt">[],
+  index: number,
+): string | null {
+  for (let position = index; position < phases.length; position += 1) {
+    const phase = phases[position]!;
+    if (isRoadmapPhaseOnRoadmap(phase) && phase.status === "done") return phase.id;
+  }
+  return null;
+}
+
+/**
+ * Checks that a new phase may go directly before `targetPhaseId`: the target must be on the
+ * Roadmap, and neither it nor any later Roadmap phase may be Done.
+ */
+export function validateRoadmapPhaseInsertionTarget(
+  phases: readonly Pick<NotesPhase, "id" | "status" | "deletion" | "archivedAt">[],
+  targetPhaseId: string,
+): RoadmapPhaseOrderRefusal | null {
+  const index = phases.findIndex((phase) => phase.id === targetPhaseId);
+  const target = phases[index];
+  if (!target || !isRoadmapPhaseOnRoadmap(target)) {
+    return { reason: "target-unavailable", phaseId: targetPhaseId };
+  }
+  const donePhaseId = doneRoadmapPhaseFrom(phases, index);
+  return donePhaseId === null
+    ? null
+    : { reason: "ahead-of-done", phaseId: targetPhaseId, donePhaseId };
+}
+
+/**
+ * Places each inserted item directly before its target (keeping their relative order) and
+ * appends the rest. Callers validate targets first; an unknown target is a bug.
+ */
+export function insertRoadmapPhases<T>(
+  existing: readonly T[],
+  inserted: readonly { item: T; insertBeforePhaseId?: string | undefined }[],
+  idOf: (item: T) => string,
+): T[] {
+  const byTarget = new Map<string, T[]>();
+  const appended: T[] = [];
+  for (const { item, insertBeforePhaseId } of inserted) {
+    if (insertBeforePhaseId === undefined) {
+      appended.push(item);
+      continue;
+    }
+    const group = byTarget.get(insertBeforePhaseId) ?? [];
+    group.push(item);
+    byTarget.set(insertBeforePhaseId, group);
+  }
+  const result: T[] = [];
+  for (const item of existing) {
+    const group = byTarget.get(idOf(item));
+    if (group) {
+      result.push(...group);
+      byTarget.delete(idOf(item));
+    }
+    result.push(item);
+  }
+  if (byTarget.size > 0) {
+    throw new Error(`insertRoadmapPhases: unknown target ${[...byTarget.keys()].join(", ")}`);
+  }
+  result.push(...appended);
+  return result;
+}
+
+/** Plain-language reason for a refused placement, for tool and proposal errors. */
+export function describeRoadmapPhaseOrderRefusal(refusal: RoadmapPhaseOrderRefusal): string {
+  switch (refusal.reason) {
+    case "phase-not-movable":
+      return `phase ${refusal.phaseId} is ${refusal.notMovable} and cannot be moved`;
+    case "target-unavailable":
+      return `phase ${refusal.phaseId} is not on the Roadmap (missing, deleted, or archived)`;
+    case "same-phase":
+      return "a phase cannot be moved next to itself";
+    case "ahead-of-done":
+      return `that position is ahead of Done phase ${refusal.donePhaseId}`;
+    case "no-change":
+      return `phase ${refusal.phaseId} is already in that position`;
+  }
+}
+
+/** Rewrites `order` to match array positions: no duplicates, no gaps. */
+export function reindexRoadmapPhaseOrder<T extends { order: number }>(phases: readonly T[]): T[] {
+  return phases.map((phase, order) => (phase.order === order ? phase : { ...phase, order }));
+}
+
+/**
+ * Plans moving one phase directly before or after another. Done, archived and deleted phases
+ * cannot move; the target must be on the Roadmap; and the moved phase may not land ahead of a
+ * Roadmap Done phase. Returns the reordered, reindexed phase array.
+ */
+export function planRoadmapPhaseMove<
+  T extends Pick<NotesPhase, "id" | "status" | "deletion" | "archivedAt" | "order">,
+>(
+  phases: readonly T[],
+  phaseId: string,
+  placement: RoadmapPhasePlacement,
+): { ok: true; phases: T[] } | { ok: false; refusal: RoadmapPhaseOrderRefusal } {
+  if (placement.targetPhaseId === phaseId) {
+    return { ok: false, refusal: { reason: "same-phase", phaseId } };
+  }
+  const source = phases.find((phase) => phase.id === phaseId);
+  const notMovable = classifyRoadmapPhaseEditability(source);
+  if (notMovable !== null || !source) {
+    return {
+      ok: false,
+      refusal: { reason: "phase-not-movable", phaseId, notMovable: notMovable ?? "missing" },
+    };
+  }
+  const target = phases.find((phase) => phase.id === placement.targetPhaseId);
+  if (!target || !isRoadmapPhaseOnRoadmap(target)) {
+    return {
+      ok: false,
+      refusal: { reason: "target-unavailable", phaseId: placement.targetPhaseId },
+    };
+  }
+  const remaining = phases.filter((phase) => phase.id !== phaseId);
+  const targetIndex = remaining.findIndex((phase) => phase.id === placement.targetPhaseId);
+  const insertAt = placement.position === "before" ? targetIndex : targetIndex + 1;
+  const next = [...remaining];
+  next.splice(insertAt, 0, source);
+  const donePhaseId = doneRoadmapPhaseFrom(next, insertAt + 1);
+  if (donePhaseId !== null) {
+    return { ok: false, refusal: { reason: "ahead-of-done", phaseId, donePhaseId } };
+  }
+  const roadmapIds = (list: readonly T[]) =>
+    list.filter(isRoadmapPhaseOnRoadmap).map((phase) => phase.id);
+  if (stringArraysEqual(roadmapIds(phases), roadmapIds(next))) {
+    return { ok: false, refusal: { reason: "no-change", phaseId } };
+  }
+  return { ok: true, phases: reindexRoadmapPhaseOrder(next) };
+}
+
+/** Moves one entry within an order list (entries are Roadmap phases only). */
+export function moveRoadmapPhaseOrderEntry(
+  entries: readonly RoadmapPhaseOrderEntry[],
+  phaseId: string,
+  placement: RoadmapPhasePlacement,
+): RoadmapPhaseOrderEntry[] | null {
+  const moved = entries.find((entry) => entry.phaseId === phaseId);
+  if (!moved || placement.targetPhaseId === phaseId) return null;
+  const remaining = entries.filter((entry) => entry.phaseId !== phaseId);
+  const targetIndex = remaining.findIndex((entry) => entry.phaseId === placement.targetPhaseId);
+  if (targetIndex < 0) return null;
+  remaining.splice(placement.position === "before" ? targetIndex : targetIndex + 1, 0, moved);
+  return remaining.map((entry) => ({ ...entry }));
+}
+
+export function roadmapPhaseMovePlacement(
+  request: Pick<RoadmapPhaseMoveRequest, "beforePhaseId" | "afterPhaseId">,
+): RoadmapPhasePlacement {
+  return request.beforePhaseId !== undefined
+    ? { position: "before", targetPhaseId: request.beforePhaseId }
+    : { position: "after", targetPhaseId: request.afterPhaseId ?? "" };
+}
+
+export function validateRoadmapPhaseMoveRequest(
+  value: unknown,
+): RoadmapWorkflowValidationResult<RoadmapPhaseMoveRequest> {
+  if (!isRecordWithKeys(value, MOVE_REQUEST_BASE_KEYS, MOVE_REQUEST_PLACEMENT_KEYS)) {
+    return invalid(
+      "$",
+      `expected ${MOVE_REQUEST_BASE_KEYS.join(", ")} and exactly one of ${MOVE_REQUEST_PLACEMENT_KEYS.join(", ")}`,
+    );
+  }
+  if (!isNonNegativeInteger(value.expectedRevision)) {
+    return invalid("expectedRevision", "expected a non-negative integer");
+  }
+  const summary = normalizedBoundedString(
+    value.summary,
+    ROADMAP_PHASE_DRAFT_SUMMARY_MAX_LENGTH,
+    "summary",
+  );
+  if (!summary.ok) return summary;
+  const phaseId = boundedIdentifier(value.phaseId, "phaseId");
+  if (!phaseId.ok) return phaseId;
+  const hasBefore = value.beforePhaseId !== undefined;
+  const hasAfter = value.afterPhaseId !== undefined;
+  if (hasBefore === hasAfter) {
+    return invalid("$", "expected exactly one of beforePhaseId or afterPhaseId");
+  }
+  const field = hasBefore ? "beforePhaseId" : "afterPhaseId";
+  const target = boundedIdentifier(value[field], field);
+  if (!target.ok) return target;
+  if (target.value === phaseId.value) {
+    return invalid(field, "a phase cannot be moved next to itself");
+  }
+  return {
+    ok: true,
+    value: {
+      expectedRevision: value.expectedRevision,
+      summary: summary.value,
+      phaseId: phaseId.value,
+      ...(hasBefore ? { beforePhaseId: target.value } : { afterPhaseId: target.value }),
+    },
+  };
+}
+
+export function validateRoadmapPhaseMoveDraft(
+  value: unknown,
+): RoadmapWorkflowValidationResult<RoadmapPhaseMoveDraft> {
+  if (!isRecordWithExactKeys(value, MOVE_DRAFT_KEYS)) {
+    return invalid("$", `expected exactly: ${MOVE_DRAFT_KEYS.join(", ")}`);
+  }
+  if (value.kind !== "move") return invalid("kind", 'expected "move"');
+  const id = boundedIdentifier(value.id, "id");
+  if (!id.ok) return id;
+  const projectKey = normalizedBoundedString(value.projectKey, 4_096, "projectKey");
+  if (!projectKey.ok) return projectKey;
+  if (!isNonNegativeInteger(value.basedOnRevision)) {
+    return invalid("basedOnRevision", "expected a non-negative integer");
+  }
+  if (!isIsoTimestamp(value.createdAt)) return invalid("createdAt", "expected an ISO timestamp");
+  const sessionId = boundedIdentifier(value.createdBySessionId, "createdBySessionId");
+  if (!sessionId.ok) return sessionId;
+  const summary = normalizedBoundedString(
+    value.summary,
+    ROADMAP_PHASE_DRAFT_SUMMARY_MAX_LENGTH,
+    "summary",
+  );
+  if (!summary.ok) return summary;
+  const phaseId = boundedIdentifier(value.phaseId, "phaseId");
+  if (!phaseId.ok) return phaseId;
+  const phaseTitle = looseBeforeString(value.phaseTitle, "phaseTitle");
+  if (!phaseTitle.ok) return phaseTitle;
+  if (value.position !== "before" && value.position !== "after") {
+    return invalid("position", 'expected "before" or "after"');
+  }
+  const targetPhaseId = boundedIdentifier(value.targetPhaseId, "targetPhaseId");
+  if (!targetPhaseId.ok) return targetPhaseId;
+  if (targetPhaseId.value === phaseId.value) {
+    return invalid("targetPhaseId", "a phase cannot be moved next to itself");
+  }
+  const targetPhaseTitle = looseBeforeString(value.targetPhaseTitle, "targetPhaseTitle");
+  if (!targetPhaseTitle.ok) return targetPhaseTitle;
+  if (value.status !== "pending" && value.status !== "stale") {
+    return invalid("status", 'expected "pending" or "stale"');
+  }
+  const preview = validateOrderPreview(value.orderPreview, "orderPreview");
+  if (!preview.ok) return preview;
+  const placement = { position: value.position, targetPhaseId: targetPhaseId.value } as const;
+  const expectedAfter = moveRoadmapPhaseOrderEntry(preview.value.before, phaseId.value, placement);
+  if (!expectedAfter || !orderEntriesEqual(expectedAfter, preview.value.after)) {
+    return invalid("orderPreview.after", "expected the before order with the phase moved");
+  }
+  if (orderEntriesEqual(preview.value.before, preview.value.after)) {
+    return invalid("orderPreview.after", "expected an order different from before");
+  }
+  return {
+    ok: true,
+    value: {
+      kind: "move",
+      id: id.value,
+      projectKey: projectKey.value,
+      basedOnRevision: value.basedOnRevision,
+      createdAt: value.createdAt,
+      createdBySessionId: sessionId.value,
+      summary: summary.value,
+      phaseId: phaseId.value,
+      phaseTitle: phaseTitle.value,
+      position: value.position,
+      targetPhaseId: targetPhaseId.value,
+      targetPhaseTitle: targetPhaseTitle.value,
+      orderPreview: preview.value,
+      status: value.status,
+    },
+  };
+}
+
+/**
+ * Applies an approved move when the Roadmap order still matches the proposal and the move
+ * still satisfies every placement rule. Only `order` values and `updatedAt` change.
+ */
+export function applyRoadmapPhaseMove(
+  document: NotesDocumentV3,
+  draft: RoadmapPhaseMoveDraft,
+  timestamp: string,
+): RoadmapPhaseMoveApplication {
+  const source = document.phases.find((phase) => phase.id === draft.phaseId);
+  const notMovable = classifyRoadmapPhaseEditability(source);
+  if (notMovable !== null) {
+    return { status: "phase-not-editable", phaseId: draft.phaseId, reason: notMovable };
+  }
+  const currentOrder = roadmapPhaseOrderEntries(document.phases).map((entry) => entry.phaseId);
+  const proposedOrder = draft.orderPreview.before.map((entry) => entry.phaseId);
+  if (!stringArraysEqual(currentOrder, proposedOrder)) {
+    return { status: "phase-changed", phaseId: draft.phaseId };
+  }
+  const planned = planRoadmapPhaseMove(document.phases, draft.phaseId, {
+    position: draft.position,
+    targetPhaseId: draft.targetPhaseId,
+  });
+  if (!planned.ok) {
+    return planned.refusal.reason === "phase-not-movable"
+      ? {
+          status: "phase-not-editable",
+          phaseId: draft.phaseId,
+          reason: planned.refusal.notMovable,
+        }
+      : { status: "phase-changed", phaseId: draft.phaseId };
+  }
+  const nextOrder = roadmapPhaseOrderEntries(planned.phases).map((entry) => entry.phaseId);
+  const approvedOrder = draft.orderPreview.after.map((entry) => entry.phaseId);
+  if (!stringArraysEqual(nextOrder, approvedOrder)) {
+    return { status: "phase-changed", phaseId: draft.phaseId };
+  }
+  return {
+    status: "ok",
+    document: {
+      ...document,
+      phases: planned.phases,
+      updatedAt: strictlyLaterTimestamp(timestamp, document.updatedAt),
+    },
+  };
+}
+
+/** Builds the approval-card order lists for a create draft that inserts phases. */
+export function buildRoadmapPhaseInsertionPreview(
+  phases: readonly Pick<NotesPhase, "id" | "title" | "deletion" | "archivedAt">[],
+  drafted: readonly Pick<RoadmapDraftPhase, "phaseId" | "title" | "insertBeforePhaseId">[],
+): RoadmapPhaseOrderPreview {
+  const before = roadmapPhaseOrderEntries(phases);
+  const after = insertRoadmapPhases(
+    before,
+    drafted.map((phase) => ({
+      item: { phaseId: phase.phaseId, title: phase.title },
+      insertBeforePhaseId: phase.insertBeforePhaseId,
+    })),
+    (entry) => entry.phaseId,
+  );
+  return { before, after: after.map((entry) => ({ ...entry })) };
+}
+
+function validateOrderPreview(
+  value: unknown,
+  path: string,
+): RoadmapWorkflowValidationResult<RoadmapPhaseOrderPreview> {
+  if (!isRecordWithExactKeys(value, ORDER_PREVIEW_KEYS)) {
+    return invalid(path, `expected exactly: ${ORDER_PREVIEW_KEYS.join(", ")}`);
+  }
+  const before = validateOrderEntries(value.before, `${path}.before`);
+  if (!before.ok) return before;
+  const after = validateOrderEntries(value.after, `${path}.after`);
+  if (!after.ok) return after;
+  return { ok: true, value: { before: before.value, after: after.value } };
+}
+
+function validateOrderEntries(
+  value: unknown,
+  path: string,
+): RoadmapWorkflowValidationResult<RoadmapPhaseOrderEntry[]> {
+  if (!Array.isArray(value) || value.length > ROADMAP_PHASE_ORDER_PREVIEW_MAX_ITEMS) {
+    return invalid(path, `expected up to ${ROADMAP_PHASE_ORDER_PREVIEW_MAX_ITEMS} phases`);
+  }
+  const seen = new Set<string>();
+  const entries: RoadmapPhaseOrderEntry[] = [];
+  for (let index = 0; index < value.length; index += 1) {
+    const candidate = value[index];
+    if (!isRecordWithExactKeys(candidate, ORDER_ENTRY_KEYS)) {
+      return invalid(`${path}[${index}]`, `expected exactly: ${ORDER_ENTRY_KEYS.join(", ")}`);
+    }
+    const phaseId = boundedIdentifier(candidate.phaseId, `${path}[${index}].phaseId`);
+    if (!phaseId.ok) return phaseId;
+    if (seen.has(phaseId.value)) {
+      return invalid(`${path}[${index}].phaseId`, "expected a unique phase ID");
+    }
+    seen.add(phaseId.value);
+    const title = looseBeforeString(candidate.title, `${path}[${index}].title`);
+    if (!title.ok) return title;
+    entries.push({ phaseId: phaseId.value, title: title.value });
+  }
+  return { ok: true, value: entries };
+}
+
+function orderEntriesEqual(
+  left: readonly RoadmapPhaseOrderEntry[],
+  right: readonly RoadmapPhaseOrderEntry[],
+): boolean {
+  return (
+    left.length === right.length &&
+    left.every(
+      (entry, index) =>
+        entry.phaseId === right[index]!.phaseId && entry.title === right[index]!.title,
+    )
+  );
+}
+
 export function validateRoadmapPhaseCreateDraft(
   value: unknown,
 ): RoadmapWorkflowValidationResult<RoadmapPhaseCreateDraft> {
@@ -595,10 +1107,7 @@ export function validateRoadmapPhaseCreateDraft(
   const phases: RoadmapDraftPhase[] = [];
   for (let index = 0; index < value.phases.length; index += 1) {
     const candidate = value.phases[index];
-    if (
-      !isRecordWithExactKeys(candidate, DRAFT_PHASE_BASE_KEYS) &&
-      !isRecordWithExactKeys(candidate, DRAFT_PHASE_KEYS)
-    ) {
+    if (!isRecordWithKeys(candidate, DRAFT_PHASE_BASE_KEYS, DRAFT_PHASE_OPTIONAL_KEYS)) {
       return invalid(`phases[${index}]`, `expected exactly: ${DRAFT_PHASE_KEYS.join(", ")}`);
     }
     const phaseId = boundedIdentifier(candidate.phaseId, `phases[${index}].phaseId`);
@@ -616,12 +1125,57 @@ export function validateRoadmapPhaseCreateDraft(
     );
     if (!linkedIds.ok) return linkedIds;
     for (const referenceId of linkedIds.value) linkedReferenceIds.add(referenceId);
-    phases.push({ phaseId: phaseId.value, ...phase.value, referenceIds: linkedIds.value });
+    const insertBefore = validateInsertBeforePhaseId(
+      candidate.insertBeforePhaseId,
+      `phases[${index}].insertBeforePhaseId`,
+    );
+    if (!insertBefore.ok) return insertBefore;
+    phases.push({
+      phaseId: phaseId.value,
+      ...phase.value,
+      referenceIds: linkedIds.value,
+      ...(insertBefore.value === undefined ? {} : { insertBeforePhaseId: insertBefore.value }),
+    });
   }
   for (let index = 0; index < references.value.length; index += 1) {
     if (!linkedReferenceIds.has(references.value[index]!.id)) {
       return invalid(`references[${index}].id`, "reference must be linked to a phase");
     }
+  }
+
+  const inserts = phases.some((phase) => phase.insertBeforePhaseId !== undefined);
+  let orderPreview: RoadmapPhaseOrderPreview | undefined;
+  if (value.orderPreview !== undefined || inserts) {
+    if (value.orderPreview === undefined || !inserts) {
+      return invalid("orderPreview", "expected an order preview exactly when phases are inserted");
+    }
+    const preview = validateOrderPreview(value.orderPreview, "orderPreview");
+    if (!preview.ok) return preview;
+    const existingIds = new Set(preview.value.before.map((entry) => entry.phaseId));
+    for (let index = 0; index < phases.length; index += 1) {
+      const target = phases[index]!.insertBeforePhaseId;
+      if (target !== undefined && !existingIds.has(target)) {
+        return invalid(
+          `phases[${index}].insertBeforePhaseId`,
+          "expected a phase in orderPreview.before",
+        );
+      }
+      if (existingIds.has(phases[index]!.phaseId)) {
+        return invalid(`phases[${index}].phaseId`, "expected a new phase ID");
+      }
+    }
+    const expected = insertRoadmapPhases(
+      preview.value.before,
+      phases.map((phase) => ({
+        item: { phaseId: phase.phaseId, title: phase.title },
+        insertBeforePhaseId: phase.insertBeforePhaseId,
+      })),
+      (entry) => entry.phaseId,
+    );
+    if (!orderEntriesEqual(expected, preview.value.after)) {
+      return invalid("orderPreview.after", "expected the before order with the new phases placed");
+    }
+    orderPreview = preview.value;
   }
 
   return {
@@ -636,9 +1190,18 @@ export function validateRoadmapPhaseCreateDraft(
       references: references.value,
       phases,
       sourcesNotCited: sourcesNotCited ? sourcesNotCited.value : null,
+      ...(orderPreview ? { orderPreview } : {}),
       status: value.status,
     },
   };
+}
+
+function validateInsertBeforePhaseId(
+  value: unknown,
+  path: string,
+): RoadmapWorkflowValidationResult<string | undefined> {
+  if (value === undefined) return { ok: true, value: undefined };
+  return boundedIdentifier(value, path);
 }
 
 export function isRoadmapInspectionOutcome(value: unknown): value is RoadmapInspectionOutcome {
@@ -689,6 +1252,7 @@ export function isRoadmapPhaseDraftApprovalResult(
         new Set(value.phaseIds).size === value.phaseIds.length
       );
     case "edited":
+    case "moved":
       return (
         isRecordWithExactKeys(value, ["status", "revision", "phaseId"]) &&
         isNonNegativeInteger(value.revision) &&
@@ -749,10 +1313,10 @@ export function validateRoadmapDraftFeedback(
 function validateDraftReferenceProposals(
   value: unknown,
 ): RoadmapWorkflowValidationResult<RoadmapDraftReferenceProposal[]> {
-  if (!Array.isArray(value) || value.length > NOTES_ROADMAP_PROPOSALS_MAX_ITEMS) {
+  if (!Array.isArray(value) || value.length > ROADMAP_DRAFT_REFERENCES_MAX_ITEMS) {
     return invalid(
       "proposedReferences",
-      `expected up to ${NOTES_ROADMAP_PROPOSALS_MAX_ITEMS} references`,
+      `expected up to ${ROADMAP_DRAFT_REFERENCES_MAX_ITEMS} references`,
     );
   }
   const keys = new Set<string>();
@@ -794,8 +1358,8 @@ function validateDraftReferenceProposals(
 function validateDraftReferences(
   value: unknown,
 ): RoadmapWorkflowValidationResult<NotesReferenceProjection[]> {
-  if (!Array.isArray(value) || value.length > NOTES_ROADMAP_PROPOSALS_MAX_ITEMS) {
-    return invalid("references", `expected up to ${NOTES_ROADMAP_PROPOSALS_MAX_ITEMS} references`);
+  if (!Array.isArray(value) || value.length > ROADMAP_DRAFT_REFERENCES_MAX_ITEMS) {
+    return invalid("references", `expected up to ${ROADMAP_DRAFT_REFERENCES_MAX_ITEMS} references`);
   }
   const ids = new Set<string>();
   const identities = new Map<string, number>();
@@ -921,10 +1485,7 @@ function validateProposedPhase(
   path: string,
   knownReferenceKeys: ReadonlySet<string>,
 ): RoadmapWorkflowValidationResult<RoadmapProposedPhase> {
-  if (
-    !isRecordWithExactKeys(value, PROPOSED_PHASE_BASE_KEYS) &&
-    !isRecordWithExactKeys(value, PROPOSED_PHASE_KEYS)
-  ) {
+  if (!isRecordWithKeys(value, PROPOSED_PHASE_BASE_KEYS, PROPOSED_PHASE_OPTIONAL_KEYS)) {
     return invalid(path, `expected exactly: ${PROPOSED_PHASE_KEYS.join(", ")}`);
   }
   const phase = validateProposedPhaseRecord(value, path);
@@ -935,7 +1496,19 @@ function validateProposedPhase(
     knownReferenceKeys,
   );
   if (!referenceKeys.ok) return referenceKeys;
-  return { ok: true, value: { ...phase.value, referenceKeys: referenceKeys.value } };
+  const insertBefore = validateInsertBeforePhaseId(
+    value.insertBeforePhaseId,
+    `${path}.insertBeforePhaseId`,
+  );
+  if (!insertBefore.ok) return insertBefore;
+  return {
+    ok: true,
+    value: {
+      ...phase.value,
+      referenceKeys: referenceKeys.value,
+      ...(insertBefore.value === undefined ? {} : { insertBeforePhaseId: insertBefore.value }),
+    },
+  };
 }
 
 function validateProposedPhaseRecord(

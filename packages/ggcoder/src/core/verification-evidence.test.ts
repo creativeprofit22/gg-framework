@@ -914,6 +914,7 @@ describe("SessionVerificationEvidenceLedger", () => {
     "roadmap_status",
     "roadmap_phase_draft",
     "roadmap_phase_edit",
+    "roadmap_phase_move",
     "roadmap_inspect",
     "roadmap_bind",
     "roadmap_checkpoint",

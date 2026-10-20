@@ -3,9 +3,14 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import type {
-  RoadmapPhaseCreateDraft,
-  RoadmapPhaseEditDraft,
+import {
+  buildRoadmapPhaseInsertionPreview,
+  moveRoadmapPhaseOrderEntry,
+  roadmapPhaseOrderEntries,
+  type RoadmapPhaseCreateDraft,
+  type RoadmapPhaseEditDraft,
+  type RoadmapPhaseMoveDraft,
+  type RoadmapPhasePlacement,
 } from "@kenkaiiii/gg-core/roadmap-workflow";
 import {
   ProjectNotesRepository,
@@ -4437,6 +4442,267 @@ describe("ProjectNotesRepository approved phase edit", () => {
         approvedPhaseEditDraft(cwd, 1) as unknown as RoadmapPhaseCreateDraft,
       ),
     ).resolves.toMatchObject({ status: "invalid-proposal" });
+    expect(await readNotesFiles(paths)).toEqual(filesBefore);
+  });
+});
+
+/** Phases a, b, c (not started) after the canonical in-progress `phase-1`. */
+function roadmapNotes(label: string): NotesDocumentV3 {
+  const document = notes(label);
+  const template = document.phases[0]!;
+  for (const id of ["a", "b", "c"]) {
+    document.phases.push({
+      ...structuredClone(template),
+      id,
+      title: `Phase ${id}`,
+      order: document.phases.length,
+      status: "not-started",
+      referenceIds: [],
+      session: null,
+      reminder: null,
+      overrides: { status: null, referenceIds: null },
+      lifecycleEvents: [],
+    });
+  }
+  return document;
+}
+
+function markDone(document: NotesDocumentV3, id: string): void {
+  const phase = document.phases.find((candidate) => candidate.id === id)!;
+  phase.status = "done";
+  phase.session = null;
+  phase.completedAt = NOW;
+  phase.overrides.status = { value: "done", source: "user", updatedAt: NOW };
+  phase.lifecycleEvents = [
+    {
+      id: `manual-done-${id}`,
+      fromStatus: "not-started",
+      toStatus: "done",
+      source: "user",
+      timestamp: NOW,
+      reason: null,
+      kind: "other",
+    },
+  ];
+}
+
+function insertingPhaseDraft(
+  cwd: string,
+  document: NotesDocumentV3,
+  placements: (string | undefined)[],
+): RoadmapPhaseCreateDraft {
+  const draft = approvedPhaseDraft(
+    cwd,
+    1,
+    placements.map((_, index) => `inserted-${index + 1}`),
+  );
+  draft.phases.forEach((phase, index) => {
+    const target = placements[index];
+    if (target !== undefined) phase.insertBeforePhaseId = target;
+  });
+  draft.orderPreview = buildRoadmapPhaseInsertionPreview(document.phases, draft.phases);
+  return draft;
+}
+
+function approvedPhaseMoveDraft(
+  cwd: string,
+  document: NotesDocumentV3,
+  phaseId: string,
+  placement: RoadmapPhasePlacement,
+): RoadmapPhaseMoveDraft {
+  const before = roadmapPhaseOrderEntries(document.phases);
+  return {
+    kind: "move",
+    id: "move-draft-1",
+    projectKey: canonicalProjectKey(cwd),
+    basedOnRevision: 1,
+    createdAt: NOW,
+    createdBySessionId: "session-draft",
+    summary: "Reorder the Roadmap",
+    phaseId,
+    phaseTitle: `Phase ${phaseId}`,
+    position: placement.position,
+    targetPhaseId: placement.targetPhaseId,
+    targetPhaseTitle: `Phase ${placement.targetPhaseId}`,
+    orderPreview: { before, after: moveRoadmapPhaseOrderEntry(before, phaseId, placement) ?? [] },
+    status: "pending",
+  };
+}
+
+describe("ProjectNotesRepository approved phase placement", () => {
+  it("inserts a drafted phase before its target and moves later phases down by one", async () => {
+    const cwd = "/work/approved-phase-insert";
+    const repository = new ProjectNotesRepository(await tempAgentDir());
+    const initial = roadmapNotes("insert baseline");
+    await repository.migrate(cwd, initial);
+
+    await expect(
+      repository.createApprovedPhases(cwd, insertingPhaseDraft(cwd, initial, ["b"])),
+    ).resolves.toEqual({ status: "created", revision: 2, phaseIds: ["inserted-1"] });
+    const loaded = await repository.load(cwd);
+    if (loaded.status !== "ok") throw new Error("expected Notes to load");
+    expect(loaded.snapshot.document.phases.map((phase) => [phase.id, phase.order])).toEqual([
+      ["phase-1", 0],
+      ["a", 1],
+      ["inserted-1", 2],
+      ["b", 3],
+      ["c", 4],
+    ]);
+    // Only `order` changed on the shifted phases.
+    expect(loaded.snapshot.document.phases[3]).toEqual({ ...initial.phases[2]!, order: 3 });
+  });
+
+  it("keeps several inserted phases in draft order and still appends untargeted ones", async () => {
+    const cwd = "/work/approved-phase-insert-many";
+    const repository = new ProjectNotesRepository(await tempAgentDir());
+    const initial = roadmapNotes("insert many baseline");
+    await repository.migrate(cwd, initial);
+
+    await expect(
+      repository.createApprovedPhases(
+        cwd,
+        insertingPhaseDraft(cwd, initial, ["a", "a", undefined]),
+      ),
+    ).resolves.toMatchObject({ status: "created", revision: 2 });
+    const loaded = await repository.load(cwd);
+    if (loaded.status !== "ok") throw new Error("expected Notes to load");
+    expect(loaded.snapshot.document.phases.map((phase) => phase.id)).toEqual([
+      "phase-1",
+      "inserted-1",
+      "inserted-2",
+      "a",
+      "b",
+      "c",
+      "inserted-3",
+    ]);
+    expect(loaded.snapshot.document.phases.map((phase) => phase.order)).toEqual([
+      0, 1, 2, 3, 4, 5, 6,
+    ]);
+  });
+
+  it("refuses to insert ahead of a Done phase without writing", async () => {
+    const cwd = "/work/approved-phase-insert-done";
+    const repository = new ProjectNotesRepository(await tempAgentDir());
+    const initial = roadmapNotes("insert done baseline");
+    markDone(initial, "b");
+    await repository.migrate(cwd, initial);
+    const paths = repository.paths(cwd);
+    const filesBefore = await readNotesFiles(paths);
+
+    await expect(
+      repository.createApprovedPhases(cwd, insertingPhaseDraft(cwd, initial, ["a"])),
+    ).resolves.toMatchObject({
+      status: "invalid-proposal",
+      message: expect.stringContaining("ahead of Done phase b"),
+    });
+    expect(await readNotesFiles(paths)).toEqual(filesBefore);
+  });
+
+  it("applies an approved move atomically with exactly one revision bump", async () => {
+    const cwd = "/work/approved-phase-move";
+    const repository = new ProjectNotesRepository(await tempAgentDir());
+    const initial = roadmapNotes("move baseline");
+    await repository.migrate(cwd, initial);
+
+    await expect(
+      repository.applyApprovedPhaseMove(
+        cwd,
+        approvedPhaseMoveDraft(cwd, initial, "c", { position: "before", targetPhaseId: "a" }),
+        EDIT_LATER,
+      ),
+    ).resolves.toEqual({ status: "moved", revision: 2, phaseId: "c" });
+    const loaded = await repository.load(cwd);
+    if (loaded.status !== "ok") throw new Error("expected Notes to load");
+    expect(loaded.snapshot.revision).toBe(2);
+    expect(loaded.snapshot.document.phases.map((phase) => [phase.id, phase.order])).toEqual([
+      ["phase-1", 0],
+      ["c", 1],
+      ["a", 2],
+      ["b", 3],
+    ]);
+    // Content is untouched: only `order` and the document timestamp change.
+    const byId = new Map(initial.phases.map((phase) => [phase.id, phase]));
+    for (const phase of loaded.snapshot.document.phases) {
+      expect({ ...phase, order: 0 }).toEqual({ ...byId.get(phase.id), order: 0 });
+    }
+    expect(loaded.snapshot.document.updatedAt).toBe(EDIT_LATER);
+  });
+
+  it("refuses a move after the Roadmap order changed, writing nothing", async () => {
+    const cwd = "/work/approved-phase-move-stale";
+    const repository = new ProjectNotesRepository(await tempAgentDir());
+    const initial = roadmapNotes("move stale baseline");
+    await repository.migrate(cwd, initial);
+    const draft = approvedPhaseMoveDraft(cwd, initial, "c", {
+      position: "before",
+      targetPhaseId: "a",
+    });
+    const reordered = structuredClone(initial);
+    const [first, a, b, c] = reordered.phases;
+    reordered.phases = [first!, b!, a!, c!].map((phase, order) => ({ ...phase, order }));
+    await expect(repository.save(cwd, 1, reordered)).resolves.toMatchObject({ status: "ok" });
+    const paths = repository.paths(cwd);
+    const filesBefore = await readNotesFiles(paths);
+
+    await expect(repository.applyApprovedPhaseMove(cwd, draft, EDIT_LATER)).resolves.toEqual({
+      status: "phase-changed",
+      phaseId: "c",
+    });
+    expect(await readNotesFiles(paths)).toEqual(filesBefore);
+  });
+
+  it("refuses moving a Done phase, or a phase that would land ahead of one, writing nothing", async () => {
+    const cwd = "/work/approved-phase-move-done";
+    const repository = new ProjectNotesRepository(await tempAgentDir());
+    const initial = roadmapNotes("move done baseline");
+    markDone(initial, "c");
+    await repository.migrate(cwd, initial);
+    const paths = repository.paths(cwd);
+    const filesBefore = await readNotesFiles(paths);
+
+    await expect(
+      repository.applyApprovedPhaseMove(
+        cwd,
+        approvedPhaseMoveDraft(cwd, initial, "c", { position: "before", targetPhaseId: "a" }),
+        EDIT_LATER,
+      ),
+    ).resolves.toEqual({ status: "phase-not-editable", phaseId: "c", reason: "done" });
+    await expect(
+      repository.applyApprovedPhaseMove(
+        cwd,
+        approvedPhaseMoveDraft(cwd, initial, "a", { position: "after", targetPhaseId: "b" }),
+        EDIT_LATER,
+      ),
+    ).resolves.toEqual({ status: "phase-changed", phaseId: "a" });
+    expect(await readNotesFiles(paths)).toEqual(filesBefore);
+  });
+
+  it("rejects malformed and foreign-project move drafts without writing", async () => {
+    const cwd = "/work/approved-phase-move-invalid";
+    const repository = new ProjectNotesRepository(await tempAgentDir());
+    const initial = roadmapNotes("move invalid baseline");
+    await repository.migrate(cwd, initial);
+    const paths = repository.paths(cwd);
+    const filesBefore = await readNotesFiles(paths);
+    const selfMove = approvedPhaseMoveDraft(cwd, initial, "c", {
+      position: "before",
+      targetPhaseId: "a",
+    });
+    selfMove.targetPhaseId = "c";
+
+    await expect(
+      repository.applyApprovedPhaseMove(cwd, selfMove, EDIT_LATER),
+    ).resolves.toMatchObject({ status: "invalid-proposal" });
+    await expect(
+      repository.applyApprovedPhaseMove(
+        cwd,
+        approvedPhaseMoveDraft("/work/elsewhere", initial, "c", {
+          position: "before",
+          targetPhaseId: "a",
+        }),
+        EDIT_LATER,
+      ),
+    ).resolves.toEqual({ status: "proposal-project-mismatch" });
     expect(await readNotesFiles(paths)).toEqual(filesBefore);
   });
 });

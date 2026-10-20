@@ -2,11 +2,22 @@ import { randomUUID } from "node:crypto";
 import { canonicalProjectKey, type NotesPhase } from "@kenkaiiii/gg-core/project-notes";
 import {
   buildRoadmapPhaseEditChanges,
+  buildRoadmapPhaseInsertionPreview,
   classifyRoadmapPhaseEditability,
+  describeRoadmapPhaseOrderRefusal,
   isRoadmapPhaseEditDraft,
+  isRoadmapPhaseMoveDraft,
+  moveRoadmapPhaseOrderEntry,
+  planRoadmapPhaseMove,
+  roadmapPhaseMovePlacement,
+  roadmapPhaseOrderEntries,
+  validateRoadmapPhaseCreateDraft,
   validateRoadmapPhaseEditDraft,
   validateRoadmapPhaseDraftRequest,
   validateRoadmapPhaseEditRequest,
+  validateRoadmapPhaseInsertionTarget,
+  validateRoadmapPhaseMoveDraft,
+  validateRoadmapPhaseMoveRequest,
   type RoadmapPhaseCreateDraft,
   type RoadmapPhaseDraft,
   type RoadmapPhaseDraftApprovalResult,
@@ -14,14 +25,33 @@ import {
   type RoadmapPhaseDraftRequest,
   type RoadmapPhaseEditDraft,
   type RoadmapPhaseEditRequest,
+  type RoadmapPhaseMoveDraft,
+  type RoadmapPhaseMoveRequest,
   type RoadmapPhaseNotEditableReason,
+  type RoadmapPhaseOrderPreview,
+  type RoadmapPhaseOrderRefusal,
 } from "@kenkaiiii/gg-core/roadmap-workflow";
 
 export interface RoadmapPhaseDraftCreateRequest {
   cwd: string;
   sessionId: string;
   request: RoadmapPhaseDraftRequest;
+  /** Phases at the inspected revision; required when a proposed phase sets `insertBeforePhaseId`. */
+  currentPhases?: readonly NotesPhase[];
 }
+
+export interface RoadmapPhaseMoveDraftCreateRequest {
+  cwd: string;
+  sessionId: string;
+  request: RoadmapPhaseMoveRequest;
+  /** Phases at the inspected revision. */
+  currentPhases: readonly NotesPhase[];
+}
+
+export type RoadmapPhaseMoveDraftCreateResult =
+  | { status: "drafted"; draft: RoadmapPhaseMoveDraft }
+  | Exclude<RoadmapPhaseDraftCreateResult, { status: "drafted" }>
+  | { status: "order-refused"; refusal: RoadmapPhaseOrderRefusal };
 
 export type RoadmapPhaseDraftCreateResult =
   | { status: "drafted"; draft: RoadmapPhaseCreateDraft }
@@ -53,7 +83,7 @@ type DecisionTombstone =
   | {
       projectKey: string;
       decision: "approved";
-      result: Extract<RoadmapPhaseDraftApprovalResult, { status: "created" | "edited" }>;
+      result: Extract<RoadmapPhaseDraftApprovalResult, { status: "created" | "edited" | "moved" }>;
     }
   | {
       projectKey: string;
@@ -117,7 +147,31 @@ export class AppSidecarRoadmapDraftCoordinator {
       ...phase,
       referenceIds: (referenceKeys ?? []).map((key) => referenceIdsByKey.get(key)!),
     }));
-    const draft: RoadmapPhaseCreateDraft = {
+    let orderPreview: RoadmapPhaseOrderPreview | undefined;
+    if (phases.some((phase) => phase.insertBeforePhaseId !== undefined)) {
+      const currentPhases = input.currentPhases;
+      if (!currentPhases) {
+        return {
+          status: "invalid-proposal",
+          path: "phases",
+          message: "expected the inspected Roadmap to place inserted phases",
+        };
+      }
+      for (let index = 0; index < phases.length; index += 1) {
+        const target = phases[index]!.insertBeforePhaseId;
+        if (target === undefined) continue;
+        const refusal = validateRoadmapPhaseInsertionTarget(currentPhases, target);
+        if (refusal) {
+          return {
+            status: "invalid-proposal",
+            path: `phases[${index}].insertBeforePhaseId`,
+            message: describeRoadmapPhaseOrderRefusal(refusal),
+          };
+        }
+      }
+      orderPreview = buildRoadmapPhaseInsertionPreview(currentPhases, phases);
+    }
+    const candidate: RoadmapPhaseCreateDraft = {
       id: draftId,
       projectKey,
       basedOnRevision: validated.value.expectedRevision,
@@ -127,10 +181,85 @@ export class AppSidecarRoadmapDraftCoordinator {
       references,
       phases,
       sourcesNotCited: validated.value.sourcesNotCited ?? null,
+      ...(orderPreview ? { orderPreview } : {}),
       status: "pending",
     };
+    // Legacy appends skip re-validation so their stored shape stays exactly as before.
+    let draft = candidate;
+    if (orderPreview) {
+      const checked = validateRoadmapPhaseCreateDraft(candidate);
+      if (!checked.ok) {
+        return {
+          status: "invalid-proposal",
+          path: checked.error.path,
+          message: checked.error.message,
+        };
+      }
+      draft = checked.value;
+    }
     this.store(projectKey, draft);
     return { status: "drafted", draft: cloneCreateDraft(draft) };
+  }
+
+  /** Proposes moving one existing phase; shares the one-pending-per-project slot. */
+  createMove(input: RoadmapPhaseMoveDraftCreateRequest): RoadmapPhaseMoveDraftCreateResult {
+    const validated = validateRoadmapPhaseMoveRequest(input.request);
+    if (!validated.ok) {
+      return {
+        status: "invalid-proposal",
+        path: validated.error.path,
+        message: validated.error.message,
+      };
+    }
+    const request = validated.value;
+    const projectKey = canonicalProjectKey(input.cwd);
+    const existing = this.pendingByProject.get(projectKey);
+    if (existing) {
+      this.emit(projectKey, existing);
+      return { status: "proposal-pending", draft: cloneDraft(existing)! };
+    }
+    const placement = roadmapPhaseMovePlacement(request);
+    const planned = planRoadmapPhaseMove(input.currentPhases, request.phaseId, placement);
+    if (!planned.ok) return { status: "order-refused", refusal: planned.refusal };
+    const before = roadmapPhaseOrderEntries(input.currentPhases);
+    const after = moveRoadmapPhaseOrderEntry(before, request.phaseId, placement);
+    const phase = input.currentPhases.find((candidate) => candidate.id === request.phaseId);
+    const target = input.currentPhases.find(
+      (candidate) => candidate.id === placement.targetPhaseId,
+    );
+    if (!after || !phase || !target) {
+      return {
+        status: "invalid-proposal",
+        path: "phaseId",
+        message: "expected both phases on the inspected Roadmap",
+      };
+    }
+    const candidate: RoadmapPhaseMoveDraft = {
+      kind: "move",
+      id: this.createId(),
+      projectKey,
+      basedOnRevision: request.expectedRevision,
+      createdAt: this.now(),
+      createdBySessionId: input.sessionId,
+      summary: request.summary,
+      phaseId: request.phaseId,
+      phaseTitle: phase.title,
+      position: placement.position,
+      targetPhaseId: placement.targetPhaseId,
+      targetPhaseTitle: target.title,
+      orderPreview: { before, after },
+      status: "pending",
+    };
+    const checked = validateRoadmapPhaseMoveDraft(candidate);
+    if (!checked.ok) {
+      return {
+        status: "invalid-proposal",
+        path: checked.error.path,
+        message: checked.error.message,
+      };
+    }
+    this.store(projectKey, checked.value);
+    return { status: "drafted", draft: cloneMoveDraft(checked.value) };
   }
 
   /** Proposes changed fields of one existing phase; shares the one-pending-per-project slot. */
@@ -268,7 +397,7 @@ export class AppSidecarRoadmapDraftCoordinator {
     commit: (draft: RoadmapPhaseDraft) => Promise<RoadmapPhaseDraftApprovalResult>,
   ): Promise<RoadmapPhaseDraftApprovalResult> {
     const result = await commit(cloneDraft(draft)!);
-    if (result.status === "created" || result.status === "edited") {
+    if (result.status === "created" || result.status === "edited" || result.status === "moved") {
       this.removePending(draft);
       this.rememberDecision(draft.id, { projectKey, decision: "approved", result });
       this.emit(projectKey, null);
@@ -352,7 +481,19 @@ function alreadyDecidedRejection(
 
 function cloneDraft(draft: RoadmapPhaseDraft | null): RoadmapPhaseDraft | null {
   if (!draft) return null;
-  return isRoadmapPhaseEditDraft(draft) ? cloneEditDraft(draft) : cloneCreateDraft(draft);
+  if (isRoadmapPhaseEditDraft(draft)) return cloneEditDraft(draft);
+  return isRoadmapPhaseMoveDraft(draft) ? cloneMoveDraft(draft) : cloneCreateDraft(draft);
+}
+
+function cloneOrderPreview(preview: RoadmapPhaseOrderPreview): RoadmapPhaseOrderPreview {
+  return {
+    before: preview.before.map((entry) => ({ ...entry })),
+    after: preview.after.map((entry) => ({ ...entry })),
+  };
+}
+
+function cloneMoveDraft(draft: RoadmapPhaseMoveDraft): RoadmapPhaseMoveDraft {
+  return { ...draft, orderPreview: cloneOrderPreview(draft.orderPreview) };
 }
 
 function cloneEditDraft(draft: RoadmapPhaseEditDraft): RoadmapPhaseEditDraft {
@@ -378,5 +519,6 @@ function cloneCreateDraft(draft: RoadmapPhaseCreateDraft): RoadmapPhaseCreateDra
       doneWhen: [...phase.doneWhen],
       referenceIds: [...phase.referenceIds],
     })),
+    ...(draft.orderPreview ? { orderPreview: cloneOrderPreview(draft.orderPreview) } : {}),
   };
 }

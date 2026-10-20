@@ -1,7 +1,6 @@
 import { z } from "zod";
 import type { AgentTool } from "@kenkaiiii/gg-agent";
 import {
-  NOTES_ROADMAP_PROPOSALS_MAX_ITEMS,
   type ProjectNotesCorruption,
   type ProjectNotesUnsupportedFormat,
 } from "@kenkaiiii/gg-core/project-notes";
@@ -13,6 +12,7 @@ import {
   ROADMAP_PHASE_GOAL_MAX_LENGTH,
   ROADMAP_DRAFT_REFERENCE_KEY_MAX_LENGTH,
   ROADMAP_DRAFT_REFERENCE_KEYS_MAX_ITEMS,
+  ROADMAP_DRAFT_REFERENCES_MAX_ITEMS,
   ROADMAP_PHASE_SOURCE_PROMPT_MAX_LENGTH,
   ROADMAP_PHASE_TITLE_MAX_LENGTH,
   ROADMAP_PROPOSED_PHASES_MAX_ITEMS,
@@ -24,6 +24,9 @@ import {
 import { MIN_NO_SOURCES_REASON_LENGTH } from "../core/research-sources.js";
 
 type JsonSchema = Record<string, unknown>;
+
+/** Matches the shared request validator's identifier bound. */
+export const PHASE_ID_MAX_LENGTH = 512;
 
 const roadmapReferenceRangeInputSchema: JsonSchema = {
   type: "object",
@@ -86,6 +89,13 @@ const roadmapProposedPhaseInputSchema: JsonSchema = {
       items: { type: "string", minLength: 1, maxLength: ROADMAP_DRAFT_REFERENCE_KEY_MAX_LENGTH },
       maxItems: ROADMAP_DRAFT_REFERENCE_KEYS_MAX_ITEMS,
     },
+    insert_before_phase_id: {
+      type: "string",
+      minLength: 1,
+      maxLength: PHASE_ID_MAX_LENGTH,
+      description:
+        "Optional id of an existing Roadmap phase this new phase goes directly before. Omit to add it at the end.",
+    },
   },
   required: ["title", "goal", "doneWhen", "sourcePrompt"],
   additionalProperties: false,
@@ -109,7 +119,7 @@ const roadmapPhaseDraftInputSchema: JsonSchema = {
     proposed_references: {
       type: "array",
       items: roadmapDraftReferenceInputSchema,
-      maxItems: NOTES_ROADMAP_PROPOSALS_MAX_ITEMS,
+      maxItems: ROADMAP_DRAFT_REFERENCES_MAX_ITEMS,
     },
     sources_not_cited: {
       type: "string",
@@ -215,6 +225,7 @@ const RoadmapProposedPhaseParams = z
     doneWhen: DoneWhen,
     sourcePrompt: boundedText(ROADMAP_PHASE_SOURCE_PROMPT_MAX_LENGTH, "sourcePrompt"),
     reference_keys: z.array(referenceKey).max(ROADMAP_DRAFT_REFERENCE_KEYS_MAX_ITEMS).optional(),
+    insert_before_phase_id: boundedText(PHASE_ID_MAX_LENGTH, "insert_before_phase_id").optional(),
   })
   .strict();
 
@@ -225,7 +236,7 @@ const RoadmapPhaseDraftParamsBase = z
     phases: z.array(RoadmapProposedPhaseParams).min(1).max(ROADMAP_PROPOSED_PHASES_MAX_ITEMS),
     proposed_references: z
       .array(RoadmapDraftReferenceParams)
-      .max(NOTES_ROADMAP_PROPOSALS_MAX_ITEMS)
+      .max(ROADMAP_DRAFT_REFERENCES_MAX_ITEMS)
       .optional(),
     // A blank reason means "no reason": the citation gate still applies.
     sources_not_cited: z
@@ -258,9 +269,12 @@ function toRoadmapPhaseDraftRequest(
   return {
     expectedRevision: input.expected_revision,
     summary: input.summary,
-    phases: input.phases.map(({ reference_keys, ...phase }) => ({
+    phases: input.phases.map(({ reference_keys, insert_before_phase_id, ...phase }) => ({
       ...phase,
       referenceKeys: reference_keys ?? [],
+      ...(insert_before_phase_id === undefined
+        ? {}
+        : { insertBeforePhaseId: insert_before_phase_id }),
     })),
     proposedReferences: (input.proposed_references ?? []).map((reference) => ({
       referenceKey: reference.reference_key,
@@ -309,6 +323,7 @@ export function createRoadmapPhaseDraftTool(
     description:
       "Draft bounded Roadmap phases for approval; never write Project Notes or files while drafting. " +
       'Call roadmap_inspect with scope "roadmap" immediately first and pass its revision as expected_revision. Draft only flat peer phases, never nested or parent/child phases. ' +
+      "New phases are added at the end. When a phase must come before existing phases, set its insert_before_phase_id to that phase's id; phases sharing a target keep their draft order. Nothing can be inserted ahead of a Done phase. " +
       "After submitting the draft, stop because it is pending user approval; do not implement it. " +
       "Use roadmap_status for execution progress on approved phases. Ordinary coding requests need no Roadmap action. " +
       "Cite external code that informed the phases in proposed_references (commit permalink as canonical_url) and link it via each phase's reference_keys; " +

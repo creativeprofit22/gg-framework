@@ -911,6 +911,7 @@ const READ_ONLY_OR_METADATA_TOOLS = new Set([
   "roadmap_inspect",
   "roadmap_phase_draft",
   "roadmap_phase_edit",
+  "roadmap_phase_move",
   "roadmap_status",
   "skill",
   "task_output",

@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  ROADMAP_DRAFT_REFERENCE_KEYS_MAX_ITEMS,
+  ROADMAP_DRAFT_REFERENCES_MAX_ITEMS,
   ROADMAP_PHASE_DONE_WHEN_ITEM_MAX_LENGTH,
   ROADMAP_PHASE_DONE_WHEN_MAX_ITEMS,
   ROADMAP_PHASE_DRAFT_SUMMARY_MAX_LENGTH,
@@ -9,7 +11,17 @@ import {
   ROADMAP_PROPOSED_PHASES_MAX_ITEMS,
   ROADMAP_PHASE_EDIT_BEFORE_MAX_LENGTH,
   applyRoadmapPhaseEdit,
+  applyRoadmapPhaseMove,
   buildRoadmapPhaseEditChanges,
+  buildRoadmapPhaseInsertionPreview,
+  insertRoadmapPhases,
+  isRoadmapPhaseMoveDraft,
+  moveRoadmapPhaseOrderEntry,
+  planRoadmapPhaseMove,
+  roadmapPhaseOrderEntries,
+  validateRoadmapPhaseInsertionTarget,
+  validateRoadmapPhaseMoveRequest,
+  type RoadmapPhaseMoveDraft,
   classifyRoadmapPhaseEditability,
   isRoadmapInspectionOutcome,
   isRoadmapPhaseDraft,
@@ -333,6 +345,33 @@ describe("Roadmap workflow protocol", () => {
         phases: [{ ...request().phases[0], referenceKeys: ["source"] }],
       },
     });
+  });
+
+  it("lets one phase cite up to the draft reference limit and rejects one more", () => {
+    const draftWith = (count: number) => {
+      const keys = Array.from({ length: count }, (_, index) => `source-${index}`);
+      return {
+        ...request(),
+        proposedReferences: keys.map((referenceKey, index) => ({
+          referenceKey,
+          provider: "github",
+          canonicalUrl: `https://github.com/KenKaiiii/gg-framework/blob/main/file-${index}.ts`,
+          owner: "KenKaiiii",
+          repo: "gg-framework",
+          relevance: "contract",
+        })),
+        phases: [{ ...request().phases[0], referenceKeys: keys }],
+      };
+    };
+
+    expect(ROADMAP_DRAFT_REFERENCES_MAX_ITEMS).toBe(50);
+    expect(ROADMAP_DRAFT_REFERENCE_KEYS_MAX_ITEMS).toBe(50);
+    expect(validateRoadmapPhaseDraftRequest(draftWith(ROADMAP_DRAFT_REFERENCES_MAX_ITEMS)).ok).toBe(
+      true,
+    );
+    expect(
+      validateRoadmapPhaseDraftRequest(draftWith(ROADMAP_DRAFT_REFERENCES_MAX_ITEMS + 1)),
+    ).toMatchObject({ ok: false, error: { path: "proposedReferences" } });
   });
 
   it.each([
@@ -776,5 +815,227 @@ describe("Roadmap phase edit protocol", () => {
     expect(
       isRoadmapPhaseDraftApprovalResult({ status: "phase-changed", phaseId: "p1", extra: 1 }),
     ).toBe(false);
+  });
+});
+
+describe("Roadmap phase placement", () => {
+  const roadmap = (overrides: Record<string, Partial<NotesPhase>> = {}): NotesPhase[] =>
+    ["a", "b", "c", "d"].map((id, order) =>
+      notesPhase({ id, title: `Phase ${id}`, order, ...overrides[id] }),
+    );
+  const ids = (phases: readonly NotesPhase[]) => phases.map((phase) => phase.id);
+  const done: Partial<NotesPhase> = { status: "done", completedAt: "2026-08-05T11:00:00.000Z" };
+  const deleted: Partial<NotesPhase> = {
+    deletion: { version: 1, currentDeletionId: "deletion-1", events: [] },
+  };
+
+  it("moves a phase before or after a target and reindexes order without gaps", () => {
+    const before = planRoadmapPhaseMove(roadmap(), "d", { position: "before", targetPhaseId: "b" });
+    expect(before.ok && ids(before.phases)).toEqual(["a", "d", "b", "c"]);
+    expect(before.ok && before.phases.map((phase) => phase.order)).toEqual([0, 1, 2, 3]);
+    const after = planRoadmapPhaseMove(roadmap(), "a", { position: "after", targetPhaseId: "c" });
+    expect(after.ok && ids(after.phases)).toEqual(["b", "c", "a", "d"]);
+  });
+
+  it.each<["done" | "archived" | "deleted", Partial<NotesPhase>]>([
+    ["done", done],
+    ["archived", { archivedAt: "2026-08-05T11:00:00.000Z" }],
+    ["deleted", deleted],
+  ])("refuses to move a %s phase", (notMovable, overrides) => {
+    expect(
+      planRoadmapPhaseMove(roadmap({ c: overrides }), "c", {
+        position: "before",
+        targetPhaseId: "b",
+      }),
+    ).toEqual({
+      ok: false,
+      refusal: { reason: "phase-not-movable", phaseId: "c", notMovable },
+    });
+  });
+
+  it("refuses unknown, deleted and archived targets, self moves and no-op moves", () => {
+    const move = (phases: NotesPhase[], targetPhaseId: string, position: "before" | "after") =>
+      planRoadmapPhaseMove(phases, "c", { position, targetPhaseId });
+    expect(move(roadmap(), "elsewhere", "before")).toMatchObject({
+      refusal: { reason: "target-unavailable" },
+    });
+    expect(move(roadmap({ a: deleted }), "a", "before")).toMatchObject({
+      refusal: { reason: "target-unavailable" },
+    });
+    expect(
+      move(roadmap({ a: { archivedAt: "2026-08-05T11:00:00.000Z" } }), "a", "before"),
+    ).toMatchObject({ refusal: { reason: "target-unavailable" } });
+    expect(move(roadmap(), "c", "before")).toMatchObject({ refusal: { reason: "same-phase" } });
+    expect(move(roadmap(), "b", "after")).toMatchObject({ refusal: { reason: "no-change" } });
+    expect(move(roadmap(), "d", "before")).toMatchObject({ refusal: { reason: "no-change" } });
+  });
+
+  it("refuses to move a phase ahead of any Roadmap Done phase", () => {
+    expect(
+      planRoadmapPhaseMove(roadmap({ b: done }), "d", { position: "before", targetPhaseId: "a" }),
+    ).toEqual({
+      ok: false,
+      refusal: { reason: "ahead-of-done", phaseId: "d", donePhaseId: "b" },
+    });
+    // After the last Done phase is fine.
+    const allowed = planRoadmapPhaseMove(roadmap({ b: done }), "d", {
+      position: "after",
+      targetPhaseId: "b",
+    });
+    expect(allowed.ok && ids(allowed.phases)).toEqual(["a", "b", "d", "c"]);
+  });
+
+  it("validates insertion targets and keeps inserted phases' relative order", () => {
+    expect(validateRoadmapPhaseInsertionTarget(roadmap(), "b")).toBeNull();
+    expect(validateRoadmapPhaseInsertionTarget(roadmap({ c: done }), "b")).toEqual({
+      reason: "ahead-of-done",
+      phaseId: "b",
+      donePhaseId: "c",
+    });
+    expect(validateRoadmapPhaseInsertionTarget(roadmap({ b: done }), "b")).toMatchObject({
+      reason: "ahead-of-done",
+    });
+    expect(validateRoadmapPhaseInsertionTarget(roadmap({ b: deleted }), "b")).toMatchObject({
+      reason: "target-unavailable",
+    });
+    expect(validateRoadmapPhaseInsertionTarget(roadmap(), "elsewhere")).toMatchObject({
+      reason: "target-unavailable",
+    });
+    expect(
+      insertRoadmapPhases(
+        ["a", "b"],
+        [
+          { item: "x", insertBeforePhaseId: "b" },
+          { item: "y" },
+          { item: "z", insertBeforePhaseId: "b" },
+        ],
+        (id) => id,
+      ),
+    ).toEqual(["a", "x", "z", "b", "y"]);
+  });
+
+  it("validates move requests: exactly one placement and never next to itself", () => {
+    const base = { expectedRevision: 3, summary: "Reorder", phaseId: "c" };
+    expect(validateRoadmapPhaseMoveRequest({ ...base, beforePhaseId: "a" })).toEqual({
+      ok: true,
+      value: { ...base, beforePhaseId: "a" },
+    });
+    expect(validateRoadmapPhaseMoveRequest(base).ok).toBe(false);
+    expect(
+      validateRoadmapPhaseMoveRequest({ ...base, beforePhaseId: "a", afterPhaseId: "b" }).ok,
+    ).toBe(false);
+    expect(validateRoadmapPhaseMoveRequest({ ...base, afterPhaseId: "c" }).ok).toBe(false);
+    expect(
+      validateRoadmapPhaseMoveRequest({ ...base, expectedRevision: -1, afterPhaseId: "a" }).ok,
+    ).toBe(false);
+  });
+
+  function moveDraft(phases: NotesPhase[]): RoadmapPhaseMoveDraft {
+    const before = roadmapPhaseOrderEntries(phases);
+    const placement = { position: "before", targetPhaseId: "a" } as const;
+    return {
+      kind: "move",
+      id: "move-1",
+      projectKey: "/work/app",
+      basedOnRevision: 3,
+      createdAt: "2026-08-05T12:00:00.000Z",
+      createdBySessionId: "session-1",
+      summary: "Do d first",
+      phaseId: "d",
+      phaseTitle: "Phase d",
+      position: placement.position,
+      targetPhaseId: placement.targetPhaseId,
+      targetPhaseTitle: "Phase a",
+      orderPreview: { before, after: moveRoadmapPhaseOrderEntry(before, "d", placement) ?? [] },
+      status: "pending",
+    };
+  }
+
+  it("validates move drafts and applies them only to the proposed order", () => {
+    const phases = roadmap();
+    const draft = moveDraft(phases);
+    expect(validateRoadmapPhaseDraft(draft)).toEqual({ ok: true, value: draft });
+    expect(isRoadmapPhaseMoveDraft(draft)).toBe(true);
+    expect(
+      validateRoadmapPhaseDraft({
+        ...draft,
+        orderPreview: { ...draft.orderPreview, after: draft.orderPreview.before },
+      }).ok,
+    ).toBe(false);
+    expect(validateRoadmapPhaseDraft({ ...draft, targetPhaseId: "d" }).ok).toBe(false);
+
+    const at = "2026-08-05T13:00:00.000Z";
+    const applied = applyRoadmapPhaseMove(notesDocument(phases), draft, at);
+    if (applied.status !== "ok") throw new Error("expected the move to apply");
+    expect(ids(applied.document.phases)).toEqual(["d", "a", "b", "c"]);
+    expect(applied.document.updatedAt).toBe(at);
+    expect(validateNotesDocumentV3(applied.document).ok).toBe(true);
+
+    const reordered = planRoadmapPhaseMove(phases, "c", { position: "before", targetPhaseId: "b" });
+    if (!reordered.ok) throw new Error("expected setup reorder");
+    expect(applyRoadmapPhaseMove(notesDocument(reordered.phases), draft, at)).toEqual({
+      status: "phase-changed",
+      phaseId: "d",
+    });
+    expect(applyRoadmapPhaseMove(notesDocument(roadmap({ d: done })), draft, at)).toEqual({
+      status: "phase-not-editable",
+      phaseId: "d",
+      reason: "done",
+    });
+  });
+
+  it("accepts legacy create drafts unchanged and checks insertion previews", () => {
+    const phases = roadmap();
+    const legacy = {
+      id: "draft-1",
+      projectKey: "/work/app",
+      basedOnRevision: 3,
+      createdAt: "2026-08-05T12:00:00.000Z",
+      createdBySessionId: "session-1",
+      summary: "Add work",
+      phases: [
+        {
+          phaseId: "new-1",
+          title: "New",
+          goal: "Goal",
+          doneWhen: ["Done"],
+          sourcePrompt: "Prompt",
+        },
+      ],
+      status: "pending",
+    };
+    const legacyResult = validateRoadmapPhaseDraft(legacy);
+    expect(legacyResult.ok).toBe(true);
+    expect(legacyResult.ok && legacyResult.value).not.toHaveProperty("orderPreview");
+
+    const inserting = {
+      ...legacy,
+      phases: [{ ...legacy.phases[0]!, insertBeforePhaseId: "b" }],
+    };
+    const orderPreview = buildRoadmapPhaseInsertionPreview(phases, inserting.phases);
+    expect(orderPreview.after.map((entry) => entry.phaseId)).toEqual(["a", "new-1", "b", "c", "d"]);
+    expect(validateRoadmapPhaseDraft({ ...inserting, orderPreview }).ok).toBe(true);
+    // A preview is required exactly when a phase is inserted, and must match the placement.
+    expect(validateRoadmapPhaseDraft(inserting).ok).toBe(false);
+    expect(validateRoadmapPhaseDraft({ ...legacy, orderPreview }).ok).toBe(false);
+    expect(
+      validateRoadmapPhaseDraft({
+        ...inserting,
+        orderPreview: { ...orderPreview, after: [...orderPreview.before, orderPreview.after[1]!] },
+      }).ok,
+    ).toBe(false);
+    expect(
+      validateRoadmapPhaseDraftRequest({
+        ...request(),
+        phases: [{ ...request().phases[0]!, insertBeforePhaseId: "b" }],
+      }),
+    ).toMatchObject({ ok: true, value: { phases: [{ insertBeforePhaseId: "b" }] } });
+  });
+
+  it("accepts moved approval results", () => {
+    expect(isRoadmapPhaseDraftApprovalResult({ status: "moved", revision: 4, phaseId: "d" })).toBe(
+      true,
+    );
+    expect(isRoadmapPhaseDraftApprovalResult({ status: "moved", revision: 4 })).toBe(false);
   });
 });

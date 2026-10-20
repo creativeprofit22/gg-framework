@@ -817,14 +817,23 @@ pub(crate) const ROADMAP_PHASE_DRAFT_KEYS: [&str; 8] = [
 ];
 
 // Mirrors gg-core DRAFT_OPTIONAL_KEYS; legacy drafts omit these.
-pub(crate) const ROADMAP_PHASE_DRAFT_OPTIONAL_KEYS: [&str; 2] = ["references", "sourcesNotCited"];
+pub(crate) const ROADMAP_PHASE_DRAFT_OPTIONAL_KEYS: [&str; 3] =
+    ["references", "sourcesNotCited", "orderPreview"];
 
 pub(crate) const ROADMAP_PHASE_DRAFT_SOURCES_NOT_CITED_MAX_LENGTH: usize = 1_024;
 
 pub(crate) const ROADMAP_DRAFT_PHASE_KEYS: [&str; 5] =
     ["phaseId", "title", "goal", "doneWhen", "sourcePrompt"];
 
+// Mirrors gg-core DRAFT_PHASE_OPTIONAL_KEYS; legacy draft phases omit these.
+pub(crate) const ROADMAP_DRAFT_PHASE_OPTIONAL_KEYS: [&str; 2] =
+    ["referenceIds", "insertBeforePhaseId"];
+
 pub(crate) const ROADMAP_PROPOSED_PHASES_MAX_ITEMS: usize = 20;
+
+pub(crate) const ROADMAP_DRAFT_REFERENCES_MAX_ITEMS: usize = 50;
+
+pub(crate) const ROADMAP_DRAFT_REFERENCE_KEYS_MAX_ITEMS: usize = ROADMAP_DRAFT_REFERENCES_MAX_ITEMS;
 
 pub(crate) const ROADMAP_PHASE_DONE_WHEN_MAX_ITEMS: usize = 20;
 
@@ -864,18 +873,6 @@ pub(crate) fn normalized_bounded_utf16(
     (1..=max_length)
         .contains(&normalized.encode_utf16().count())
         .then_some(normalized)
-}
-
-// Reference fields were absent in legacy drafts. Keep exact-key validation for both forms.
-pub(crate) fn has_roadmap_reference_keys(
-    object: &serde_json::Map<String, serde_json::Value>,
-    base: &[&str],
-    reference_key: &str,
-) -> bool {
-    has_exact_keys(object, base)
-        || (object.len() == base.len() + 1
-            && object.contains_key(reference_key)
-            && base.iter().all(|key| object.contains_key(*key)))
 }
 
 // Mirrors gg-core isRecordWithKeys: every base key required, only listed optional extras.
@@ -1018,13 +1015,24 @@ pub(crate) fn roadmap_draft_reference(value: &serde_json::Value) -> Option<(Stri
     ))
 }
 
-pub(crate) fn is_roadmap_draft_phase(value: &serde_json::Value) -> Option<String> {
+/// Returns the phase ID and its optional `insertBeforePhaseId` target.
+pub(crate) fn is_roadmap_draft_phase(
+    value: &serde_json::Value,
+) -> Option<(String, Option<String>)> {
     let object = value.as_object()?;
-    if !has_roadmap_reference_keys(object, &ROADMAP_DRAFT_PHASE_KEYS, "referenceIds") {
+    if !has_required_and_optional_keys(
+        object,
+        &ROADMAP_DRAFT_PHASE_KEYS,
+        &ROADMAP_DRAFT_PHASE_OPTIONAL_KEYS,
+    ) {
         return None;
     }
 
     let phase_id = normalized_bounded_code_points(object.get("phaseId"), 512)?;
+    let insert_before = match object.get("insertBeforePhaseId") {
+        None => None,
+        value => Some(normalized_bounded_code_points(value, 512)?),
+    };
     normalized_bounded_code_points(object.get("title"), 200)?;
     normalized_bounded_code_points(object.get("goal"), 4_096)?;
     normalized_bounded_code_points(object.get("sourcePrompt"), 16_384)?;
@@ -1041,7 +1049,7 @@ pub(crate) fn is_roadmap_draft_phase(value: &serde_json::Value) -> Option<String
         }
     }
 
-    Some(phase_id)
+    Some((phase_id, insert_before))
 }
 
 pub(crate) const ROADMAP_PHASE_EDIT_DRAFT_KEYS: [&str; 12] = [
@@ -1178,7 +1186,10 @@ pub(crate) fn is_roadmap_phase_draft(value: &serde_json::Value) -> bool {
         return false;
     };
     if object.contains_key("kind") {
-        return is_roadmap_phase_edit_draft(object);
+        return match object.get("kind").and_then(serde_json::Value::as_str) {
+            Some("move") => is_roadmap_phase_move_draft(object),
+            _ => is_roadmap_phase_edit_draft(object),
+        };
     }
     if !has_required_and_optional_keys(
         object,
@@ -1223,7 +1234,7 @@ pub(crate) fn is_roadmap_phase_draft(value: &serde_json::Value) -> bool {
     let Some(references) = roadmap_reference_array(object.get("references")) else {
         return false;
     };
-    if references.len() > 20 {
+    if references.len() > ROADMAP_DRAFT_REFERENCES_MAX_ITEMS {
         return false;
     }
     let mut reference_ids = HashSet::new();
@@ -1238,14 +1249,19 @@ pub(crate) fn is_roadmap_phase_draft(value: &serde_json::Value) -> bool {
     }
     let mut phase_ids = HashSet::new();
     let mut linked_ids = HashSet::new();
+    let mut placements: Vec<(String, Option<String>)> = Vec::with_capacity(phases.len());
     for phase in phases {
-        if !is_roadmap_draft_phase(phase).is_some_and(|id| phase_ids.insert(id)) {
+        let Some((phase_id, insert_before)) = is_roadmap_draft_phase(phase) else {
+            return false;
+        };
+        if !phase_ids.insert(phase_id.clone()) {
             return false;
         }
+        placements.push((phase_id, insert_before));
         let Some(links) = roadmap_reference_array(phase.get("referenceIds")) else {
             return false;
         };
-        if links.len() > 20 {
+        if links.len() > ROADMAP_DRAFT_REFERENCE_KEYS_MAX_ITEMS {
             return false;
         }
         let mut seen = HashSet::new();
@@ -1260,6 +1276,165 @@ pub(crate) fn is_roadmap_phase_draft(value: &serde_json::Value) -> bool {
         }
     }
     linked_ids == reference_ids
+        && is_roadmap_insertion_preview(object.get("orderPreview"), &placements)
+}
+
+pub(crate) const ROADMAP_PHASE_ORDER_PREVIEW_MAX_ITEMS: usize = 1_000;
+
+/// Mirrors gg-core `validateOrderEntries`: exact keys, unique bounded IDs, loose display titles.
+pub(crate) fn roadmap_order_entry_ids(value: Option<&serde_json::Value>) -> Option<Vec<String>> {
+    let entries = value?.as_array()?;
+    if entries.len() > ROADMAP_PHASE_ORDER_PREVIEW_MAX_ITEMS {
+        return None;
+    }
+    let mut seen = HashSet::new();
+    let mut ids = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let object = entry.as_object()?;
+        if !has_exact_keys(object, &["phaseId", "title"]) {
+            return None;
+        }
+        let id = normalized_bounded_code_points(object.get("phaseId"), 512)?;
+        roadmap_edit_before_string(object.get("title"))?;
+        if !seen.insert(id.clone()) {
+            return None;
+        }
+        ids.push(id);
+    }
+    Some(ids)
+}
+
+pub(crate) fn roadmap_order_preview_ids(
+    value: Option<&serde_json::Value>,
+) -> Option<(Vec<String>, Vec<String>)> {
+    let object = value?.as_object()?;
+    if !has_exact_keys(object, &["before", "after"]) {
+        return None;
+    }
+    Some((
+        roadmap_order_entry_ids(object.get("before"))?,
+        roadmap_order_entry_ids(object.get("after"))?,
+    ))
+}
+
+/// Mirrors gg-core create-draft validation: a preview exists exactly when a phase is inserted,
+/// and `after` is `before` with each new phase placed before its target (or appended).
+pub(crate) fn is_roadmap_insertion_preview(
+    value: Option<&serde_json::Value>,
+    placements: &[(String, Option<String>)],
+) -> bool {
+    let inserts = placements.iter().any(|(_, target)| target.is_some());
+    let Some(value) = value else {
+        return !inserts;
+    };
+    if !inserts {
+        return false;
+    }
+    let Some((before, after)) = roadmap_order_preview_ids(Some(value)) else {
+        return false;
+    };
+    if placements.iter().any(|(id, target)| {
+        before.contains(id)
+            || target
+                .as_ref()
+                .is_some_and(|target| !before.contains(target))
+    }) {
+        return false;
+    }
+    let mut expected = Vec::with_capacity(before.len() + placements.len());
+    for existing in &before {
+        expected.extend(
+            placements
+                .iter()
+                .filter(|(_, target)| target.as_ref() == Some(existing))
+                .map(|(id, _)| id.clone()),
+        );
+        expected.push(existing.clone());
+    }
+    expected.extend(
+        placements
+            .iter()
+            .filter(|(_, target)| target.is_none())
+            .map(|(id, _)| id.clone()),
+    );
+    expected == after
+}
+
+pub(crate) const ROADMAP_PHASE_MOVE_DRAFT_KEYS: [&str; 14] = [
+    "kind",
+    "id",
+    "projectKey",
+    "basedOnRevision",
+    "createdAt",
+    "createdBySessionId",
+    "summary",
+    "phaseId",
+    "phaseTitle",
+    "position",
+    "targetPhaseId",
+    "targetPhaseTitle",
+    "orderPreview",
+    "status",
+];
+
+/// Mirrors gg-core `validateRoadmapPhaseMoveDraft`.
+pub(crate) fn is_roadmap_phase_move_draft(
+    object: &serde_json::Map<String, serde_json::Value>,
+) -> bool {
+    if !has_exact_keys(object, &ROADMAP_PHASE_MOVE_DRAFT_KEYS)
+        || object.get("kind").and_then(serde_json::Value::as_str) != Some("move")
+        || !matches!(
+            object.get("status").and_then(serde_json::Value::as_str),
+            Some("pending" | "stale")
+        )
+        || normalized_bounded_code_points(object.get("id"), 512).is_none()
+        || normalized_bounded_code_points(object.get("projectKey"), 4_096).is_none()
+        || !is_non_negative_integer(object.get("basedOnRevision"))
+        || !is_roadmap_timestamp(object.get("createdAt"))
+        || normalized_bounded_code_points(object.get("createdBySessionId"), 512).is_none()
+        || normalized_bounded_code_points(object.get("summary"), 4_096).is_none()
+        || roadmap_edit_before_string(object.get("phaseTitle")).is_none()
+        || roadmap_edit_before_string(object.get("targetPhaseTitle")).is_none()
+    {
+        return false;
+    }
+    let Some(position) = object
+        .get("position")
+        .and_then(serde_json::Value::as_str)
+        .filter(|position| matches!(*position, "before" | "after"))
+    else {
+        return false;
+    };
+    let (Some(phase_id), Some(target_id)) = (
+        normalized_bounded_code_points(object.get("phaseId"), 512),
+        normalized_bounded_code_points(object.get("targetPhaseId"), 512),
+    ) else {
+        return false;
+    };
+    if phase_id == target_id {
+        return false;
+    }
+    let Some((before, after)) = roadmap_order_preview_ids(object.get("orderPreview")) else {
+        return false;
+    };
+    let mut expected: Vec<String> = before
+        .iter()
+        .filter(|id| **id != phase_id)
+        .cloned()
+        .collect();
+    if expected.len() + 1 != before.len() {
+        return false;
+    }
+    let Some(target_index) = expected.iter().position(|id| *id == target_id) else {
+        return false;
+    };
+    let insert_at = if position == "before" {
+        target_index
+    } else {
+        target_index + 1
+    };
+    expected.insert(insert_at, phase_id);
+    expected == after && after != before
 }
 
 pub(crate) fn is_roadmap_phase_draft_get_outcome(value: &serde_json::Value, outcome: &str) -> bool {
@@ -1298,7 +1473,7 @@ pub(crate) fn is_roadmap_phase_draft_approval_outcome(
                                 .all(|id| id.as_str().is_some_and(|id| !id.is_empty()))
                     })
         }
-        "edited" => {
+        "edited" | "moved" => {
             is_non_negative_integer(value.get("revision"))
                 && is_non_empty_string(value.get("phaseId"))
         }
@@ -2530,6 +2705,163 @@ mod tests {
         }
     }
 
+    fn order_entries(ids: &[&str]) -> serde_json::Value {
+        serde_json::Value::Array(
+            ids.iter()
+                .map(|id| serde_json::json!({ "phaseId": id, "title": format!("Phase {id}") }))
+                .collect(),
+        )
+    }
+
+    fn pending_roadmap_move_draft() -> serde_json::Value {
+        serde_json::json!({
+            "status": "ok",
+            "draft": {
+                "kind": "move",
+                "id": "draft-move",
+                "projectKey": "project-1",
+                "basedOnRevision": 4,
+                "createdAt": "2026-01-01T00:00:00.000Z",
+                "createdBySessionId": "session-1",
+                "summary": "Do C before B",
+                "phaseId": "c",
+                "phaseTitle": "Phase c",
+                "position": "before",
+                "targetPhaseId": "b",
+                "targetPhaseTitle": "Phase b",
+                "orderPreview": {
+                    "before": order_entries(&["a", "b", "c"]),
+                    "after": order_entries(&["a", "c", "b"]),
+                },
+                "status": "pending",
+            },
+        })
+    }
+
+    fn get_draft(value: &serde_json::Value) -> Result<serde_json::Value, String> {
+        normalize_roadmap_phase_draft_response(
+            reqwest::StatusCode::OK,
+            &value.to_string(),
+            RoadmapPhaseDraftResponseKind::Get,
+        )
+    }
+
+    #[test]
+    fn roadmap_phase_move_draft_proxy_accepts_well_formed_and_rejects_malformed_moves() {
+        let pending = pending_roadmap_move_draft();
+        assert!(get_draft(&pending).is_ok());
+        let mut after = pending.clone();
+        after["draft"]["position"] = serde_json::json!("after");
+        after["draft"]["phaseId"] = serde_json::json!("a");
+        after["draft"]["targetPhaseId"] = serde_json::json!("b");
+        after["draft"]["orderPreview"]["after"] = order_entries(&["b", "a", "c"]);
+        assert!(get_draft(&after).is_ok());
+
+        let mutate = |apply: &dyn Fn(&mut serde_json::Value)| {
+            let mut draft = pending.clone();
+            apply(&mut draft["draft"]);
+            draft
+        };
+        for malformed in [
+            mutate(&|draft| draft["extra"] = serde_json::json!(true)),
+            mutate(&|draft| draft["position"] = serde_json::json!("above")),
+            // Next to itself.
+            mutate(&|draft| draft["targetPhaseId"] = serde_json::json!("c")),
+            // `after` must be the before order with the phase moved.
+            mutate(&|draft| draft["orderPreview"]["after"] = order_entries(&["c", "a", "b"])),
+            mutate(&|draft| draft["orderPreview"]["after"] = order_entries(&["a", "b", "c"])),
+            mutate(&|draft| draft["orderPreview"]["before"] = order_entries(&["a", "b", "b"])),
+            mutate(&|draft| draft["targetPhaseId"] = serde_json::json!("missing")),
+            mutate(&|draft| {
+                draft.as_object_mut().unwrap().remove("orderPreview");
+            }),
+        ] {
+            assert!(
+                get_draft(&malformed).is_err(),
+                "accepted malformed move: {malformed}"
+            );
+        }
+
+        let moved = normalize_roadmap_phase_draft_response(
+            reqwest::StatusCode::OK,
+            r#"{"status":"moved","revision":5,"phaseId":"c"}"#,
+            RoadmapPhaseDraftResponseKind::Approve,
+        )
+        .unwrap();
+        assert_eq!(moved["status"], "moved");
+        assert!(normalize_roadmap_phase_draft_response(
+            reqwest::StatusCode::OK,
+            r#"{"status":"moved","revision":5}"#,
+            RoadmapPhaseDraftResponseKind::Approve,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn roadmap_phase_create_draft_proxy_validates_inserted_phase_positions() {
+        let phase = |id: &str, target: Option<&str>| {
+            let mut phase = serde_json::json!({
+                "phaseId": id, "title": format!("Phase {id}"), "goal": "Goal",
+                "doneWhen": ["Done"], "sourcePrompt": "Prompt", "referenceIds": [],
+            });
+            if let Some(target) = target {
+                phase["insertBeforePhaseId"] = serde_json::json!(target);
+            }
+            phase
+        };
+        let draft = |phases: serde_json::Value, preview: Option<serde_json::Value>| {
+            let mut value = serde_json::json!({
+                "status": "ok",
+                "draft": {
+                    "id": "draft-1", "projectKey": "project-1", "basedOnRevision": 1,
+                    "createdAt": "2026-01-01T00:00:00.000Z", "createdBySessionId": "session-1",
+                    "summary": "Insert", "references": [], "phases": phases,
+                    "sourcesNotCited": null, "status": "pending",
+                },
+            });
+            if let Some(preview) = preview {
+                value["draft"]["orderPreview"] = preview;
+            }
+            value
+        };
+        let preview = |before: &[&str], after: &[&str]| serde_json::json!({ "before": order_entries(before), "after": order_entries(after) });
+        // Legacy appends carry no preview.
+        assert!(get_draft(&draft(serde_json::json!([phase("n", None)]), None)).is_ok());
+        assert!(get_draft(&draft(
+            serde_json::json!([
+                phase("n1", Some("b")),
+                phase("n2", Some("b")),
+                phase("n3", None)
+            ]),
+            Some(preview(&["a", "b"], &["a", "n1", "n2", "b", "n3"])),
+        ))
+        .is_ok());
+        for malformed in [
+            draft(serde_json::json!([phase("n", Some("b"))]), None),
+            draft(
+                serde_json::json!([phase("n", None)]),
+                Some(preview(&["a"], &["a", "n"])),
+            ),
+            draft(
+                serde_json::json!([phase("n", Some("b"))]),
+                Some(preview(&["a", "b"], &["n", "a", "b"])),
+            ),
+            draft(
+                serde_json::json!([phase("n", Some("missing"))]),
+                Some(preview(&["a", "b"], &["a", "b", "n"])),
+            ),
+            draft(
+                serde_json::json!([phase("n", Some(""))]),
+                Some(preview(&["a", "b"], &["a", "b", "n"])),
+            ),
+        ] {
+            assert!(
+                get_draft(&malformed).is_err(),
+                "accepted malformed insert: {malformed}"
+            );
+        }
+    }
+
     #[test]
     fn roadmap_phase_draft_proxy_validates_reference_bearing_daemon_payloads() {
         let pending = serde_json::json!({
@@ -2579,6 +2911,30 @@ mod tests {
         let mut legacy_uncited = empty.clone();
         legacy_uncited["draft"]["sourcesNotCited"] = serde_json::Value::Null;
         assert!(validate(&legacy_uncited).is_ok());
+        let with_references = |count: usize| {
+            let mut draft = pending.clone();
+            let template = pending["draft"]["references"][0].clone();
+            let references: Vec<serde_json::Value> = (0..count)
+                .map(|index| {
+                    let mut reference = template.clone();
+                    reference["id"] = serde_json::json!(format!("ref-{index}"));
+                    reference["issue"] = serde_json::json!(index + 1);
+                    reference["canonicalUrl"] = serde_json::json!(format!(
+                        "https://github.com/example/project/issues/{}",
+                        index + 1
+                    ));
+                    reference
+                })
+                .collect();
+            draft["draft"]["phases"][0]["referenceIds"] =
+                references.iter().map(|r| r["id"].clone()).collect();
+            draft["draft"]["references"] = serde_json::Value::Array(references);
+            draft
+        };
+        assert_eq!(ROADMAP_DRAFT_REFERENCES_MAX_ITEMS, 50);
+        assert_eq!(ROADMAP_DRAFT_REFERENCE_KEYS_MAX_ITEMS, 50);
+        assert!(validate(&with_references(ROADMAP_DRAFT_REFERENCES_MAX_ITEMS)).is_ok());
+        assert!(validate(&with_references(ROADMAP_DRAFT_REFERENCES_MAX_ITEMS + 1)).is_err());
         for replacement in [
             serde_json::json!(7),
             serde_json::json!(""),

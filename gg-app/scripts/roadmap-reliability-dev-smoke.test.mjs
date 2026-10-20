@@ -31,8 +31,8 @@ test("review fixture is long, session-scoped, repeatable, and does not mutate No
   assert.deepEqual(fixturePendingReviews(state, "a"), a);
   assert.notEqual(fixturePendingReviews(state, "b").draft.id, a.draft.id);
   assert.equal(a.draft.phases.length, 20);
-  assert.equal(a.draft.references.length, 20);
-  assert.equal(a.draft.phases[0].referenceIds.length, 20);
+  assert.equal(a.draft.references.length, 50);
+  assert.equal(a.draft.phases[0].referenceIds.length, 50);
   assert.equal(a.draft.phases[0].sourcePrompt.length, 16_384);
   assert.equal(a.draft.phases[0].doneWhen.length, 20);
   assert.equal(a.draft.phases[0].doneWhen[0].length, 1_024);

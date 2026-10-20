@@ -16,10 +16,7 @@ import {
   type RoadmapPhaseEditRequest,
   type RoadmapPhaseNotEditableReason,
 } from "@kenkaiiii/gg-core/roadmap-workflow";
-import { DoneWhen, boundedText } from "./roadmap-phase-draft.js";
-
-/** Matches the shared request validator's identifier bound. */
-const PHASE_ID_MAX_LENGTH = 512;
+import { DoneWhen, PHASE_ID_MAX_LENGTH, boundedText } from "./roadmap-phase-draft.js";
 
 const roadmapPhaseEditInputSchema: Record<string, unknown> = {
   type: "object",

@@ -67,7 +67,7 @@ On a subscription, less usage means more work out of your plan. The same allowan
 
    **Windows:** [Download the latest release](https://github.com/KenKaiii/gg-framework/releases/latest) and run the `.exe` installer.
 
-   **Development:** With Node.js, pnpm, and the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/) installed:
+   **Development:** With Node.js 22 or newer, pnpm 10 (the repo pins `pnpm@10.17.1`; `corepack enable` picks it up), and the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/) installed:
 
    ```bash
    git clone https://github.com/KenKaiii/gg-framework.git
@@ -78,6 +78,37 @@ On a subscription, less usage means more work out of your plan. The same allowan
    ```
 
 2. Open the app, connect your AI provider, and pick Code, Chat, or Motion.
+
+3. Check your changes (from the repo root):
+
+   ```bash
+   pnpm check          # typecheck every package
+   pnpm lint           # ESLint
+   pnpm format:check   # Prettier, read-only
+   pnpm test           # full test suite
+   ```
+
+   For app-only work, `pnpm --filter gg-app check`, `lint` and `test` are quicker. See [gg-app/README.md](gg-app/README.md).
+
+### Optional settings
+
+Nothing needs an `.env` file: you sign in to providers inside the app. These environment variables are optional overrides:
+
+| Variable                                                                   | What it does                                                                           |
+| -------------------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
+| `GG_AGENT_DIR`                                                             | Absolute path for settings, sessions and logins. Defaults to `~/.gg`.                  |
+| `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_BASE_URL`, `AZURE_OPENAI_DEPLOYMENT` | Azure OpenAI connection. The base URL must be a full `https` Responses endpoint.       |
+| `AZURE_OPENAI_MODEL_ID`                                                    | Optional model name to show for the Azure deployment.                                  |
+| `GGCODER_GEMINI_OAUTH_CLIENT_ID`, `GGCODER_GEMINI_OAUTH_CLIENT_SECRET`     | Use your own Google Cloud OAuth client for Gemini sign-in instead of the built-in one. |
+
+## This Local Fork
+
+This checkout is a local fork of [KenKaiii/gg-framework](https://github.com/KenKaiii/gg-framework) that carries its own fixes. It builds as a separate app, **GG Coder Local Fork**, so it never overwrites the official install, and it doesn't use the official update feed.
+
+- Build the fork's installer: `pnpm app:build:local-patched`
+- Pull in upstream changes and keep the local fixes: `pnpm app:update:local-fixes` (checks only by default; it never pushes unless you pass `--push`)
+
+How updates and protected branches work is in [gg-app/LOCAL_FIXES.md](gg-app/LOCAL_FIXES.md).
 
 ## Build with the framework
 

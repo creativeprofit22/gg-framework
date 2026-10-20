@@ -26,19 +26,21 @@ pnpm --filter gg-app lint
 
 ## Architecture
 
-Each window runs its **own** Node agent sidecar pointed at its **own** project folder.
-Separate agents, separate projects, fully isolated. Multiple windows means multiple
-projects open at once.
+One Node daemon serves **every** window. Each pane is its own logical session with its own
+project folder, so windows and panes stay isolated even though they share one process.
+Rust starts the daemon, and respawns and recovers it if it dies.
 
 ```
-React webview ──invoke()──▶ Rust commands ──HTTP──▶ Node sidecar (AgentSession)
-     ▲                          │                         │
-     └────── emit_to(window) ◀──┴──── SSE /events ◀────────┘
+React webview ──invoke()──▶ Rust commands ──HTTP + x-gg-session──▶ Node daemon (one AgentSession per pane)
+     ▲                          │                                        │
+     └────── emit_to(window) ◀──┴──────────── SSE /events ◀──────────────┘
 ```
 
-- **`src-tauri/src/lib.rs`** is the Rust shell. It owns a sidecar registry keyed by window
-  label, every command resolves the calling window's port, and SSE frames go out through
-  `emit_to` so windows never see each other's events.
+- **`src-tauri/src/daemon.rs`** owns the shared daemon. Every command sends the per-launch
+  `x-gg-token` and the calling pane's `x-gg-session` header (neither ever reaches webview
+  code), and daemon events go out as `agent-event` through `emit_to`, so windows never see
+  each other's events. Frontend listeners must use `getCurrentWebviewWindow().listen`, or
+  secondary windows miss them.
 - **`src/agent.ts`** is the only bridge to Rust. All IPC wrappers live here. The webview
   never `fetch`es the sidecar directly, since mixed content is blocked on the `tauri://`
   origin.
@@ -104,5 +106,6 @@ Packaging (bundled per-platform Node runtime, single-file esbuild sidecar, exter
 signing/notarization) is in [DISTRIBUTION.md](DISTRIBUTION.md). Releases fire from a `v*`
 git tag. Version bumps go through `pnpm --filter gg-app bump`, never by hand.
 
-Debug log: `~/.gg/gg-app-sidecar.log`. Each window's sidecar appends to it, tagged with its
-own `sid=`.
+Debug log: `~/.gg/gg-app-<app-id>-sidecar.log`, written by the shared daemon (for example
+`gg-app-com-ggcoder-app-sidecar.log`, or `gg-app-com-ggcoder-local-fork-sidecar.log` for the
+Local Fork), so the official app and the fork never write to the same file.

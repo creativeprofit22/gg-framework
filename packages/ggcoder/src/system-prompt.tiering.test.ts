@@ -70,6 +70,25 @@ describe("tool tiering in the system prompt", () => {
     expect(prompt).toContain("On demand (call by name;");
   });
 
+  it("advertises the corpus through steroids, not the read-only research facade", async () => {
+    const cwd = await makeProject();
+    const prompt = await buildSystemPrompt(
+      cwd,
+      undefined,
+      false,
+      undefined,
+      ["read", "bash", "tool_search"],
+      undefined,
+      "anthropic",
+      undefined,
+      ["steroids", "research_corpus"],
+    );
+    // Production Local Fork wording for the hint.
+    expect(prompt).toContain("- **steroids**: Real-repo examples.");
+    expect(prompt).not.toContain("**research_corpus**");
+    expect(prompt).not.toMatch(/read-only corpus/i);
+  });
+
   it("keeps cross-tool steering without repeating live tool descriptions", async () => {
     const cwd = await makeProject();
     const prompt = await buildSystemPrompt(cwd, [], false, undefined, ["edit", "write"]);

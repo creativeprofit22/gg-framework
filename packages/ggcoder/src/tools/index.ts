@@ -178,6 +178,15 @@ export interface CreateToolsOptions {
    */
   steroidsBin?: string | null;
   /**
+   * Include advisory-only tools (`ADVISORY_ONLY_TOOL_NAMES`, currently the
+   * read-only `research_corpus` facade). Off by default: ordinary hosts such as
+   * the terminal TUI have no programmatic advisory turn, and advertising the
+   * read-only facade next to `steroids` makes the model refuse corpus
+   * add/refresh requests. AgentSession opts in because it defers and gates
+   * these tools to advisory turns only.
+   */
+  includeAdvisoryOnlyTools?: boolean;
+  /**
    * Session record of retrieved corpus code. Corpus tools record into it and
    * exit_plan refuses plans that omit those sources.
    */
@@ -374,7 +383,10 @@ export async function createTools(
   // Local corpus of real repos; only when the CLI is actually on this machine.
   const steroidsBin = opts?.steroidsBin === undefined ? findSteroidsBinary() : opts.steroidsBin;
   if (steroidsBin) {
-    const corpusTools = [createSteroidsTool(steroidsBin), createResearchCorpusTool(steroidsBin)];
+    const corpusTools = [
+      createSteroidsTool(steroidsBin),
+      ...(opts?.includeAdvisoryOnlyTools ? [createResearchCorpusTool(steroidsBin)] : []),
+    ];
     const ledger = opts?.researchSources;
     tools.push(
       ...(ledger

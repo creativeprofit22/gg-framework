@@ -71,7 +71,20 @@ export const AUTO_LOADED_TOOL_NAMES: ReadonlySet<string> = new Set([
   "list_agents",
   "interrupt_agent",
   "exit_plan",
+  // Programmatic assessment promotes this read-only facade itself. Indexing it
+  // beside `steroids` made ordinary turns refuse corpus add/refresh as
+  // "read-only tools only", so ordinary turns only see `steroids`.
+  "research_corpus",
 ]);
+
+/**
+ * Built-ins reserved for programmatic advisory turns. The session always holds
+ * them back (even with deferral off or an allow-list), keeps them out of
+ * `tool_search` and by-name loading, and only the advisory turn promotes them.
+ * `research_corpus` is a read-only facade; offering it in ordinary turns made
+ * corpus add/refresh requests pick it over `steroids` and fail.
+ */
+export const ADVISORY_ONLY_TOOL_NAMES: ReadonlySet<string> = new Set(["research_corpus"]);
 
 export const DEFERRED_TOOL_NAMES: readonly string[] = [
   "task_output",

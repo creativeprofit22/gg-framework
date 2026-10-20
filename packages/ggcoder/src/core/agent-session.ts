@@ -138,7 +138,7 @@ import {
   type ProcessManager,
   type CreateToolsResult,
 } from "../tools/index.js";
-import { partitionToolsByTier } from "../tools/tool-tiers.js";
+import { ADVISORY_ONLY_TOOL_NAMES, partitionToolsByTier } from "../tools/tool-tiers.js";
 import type { CommandCreationReviewer } from "./programmatic/command-creation.js";
 import type { ProgrammaticAssessmentOutcome } from "./programmatic/assessment.js";
 import type { ProgrammaticSetupInspection } from "./programmatic/setup-inspection.js";
@@ -1207,6 +1207,8 @@ export class AgentSession {
       model: this.model,
       lspDiagnostics: this.settingsManager.get("lspDiagnostics"),
       deferLspDiagnostics: true,
+      // Deferred and gated to programmatic advisory turns below.
+      includeAdvisoryOnlyTools: true,
       getWriteGuardSettings: () => ({
         allowOutsideWorkspaceWrites: this.settingsManager.get("allowOutsideWorkspaceWrites"),
         additionalRoots: this.additionalRoots,
@@ -1287,7 +1289,18 @@ export class AgentSession {
     if (isInternalDiagnosticsEnabled()) {
       additionalTools.push(createSessionStatsTool(() => this.diagnosticsRecorder));
     }
-    const tools = [...builtInTools, ...additionalTools];
+    const additionalToolNames = new Set(additionalTools.map((tool) => tool.name));
+    // Advisory-only built-ins never go live at setup, on any path: only an
+    // active programmatic advisory turn promotes them from the deferred map.
+    // A same-named host tool (isolated specialist sessions) still wins.
+    const advisoryOnlyBuiltIns = builtInTools.filter(
+      (tool) =>
+        ADVISORY_ONLY_TOOL_NAMES.has(tool.name) &&
+        !additionalToolNames.has(tool.name) &&
+        this.isToolAllowed(tool.name),
+    );
+    const liveBuiltIns = builtInTools.filter((tool) => !ADVISORY_ONLY_TOOL_NAMES.has(tool.name));
+    const tools = [...liveBuiltIns, ...additionalTools];
     // Static allow-lists (Ken) and live capability policies (chat Research) share
     // one guarded registry, so initial, additional, promoted, and late tools obey
     // the same boundary and stale references re-check it at execution time.
@@ -1298,8 +1311,7 @@ export class AgentSession {
     // same-named host tool also overrides its built-in instead of leaving a stale
     // built-in definition in the deferred catalog.
     if (!this.opts.allowedTools && this.settingsManager.get("deferredBuiltinTools")) {
-      const additionalToolNames = new Set(additionalTools.map((tool) => tool.name));
-      const tierableBuiltIns = builtInTools.filter((tool) => !additionalToolNames.has(tool.name));
+      const tierableBuiltIns = liveBuiltIns.filter((tool) => !additionalToolNames.has(tool.name));
       // Wrap before partitioning so a deferred trigger (spawn_agent) still
       // promotes its follow-ups once the catalog loads it.
       const partition = partitionToolsByTier(
@@ -1309,7 +1321,10 @@ export class AgentSession {
       // orchestrates, so its agent tools are always at hand). Fixed for the
       // session, so the cached tool block stays byte-stable.
       const keep = new Set(this.opts.coreTools ?? []);
-      const deferred = partition.deferred.filter((tool) => !keep.has(tool.name));
+      const deferred = [
+        ...partition.deferred.filter((tool) => !keep.has(tool.name)),
+        ...advisoryOnlyBuiltIns,
+      ];
       const core = [...partition.core, ...partition.deferred.filter((tool) => keep.has(tool.name))];
       this.registerTools([...core, ...additionalTools]);
       if (deferred.length > 0) {
@@ -1323,6 +1338,10 @@ export class AgentSession {
       }
     } else {
       this.registerTools(allowedTools);
+      // No catalog or prompt index here: the advisory turn alone promotes these.
+      if (advisoryOnlyBuiltIns.length > 0) {
+        this.deferredBuiltinTools = new Map(advisoryOnlyBuiltIns.map((tool) => [tool.name, tool]));
+      }
     }
     this.rebuildReadTool = rebuildReadTool;
     this.clearReadTracker = clearReadTracker;
@@ -1882,7 +1901,9 @@ export class AgentSession {
             : { serverName, ok: false, error: outcome.error };
         },
         (toolName) =>
-          !this.unavailableToolNames.has(toolName) && this.isToolCapabilityAllowed(toolName),
+          (!ADVISORY_ONLY_TOOL_NAMES.has(toolName) || this.advisoryTurn?.active === true) &&
+          !this.unavailableToolNames.has(toolName) &&
+          this.isToolCapabilityAllowed(toolName),
         this.contextLimits,
       ),
     );
@@ -1942,6 +1963,8 @@ export class AgentSession {
   /** Resolve a deferred built-in called by name (append-only promotion). */
   private promoteDeferredBuiltin(name: string): AgentTool | undefined {
     if (!this.deferredBuiltinTools.has(name)) return undefined;
+    // Advisory-only tools load solely through the advisory turn, never by name.
+    if (ADVISORY_ONLY_TOOL_NAMES.has(name)) return this.tools.find((t) => t.name === name);
     if (!this.registeredTools.has(name)) this.promoteDeferredBuiltins([name]);
     return this.tools.find((t) => t.name === name);
   }
@@ -5273,6 +5296,7 @@ export class AgentSession {
   private promoteCapabilityAllowedDeferredBuiltins(): void {
     if (!this.toolCapabilityPolicy) return;
     for (const [toolName, tool] of this.deferredBuiltinTools) {
+      if (ADVISORY_ONLY_TOOL_NAMES.has(toolName)) continue;
       if (!this.isToolCapabilityAllowed(toolName) || this.registeredTools.has(toolName)) continue;
       this.registeredTools.set(toolName, this.guardRegisteredTool(tool));
       this.capabilityPromotedBuiltinNames.add(toolName);

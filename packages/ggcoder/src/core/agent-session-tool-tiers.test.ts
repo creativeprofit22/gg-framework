@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
-import type { AgentTool, ToolContext } from "@kenkaiiii/gg-agent";
+import { agentLoop, type AgentTool, type ToolContext } from "@kenkaiiii/gg-agent";
 import type * as GgAgentModule from "@kenkaiiii/gg-agent";
 import type * as McpModule from "./mcp/index.js";
 import { useFakeHome } from "../test-support/fake-home.js";
@@ -65,6 +65,14 @@ async function writeSettings(settings: Record<string, unknown>): Promise<void> {
     JSON.stringify(settings),
     "utf-8",
   );
+}
+
+/** Detection only stats the file; the corpus tools are never executed. */
+async function writeFakeSteroidsBin(): Promise<void> {
+  const binDir = path.join(tempHome, ".gg", "bin");
+  await fs.mkdir(binDir, { recursive: true });
+  const name = process.platform === "win32" ? "steroids.exe" : "steroids";
+  await fs.writeFile(path.join(binDir, name), "");
 }
 
 async function createUninitializedSession(extra: Record<string, unknown> = {}) {
@@ -504,6 +512,66 @@ describe("AgentSession built-in tool tiering", () => {
       await expect(
         registered.get("mcp__unsafe-search__query")?.execute({}, TOOL_CONTEXT),
       ).rejects.toThrow("mcp__unsafe-search__query is unavailable");
+    } finally {
+      await session.dispose();
+    }
+  }, 20_000);
+
+  it("keeps research_corpus out of ordinary turns when deferral is off", async () => {
+    await writeFakeSteroidsBin();
+    await writeSettings({ deferredBuiltinTools: false });
+    const session = await createSession();
+    try {
+      const prompt = String(session.getMessages()[0]?.content ?? "");
+      expect(liveToolNames(session)).toContain("steroids");
+      expect(liveToolNames(session)).not.toContain("research_corpus");
+      expect(prompt).not.toContain("research_corpus");
+      const resolve = (
+        session as unknown as { promoteDeferredBuiltin(name: string): AgentTool | undefined }
+      ).promoteDeferredBuiltin.bind(session);
+      expect(resolve("research_corpus")).toBeUndefined();
+
+      // The programmatic advisory turn still promotes it, then removes it.
+      const proposal = await buildProgrammaticProfileProposal(tempProject);
+      expect(
+        (
+          await persistProgrammaticProfile(
+            tempProject,
+            proposal.configurationFingerprint,
+            proposal.profile,
+          )
+        ).ok,
+      ).toBe(true);
+      // The live tools array is mutated after the turn, so snapshot it at call time.
+      let advisoryTools: string[] = [];
+      const emptyLoop = vi.mocked(agentLoop).getMockImplementation();
+      if (!emptyLoop) throw new Error("agentLoop mock implementation missing");
+      vi.mocked(agentLoop).mockImplementationOnce((messages, options) => {
+        advisoryTools = options.tools?.map((tool) => tool.name) ?? [];
+        return emptyLoop(messages, options);
+      });
+      await session.prompt("/programmatic");
+      expect(advisoryTools).toContain("research_corpus");
+      expect(liveToolNames(session)).not.toContain("research_corpus");
+    } finally {
+      await session.dispose();
+    }
+  }, 20_000);
+
+  it("never surfaces research_corpus through tool_search in ordinary turns", async () => {
+    await writeFakeSteroidsBin();
+    const session = await createSession();
+    try {
+      const toolSearch = (session as unknown as { tools: AgentTool[] }).tools.find(
+        (tool) => tool.name === "tool_search",
+      );
+      const added = String(await toolSearch?.execute({ query: "corpus add" }, TOOL_CONTEXT));
+      expect(added).not.toContain("research_corpus");
+      expect(added).toContain("steroids:");
+      const missed = String(await toolSearch?.execute({ query: "zzqx" }, TOOL_CONTEXT));
+      expect(missed).toContain("Still in the catalog");
+      expect(missed).not.toContain("research_corpus");
+      expect(liveToolNames(session)).not.toContain("research_corpus");
     } finally {
       await session.dispose();
     }

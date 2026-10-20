@@ -39,6 +39,32 @@ describe("createTools LSP policy", () => {
   });
 });
 
+describe("createTools advisory-only corpus facade", () => {
+  async function corpusToolNames(includeAdvisoryOnlyTools?: boolean): Promise<string[]> {
+    const dir = mkdtempSync(path.join(tmpdir(), "gg-steroids-bin-"));
+    dirs.push(dir);
+    const steroidsBin = path.join(dir, "steroids");
+    writeFileSync(steroidsBin, "");
+    const result = await createTools(process.cwd(), {
+      steroidsBin,
+      lspDiagnostics: false,
+      ...(includeAdvisoryOnlyTools === undefined ? {} : { includeAdvisoryOnlyTools }),
+    });
+    results.push(result);
+    return result.tools
+      .map((tool) => tool.name)
+      .filter((name) => name === "steroids" || name === "research_corpus");
+  }
+
+  it("omits research_corpus by default so ordinary hosts route corpus work to steroids", async () => {
+    expect(await corpusToolNames()).toEqual(["steroids"]);
+  });
+
+  it("includes research_corpus only when advisory-only tools are requested", async () => {
+    expect(await corpusToolNames(true)).toEqual(["steroids", "research_corpus"]);
+  });
+});
+
 describe("createTools research citation gate (terminal TUI wiring)", () => {
   const PLAN_STEPS = "\n\n## Steps\n1. Do the thing.\n";
 

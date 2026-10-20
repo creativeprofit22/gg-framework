@@ -147,6 +147,12 @@ describe("prompt commands", () => {
     expect(cmd?.prompt).toContain("Do not index anything until the user answers");
     expect(cmd?.prompt).toContain("`steroids` `add`");
     expect(cmd?.prompt).toContain(STEROIDS_COLLAPSIBLE_TABLE_MARKER);
+    // The desktop table only types ISO dates and plain numbers; other formats
+    // silently drop relative dates, freshness dots, and star bars.
+    expect(cmd?.prompt).toContain("last push cell as the ISO date `YYYY-MM-DD`");
+    expect(cmd?.prompt).toContain(
+      "stars cell as a plain number, either `5,143` or a compact `5.1k`, with no icon",
+    );
   });
 
   it("routes real-code comparison through the native steroids tool", () => {

@@ -37,21 +37,20 @@ describe("narrow-window layout contracts", () => {
     // glass theme layered on top). Regression: glass.css once set
     // `width: max-content`, overriding the fluid width on every wide table.
     // glass.css is Light-only, so its rules carry the zero-specificity
-    // `:where(:root[data-appearance-theme="light"])` scope prefix.
+    // `:where(:root[data-appearance-theme="light"])` scope prefix. It now has
+    // no table rules at all (asserted below), but any that return are scanned.
     const declared: string[] = [];
-    let glassRules = 0;
     for (const css of [appCss, glassCss]) {
       for (const rule of css.matchAll(
         /^(?::where\(:root\[data-appearance-theme="light"\]\)\s+)?\.markdown table\s*\{([^}]*)\}/gm,
       )) {
-        if (css === glassCss) glassRules += 1;
         for (const decl of (rule[1] ?? "").matchAll(/(?:^|;|\*\/)\s*width\s*:\s*([^;]+);/g)) {
           declared.push((decl[1] ?? "").trim());
         }
       }
     }
     expect(declared.length).toBeGreaterThan(0);
-    expect(glassRules).toBeGreaterThan(0);
+    expect(glassCss).not.toMatch(/\.markdown table\s*\{/);
     expect(declared.at(-1)).toBe("100%");
     expect(declared).not.toContain("max-content");
   });
@@ -60,11 +59,72 @@ describe("narrow-window layout contracts", () => {
     const cap = appearanceCss.match(
       /:root\[data-appearance-cap="on"\]([^{]*)\{\s*max-inline-size:\s*74ch;/,
     );
+    // Every table (folding /steroids one included) renders as one `.md-table`
+    // card, the direct child of the reply's Markdown.
     expect(cap?.[1]?.replace(/\s+/g, " ").trim()).toBe(
-      ".assistant-text .markdown > :not(.md-table-scroll, .md-table-collapsible)",
+      ".assistant-text .markdown > :not(.md-table)",
+    );
+    // The always-on 36em prose measure must also exempt the table card, or the
+    // /steroids candidates table is squeezed and its right columns hidden.
+    const measure = appCss.match(
+      /(\.assistant-text\s+\.markdown\s*>\s*:not\([^)]*\))\s*\{\s*max-width:\s*36em;/,
+    );
+    expect(measure?.[1]?.replace(/\s+/g, " ").trim()).toBe(
+      ".assistant-text .markdown > :not(.md-table, .code-block, .ken-prompt-block)",
     );
     expect(appCss).not.toMatch(/\.markdown th,\s*\.markdown td code\s*\{\s*white-space:\s*nowrap;/);
     expect(appCss).toMatch(/\.markdown td code\s*\{\s*white-space:\s*nowrap;/);
+  });
+
+  it("draws every Markdown table grid from shared ink tokens, with no Light-only overrides", () => {
+    // Regression: glass.css's Light-only table rules drew white hairlines and a
+    // white header strip, which vanished on Light's white canvas.
+    expect(glassCss).not.toMatch(/\.markdown\s+(?:table|th|td|tbody|tr|:is\(th)/);
+    expect(appCss).toMatch(/--table-line:\s*rgb\(var\(--ink-rgb\) \/ [\d.]+\);/);
+    expect(appCss).toMatch(/--table-line-strong:\s*rgb\(var\(--ink-rgb\) \/ [\d.]+\);/);
+    expect(appCss).toMatch(
+      /\.markdown th,\s*\.markdown td\s*\{[^}]*border-bottom:\s*1px solid var\(--table-line\);/,
+    );
+    expect(appCss).toMatch(
+      /\.markdown \.md-table-scroll\s*\{[^}]*border:\s*1px solid var\(--table-line-strong\);/,
+    );
+    // Material is per theme through tokens on the same rules: Dark's Alloy keys
+    // in App.css :root, Light's liquid glass in appearance.css. Light's values
+    // must not live in glass.css, whose zero-specificity scope loses to :root.
+    for (const token of [
+      "--table-card-bg",
+      "--table-head-bg",
+      "--table-toggle-bg",
+      "--table-grain",
+    ]) {
+      expect(appCss).toMatch(new RegExp(`${token}:`));
+      expect(appearanceCss).toMatch(
+        new RegExp(`:root\\[data-appearance-theme="light"\\]\\s*\\{[^}]*${token}:`),
+      );
+      expect(glassCss).not.toMatch(new RegExp(`${token}:`));
+    }
+    expect(appCss).toMatch(/--table-head-bg:\s*var\(--key\);/);
+    expect(appCss).toMatch(/\.markdown th\s*\{[^}]*background-image:\s*var\(--table-grain\);/);
+    // Reduced transparency / more contrast drop the grain in both themes.
+    for (const css of [appCss, appearanceCss]) {
+      expect(css).toMatch(
+        /@media \(prefers-reduced-transparency: reduce\), \(prefers-contrast: more\)\s*\{[^@]*?--table-grain:\s*none;/,
+      );
+    }
+    // Content stays light: no zebra fill, and dates and ranks carry no chip or
+    // badge fill (the palette probe measured the chip fill as the heaviest
+    // colour in Light).
+    expect(appCss).not.toMatch(/tr:nth-child\(even\)/);
+    expect(appCss).not.toMatch(/\.markdown \.md-date\s*\{[^}]*background/);
+    expect(appCss).not.toMatch(/\.markdown \.md-rank\s*\{[^}]*background/);
+    // Header icon motions only run when motion is welcome.
+    expect(appCss).toMatch(
+      /@media \(prefers-reduced-motion: no-preference\)\s*\{\s*\.markdown th:is\(:hover, :focus-within\) \.md-th-icon/,
+    );
+    // Narrow panes tighten cells for every theme, not only Light.
+    expect(appCss).toMatch(
+      /@container \(max-width:\s*420px\)\s*\{[^@]*?\.markdown :is\(th, td\)\s*\{\s*padding:/,
+    );
   });
 
   it("keeps the portaled model menu fixed above responsive footer clipping", () => {

@@ -36,6 +36,32 @@
   /* The ink overlays are drawn in (hover washes, hairlines): white on dark,
      deep navy on light. Used as `rgb(var(--ink-rgb) / <alpha>)`. */
   --ink-rgb: 255 255 255;
+  /* Data tables (every Markdown table, the Memory list): one recipe drawn in
+     the ink, so the grid reads on Dark and Light alike without per-theme
+     overrides. Frame and header rule are the strong line, cell rules the soft
+     one; the header strip is a faint ink wash, hover a primary wash. */
+  --table-line: rgb(var(--ink-rgb) / 0.12);
+  --table-line-strong: rgb(var(--ink-rgb) / 0.22);
+  --table-row-hover: color-mix(in srgb, var(--primary) 9%, transparent);
+  /* The copy pill floats over the header band, so it is solid enough to sit
+     on the header text it may briefly cover. */
+  --table-actions-bg: var(--surface-2);
+  /* Table material, per theme. These defaults are Dark's Alloy: the card is a
+     faint panel with the deck's dark lip, and the header and fold toggle are
+     keys (lit top edge over a matte grain); the pressed toggle sinks into a
+     well. Light's liquid-glass values live in appearance.css. The grain sits
+     on the header and footer bands only, never behind the reading cells.
+     Grain: SVG fractal noise (as superset-sh/superset's Background.tsx),
+     thresholded so only sparse specks survive, like a fine dither. */
+  --table-card-bg: color-mix(in srgb, var(--surface-1) 35%, transparent);
+  --table-card-shadow: 0 1px 0 var(--key-edge);
+  --table-head-bg: var(--key);
+  --table-head-shadow: inset 0 1px 0 var(--key-hi);
+  --table-toggle-bg: var(--key);
+  --table-toggle-hover-bg: var(--surface-3);
+  --table-toggle-press-bg: var(--well);
+  --table-toggle-press-shadow: inset 0 1px 2px var(--well-shadow);
+  --table-grain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='g'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 0 0 0 0.3 -0.12'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23g)'/%3E%3C/svg%3E");
 
   /* Meter — a filled track with a draggable thumb (Radio volume). Themes
      override these together so track, fill and thumb stay legible. */
@@ -282,6 +308,8 @@
   --dur-pop-out: 180ms;
   /* New transcript rows (your message, the reply, notices) rising into place. */
   --dur-row: 220ms;
+  /* Rows a folded table reveals arrive this far apart, top to bottom. */
+  --dur-row-stagger: 30ms;
   /* Things that resolve out of a blur (transcript rows, swapped labels, the
      tool panel): long enough that the blur reads as a dissolve, not a flicker. */
   --dur-dissolve: 340ms;
@@ -1361,6 +1389,10 @@ select {
      --glass-surface-shadow. appearance.css keeps a Light copy. */
   :root {
     --shadow-raised: inset 0 0 0 1px var(--border-strong);
+    /* Tables keep their frame and grid, drop the grain and the soft lift. */
+    --table-grain: none;
+    /* Not `none`: the toggle lists this after its edge shadow. */
+    --table-card-shadow: 0 0 transparent;
   }
 }
 /* The campfire scenery (HomeScenery.tsx): the critters' clearing in the
@@ -8629,34 +8661,218 @@ select {
     color: MarkText;
   }
 }
-/* The scroller owns overflow so the table can stay a real table at full width:
+/* ── Markdown tables: one recipe for every table in every theme ──
+   Every table is one card (`.md-table`, Markdown.tsx MarkdownTable): copy
+   actions, a hairline-framed scroller and, on the /steroids table, a fold
+   toggle as its footer. The scroller's frame stays put while a wide table
+   scrolls inside it. Lines and washes come from the --table-* tokens, so Dark
+   and Light share these rules; rehype-tables.ts labels columns by kind.
+   The scroller owns overflow so the table can stay a real table at full width:
    `display: block` on the table shrink-wrapped its grid to the first layout's
    content width, so it never grew or re-flowed when the pane was resized. */
-.markdown .md-table-scroll {
+.markdown .md-table {
+  position: relative;
   margin: 0.5em 0;
+}
+.markdown .md-table-scroll {
+  margin: 0;
   max-width: 100%;
   overflow-x: auto;
   overscroll-behavior-x: contain;
+  border: 1px solid var(--table-line-strong);
+  border-radius: var(--radius-card);
+  background: var(--table-card-bg);
+  box-shadow: var(--table-card-shadow);
 }
-/* Folding /steroids table: the toggle sits directly under the table (as under
-   a folded code block), so the wrapper owns the bottom gap instead. */
-.markdown .md-table-collapsible {
-  margin-bottom: 0.5em;
+/* The folding /steroids table: the toggle is the card's footer, so the table
+   and its control read as one object. */
+.markdown .md-table.foldable .md-table-scroll {
+  border-end-start-radius: 0;
+  border-end-end-radius: 0;
+  /* The footer carries the card's lip instead. */
+  box-shadow: none;
 }
-.markdown .md-table-collapsible .md-table-scroll {
-  margin-bottom: 0;
+/* Copy as Markdown / CSV: a small pill over the header's far end, shown while
+   the table is hovered or holds focus (always on touch, which has no hover).
+   Like the code-block copy button, it may briefly cover the end of the last
+   header. */
+.markdown .md-table-actions {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  z-index: 1;
+  display: inline-flex;
+  gap: var(--space-1);
+  padding: var(--space-1);
+  border-radius: var(--radius-button);
+  background: var(--table-actions-bg);
+  box-shadow: 0 0 0 1px var(--table-line-strong);
+  opacity: 0;
+  transition: opacity var(--t-out);
+}
+.markdown .md-table:is(:hover, :focus-within) .md-table-actions {
+  opacity: 1;
+  transition: opacity var(--t-in);
+}
+@media (hover: none) {
+  .markdown .md-table-actions {
+    opacity: 1;
+  }
+}
+.markdown .md-table-action {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 24px;
+  padding: 0 var(--space-3);
+  border: 0;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--text-muted);
+  font-family: var(--sans);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+  transition:
+    background-color var(--t-out),
+    color var(--t-out);
+}
+.markdown .md-table-action:hover {
+  background: var(--table-row-hover);
+  color: var(--text);
+  transition:
+    background-color var(--t-in),
+    color var(--t-in);
+}
+.markdown .md-table-toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 32px;
+  margin: 0;
+  padding: var(--space-3) var(--space-6);
+  border: 1px solid var(--table-line-strong);
+  border-top: 0;
+  border-radius: 0 0 var(--radius-card) var(--radius-card);
+  background-color: var(--table-toggle-bg);
+  background-image: var(--table-grain);
+  box-shadow: var(--table-head-shadow), var(--table-card-shadow);
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background-color var(--t-out),
+    color var(--t-out),
+    box-shadow var(--t-out);
+}
+.markdown .md-table-toggle:hover {
+  background-color: var(--table-toggle-hover-bg);
+  color: var(--text);
+  transition:
+    background-color var(--t-in),
+    color var(--t-in),
+    box-shadow var(--t-in);
+}
+/* Pressed: the key sinks into its well, like the deck's keys. */
+.markdown .md-table-toggle:active {
+  background-color: var(--table-toggle-press-bg);
+  box-shadow: var(--table-toggle-press-shadow);
+  transition-duration: var(--dur-press);
+}
+/* The caret points where the table will go: down to unfold, up to fold, and
+   leans one pixel that way on hover, a small hint of what the click does. */
+.markdown .md-table-toggle-icon {
+  flex: none;
+  transition:
+    transform var(--dur-row) var(--ease-out),
+    translate var(--t-out);
+}
+.markdown .md-table-toggle[aria-expanded="true"] .md-table-toggle-icon {
+  transform: rotate(180deg);
+}
+.markdown .md-table-toggle:hover .md-table-toggle-icon {
+  translate: 0 1px;
+  transition:
+    transform var(--dur-row) var(--ease-out),
+    translate var(--t-in);
+}
+.markdown .md-table-toggle[aria-expanded="true"]:hover .md-table-toggle-icon {
+  translate: 0 -1px;
+}
+/* Unfolded rows rise in one after another, so the eye lands on what was added.
+   `revealing` lasts just past the animation, so a later sort that moves rows
+   doesn't replay it. */
+.markdown .md-table.revealing tbody tr:nth-child(n + 4) > td {
+  animation: reveal-up var(--dur-row) var(--ease-out) backwards;
+}
+.markdown .md-table.revealing tbody tr:nth-child(5) > td {
+  animation-delay: var(--dur-row-stagger);
+}
+.markdown .md-table.revealing tbody tr:nth-child(6) > td {
+  animation-delay: calc(var(--dur-row-stagger) * 2);
+}
+.markdown .md-table.revealing tbody tr:nth-child(7) > td {
+  animation-delay: calc(var(--dur-row-stagger) * 3);
+}
+.markdown .md-table.revealing tbody tr:nth-child(n + 8) > td {
+  animation-delay: calc(var(--dur-row-stagger) * 4);
+}
+@media (pointer: coarse) {
+  .markdown .md-table-toggle {
+    min-height: 44px;
+  }
+  .markdown .md-table-action {
+    min-height: 32px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .markdown .md-table-toggle-icon {
+    transition: none;
+  }
+  .markdown .md-table-toggle:hover .md-table-toggle-icon {
+    translate: none;
+  }
+  .markdown .md-table.revealing tbody tr > td {
+    animation: none;
+  }
+}
+@media (forced-colors: active) {
+  .markdown .md-table-scroll,
+  .markdown .md-table-toggle {
+    border-color: CanvasText;
+  }
+  .markdown .md-table-toggle,
+  .markdown .md-table-actions {
+    color: ButtonText;
+    background: ButtonFace;
+    box-shadow: none;
+  }
+  .markdown th {
+    background-image: none;
+  }
 }
 /* Full width of whatever holds it (the whole conversation column in a reply).
    A table's width is a floor, not a cap, so one wider than this still grows
-   and the frame above scrolls it. */
+   and the frame above scrolls it. Separate borders: the frame draws the outer
+   edge, cells draw only the row rules, so no line doubles up. */
 .markdown table {
   width: 100%;
-  border-collapse: collapse;
-  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-variant-numeric: tabular-nums;
 }
+/* A ledger: row rules only. The header band and the frame give the columns
+   their structure, so vertical lines would only add noise around wrapped text. */
 .markdown th,
 .markdown td {
-  border: 1px solid var(--border);
+  border: 0;
+  border-bottom: 1px solid var(--table-line);
   padding: 7px var(--space-6);
   text-align: left;
   vertical-align: top;
@@ -8682,9 +8898,372 @@ select {
 .markdown td code {
   white-space: nowrap;
 }
+/* The header is a lit band (the theme's key or frosted strip, with its grain)
+   over the strong rule, with small letter-spaced labels so the content leads. */
 .markdown th {
-  background: var(--surface-1);
+  background-color: var(--table-head-bg);
+  background-image: var(--table-grain);
+  box-shadow: var(--table-head-shadow);
+  border-bottom-color: var(--table-line-strong);
+  color: var(--text-secondary);
+  font-size: 0.78em;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  vertical-align: bottom;
+}
+/* Column icons (Markdown.tsx ColumnIcon): a muted glyph before each known
+   header that lights to the accent on hover or focus, each with its own small
+   motion: the star tilts, the clock ticks forward, the puzzle piece slots in,
+   the lightbulb lifts, the branch and paper lift, the hash leans. Decorative
+   only. */
+.markdown .md-th-label {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+.markdown .md-th-icon {
+  flex: none;
+  color: var(--text-muted);
+  transition:
+    color var(--t-out),
+    transform var(--t-out);
+}
+.markdown th:is(:hover, :focus-within) .md-th-icon,
+.markdown .md-th-sort[data-sorted] .md-th-icon {
+  color: var(--primary);
+  transition:
+    color var(--t-in),
+    transform var(--t-in);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .markdown th:is(:hover, :focus-within) .md-th-icon[data-icon="star"] {
+    transform: rotate(-14deg) scale(1.12);
+  }
+  .markdown th:is(:hover, :focus-within) .md-th-icon[data-icon="time"] {
+    transform: rotate(30deg);
+  }
+  /* The puzzle piece slots in sideways; the lightbulb lifts as it lights. */
+  .markdown th:is(:hover, :focus-within) .md-th-icon[data-icon="fit"] {
+    transform: translateX(2px) rotate(-8deg);
+  }
+  .markdown th:is(:hover, :focus-within) .md-th-icon[data-icon="reason"] {
+    transform: translateY(-1px) scale(1.1);
+  }
+  .markdown th:is(:hover, :focus-within) .md-th-icon[data-icon="rank"] {
+    transform: skewX(-10deg);
+  }
+  .markdown th:is(:hover, :focus-within) .md-th-icon:is([data-icon="risk"], [data-icon="version"]) {
+    transform: rotate(-10deg);
+  }
+  .markdown
+    th:is(:hover, :focus-within)
+    .md-th-icon:is(
+      [data-icon="repo"],
+      [data-icon="package"],
+      [data-icon="file"],
+      [data-icon="note"]
+    ) {
+    transform: translateY(-1px);
+  }
+}
+/* Sortable headers: the label is a button. The active column shows its arrow;
+   others show a faint up/down caret on hover or keyboard focus. */
+.markdown .md-th-sort {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: inherit;
+  font: inherit;
+  letter-spacing: inherit;
+  text-align: inherit;
+  text-transform: inherit;
+  cursor: pointer;
+  transition: color var(--t-out);
+}
+.markdown .md-th-sort:hover,
+.markdown .md-th-sort[data-sorted] {
+  color: var(--text);
+  transition: color var(--t-in);
+}
+.markdown .md-th-sort:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+.markdown .md-th-sort-icon {
+  flex: none;
+  opacity: 0;
+  transition: opacity var(--t-out);
+}
+.markdown th:hover .md-th-sort-icon,
+.markdown .md-th-sort:focus-visible .md-th-sort-icon {
+  opacity: 0.6;
+  transition: opacity var(--t-in);
+}
+.markdown .md-th-sort[data-sorted] .md-th-sort-icon {
+  opacity: 1;
+}
+/* Data-aware columns (rehype-tables.ts): figures right-align on their digits,
+   and dates, ids and figures never break across lines. A rank column stays
+   narrow and quiet. */
+.markdown :is(th, td).md-col-num {
+  text-align: right;
+  white-space: nowrap;
+}
+.markdown :is(th, td):is(.md-col-date, .md-col-id) {
+  white-space: nowrap;
+}
+.markdown :is(th, td).md-col-rank {
+  width: 1%;
+  white-space: nowrap;
+}
+.markdown td.md-col-rank {
+  color: var(--text-muted);
+}
+/* owner/name and folder paths: muted folders, a bold name, breaks only after a
+   slash (each piece stays whole, so "react-markdown" never splits at its dash).
+   Folders take the solid muted ink, never opacity: faded link colour washed
+   out in both themes. */
+.markdown .md-path-seg,
+.markdown .md-path-name {
+  white-space: nowrap;
+}
+.markdown .md-path-seg {
+  color: var(--text-muted);
+}
+.markdown .md-path-name {
   font-weight: 600;
+}
+/* GitHub repo identity (rehype-tables.ts): the owner as a small muted line
+   above the name in bold. Solid ink only, never opacity: faded link colour
+   washed out in both themes. */
+.markdown a:has(> .md-repo) {
+  display: inline-block;
+  text-decoration: none;
+}
+.markdown .md-repo {
+  display: inline-flex;
+  flex-direction: column;
+  line-height: 1.2;
+  vertical-align: top;
+}
+.markdown .md-repo-owner {
+  color: var(--text-muted);
+  font-size: 0.78em;
+  font-weight: 500;
+  white-space: nowrap;
+}
+/* The slash stays in the text (copy, screen readers) but the stacked layout
+   already says "owner, then name". */
+.markdown .md-repo-slash {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+/* Names sit in the reading ink; the accent and underline arrive on hover, so
+   a whole column of links doesn't shout. */
+.markdown .md-repo-name {
+  color: var(--text);
+  font-weight: 600;
+  white-space: nowrap;
+  text-decoration: underline;
+  text-decoration-color: transparent;
+  text-underline-offset: 2px;
+  transition:
+    color var(--t-out),
+    text-decoration-color var(--t-out);
+}
+.markdown a:hover .md-repo-name,
+.markdown a:focus-visible .md-repo-name {
+  color: var(--primary);
+  text-decoration-color: currentColor;
+  transition:
+    color var(--t-in),
+    text-decoration-color var(--t-in);
+}
+/* Ranks: plain numerals, no boxes. The top three take the accent. */
+.markdown .md-rank {
+  color: var(--text-muted);
+  font-weight: 600;
+}
+.markdown .md-rank[data-rank] {
+  color: var(--primary);
+  font-weight: 700;
+}
+/* An empty cell shows a dim dash instead of a gap; screen readers skip it. */
+.markdown td.md-cell-empty::after {
+  content: "—";
+  content: "—" / "";
+  color: var(--text-muted);
+}
+/* /steroids: a hairline under each star count, scaled to the list's highest
+   and anchored right under the right-aligned digits. It grows in once, from
+   the right, when the table first renders. */
+.markdown .md-meter {
+  display: block;
+  height: 2px;
+  margin-top: var(--space-2);
+  border-radius: var(--radius-pill);
+  background: rgb(var(--ink-rgb) / 0.07);
+  overflow: hidden;
+}
+.markdown .md-meter-fill {
+  display: block;
+  height: 100%;
+  margin-left: auto;
+  border-radius: inherit;
+  background: var(--primary);
+  transform-origin: right;
+  animation: md-meter-grow calc(var(--dur-row) * 3) var(--ease-out) backwards;
+  transition: width var(--dur-row) var(--ease-out);
+}
+@keyframes md-meter-grow {
+  from {
+    transform: scaleX(0);
+  }
+}
+/* /steroids: last push as plain text, "3 days ago", led by a freshness dot
+   (green within FRESH_DAYS, amber after). The words carry the meaning; the
+   dot is a glance cue. The full date is the tooltip. */
+.markdown .md-date {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-3);
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+.markdown .md-fresh-dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--warning);
+}
+.markdown .md-date-fresh .md-fresh-dot {
+  background: var(--success);
+}
+/* Sentences step back half a shade so names, figures and dates lead. */
+.markdown td.md-cell-prose {
+  color: var(--text-secondary);
+}
+/* Row accent: the hovered row gets an accent edge on its first cell, so the eye
+   holds the row across wide tables. */
+.markdown tbody tr > td:first-child {
+  transition:
+    box-shadow var(--t-out),
+    background-color var(--t-out);
+}
+.markdown tbody tr:hover > td:first-child {
+  box-shadow: inset 2px 0 0 var(--primary);
+  transition:
+    box-shadow var(--t-in),
+    background-color var(--t-in);
+}
+@media (prefers-reduced-motion: reduce) {
+  .markdown .md-meter-fill {
+    animation: none;
+    transition: none;
+  }
+}
+.markdown tbody tr:last-child > td {
+  border-bottom: 0;
+}
+/* No zebra: row rules already separate rows. A hover wash lets the eye
+   follow one row across. */
+.markdown tbody tr:hover > td {
+  background: var(--table-row-hover);
+}
+/* Narrow panes: tighter cells give the columns' text the room, so tables fit
+   instead of scrolling sideways. */
+@container (max-width: 640px) {
+  .markdown :is(th, td) {
+    padding-inline: var(--space-4);
+  }
+}
+@container (max-width: 420px) {
+  /* Phone-width panes: every column sits at its longest word here, so a
+     slightly smaller face is what lets a narrow table fit. */
+  .markdown table {
+    font-size: 0.93em;
+  }
+  .markdown :is(th, td) {
+    padding: var(--space-3);
+  }
+  /* Tables of four or more columns become a stack of cards, one per row, each
+     line "LABEL value" (the label is the cell's header, from data-label).
+     The header row is hidden; the labels carry it, and the copy pill moves
+     above the card instead of over the header. */
+  .markdown .md-table-actions {
+    position: static;
+    display: flex;
+    width: fit-content;
+    margin: 0 0 var(--space-2) auto;
+    opacity: 1;
+  }
+  .markdown table.md-table-cards,
+  .markdown table.md-table-cards > tbody,
+  .markdown table.md-table-cards > tbody > tr,
+  .markdown table.md-table-cards > tbody > tr > td {
+    display: block;
+  }
+  .markdown table.md-table-cards > thead {
+    display: none;
+  }
+  .markdown table.md-table-cards > tbody > tr {
+    padding: var(--space-4) var(--space-5);
+    border-bottom: 1px solid var(--table-line);
+  }
+  .markdown table.md-table-cards > tbody > tr:last-child {
+    border-bottom: 0;
+  }
+  .markdown table.md-table-cards > tbody > tr:hover {
+    background: var(--table-row-hover);
+    box-shadow: inset 2px 0 0 var(--primary);
+  }
+  .markdown table.md-table-cards > tbody > tr > td:first-child {
+    box-shadow: none;
+  }
+  .markdown table.md-table-cards > tbody > tr > td {
+    position: relative;
+    min-width: 0;
+    max-width: none;
+    min-height: 2.4em;
+    padding: var(--space-1) 0 var(--space-1) 7em;
+    border: 0;
+    background: none;
+    text-align: left;
+    white-space: normal;
+  }
+  .markdown table.md-table-cards > tbody > tr > td::before {
+    content: attr(data-label);
+    position: absolute;
+    top: var(--space-1);
+    left: 0;
+    /* 7em of the cell's text is ~8.5em at the label's smaller size. Long
+       labels wrap between words ("LAST / PUSH") instead of being cut off. */
+    width: 8.4em;
+    color: var(--text-muted);
+    font-size: 0.78em;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    line-height: 1.3;
+    padding-top: 0.3em;
+    text-transform: uppercase;
+  }
+  .markdown table.md-table-cards .md-meter {
+    max-width: 10em;
+  }
+  .markdown table.md-table-cards .md-meter-fill {
+    margin-left: 0;
+  }
 }
 .markdown del {
   color: var(--text-muted);
@@ -8703,13 +9282,6 @@ select {
 .markdown h3:first-child {
   margin-top: 0;
 }
-.markdown th {
-  color: var(--text);
-}
-/* Zebra striping for readability against the dark canvas. */
-.markdown tbody tr:nth-child(even) td {
-  background: color-mix(in srgb, var(--surface-1) 50%, transparent);
-}
 
 /* ── Tool rows (status dot + styled verb/detail/summary) ── */
 .tool-entry {
@@ -8723,7 +9295,7 @@ select {
 /* Prose and lists keep the ~72-character reading measure. Tables, code blocks
    and Ken's prompt blocks are data, not lines of reading, so they take the
    full conversation column (long code lines wrap far less). */
-.assistant-text .markdown > :not(.md-table-scroll, .code-block, .ken-prompt-block) {
+.assistant-text .markdown > :not(.md-table, .code-block, .ken-prompt-block) {
   max-width: 36em;
 }
 /* A clear gap between paragraphs, lists and code: one blank line's worth. */
@@ -12127,16 +12699,23 @@ select {
   font: inherit;
   font-size: var(--fs-xs);
   text-align: left;
-  color: var(--text-dim);
+  /* --text-muted, full opacity: the dimmed --text-dim at 0.8 measured under
+     4.5:1 in both themes. */
+  color: var(--text-muted);
   background: transparent;
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-strong);
   border-radius: var(--radius-button);
   cursor: pointer;
-  opacity: 0.8;
-  transition: opacity var(--t-in);
+  transition:
+    color var(--t-out),
+    border-color var(--t-out);
 }
 .code-expand:hover {
-  opacity: 1;
+  color: var(--text);
+  border-color: rgb(var(--ink-rgb) / 0.3);
+  transition:
+    color var(--t-in),
+    border-color var(--t-in);
 }
 /* Fade the last preview line so a fold reads as "there is more", not "the end". */
 .code-block.folded pre {
@@ -13764,7 +14343,7 @@ select {
   max-height: min(480px, 64vh);
   overflow: auto;
   overscroll-behavior: none;
-  border: 1px solid var(--border);
+  border: 1px solid var(--table-line-strong);
   border-radius: var(--radius-card);
 }
 .memory-table {
@@ -13778,7 +14357,8 @@ select {
   top: 0;
   z-index: 1;
   padding: 9px var(--space-5);
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--table-line-strong);
+  /* Opaque: the sticky header covers rows scrolling under it. */
   background: var(--surface-1);
   color: var(--text-dim);
   font-size: var(--fs-xs);
@@ -13789,7 +14369,7 @@ select {
 }
 .memory-table td {
   padding: var(--space-5);
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--table-line);
   vertical-align: top;
 }
 .memory-table tbody tr:last-child td {

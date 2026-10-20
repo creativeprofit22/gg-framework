@@ -18,11 +18,27 @@ import { toast } from "./toast";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
 import {
+  ArrowDownIcon,
   ArrowElbowDownLeftIcon,
+  ArrowUpIcon,
+  CaretDownIcon,
+  CaretUpDownIcon,
   CheckIcon,
+  ClockIcon,
   CopyIcon,
+  FileIcon,
   FilePlusIcon,
+  GitBranchIcon,
+  HashIcon,
+  type Icon as PhosphorIcon,
+  LightbulbIcon,
+  PackageIcon,
   PlusIcon,
+  PuzzlePieceIcon,
+  StarIcon,
+  TagIcon,
+  TextAlignLeftIcon,
+  WarningIcon,
 } from "@phosphor-icons/react";
 import { openUrlStrict, sendPrompt } from "./agent";
 import { PRODUCT_DISPLAY_NAME } from "./brand";
@@ -48,6 +64,21 @@ import {
 import { marked } from "marked";
 import { rehypeAnimateWords } from "./rehype-animate-words";
 import { rehypeArrows } from "./rehype-arrows";
+import { rehypeTables } from "./rehype-tables";
+import {
+  childElements,
+  type ColumnKind,
+  firstSortDirection,
+  hastText,
+  type HeaderIcon,
+  headerIcon,
+  relativeDate,
+  type SortDirection,
+  sortKey,
+  sortRowOrder,
+  tableToCsv,
+  tableToMarkdown,
+} from "./markdown-table-data";
 import { useAnimatedHeight } from "./animated-height";
 import "highlight.js/styles/github-dark.css";
 
@@ -138,6 +169,80 @@ const CollapsibleTableContext = createContext(false);
 const COLLAPSED_TABLE_ROWS = 3;
 /** True while the enclosing collapsible table is folded to its first rows. */
 const TableFoldedContext = createContext(false);
+/** Tables with at least this many body rows sort by a header click. */
+const SORTABLE_TABLE_ROWS = 3;
+/** How long unfolded rows keep their rise-in animation hook. */
+const TABLE_REVEAL_MS = 700;
+
+interface TableSort {
+  column: number;
+  kind: ColumnKind;
+  direction: SortDirection;
+}
+/** The enclosing table's sort, or null when its headers don't sort. */
+const TableSortContext = createContext<{
+  sort: TableSort | null;
+  toggle: (column: number, kind: ColumnKind) => void;
+} | null>(null);
+/** The moment the enclosing table first rendered, for relative dates; null outside one. */
+const TableClockContext = createContext<number | null>(null);
+
+const COLUMN_KINDS: readonly ColumnKind[] = ["rank", "num", "date", "id", "text"];
+
+/** The column kind rehype-tables stored on a cell, or text. */
+function cellKind(node: ExtraProps["node"]): ColumnKind {
+  const value = node?.properties?.dataKind;
+  return COLUMN_KINDS.find((kind) => kind === value) ?? "text";
+}
+
+/** The column index rehype-tables stored on a cell, or null. */
+function cellColumn(node: ExtraProps["node"]): number | null {
+  const value = Number(node?.properties?.dataCol);
+  return Number.isInteger(value) && value >= 0 ? value : null;
+}
+
+/** Copy the table out as Markdown (links and code kept) or as CSV. */
+function TableCopyActions({ table }: { table: ExtraProps["node"] }): React.ReactElement {
+  const [copied, setCopied] = useState<"markdown" | "csv" | null>(null);
+  useEffect(() => {
+    if (!copied) return;
+    const timer = setTimeout(() => setCopied(null), 1500);
+    return () => clearTimeout(timer);
+  }, [copied]);
+  const copy = (format: "markdown" | "csv"): void => {
+    if (!table) return;
+    const text = format === "markdown" ? tableToMarkdown(table) : tableToCsv(table);
+    void navigator.clipboard
+      .writeText(text)
+      .then(() => setCopied(format))
+      .catch(() => toast("Couldn't copy to the clipboard.", "error"));
+  };
+  const button = (format: "markdown" | "csv", label: string): React.ReactElement => {
+    const done = copied === format;
+    return (
+      <button
+        type="button"
+        className="md-table-action"
+        onClick={() => copy(format)}
+        aria-label={done ? `Copied table as ${label}` : `Copy table as ${label}`}
+        title={done ? "Copied" : `Copy table as ${label}`}
+      >
+        {done ? (
+          <CheckIcon size={12} aria-hidden="true" />
+        ) : (
+          <CopyIcon size={12} aria-hidden="true" />
+        )}
+        <span>{done ? "Copied" : label}</span>
+      </button>
+    );
+  };
+  return (
+    <div className="md-table-actions">
+      {button("markdown", "Markdown")}
+      {button("csv", "CSV")}
+    </div>
+  );
+}
 
 /** Count the body rows in a hast `<table>`, without rendering them. */
 function tableBodyRowCount(node: ExtraProps["node"]): number {
@@ -176,61 +281,200 @@ function StepList({
  * a real `display: table` at 100% width — it then fills and re-flows with the
  * pane as it resizes, and only scrolls when its columns can't wrap any narrower.
  *
- * The /steroids candidates table folds to its top rows; a toggle under it
- * reveals the rest or folds it back.
+ * Every table sits in one `.md-table` card with copy actions (Markdown / CSV),
+ * and sorts by a header click once it has a few rows. The /steroids candidates
+ * table also folds to its top rows; a toggle under it reveals the rest or
+ * folds it back. The card keeps one shape whether or not it folds, so a
+ * streaming table isn't remounted (replaying its word fade-in and resetting
+ * its scroll) when the toggle first appears.
  */
 function MarkdownTable({
   children,
+  className,
   node,
 }: {
   children?: React.ReactNode;
+  className?: string;
 } & ExtraProps): React.ReactElement {
   const collapsible = useContext(CollapsibleTableContext);
   const [expanded, setExpanded] = useState(false);
+  const [revealing, setRevealing] = useState(false);
+  const [sort, setSort] = useState<TableSort | null>(null);
+  const [now] = useState(() => Date.now());
   const rootRef = useRef<HTMLDivElement>(null);
   const captureHeight = useAnimatedHeight(rootRef, expanded);
   const panelId = useId();
   const totalRows = tableBodyRowCount(node);
   const foldable = collapsible && totalRows > COLLAPSED_TABLE_ROWS;
   const folded = foldable && !expanded;
-  const table = (
-    <div className="md-table-scroll" id={panelId} tabIndex={0} role="region" aria-label="Table">
-      <table>
-        <TableFoldedContext.Provider value={folded}>{children}</TableFoldedContext.Provider>
-      </table>
-    </div>
+  const sortable = totalRows >= SORTABLE_TABLE_ROWS;
+  useEffect(() => {
+    if (!revealing) return;
+    const timer = setTimeout(() => setRevealing(false), TABLE_REVEAL_MS);
+    return () => clearTimeout(timer);
+  }, [revealing]);
+  // First click sorts figures biggest/newest first and text A→Z, the second
+  // reverses, the third restores the reply's own order.
+  const sortContext = useMemo(
+    () => ({
+      sort,
+      toggle: (column: number, kind: ColumnKind) =>
+        setSort((current) => {
+          const first = firstSortDirection(kind);
+          if (current?.column !== column) return { column, kind, direction: first };
+          if (current.direction === first) {
+            return { column, kind, direction: first === "asc" ? "desc" : "asc" };
+          }
+          return null;
+        }),
+    }),
+    [sort],
   );
-  if (!collapsible) return table;
-  // A collapsible table keeps one wrapper shape before and after it grows past
-  // the fold, so a streaming table isn't remounted (replaying its word fade-in
-  // and resetting its scroll) when the toggle first appears.
+  // `foldable` joins the toggle to the card as its footer; `expanded` marks the
+  // unfolded state and `revealing` (briefly, after unfolding) lets the newly
+  // shown rows rise in without replaying when a sort later moves rows.
+  const classes = [
+    "md-table",
+    collapsible ? "md-table-collapsible" : "",
+    foldable ? (folded ? "foldable folded" : "foldable expanded") : "",
+    revealing ? "revealing" : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
   return (
-    <div ref={rootRef} className={`md-table-collapsible${folded ? " folded" : ""}`}>
-      {table}
+    <div ref={rootRef} className={classes}>
+      <TableCopyActions table={node} />
+      <div className="md-table-scroll" id={panelId} tabIndex={0} role="region" aria-label="Table">
+        <table className={className}>
+          <TableClockContext.Provider value={now}>
+            <TableSortContext.Provider value={sortable ? sortContext : null}>
+              <TableFoldedContext.Provider value={folded}>{children}</TableFoldedContext.Provider>
+            </TableSortContext.Provider>
+          </TableClockContext.Provider>
+        </table>
+      </div>
       {foldable && (
         <button
           type="button"
-          className="code-expand"
+          className="md-table-toggle"
           aria-expanded={expanded}
           aria-controls={panelId}
           onClick={() => {
             captureHeight();
+            setRevealing(!expanded);
             setExpanded(!expanded);
           }}
         >
-          {folded ? `Show all ${totalRows} repos` : `Show top ${COLLAPSED_TABLE_ROWS} only`}
+          <CaretDownIcon className="md-table-toggle-icon" size={14} aria-hidden="true" />
+          <span>
+            {folded ? `Show all ${totalRows} repos` : `Show top ${COLLAPSED_TABLE_ROWS} only`}
+          </span>
         </button>
       )}
     </div>
   );
 }
 
-/** Table body that drops rows past the fold while its table is folded. */
-function MarkdownTableBody({ children }: { children?: React.ReactNode }): React.ReactElement {
+const HEADER_ICON_GLYPHS: Readonly<Record<HeaderIcon, PhosphorIcon>> = {
+  rank: HashIcon,
+  repo: GitBranchIcon,
+  package: PackageIcon,
+  star: StarIcon,
+  time: ClockIcon,
+  fit: PuzzlePieceIcon,
+  reason: LightbulbIcon,
+  note: TextAlignLeftIcon,
+  file: FileIcon,
+  risk: WarningIcon,
+  version: TagIcon,
+};
+
+/** The header's column icon (decorative; `data-icon` picks its hover motion). */
+function ColumnIcon({ icon }: { icon: HeaderIcon | null }): React.ReactElement | null {
+  if (!icon) return null;
+  const Glyph = HEADER_ICON_GLYPHS[icon];
+  return <Glyph className="md-th-icon" data-icon={icon} size={13} aria-hidden="true" />;
+}
+
+/**
+ * A header cell, led by its column's icon. In a sortable table its label is a
+ * button: the arrow shows the active direction, and an inactive column shows
+ * a faint ⇅ on hover/focus.
+ */
+function TableHeaderCell({
+  children,
+  className,
+  style,
+  node,
+}: {
+  children?: React.ReactNode;
+  className?: string;
+  style?: React.CSSProperties;
+} & ExtraProps): React.ReactElement {
+  const sorting = useContext(TableSortContext);
+  const column = cellColumn(node);
+  const kind = cellKind(node);
+  const icon = headerIcon(node ? hastText(node) : "", kind);
+  if (!sorting || column === null) {
+    return (
+      <th className={className} style={style}>
+        <span className="md-th-label">
+          <ColumnIcon icon={icon} />
+          <span>{children}</span>
+        </span>
+      </th>
+    );
+  }
+  const direction = sorting.sort?.column === column ? sorting.sort.direction : null;
+  const Icon =
+    direction === "asc" ? ArrowUpIcon : direction === "desc" ? ArrowDownIcon : CaretUpDownIcon;
+  return (
+    <th
+      className={className}
+      style={style}
+      aria-sort={
+        direction === "asc" ? "ascending" : direction === "desc" ? "descending" : undefined
+      }
+    >
+      <button
+        type="button"
+        className="md-th-sort"
+        data-sorted={direction ?? undefined}
+        onClick={() => sorting.toggle(column, kind)}
+      >
+        <ColumnIcon icon={icon} />
+        <span>{children}</span>
+        <Icon className="md-th-sort-icon" size={12} weight="bold" aria-hidden="true" />
+      </button>
+    </th>
+  );
+}
+
+/**
+ * Table body: puts rows in the active sort order (matching each rendered row
+ * to its hast row by position), then drops rows past the fold while folded.
+ */
+function MarkdownTableBody({
+  children,
+  node,
+}: { children?: React.ReactNode } & ExtraProps): React.ReactElement {
   const folded = useContext(TableFoldedContext);
-  if (!folded) return <tbody>{children}</tbody>;
-  const rows = Children.toArray(children).filter(isValidElement);
-  return <tbody>{rows.slice(0, COLLAPSED_TABLE_ROWS)}</tbody>;
+  const sort = useContext(TableSortContext)?.sort ?? null;
+  if (!folded && !sort) return <tbody>{children}</tbody>;
+  let rows = Children.toArray(children).filter(isValidElement);
+  const hastRows = node ? childElements(node, "tr") : [];
+  if (sort && hastRows.length === rows.length) {
+    const keys = hastRows.map((row) => {
+      const cell = childElements(row, "td")[sort.column];
+      return cell ? sortKey(hastText(cell), sort.kind) : null;
+    });
+    const ordered = rows;
+    rows = sortRowOrder(keys, sort.direction).flatMap((index) => {
+      const row = ordered[index];
+      return row ? [row] : [];
+    });
+  }
+  return <tbody>{folded ? rows.slice(0, COLLAPSED_TABLE_ROWS) : rows}</tbody>;
 }
 
 /** Cells with at least this much text are sentences, not labels. */
@@ -270,19 +514,62 @@ function withPathBreaks(children: React.ReactNode): React.ReactNode {
  * A body cell. Sentence-length cells get a readable minimum width
  * (`.md-cell-prose`) that relaxes in narrow panes, so tables fit instead of
  * scrolling sideways; short labels ("Low", "Done") keep their natural width.
- * Only `style` (GFM column alignment) is carried over from the parser.
+ * Carried over from the parser and rehype-tables: `style` (GFM column
+ * alignment), the column-kind class and the header label (`data-label`, which
+ * the narrow-pane cards show beside the value).
+ *
+ * In the /steroids table, a number gets a thin bar scaled to the column's
+ * largest value, and a date reads relative ("3 days ago") with a freshness dot
+ * and the full date on hover.
  */
 function TableCell({
   children,
+  className,
   style,
+  node,
 }: {
   children?: React.ReactNode;
+  className?: string;
   style?: React.CSSProperties;
-}): React.ReactElement {
-  const prose = codeNodeText(children).length >= PROSE_CELL_CHARS;
+} & ExtraProps): React.ReactElement {
+  const steroids = useContext(CollapsibleTableContext);
+  const now = useContext(TableClockContext);
+  const text = codeNodeText(children);
+  const prose = text.length >= PROSE_CELL_CHARS;
+  const kind = cellKind(node);
+  const label = node?.properties?.dataLabel;
+  const classes = [className, prose ? "md-cell-prose" : ""].filter(Boolean).join(" ");
+  let content: React.ReactNode = withPathBreaks(children);
+  if (steroids && kind === "date" && now !== null) {
+    const relative = relativeDate(text, now);
+    if (relative) {
+      const date = text.trim();
+      content = (
+        <time className={`md-date md-date-${relative.freshness}`} dateTime={date} title={date}>
+          <span className="md-fresh-dot" aria-hidden="true" />
+          {relative.label}
+        </time>
+      );
+    }
+  }
+  const ratio = Number(node?.properties?.dataRatio);
+  const meter =
+    steroids && kind === "num" && Number.isFinite(ratio) && ratio > 0 ? (
+      <span className="md-meter" aria-hidden="true">
+        <span
+          className="md-meter-fill"
+          style={{ width: `${Math.min(100, Math.round(ratio * 1000) / 10)}%` }}
+        />
+      </span>
+    ) : null;
   return (
-    <td className={prose ? "md-cell-prose" : undefined} style={style}>
-      {withPathBreaks(children)}
+    <td
+      className={classes || undefined}
+      style={style}
+      data-label={typeof label === "string" ? label : undefined}
+    >
+      {content}
+      {meter}
     </td>
   );
 }
@@ -1024,21 +1311,24 @@ function promptSourceFence(raw: string): { body: string; end: number } | null {
   return null;
 }
 
-const ANIMATED_PLUGINS = [rehypeHighlight, rehypeArrows, rehypeAnimateWords];
+// rehype-tables reads whole text nodes, so it runs before words are split.
+const ANIMATED_PLUGINS = [rehypeHighlight, rehypeArrows, rehypeTables, rehypeAnimateWords];
 /**
  * How long a block keeps its word spans after a newer block starts below it.
  * Covers the reveal catching up plus the word fade (`--dur-row`, 220ms), so the
  * last words of a finished paragraph finish fading instead of snapping solid.
  */
 const WORD_FADE_HOLD_MS = 450;
-const PLUGINS = [rehypeHighlight, rehypeArrows];
+const PLUGINS = [rehypeHighlight, rehypeArrows, rehypeTables];
 const COMPONENTS = {
   a: ExternalLink,
   ol: StepList,
   pre: PreBlock,
-  // Fork: MarkdownTable is upstream's scroll wrapper plus /steroids folding.
+  // Fork: MarkdownTable is upstream's scroll wrapper plus the shared table card
+  // (copy, sorting) and /steroids folding.
   table: MarkdownTable,
   tbody: MarkdownTableBody,
+  th: TableHeaderCell,
   td: TableCell,
 };
 
@@ -1135,24 +1425,28 @@ export const Markdown = memo(function Markdown({
   }, []);
   return (
     <div ref={rootRef} className="markdown">
-      {visible.map((block, index) => (
-        // A ```prompt block reveals its "Send to GG Coder" button as soon as ITS
-        // own closing fence arrives (per-block), not when the whole reply ends —
-        // so the button shows right after Ken finishes the prompt even if he
-        // keeps talking after it.
-        <MemoizedMarkdownBlock
-          key={index}
-          content={block}
-          promptReady={isPromptBlockComplete(block)}
-          // Only the trailing block is still growing; the ones just above it
-          // keep their spans briefly so their last words finish fading. Older
-          // blocks stay memoized and span-free.
-          animate={animate && index >= spanFrom}
-          collapseTable={
-            index > 0 && visible[index - 1].trim() === STEROIDS_COLLAPSIBLE_TABLE_MARKER
-          }
-        />
-      ))}
+      {visible.map((block, index) =>
+        // The /steroids marker only tags the table after it; it is never shown
+        // (unrendered HTML comments otherwise print as literal text).
+        block.trim() === STEROIDS_COLLAPSIBLE_TABLE_MARKER ? null : (
+          // A ```prompt block reveals its "Send to GG Coder" button as soon as ITS
+          // own closing fence arrives (per-block), not when the whole reply ends —
+          // so the button shows right after Ken finishes the prompt even if he
+          // keeps talking after it.
+          <MemoizedMarkdownBlock
+            key={index}
+            content={block}
+            promptReady={isPromptBlockComplete(block)}
+            // Only the trailing block is still growing; the ones just above it
+            // keep their spans briefly so their last words finish fading. Older
+            // blocks stay memoized and span-free.
+            animate={animate && index >= spanFrom}
+            collapseTable={
+              index > 0 && visible[index - 1].trim() === STEROIDS_COLLAPSIBLE_TABLE_MARKER
+            }
+          />
+        ),
+      )}
       {rowFolded && (
         <button
           type="button"

@@ -73,6 +73,31 @@ describe("Markdown tables", () => {
     expect(screen.getByRole("button", { name: "Show all 5 repos" })).toBeTruthy();
   });
 
+  it("never prints the /steroids marker, and joins the toggle to the table card", () => {
+    // Arrange / Act
+    const rows = [1, 2, 3, 4].map((n) => `| ${n} | repo-${n} |`).join("\n");
+    const { container } = render(
+      <Markdown>{`Ranked:\n\n${STEROIDS_COLLAPSIBLE_TABLE_MARKER}\n\n| # | Repo |\n| --- | --- |\n${rows}`}</Markdown>,
+    );
+
+    // Assert: regression, the HTML-comment marker rendered as literal text.
+    expect(container.textContent).not.toContain("gg:collapsible-table");
+    expect(container.textContent).toContain("Ranked:");
+    const wrapper = container.querySelector(".md-table-collapsible");
+    expect(wrapper?.classList.contains("foldable")).toBe(true);
+    expect(wrapper?.classList.contains("folded")).toBe(true);
+    const toggle = screen.getByRole("button", { name: "Show all 4 repos" });
+    expect(toggle.className).toBe("md-table-toggle");
+    expect(toggle.parentElement).toBe(wrapper);
+
+    // Act: unfold; the revealed rows get the rise-in hook.
+    fireEvent.click(toggle);
+
+    // Assert
+    expect(wrapper?.classList.contains("expanded")).toBe(true);
+    expect(wrapper?.classList.contains("folded")).toBe(false);
+  });
+
   it("keeps the streaming /steroids table mounted when it grows past the fold", () => {
     // Arrange: a streaming reply whose table has not reached the fold yet.
     const tableOf = (count: number): string => {
@@ -103,7 +128,9 @@ describe("Markdown tables", () => {
 
     // Assert
     expect(container.querySelectorAll("tbody tr")).toHaveLength(3);
-    expect(screen.queryByRole("button")).toBeNull();
+    // Every table has copy (and, from three rows, sort) buttons; no fold toggle.
+    expect(screen.queryByRole("button", { name: /^Show / })).toBeNull();
+    expect(container.querySelector(".md-table-toggle")).toBeNull();
   });
 
   it("carries GFM column alignment onto cells as inline text-align", () => {

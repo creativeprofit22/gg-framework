@@ -320,48 +320,11 @@
   background: var(--glass-hover);
 }
 
-/* Tables: a rounded glass card. The card is the scroll frame (Markdown.tsx
-   MarkdownTable), so its edge and corners stay put while a wide table scrolls
-   inside it. Grid lines become hairlines, the header row a lit strip, and the
-   zebra a whisper of white. */
-/* Width is owned by App.css (`100%`, inside the `.md-table-scroll` scroller).
-   Never set `max-content` here: cells then can't wrap, so every wide table
-   forces a horizontal scrollbar in narrow chat panes. */
-:where(:root[data-appearance-theme="light"]) .markdown .md-table-scroll {
-  border-radius: var(--radius-card);
-  background: rgb(255 255 255 / 0.03);
-  box-shadow: var(--liquid-rim-soft-small);
-}
-:where(:root[data-appearance-theme="light"]) .markdown table {
-  border-collapse: separate;
-  border-spacing: 0;
-}
-:where(:root[data-appearance-theme="light"]) .markdown th,
-:where(:root[data-appearance-theme="light"]) .markdown td {
-  border: 0;
-  border-bottom: 1px solid rgb(255 255 255 / 0.07);
-  padding: 7px var(--space-6);
-}
-/* Narrow panes: tighter cell padding gives the columns' text the room, so
-   tables fit instead of scrolling sideways. */
-@container (max-width: 640px) {
-  :where(:root[data-appearance-theme="light"]) .markdown :is(th, td) {
-    padding-inline: var(--space-4);
-  }
-}
-:where(:root[data-appearance-theme="light"]) .markdown :is(th, td) + :is(th, td) {
-  border-left: 1px solid rgb(255 255 255 / 0.05);
-}
-:where(:root[data-appearance-theme="light"]) .markdown tr:last-child > td {
-  border-bottom: 0;
-}
-:where(:root[data-appearance-theme="light"]) .markdown th {
-  background: rgb(255 255 255 / 0.07);
-  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.1);
-}
-:where(:root[data-appearance-theme="light"]) .markdown tbody tr:nth-child(even) td {
-  background: rgb(255 255 255 / 0.025);
-}
+/* Tables: no Light-only rules. Every Markdown table uses the shared recipe in
+   App.css (the --table-* ink tokens); the glass port's white hairlines here
+   vanished on Light's white canvas. Width is owned by App.css too (`100%`,
+   inside the `.md-table-scroll` scroller): never `max-content`, or cells can't
+   wrap and every wide table scrolls sideways in narrow chat panes. */
 
 /* Blockquotes: a lit glass edge instead of a flat grey rule. */
 :where(:root[data-appearance-theme="light"]) .markdown blockquote {

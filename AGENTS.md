@@ -43,6 +43,12 @@ GG Framework is a pnpm monorepo for GG Coder: a multi-provider coding-agent runt
 
 <!-- gg:init:end -->
 
+## Check scope
+
+- Per commit / while working: run `pnpm --filter gg-app check`, `lint`, `format:check`, plus only the tests covering the files changed. Run each standalone and unpiped.
+- Full `pnpm test` only before a release, a distributable Local Fork rebuild, or an upstream sync, OR when the change touches cross-area code: gg-core contracts, Rust/Tauri, the daemon, auth, build/packaging/sidecar scripts.
+- When skipping the full run, say so in the report and name the scoped tests that were run instead.
+
 ## Verification status handoff
 
 - Before discussing Local Fork `/ship`, release blockers, Roadmap regression or historical daemon verification, read `.gg/verification/current-status.md` and the relevant linked evidence. This applies to status questions as well as execution work; ordinary unrelated coding does not require it.

@@ -1,4 +1,5 @@
 import readline from "node:readline/promises";
+import chalk from "chalk";
 import { stdin, stdout } from "node:process";
 import { agentLoop, type AgentEvent } from "@kenkaiiii/gg-agent";
 import type { Message } from "@kenkaiiii/gg-ai";
@@ -22,7 +23,7 @@ import { formatUserError } from "./utils/error-handler.js";
 import { AuthStorage } from "./core/auth-storage.js";
 import { kimiCodingHeaders, isKimiCodingEndpoint } from "./core/oauth/kimi.js";
 import { ensureAppDirs, foregroundLimitSettingsFrom, loadSavedSettings } from "./config.js";
-import { discoverSkills } from "./core/skills.js";
+import { blockedSkillNotice, discoverSkillsWithBlocked } from "./core/skills.js";
 import path from "node:path";
 import fs from "node:fs/promises";
 import { shouldCompact, compact } from "./core/compaction/compactor.js";
@@ -46,12 +47,16 @@ export async function runInteractive(config: CliConfig): Promise<void> {
   await authStorage.load();
 
   // Discover skills and create tools before building the prompt so tool names are accurate.
-  const skills = await discoverSkills({
+  const { skills, blocked: blockedSkills } = await discoverSkillsWithBlocked({
     globalSkillsDir: paths.skillsDir,
     projectDir: cwd,
   });
+  // Same startup-warning line as an expired login: plain, never a prompt.
+  for (const blocked of blockedSkills)
+    console.warn(chalk.yellow(`⚠ ${blockedSkillNotice(blocked)}`));
   const { tools, processManager, lspManager, debugManager } = await createTools(cwd, {
     skills,
+    blockedSkills,
     provider,
     model,
     authStorage,

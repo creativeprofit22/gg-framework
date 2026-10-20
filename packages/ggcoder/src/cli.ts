@@ -122,7 +122,7 @@ import {
 } from "./cli/shared.js";
 import { discoverAgents } from "./core/agents.js";
 import { applyAsyncSubagentPolicy } from "./core/subagent-policy.js";
-import { discoverSkills } from "./core/skills.js";
+import { blockedSkillNotice, discoverSkillsWithBlocked } from "./core/skills.js";
 import path from "node:path";
 import chalk from "chalk";
 import { checkAndAutoUpdate } from "./core/auto-update.js";
@@ -711,10 +711,13 @@ async function runInkTUI(opts: {
     globalAgentsDir: paths.agentsDir,
     projectDir: cwd,
   });
-  const skills = await discoverSkills({
+  const { skills, blocked: blockedSkills } = await discoverSkillsWithBlocked({
     globalSkillsDir: paths.skillsDir,
     projectDir: cwd,
   });
+  // Same startup-warning line as an expired login: plain, never a prompt.
+  for (const blocked of blockedSkills)
+    console.warn(chalk.yellow(`⚠ ${blockedSkillNotice(blocked)}`));
 
   // Runtime mode refs — shared between tools and UI
   const planModeRef = { current: false };
@@ -746,6 +749,7 @@ async function runInkTUI(opts: {
     commandDiscovery: { workspaceActions: UI_SLASH_COMMANDS },
     agents,
     skills,
+    blockedSkills,
     provider,
     model,
     planModeRef,

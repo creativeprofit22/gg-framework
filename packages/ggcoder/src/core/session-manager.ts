@@ -252,7 +252,9 @@ export interface AppMarkerPayload extends RecordedPosition {
     /** A run that opened the journal and never closed it — the process died
      *  mid-run. `data` carries { generation, startedAt }. Surfaced so the user
      *  can review what the run's tools already changed; never auto-resumed. */
-    | "interrupted_run";
+    | "interrupted_run"
+    /** A safety block (or infected installed package); `data` carries { rule, target }. */
+    | "security";
   afterMessageCount: number;
   /** Kind-specific display fields (reason/title/headline/kenSent/counts/…). */
   data: Record<string, unknown>;
@@ -2054,7 +2056,8 @@ export class SessionManager {
             kind === "model_switch" ||
             kind === "import" ||
             kind === "interrupted_run" ||
-            kind === "plan_gate")
+            kind === "plan_gate" ||
+            kind === "security")
         ) {
           return [
             {

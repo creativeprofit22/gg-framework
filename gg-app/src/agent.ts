@@ -368,9 +368,33 @@ export interface GitHubCI {
   stale?: boolean;
 }
 
+/** A skill the sidecar's safety scan refused to load (it is simply absent). */
+export interface BlockedSkill {
+  name: string;
+  path: string;
+  /** "project", "global", "bundled" or "motion". */
+  scope: string;
+  /** Plain words: what the skill tried to do. */
+  reason: string;
+  /** Content hash; "" when the block isn't about content. */
+  hash: string;
+}
+
+/** A project lockfile pins a package now known to be malware (background check). */
+export interface SecurityNotice {
+  /** Stable id; the same notice is shown once. */
+  key: string;
+  /** One plain line for the user. */
+  message: string;
+}
+
 export interface AgentState extends DesktopContextSnapshot, DesktopSessionUXState {
   kenState?: KenState | null;
   conversationId?: string;
+  /** Skills kept out of this session for safety. Absent on older sidecars. */
+  blockedSkills?: BlockedSkill[];
+  /** Installed packages now known to be infected. Absent on older sidecars. */
+  installedThreats?: SecurityNotice[];
   provider: string;
   model: string;
   cwd: string;
@@ -1325,6 +1349,8 @@ export interface HistoryEntry {
   error?: ChatErrorData & { scope: string; headline: string };
   /** Webview-copy info row marker (e.g. the video-capability warning). */
   infoKind?: "video_warning";
+  /** Safety-block chat row. */
+  security?: { rule: string; target: string };
   /** Tool-produced images rendered inline (same as live `images` items),
    *  reconstructed from ImageContent blocks in persisted tool results.
    *  `text` holds verbatim image warnings, rendered once before these images. */
@@ -2672,8 +2698,9 @@ export function isMcpAuthDoneEvent(event: SidecarEvent): event is McpAuthDoneEve
   );
 }
 
-import type { McpServerRow } from "@kenkaiiii/gg-core";
-export type { McpServerRow } from "@kenkaiiii/gg-core";
+import type { McpServerRow as CoreMcpServerRow } from "@kenkaiiii/gg-core";
+/** Core MCP row plus upstream gg-safe's hidden-tool warning (one line per tool). */
+export type McpServerRow = CoreMcpServerRow & { warning?: string };
 
 /** Outcome of adding an MCP server from a pasted command line. */
 export interface AddMcpResult {
@@ -2726,6 +2753,7 @@ function isMcpServerRow(value: unknown): value is LegacyMcpServerRow {
       row.failureReason === "trust-blocked" ||
       row.failureReason === "connection-failed") &&
     (row.requiresAuth === undefined || typeof row.requiresAuth === "boolean") &&
+    (row.warning === undefined || typeof row.warning === "string") &&
     typeof row.toolCount === "number" &&
     Number.isSafeInteger(row.toolCount) &&
     row.toolCount >= 0 &&

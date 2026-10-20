@@ -25,7 +25,39 @@ https://github.com/user-attachments/assets/8f264af5-c757-4dcc-b622-b9e0edf36f89
   <a href="https://skool.com/kenkai"><img src="https://img.shields.io/badge/Skool-Community-b0b6ff?style=for-the-badge" alt="Skool"></a>
 </p>
 
-GG Coder is a desktop AI app that helps you write code, chat, and make videos. Ken Autopilot checks the coding work, chat remembers context, and GG Motion creates videos from your ideas. Pick your AI provider, open as many windows as you need, and tell it what you want to do. Less babysitting, more getting things done.
+GG Coder is a desktop AI app for coding, chatting, running whole goals and making videos. Pick your AI provider, open as many windows as you need, and tell it what you want done. Less babysitting, more getting things done.
+
+## Why GG Coder
+
+**The leanest coding agent I've tested.** I raced GG Coder against 9 other coding agents on the same model. GG had the fastest time, level with Goose and Copilot, and was the cheapest of all 10.
+
+| Agent              | Time for the full suite | Usage per suite | GG Coder compared          |
+| ------------------ | ----------------------- | --------------- | -------------------------- |
+| **GG Coder**       | **125 s**               | **$0.095**      |                            |
+| Goose              | 126 s                   | $0.106          | same speed, 11% less usage |
+| GitHub Copilot CLI | 129 s                   | $0.126          | same speed, 25% less usage |
+| Claude Code        | 154 s                   | $0.212          | 19% faster, 55% less usage |
+| Oh My Pi           | 161 s                   | $0.150          | 23% faster, 37% less usage |
+| Crush              | 164 s                   | $0.196          | 24% faster, 52% less usage |
+| Factory Droid      | 172 s                   | $0.130          | 28% faster, 27% less usage |
+| Deep Agents        | 197 s                   | $0.206          | 37% faster, 54% less usage |
+| Qwen Code          | 229 s                   | $0.319          | 46% faster, 70% less usage |
+| Hermes Agent       | 285 s                   | $0.146          | 56% faster, 35% less usage |
+
+On a subscription, less usage means more work out of your plan. The same allowance covers about **2.2x** the coding it would in Claude Code, and about **1.6x** what it would in Oh My Pi.
+
+<sub>Every agent on Claude Haiku 5.5, across more than 3,000 test runs.</sub>
+
+## What you get
+
+- **Code:** a coding agent that plans, edits, runs your tests and tells you straight what it verified. Plan mode lets you review the plan before anything changes.
+- **Ken Autopilot:** reviews the coding work and keeps it going until it's actually done and checked, so you don't have to babysit it.
+- **GG Goals:** hand over a whole goal and walk away. It agrees the approach with you, then does the work, splitting big independent parts across a team of workers that run side by side, and keeps you posted until the goal is met. It works on any folder, not just code: research, documents, plans.
+- **Agent Steroids:** a local library of real, current open-source code. Your agent looks up how real projects solve a problem instead of guessing, offline and with no limits.
+- **Chat:** conversations that remember context.
+- **GG Motion:** turns your ideas into videos.
+- **Your models, your way:** sign in with Claude, ChatGPT, Gemini, Grok or Kimi subscriptions, use API keys for OpenAI, Anthropic, DeepSeek, GLM, MiniMax, OpenRouter and more, or run local models. A usage meter shows how much of your plan you've used.
+- **Plugs into your workflow:** connect MCP servers, and drive GG from Telegram, voice notes included.
 
 ## Get started
 

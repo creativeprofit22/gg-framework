@@ -655,19 +655,196 @@ function classifyStrict(command: string): VerificationCommandClassification {
   return accepted(segments.length === 1 ? results[0].reason : "bounded verification command chain");
 }
 
+type TopLevelOperator = "&&" | "||" | "|" | ";" | "&" | "\n";
+
+interface TopLevelSegment {
+  text: string;
+  /** Operator that ended the previous segment (null for the first). */
+  before: TopLevelOperator | null;
+  /** Operator that ends this segment (null for the last). */
+  after: TopLevelOperator | null;
+}
+
+/** `name` of a heredoc introduced at `start` (just past `<<`/`<<-`), with the
+ *  index after it. Quotes around the delimiter are removed. */
+function readHeredocDelimiter(
+  command: string,
+  start: number,
+): { word: string; end: number } | null {
+  let i = start;
+  while (command[i] === " " || command[i] === "\t") i++;
+  const quote = command[i] === "'" || command[i] === '"' ? command[i] : null;
+  if (quote) {
+    const close = command.indexOf(quote, i + 1);
+    if (close < 0) return null;
+    return { word: command.slice(i + 1, close), end: close + 1 };
+  }
+  const match = /^[^\s;&|<>()]+/.exec(command.slice(i));
+  return match ? { word: match[0].replace(/\\/g, ""), end: i + match[0].length } : null;
+}
+
 /**
- * True when some segment of `command` is, on its own, a bounded check — i.e.
- * the chain wraps a real verification attempt. Used to decide whether a
- * rejected classification deserves user-visible feedback: exploration that
- * merely mentions a verifier (`ls .venv/bin | grep ruff`, `ruff --version`)
- * was never a verification attempt and gets no nag.
+ * The top-level segments of a shell command: split on `;`, `&&`, `||`, `|`,
+ * `&` and newlines, but not inside quotes, `$( … )`, `( … )`, backticks or
+ * heredoc bodies, and never on redirections (`2>&1`, `&>`). Comments are
+ * dropped. Null when the text cannot be accounted for (an unterminated quote,
+ * group or heredoc).
+ *
+ * Only {@link extractStandaloneCheck} uses this, and whatever it returns is
+ * re-run and judged on its own exit status, so a misread here can at worst
+ * re-run a real check; it can never turn into evidence by itself.
  */
-export function containsBoundedCheck(command: string): boolean {
-  return command
-    .split(/(?:&&|\|\||[;|\n])/)
-    .map((segment) => segment.trim())
-    .filter(Boolean)
-    .some((segment) => classifySegment(segment).accepted);
+function topLevelSegments(command: string): TopLevelSegment[] | null {
+  const segments: TopLevelSegment[] = [];
+  const heredocs: Array<{ word: string; stripTabs: boolean }> = [];
+  let current = "";
+  let before: TopLevelOperator | null = null;
+  let depth = 0;
+  const end = (op: TopLevelOperator | null): void => {
+    const text = current.trim();
+    if (text) segments.push({ text, before, after: op });
+    current = "";
+    if (text || op !== "\n") before = op;
+  };
+  let i = 0;
+  while (i < command.length) {
+    const ch = command[i]!;
+    const next = command[i + 1];
+    if (ch === "\\") {
+      current += command.slice(i, i + 2);
+      i += 2;
+      continue;
+    }
+    if (ch === "'" || ch === "`") {
+      const close = command.indexOf(ch, i + 1);
+      if (close < 0) return null;
+      current += command.slice(i, close + 1);
+      i = close + 1;
+      continue;
+    }
+    if (ch === '"') {
+      let j = i + 1;
+      while (j < command.length && command[j] !== '"') j += command[j] === "\\" ? 2 : 1;
+      if (j >= command.length) return null;
+      current += command.slice(i, j + 1);
+      i = j + 1;
+      continue;
+    }
+    if (ch === "#" && (current === "" || /\s$/.test(current))) {
+      const newline = command.indexOf("\n", i);
+      i = newline < 0 ? command.length : newline;
+      continue;
+    }
+    if (ch === "<" && next === "<" && command[i + 2] !== "<") {
+      const stripTabs = command[i + 2] === "-";
+      const delimiter = readHeredocDelimiter(command, i + (stripTabs ? 3 : 2));
+      if (!delimiter) return null;
+      heredocs.push({ word: delimiter.word, stripTabs });
+      current += command.slice(i, delimiter.end);
+      i = delimiter.end;
+      continue;
+    }
+    if (ch === "\n" && heredocs.length > 0) {
+      // Heredoc bodies start on the next line; skip each up to its delimiter.
+      let lineStart = i + 1;
+      for (const { word, stripTabs } of heredocs.splice(0)) {
+        for (;;) {
+          if (lineStart > command.length) return null;
+          const lineEnd = command.indexOf("\n", lineStart);
+          const line = command.slice(lineStart, lineEnd < 0 ? command.length : lineEnd);
+          lineStart = lineEnd < 0 ? command.length + 1 : lineEnd + 1;
+          if ((stripTabs ? line.replace(/^\t+/, "") : line) === word) break;
+        }
+      }
+      if (depth === 0) end("\n");
+      i = lineStart - 1;
+      continue;
+    }
+    if (ch === "(" || (ch === "$" && next === "(")) {
+      depth++;
+      current += ch === "$" ? "$(" : "(";
+      i += ch === "$" ? 2 : 1;
+      continue;
+    }
+    if (ch === ")") {
+      if (depth === 0) return null;
+      depth--;
+      current += ch;
+      i++;
+      continue;
+    }
+    if (depth === 0) {
+      const pair = command.slice(i, i + 2);
+      if (pair === "&&" || pair === "||") {
+        end(pair);
+        i += 2;
+        continue;
+      }
+      if (ch === "|") {
+        end("|");
+        i += next === "&" ? 2 : 1;
+        continue;
+      }
+      if (ch === ";" || ch === "\n") {
+        end(ch);
+        i++;
+        continue;
+      }
+      // A lone & backgrounds; `>&`, `<&` and `&>` are redirections.
+      if (ch === "&" && next !== ">" && !/[<>]$/.test(current)) {
+        end("&");
+        i++;
+        continue;
+      }
+    }
+    current += ch;
+    i++;
+  }
+  if (depth !== 0 || heredocs.length > 0) return null;
+  end(null);
+  return segments;
+}
+
+/**
+ * The bounded check a refused command ran, as a command that counts on its
+ * own: `cd app && npm test` from `cd app && rg -n old . ; npm test 2>&1 |
+ * tail -15; node -e '…'`. Null when the command already counts, holds no
+ * check, or its working directory is ambiguous (a `cd` after the first
+ * segment). With several checks, the last one wins.
+ *
+ * The host re-runs the result when a turn ends unverified (see
+ * VerificationTracker.takeRefusedCheck), so the evidence is the re-run's own
+ * exit status, never the original command's.
+ */
+export function extractStandaloneCheck(command: string): string | null {
+  if (classifyStrict(command).accepted) return null;
+  const segments = topLevelSegments(command);
+  if (!segments) return null;
+  let checkIndex = -1;
+  let check = "";
+  for (const [index, segment] of segments.entries()) {
+    // A pipeline's later stages are filters, never the check itself.
+    if (segment.before === "|") continue;
+    const text = segment.text.replace(/\s+2>&1$/, "");
+    const verdict = classifyStrict(text);
+    if (verdict.accepted && !verdict.mayMutate) {
+      checkIndex = index;
+      check = text;
+    }
+  }
+  if (checkIndex < 0) return null;
+  const first = segments[0]!;
+  const leadingCd =
+    checkIndex > 0 && first.after === "&&" && /^cd\s+[^\s;&|<>()$`'"]+$/.test(first.text)
+      ? first.text
+      : null;
+  const moves = segments
+    .slice(leadingCd ? 1 : 0, checkIndex)
+    .some((segment) => /^(?:cd|pushd|popd)(?:\s|$)/.test(segment.text));
+  if (moves) return null;
+  const standalone = leadingCd ? `${leadingCd} && ${check}` : check;
+  const verdict = classifyStrict(standalone);
+  return verdict.accepted && !verdict.mayMutate ? standalone : null;
 }
 
 function resultText(result: ToolResult): string {
@@ -951,6 +1128,16 @@ function isCodeMutation(call: { name: string; args: Record<string, unknown> }): 
   return false;
 }
 
+/** A check the model ran inside a command whose exit status could not count. */
+export interface RefusedCheck {
+  /** The check alone, in a form that counts on its own (`cd app && npm test`). */
+  command: string;
+  /** Ledger generation when the model's command finished. */
+  generation: number;
+  /** Ledger run that observed it. */
+  run: number;
+}
+
 export interface SessionVerificationEvidenceLedgerSnapshot {
   currentEvidence: RoadmapShellEvidence[];
   staleEvidence: RoadmapShellEvidence[];
@@ -1036,6 +1223,8 @@ export class SessionVerificationEvidenceLedger {
   private readonly coverage = new Map<string, "passed" | "failed">();
   /** bash runs with pipefail (not the cmd.exe fallback): see classifyVerificationCommand. */
   private readonly posixShell: boolean;
+  /** See {@link takeRefusedCheck}. */
+  private refusedCheck: RefusedCheck | null = null;
 
   constructor({ posixShell = !resolveShell("").isCmdFallback }: { posixShell?: boolean } = {}) {
     this.posixShell = posixShell;
@@ -1072,6 +1261,24 @@ export class SessionVerificationEvidenceLedger {
     this.run += 1;
     this.runChanged = false;
     this.runChecked = false;
+    this.refusedCheck = null;
+  }
+
+  /**
+   * Upstream 0.94's refused-check recovery, on this ledger: the last check the
+   * model ran this run inside a command that could not count (`npm test 2>&1 |
+   * tail; node -e '…'`), provided nothing was mutated since, no background
+   * check is pending and the run is otherwise unverified. It recovers a check
+   * the model already ran; it never adds one the model skipped. Returned once.
+   */
+  takeRefusedCheck(): RefusedCheck | null {
+    const pending = this.refusedCheck;
+    this.refusedCheck = null;
+    if (!pending || pending.run !== this.run || pending.generation !== this.generation) {
+      return null;
+    }
+    if (this.pendingBackground.size > 0) return null;
+    return this.verificationProblem() !== null ? pending : null;
   }
 
   runActivity(): { changed: boolean; checked: boolean; evidence: VerificationEvidence[] } {
@@ -1175,6 +1382,21 @@ export class SessionVerificationEvidenceLedger {
       return;
     }
     if (input.name !== "bash") return;
+
+    // Upstream 0.94 rerun rule: remember the last check the model ran inside a
+    // command whose exit status could not count, so the session can re-run it
+    // standalone if the turn would otherwise end unverified.
+    if (gateClassification?.accepted) {
+      this.refusedCheck = null;
+    } else if (
+      !input.isError &&
+      input.args.persist !== true &&
+      input.args.run_in_background !== true &&
+      diagnostics?.reason !== "backgrounded"
+    ) {
+      const check = extractStandaloneCheck(String(input.args.command ?? "").trim());
+      if (check) this.refusedCheck = { command: check, generation: this.generation, run };
+    }
 
     // A handed-off check counts as run only once its terminal result is recorded.
     if (

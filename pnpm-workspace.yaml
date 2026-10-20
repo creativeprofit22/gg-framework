@@ -1,7 +1,6 @@
 packages:
   - "packages/*"
   - "Matey"
-  - "experiments/*"
   - "gg-app"
 
 # Kept here, not in package.json's "pnpm" field: newer pnpm (used by

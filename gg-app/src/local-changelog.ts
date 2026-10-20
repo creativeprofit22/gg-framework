@@ -53,10 +53,30 @@ export const CURRENT_LOCAL_RELEASE_NOTES = requireCurrentReleaseNotes(releaseNot
 /** Newest first. Maintained only by the Local Fork release flow. */
 export const LOCAL_CHANGELOG: LocalChangelogEntry[] = [
   {
-    id: "local-2026-10-17-upstream-0934-renames-and-no-surprise-bills",
+    id: "local-2026-10-19-upstream-0942-safe-installs-and-guarded-tools",
     label: CURRENT_LOCAL_RELEASE_NOTES.label,
     date: CURRENT_LOCAL_RELEASE_NOTES.date,
     items: CURRENT_LOCAL_RELEASE_NOTES.sections.flatMap(({ items }) => items),
+  },
+  {
+    id: "local-2026-10-17-upstream-0934-renames-and-no-surprise-bills",
+    label: "Upstream 0.93.4, with renamable sessions and no surprise bills",
+    date: "2026-10-17",
+    items: [
+      "Give any session a name you'll recognise at a glance. Click `Rename` next to a session in your project's list, type the new name and save it.",
+      "When your agent suggests changes to a Roadmap phase, you now see exactly what would change before anything is saved. Each changed field shows `Before` and `After`, and nothing happens until you pick `Apply edit` or `Reject edit`. If the phase changed in the meantime, you'll see `This edit is out of date.` instead of overwriting newer work.",
+      "A task that stops short now tells you why. `Tasks` explains whether Autopilot handed the work back to you, the run ended without the task being marked done, or GG Coder closed mid-run. A task that's waiting on you reads `needs review` instead of a plain blocked.",
+      "When you're driving a session yourself, your agent now waits for your answer to its question for as long as you need, and the card no longer claims it stopped waiting.",
+      "Long jobs no longer die at the `5 minute` mark. A hidden limit was cutting off big file writes and long, quiet thinking on every model, then retrying the same doomed request until it gave up. If a huge write still stalls, your agent is asked to break it into smaller pieces, and the error now says the reply stalled instead of blaming your internet.",
+      "No surprise bills. `MiMo UltraSpeed` and `Claude Opus 5.5 Fast` ask before you switch to them, and paid models never sneak into Ken, helpers, restarts or your saved default.",
+      "Your agent reacts the moment a build, test run or CI check fails, usually within about `2 seconds`, instead of waiting for the whole job or a timer. If something breaks after it has already finished its turn, it comes back to deal with it on its own.",
+      "Answering your agent's questions feels smoother. Your pick fills in and holds for a beat before the card melts away, and number keys like `1` press just like a click. Cards with several questions have one `Send answers` button at the very bottom, and you can still send early: it shows how many you've answered and sends the rest as skipped.",
+      "Million-token models keep far more of your conversation in view. `MiMo`, `DeepSeek` and `Kimi` now tidy up near `850K` tokens instead of a third of the way in, while Grok and Gemini 3.1 Pro tidy up just before their pricier long-context rates. `GPT-6 Astra` on `Experimental` still keeps its full larger window.",
+      "Gemini works again for personal Google accounts. Pick `Gemini API key` next to `Sign in with Google` and paste a key from Google AI Studio. It's used first whenever it's set, and disconnecting it leaves your Google sign-in alone.",
+      "Image generation works again with your ChatGPT login, on the same image service Codex uses. It can make `transparent backgrounds`, blend up to `5` reference images in one edit, tells you the size you actually got, and says plainly when your plan or daily limit is the problem. Every image that finishes is still saved if a later one fails.",
+      "Grok got a lot sharper in long sessions. It now runs on xAI's newer `Responses API`, so it keeps its own reasoning from one step to the next instead of starting cold after every tool call, and xAI still remembers your conversation so long chats stay cheaper and snappier. Both API keys and `SuperGrok` logins get it.",
+      "`Claude Fable 5.1` gets its full `xhigh` thinking when you ask for it.",
+    ],
   },
   {
     id: "local-2026-10-15-enhancer-highlights-and-mcp-retry",

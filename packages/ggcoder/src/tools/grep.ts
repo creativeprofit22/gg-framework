@@ -194,7 +194,7 @@ export function createGrepTool(
   return {
     name: "grep",
     description:
-      "Regex search of file contents → path:line:text. Skips .gitignored and binary files.",
+      "Regex search of file contents → matches grouped by file (path, then line:text rows). Skips .gitignored and binary files.",
     parameters: GrepParams,
     async execute({ pattern, path: searchPath, include, max_results, case_insensitive }) {
       const dir = searchPath ? resolvePath(cwd, searchPath) : cwd;
@@ -1083,6 +1083,40 @@ function deadlineNotice(deadlineMs: number): string {
   return `[Stopped after ${deadlineMs / 1000}s — narrow the pattern or pass a narrower path/include]`;
 }
 
+/**
+ * Render `path:line:text` records ripgrep `--heading` style: each file's path
+ * once, then its `line:text` rows, files separated by a blank line.
+ *
+ * Every grep result stays in the conversation and is re-read on each later
+ * request. Repeating the path on every row was ~23% of grep output on a real
+ * repo (bench/prompt-diet opt-repo1: 739k → 566k chars over 92 calls), so the
+ * heading form carries the same facts for fewer tokens. Records arrive grouped
+ * already (each scan path walks file by file); a path that reappears later
+ * simply gets another heading. The path is split at the first `:<digits>:` —
+ * relative paths have no such run, and a Windows drive prefix (`D:\`) does
+ * not match it.
+ */
+export function groupByFile(results: readonly string[]): string {
+  const out: string[] = [];
+  let current: string | undefined;
+  for (const record of results) {
+    const m = /^(.*?):(\d+):/.exec(record);
+    if (!m) {
+      current = undefined;
+      out.push(record);
+      continue;
+    }
+    const file = m[1]!;
+    if (file !== current) {
+      if (out.length > 0) out.push("");
+      out.push(file);
+      current = file;
+    }
+    out.push(record.slice(file.length + 1));
+  }
+  return out.join("\n");
+}
+
 function formatResults(
   results: string[],
   maxResults: number,
@@ -1099,7 +1133,7 @@ function formatResults(
     return empty;
   }
 
-  let output = results.join("\n");
+  let output = groupByFile(results);
   if (results.length >= maxResults) {
     output += `\n\n[Truncated at ${maxResults} matches]`;
   } else {

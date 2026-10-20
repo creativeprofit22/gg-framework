@@ -1003,14 +1003,15 @@ export class ProcessManager {
     cwd: string,
     launch?: SandboxLaunch,
     wake?: WakeRules,
+    /** Extra env for this process (e.g. the package release-age cooldown). */
+    extraEnv: Record<string, string> = {},
   ): Promise<StartResult> {
     if (this.closing) throw new Error("Process manager is shutting down");
     const { id, logFile, logStream } = await this.openBackgroundLog();
 
     const shell = launch ?? resolveShell(command);
-    const environment = launch?.sandboxed
-      ? { ...getSafeToolEnv(), ...SANDBOX_ENV_PATCH }
-      : getSafeToolEnv();
+    const base = { ...getSafeToolEnv(), ...extraEnv };
+    const environment = launch?.sandboxed ? { ...base, ...SANDBOX_ENV_PATCH } : base;
     let child: ChildProcess;
     try {
       if (this.closing) throw new Error("Process manager is shutting down");

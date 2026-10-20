@@ -31,7 +31,7 @@ GG Framework is a pnpm monorepo for GG Coder: a multi-provider coding-agent runt
 - Multi-line GitHub Actions steps must declare `shell: bash`. PowerShell otherwise reports only the final command's status on Windows and can hide earlier test/build failures.
 - Keep the Local Fork identity (`GG Coder Local Fork`, `com.ggcoder.local-fork`, `gg-coder-local-fork`) synchronized across Tauri config, Cargo, Node paths, and Rust. The isolated identity prevents local builds overwriting official app data/installations.
 - Local Fork updater artifacts and endpoints remain disabled. Upstream integration uses the guarded local-update workflow on `custom/local-customizations`; it creates recovery evidence, restores dirty files byte-for-byte, verifies identity, and never pushes unless explicitly requested.
-- `bench/size-gate.mjs` accepts filters only through `--only`; a positional target is ignored and accidentally checks every artifact, including an unbuilt sidecar.
+- `.github/ci/size-gate.mjs` accepts filters only through `--only`; a positional target is ignored and accidentally checks every artifact, including an unbuilt sidecar.
 
 ## Unique Workflows
 

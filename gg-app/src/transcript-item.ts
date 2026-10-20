@@ -45,6 +45,8 @@ export type Item =
   // streamed from the ken_* SSE events. Never mistaken for GG Coder.
   | { kind: "ken"; id: number; text: string }
   | { kind: "info"; id: number; text: string }
+  // A safety guard blocked something (or found an infected installed package).
+  | { kind: "security"; id: number; rule: string; target: string; count?: number }
   // Structured error (see gg-ai's formatError): headline always answers "is this
   // me or them", message is the raw detail (omitted when redundant with the
   // headline), guidance is the action line (retry / switch model / log in /

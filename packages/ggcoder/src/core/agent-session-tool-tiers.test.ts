@@ -441,6 +441,64 @@ describe("AgentSession built-in tool tiering", () => {
     }
   }, 20_000);
 
+  it("attaches Anthropic's native web search only once web_search is promoted", async () => {
+    // The server tool is ~2.5k prefix tokens per request; web search is
+    // reached in ~6% of sessions, so it follows the same tiering as the rest.
+    const session = await createSession();
+    try {
+      const s = session as unknown as {
+        nativeWebSearchOn(): boolean;
+        promoteDeferredBuiltin(name: string): AgentTool | undefined;
+      };
+      const prompt = String(session.getMessages()[0]?.content ?? "");
+      expect(prompt).toContain("- **web_search**:");
+      expect(liveToolNames(session)).not.toContain("web_search");
+      expect(s.nativeWebSearchOn()).toBe(false);
+
+      const before = liveToolNames(session);
+      expect(s.promoteDeferredBuiltin("web_search")?.name).toBe("web_search");
+      expect(liveToolNames(session)).toEqual([...before, "web_search"]);
+      expect(s.nativeWebSearchOn()).toBe(true);
+    } finally {
+      await session.dispose();
+    }
+  }, 20_000);
+
+  it("attaches native web search up front when the human prompt asks for the web", async () => {
+    const session = await createSession();
+    try {
+      const s = session as unknown as {
+        nativeWebSearchOn(): boolean;
+        attachWebSearchIfAsked(content: unknown): void;
+      };
+      s.attachWebSearchIfAsked("Rename circleArea and search for its callers.");
+      expect(s.nativeWebSearchOn()).toBe(false);
+      s.attachWebSearchIfAsked([
+        { type: "text", text: "Search the web for the Node release page" },
+      ]);
+      expect(s.nativeWebSearchOn()).toBe(true);
+      expect(liveToolNames(session).filter((n) => n === "web_search")).toHaveLength(1);
+    } finally {
+      await session.dispose();
+    }
+  }, 20_000);
+
+  it("keeps native web search always on for untiered Anthropic sessions", async () => {
+    await writeSettings({ deferredBuiltinTools: false });
+    const eager = await createSession();
+    const allowed = await createSession({ allowedTools: ["read", "grep"] });
+    try {
+      for (const session of [eager, allowed]) {
+        expect((session as unknown as { nativeWebSearchOn(): boolean }).nativeWebSearchOn()).toBe(
+          true,
+        );
+      }
+    } finally {
+      await eager.dispose();
+      await allowed.dispose();
+    }
+  }, 20_000);
+
   it("registers tool_search even with no MCP server connected", async () => {
     const session = await createSession();
     try {

@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { AgentTool } from "@kenkaiiii/gg-agent";
 import { CONTEXT_LIMITS, type ContextLimits } from "../core/context-limits.js";
-import { renderSkillLines, type Skill } from "../core/skills.js";
+import { renderSkillLines, type BlockedSkill, type Skill } from "../core/skills.js";
 
 const parameters = z.object({
   skill: z.string(),
@@ -11,6 +11,7 @@ const parameters = z.object({
 export function createSkillTool(
   skills: Skill[],
   limits: ContextLimits = CONTEXT_LIMITS,
+  blocked: readonly BlockedSkill[] = [],
 ): AgentTool<typeof parameters> {
   // Case-insensitive: discovery dedupes lowercase names, so `Foo` can be
   // listed while a literal lookup of `foo` (or vice versa) would miss.
@@ -23,6 +24,15 @@ export function createSkillTool(
     async execute(input) {
       const skill = skillMap.get(input.skill.toLowerCase());
       if (!skill) {
+        const refused = blocked.find((b) => b.name.toLowerCase() === input.skill.toLowerCase());
+        if (refused) {
+          // Thrown so the model can't mistake it for loaded instructions; the
+          // plain reason lets it tell the user and carry on without the skill.
+          throw new Error(
+            `Skill "${refused.name}" was blocked for safety (${refused.reason}) and is not available. ` +
+              `Tell the user and continue without it.`,
+          );
+        }
         // Thrown, not returned: a plain-text "not found" reads as success to the
         // model. Bench (glm-ab7): GLM "loaded" skill "enter_plan", believed it was
         // in plan mode, and edited without the plan step. Name the real tool.

@@ -12,6 +12,7 @@ import { SubAgentFeed } from "./SubAgentFeed";
 import { CompactionNotice } from "./CompactionNotice";
 import { PlanModeLogo } from "./PlanModeLogo";
 import { PlanDecisionNotice } from "./PlanDecisionNotice";
+import { SecurityNotice } from "./SecurityNotice";
 import { AskBand } from "./AskBand";
 import { Markdown } from "./Markdown";
 import { Skeleton } from "./Skeleton";
@@ -424,6 +425,15 @@ function TranscriptRowBody({
       );
     case "subagent_group":
       return <SubAgentFeed agents={item.agents} aborted={item.aborted} />;
+    case "security":
+      return (
+        <SecurityNotice
+          rule={item.rule}
+          target={item.target}
+          count={item.count}
+          variantKey={String(item.id)}
+        />
+      );
     case "compaction":
       return (
         <CompactionNotice

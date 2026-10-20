@@ -30,6 +30,10 @@ describe("Qwen subprocess credential boundary", () => {
   });
   it("filters MCP after merging explicit overrides at the actual transport construction", () => {
     const source = readFileSync(new URL("../core/mcp/client.ts", import.meta.url), "utf8");
-    expect(source).toContain("env: withoutQwenRuntimeSecret({ ...process.env, ...config.env })");
+    // Upstream gg-safe adds the package cooldown env between the two; the
+    // filter must still wrap the fully merged environment, config.env last.
+    expect(source).toMatch(
+      /env: withoutQwenRuntimeSecret\(\{\s*\.\.\.process\.env,\s*\.\.\.cooldownEnv,\s*\.\.\.config\.env,?\s*\}\)/,
+    );
   });
 });

@@ -519,7 +519,7 @@
     },
     {
       "name": "grep",
-      "description": "Regex search of file contents → path:line:text. Skips .gitignored and binary files.",
+      "description": "Regex search of file contents → matches grouped by file (path, then line:text rows). Skips .gitignored and binary files.",
       "schema": {
         "type": "object",
         "properties": {
@@ -546,7 +546,7 @@
           "pattern"
         ]
       },
-      "hash": "fca2f3ad82151cecaa09d52c16967cb8d190468497beed8a9079e4c90945b351"
+      "hash": "aea09b5cbebb692cd0adc330f8b2a8bbcfc623493875474ee6555fdd276cc6aa"
     },
     {
       "name": "ls",

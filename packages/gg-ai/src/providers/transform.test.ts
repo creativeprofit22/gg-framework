@@ -375,6 +375,79 @@ describe("Anthropic transform", () => {
     expect(result.system?.[1]?.text).toBe("Today's date: 17 May 2026");
   });
 
+  describe("deferred server tool calls", () => {
+    // web_search called alongside a client tool: the API defers the search and
+    // returns its result at the start of the NEXT response.
+    const deferred: Message[] = [
+      { role: "user", content: "research this" },
+      {
+        role: "assistant",
+        content: [
+          { type: "tool_call", id: "toolu_a", name: "web_fetch", args: { url: "https://a" } },
+          {
+            type: "server_tool_call",
+            id: "srvtoolu_1",
+            name: "web_search",
+            input: { query: "q1" },
+          },
+        ],
+      },
+      {
+        role: "tool",
+        content: [{ type: "tool_result", toolCallId: "toolu_a", content: "page a" }],
+      },
+    ];
+    const blockTypes = (result: ReturnType<typeof toAnthropicMessages>) =>
+      result.messages.map((m) =>
+        typeof m.content === "string" ? ["string"] : m.content.map((b) => b.type),
+      );
+
+    it("keeps an unresolved call while the follow-up holds only tool results", () => {
+      expect(blockTypes(toAnthropicMessages(deferred))).toEqual([
+        ["string"],
+        ["tool_use", "server_tool_use"],
+        ["tool_result"],
+      ]);
+    });
+
+    it("keeps a call whose result arrived in the next assistant message", () => {
+      const resolved: Message[] = [
+        ...deferred,
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "server_tool_result",
+              toolUseId: "srvtoolu_1",
+              resultType: "web_search_tool_result",
+              data: { type: "web_search_tool_result", tool_use_id: "srvtoolu_1", content: [] },
+            },
+            { type: "text", text: "done" },
+          ],
+        },
+        { role: "user", content: "thanks" },
+      ];
+      expect(blockTypes(toAnthropicMessages(resolved))).toEqual([
+        ["string"],
+        ["tool_use", "server_tool_use"],
+        ["tool_result"],
+        ["web_search_tool_result", "text"],
+        ["string"],
+      ]);
+    });
+
+    // Regression: a post-compaction re-grounding note (or a new prompt after
+    // a failed run) after the tool results closes the turn, and the API 400s:
+    // "`web_search` tool use with id … was found without a corresponding
+    // `web_search_tool_result` block" on every later request.
+    it("drops an unresolved call once something other than tool results closes the turn", () => {
+      const closed: Message[] = [...deferred, { role: "user", content: "re-grounding note" }];
+      const result = toAnthropicMessages(closed);
+      expect(blockTypes(result)).toEqual([["string"], ["tool_use"], ["tool_result"], ["string"]]);
+      expect(JSON.stringify(result.messages)).not.toContain("srvtoolu_1");
+    });
+  });
+
   describe("conversation cache breakpoints with a 1-h TTL", () => {
     const long = { type: "ephemeral" as const, ttl: "1h" as const };
     const short = { type: "ephemeral" as const };

@@ -161,6 +161,9 @@ const SettingsSchema = z.object({
    *  argument as null, costing output tokens and latency per call. `auto`
    *  turns it off (measured faster on all three gpt-6 models); `on` restores it. */
   codexStrictTools: z.enum(["auto", "on", "off"]).default("auto"),
+  /** Release-age cooldown (days) for every package install the agent runs:
+   *  versions younger than this are skipped. 0 disables. */
+  packageCooldownDays: z.number().min(0).max(365).default(2),
 });
 
 export type Settings = z.infer<typeof SettingsSchema>;
@@ -195,6 +198,7 @@ export const DEFAULT_SETTINGS: Settings = {
   cachePrewarm: true,
   codexResponsesLite: "auto",
   codexStrictTools: "auto",
+  packageCooldownDays: 2,
 };
 
 // ── Settings Manager ───────────────────────────────────────

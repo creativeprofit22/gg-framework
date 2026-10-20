@@ -11,7 +11,7 @@ export const PACKS: Readonly<Record<LanguageId, string>> = {
 
 - \`tsc --strict\` + \`noUncheckedIndexedAccess\`; Biome for format/lint.
 - No \`any\`, no non-null \`!\`; prefer \`satisfies\` over \`as\`.
-- Validate external input with a schema lib.
+- Validate external input (with the project's schema lib if it has one).
 - Result-style returns for expected failures; throw only for bugs.
 - Named exports only; no floating promises; pass \`AbortSignal\` to I/O.
 - Avoid \`enum\`, \`namespace\`, deep inheritance.`,
@@ -19,7 +19,7 @@ export const PACKS: Readonly<Record<LanguageId, string>> = {
   javascript: `### JavaScript
 
 - ESM; \`const\`, \`===\`, no \`var\`; JSDoc + \`// @ts-check\`.
-- Validate external input with a schema lib; no floating promises.
+- Validate external input (with the project's schema lib if it has one); no floating promises.
 - Avoid default exports, prototype mutation, implicit globals.`,
 
   python: `### Python

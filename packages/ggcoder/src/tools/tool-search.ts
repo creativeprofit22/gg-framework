@@ -45,10 +45,7 @@ export function createToolSearchTool(
     description: "Load on-demand/integration tools by capability; callable next step.",
     parameters: ToolSearchParams,
     async execute({ query }) {
-      const matches = catalog
-        .search(query, 100)
-        .filter((tool) => isVisible(tool.name))
-        .slice(0, 5);
+      const matches = catalog.search(query, 5, isVisible);
       if (matches.length === 0) {
         const remaining = catalog.names().filter(isVisible);
         return remaining.length === 0

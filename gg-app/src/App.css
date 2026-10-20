@@ -5360,6 +5360,20 @@ select {
   font-size: var(--fs-sm);
   line-height: 1.4;
 }
+/* Why a server isn't fully usable (blocked, failed, tools hidden for
+   safety): under its row, aligned with the name (row padding + dot + gap). */
+.mcp-notes {
+  list-style: none;
+  margin: 0;
+  padding: 0 var(--space-3) var(--space-3) calc(var(--space-3) + 16px + var(--space-4));
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  font-family: var(--sans);
+  font-size: var(--fs-sm);
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
 /* Steroids' status line uses the list row's anatomy, but it is one fact, not
    a pickable entry: it lines up with the card's title and text and has no
    hover. */

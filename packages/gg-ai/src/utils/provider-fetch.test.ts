@@ -1,7 +1,11 @@
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { PROVIDER_TRANSPORT_TIMEOUT_MS, createProviderFetch } from "./provider-fetch.js";
+import {
+  PROVIDER_TRANSPORT_TIMEOUT_MS,
+  createProviderFetch,
+  nodeUsesEnvProxy,
+} from "./provider-fetch.js";
 
 /**
  * Regression for the 2026-10-17 incident: Node's built-in fetch killed every
@@ -51,6 +55,7 @@ const silentBody =
 let server: Server | undefined;
 afterEach(async () => {
   vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
   await server?.close();
   server = undefined;
 });
@@ -143,6 +148,45 @@ describe("createProviderFetch", () => {
     const response = await providerFetch("http://127.0.0.1:9/never");
     expect(await response.text()).toBe("from host");
     expect(replaced).toHaveBeenCalledOnce();
+  });
+
+  // Regression: with NODE_USE_ENV_PROXY=1, Node's fetch used HTTPS_PROXY but
+  // this fetch's own dispatcher sent provider requests straight past it.
+  it("tunnels through HTTPS_PROXY when the env proxy is on", async () => {
+    const tunnels: string[] = [];
+    const proxy = http.createServer((_req, res) => res.writeHead(405).end());
+    proxy.on("connect", (req, socket) => {
+      tunnels.push(req.url ?? "");
+      socket.end("HTTP/1.1 403 Forbidden\r\n\r\n");
+    });
+    await new Promise<void>((resolve) => proxy.listen(0, "127.0.0.1", resolve));
+    try {
+      const { port } = proxy.address() as AddressInfo;
+      vi.stubEnv("HTTPS_PROXY", `http://127.0.0.1:${port}`);
+      vi.stubEnv("NO_PROXY", "");
+      const viaProxy = createProviderFetch(5_000, { useEnvProxy: true });
+      await expect(viaProxy("https://provider.invalid/v1/messages")).rejects.toThrow();
+      expect(tunnels).toEqual(["provider.invalid:443"]);
+    } finally {
+      await new Promise<void>((resolve) => proxy.close(() => resolve()));
+    }
+  });
+
+  it("uses the env proxy exactly when Node does", () => {
+    const uses = (env: NodeJS.ProcessEnv, nodeVersion = "26.0.0", execArgv: string[] = []) =>
+      nodeUsesEnvProxy({ env, nodeVersion, execArgv });
+    const on = { NODE_USE_ENV_PROXY: "1" };
+    expect(uses(on)).toBe(true);
+    expect(uses(on, "24.0.0")).toBe(true);
+    expect(uses(on, "22.21.0")).toBe(true);
+    // Older Node ignores the variable — including the app's bundled 22.12.
+    expect(uses(on, "22.12.0")).toBe(false);
+    expect(uses(on, "23.11.0")).toBe(false);
+    expect(uses({ NODE_OPTIONS: "--trace-warnings --use-env-proxy" })).toBe(true);
+    expect(uses({}, "26.0.0", ["--use-env-proxy"])).toBe(true);
+    // Node only accepts "1"; a proxy variable alone turns nothing on.
+    expect(uses({ NODE_USE_ENV_PROXY: "true" })).toBe(false);
+    expect(uses({ HTTPS_PROXY: "http://proxy:8080" })).toBe(false);
   });
 
   it("outlasts the agent loop's longest watchdog (15min thinking hard cap)", () => {

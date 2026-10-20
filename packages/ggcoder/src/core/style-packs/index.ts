@@ -43,7 +43,7 @@ export function renderStylePacksSection(active: Set<LanguageId>, cwd: string): s
   if (parts.length === 0) return "";
   return (
     `## Language Style Packs\n\n` +
-    `Defaults for new code in active languages.\n\n` +
+    `Defaults for new code where the project has no convention.\n\n` +
     `${AGENT_WRITTEN_CODE_PREAMBLE}\n\n` +
     parts.join("\n\n")
   );

@@ -1,5 +1,19 @@
 # @kenkaiiii/gg-ai
 
+## 5.84.2
+
+## 5.84.1
+
+## 5.84.0
+
+## 5.83.5
+
+## 5.83.4
+
+### Patch Changes
+
+- 420b1ad: Provider requests honour HTTP_PROXY / HTTPS_PROXY / NO_PROXY again when Node's env proxy is on (`NODE_USE_ENV_PROXY=1` or `--use-env-proxy`). Since the 300s timeout fix, provider calls went through their own connection pool and skipped the proxy, so they failed on networks that only allow proxied traffic.
+
 ## 5.83.3
 
 ## 5.83.2

@@ -60,7 +60,13 @@ export function LiveToolPanel({ entries }: Props): React.ReactElement | null {
               key={`${i}:${p.text}`}
               className="fade-swap"
               style={{
-                color: p.dim ? theme.textDim : p.tone ? toneColor(p.tone) : theme.text,
+                color: p.warn
+                  ? theme.warning
+                  : p.dim
+                    ? theme.textDim
+                    : p.tone
+                      ? toneColor(p.tone)
+                      : theme.text,
                 fontWeight: p.bold ? 600 : 400,
               }}
             >

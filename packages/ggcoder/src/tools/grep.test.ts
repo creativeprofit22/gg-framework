@@ -2,9 +2,28 @@ import { afterAll, describe, expect, it, vi } from "vitest";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { createGrepTool, requiredLiterals } from "./grep.js";
+import { createGrepTool, groupByFile, requiredLiterals } from "./grep.js";
 import { localOperations, type ToolOperations } from "./operations.js";
 import { disposeGrepWorkerPool, GrepWorkerPool } from "./grep-scan.js";
+
+/** Grouped grep output back to flat `path:line:text` records (+ trailing notes). */
+function flat(output: unknown): string {
+  const s = String(output);
+  const idx = s.search(/\n\n(?:\[Truncated|\d+ match)/);
+  const body = idx >= 0 ? s.slice(0, idx) : s;
+  const tail = idx >= 0 ? s.slice(idx) : "";
+  const records: string[] = [];
+  let file: string | undefined;
+  for (const line of body.split("\n")) {
+    if (!line) {
+      file = undefined;
+      continue;
+    }
+    if (file !== undefined && /^\d+:/.test(line)) records.push(`${file}:${line}`);
+    else file = line;
+  }
+  return records.length > 0 ? records.join("\n") + tail : s;
+}
 
 function context() {
   return { signal: new AbortController().signal, toolCallId: "test" };
@@ -21,9 +40,9 @@ describe("createGrepTool", () => {
       context(),
     );
 
-    expect(result).toContain("a.txt:1:needle");
-    expect(result).not.toContain("z.txt:1:needle");
-    expect(result).toContain("[Truncated at 1 matches]");
+    expect(flat(result)).toContain("a.txt:1:needle");
+    expect(flat(result)).not.toContain("z.txt:1:needle");
+    expect(flat(result)).toContain("[Truncated at 1 matches]");
   });
 
   it("accepts a leading (?i) as a case-insensitive regex flag", async () => {
@@ -35,7 +54,7 @@ describe("createGrepTool", () => {
       context(),
     );
 
-    expect(result).toContain("deploy.txt:1:Deploy to Railway");
+    expect(flat(result)).toContain("deploy.txt:1:Deploy to Railway");
   });
 
   it.each(["(a+)+$", "(\\w+\\s?)*$", "(x*){2,}", "((ab)+)+"])(
@@ -66,7 +85,7 @@ describe("createGrepTool", () => {
       context(),
     );
 
-    expect(result).toContain("a.txt:1:abab");
+    expect(flat(result)).toContain("a.txt:1:abab");
   });
 
   it.each(["(?:ab)+", "(?:ab|ba)+", "(?:a|b)*b", "(\\d+)?ab", "(a+){1,3}"])(
@@ -77,7 +96,7 @@ describe("createGrepTool", () => {
 
       const result = await createGrepTool(tmpDir).execute({ pattern, include: "*.txt" }, context());
 
-      expect(result).toContain("a.txt:1:abab");
+      expect(flat(result)).toContain("a.txt:1:abab");
     },
   );
 
@@ -115,9 +134,9 @@ describe("createGrepTool", () => {
         context(),
       );
 
-      expect(result).toContain("f00.txt:1:needle");
-      expect(result).not.toContain("f39.txt:1:needle");
-      expect(result).toContain("Stopped after 0.3s");
+      expect(flat(result)).toContain("f00.txt:1:needle");
+      expect(flat(result)).not.toContain("f39.txt:1:needle");
+      expect(flat(result)).toContain("Stopped after 0.3s");
     } finally {
       clock.mockRestore();
     }
@@ -132,8 +151,8 @@ describe("createGrepTool", () => {
       context(),
     );
 
-    expect(result).toContain("No matches found.");
-    expect(result).toContain("narrow the pattern");
+    expect(flat(result)).toContain("No matches found.");
+    expect(flat(result)).toContain("narrow the pattern");
   });
 });
 
@@ -267,11 +286,11 @@ describe("in-process fast path", () => {
       ),
     );
 
-    expect(result).toContain(`${path.join("logs", "keep.txt")}:1:needle`);
-    expect(result).toContain(`${path.join("src", "a.txt")}:1:needle`);
+    expect(flat(result)).toContain(`${path.join("logs", "keep.txt")}:1:needle`);
+    expect(flat(result)).toContain(`${path.join("src", "a.txt")}:1:needle`);
     // git cannot re-include a file under an ignored directory.
-    expect(result).not.toContain("drop.txt");
-    expect(result).not.toContain(path.join("out", "x.txt"));
+    expect(flat(result)).not.toContain("drop.txt");
+    expect(flat(result)).not.toContain(path.join("out", "x.txt"));
   });
 });
 
@@ -297,4 +316,27 @@ describe("requiredLiterals", () => {
       expect(requiredLiterals(pattern)).toBeUndefined();
     },
   );
+
+  it("prints each file's path once, then its line:text rows", () => {
+    expect(
+      groupByFile([
+        "src/a.ts:3:const x = 1;",
+        "src/a.ts:9:x: 2:3",
+        String.raw`D:\repo\b.ts:12:y`,
+        "src/a.ts:40:again",
+      ]),
+    ).toBe(
+      [
+        "src/a.ts",
+        "3:const x = 1;",
+        "9:x: 2:3",
+        "",
+        String.raw`D:\repo\b.ts`,
+        "12:y",
+        "",
+        "src/a.ts",
+        "40:again",
+      ].join("\n"),
+    );
+  });
 });

@@ -133,7 +133,11 @@ describe("AgentSession.prewarm", () => {
         "transportSessionId",
         "userAgent",
       ]) {
-        expect(warm?.[key as keyof typeof warm]).toEqual(real[key]);
+        // The loop takes webSearch as a per-request getter (native search can
+        // be attached mid-run); parity is about the value the request carries.
+        const realValue =
+          typeof real[key] === "function" ? (real[key] as () => unknown)() : real[key];
+        expect(warm?.[key as keyof typeof warm]).toEqual(realValue);
       }
       // Prewarm ends at the last user turn; the real request extends it.
       const warmMessages = warm?.messages ?? [];

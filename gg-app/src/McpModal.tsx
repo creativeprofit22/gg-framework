@@ -50,6 +50,42 @@ interface McpManagementError {
  * selected, since the modal has no inherent project context. Successful changes
  * reload the pane-scoped AgentSession before the management action completes.
  */
+/** Most hidden-tool lines shown under a row; the rest are counted. */
+const MAX_NOTE_LINES = 3;
+
+/**
+ * Why a server isn't fully usable, under its row: each tool the safety guard
+ * hid from the model. Never a prompt.
+ */
+function McpRowNotes({ server }: { server: McpServerRow }): React.ReactElement | null {
+  const lines: { text: string; tone: string }[] = [];
+  // Connect failures get fixed copy in the row: raw `error` is diagnostic-only
+  // (it can carry transport secrets), so notes carry only hidden-tool lines.
+  const hidden = (server.warning ?? "")
+    .split("\n")
+    .filter(Boolean)
+    // The row already names the server.
+    .map((line) => line.replace(` from server "${server.name}"`, ""));
+  for (const line of hidden.slice(0, MAX_NOTE_LINES))
+    lines.push({ text: line, tone: theme.warning });
+  if (hidden.length > MAX_NOTE_LINES) {
+    lines.push({
+      text: `and ${hidden.length - MAX_NOTE_LINES} more hidden`,
+      tone: theme.textMuted,
+    });
+  }
+  if (lines.length === 0) return null;
+  return (
+    <ul className="mcp-notes">
+      {lines.map((line, i) => (
+        <li key={i} style={{ color: line.tone }}>
+          {line.text}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 export function McpModal({ onClose, client }: Props): React.ReactElement {
   const embedded = useModalEmbedState() === "embed";
   const [servers, setServers] = useState<McpServerRow[]>([]);
@@ -252,79 +288,82 @@ export function McpModal({ onClose, client }: Props): React.ReactElement {
       ) : (
         <div className="mcp-list" aria-busy={loading}>
           {visible.map((s) => (
-            <div className="mcp-item" key={`${s.scope}:${s.name}`}>
-              <span
-                className="mcp-dot"
-                style={{
-                  color: !s.enabled
-                    ? theme.textMuted
-                    : s.ok
-                      ? theme.success
-                      : s.requiresAuth
-                        ? theme.warning
-                        : theme.error,
-                }}
-              >
-                {!s.enabled ? (
-                  <MinusCircleIcon size={15} className="mcp-status-disabled" />
-                ) : s.ok ? (
-                  <CheckCircleIcon size={15} className="mcp-status-connected" />
-                ) : s.requiresAuth ? (
-                  <LockIcon size={14} className="mcp-status-auth" />
-                ) : (
-                  <XCircleIcon size={15} className="mcp-status-failed" />
-                )}
-              </span>
-              <div style={{ flex: "1 1 auto", minWidth: 0 }}>
-                <div className="mcp-name" style={{ color: theme.text }} title={s.summary}>
-                  {s.name}
-                </div>
-                {s.enabled && !s.ok && !s.requiresAuth && (
-                  <div
-                    className="mcp-meta"
-                    style={{ color: theme.error, whiteSpace: "normal", overflowWrap: "anywhere" }}
-                  >
-                    {/* Raw s.error is diagnostic-only, even after transport redaction. */}
-                    {s.failureReason === "trust-blocked"
-                      ? "Project server blocked. Add or re-add it in this project to trust it."
-                      : "Could not connect. Check the server settings and availability."}
+            <div className="mcp-entry" key={`${s.scope}:${s.name}`}>
+              <div className="mcp-item">
+                <span
+                  className="mcp-dot"
+                  style={{
+                    color: !s.enabled
+                      ? theme.textMuted
+                      : s.ok
+                        ? theme.success
+                        : s.requiresAuth
+                          ? theme.warning
+                          : theme.error,
+                  }}
+                >
+                  {!s.enabled ? (
+                    <MinusCircleIcon size={15} className="mcp-status-disabled" />
+                  ) : s.ok ? (
+                    <CheckCircleIcon size={15} className="mcp-status-connected" />
+                  ) : s.requiresAuth ? (
+                    <LockIcon size={14} className="mcp-status-auth" />
+                  ) : (
+                    <XCircleIcon size={15} className="mcp-status-failed" />
+                  )}
+                </span>
+                <div style={{ flex: "1 1 auto", minWidth: 0 }}>
+                  <div className="mcp-name" style={{ color: theme.text }} title={s.summary}>
+                    {s.name}
                   </div>
+                  {s.enabled && !s.ok && !s.requiresAuth && (
+                    <div
+                      className="mcp-meta"
+                      style={{ color: theme.error, whiteSpace: "normal", overflowWrap: "anywhere" }}
+                    >
+                      {/* Raw s.error is diagnostic-only, even after transport redaction. */}
+                      {s.failureReason === "trust-blocked"
+                        ? "Project server blocked. Add or re-add it in this project to trust it."
+                        : "Could not connect. Check the server settings and availability."}
+                    </div>
+                  )}
+                </div>
+                {!s.enabled ? (
+                  <span className="mcp-meta" style={{ color: theme.textMuted }}>
+                    Disabled
+                  </span>
+                ) : s.ok ? (
+                  <span className="mcp-meta" style={{ color: theme.textDim }}>
+                    {`${s.toolCount} tool${s.toolCount === 1 ? "" : "s"}`}
+                  </span>
+                ) : s.requiresAuth ? (
+                  <span className="mcp-meta" style={{ color: theme.warning }}>
+                    Requires login
+                  </span>
+                ) : null}
+                {s.enabled && s.requiresAuth && !s.ok && (
+                  <button
+                    type="button"
+                    className="btn btn-primary btn-sm"
+                    disabled={loggingIn === s.name}
+                    title={`Sign in to "${s.name}"`}
+                    onClick={() => void signIn(s.name, s.scope)}
+                  >
+                    {loggingIn === s.name ? "Signing in…" : "Sign in"}
+                  </button>
                 )}
-              </div>
-              {!s.enabled ? (
-                <span className="mcp-meta" style={{ color: theme.textMuted }}>
-                  Disabled
-                </span>
-              ) : s.ok ? (
-                <span className="mcp-meta" style={{ color: theme.textDim }}>
-                  {`${s.toolCount} tool${s.toolCount === 1 ? "" : "s"}`}
-                </span>
-              ) : s.requiresAuth ? (
-                <span className="mcp-meta" style={{ color: theme.warning }}>
-                  Requires login
-                </span>
-              ) : null}
-              {s.enabled && s.requiresAuth && !s.ok && (
                 <button
                   type="button"
-                  className="btn btn-primary btn-sm"
-                  disabled={loggingIn === s.name}
-                  title={`Sign in to "${s.name}"`}
-                  onClick={() => void signIn(s.name, s.scope)}
+                  className="mcp-delete"
+                  style={{ color: theme.textDim }}
+                  aria-label={`Delete ${s.name}`}
+                  title={`Remove "${s.name}"`}
+                  onClick={() => void remove(s.name, s.scope)}
                 >
-                  {loggingIn === s.name ? "Signing in\u2026" : "Sign in"}
+                  <XIcon size={12} weight="bold" aria-hidden="true" />
                 </button>
-              )}
-              <button
-                type="button"
-                className="mcp-delete"
-                style={{ color: theme.textDim }}
-                aria-label={`Delete ${s.name}`}
-                title={`Remove "${s.name}"`}
-                onClick={() => void remove(s.name, s.scope)}
-              >
-                <XIcon size={12} weight="bold" aria-hidden="true" />
-              </button>
+              </div>
+              {s.enabled && <McpRowNotes server={s} />}
             </div>
           ))}
         </div>

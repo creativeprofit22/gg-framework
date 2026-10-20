@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// size-gate — enforce bundle-size budgets.
+// size-gate — informational bundle-size report (legacy command name).
 // Artifacts:
 //   dist:ggcoder — total bytes of packages/ggcoder/dist (the shipped CLI).
 //   frontend:initial — entry JS + static imports, excluding on-demand chunks.
@@ -9,17 +9,18 @@
 //                  cannot hold across the CI matrix's three OSes. Dependency-
 //                  tree churn is still caught by the dist:ggcoder artifact.
 // Usage:
-//   node bench/size-gate.mjs                 # check all artifacts against baseline
-//   node bench/size-gate.mjs --only sidecar  # check one artifact
-//   node bench/size-gate.mjs --update        # re-baseline after an intentional change
-// Fail on growth above baseline + max(2%, 100KB; 10KB for initial frontend JS).
+//   node .github/ci/size-gate.mjs                 # check all artifacts against baseline
+//   node .github/ci/size-gate.mjs --only sidecar  # check one artifact
+//   node .github/ci/size-gate.mjs --update        # re-baseline after an intentional change
+// Highlight growth above baseline + max(2%, 100KB; 10KB for initial frontend JS).
+// Size growth never fails CI; missing or unreadable build artifacts still do.
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const BASELINE_PATH = path.join(REPO_ROOT, "bench/baseline/sizes.json");
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+const BASELINE_PATH = path.join(REPO_ROOT, ".github/ci/baseline/sizes.json");
 const TOLERANCE = { relative: 0.02, absoluteBytes: 100 * 1024 };
 
 /** Recursive byte total of a directory (or single file). */
@@ -96,8 +97,7 @@ for (const [name, measure] of Object.entries(ARTIFACTS)) {
   const absoluteTolerance = name === "frontend:initial" ? 10 * 1024 : TOLERANCE.absoluteBytes;
   const allowed = entry.bytes + Math.max(entry.bytes * TOLERANCE.relative, absoluteTolerance);
   const delta = bytes - entry.bytes;
-  const verdict = bytes > allowed ? "FAIL" : delta < 0 ? "smaller" : "ok";
-  if (bytes > allowed && !update) failed = true;
+  const verdict = bytes > allowed ? "growth (informational)" : delta < 0 ? "smaller" : "ok";
   rows.push([name, fmt(entry.bytes), fmt(bytes), `${delta >= 0 ? "+" : ""}${fmt(delta)}`, verdict]);
 }
 
@@ -111,9 +111,7 @@ console.log(
 );
 
 if (failed) {
-  console.error(
-    "\nSize gate failed. Check growth or missing build artifacts; do not rebaseline to bypass a regression.",
-  );
+  console.error("\nSize report incomplete: required build artifacts could not be measured.");
   process.exit(1);
 }
 

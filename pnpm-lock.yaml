@@ -127,21 +127,6 @@ importers:
         specifier: ^4.1.7
         version: 4.1.7(@types/node@25.9.1)(jsdom@29.1.1(@noble/hashes@2.4.0))(vite@7.3.7(@types/node@25.9.1)(jiti@2.7.0)(lightningcss@1.33.0)(tsx@4.23.13))
 
-  experiments/prompt-bench:
-    dependencies:
-      '@kenkaiiii/gg-agent':
-        specifier: workspace:*
-        version: link:../../packages/gg-agent
-      '@kenkaiiii/gg-ai':
-        specifier: workspace:*
-        version: link:../../packages/gg-ai
-      '@kenkaiiii/ggcoder':
-        specifier: workspace:*
-        version: link:../../packages/ggcoder
-      zod:
-        specifier: ^4.5.4
-        version: 4.5.4
-
   gg-app:
     dependencies:
       '@kenkaiiii/error-mom':

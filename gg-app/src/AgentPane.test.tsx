@@ -1392,6 +1392,51 @@ describe("completed verification task (mocked native transport)", () => {
   );
 });
 
+describe("gg-safe security surfaces (mocked native transport)", () => {
+  it("restores collapsed security rows, renders live blocks, and toasts blocked skills once", async () => {
+    // Real useAgentEvents handler, so the live security_block event is exercised.
+    nativeMocks.realMentor = true;
+    localStorage.clear();
+    const pane = client("gg-safe-security", 1);
+    const emit = liveEvents(pane);
+    vi.mocked(pane.getState).mockResolvedValue({
+      ...agentState("test"),
+      blockedSkills: [
+        {
+          name: "evil-skill",
+          path: "/p/evil",
+          scope: "project",
+          reason: "reads secrets",
+          hash: "h1",
+        },
+      ],
+      installedThreats: [{ key: "lock:debug@4.4.2", message: "debug@4.4.2 is malware" }],
+    });
+    const security = { rule: "malicious-package", target: "npm install chalk@5.6.1" };
+    vi.mocked(pane.listHistory).mockResolvedValue([
+      { role: "assistant", text: "", security },
+      { role: "assistant", text: "", security },
+    ] as AgentModule.HistoryEntry[]);
+    render(<AgentPane client={pane} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
+    const restored = await screen.findAllByText(/Blocked for safety: known malware/);
+    expect(restored).toHaveLength(1);
+    expect(restored[0]?.textContent).toContain("×2");
+    expect(nativeMocks.toast).toHaveBeenCalledWith(
+      'Skill "evil-skill" blocked for safety: reads secrets',
+      "warning",
+      8000,
+    );
+    expect(nativeMocks.toast).toHaveBeenCalledWith("debug@4.4.2 is malware", "warning", 12000);
+
+    await act(async () => {
+      emit("security_block", { rule: "dns-exfil", target: "ping x" });
+    });
+    expect(await screen.findByText(/Blocked for safety: would leak data/)).toBeTruthy();
+  });
+});
+
 describe("queued cancellation ordering (mocked native transport)", () => {
   it.each([false, true])(
     "ignores a delayed cancellation snapshot after newer events (reset=%s)",

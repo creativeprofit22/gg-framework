@@ -253,6 +253,9 @@ import {
 } from "./PromptEnhancement";
 import { EnhanceDissolve } from "./EnhanceDissolve";
 import { toast } from "./toast";
+import { SecurityNotice } from "./SecurityNotice";
+import { takeNewBlockedSkillMessages } from "./blocked-skills";
+import { collapseSecurityRows, takeNewSecurityNotices } from "./security-notices";
 import { fileToPending, toWire, attachmentToPending, type PendingAttachment } from "./attachments";
 import { RoadmapPhaseDraftReviewModal } from "./RoadmapPhaseDraftReviewModal";
 import { useRoadmapDraft } from "./useRoadmapDraft";
@@ -409,6 +412,8 @@ export type Item =
   // streamed from the ken_* SSE events. Never mistaken for GG Coder.
   | { kind: "ken"; id: number; text: string }
   | { kind: "info"; id: number; text: string }
+  // A safety guard blocked something (or found an infected installed package).
+  | { kind: "security"; id: number; rule: string; target: string; count?: number }
   | { kind: "programmatic_execution_evidence"; id: number; items: ProgrammaticExecutionEvidence[] }
   | {
       kind: "mcp_tool_failure";
@@ -2166,6 +2171,13 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       if (st) applyKenHydration(st.kenState);
       if (st) {
         setState(st);
+        // Shown once across panes/windows/restarts (localStorage-remembered).
+        for (const message of takeNewBlockedSkillMessages(st.blockedSkills, localStorage)) {
+          toast(message, "warning", 8000);
+        }
+        for (const message of takeNewSecurityNotices(st.installedThreats, localStorage)) {
+          toast(message, "warning", 12000);
+        }
         setRunning(st.running);
         setContextTokens(st.contextTokens);
         replacePlanReview(st.pendingPlanReview ?? null);
@@ -2214,109 +2226,119 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
         // Reloaded rows get new keys; the goal tally starts again from them.
         setTranscriptEpoch((epoch) => epoch + 1);
         setItems(
-          history.flatMap((h): Item | Item[] => {
-            if (h.mcpToolFailure)
-              return {
-                kind: "mcp_tool_failure",
-                id: nextId(),
-                name: h.mcpToolFailure.name,
-                result: h.mcpToolFailure.result,
-              };
-            // Tool-produced images (screenshots, generate_image) — reconstructed
-            // from persisted ImageContent blocks, downsampled by the sidecar.
-            if (h.toolImages && h.toolImages.length > 0)
-              return [
-                ...(h.text ? [{ kind: "info" as const, id: nextId(), text: h.text }] : []),
-                {
-                  kind: "images",
+          collapseSecurityRows(
+            history.flatMap((h): Item | Item[] => {
+              if (h.mcpToolFailure)
+                return {
+                  kind: "mcp_tool_failure",
                   id: nextId(),
-                  images: h.toolImages.map((img) => ({ src: img.src, path: img.path })),
-                },
-              ];
-            // Sub-agent delegation group — reconstructed from persisted tool_call
-            // + tool_result pairing. toolUseCount/activities aren't persisted, so
-            // the resumed feed shows agent name + status only.
-            if (h.subagentGroup && h.subagentGroup.length > 0)
+                  name: h.mcpToolFailure.name,
+                  result: h.mcpToolFailure.result,
+                };
+              // Tool-produced images (screenshots, generate_image) — reconstructed
+              // from persisted ImageContent blocks, downsampled by the sidecar.
+              if (h.toolImages && h.toolImages.length > 0)
+                return [
+                  ...(h.text ? [{ kind: "info" as const, id: nextId(), text: h.text }] : []),
+                  {
+                    kind: "images",
+                    id: nextId(),
+                    images: h.toolImages.map((img) => ({ src: img.src, path: img.path })),
+                  },
+                ];
+              // Sub-agent delegation group — reconstructed from persisted tool_call
+              // + tool_result pairing. toolUseCount/activities aren't persisted, so
+              // the resumed feed shows agent name + status only.
+              if (h.subagentGroup && h.subagentGroup.length > 0)
+                return {
+                  kind: "subagent_group",
+                  id: nextId(),
+                  agents: h.subagentGroup.map((a, i) => ({
+                    toolCallId: `history-${i}`,
+                    agentName: a.agentName,
+                    status: a.status,
+                    activities: [],
+                    toolUseCount: a.toolUseCount,
+                    tokenUsage: { input: 0, output: 0 },
+                  })),
+                };
+              if (h.hook) return { kind: "hook", id: nextId(), hook: h.hook };
+              // A resumed compacted session shows the quiet compaction notice in
+              // place of the raw summary body (counts aren't persisted).
+              if (h.compacted)
+                return {
+                  kind: "compaction",
+                  id: nextId(),
+                  status: "done",
+                  originalCount: h.compactionCounts?.originalCount,
+                  newCount: h.compactionCounts?.newCount,
+                };
+              // Persisted display-only markers: plan-mode banner, task header,
+              // error rows, and the video-capability info row — all rendered
+              // identically to their live counterparts.
+              if (h.plan) return { kind: "plan", id: nextId(), reason: h.plan.reason };
+              if (h.task) return { kind: "task", id: nextId(), title: h.task.title };
+              if (h.error) {
+                return {
+                  kind: "error",
+                  id: nextId(),
+                  ...readChatError({ ...h.error }, h.error.scope, true),
+                };
+              }
+              if (h.security)
+                return {
+                  kind: "security",
+                  id: nextId(),
+                  rule: h.security.rule,
+                  target: h.security.target,
+                };
+              if (h.infoKind === "video_warning")
+                return { kind: "info", id: nextId(), text: VIDEO_CAPABILITY_WARNING };
+              // Ken "Send to GG Coder" prompts: restore the shimmer label, not the
+              // full prompt body (matches live).
+              if (h.kenSent && h.role === "user")
+                return { kind: "user", id: nextId(), text: h.text, kenSent: true };
+              // Persisted Ken (mentor) turns: his reply restores as a Ken bubble,
+              // the `@Ken` question as a Ken-tinted user bubble (matches live).
+              if (h.ken && h.role === "assistant")
+                return { kind: "ken", id: nextId(), text: h.text };
+              if (h.ken && h.role === "user")
+                return { kind: "user", id: nextId(), text: h.text, ken: true };
+              // Persisted autopilot verdict marker: render identically to the
+              // live item so a resumed session never shows the raw verdict text
+              // (e.g. "ALL_CLEAR") the model actually replied with.
+              if (h.autopilot)
+                return {
+                  kind: "autopilot",
+                  id: nextId(),
+                  phase: h.autopilot.phase,
+                  reason: h.autopilot.reason,
+                  body: h.autopilot.body,
+                  copySeed: h.autopilot.copySeed,
+                };
+              if (h.role !== "user") return { kind: h.role, id: nextId(), text: h.text };
+              // App-button prompts (e.g. "Initialize Git") were shown live as a
+              // friendly shimmer label, not the expanded body. The label is
+              // webview-only, so recover it from the restored prompt text. Slash
+              // commands are already collapsed to `/name` by the sidecar (h.command).
+              const label = !h.command ? recoverPromptLabel(h.text) : null;
+              // Recover @-referenced files appended to the prompt so resumed
+              // sessions show the same file chips (and clean text) as when sent.
+              const parsed = !h.command && label === null ? parseReferencedFiles(h.text) : null;
               return {
-                kind: "subagent_group",
+                kind: "user",
                 id: nextId(),
-                agents: h.subagentGroup.map((a, i) => ({
-                  toolCallId: `history-${i}`,
-                  agentName: a.agentName,
-                  status: a.status,
-                  activities: [],
-                  toolUseCount: a.toolUseCount,
-                  tokenUsage: { input: 0, output: 0 },
-                })),
+                text: parsed ? parsed.text : h.text,
+                command: h.command || label !== null,
+                ...(label !== null ? { label } : {}),
+                images: h.images && h.images.length > 0 ? h.images : undefined,
+                ...(parsed && parsed.files.length > 0 ? { files: parsed.files } : {}),
+                ...(h.enhancements && h.enhancements.length > 0
+                  ? { enhancements: h.enhancements }
+                  : {}),
               };
-            if (h.hook) return { kind: "hook", id: nextId(), hook: h.hook };
-            // A resumed compacted session shows the quiet compaction notice in
-            // place of the raw summary body (counts aren't persisted).
-            if (h.compacted)
-              return {
-                kind: "compaction",
-                id: nextId(),
-                status: "done",
-                originalCount: h.compactionCounts?.originalCount,
-                newCount: h.compactionCounts?.newCount,
-              };
-            // Persisted display-only markers: plan-mode banner, task header,
-            // error rows, and the video-capability info row — all rendered
-            // identically to their live counterparts.
-            if (h.plan) return { kind: "plan", id: nextId(), reason: h.plan.reason };
-            if (h.task) return { kind: "task", id: nextId(), title: h.task.title };
-            if (h.error) {
-              return {
-                kind: "error",
-                id: nextId(),
-                ...readChatError({ ...h.error }, h.error.scope, true),
-              };
-            }
-            if (h.infoKind === "video_warning")
-              return { kind: "info", id: nextId(), text: VIDEO_CAPABILITY_WARNING };
-            // Ken "Send to GG Coder" prompts: restore the shimmer label, not the
-            // full prompt body (matches live).
-            if (h.kenSent && h.role === "user")
-              return { kind: "user", id: nextId(), text: h.text, kenSent: true };
-            // Persisted Ken (mentor) turns: his reply restores as a Ken bubble,
-            // the `@Ken` question as a Ken-tinted user bubble (matches live).
-            if (h.ken && h.role === "assistant") return { kind: "ken", id: nextId(), text: h.text };
-            if (h.ken && h.role === "user")
-              return { kind: "user", id: nextId(), text: h.text, ken: true };
-            // Persisted autopilot verdict marker: render identically to the
-            // live item so a resumed session never shows the raw verdict text
-            // (e.g. "ALL_CLEAR") the model actually replied with.
-            if (h.autopilot)
-              return {
-                kind: "autopilot",
-                id: nextId(),
-                phase: h.autopilot.phase,
-                reason: h.autopilot.reason,
-                body: h.autopilot.body,
-                copySeed: h.autopilot.copySeed,
-              };
-            if (h.role !== "user") return { kind: h.role, id: nextId(), text: h.text };
-            // App-button prompts (e.g. "Initialize Git") were shown live as a
-            // friendly shimmer label, not the expanded body. The label is
-            // webview-only, so recover it from the restored prompt text. Slash
-            // commands are already collapsed to `/name` by the sidecar (h.command).
-            const label = !h.command ? recoverPromptLabel(h.text) : null;
-            // Recover @-referenced files appended to the prompt so resumed
-            // sessions show the same file chips (and clean text) as when sent.
-            const parsed = !h.command && label === null ? parseReferencedFiles(h.text) : null;
-            return {
-              kind: "user",
-              id: nextId(),
-              text: parsed ? parsed.text : h.text,
-              command: h.command || label !== null,
-              ...(label !== null ? { label } : {}),
-              images: h.images && h.images.length > 0 ? h.images : undefined,
-              ...(parsed && parsed.files.length > 0 ? { files: parsed.files } : {}),
-              ...(h.enhancements && h.enhancements.length > 0
-                ? { enhancements: h.enhancements }
-                : {}),
-            };
-          }),
+            }),
+          ),
         );
       }
       if (st?.conversationId && st.sessionId && unresolvedSessionResetRef.current === unresolved) {
@@ -6156,6 +6178,17 @@ const TranscriptRowBody = memo(function TranscriptRowBody({
       return (
         <div className="line info" data-swap-row={item.id} style={{ color: theme.textDim }}>
           {item.text}
+        </div>
+      );
+    case "security":
+      return (
+        <div data-swap-row={item.id}>
+          <SecurityNotice
+            rule={item.rule}
+            target={item.target}
+            count={item.count}
+            variantKey={String(item.id)}
+          />
         </div>
       );
     case "mcp_tool_failure": {

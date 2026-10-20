@@ -22,6 +22,46 @@ export interface ChangelogEntry {
 /** Newest first. Prepended by the `/release` flow. */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.94.2",
+    date: "2026-10-19",
+    items: [
+      "Web research can't jam a long session anymore. When your agent ran a `web_search` and fetched a page in the same breath right before your chat got tidied up, every message after that could bounce back with a scary `400` error. I fixed it at the root, so research-heavy sessions just keep flowing, and if one of yours is stuck right now, this update brings it back to life on the next message.",
+    ],
+  },
+  {
+    version: "0.94.1",
+    date: "2026-10-19",
+    items: [
+      "Your agent stops installing old versions with serious security holes. AI models love pinning ancient releases like `axios@0.21.1`, so when a version has a known high or critical flaw and a fixed release exists in the same line, GG quietly moves it there instead, straight to `axios@0.34.0`. Nothing breaks, nothing asks you anything, and everyday installs stay exactly as fast as before.",
+    ],
+  },
+  {
+    version: "0.94.0",
+    date: "2026-10-19",
+    items: [
+      "Your agent can no longer install a hijacked package. Every big npm hijack of the last two years was live for only a few hours, so GG now skips any release younger than `2 days` and checks every install against the public malware list, which refreshes itself daily. If a package already in your project gets flagged later, GG spots it, swaps it out and writes it into your `CLAUDE.md` so every future session steers clear. No pop-ups, no questions. It just handles it.",
+      "Poisoned skills, sneaky `MCP` servers and booby-trapped web pages can't turn your agent against you anymore. Skills carrying malware never load, MCP tools with hidden orders get quietly hidden, and if a README tries to make your agent leak your keys or switch off its own safety, GG stops it cold.",
+      "You always know what got stopped. Every block lands in your chat as one plain line, repeats fold into a single row, and your agent tells you what it did instead. I ran all of it against over `100,000` of my own real coding actions to make sure it stays out of your way, and GG starts just as fast as before.",
+    ],
+  },
+  {
+    version: "0.93.6",
+    date: "2026-10-18",
+    items: [
+      "GG Coder just got leaner again. I only load web search when you actually need the web, slimmed down what searches hand back to your agent, and moved a startup check out of your way. On `Claude Haiku 5.5` that's `24%` fewer tokens per task with more tasks passing, and in a fresh race against `9` other agents GG came out cheapest of all and level with the fastest. Your plan now stretches to about `2.2x` the coding you'd get from Claude Code.",
+      "A search that hits minified files can no longer flood your chat. One unlucky search could dump `135k` tokens into a single reply and burn through your usage, so I now hold oversized output to its `50 KB` cap no matter how it's shaped.",
+      "The titlebar stops calling your project `not a git repo` just because git was slow to answer on a busy machine. GG now waits it out in the background and shows the real state.",
+    ],
+  },
+  {
+    version: "0.93.5",
+    date: "2026-10-18",
+    items: [
+      "GG Coder is now the leanest coding agent I've tested. I raced it against `9` other agents on the same model, `Claude Haiku 5.5`, and GG finished every task, tied the two fastest and came out cheapest of the lot. Against Claude Code it was 14% faster and burned 47% less usage, and against Oh My Pi it was 23% faster and burned 34% less. On a subscription, that stretches your plan to roughly `1.9x` the coding you'd get from Claude Code. The trick: after it changes code, GG now gives you a tight summary instead of an essay, while answers and reviews keep their full length.",
+      "Work whose tests passed now shows as verified. Your agent often runs tests inside a bigger command, and GG couldn't count that as proof, so finished work could still look `incomplete`. Now GG quietly re-checks those tests itself in under a second, so the badge tells you the truth.",
+    ],
+  },
+  {
     version: "0.93.4",
     date: "2026-10-17",
     items: [

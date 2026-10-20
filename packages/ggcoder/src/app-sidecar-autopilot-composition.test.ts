@@ -77,6 +77,9 @@ async function pane(
     getPlanMode: () => false,
     getRoadmapPhaseLeaseMarker: () => null,
     getCacheExpiryStatus: (_now?: number): CacheExpiryStatus | null => null,
+    // Upstream gg-safe state fields read by the state snapshot.
+    getBlockedSkills: () => [],
+    getInstalledThreats: () => [],
     dispose: async () => {},
   };
   const events = vi.fn();

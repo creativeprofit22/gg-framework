@@ -5,16 +5,16 @@
 // BLOCKING gate): max(baseline * 1.5, 5000ms) — this catches pathological
 // regressions like sync I/O at import time, not 50ms scheduler noise.
 // Usage:
-//   node bench/startup-gate.mjs            # check against baseline
-//   node bench/startup-gate.mjs --update   # re-baseline
+//   node .github/ci/startup-gate.mjs            # check against baseline
+//   node .github/ci/startup-gate.mjs --update   # re-baseline
 import { readFileSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 
-const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const BASELINE_PATH = path.join(REPO_ROOT, "bench/baseline/sizes.json");
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+const BASELINE_PATH = path.join(REPO_ROOT, ".github/ci/baseline/sizes.json");
 const CLI = path.join(REPO_ROOT, "packages/ggcoder/dist/cli.js");
 const RUNS = 5;
 const HARD_FLOOR_MS = 5000;
@@ -56,7 +56,7 @@ if (!entry) {
   if (median > budget) {
     console.error(
       "\nStartup budget exceeded. If the regression is intentional, re-baseline with:\n" +
-        "  node bench/startup-gate.mjs --update",
+        "  node .github/ci/startup-gate.mjs --update",
     );
     process.exit(1);
   }

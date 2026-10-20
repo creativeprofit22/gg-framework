@@ -6,6 +6,7 @@ import { randomUUID } from "node:crypto";
 import type { Message } from "@kenkaiiii/gg-ai";
 import type { AgentEvent } from "@kenkaiiii/gg-agent";
 import { useFakeHome } from "../test-support/fake-home.js";
+import { removeWhenReleased } from "./lsp/test-support.js";
 import type { AgentSession } from "./agent-session.js";
 import type { ProcessManager } from "./process-manager.js";
 import { createBashTool, REVIEW_REJECTED_BEFORE_START } from "../tools/bash.js";
@@ -41,8 +42,9 @@ afterEach(async () => {
   await session?.dispose();
   session = undefined;
   restoreHome?.();
-  await fs.rm(home, { recursive: true, force: true });
-  await fs.rm(cwd, { recursive: true, force: true });
+  // Windows refuses to delete a folder a still-exiting node child holds.
+  await removeWhenReleased(home);
+  await removeWhenReleased(cwd);
 });
 async function makeSession(transient = true, sessionId?: string) {
   const { AgentSession: Session } = await import("./agent-session.js");
@@ -256,5 +258,55 @@ describe("honest reports without stop gates", () => {
         .getVerificationEvidenceLedgerSnapshot()
         .currentEvidence.every((entry) => entry.status === "unavailable"),
     ).toBe(true);
+  });
+});
+
+// Upstream 0.94 regression (arena, 2026-10-18): Haiku 5.5 ran passing tests
+// inside longer commands in 21/50 trials; none counted, so runs showed as
+// unverified. The session now re-runs that check standalone, on this ledger.
+describe("re-running a check whose exit status could not count", { timeout: 60_000 }, () => {
+  const check = "node --test pass.test.mjs";
+  const compound = `${check} 2>&1 | tail -3; node -e "console.log(1)"`;
+  const writeTest = (passes: boolean) =>
+    fs.writeFile(
+      path.join(cwd, "pass.test.mjs"),
+      `import test from "node:test";\ntest("t", () => { if (!${passes}) throw new Error("no"); });\n`,
+    );
+  const evidenceFor = (command: string) =>
+    session!
+      .getVerificationEvidenceLedgerSnapshot()
+      .currentEvidence.filter((entry) => entry.command === command);
+
+  it("records the re-run's pass when the turn would end", async () => {
+    await writeTest(true);
+    const { internal } = await makeSession();
+    await tool(internal, "edit", { file_path: "source.ts" });
+    await tool(internal, "bash", { command: compound }, 0);
+    expect(session!.getVerificationProblem()).not.toBeNull();
+    await internal.getHookFollowUpMessages();
+    expect(session!.getVerificationProblem()).toBeNull();
+    expect(evidenceFor(check)).toEqual([expect.objectContaining({ status: "passed" })]);
+  });
+
+  it("stays unverified, without a recorded failure, when the re-run fails", async () => {
+    await writeTest(false);
+    const { internal } = await makeSession();
+    await tool(internal, "edit", { file_path: "source.ts" });
+    await tool(internal, "bash", { command: compound }, 0);
+    await internal.getHookFollowUpMessages();
+    const problem = session!.getVerificationProblem();
+    expect(problem).not.toBeNull();
+    expect(problem).not.toContain("a check failed");
+    expect(evidenceFor(check)).toEqual([]);
+  });
+
+  it("does not run a check the model skipped after its last edit", async () => {
+    await writeTest(true);
+    const { internal } = await makeSession();
+    await tool(internal, "bash", { command: compound }, 0);
+    await tool(internal, "edit", { file_path: "source.ts" });
+    await internal.getHookFollowUpMessages();
+    expect(session!.getVerificationProblem()).not.toBeNull();
+    expect(evidenceFor(check)).toEqual([]);
   });
 });

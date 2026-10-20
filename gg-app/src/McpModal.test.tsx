@@ -91,6 +91,33 @@ describe("McpModal lifecycle guidance", () => {
 });
 
 describe("McpModal server status", () => {
+  it("lists tools the safety guard hid under the row, capped with a remainder", async () => {
+    listMcpServersMock.mockResolvedValue([
+      {
+        ...connectedRow,
+        warning: [1, 2, 3, 4, 5]
+          .map((n) => `Hid tool "t${n}" from server "example": prompt injection`)
+          .join("\n"),
+      },
+    ]);
+    render(<McpModal client={client} onClose={vi.fn()} />);
+    const first = await screen.findByText('Hid tool "t1": prompt injection');
+    const entry = first.closest(".mcp-entry");
+    expect(entry?.querySelector(".mcp-item")?.textContent).toContain("example");
+    expect(entry?.querySelectorAll(".mcp-notes li")).toHaveLength(4);
+    expect(screen.getByText("and 2 more hidden")).toBeTruthy();
+    expect(screen.queryByText(/t4/)).toBeNull();
+  });
+
+  it("does not show hidden-tool notes for disabled servers", async () => {
+    listMcpServersMock.mockResolvedValue([
+      { ...connectedRow, enabled: false, warning: 'Hid tool "t1" from server "example": x' },
+    ]);
+    render(<McpModal client={client} onClose={vi.fn()} />);
+    await screen.findByText("Disabled");
+    expect(document.querySelector(".mcp-notes")).toBeNull();
+  });
+
   it.each([
     ["trust-blocked", "Project server blocked. Add or re-add it in this project to trust it."],
     ["connection-failed", "Could not connect. Check the server settings and availability."],

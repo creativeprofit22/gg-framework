@@ -1,6 +1,7 @@
 import type { McpServerRow } from "@kenkaiiii/gg-core";
 import { loadSavedSettings, projectScopeAllowed } from "./config.js";
 import { MCPClientManager } from "./core/mcp/client.js";
+import { hiddenToolMessage } from "./core/mcp/index.js";
 import { loadServers } from "./core/mcp/store.js";
 import type { MCPServerConfig } from "./core/mcp/types.js";
 
@@ -48,6 +49,9 @@ export async function buildMcpRows(cwd: string, settingsFile: string): Promise<M
           kind: s.config.url ? "http" : "stdio",
           summary: mcpRowSummary(s.config),
           requiresAuth: result?.requiresAuth,
+          ...(result?.hidden?.length
+            ? { warning: result.hidden.map(hiddenToolMessage).join("\n") }
+            : {}),
         };
       }),
       ...blocked.map((s): McpServerRow => ({

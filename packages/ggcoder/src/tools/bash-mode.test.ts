@@ -4,7 +4,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { PassThrough, Writable } from "node:stream";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ProcessManager } from "../core/process-manager.js";
 import type { BashToolResultDetails } from "../types.js";
 import { createBashTool } from "./bash.js";
@@ -143,6 +143,20 @@ const foregroundCommands = [
 ] as const;
 
 describe("bash explicit command modes", () => {
+  // `pnpm exec <bin>` passes the gg-safe package check, which may query the
+  // registry/OSV before spawning. Keep tests offline (the check fails open).
+  beforeEach(() => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new Error("offline");
+      }),
+    );
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
   describe.each(foregroundCommands)("foreground $commandClass", ({ command, timeoutMs }) => {
     it("waits for final status with ignored stdin and structured timeout diagnostics", async () => {
       const harness = await createHarness();
@@ -155,7 +169,9 @@ describe("bash explicit command modes", () => {
           return result;
         });
 
-        await vi.waitFor(() => expect(harness.spawn).toHaveBeenCalledTimes(1));
+        // The first case pays the cold gg-safe module load (~0.5 s alone, >1 s
+        // under a parallel run) before spawning; later cases take ~70 ms.
+        await vi.waitFor(() => expect(harness.spawn).toHaveBeenCalledTimes(1), { timeout: 5_000 });
         expect(harness.spawn.mock.calls[0]?.[2]).toMatchObject({
           detached: true,
           stdio: ["ignore", "pipe", "pipe"],

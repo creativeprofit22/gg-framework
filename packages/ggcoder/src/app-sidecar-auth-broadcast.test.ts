@@ -335,7 +335,14 @@ describe("a goal window reconnecting", () => {
       body: { mode: "code", cwd: goalDir },
     });
     expect(created.status).toBe(200);
-    const state = await request("GET", "/state", { session: created.json.sessionId as string });
+    // A busy machine can make the first git read miss its 2 s limit; the
+    // sidecar then re-reads in the background, so poll briefly for the result.
+    const sessionId = created.json.sessionId as string;
+    let state = await request("GET", "/state", { session: sessionId });
+    for (let i = 0; i < 40 && state.json.isGitRepo !== true; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      state = await request("GET", "/state", { session: sessionId });
+    }
     expect(state.json.isGitRepo).toBe(true);
     expect(state.json.gitDirtyFileCount).toBe(2);
   });

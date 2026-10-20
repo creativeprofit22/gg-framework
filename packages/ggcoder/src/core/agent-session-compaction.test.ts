@@ -1159,6 +1159,54 @@ describe("AgentSession mid-turn compaction", () => {
     expect(compactMock.mock.calls.at(-1)?.[0]).toContainEqual(pendingMessage);
   });
 
+  it("keeps the run's post-compaction messages when the run then fails", async () => {
+    shouldCompactMock.mockReturnValue(true);
+    // A fresh array per call, like the real compactor.
+    compactMock.mockImplementation(async () =>
+      compactionResult([
+        { role: "system", content: "system prompt" },
+        { role: "user", content: "[compacted in-flight history]" },
+      ]),
+    );
+    const postCompaction: Message[] = [
+      { role: "assistant", content: [{ type: "tool_call", id: "t2", name: "read", args: {} }] },
+      { role: "tool", content: [{ type: "tool_result", toolCallId: "t2", content: "out" }] },
+    ];
+    agentLoopMock.mockImplementation(async function* (
+      messages: Message[],
+      options: {
+        transformContext?: (m: Message[], o: TransformContextOptions) => Promise<Message[]>;
+      },
+    ) {
+      // Mirrors agentLoop: adopt the compacted history in place, keep going, then fail.
+      const transformed = await options.transformContext!(messages, { pendingMessages: [] });
+      messages.length = 0;
+      messages.push(...transformed, ...postCompaction);
+      yield {
+        type: "turn_end",
+        turn: 1,
+        stopReason: "tool_use",
+        usage: { inputTokens: 1, outputTokens: 1 },
+      };
+      throw new Error("provider rejected the request");
+    });
+
+    const { AgentSession } = await import("./agent-session.js");
+    const session = new AgentSession({
+      provider: "anthropic",
+      model: "claude-test",
+      cwd: tmpProject,
+      systemPrompt: "system prompt",
+      transient: true,
+    });
+    await session.initialize();
+    await expect(session.prompt("run a tool loop")).rejects.toThrow("provider rejected");
+    const history = session.getMessages();
+    await session.dispose();
+
+    expect(history.slice(-2)).toEqual(postCompaction);
+  });
+
   it("reuses authoritative usage for the first context check of the next prompt", async () => {
     const usage: Usage = { inputTokens: 120_000, outputTokens: 100 };
     shouldCompactMock.mockImplementation(

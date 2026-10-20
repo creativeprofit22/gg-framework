@@ -15,4 +15,6 @@ export interface McpServerRow {
   /** Transport summary for display (URL or command + arguments). */
   summary: string;
   requiresAuth?: boolean;
+  /** gg-safe: one line per tool the guard hid from the model (safe to render). */
+  warning?: string;
 }

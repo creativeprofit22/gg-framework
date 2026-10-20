@@ -165,6 +165,60 @@ export function applyServerFallbackReplay(
   return out.every(isServerFallbackBlock) ? [] : out;
 }
 
+/** Id of a server-tool call block (`server_tool_call` part or raw `server_tool_use`). */
+function serverToolUseId(part: ContentPart): string | undefined {
+  if (part.type === "server_tool_call") return part.id;
+  if (
+    part.type === "raw" &&
+    part.data.type === "server_tool_use" &&
+    typeof part.data.id === "string"
+  )
+    return part.data.id;
+  return undefined;
+}
+
+/**
+ * Ids of server-tool calls that must not be replayed: no result block for them
+ * exists anywhere in the history, and the turn they belong to is closed.
+ *
+ * When Claude calls a server tool (web_search) alongside a client tool, the API
+ * defers the server tool: the response holds a `server_tool_use` with no result,
+ * and the result arrives at the start of the NEXT response — but only if the
+ * follow-up user message holds nothing except `tool_result` blocks. Anything
+ * after the results (a re-grounding or steering note, a new prompt after an
+ * error) closes the turn, and the API 400s on the still-unresolved call:
+ * "`web_search` tool use with id … was found without a corresponding
+ * `web_search_tool_result` block". Every later request repeats it, so the
+ * session is stuck. So a resultless call is kept only while it can still
+ * resolve: in the last assistant message, followed by nothing but tool results
+ * (or nothing at all — a `pause_turn` resend).
+ */
+function unresolvedServerToolUseIds(messages: Message[]): Set<string> {
+  const resultIds = new Set<string>();
+  let lastAssistantIdx = -1;
+  messages.forEach((msg, idx) => {
+    if (msg.role !== "assistant") return;
+    lastAssistantIdx = idx;
+    if (typeof msg.content === "string") return;
+    for (const part of msg.content) {
+      if (part.type === "server_tool_result") resultIds.add(part.toolUseId);
+      else if (part.type === "raw" && typeof part.data.tool_use_id === "string")
+        resultIds.add(part.data.tool_use_id);
+    }
+  });
+  const turnStillOpen = messages.slice(lastAssistantIdx + 1).every((m) => m.role === "tool");
+  const dropped = new Set<string>();
+  messages.forEach((msg, idx) => {
+    if (msg.role !== "assistant" || typeof msg.content === "string") return;
+    if (idx === lastAssistantIdx && turnStillOpen) return;
+    for (const part of msg.content) {
+      const id = serverToolUseId(part);
+      if (id !== undefined && !resultIds.has(id)) dropped.add(id);
+    }
+  });
+  return dropped;
+}
+
 /** Map a single assistant content part to its Anthropic wire block (or null to drop). */
 function toAnthropicAssistantPart(
   part: ContentPart,
@@ -799,6 +853,7 @@ export function toAnthropicMessages(
   const keepFallbackBlocks = options?.fallbackBlocks === true;
   // Client tool calls dropped by the fallback replay rules; their results go too.
   const droppedToolCallIds = new Set<string>();
+  const unresolvedServerToolIds = unresolvedServerToolUseIds(messages);
 
   // Thinking is preserved across the ACTIVE trajectory: every assistant turn
   // after the last real user message (tool results are role "tool", not "user").
@@ -871,11 +926,18 @@ export function toAnthropicMessages(
       // filter below and would reach the wire as an empty string — Anthropic
       // 400s on it just like an empty text block. Drop it (baseline #20 D).
       if (typeof msg.content === "string" && msg.content === "") continue;
-      const content =
-        typeof msg.content === "string"
+      const replayable =
+        typeof msg.content === "string" || unresolvedServerToolIds.size === 0
           ? msg.content
+          : msg.content.filter((part) => {
+              const id = serverToolUseId(part);
+              return id === undefined || !unresolvedServerToolIds.has(id);
+            });
+      const content =
+        typeof replayable === "string"
+          ? replayable
           : toAnthropicAssistantContent(
-              applyServerFallbackReplay(msg.content, keepFallbackBlocks, droppedToolCallIds),
+              applyServerFallbackReplay(replayable, keepFallbackBlocks, droppedToolCallIds),
               msgIdx > trajectoryStartIdx,
               idMap,
             );

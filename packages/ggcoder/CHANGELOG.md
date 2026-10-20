@@ -1,5 +1,57 @@
 # @kenkaiiii/ggcoder
 
+## 5.84.2
+
+### Patch Changes
+
+- Fix Anthropic 400 "web_search tool use … without a corresponding web_search_tool_result" that bricked sessions after a deferred web search, and keep a run's post-compaction messages when the run fails.
+  - @kenkaiiii/gg-ai@5.84.2
+  - @kenkaiiii/gg-agent@5.84.2
+  - @kenkaiiii/gg-core@5.84.2
+
+## 5.84.1
+
+### Patch Changes
+
+- Installs of a package version with HIGH or CRITICAL known security flaws are now moved to the newest fixed release in the same major version (for example `axios@0.21.1` → `0.34.0`), with no prompt. Versions with no fix yet, or only fixed in a new major, are left alone, and clean installs make no extra requests.
+  - @kenkaiiii/gg-ai@5.84.1
+  - @kenkaiiii/gg-agent@5.84.1
+  - @kenkaiiii/gg-core@5.84.1
+
+## 5.84.0
+
+### Minor Changes
+
+- Add a security layer that blocks infected packages, malicious skills, poisoned MCP tools and prompt-injection actions without ever asking the user. Installs skip versions under 2 days old (the window every recent hijack lived in) and are checked against the public OSV malware list live and through a daily background feed; projects are re-checked for packages flagged after install. Skills with malware patterns are not loaded, poisoned or quietly changed MCP tools are hidden, and harmful actions (sending secrets out, DNS leaks, switching on auto-run in other tools, launching AI CLIs with safety off) are blocked. Each block leaves a chat row, and blocked packages are recorded in the project's CLAUDE.md or AGENTS.md so later sessions avoid them.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.84.0
+- @kenkaiiii/gg-agent@5.84.0
+- @kenkaiiii/gg-core@5.84.0
+
+## 5.83.5
+
+### Patch Changes
+
+- a69cc27: The titlebar no longer shows a project as "not a git repo, 0 changed files" when git is just slow to answer. On a busy machine, git could miss GG's 2-second limit when a window opened, and that timeout was reported as "not a repo" with nothing to correct it until the next run. GG now treats a timeout as unknown, and re-reads the git state in the background with more time.
+- Leaner, faster requests. On Anthropic, the built-in web search tool (about 2,500 tokens on every request) is now attached only when a session needs the web, either when the prompt asks for it or when the model looks it up. `tool_search` now loads only the best match instead of up to five loosely related tools. Grep output lists each file path once instead of on every matching line. Oversized bash output is held to its 50 KB cap even when it is made of a few huge lines, such as minified bundles. The Claude Code version lookup no longer blocks the first message. On Claude Haiku 5.5 across 270 benchmark runs, input tokens fell 24% with more tasks passing.
+  - @kenkaiiii/gg-ai@5.83.5
+  - @kenkaiiii/gg-agent@5.83.5
+  - @kenkaiiii/gg-core@5.83.5
+
+## 5.83.4
+
+### Patch Changes
+
+- 420b1ad: The bash tool no longer appends a "Verification evidence rejected" note to checks whose exit status can't prove success (e.g. `npm test | grep x; git diff`). The model almost always re-ran the suite after it, and the output it already had was correct. Such checks still don't count as verification: run status reports the turn as incomplete, as before. On Claude Haiku 5.5 this cut model requests about 7% and input tokens about 9%, with no change in pass rate.
+- 420b1ad: Shorter replies and a cleaner system prompt. After changing code, the agent's summary now aims for under ~100 words: a bold headline, then a few flat bullets with what changed, the check result, and any caveat or change made beyond the request. Answers and reviews keep the length they need. Progress messages between steps are one sentence. On Claude Haiku 5.5 this cut task time about 15% and cost about 15%, with no change in pass rate or test reporting. The prompt also drops a few contradictions. Language style packs no longer override a project's own conventions or push it to install a schema library. The agent runs one check after its edits instead of deferring checks to /commit. Detailed hardening rules now live only in the bulletproof skill.
+- 420b1ad: Turns no longer show as unverified when the agent's tests actually passed. Agents often run tests inside a longer command (`npm test 2>&1 | tail; node -e '…'`), and that command's exit status comes from its last part, so the tests never counted. When a turn would end unverified that way, GG now runs that test command once more on its own and records its real result. It never runs checks the agent skipped. If nothing was edited since, a pass counts as verification. A failed re-run leaves the turn unverified without marking it failed.
+- Updated dependencies [420b1ad]
+  - @kenkaiiii/gg-ai@5.83.4
+  - @kenkaiiii/gg-agent@5.83.4
+  - @kenkaiiii/gg-core@5.83.4
+
 ## 5.83.3
 
 ### Patch Changes

@@ -19,11 +19,19 @@ import { createToolSearchTool } from "./tools/tool-search.js";
 const observedProviderToolNames = vi.hoisted(() => [] as string[][]);
 const observedNativeWebSearch = vi.hoisted(() => [] as boolean[]);
 const agentLoopMock = vi.hoisted(() =>
-  vi.fn((_messages: unknown, options: { tools?: AgentTool[]; webSearch?: boolean }) => {
-    observedProviderToolNames.push((options.tools ?? []).map((tool) => tool.name).sort());
-    observedNativeWebSearch.push(options.webSearch === true);
-    return (async function* emptyLoop() {})();
-  }),
+  vi.fn(
+    (
+      _messages: unknown,
+      options: { tools?: AgentTool[]; webSearch?: boolean | (() => boolean) },
+    ) => {
+      observedProviderToolNames.push((options.tools ?? []).map((tool) => tool.name).sort());
+      // Upstream 0.93.6 passes a per-request predicate; resolve it as the loop would.
+      const webSearch =
+        typeof options.webSearch === "function" ? options.webSearch() : options.webSearch;
+      observedNativeWebSearch.push(webSearch === true);
+      return (async function* emptyLoop() {})();
+    },
+  ),
 );
 
 vi.mock("@kenkaiiii/gg-agent", async () => {
@@ -41,9 +49,11 @@ const REMOVED_RESEARCH_TOOLS = [
   "delegate_to_agent",
 ] as const;
 
-const PROVIDER_VISIBLE_RESEARCH_TOOL_NAMES = RESEARCH_CHAT_ALLOWED_TOOL_NAMES.filter(
-  (name) => name !== "web_search",
-);
+// Upstream 0.93.6: on a tiered Anthropic session native web search rides along
+// only once the client `web_search` is promoted, and the Anthropic transport
+// then drops the client tool in favour of the native one. Research allows
+// `web_search`, so its policy promotes it and the loop sees every allowed tool.
+const PROVIDER_VISIBLE_RESEARCH_TOOL_NAMES = [...RESEARCH_CHAT_ALLOWED_TOOL_NAMES];
 
 const TOOL_CONTEXT = {
   signal: new AbortController().signal,

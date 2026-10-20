@@ -13,6 +13,7 @@ import { assertProviderExecutionAllowed, runUnattended } from "./core/provider-e
  * The agent spine (gg-ai → gg-agent → gg-core) and every tool are reused
  * unchanged via AgentSession — this file is only a network seam.
  */
+import { startThreatFeedSync } from "./core/threat-feed.js";
 import http from "node:http";
 import { nativeDevAuthFile, isNativeManagedAuthProvider } from "./app-sidecar-native-auth.js";
 import fs from "node:fs/promises";
@@ -503,6 +504,8 @@ interface HistoryEntryForWire {
   error?: AppErrorPayload;
   /** Webview-copy info row marker (e.g. the video-capability warning). */
   infoKind?: "video_warning";
+  /** Safety-block chat row (persisted `security` app marker). */
+  security?: { rule: string; target: string };
   /** Image previews; `text` carries verbatim warnings rendered once before them. */
   toolImages?: Array<{ src: string; path?: string }>;
   /** Failed MCP result restored as a durable transcript row. */
@@ -569,6 +572,9 @@ interface SseClient {
   id: number;
   res: http.ServerResponse;
 }
+
+/** Limit for re-reading git state in the background when git missed the usual 2 s. */
+const SLOW_GIT_READ_TIMEOUT_MS = 15_000;
 
 async function main(): Promise<void> {
   // Hidden persistent-worker dispatch must win before strict JSON/server parsing.
@@ -680,6 +686,10 @@ async function main(): Promise<void> {
   // Sweep recoverable full tool outputs (~/.gg/tool-output/) older than 48h.
   // Fire-and-forget: cleanup must never delay or break startup.
   void cleanupToolOutputs().catch(() => {});
+
+  // Daily malicious-package feed (OSV MAL-, npm + PyPI): deferred, background,
+  // fail-silent; at most one sync a day (core/threat-feed.ts).
+  startThreatFeedSync();
 
   const auth = new AuthStorage(nativeDevAuthFile(paths.authFile));
   await auth.load();
@@ -2161,7 +2171,8 @@ async function createSession(
   // follows the active model. A Goal window reads git from its attached
   // project folder, not the goal folder (see resolveGitCwd), and re-targets
   // when the goal's folders change (`retargetGit`).
-  let gitCwd = await resolveGitCwd(cwd, goal?.record ?? null);
+  const initialTarget = await resolveGitCwd(cwd, goal?.record ?? null);
+  let gitCwd = initialTarget.dir;
   const initialGit = await readGitState(gitCwd);
   let gitBranch: string | null = initialGit.branch;
   let gitIsRepo: boolean = initialGit.isRepo;
@@ -2473,6 +2484,8 @@ async function createSession(
     target.eventBus.on("model_change", (data) => broadcast("model_change", data));
     target.eventBus.on("hook", (data) => broadcast("hook", data));
     target.eventBus.on("diagnostics", (data) => broadcast("diagnostics", data));
+    target.eventBus.on("security_notice", (data) => broadcast("security_notice", data));
+    target.eventBus.on("security_block", (data) => broadcast("security_block", data));
     target.eventBus.on("hook_armed", (data) => broadcast("hook_armed", data));
     target.eventBus.on("subagent_state", (data) => {
       broadcast("subagent_state", data);
@@ -4111,28 +4124,48 @@ async function createSession(
   let gitTargetGeneration = 0;
   /**
    * A goal's attached folders changed: point the titlebar's git state at the
-   * new project folder. No-op when the target is unchanged; a newer call or
-   * teardown supersedes one still reading git.
+   * new project folder. No-op when the target is unchanged, unless `reread`
+   * asks for a fresh read of the same folder; a newer call or teardown
+   * supersedes one still reading git.
    */
-  async function retargetGit(): Promise<void> {
+  async function retargetGit(
+    options: { reread?: boolean; timeoutMs?: number } = {},
+  ): Promise<void> {
     const generation = ++gitTargetGeneration;
-    const next = await resolveGitCwd(cwd, goal?.record ?? null);
-    if (generation !== gitTargetGeneration || repoWatchStopped || next === gitCwd) return;
-    const state = await readGitState(next);
+    const read = { timeoutMs: options.timeoutMs };
+    const { dir: next } = await resolveGitCwd(cwd, goal?.record ?? null, (dir) =>
+      isGitRepo(dir, read),
+    );
     if (generation !== gitTargetGeneration || repoWatchStopped) return;
-    repoWatch.unsubscribe();
+    if (next === gitCwd && !options.reread) return;
+    const state = await readGitState(next, read);
+    if (generation !== gitTargetGeneration || repoWatchStopped) return;
+    const moved = next !== gitCwd || state.gitHubSlug !== gitHubSlug;
     gitCwd = next;
     gitBranch = state.branch;
     gitIsRepo = state.isRepo;
     gitDirtyFileCount = state.dirtyFileCount;
     gitHubSlug = state.gitHubSlug;
-    // The old repo's numbers don't apply; the new watchers fill these in.
-    gitHubIssues = null;
-    gitHubPRs = null;
-    gitHubCI = null;
-    projectHealthScan = null;
-    repoWatch = watchRepo(gitCwd);
+    if (moved) {
+      // The old repo's numbers don't apply; the new watchers fill these in.
+      repoWatch.unsubscribe();
+      gitHubIssues = null;
+      gitHubPRs = null;
+      gitHubCI = null;
+      projectHealthScan = null;
+      repoWatch = watchRepo(gitCwd);
+    }
     broadcast("extras", footerExtras());
+  }
+  // Git missed its 2 s limit at startup (a busy machine): the titlebar would
+  // show "not a repo" until the next run. Read again in the background with
+  // more time; window creation doesn't wait for it.
+  if (!initialTarget.settled || !initialGit.settled) {
+    retargetGit({ reread: true, timeoutMs: SLOW_GIT_READ_TIMEOUT_MS }).catch((err: unknown) => {
+      log("WARN", "app-sidecar", "slow git re-read failed", {
+        message: err instanceof Error ? err.message : String(err),
+      });
+    });
   }
 
   const continuationHandoffService = new AppSidecarContinuationHandoffService({
@@ -4311,6 +4344,9 @@ async function createSession(
       chatAgent,
       // A goal window must stay a goal after a reconnect or daemon restart.
       goal: goalStatePayload({ goal, session }),
+      // Skills the safety scan kept out; the app shows each once (toast).
+      blockedSkills: session.getBlockedSkills(),
+      installedThreats: session.getInstalledThreats().map(({ key, message }) => ({ key, message })),
       running,
       runState: runLifecycle.state,
       ready: true,
@@ -4933,6 +4969,12 @@ async function createSession(
                 role: "assistant",
                 text: "",
                 task: { title: typeof d.title === "string" ? d.title : "" },
+              });
+            } else if (marker.kind === "security" && typeof d.rule === "string") {
+              history.push({
+                role: "assistant",
+                text: "",
+                security: { rule: d.rule, target: typeof d.target === "string" ? d.target : "" },
               });
             } else if (marker.kind === "error" && typeof d.headline === "string") {
               const error = restoreAppErrorPayload(d);

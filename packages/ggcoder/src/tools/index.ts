@@ -65,7 +65,7 @@ import type { WriteGuardSettings } from "../core/workspace-guard.js";
 import type { GetNetworkPolicy } from "../core/network-guard.js";
 import type { SandboxPolicy } from "../core/sandbox.js";
 import type { AgentDefinition } from "../core/agents.js";
-import type { Skill } from "../core/skills.js";
+import type { BlockedSkill, Skill } from "../core/skills.js";
 import type { AgentNotificationQueue } from "../core/agent-notifications.js";
 
 // Canonical registry of built-in tool names. Defined in prompt-hints (a leaf
@@ -90,6 +90,8 @@ export interface CreateToolsOptions {
   /** Default provider/model for spawned children (see SubAgentManagerOptions). */
   getChildModel?: () => ChildModelPick | undefined;
   skills?: Skill[];
+  /** Skills the safety scan refused; the skill tool names them instead of "not found". */
+  blockedSkills?: readonly BlockedSkill[];
   /** Byte budgets for skill catalog / MCP descriptions in tool schemas. */
   contextLimits?: ContextLimits;
   provider?: Provider;
@@ -166,6 +168,8 @@ export interface CreateToolsOptions {
   getSandboxPolicy?: () => SandboxPolicy;
   /** Lazily read bash yield / inactivity / hard-limit settings. Defaults apply when omitted. */
   getForegroundLimitSettings?: () => ForegroundLimitSettings;
+  /** Package release-age cooldown in days (settings `packageCooldownDays`). */
+  getPackageCooldownDays?: () => number;
   /**
    * Lazily read whether `grep` may use the external `rg` scanner when present
    * (grepUseRipgrep). Defaults to enabled when omitted.
@@ -337,6 +341,7 @@ export async function createTools(
       opts?.getNetworkPolicy,
       ops === localOperations ? opts?.getSandboxPolicy : undefined,
       opts?.getForegroundLimitSettings,
+      opts?.getPackageCooldownDays,
     ),
     createTauriPackageTool(cwd, processManager, {
       operations: ops,
@@ -395,8 +400,11 @@ export async function createTools(
     );
   }
 
-  // Add web search tool for providers without reliable native web search
-  if (opts?.provider && opts.provider !== "anthropic") {
+  // Client web search. On Anthropic it is only the deferred catalog entry for
+  // the native server tool: once promoted, the transport swaps in
+  // `web_search_20250305` (same name) instead of this schema, and a call made
+  // before promotion runs this client search. See AgentSession.nativeWebSearchOn.
+  if (opts?.provider) {
     tools.push(createWebSearchTool(opts?.getNetworkPolicy));
   }
 
@@ -455,7 +463,7 @@ export async function createTools(
   }
 
   if (opts?.skills && opts.skills.length > 0) {
-    tools.push(createSkillTool(opts.skills, opts.contextLimits));
+    tools.push(createSkillTool(opts.skills, opts.contextLimits, opts.blockedSkills));
   }
 
   if (opts?.onEnterPlan) {

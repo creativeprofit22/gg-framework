@@ -16,6 +16,7 @@ beforeEach(async () => {
 afterEach(async () => {
   if (prevAgentDir === undefined) delete process.env.GG_AGENT_DIR;
   else process.env.GG_AGENT_DIR = prevAgentDir;
+  vi.unstubAllGlobals();
   vi.restoreAllMocks();
   await fs.rm(tmpDir, { recursive: true, force: true });
 });
@@ -91,5 +92,92 @@ describe("noteRequiredClaudeCodeVersion", () => {
   it("ignores errors that carry no version requirement", async () => {
     const { noteRequiredClaudeCodeVersion } = await load();
     expect(await noteRequiredClaudeCodeVersion("rate_limit_error")).toBe(false);
+  });
+});
+
+describe("getClaudeCodeVersion", () => {
+  async function writeCache(version: string, fetchedAt: number) {
+    await fs.writeFile(cacheFile(), JSON.stringify({ version, fetchedAt }));
+  }
+
+  it("serves a fresh disk cache without touching npm", async () => {
+    await writeCache("2.1.300", Date.now());
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ version: "9.9.9" })));
+    vi.stubGlobal("fetch", fetchMock);
+    const mod = await load();
+    expect(await mod.getClaudeCodeVersion()).toBe("2.1.300");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("serves a stale disk cache at once and refreshes it in the background", async () => {
+    await writeCache("2.1.300", Date.now() - 3 * 24 * 60 * 60 * 1000);
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const fetchMock = vi.fn(async () => {
+      await gate;
+      return new Response(JSON.stringify({ version: "2.1.400" }));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const mod = await load();
+
+    // Returns before the (blocked) npm request completes.
+    expect(await mod.getClaudeCodeVersion()).toBe("2.1.300");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    release();
+    await mod.pendingClaudeCodeVersionRefresh();
+    expect(await mod.getClaudeCodeVersion()).toBe("2.1.400");
+    const disk = JSON.parse(await fs.readFile(cacheFile(), "utf8")) as { version: string };
+    expect(disk.version).toBe("2.1.400");
+  });
+
+  it("does not let a background refresh lower a version Anthropic demanded", async () => {
+    await writeCache("2.1.300", Date.now() - 3 * 24 * 60 * 60 * 1000);
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let calls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        calls += 1;
+        // First call is the background refresh (held); the second comes from
+        // noteRequiredClaudeCodeVersion and is offline.
+        if (calls === 1) {
+          await gate;
+          return new Response(JSON.stringify({ version: "2.1.350" }));
+        }
+        throw new Error("offline");
+      }),
+    );
+    const mod = await load();
+    expect(await mod.getClaudeCodeVersion()).toBe("2.1.300");
+    expect(await mod.noteRequiredClaudeCodeVersion("version 2.1.400 or newer is required.")).toBe(
+      true,
+    );
+    release();
+    await mod.pendingClaudeCodeVersionRefresh();
+    expect(await mod.getClaudeCodeVersion()).toBe("2.1.400");
+    const disk = JSON.parse(await fs.readFile(cacheFile(), "utf8")) as { version: string };
+    expect(disk.version).toBe("2.1.400");
+  });
+
+  it("waits for npm when there is no disk cache", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify({ version: "2.1.401" }))),
+    );
+    const mod = await load();
+    expect(await mod.getClaudeCodeVersion()).toBe("2.1.401");
+  });
+
+  it("falls back to the built-in version when npm fails and nothing is cached", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new Error("offline");
+      }),
+    );
+    const mod = await load();
+    expect(await mod.getClaudeCodeVersion()).toMatch(/^\d+\.\d+\.\d+$/);
   });
 });

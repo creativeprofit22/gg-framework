@@ -31,11 +31,16 @@ import { isPlanModeActive, planModeRestriction } from "../core/runtime-mode.js";
 import { isCatastrophicCommand } from "../core/workspace-guard.js";
 import { checkDestructiveGit } from "../core/destructive-git-guard.js";
 import { shellThreatBlockMessage } from "../core/shell-threats.js";
-import { checkPackageInstall } from "../core/package-threats.js";
+import { checkPackageInstall, packageBlockMessage } from "../core/package-threats.js";
 import {
-  classifyVerificationCommand,
-  containsBoundedCheck,
-} from "../core/verification-evidence.js";
+  bunCooldownCommand,
+  cooldownFailureHint,
+  detectMentionedVersions,
+  mayInstall,
+  packageCooldownEnv,
+  scopeCooldown,
+} from "../core/package-cooldown.js";
+import { classifyVerificationCommand } from "../core/verification-evidence.js";
 import { checkCommandPolicy, type GetNetworkPolicy } from "../core/network-guard.js";
 import {
   BOUNDED_OUTPUT_MAX_BYTES,
@@ -56,8 +61,11 @@ import { collectVerificationReview } from "./verification-review.js";
 import { captureVerificationSnapshot } from "../core/verification-snapshot.js";
 
 /** Tool env, plus the tweaks that only make sense inside the OS sandbox. */
-function sandboxAwareEnv(sandboxed: boolean): Record<string, string> {
-  const env = getSafeToolEnv();
+function sandboxAwareEnv(
+  sandboxed: boolean,
+  cooldown: Record<string, string> = {},
+): Record<string, string> {
+  const env = { ...getSafeToolEnv(), ...cooldown };
   return sandboxed ? { ...env, ...SANDBOX_ENV_PATCH } : env;
 }
 
@@ -108,30 +116,21 @@ const GUESSED_WAIT_SECONDS = 10;
  * model can recover the lost portion with `read --offset` instead of
  * re-running the command. The offload is best-effort — a full disk or
  * permission error never fails the tool result.
+ *
+ * A check whose exit status cannot prove success (`npm test | grep x; git diff`)
+ * gets no note in its result. The host still refuses it as evidence; if the
+ * turn would end unverified, the session re-runs the check on its own
+ * (AgentSession.rerunRefusedCheck) and counts only that exit status. The note
+ * used to flag the command mid-task; on Haiku 5.5 the model re-ran
+ * the suite after it nearly every time, and spent thinking deciding whether
+ * the note was an injection, while the output it had was already correct.
+ * Removing it cut model requests 7% and input tokens 9% at an unchanged pass
+ * rate; time saved was within noise (bench/h2h/arena, haiku-confirm, 100
+ * paired trials, 2026-10-18).
  */
-export async function renderBashOutput(
-  rawOutput: string,
-  command?: string,
-  /** bash with pipefail (not the cmd.exe fallback): see classifyVerificationCommand. */
-  posixShell = false,
-): Promise<string> {
-  // Feedback only when the command wraps a real check. Exploration that merely
-  // mentions a verifier (`ls .venv/bin | grep ruff`) is not a verification
-  // attempt; nagging it made the model reshape harmless commands repeatedly.
-  // Showing the note only once per session was measured and rejected: it cut
-  // notes by a third but raised tool calls 27% (bench/h2h/DIRAC-FINDINGS.md).
-  const check =
-    command && containsBoundedCheck(command)
-      ? classifyVerificationCommand(command, { posixShell })
-      : undefined;
-  const feedback =
-    check?.candidate && !check.accepted && check.snapshotPreserveOnly
-      ? "\n\n[This mixed check/inspection chain cannot establish fresh verification; it can only preserve earlier successful checks. If the current changes are not already verified, run the check standalone or chain only checks with &&. Do not claim fresh verification from this shell exit status.]"
-      : check?.candidate && !check.accepted && !check.snapshotEligible
-        ? `\n\n[Verification evidence rejected: ${check.reason}. The output is still valid information; do not reshape this command to satisfy this note. When you need verification, run the check once as a standalone command (or chain only checks with &&) after your last edit, and do not claim verification from this shell exit status.]`
-        : "";
+export async function renderBashOutput(rawOutput: string): Promise<string> {
   const result = truncateTail(rawOutput);
-  if (!result.truncated) return result.content + feedback;
+  if (!result.truncated) return result.content;
   const overflowPath =
     Buffer.byteLength(rawOutput, "utf-8") > MAX_BYTES
       ? await writeOverflow(rawOutput, "bash").catch(() => null)
@@ -141,7 +140,7 @@ export async function renderBashOutput(
     : "";
   const c = compressToolOutput(rawOutput);
   const what = describeCompressed(rawOutput, c.content);
-  return `[${c.notice}${what ? ` ${what}` : ""}${overflowNotice}]\n${c.content}${feedback}`;
+  return `[${c.notice}${what ? ` ${what}` : ""}${overflowNotice}]\n${c.content}`;
 }
 
 export interface ForegroundCommandExecution {
@@ -215,6 +214,8 @@ interface ForegroundCommandOptions {
   ops: ToolOperations;
   processManager: ProcessManager;
   launch?: SandboxLaunch;
+  /** Extra env for this command only (package release-age cooldown). */
+  env?: Record<string, string>;
   onUpdate?: (output: string, totalBytes: number) => void;
   cleanupProcessTree?: (target: ProcessTarget) => Promise<void>;
   reapProcessWrapper?: (target: ProcessTarget) => void;
@@ -239,6 +240,7 @@ export async function executeForegroundCommand({
   ops,
   processManager,
   launch,
+  env,
   onUpdate,
   cleanupProcessTree = ops.process.cleanupProcessTree,
   reapProcessWrapper: reapWrapper = ops.process.reapProcessWrapper,
@@ -503,7 +505,7 @@ export async function executeForegroundCommand({
         cwd,
         detached: true,
         stdio: ["ignore", "pipe", "pipe"],
-        env: sandboxAwareEnv(effectiveLaunch.sandboxed),
+        env: sandboxAwareEnv(effectiveLaunch.sandboxed, env),
       });
       pid = child.pid ?? null;
 
@@ -658,6 +660,8 @@ export async function executeForegroundCommand({
 
 interface PersistentCommandOptions {
   command: string;
+  /** What the shell actually runs (cooldown-scoped); `command` stays the recorded one. */
+  runCommand?: string;
   cwd: string;
   timeoutMs: number;
   /** Stop after this long with no output; 0/omitted = never. */
@@ -670,6 +674,7 @@ interface PersistentCommandOptions {
 
 async function executePersistentCommand({
   command,
+  runCommand = command,
   cwd,
   timeoutMs,
   inactivityMs,
@@ -681,7 +686,7 @@ async function executePersistentCommand({
   const startedAt = Date.now();
   const foregroundLog = await processManager.allocateForegroundLog();
   const result = await shell.run(
-    command,
+    runCommand,
     timeoutMs,
     signal,
     onUpdate,
@@ -726,7 +731,6 @@ async function executePersistentCommand({
 async function renderStructuredForegroundResult(
   execution: ForegroundCommandExecution,
   persistent: boolean,
-  command?: string,
 ): Promise<{ content: string; details: BashToolResultDetails; isError?: boolean }> {
   const { outcome } = execution;
   const diagnostics = formatForegroundDiagnostics(outcome);
@@ -745,7 +749,7 @@ async function renderStructuredForegroundResult(
     };
   }
 
-  let output = await renderBashOutput(execution.rawOutput, command, !execution.isCmdFallback);
+  let output = await renderBashOutput(execution.rawOutput);
   if (execution.outputCapped) {
     output =
       `[Output exceeded ${MAX_OUTPUT_BYTES / 1024 / 1024} MB; the earliest part was dropped. ` +
@@ -814,6 +818,28 @@ async function renderStructuredForegroundResult(
   };
 }
 
+/**
+ * An install the release-age cooldown may have refused: say so above the
+ * output, so the model does not retry blindly (upstream gg-safe).
+ */
+function withCooldownHint<T extends { content: string }>(
+  rendered: T,
+  execution: ForegroundCommandExecution,
+  install: boolean,
+  cooldownDays: number,
+): T {
+  if (!install || execution.outcome.reason !== "nonZeroExit") return rendered;
+  const hint = cooldownFailureHint(execution.rawOutput, cooldownDays);
+  if (!hint) return rendered;
+  // Keep "Exit code: N" first: run status and the ledger read it from line 1.
+  const firstBreak = rendered.content.indexOf("\n");
+  const content =
+    firstBreak < 0
+      ? `${rendered.content}\n[${hint}]`
+      : `${rendered.content.slice(0, firstBreak + 1)}[${hint}]\n${rendered.content.slice(firstBreak + 1)}`;
+  return { ...rendered, content };
+}
+
 function formatDuration(ms: number): string {
   const seconds = Math.round(ms / 1000);
   if (seconds < 120) return `${seconds}s`;
@@ -850,12 +876,12 @@ export function createBashTool(
   getNetworkPolicy?: GetNetworkPolicy,
   getSandboxPolicy?: () => SandboxPolicy,
   getForegroundLimitSettings?: () => ForegroundLimitSettings,
+  /** Package release-age cooldown in days; 0 disables. Default 2. */
+  getPackageCooldownDays: () => number = () => 2,
 ): AgentTool<typeof BashParams> {
   // Lazily created on the first persist:true call; one session per tool
   // instance (i.e. per agent session), owned by the shared process manager.
   let sessionShell: PersistentShell | null = null;
-  /** Install commands the model re-ran after a typosquat warning. */
-  const confirmedInstalls = new Set<string>();
   let sessionSandboxKey: string | null = null;
   let sessionSandboxed = false;
   // Shell selection doesn't depend on the command, so resolve ONCE at tool
@@ -958,22 +984,40 @@ export function createBashTool(
       if (threatBlocked) {
         return `Error: ${threatBlocked}`;
       }
-      // Package-install guard: known malware (OSV, fail-open) is refused;
-      // a likely typosquat is stopped once and allowed on an identical retry.
-      const packageThreats = await checkPackageInstall(command, { signal: context.signal });
-      const malware = packageThreats.find((threat) => threat.severity === "block");
-      if (malware) {
-        return `Error: Blocked by package safety check (${malware.rule}): ${malware.detail}`;
+      // Package-install guard: known malware (local feed + version-aware OSV),
+      // lockfile contents, provenance downgrade, release age and precise
+      // typosquats. A catch is a block; network only for installs, fail-open.
+      const cooldownDays = getPackageCooldownDays();
+      // Version detection starts now, in parallel with the check (shared, once per process).
+      const install = mayInstall(command);
+      const versionsReady = install
+        ? detectMentionedVersions(command, cwd)
+        : Promise.resolve({} as Awaited<ReturnType<typeof detectMentionedVersions>>);
+      const packageThreats = install
+        ? await checkPackageInstall(command, { signal: context.signal, cwd, cooldownDays })
+        : [];
+      const packageBlocked = packageBlockMessage(packageThreats);
+      if (packageBlocked) {
+        // `details` carries the refused packages to the session, which records
+        // them in the project's "don't install" list (core/blocked-packages-file.ts).
+        const blocked = packageThreats.flatMap((t) => t.blocked ?? []);
+        return {
+          content: `Error: ${packageBlocked}`,
+          ...(blocked.length > 0 ? { details: { safetyBlock: { packages: blocked } } } : {}),
+        };
       }
-      const typosquats = packageThreats.filter((threat) => threat.severity === "warn");
-      if (typosquats.length > 0 && !confirmedInstalls.has(command)) {
-        confirmedInstalls.add(command);
-        return (
-          `Error: not run — ${typosquats.map((threat) => threat.detail).join("; ")}. ` +
-          `If this really is the package you want, run the exact same command again.`
-        );
-      }
-      // Network allowlist — defence in depth only.
+      // Native release-age cooldown for every install (transitive deps too).
+      const versions = await versionsReady;
+      const cooldownEnv = install
+        ? packageCooldownEnv(command, { days: cooldownDays, now: Date.now(), cwd, versions })
+        : {};
+      // bun has no env setting: the cooldown goes in as a flag.
+      const runCommand = install
+        ? bunCooldownCommand(command, cooldownDays, versions.bun ?? null)
+        : command;
+      // Network allowlist — defence in depth only. Recognises the common egress
+      // command shapes; an unrecognised command is never blocked (see
+      // core/network-guard.ts for why this is not a sandbox).
       const networkBlocked = checkCommandPolicy(command, getNetworkPolicy);
       if (networkBlocked) {
         return `Error: ${networkBlocked}`;
@@ -1009,7 +1053,12 @@ export function createBashTool(
             });
             const shell = new PersistentShell(
               cwd,
-              sandboxAwareEnv(launch.sandboxed),
+              // Env is fixed at shell start: only pip's (always safe) here;
+              // the others are scoped per command below.
+              sandboxAwareEnv(
+                launch.sandboxed,
+                cooldownDays > 0 ? { PIP_UPLOADED_PRIOR_TO: `P${cooldownDays}D` } : {},
+              ),
               MAX_OUTPUT_BYTES,
               ops.process,
               shellOpts,
@@ -1036,6 +1085,7 @@ export function createBashTool(
         if (context.signal.aborted) return CANCELLED_BEFORE_START;
         const execution = await executePersistentCommand({
           command,
+          runCommand: scopeCooldown(runCommand, cooldownEnv),
           cwd,
           timeoutMs: persistentLimits.hardMs ?? NO_DEADLINE,
           inactivityMs: persistentLimits.inactivityMs ?? 0,
@@ -1047,7 +1097,12 @@ export function createBashTool(
                 context.onUpdate?.({ type: "bash_progress", output, totalBytes })
             : undefined,
         });
-        const rendered = await renderStructuredForegroundResult(execution, true, command);
+        const rendered = withCooldownHint(
+          await renderStructuredForegroundResult(execution, true),
+          execution,
+          install,
+          cooldownDays,
+        );
         return {
           ...rendered,
           content: annotateSandboxDenial(rendered.content, sessionSandboxed),
@@ -1056,12 +1111,12 @@ export function createBashTool(
       if (commandMode === "background") {
         let launch: SandboxLaunch;
         try {
-          launch = await prepareLaunch(resolveShell(command, shellOpts));
+          launch = await prepareLaunch(resolveShell(runCommand, shellOpts));
         } catch (error) {
           return `Error: OS sandbox unavailable; command was not run: ${(error as Error).message}`;
         }
         if (context.signal.aborted) return CANCELLED_BEFORE_START;
-        const result = await processManager.start(command, cwd, launch, wakeRules);
+        const result = await processManager.start(runCommand, cwd, launch, wakeRules, cooldownEnv);
         const watchWarnings = backgroundWatchWarnings(command);
         return (
           `Background process started.\n` +
@@ -1093,7 +1148,9 @@ export function createBashTool(
         mode: "spawn",
         canHandOff: true,
       });
-      const shell = resolveShell(command, shellOpts);
+      // Cross-platform shell: bash on macOS/Linux, Git Bash on Windows (or
+      // cmd.exe fallback), wrapped by the OS sandbox before any child starts.
+      const shell = resolveShell(runCommand, shellOpts);
       let launch: SandboxLaunch;
       try {
         launch = await prepareLaunch(shell);
@@ -1127,8 +1184,14 @@ export function createBashTool(
           ? (output, totalBytes) =>
               context.onUpdate?.({ type: "bash_progress", output, totalBytes })
           : undefined,
+        env: cooldownEnv,
       });
-      const rendered = await renderStructuredForegroundResult(execution, false, command);
+      const rendered = withCooldownHint(
+        await renderStructuredForegroundResult(execution, false),
+        execution,
+        install,
+        cooldownDays,
+      );
       // A hand-off is still running: its "after" state does not exist yet.
       if (
         inputsBefore !== undefined &&

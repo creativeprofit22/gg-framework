@@ -32,6 +32,18 @@ import {
   type ContinuationReviewRecord,
 } from "./continuation-review-context.js";
 import {
+  sameStamp,
+  scanProjectLockfiles,
+  stampProjectLockfiles,
+  type InstalledThreat,
+  type LockfileStamp,
+} from "./installed-threats.js";
+import { onThreatFeedUpdated } from "./threat-feed.js";
+import type { PackageCheckOptions } from "./package-threats.js";
+import { parseSafetyBlock } from "./action-threats.js";
+import { recordBlockedPackages } from "./blocked-packages-file.js";
+import type { BlockedPackage } from "./shell-threats.js";
+import {
   COMPLETION_REVIEW_STATE_KIND,
   type CompletionReview,
   type CompletionReviewRequest,
@@ -124,7 +136,7 @@ import {
   resolveTransportModel,
   type OpenAICodexContextProfile,
 } from "./model-registry.js";
-import { discoverSkills, type Skill } from "./skills.js";
+import { discoverSkillsWithBlocked, type BlockedSkill, type Skill } from "./skills.js";
 import { ensureAppDirs } from "../config.js";
 import {
   buildSubAgentSystemPrompt,
@@ -593,6 +605,21 @@ export interface AgentSessionOptions {
    */
   skills?: readonly Skill[];
   /**
+   * Background check of the project's lockfiles for packages flagged as
+   * malware after install. Default on, except under vitest.
+   */
+  installedPackageWatch?: boolean;
+  /** Delay before the first installed-package check (default 5 s). */
+  installedPackageWatchDelayMs?: number;
+  /** Options for the installed-package check (tests inject fetch/feed). */
+  installedPackageCheck?: PackageCheckOptions;
+  /**
+   * Record refused packages in the project's instruction file (AGENTS.md /
+   * CLAUDE.md) so later sessions know them. Default on for project sessions,
+   * except under vitest.
+   */
+  blockedPackagesFile?: boolean;
+  /**
    * Mode-specific defaults for prompt byte budgets. The user's `contextLimits`
    * setting still overrides these. Motion raises its skill-catalog budget
    * because its skill set is a fixed, bundled one (never untrusted files).
@@ -719,6 +746,61 @@ export interface AgentSessionState {
 
 // ── Agent Session ──────────────────────────────────────────
 
+/** A prompt that asks for the live web (see AgentSession.attachWebSearchIfAsked). */
+const WEB_INTENT =
+  /\b(?:web|internet|online|google|googling|website|look (?:it |this |that )?up|(?:latest|newest|current) (?:version|release|news|docs?|documentation)|release notes|news)\b/i;
+
+/** Distinct security rows one run may add to the chat (and session file). */
+const MAX_SECURITY_ROWS_PER_RUN = 20;
+
+/**
+ * A chat row's target: first line, no control or bidi-override characters
+ * (they could make a command look like another), at most 120 chars.
+ */
+export function securityRowTarget(raw: string): string {
+  const first = (raw.slice(0, 1024).split(/\r?\n/, 1)[0] ?? "")
+    // eslint-disable-next-line no-control-regex -- stripping control characters is the point
+    .replace(/[\u0000-\u001f\u007f\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, "")
+    .trim();
+  return first.length > 120 ? `${first.slice(0, 119)}\u2026` : first;
+}
+
+/** Not the home folder or a filesystem root (those are never a project). */
+export function isScannableProjectDir(dir: string, home: string = os.homedir()): boolean {
+  const resolved = path.resolve(dir);
+  if (path.parse(resolved).root === resolved) return false;
+  const norm = (p: string): string => (process.platform === "win32" ? p.toLowerCase() : p);
+  return !home || norm(path.resolve(home)) !== norm(resolved);
+}
+
+/**
+ * Windows on the same project in this process share one in-flight scan
+ * (session start and a feed update otherwise fire N identical scans).
+ */
+const inflightLockfileScans = new Map<
+  string,
+  Promise<{ stamp: LockfileStamp; found: InstalledThreat[] }>
+>();
+
+function sharedLockfileScan(
+  cwd: string,
+  options: PackageCheckOptions | undefined,
+): Promise<{ stamp: LockfileStamp; found: InstalledThreat[] }> {
+  const run = async (): Promise<{ stamp: LockfileStamp; found: InstalledThreat[] }> => {
+    const stamp = await stampProjectLockfiles(cwd);
+    const found = stamp.size === 0 ? [] : await scanProjectLockfiles(cwd, options);
+    return { stamp, found };
+  };
+  // Test-specific check options are never shared.
+  if (options) return run();
+  const key = path.resolve(cwd);
+  const existing = inflightLockfileScans.get(key);
+  if (existing) return existing;
+  const promise = run().finally(() => inflightLockfileScans.delete(key));
+  inflightLockfileScans.set(key, promise);
+  return promise;
+}
+
 export class AgentSession {
   readonly eventBus = new EventBus();
   readonly slashCommands = new SlashCommandRegistry();
@@ -775,6 +857,18 @@ export class AgentSession {
     | ((toolCalls: readonly ToolCall[], toolResults: readonly ToolResult[]) => Promise<void>)
     | undefined;
   private skills: Skill[] = [];
+  /** Skills discovery refused to load (safety scan); shown to the user, named by the skill tool. */
+  private blockedSkills: BlockedSkill[] = [];
+  /** Lockfile entries now known to be malware (background check), for the app/CLI to show. */
+  private installedThreats: InstalledThreat[] = [];
+  private installedWatchStop: (() => void) | undefined;
+  private installedStamp: LockfileStamp | undefined;
+  private installedScanRunning = false;
+  private installedWatchStopped = false;
+  /** rule\0target of the security rows already shown this run. */
+  private securityRowsThisRun = new Set<string>();
+  /** Project session (code mode): the only kind that writes the "don't install" list. */
+  private projectSession = false;
   private cacheKeyLogged = false;
   // ── Self-correction hook state (mirrors the TUI's useAgentLoop refs) ──
   // Reset at the start of every run; observed from the event stream; read by
@@ -1088,6 +1182,12 @@ export class AgentSession {
     // Set model for accurate token estimation
     setEstimatorModel(this.model);
 
+    // The Anthropic transport needs the current Claude Code version for its
+    // User-Agent before the first request. Without a fresh on-disk cache that
+    // is an npm round-trip (~0.3–3s) on the user's first prompt; start it now
+    // so it overlaps session setup and the user's typing instead.
+    if (this.provider === "anthropic") void getClaudeCliUserAgent().catch(() => {});
+
     const paths = await ensureAppDirs();
 
     // Load settings & auth
@@ -1106,6 +1206,12 @@ export class AgentSession {
     this.sessionManager = new SessionManager(this.opts.sessionRootDir ?? paths.sessionsDir);
 
     const projectCustomization = this.opts.projectCustomization !== false;
+    // A real project folder: not Motion (own skills), not GG Goals (goal notes
+    // folder, agentContext "none"), not chat (no project customization).
+    this.projectSession =
+      projectCustomization &&
+      !this.opts.skills &&
+      (this.opts.agentContext ?? "project") === "project";
     // A sub-agent worker never creates them: the session that owns the
     // project does. GG Goals' workers work in the user's attached folders,
     // which mustn't gain empty .gg folders as a side effect.
@@ -1119,10 +1225,13 @@ export class AgentSession {
     if (this.opts.skills) {
       this.skills = [...this.opts.skills];
     } else if (projectCustomization) {
-      this.skills = await discoverSkills({
+      const discovery = await discoverSkillsWithBlocked({
         globalSkillsDir: paths.skillsDir,
         projectDir: this.cwd,
       });
+      this.skills = discovery.skills;
+      this.blockedSkills = discovery.blocked;
+      this.startInstalledPackageWatch();
     } else {
       this.skills = [];
     }
@@ -1202,6 +1311,7 @@ export class AgentSession {
       shareWorkspaceRoots: this.opts.shareRootsWithSubAgents,
       defaultSubAgent: this.opts.defaultSubAgent,
       skills: this.skills,
+      blockedSkills: this.blockedSkills,
       contextLimits: this.contextLimits,
       provider: this.provider,
       model: this.model,
@@ -1213,6 +1323,7 @@ export class AgentSession {
         allowOutsideWorkspaceWrites: this.settingsManager.get("allowOutsideWorkspaceWrites"),
         additionalRoots: this.additionalRoots,
       }),
+      getPackageCooldownDays: () => this.settingsManager.get("packageCooldownDays"),
       getNetworkPolicy: () => ({
         mode: this.settingsManager.get("networkMode"),
         allow: this.settingsManager.get("networkAllow"),
@@ -1914,6 +2025,46 @@ export class AgentSession {
   }
 
   /**
+   * Whether provider-native web search rides along with this request.
+   *
+   * Anthropic's `web_search_20250305` server tool costs ~2.5k prefix tokens on
+   * every request (count_tokens: 6,628 vs 4,098 for the GG prefix without it),
+   * yet web search is reached in ~6% of sessions — the reason the client tool
+   * is deferred everywhere else. So on a tiered Anthropic session it is only
+   * attached once the model has promoted `web_search` (tool_search or a direct
+   * call). The server tool is appended last, so the tool block stays
+   * append-only. Untiered sessions and other providers keep it always on.
+   */
+  private nativeWebSearchOn(): boolean {
+    if (this.provider !== "anthropic") return true;
+    if (!this.deferredBuiltinToolNames.includes("web_search")) return true;
+    return this.registeredTools.has("web_search");
+  }
+
+  /**
+   * A human prompt that plainly asks for the web gets native web search from
+   * its first request. Without this, an on-demand web_search costs an extra
+   * round trip (tool_search or a client search) before the native tool is
+   * attached — slower than the always-on tool it replaced for exactly the
+   * sessions that need it. Conservative on purpose: a miss only costs that
+   * one discovery turn, a false hit only the ~2.5k-token schema.
+   */
+  private attachWebSearchIfAsked(content: unknown): void {
+    if (this.provider !== "anthropic" || this.nativeWebSearchOn()) return;
+    const text =
+      typeof content === "string"
+        ? content
+        : Array.isArray(content)
+          ? content
+              .map((part) =>
+                part && typeof part === "object" && "text" in part ? String(part.text) : "",
+              )
+              .join(" ")
+          : "";
+    if (WEB_INTENT.test(text)) this.promoteDeferredBuiltin("web_search");
+  }
+
+  /**
    * `wait_agent` is deferred, yet nearly every `spawn_agent` is followed by it,
    * so the model spent a whole turn on `tool_search` just to load it (bench 41:
    * ~6 s per fan-out). Promote it as soon as a spawn succeeds instead: the tool
@@ -1963,6 +2114,11 @@ export class AgentSession {
   /** Resolve a deferred built-in called by name (append-only promotion). */
   private promoteDeferredBuiltin(name: string): AgentTool | undefined {
     if (!this.deferredBuiltinTools.has(name)) return undefined;
+    // Local Fork: by-name and intent promotion (upstream's attachWebSearchIfAsked)
+    // honour the same capability boundary as tool_search, e.g. read-only Research.
+    if (this.unavailableToolNames.has(name) || !this.isToolCapabilityAllowed(name)) {
+      return undefined;
+    }
     // Advisory-only tools load solely through the advisory turn, never by name.
     if (ADVISORY_ONLY_TOOL_NAMES.has(name)) return this.tools.find((t) => t.name === name);
     if (!this.registeredTools.has(name)) this.promoteDeferredBuiltins([name]);
@@ -2400,6 +2556,7 @@ export class AgentSession {
     await this.persistMessage(userMessage, !!options.onAccepted);
     this.lastPersistedIndex = this.messages.length;
     await options.onAccepted?.();
+    if (provenance.source === "human") this.attachWebSearchIfAsked(content);
 
     await this.runLoop(options);
   }
@@ -2433,6 +2590,7 @@ export class AgentSession {
       throw new Error("Attachments produced no usable content. Nothing was sent.");
     await this.adoptDeferredCheckpointBeforePrompt();
     await this.ensureActivePhaseSessionMetadata();
+    this.attachWebSearchIfAsked(text);
     const userMessage: Message = {
       role: "user",
       content: parts,
@@ -2549,6 +2707,7 @@ export class AgentSession {
     this.hookFileEditCounts.clear();
     this.hookToolCalls.clear();
     this.loopBreakInjected = 0;
+    this.securityRowsThisRun.clear();
     this.regroundingInjected = false;
     this.hookRecentCalls = [];
     this.semanticLoop = {
@@ -2620,6 +2779,8 @@ export class AgentSession {
         if (!call) break;
         const name = call.name;
         const args = call?.args;
+        const safetyRule = parseSafetyBlock(event.result);
+        if (safetyRule) this.recordSafetyBlock(safetyRule, name, args, event.details);
         if (call) {
           const command = typeof call.args.command === "string" ? call.args.command : "";
           // A review the bash tool rejected before spawning ran nothing: it is
@@ -3235,6 +3396,8 @@ export class AgentSession {
 
     if (diagnosticMessages.length > 0) return diagnosticMessages;
 
+    await this.rerunRefusedCheck();
+
     if (
       shouldNudgePlanSubmission({
         enabled: this.opts.planSubmissionGate === true,
@@ -3274,6 +3437,66 @@ export class AgentSession {
       this.refreshHookArming();
     }
     return null;
+  }
+
+  /**
+   * The model often runs its tests inside a longer command (`npm test 2>&1 |
+   * tail; node -e '…'`) whose exit status belongs to a later part, so the
+   * tests can pass without counting. When the turn would end unverified that
+   * way, run that check once more on its own, through the same bash tool, and
+   * record its real exit status. No model turn and nothing in the transcript:
+   * only the run's verification status changes.
+   */
+  private async rerunRefusedCheck(): Promise<void> {
+    if (this.planModeRef.current || this.opts.signal?.aborted) return;
+    const check = this.verificationEvidenceLedger.takeRefusedCheck();
+    if (!check) return;
+    const bash = this.tools.find((tool) => tool.name === "bash");
+    // An explicit timeout stops a stuck run instead of moving it to the
+    // background, which would leave a process for the next turn to collect.
+    const args = { command: check.command, timeout: 120_000 };
+    const params = bash?.parameters.safeParse(args);
+    if (!bash || !params?.success) return;
+    const startedAt = Date.now();
+    let passed = false;
+    let details: unknown;
+    try {
+      const result = await bash.execute(params.data, {
+        signal: this.opts.signal ?? new AbortController().signal,
+        toolCallId: `gg-recheck-${startedAt}`,
+      });
+      details = typeof result === "string" ? undefined : result.details;
+      const diagnostics = (
+        details as { bashDiagnostics?: { reason?: unknown; exitCode?: unknown } } | undefined
+      )?.bashDiagnostics;
+      passed = diagnostics?.reason === "completed" && diagnostics.exitCode === 0;
+    } catch (error) {
+      if (isAbortError(error) || this.opts.signal?.aborted) return;
+      log("WARN", "verification", `Re-running a refused check failed: ${String(error)}`);
+    }
+    if (this.opts.signal?.aborted) return;
+    log("INFO", "verification", "Re-ran a check whose original exit status could not count", {
+      passed: String(passed),
+      durationMs: String(Date.now() - startedAt),
+    });
+    // A pass counts like the model's own standalone check at that revision. A
+    // failure only stays unverified: the re-run lacks the original command's
+    // context (variables, files it wrote first), so it proves nothing failed.
+    if (!passed) return;
+    const workspace = this.opts.captureVerificationWorkspace
+      ? await this.opts.captureVerificationWorkspace().catch(() => undefined)
+      : undefined;
+    this.verificationEvidenceLedger.recordToolResult({
+      name: "bash",
+      args,
+      isError: false,
+      details,
+      workspace,
+      evidenceRevision: check.generation,
+      evidenceRun: check.run,
+      planMode: this.getPlanMode(),
+    });
+    await this.persistCompletionReviewState();
   }
 
   /** Wraps the real run: cancels an in-flight cache prewarm and tracks run
@@ -3439,7 +3662,7 @@ export class AgentSession {
         provider: this.provider,
         model: resolveTransportModel(this.provider, this.model),
         tools: options.disableTools ? [] : this.tools,
-        webSearch: !options.disableTools,
+        webSearch: options.disableTools ? false : () => this.nativeWebSearchOn(),
         maxTokens: this.requestMaxTokens(accountId),
         maxTurns: this.opts.maxTurns,
         maxTurnExtensions: this.opts.maxTurnExtensions,
@@ -3503,7 +3726,7 @@ export class AgentSession {
                 this.planModeRef.current || options.capThinking
                   ? clampThinkingForPlanMode(this.thinkingLevel)
                   : this.thinkingLevel,
-              webSearch: !options.disableTools,
+              webSearch: !options.disableTools && this.nativeWebSearchOn(),
               supportsImages: modelInfo?.supportsImages,
               promptCacheKey: this.getPromptCacheKey(),
             },
@@ -3710,6 +3933,12 @@ export class AgentSession {
         }
       } finally {
         this.activeLoopMessages = null;
+        // An in-flight compaction rebinds `this.messages` to the compacted array
+        // while the loop keeps appending to `loopMessages`. Resync on every exit
+        // — a failed or aborted run included — or the session silently drops
+        // this run's post-compaction messages (they are still on disk) and the
+        // next prompt replays a history the provider may reject.
+        this.messages = loopMessages;
       }
     };
 
@@ -4008,7 +4237,12 @@ export class AgentSession {
       // Add/remove client-side web_search tool based on provider.
       // Anthropic has native server-side web search; all other providers need the client tool.
       const hasWebSearch = this.registeredTools.has("web_search");
-      if (this.provider === "anthropic" && hasWebSearch) {
+      if (this.deferredBuiltinToolNames.includes("web_search")) {
+        // Tiered: the client tool lives in the catalog for every provider and,
+        // once promoted, is swapped for the native server tool by the Anthropic
+        // transport. Nothing to add or remove — doing so would either load the
+        // schema eagerly or take away a capability the model already has.
+      } else if (this.provider === "anthropic" && hasWebSearch) {
         // Switching TO anthropic — remove client-side web_search (server-side handles it)
         this.unregisterTools((toolName) => toolName === "web_search");
       } else if (this.provider !== "anthropic" && !hasWebSearch) {
@@ -4916,6 +5150,121 @@ export class AgentSession {
       )
       .digest("hex");
     return { ...identity, fingerprint };
+  }
+
+  /** Skills the safety scan kept out of this session, for the app/CLI to show. */
+  getBlockedSkills(): readonly BlockedSkill[] {
+    return this.blockedSkills;
+  }
+
+  /** Installed packages (project lockfiles) now known to be malware. */
+  getInstalledThreats(): readonly InstalledThreat[] {
+    return this.installedThreats;
+  }
+
+  /**
+   * Background check of the project's lockfiles for packages flagged as
+   * malware after they were installed: shortly after start, after each daily
+   * threat-feed update, and after a run that changed a lockfile. Never awaited
+   * by anything; a new hit is shown to the user once (security_notice) and told
+   * to the agent at its next turn. Off under vitest unless a test opts in.
+   */
+  private startInstalledPackageWatch(): void {
+    const enabled = this.opts.installedPackageWatch ?? !process.env.VITEST;
+    // Workers share their parent's project: the parent session watches it.
+    if (!enabled || !this.projectSession || this.opts.subagentWorker || this.installedWatchStop) {
+      return;
+    }
+    // The home folder or a filesystem root is not a project: never scan it.
+    if (!isScannableProjectDir(this.cwd)) return;
+    const delay = this.opts.installedPackageWatchDelayMs ?? 5_000;
+    const timer = setTimeout(() => void this.scanInstalledPackages(), delay);
+    timer.unref?.();
+    const offFeed = onThreatFeedUpdated(() => void this.scanInstalledPackages());
+    const offDone = this.eventBus.on("agent_done", () => void this.rescanIfLockfilesChanged());
+    this.installedWatchStop = () => {
+      this.installedWatchStopped = true;
+      clearTimeout(timer);
+      offFeed();
+      offDone();
+    };
+  }
+
+  private async rescanIfLockfilesChanged(): Promise<void> {
+    if (!this.installedStamp || this.installedWatchStopped) return;
+    const stamp = await stampProjectLockfiles(this.cwd);
+    if (!sameStamp(stamp, this.installedStamp)) await this.scanInstalledPackages();
+  }
+
+  /**
+   * A guard refused a tool call: a lasting chat row (live event + persisted
+   * marker, so a reopened session shows it too) and, for packages, an entry in
+   * the project's "don't install" list. All fire-and-forget; never blocks.
+   */
+  private recordSafetyBlock(rule: string, toolName: string, args: unknown, details: unknown): void {
+    const a = (args ?? {}) as Record<string, unknown>;
+    const raw = String(a.command ?? a.input ?? a.file_path ?? a.path ?? a.url ?? toolName);
+    this.emitSecurityRow(rule, securityRowTarget(raw));
+    const packages = (details as { safetyBlock?: { packages?: BlockedPackage[] } } | undefined)
+      ?.safetyBlock?.packages;
+    if (packages?.length) this.recordBlockedList(packages);
+  }
+
+  /**
+   * One row per distinct block per run: an agent retrying the same blocked
+   * install 30 times leaves one row, and a run hitting 100 blocks leaves at
+   * most MAX_SECURITY_ROWS_PER_RUN (the session file stays small).
+   */
+  private emitSecurityRow(rule: string, target: string): void {
+    const key = `${rule}\0${target}`;
+    if (this.securityRowsThisRun.has(key)) return;
+    if (this.securityRowsThisRun.size >= MAX_SECURITY_ROWS_PER_RUN) return;
+    this.securityRowsThisRun.add(key);
+    this.eventBus.emit("security_block", { rule, target });
+    void this.persistAppMarker("security", { rule, target }).catch(() => {});
+  }
+
+  private recordBlockedList(packages: readonly BlockedPackage[]): void {
+    const enabled = this.opts.blockedPackagesFile ?? !process.env.VITEST;
+    if (!enabled || !this.projectSession) return;
+    void recordBlockedPackages(this.cwd, packages).then(
+      (file) => {
+        if (file) log("INFO", "blocked-packages", `recorded blocked packages in ${file}`);
+      },
+      (err: unknown) =>
+        log("WARN", "blocked-packages", `could not record blocked packages: ${String(err)}`),
+    );
+  }
+
+  /** Exposed for tests; safe to call any time (one scan at a time, never throws). */
+  async scanInstalledPackages(): Promise<void> {
+    if (this.installedScanRunning || this.installedWatchStopped) return;
+    this.installedScanRunning = true;
+    try {
+      const { stamp, found } = await sharedLockfileScan(this.cwd, this.opts.installedPackageCheck);
+      // Disposed mid-scan: no late events.
+      if (this.installedWatchStopped) return;
+      this.installedStamp = stamp;
+      const known = new Set(this.installedThreats.map((t) => t.key));
+      this.installedThreats = found;
+      for (const threat of found) {
+        if (known.has(threat.key)) continue;
+        log("WARN", "installed-threats", threat.message);
+        this.notify(`installed-threat:${threat.file}`, threat.agentText);
+        this.eventBus.emit("security_notice", { key: threat.key, message: threat.message });
+        this.emitSecurityRow(
+          "installed-malware",
+          securityRowTarget(
+            `${threat.packages.join(", ")} in ${path.relative(this.cwd, threat.file) || threat.file}`,
+          ),
+        );
+        this.recordBlockedList(threat.blocked);
+      }
+    } catch (err) {
+      log("WARN", "installed-threats", `installed-package check failed: ${String(err)}`);
+    } finally {
+      this.installedScanRunning = false;
+    }
   }
 
   getState(): AgentSessionState {
@@ -6419,7 +6768,7 @@ export class AgentSession {
         model: this.model,
         messages,
         tools: this.tools,
-        webSearch: true,
+        webSearch: this.nativeWebSearchOn(),
         maxTokens: this.requestMaxTokens(creds.accountId),
         thinking: this.planModeRef.current
           ? clampThinkingForPlanMode(this.thinkingLevel)
@@ -6603,6 +6952,7 @@ export class AgentSession {
     // First and synchronous: nothing below may delay this, or a hung teardown
     // step leaves background commands running after the app has quit.
     if (!awaitProcesses) this.stopBackgroundProcesses();
+    this.installedWatchStop?.();
     this.assessmentSequence++;
     this.commandCreation?.dispose();
     this.programmaticProfile?.dispose();

@@ -1,4 +1,4 @@
-import { Agent, fetch as undiciFetch } from "undici";
+import { Agent, EnvHttpProxyAgent, fetch as undiciFetch } from "undici";
 
 /**
  * Transport-level timeout for every LLM provider request.
@@ -20,13 +20,55 @@ import { Agent, fetch as undiciFetch } from "undici";
 export const PROVIDER_TRANSPORT_TIMEOUT_MS = 30 * 60_000;
 
 /**
- * Build a fetch whose transport timeouts are `timeoutMs` instead of undici's
- * 300s defaults. Uses undici's own `fetch` together with its `Agent` — mixing
- * an undici-package dispatcher with Node's bundled fetch is not supported
- * across undici majors.
+ * Whether Node routes its own fetch through HTTP_PROXY / HTTPS_PROXY / NO_PROXY.
+ * Node turns that on for `--use-env-proxy` (command line or NODE_OPTIONS) or
+ * `NODE_USE_ENV_PROXY=1`. A Node that doesn't know the flag refuses to start,
+ * so a present flag is a supported one; the variable is silently ignored
+ * before fetch support landed in 24.0.0 and 22.21.0. Node 22.12, which the
+ * desktop app ships, therefore keeps provider requests direct like the rest
+ * of its traffic.
  */
-export function createProviderFetch(timeoutMs: number): typeof globalThis.fetch {
-  const dispatcher = new Agent({ headersTimeout: timeoutMs, bodyTimeout: timeoutMs });
+export function nodeUsesEnvProxy({
+  env = process.env,
+  execArgv = process.execArgv,
+  nodeVersion = process.versions.node,
+}: {
+  env?: NodeJS.ProcessEnv;
+  execArgv?: readonly string[];
+  nodeVersion?: string;
+} = {}): boolean {
+  const flags = [...execArgv, ...(env.NODE_OPTIONS ?? "").split(/\s+/)];
+  if (flags.includes("--use-env-proxy")) return true;
+  if (env.NODE_USE_ENV_PROXY !== "1") return false;
+  const [major = 0, minor = 0] = nodeVersion.split(".").map(Number);
+  return major >= 24 || (major === 22 && minor >= 21);
+}
+
+export interface ProviderFetchOptions {
+  /**
+   * Send requests through the HTTP(S)_PROXY / NO_PROXY environment variables.
+   * Defaults to {@link nodeUsesEnvProxy}, so provider requests take the same
+   * route as Node's built-in fetch.
+   */
+  useEnvProxy?: boolean;
+}
+
+/**
+ * Build a fetch whose transport timeouts are `timeoutMs` instead of undici's
+ * 300s defaults. Uses undici's own `fetch` together with its own dispatcher —
+ * mixing an undici-package dispatcher with Node's bundled fetch is not
+ * supported across undici majors.
+ *
+ * That dispatcher replaces Node's global one, so it must also replace Node's
+ * env proxy: a plain `Agent` here sent every provider request direct, past a
+ * proxy the user had turned on with NODE_USE_ENV_PROXY.
+ */
+export function createProviderFetch(
+  timeoutMs: number,
+  { useEnvProxy = nodeUsesEnvProxy() }: ProviderFetchOptions = {},
+): typeof globalThis.fetch {
+  const timeouts = { headersTimeout: timeoutMs, bodyTimeout: timeoutMs };
+  const dispatcher = useEnvProxy ? new EnvHttpProxyAgent(timeouts) : new Agent(timeouts);
   const builtinFetch = globalThis.fetch;
   const providerFetch: typeof globalThis.fetch = async (input, init) => {
     // A host that replaced the global fetch (instrumentation, polyfills, test

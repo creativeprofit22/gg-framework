@@ -5,6 +5,16 @@ import { clampToBytes, CONTEXT_LIMITS, type ContextLimits } from "./context-limi
 import { cleanInstructionText } from "../utils/text.js";
 import { parseFrontmatter } from "./frontmatter.js";
 import { log } from "./logger.js";
+import {
+  defaultSkillScanCache,
+  loadSkillScanCacheFile,
+  saveSkillScanCacheFile,
+  scanSkillFile,
+  scanSkillFolder,
+  skillBlockMessage,
+  type SkillScanCache,
+  type SkillScanResult,
+} from "./skill-scan.js";
 
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
 export const BUNDLED_SKILLS_DIRS: readonly string[] = [
@@ -58,7 +68,7 @@ export async function findMotionBundle(
 
 /** Load only Motion's authored skills; keep their contracts intact and catalog order stable. */
 export async function loadMotionSkills(bundle: MotionBundle): Promise<Skill[]> {
-  const skills = await loadSkillsFromDir(bundle.skillsDir, "motion");
+  const skills = await loadSkillsFromDir(bundle.skillsDir, "motion", newLoadContext());
   return skills.sort((a, b) => a.name.localeCompare(b.name));
 }
 
@@ -71,6 +81,43 @@ export interface Skill {
   root?: string;
 }
 
+/** A skill that discovery refused to load because the safety scan caught it. */
+export interface BlockedSkill {
+  name: string;
+  /** The skill's file (flat layout) or folder (SKILL.md layout). */
+  path: string;
+  /** Where it came from: "project", "global", "bundled" or "motion". */
+  scope: string;
+  /** Plain words: what the skill tried to do. */
+  reason: string;
+  /** Content hash of what was scanned; "" when the block isn't about content. */
+  hash: string;
+}
+
+export interface SkillDiscovery {
+  skills: Skill[];
+  blocked: BlockedSkill[];
+}
+
+/** One plain line for the user: what was blocked and why. */
+export function blockedSkillNotice(blocked: BlockedSkill): string {
+  return `Skill "${blocked.name}" blocked for safety: ${blocked.reason}`;
+}
+
+/** File that remembers scan verdicts across starts: beside the global skills dir. */
+export function skillScanCacheFile(globalSkillsDir: string): string {
+  return path.join(path.dirname(globalSkillsDir), "skill-scan-cache.json");
+}
+
+interface LoadContext {
+  cache: SkillScanCache;
+  blocked: BlockedSkill[];
+}
+
+function newLoadContext(cache: SkillScanCache = defaultSkillScanCache): LoadContext {
+  return { cache, blocked: [] };
+}
+
 /**
  * Discover skills from global and project-local skill directories.
  */
@@ -78,6 +125,30 @@ export async function discoverSkills(options: {
   globalSkillsDir: string;
   projectDir?: string;
 }): Promise<Skill[]> {
+  return (await discoverSkillsWithBlocked(options)).skills;
+}
+
+/**
+ * Discover skills and also report the ones the safety scan blocked, so the
+ * app, the CLI and the skill tool can say so instead of staying silent.
+ * Verdicts persist in `cacheFile` (default: beside `globalSkillsDir`), so an
+ * unchanged skill is never rescanned on a later start.
+ */
+export async function discoverSkillsWithBlocked(options: {
+  globalSkillsDir: string;
+  projectDir?: string;
+  cacheFile?: string;
+  cache?: SkillScanCache;
+}): Promise<SkillDiscovery> {
+  const ctx = newLoadContext(options.cache);
+  // Under vitest only an explicit file is used: many suites discover skills
+  // against the real global dir, and tests must never write the real ~/.gg.
+  const cacheFile =
+    options.cacheFile ??
+    (process.env.VITEST ? undefined : skillScanCacheFile(options.globalSkillsDir));
+  if (cacheFile) await loadSkillScanCacheFile(ctx.cache, cacheFile);
+  const changesBefore = ctx.cache.changes;
+
   const skillsByName = new Map<string, Skill>();
   const addSkills = (skills: Skill[]): void => {
     for (const skill of skills) skillsByName.set(skill.name.toLowerCase(), skill);
@@ -85,27 +156,40 @@ export async function discoverSkills(options: {
 
   // Bundled defaults ship with GG Coder. Global and project definitions with
   // the same name override them, preserving user control.
-  addSkills(await loadBundledSkills());
-  addSkills(await loadSkillsFromDir(options.globalSkillsDir, "global"));
+  addSkills(await loadBundledSkills(ctx));
+  addSkills(await loadSkillsFromDir(options.globalSkillsDir, "global", ctx));
 
   if (options.projectDir) {
     const projectSkillsDir = path.join(options.projectDir, ".gg", "skills");
-    addSkills(await loadSkillsFromDir(projectSkillsDir, "project"));
+    addSkills(await loadSkillsFromDir(projectSkillsDir, "project", ctx));
   }
 
-  return [...skillsByName.values()];
+  if (cacheFile && ctx.cache.changes !== changesBefore)
+    await saveSkillScanCacheFile(ctx.cache, cacheFile);
+
+  // A blocked name that a loaded skill of the same name replaced isn't missing.
+  const blocked = ctx.blocked.filter((b) => !skillsByName.has(b.name.toLowerCase()));
+  return { skills: [...skillsByName.values()], blocked };
 }
 
-async function loadBundledSkills(): Promise<Skill[]> {
+async function loadBundledSkills(ctx: LoadContext): Promise<Skill[]> {
   for (const dir of BUNDLED_SKILLS_DIRS) {
-    const skills = await loadSkillsFromDir(dir, "bundled");
+    const skills = await loadSkillsFromDir(dir, "bundled", ctx);
     if (skills.length > 0) return skills;
   }
   return [];
 }
 
-async function loadSkillsFromDir(dir: string, source: string): Promise<Skill[]> {
+/**
+ * GG Coder's own bundled and Motion skills ship inside the app and are not
+ * scanned at runtime (that is pure start-up cost); skills-blocked.test.ts
+ * proves every bundled one is clean at build time.
+ */
+const SHIPPED: SkillScanResult = { ok: true };
+
+async function loadSkillsFromDir(dir: string, source: string, ctx: LoadContext): Promise<Skill[]> {
   const skills: Skill[] = [];
+  const shipped = source === "bundled" || source === "motion";
 
   let dirents;
   try {
@@ -114,39 +198,80 @@ async function loadSkillsFromDir(dir: string, source: string): Promise<Skill[]> 
     return skills;
   }
 
-  for (const entry of dirents) {
-    const entryPath = path.join(dir, entry.name);
+  // Skills load concurrently so their file I/O overlaps; results (and the
+  // blocked list) are then taken in directory order, so output is stable.
+  const loaded = await Promise.all(
+    dirents.map(
+      async (entry): Promise<{ skill: Skill; verdict: SkillScanResult; at: string } | null> => {
+        const entryPath = path.join(dir, entry.name);
 
-    // Flat layout: ~/.gg/skills/foo.md
-    if (entry.isFile() && entry.name.endsWith(".md")) {
-      try {
-        const content = await fs.readFile(entryPath, "utf-8");
-        const skill = parseSkillFile(content, source);
-        if (!skill.name) skill.name = path.basename(entry.name, ".md");
-        skill.root = dir;
-        skills.push(skill);
-      } catch {
-        // Skip unreadable files
-      }
-      continue;
-    }
+        // Flat layout: ~/.gg/skills/foo.md
+        if (entry.isFile() && entry.name.endsWith(".md")) {
+          try {
+            const content = await fs.readFile(entryPath, "utf-8");
+            const skill = parseSkillFile(content, source);
+            if (!skill.name) skill.name = path.basename(entry.name, ".md");
+            const verdict = shipped ? SHIPPED : await scanSkillFile(entryPath, content, ctx.cache);
+            skill.root = dir;
+            return { skill, verdict, at: entryPath };
+          } catch {
+            return null; // Skip unreadable files
+          }
+        }
 
-    // Directory layout (skills.sh ecosystem): ~/.gg/skills/foo/SKILL.md
-    if (entry.isDirectory()) {
-      const skillFile = path.join(entryPath, "SKILL.md");
-      try {
-        const content = await fs.readFile(skillFile, "utf-8");
-        const skill = parseSkillFile(content, source);
-        if (!skill.name) skill.name = entry.name;
-        skill.root = entryPath;
-        skills.push(skill);
-      } catch {
-        // No SKILL.md — skip
-      }
-    }
+        // Directory layout (skills.sh ecosystem): ~/.gg/skills/foo/SKILL.md
+        if (entry.isDirectory()) {
+          try {
+            const content = await fs.readFile(path.join(entryPath, "SKILL.md"), "utf-8");
+            const skill = parseSkillFile(content, source);
+            if (!skill.name) skill.name = entry.name;
+            const verdict = shipped
+              ? SHIPPED
+              : await scanSkillFolder(entryPath, content, ctx.cache);
+            skill.root = entryPath;
+            return { skill, verdict, at: entryPath };
+          } catch {
+            return null; // No SKILL.md — skip
+          }
+        }
+        return null;
+      },
+    ),
+  );
+
+  for (const item of loaded) {
+    if (!item || isBlocked(item.skill.name, source, item.at, item.verdict, ctx)) continue;
+    skills.push(item.skill);
   }
 
   return skills;
+}
+
+/**
+ * gg-safe S1: a skill that matches a malware/exfil/hiding rule is not loaded.
+ * No prompt — the user may be away — one log line plus an entry in the
+ * blocked list that the app, CLI and skill tool surface in plain words.
+ */
+function isBlocked(
+  name: string,
+  source: string,
+  skillPath: string,
+  verdict: SkillScanResult,
+  ctx: LoadContext,
+): boolean {
+  if (verdict.ok) return false;
+  log("WARN", "skills", skillBlockMessage(name, verdict.finding), {
+    source,
+    rule: verdict.finding.rule,
+  });
+  ctx.blocked.push({
+    name,
+    path: skillPath,
+    scope: source,
+    reason: verdict.finding.reason,
+    hash: verdict.hash ?? "",
+  });
+  return true;
 }
 
 /**

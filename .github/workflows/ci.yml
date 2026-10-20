@@ -112,15 +112,15 @@ jobs:
           pnpm --filter @kenkaiiii/ggcoder build
 
       # Bundle growth is informational; measured CLI startup remains blocking.
-      # Reference sizes live in bench/baseline/sizes.json.
+      # Reference sizes live in .github/ci/baseline/sizes.json.
       - name: Size report + startup gate
         shell: bash
         run: |
           # --only: a positional arg is ignored by the script, which then checks
           # every artifact — including the sidecar this job never builds (that
           # one is reported in the `app` job, which bundles it).
-          node bench/size-gate.mjs --only dist:ggcoder
-          node bench/startup-gate.mjs
+          node .github/ci/size-gate.mjs --only dist:ggcoder
+          node .github/ci/startup-gate.mjs
 
       # Lint and formatting are OS-independent, so one leg is enough.
       - name: Lint + format check
@@ -278,7 +278,7 @@ jobs:
       # node_modules carries platform-conditional binaries so one baseline
       # cannot hold across the matrix).
       - name: Sidecar size report
-        run: node bench/size-gate.mjs --only sidecar
+        run: node .github/ci/size-gate.mjs --only sidecar
         shell: bash
 
       # Workspace zoom tests load an extension through full Chromium on every OS.
@@ -311,7 +311,7 @@ jobs:
         shell: bash
         run: |
           pnpm --filter gg-app build
-          node bench/size-gate.mjs --only frontend:initial
+          node .github/ci/size-gate.mjs --only frontend:initial
 
       - name: Frontend platform-class test
         run: pnpm --filter gg-app test

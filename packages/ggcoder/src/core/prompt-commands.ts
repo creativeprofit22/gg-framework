@@ -187,6 +187,7 @@ All content you generate goes inside these exact fence markers:
 - If the file exists and already has the fence: **replace everything between the markers wholesale**. Text outside the fence is user-owned — do not touch it, do not reformat it, do not move it.
 - If the file exists without the fence: read it, decide which content is hand-written knowledge worth keeping, move that above the fence untouched, and put your generated content inside a new fence. Remove generic guidance that is already covered by the system prompt (see the list above) unless it is a deliberate project-specific override.
 - If the file does not exist: create it with the fence.
+- A \`<!-- gg-safe:blocked-packages:start -->\` … \`<!-- gg-safe:blocked-packages:end -->\` block is maintained by the app (packages its safety checks blocked). Keep it outside your fence, exactly as it is.
 
 ## Step 3: Analyze the project (sub-agents in parallel)
 

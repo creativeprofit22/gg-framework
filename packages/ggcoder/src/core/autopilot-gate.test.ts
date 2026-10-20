@@ -290,9 +290,35 @@ describe("isMechanicalOnlyTurn", () => {
 
   it("is NOT mechanical for tools that mutate task/process state or produce artifacts", () => {
     expect(isMechanicalOnlyTurn([{ name: "generate_image", args: {} }])).toBe(false);
-    expect(isMechanicalOnlyTurn([{ name: "tasks", args: {} }])).toBe(false);
     expect(isMechanicalOnlyTurn([{ name: "task_send", args: {} }])).toBe(false);
     expect(isMechanicalOnlyTurn([{ name: "task_stop", args: {} }])).toBe(false);
+  });
+
+  it("treats a roadmap-bookkeeping-only turn as mechanical", () => {
+    expect(
+      isMechanicalOnlyTurn([
+        { name: "roadmap_inspect", args: {} },
+        { name: "roadmap_status", args: { transition: "done" } },
+      ]),
+    ).toBe(true);
+    // Roadmap bookkeeping alongside a code edit still gets reviewed.
+    expect(
+      isMechanicalOnlyTurn([
+        { name: "edit", args: {} },
+        { name: "roadmap_status", args: { transition: "done" } },
+      ]),
+    ).toBe(false);
+  });
+
+  it("keeps a tasks mark-done turn reviewable (task runs must not self-certify)", () => {
+    expect(isMechanicalOnlyTurn([{ name: "tasks", args: { action: "done" } }])).toBe(false);
+    // A task run that only reads files and marks itself done still gets Ken.
+    expect(
+      isMechanicalOnlyTurn([
+        { name: "read", args: { file_path: "a.ts" } },
+        { name: "tasks", args: { action: "done", id: "t1" } },
+      ]),
+    ).toBe(false);
   });
 
   it("treats a background bash start (dev server / watcher) as mechanical", () => {

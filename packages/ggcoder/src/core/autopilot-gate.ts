@@ -141,7 +141,7 @@ export interface AutopilotGateInput {
   workflowCommand: boolean;
   /** Assistant messages ADDED by this turn (after minus before). */
   assistantMessagesAdded: number;
-  /** True when every tool call this turn was mechanical bash usage (see
+  /** True when every tool call this turn was mechanical (see
    *  isMechanicalOnlyTurn) — nothing for Ken to review. Optional so existing
    *  callers/tests that don't set it default to false (reviewable). */
   mechanicalOnly?: boolean;
@@ -189,8 +189,10 @@ export interface TurnToolCall {
  *  bash, which needs isMechanicalBashCall to tell a read-only invocation from
  *  a mutating one. Deliberately excludes generate_image (produces a real
  *  artifact), subagent (can do anything internally), tasks/task_send/
- *  task_stop (mutate task/process state), and enter_plan/exit_plan (mode
- *  transitions already handled by the separate plan-mode gate check). */
+ *  task_stop (mutate task/process state; they stay reviewable), and
+ *  enter_plan/exit_plan (mode transitions already handled by the separate
+ *  plan-mode gate check). Roadmap bookkeeping tools are handled separately by
+ *  BOOKKEEPING_TOOL_NAMES. */
 const READ_ONLY_TOOL_NAMES: ReadonlySet<string> = new Set([
   "read",
   "grep",
@@ -203,6 +205,24 @@ const READ_ONLY_TOOL_NAMES: ReadonlySet<string> = new Set([
   "task_output",
   "screenshot",
   "skill",
+]);
+
+/** Local Fork: Project Notes Roadmap bookkeeping. These change status records,
+ *  not code, and enforce their own revision, lease, evidence and approval
+ *  checks, so a turn that only updates a phase gets no Ken review (and no
+ *  pre-review check demand). `tasks` is deliberately excluded (as upstream):
+ *  desktop task runs ask the agent to call `tasks done`, and that agent-marked
+ *  completion must stay provisional until Ken reviews the turn against the
+ *  task prompt — otherwise a run that did nothing but mark itself done would
+ *  settle as done unreviewed. task_send/task_stop stay reviewable too. */
+const BOOKKEEPING_TOOL_NAMES: ReadonlySet<string> = new Set([
+  "roadmap_bind",
+  "roadmap_checkpoint",
+  "roadmap_inspect",
+  "roadmap_phase_draft",
+  "roadmap_phase_edit",
+  "roadmap_phase_move",
+  "roadmap_status",
 ]);
 
 /** Leading git subcommands that are a plain add/commit/push workflow —
@@ -237,10 +257,12 @@ function isMechanicalBashCall(args: Record<string, unknown> | undefined): boolea
  * True when the turn has nothing for Ken to review: either it made NO tool
  * calls at all (a plain-text answer — "a plain question that got answered
  * with no code touched" is IGNORE per the autopilot contract), or EVERY tool
- * call was mechanical (a dedicated read-only tool, or bash usage that starts
- * a background process / is read-only / is a plain git commit-push chain).
- * ANY non-mechanical call (edit, write, subagent, generate_image, or bash
- * outside these safe shapes) makes the whole turn reviewable — conservative
+ * call was mechanical (a dedicated read-only tool in READ_ONLY_TOOL_NAMES, a
+ * Roadmap bookkeeping tool in BOOKKEEPING_TOOL_NAMES, or bash usage that
+ * starts a background process / is read-only / is a plain git commit-push
+ * chain). ANY non-mechanical call (edit, write, subagent, generate_image,
+ * tasks/task_send/task_stop, or bash outside these safe shapes) makes the
+ * whole turn reviewable — conservative
  * default: keep reviewing whenever it's unclear.
  */
 export function isMechanicalOnlyTurn(toolCalls: readonly TurnToolCall[]): boolean {
@@ -248,6 +270,7 @@ export function isMechanicalOnlyTurn(toolCalls: readonly TurnToolCall[]): boolea
   return toolCalls.every(
     (call) =>
       READ_ONLY_TOOL_NAMES.has(call.name) ||
+      BOOKKEEPING_TOOL_NAMES.has(call.name) ||
       (call.name === "bash" && isMechanicalBashCall(call.args)),
   );
 }

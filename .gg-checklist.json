@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "items": {
+    "agent-setup": {
+      "checkedAt": "2026-10-20T08:16:37.000Z",
+      "commit": "a666be6b",
+      "uncommittedChanges": true,
+      "result": "pass",
+      "summary": "AGENTS.md generated block regenerated and spot-checked against code; recurring UI/release/upstream work has project commands.",
+      "findings": [],
+      "evidence": [
+        "Scope: AGENTS.md gg:init block (4.6KB), .gg/commands, .gg/skills, gg-app/src-tauri config, build-local-hotfix.mjs, Cargo.toml, windows.rs, release/ci workflows via 3 sub-agents",
+        "Verified: tauri.local.conf.json + LOCAL_TAURI_CONFIG hold fork identity; assertIsolatedIdentities requires base com.ggcoder.app + updater artifacts",
+        "Verified: x-gg-token in lib.rs, x-gg-session in commands/agent.rs; GG_APP_DEV_SMOKE_WINDOW in windows.rs; rustls note in Cargo.toml",
+        "Skills: .gg/commands has polish, release, upstream-pr, sweep, cleanup, ref-ui, perf-ui, asset, ingest-spec, setup-polish; .gg/skills empty",
+        "Not checked: atomic temp-rename code in auth-storage.ts, full ci.yml MSI step, startup-gate.mjs flags; CLAUDE.md (shadowed by AGENTS.md) left untouched"
+      ]
+    },
+    "docs": {
+      "checkedAt": "2026-10-20T08:21:49.893Z",
+      "commit": "a666be6b",
+      "uncommittedChanges": true,
+      "result": "pass",
+      "summary": "Re-check of the 5 recorded docs findings: all fixed in README.md and gg-app/README.md (test commands, versions, optional settings, fork note, shared-daemon architecture).",
+      "findings": [],
+      "evidence": [
+        "README.md Get started step 3 now lists pnpm check, lint, format:check, test; all four exist in root package.json scripts",
+        "README.md dev step states Node.js 22+ and pnpm@10.17.1, matching packages engines and packageManager",
+        "README.md 'Optional settings' table documents GG_AGENT_DIR (gg-core/src/paths.ts:28), AZURE_OPENAI_* (ggcoder/src/core/auth-storage.ts:10-13), GGCODER_GEMINI_OAUTH_* (gg-core/src/oauth/gemini.ts:7-8)",
+        "README.md 'This Local Fork' section links gg-app/LOCAL_FIXES.md and names app:build:local-patched / app:update:local-fixes (both exist in root scripts)",
+        "gg-app/README.md architecture now describes one shared daemon with x-gg-session per pane (verified in gg-app/src-tauri/src/daemon.rs:23-26) and per-identity log name (process.rs:244,698-702)",
+        "pnpm exec prettier --check README.md gg-app/README.md: all files use Prettier code style (README.md reformatted with --write after the edit; HEAD version was clean)",
+        "Scope: re-check of the 5 findings recorded earlier today only, not a new review",
+        "Not checked: did not run pnpm install/build/tauri dev or the test commands to prove the documented steps work; package READMEs, Matey, docs/ not reviewed"
+      ]
+    }
+  }
+}

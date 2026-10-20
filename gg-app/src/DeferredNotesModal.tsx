@@ -1,6 +1,7 @@
 import { useEffect, useState, type ComponentProps } from "react";
 import { Modal } from "./Modal";
 import type { NotesModal } from "./NotesModal";
+import { notesModalDescription } from "./NotesModalHeader";
 import { loadedNotesModalContent, loadNotesModalContent } from "./notes-modal-loader";
 
 /** Mount only at the Notes open boundary, never around the workspace or composer. */
@@ -27,7 +28,12 @@ export function DeferredNotesModal(props: ComponentProps<typeof NotesModal>): Re
   }, [Content, attempt]);
 
   return (
-    <Modal title="Your notes" onClose={props.onClose} className="notes-modal">
+    <Modal
+      title="Your notes"
+      description={notesModalDescription(props.projectPath, props.phases)}
+      onClose={props.onClose}
+      className="notes-modal"
+    >
       {Content ? (
         <Content {...props} />
       ) : (

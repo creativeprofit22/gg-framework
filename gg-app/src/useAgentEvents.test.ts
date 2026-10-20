@@ -500,6 +500,17 @@ describe("useAgentEvents", () => {
       ),
     );
     expect(deps.onRoadmapPhaseDraftRefresh).toHaveBeenCalledTimes(3);
+    act(() =>
+      hook.result.current.handleEvent(
+        ev("tool_call_start", { toolCallId: "move", name: "roadmap_phase_move", args: {} }),
+      ),
+    );
+    act(() =>
+      hook.result.current.handleEvent(
+        ev("tool_call_end", { toolCallId: "move", result: "drafted" }),
+      ),
+    );
+    expect(deps.onRoadmapPhaseDraftRefresh).toHaveBeenCalledTimes(4);
   });
   it("invalidates opportunities from tool activity without trusting tool output as state", () => {
     const { hook, deps } = setup();

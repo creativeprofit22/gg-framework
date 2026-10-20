@@ -1410,6 +1410,68 @@ describe("useProjectNotes sidecar authority", () => {
     expect(persisted.phases[5]).toMatchObject({ id: "A", title: "Phase A", order: 5 });
   });
 
+  it("moves a phase past a done phase to its neighbour in the same group", async () => {
+    const cwd = "/work/move-past-done-phase";
+    const server = new FakeNotesServer();
+    const initial = notes("base");
+    const done = phase("B", 1);
+    done.status = "done";
+    initial.phases = [phase("A", 0), done, phase("C", 2)];
+    server.snapshots.set(cwd, { projectKey: cwd, revision: 1, document: initial });
+    const client = server.connect(cwd);
+    const storage = new MemoryStorage();
+    const hook = renderHook(() => useProjectNotes(cwd, hookOptions(client, storage)));
+    await waitFor(() => expect(hook.result.current.document.phases).toHaveLength(3));
+
+    // The only completed phase has no same-group neighbour to swap with.
+    act(() => hook.result.current.movePhase("B", "up"));
+    act(() => hook.result.current.movePhase("B", "down"));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(client.saveCalls).toHaveLength(0);
+
+    act(() => hook.result.current.movePhase("A", "down"));
+
+    await waitFor(() => expect(server.snapshots.get(cwd)?.revision).toBe(2));
+    const persisted = server.snapshots.get(cwd)!.document;
+    // The open group now reads C, A. The move follows the shared Roadmap rule (as drag and the
+    // agent tool do): A goes directly after C, so no open phase is left ahead of Done phase B.
+    expect(persisted.phases.map((item) => item.id)).toEqual(["B", "C", "A"]);
+    expect(persisted.phases.map((item) => item.order)).toEqual([0, 1, 2]);
+    expect(persisted.phases[0]).toMatchObject({ id: "B", status: "done" });
+  });
+
+  it("moves a task past a done task to its neighbour in the same group", async () => {
+    const cwd = "/work/move-past-done-task";
+    const server = new FakeNotesServer();
+    const done = { ...task("task-2"), status: "done" as const, completedAt: NOW };
+    server.snapshots.set(cwd, {
+      projectKey: cwd,
+      revision: 1,
+      document: notes("base", "", [task("task-1"), done, task("task-3")]),
+    });
+    const client = server.connect(cwd);
+    const storage = new MemoryStorage();
+    const hook = renderHook(() => useProjectNotes(cwd, hookOptions(client, storage)));
+    await waitFor(() => expect(hook.result.current.document.tasks).toHaveLength(3));
+
+    act(() => hook.result.current.moveTask("task-2", "up"));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(client.saveCalls).toHaveLength(0);
+
+    act(() => hook.result.current.moveTask("task-3", "up"));
+
+    await waitFor(() => expect(server.snapshots.get(cwd)?.revision).toBe(2));
+    expect(server.snapshots.get(cwd)?.document.tasks.map((item) => item.id)).toEqual([
+      "task-3",
+      "task-1",
+      "task-2",
+    ]);
+  });
+
   it.each(["source", "target"] as const)(
     "drops a queued move when another window deletes the %s instead of substituting a hidden phase",
     async (deletedRole) => {

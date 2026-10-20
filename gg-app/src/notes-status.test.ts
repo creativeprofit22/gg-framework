@@ -6,9 +6,13 @@ import {
   getDueNotesReminderCount,
   getSavedPromptCount,
   getUnfinishedNotesTaskCount,
+  groupNotesPhases,
+  groupNotesTasks,
   isNotesHandoffUnread,
+  roadmapProgressLabel,
+  selectNotesRoadmapProgress,
 } from "./notes-status";
-import type { NotesDocumentV3, NotesPhase, NotesPhaseStatus } from "./notes-types";
+import type { NotesDocumentV3, NotesPhase, NotesPhaseStatus, NotesTask } from "./notes-types";
 
 const NOW = "2026-07-25T12:00:00.000Z";
 
@@ -171,5 +175,89 @@ describe("Notes status selectors", () => {
     expect(getActiveNotesPhaseCount(document())).toBe(0);
     expect(getActiveNotesReminderCount(document())).toBe(0);
     expect(getDueNotesReminderCount(document())).toBe(0);
+  });
+});
+
+function named(status: NotesPhaseStatus, id: string, extra: Partial<NotesPhase> = {}): NotesPhase {
+  return { ...phase(status), id, title: id, ...extra };
+}
+
+function task(
+  id: string,
+  status: NotesTask["status"],
+  archivedAt: string | null = null,
+): NotesTask {
+  return {
+    id,
+    text: id,
+    status,
+    createdAt: NOW,
+    updatedAt: NOW,
+    completedAt: status === "done" ? NOW : null,
+    archivedAt,
+  };
+}
+
+describe("Roadmap progress selector", () => {
+  it("divides done by visible phases minus cancelled", () => {
+    const progress = selectNotesRoadmapProgress([
+      named("done", "a"),
+      named("in-progress", "b"),
+      named("cancelled", "c"),
+      named("done", "d"),
+      named("not-started", "e"),
+    ]);
+    expect(progress).toEqual({ done: 2, total: 4, ratio: 0.5 });
+    expect(roadmapProgressLabel(progress)).toBe("2 of 4 phases done");
+  });
+
+  it("returns a null ratio and no label when every phase is cancelled", () => {
+    const progress = selectNotesRoadmapProgress([named("cancelled", "a"), named("cancelled", "b")]);
+    expect(progress).toEqual({ done: 0, total: 0, ratio: null });
+    expect(roadmapProgressLabel(progress)).toBeNull();
+  });
+
+  it("returns a null ratio and no label for an empty roadmap", () => {
+    const progress = selectNotesRoadmapProgress([]);
+    expect(progress).toEqual({ done: 0, total: 0, ratio: null });
+    expect(roadmapProgressLabel(progress)).toBeNull();
+  });
+
+  it("excludes archived and deleted phases", () => {
+    const progress = selectNotesRoadmapProgress([
+      named("done", "kept"),
+      named("done", "archived", { archivedAt: NOW }),
+      named("in-progress", "deleted", {
+        deletion: { version: 1, currentDeletionId: "deletion-1", events: [] },
+      }),
+    ]);
+    expect(progress).toEqual({ done: 1, total: 1, ratio: 1 });
+    expect(roadmapProgressLabel(progress)).toBe("1 of 1 phase done");
+  });
+});
+
+describe("Notes grouping", () => {
+  it("splits phases into open and completed in document order", () => {
+    const groups = groupNotesPhases([
+      named("done", "a"),
+      named("planning", "b"),
+      named("cancelled", "c"),
+      named("done", "d"),
+      named("done", "archived", { archivedAt: NOW }),
+    ]);
+    expect(groups.open.map((item) => item.id)).toEqual(["b", "c"]);
+    expect(groups.completed.map((item) => item.id)).toEqual(["a", "d"]);
+  });
+
+  it("splits tasks into open and completed and drops archived tasks", () => {
+    const groups = groupNotesTasks([
+      task("done-1", "done"),
+      task("todo-1", "todo"),
+      task("archived", "done", NOW),
+      task("todo-2", "todo"),
+      task("done-2", "done"),
+    ]);
+    expect(groups.open.map((item) => item.id)).toEqual(["todo-1", "todo-2"]);
+    expect(groups.completed.map((item) => item.id)).toEqual(["done-1", "done-2"]);
   });
 });

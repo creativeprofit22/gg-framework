@@ -117,7 +117,11 @@ export function NotesStorageDiagnostics({
               <div key={label}>
                 <dt>{label}</dt>
                 <dd title={value}>{value}</dd>
-                <button type="button" onClick={() => copyDiagnostic(label, value)}>
+                <button
+                  type="button"
+                  className="notes-btn-quiet"
+                  onClick={() => copyDiagnostic(label, value)}
+                >
                   Copy
                 </button>
               </div>
@@ -301,6 +305,7 @@ export function NotesPhaseMoreControls(): ReactElement {
     reopenPhase,
     onChangePhaseStatus,
     onMovePhase,
+    moveRefusal,
     onArchivePhase,
     onDeletePhase,
     isTopologyMutationBlocked,
@@ -470,12 +475,14 @@ export function NotesPhaseMoreControls(): ReactElement {
             disabled={
               controlsDisabled ||
               position === 0 ||
+              moveRefusal("up") !== null ||
               isTopologyMutationBlocked({ type: "move", phaseId: phase.id, direction: "up" })
             }
             title={
-              isTopologyMutationBlocked({ type: "move", phaseId: phase.id, direction: "up" })
+              moveRefusal("up") ??
+              (isTopologyMutationBlocked({ type: "move", phaseId: phase.id, direction: "up" })
                 ? "This move would change the target protected by a pending phase advancement."
-                : undefined
+                : undefined)
             }
             onClick={() => onMovePhase(phase.id, "up")}
           >
@@ -486,12 +493,14 @@ export function NotesPhaseMoreControls(): ReactElement {
             disabled={
               controlsDisabled ||
               position === phaseCount - 1 ||
+              moveRefusal("down") !== null ||
               isTopologyMutationBlocked({ type: "move", phaseId: phase.id, direction: "down" })
             }
             title={
-              isTopologyMutationBlocked({ type: "move", phaseId: phase.id, direction: "down" })
+              moveRefusal("down") ??
+              (isTopologyMutationBlocked({ type: "move", phaseId: phase.id, direction: "down" })
                 ? "This move would change the target protected by a pending phase advancement."
-                : undefined
+                : undefined)
             }
             onClick={() => onMovePhase(phase.id, "down")}
           >
@@ -512,7 +521,12 @@ export function NotesPhaseMoreControls(): ReactElement {
             Archive phase
           </button>
           {onDeletePhase && (
-            <button type="button" disabled={controlsDisabled} onClick={onDeletePhase}>
+            <button
+              type="button"
+              className="notes-btn-quiet notes-btn-danger"
+              disabled={controlsDisabled}
+              onClick={onDeletePhase}
+            >
               Delete phase
             </button>
           )}

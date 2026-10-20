@@ -1,3 +1,71 @@
+import {
+  CheckCircleIcon,
+  CircleDashedIcon,
+  CircleHalfIcon,
+  EyeIcon,
+  FileTextIcon,
+  HourglassIcon,
+  NotePencilIcon,
+  ProhibitIcon,
+  WarningCircleIcon,
+  type Icon,
+} from "@phosphor-icons/react";
+import { NOTES_PHASE_STATUS_PRESENTATION } from "./notes-lifecycle-presentation";
+import type { NotesPhaseStatus } from "./notes-types";
+
+/** One icon per stored phase status; the word and tone come from NOTES_PHASE_STATUS_PRESENTATION. */
+const NOTES_PHASE_STATUS_ICON = {
+  "not-started": CircleDashedIcon,
+  planning: NotePencilIcon,
+  "waiting-for-approval": HourglassIcon,
+  "in-progress": CircleHalfIcon,
+  review: EyeIcon,
+  done: CheckCircleIcon,
+  "needs-attention": WarningCircleIcon,
+  cancelled: ProhibitIcon,
+} as const satisfies Record<NotesPhaseStatus, Icon>;
+
+/** Only these statuses earn a soft tinted background; every other status is icon + text colour. */
+const NOTES_PHASE_STATUS_TINTED = {
+  "not-started": false,
+  planning: false,
+  "waiting-for-approval": false,
+  "in-progress": false,
+  review: false,
+  done: true,
+  "needs-attention": true,
+  cancelled: false,
+} as const satisfies Record<NotesPhaseStatus, boolean>;
+
+export function NotesPhaseStatusBadge({
+  status,
+}: {
+  status: NotesPhaseStatus;
+}): React.ReactElement {
+  const { label, tone } = NOTES_PHASE_STATUS_PRESENTATION[status];
+  const StatusIcon = NOTES_PHASE_STATUS_ICON[status];
+  const tinted = NOTES_PHASE_STATUS_TINTED[status];
+  return (
+    <span className={`notes-phase-status is-tone-${tone}${tinted ? " is-tinted" : ""}`}>
+      <StatusIcon size={14} weight={tinted ? "fill" : "bold"} aria-hidden="true" />
+      <span>{label}</span>
+    </span>
+  );
+}
+
+export function NotesSavedPromptIndicator(): React.ReactElement {
+  return (
+    <span
+      className="notes-phase-saved-prompt-marker"
+      role="img"
+      aria-label="Saved prompt"
+      title="Saved prompt"
+    >
+      <FileTextIcon size={14} aria-hidden="true" />
+    </span>
+  );
+}
+
 interface Props {
   unfinishedCount: number;
   dueReminderCount: number;

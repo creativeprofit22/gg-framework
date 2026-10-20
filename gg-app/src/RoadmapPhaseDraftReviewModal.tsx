@@ -6,9 +6,15 @@ import {
   ListChecksIcon,
   XIcon,
 } from "@phosphor-icons/react";
-import type { RoadmapPhaseDraft } from "@kenkaiiii/gg-core/roadmap-workflow";
+import {
+  isRoadmapPhaseEditDraft,
+  isRoadmapPhaseMoveDraft,
+  type RoadmapPhaseDraft,
+} from "@kenkaiiii/gg-core/roadmap-workflow";
 import { openReferenceUrl } from "./notes-open-source";
 import { RoadmapPhaseEditReview } from "./RoadmapPhaseEditReview";
+import { RoadmapPhaseMoveReview } from "./RoadmapPhaseMoveReview";
+import { RoadmapPhaseOrderComparison } from "./RoadmapPhaseOrderComparison";
 
 interface RoadmapPhaseDraftReviewModalProps {
   draft: RoadmapPhaseDraft | null;
@@ -30,7 +36,19 @@ export function RoadmapPhaseDraftReviewModal({
   onReject,
 }: RoadmapPhaseDraftReviewModalProps) {
   if (!draft || !open) return null;
-  if ("kind" in draft) {
+  if (isRoadmapPhaseMoveDraft(draft)) {
+    return (
+      <RoadmapPhaseMoveReview
+        draft={draft}
+        decision={decision}
+        error={error}
+        announcement={announcement}
+        onApprove={onApprove}
+        onReject={onReject}
+      />
+    );
+  }
+  if (isRoadmapPhaseEditDraft(draft)) {
     return (
       <RoadmapPhaseEditReview
         draft={draft}
@@ -166,6 +184,16 @@ export function RoadmapPhaseDraftReviewModal({
               </li>
             ))}
           </ol>
+
+          {draft.orderPreview && (
+            <div className="roadmap-edit-changes roadmap-draft-order">
+              <RoadmapPhaseOrderComparison
+                preview={draft.orderPreview}
+                highlightedPhaseIds={new Set(draft.phases.map((phase) => phase.phaseId))}
+                highlightLabel="New"
+              />
+            </div>
+          )}
 
           {malformedLinks && (
             <div className="roadmap-draft-error" role="alert">

@@ -9,6 +9,7 @@ import {
   WarningIcon,
 } from "@phosphor-icons/react";
 import { DeferredNotesModal } from "./DeferredNotesModal";
+import { NotesDisclosure } from "./NotesDisclosure";
 import { RoadmapReminderAlert } from "./RoadmapReminderAlert";
 import type { OpenReferenceUrl } from "./notes-open-source";
 import { NotesStatusBadge, notesStatusLabel } from "./NotesStatusBadge";
@@ -124,6 +125,7 @@ export const ProjectNotes = forwardRef<ProjectNotesPromptActions, Props>(functio
     createPhase,
     editPhase,
     movePhase,
+    reorderPhase,
     changePhaseStatus,
     setPhaseStatusOverride,
     archivePhase,
@@ -409,6 +411,7 @@ export const ProjectNotes = forwardRef<ProjectNotesPromptActions, Props>(functio
         modalProjectIdentity === activeProjectIdentity &&
         createPortal(
           <DeferredNotesModal
+            projectPath={cwd || null}
             value={value}
             onChange={onChange}
             currentFocus={notesDocument.currentFocus}
@@ -436,6 +439,7 @@ export const ProjectNotes = forwardRef<ProjectNotesPromptActions, Props>(functio
             onCreatePhase={createPhase}
             onEditPhase={editPhase}
             onMovePhase={movePhase}
+            onReorderPhase={reorderPhase}
             onChangePhaseStatus={changePhaseStatus}
             onSetPhaseStatusOverride={setPhaseStatusOverride}
             onArchivePhase={archivePhase}
@@ -596,18 +600,16 @@ export function NotesPersistenceStatus({
           <strong>{title}</strong>
           <span>Stored on this device only</span>
         </div>
-        <button
-          type="button"
-          className="btn btn-sm btn-ghost notes-persistence-toggle"
-          aria-expanded={expanded}
-          aria-controls={detailId}
-          onClick={() => setExpanded((open) => !open)}
+        <NotesDisclosure
+          id={detailId}
+          label="Details"
+          expanded={expanded}
+          onToggle={() => setExpanded((open) => !open)}
+          className="notes-persistence-disclosure"
+          regionClassName="notes-persistence-detail"
         >
-          {expanded ? "Hide details" : "Show details"}
-        </button>
-        <p id={detailId} className="notes-persistence-detail" hidden={!expanded}>
-          {detail}
-        </p>
+          <p>{detail}</p>
+        </NotesDisclosure>
       </div>
     );
   }

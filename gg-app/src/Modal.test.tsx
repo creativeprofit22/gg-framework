@@ -55,6 +55,40 @@ describe("Modal", () => {
     },
   );
 
+  it("keeps the title-only header markup when no description is given", () => {
+    render(
+      <Modal title="Plain" onClose={() => {}}>
+        <span>Body</span>
+      </Modal>,
+    );
+    const dialog = screen.getByRole("dialog", { name: "Plain" });
+    expect(dialog.hasAttribute("aria-describedby")).toBe(false);
+    const head = dialog.querySelector(".modal-head");
+    expect(head?.querySelector(".modal-head-text")).toBeNull();
+    expect(head?.firstElementChild?.matches("h2.modal-title")).toBe(true);
+    expect(head?.lastElementChild?.getAttribute("aria-label")).toBe("Close");
+  });
+
+  it("describes the dialog with header text without changing its name", () => {
+    render(
+      <Modal
+        title="Your notes"
+        description={<span>alpha · 1 of 2 phases done</span>}
+        onClose={() => {}}
+      >
+        <span>Body</span>
+      </Modal>,
+    );
+    const dialog = screen.getByRole("dialog", { name: "Your notes" });
+    const id = dialog.getAttribute("aria-describedby");
+    expect(id).toBeTruthy();
+    const described = id ? document.getElementById(id) : null;
+    expect(described?.textContent).toBe("alpha · 1 of 2 phases done");
+    const head = dialog.querySelector(".modal-head");
+    expect(head?.firstElementChild?.classList.contains("modal-head-text")).toBe(true);
+    expect(head?.lastElementChild?.getAttribute("aria-label")).toBe("Close");
+  });
+
   it("exposes dialog semantics, closes on Escape, and returns focus", () => {
     const onClose = vi.fn();
     const opener = document.createElement("button");

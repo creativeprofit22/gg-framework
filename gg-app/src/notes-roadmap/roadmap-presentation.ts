@@ -2,6 +2,10 @@ import {
   classifyRoadmapAutoStartEligibility,
   isNotesPhaseAdvancementSourceCurrent,
 } from "@kenkaiiii/gg-core/project-notes";
+import {
+  planRoadmapPhaseMove,
+  type RoadmapPhasePlacement,
+} from "@kenkaiiii/gg-core/roadmap-workflow";
 import { MENTOR_DISPLAY_NAME, PRODUCT_DISPLAY_NAME } from "../brand";
 import { notesPhaseStatusLabel } from "../notes-lifecycle-presentation";
 import type {
@@ -59,6 +63,7 @@ export interface RoadmapAdvancement {
 
 export type RoadmapTopologyMutation =
   | { type: "move"; phaseId: string; direction: "up" | "down" }
+  | { type: "reorder"; phaseId: string; placement: RoadmapPhasePlacement }
   | { type: "archive" | "restore" | "pause-status" | "resume-status"; phaseId: string }
   | { type: "set-status"; phaseId: string; status: NotesPhaseStatus };
 
@@ -193,6 +198,10 @@ function applyRoadmapTopologyMutation(
       ...phase.overrides,
       status: { value: mutation.status, source: "user", updatedAt: new Date(0).toISOString() },
     };
+  }
+  if (mutation.type === "reorder") {
+    const planned = planRoadmapPhaseMove(next, mutation.phaseId, mutation.placement);
+    return planned.ok ? planned.phases : null;
   }
   if (mutation.type === "move") {
     const visible = next.filter((candidate) => candidate.archivedAt === null);

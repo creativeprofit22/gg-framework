@@ -3655,7 +3655,7 @@ select {
   border-radius: var(--radius-pill);
   background: color-mix(in srgb, var(--primary) 18%, transparent);
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: var(--fs-sm);
 }
 @container review-pane (max-width: 560px) {
   .roadmap-draft-phase {
@@ -3883,6 +3883,21 @@ select {
   font-size: var(--fs-lg);
   font-weight: 600;
   letter-spacing: -0.02em;
+}
+/* Present only when a modal passes `description`: title + supporting line on
+   the left, the close action stays right-aligned. */
+.modal-head-text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+/* A long unbroken description must wrap, never squeeze the close target. */
+.modal-head-text + .modal-close {
+  flex-shrink: 0;
+}
+.modal-description {
+  margin: var(--space-2) 0 0;
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
 }
 .modal-close {
   appearance: none;

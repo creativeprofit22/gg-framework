@@ -1,6 +1,15 @@
 // @vitest-environment jsdom
 
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  createEvent,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { createRef } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -11,6 +20,8 @@ import {
   notesPhaseDeletionGeneration,
 } from "@kenkaiiii/gg-core/project-notes";
 import * as notesLoader from "./notes-modal-loader";
+import { NOTES_PHASE_STATUS_PRESENTATION } from "./notes-lifecycle-presentation";
+import { NotesPhaseStatusBadge } from "./NotesStatusBadge";
 import {
   NOTES_REFERENCE_METADATA_MAX_LENGTH,
   NOTES_REFERENCE_URL_MAX_LENGTH,
@@ -379,6 +390,16 @@ async function selectNotesTab(
   fireEvent.click(tab);
 }
 
+/** Task row actions live behind one "⋯" trigger; open it and return the menu. */
+function openTaskMenu(taskText: string): HTMLElement {
+  fireEvent.click(screen.getByRole("button", { name: `Task actions: ${taskText}` }));
+  return screen.getByRole("menu", { name: `Actions for ${taskText}` });
+}
+
+function chooseTaskAction(taskText: string, action: string): void {
+  fireEvent.click(within(openTaskMenu(taskText)).getByRole("menuitem", { name: action }));
+}
+
 function selectPhaseView(name: "Overview" | "Completion" | "References" | "Activity" | "More") {
   const tablist = screen.getByRole("tablist", { name: / views$/ });
   const tab = Array.from(tablist.querySelectorAll<HTMLButtonElement>('[role="tab"]')).find(
@@ -389,9 +410,18 @@ function selectPhaseView(name: "Overview" | "Completion" | "References" | "Activ
   return tab;
 }
 
+/** Done phases sit in the collapsed Completed group; open it the way a user would. */
+function expandCompletedPhases(): void {
+  const toggle = globalThis.document.querySelector<HTMLButtonElement>(
+    'button[aria-controls="notes-completed-phases"]',
+  );
+  if (toggle && toggle.getAttribute("aria-expanded") !== "true") fireEvent.click(toggle);
+}
+
 async function openRoadmapPhase(title: string): Promise<void> {
   fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
   await selectNotesTab("Roadmap");
+  if (!screen.queryByRole("button", { name: `Inspect phase: ${title}` })) expandCompletedPhases();
   fireEvent.click(screen.getByRole("button", { name: `Inspect phase: ${title}` }));
 }
 
@@ -699,9 +729,34 @@ afterEach(() => {
   cleanup();
   vi.useRealTimers();
   localStorage.clear();
+  sessionStorage.clear();
   tauriMocks.invoke.mockReset();
   tauriMocks.logError.mockReset();
   vi.clearAllMocks();
+});
+
+describe("NotesPhaseStatusBadge", () => {
+  it("pairs a decorative icon with the single status word and tints only attention states", () => {
+    const statuses = Object.keys(NOTES_PHASE_STATUS_PRESENTATION).sort() as NotesPhaseStatus[];
+    expect(statuses).toHaveLength(8);
+    const icons = new Set<string>();
+    for (const status of statuses) {
+      const { container, unmount } = render(<NotesPhaseStatusBadge status={status} />);
+      const badge = container.querySelector(".notes-phase-status");
+      const { label, tone } = NOTES_PHASE_STATUS_PRESENTATION[status];
+      expect(badge?.textContent).toBe(label);
+      expect(badge?.classList.contains(`is-tone-${tone}`)).toBe(true);
+      const icon = badge?.querySelector("svg");
+      expect(icon?.getAttribute("aria-hidden")).toBe("true");
+      icons.add(icon?.innerHTML ?? "");
+      expect(badge?.classList.contains("is-tinted")).toBe(
+        status === "done" || status === "needs-attention",
+      );
+      unmount();
+    }
+    // Each status has its own icon, so colour is never the only signal.
+    expect(icons.size).toBe(statuses.length);
+  });
 });
 
 describe("ProjectNotes deferred editor", () => {
@@ -790,6 +845,34 @@ describe("ProjectNotes deferred editor", () => {
     expect(document.activeElement).toBe(overview);
     expect(screen.getByRole("dialog")).toBe(shell);
     expect(pending.load).toHaveBeenCalledTimes(2);
+  });
+
+  it("headers the modal with project and progress while the storage status stays right under it", async () => {
+    const pending = delayedEditor();
+    const client = new FakeProjectNotesClient("/work/header-project");
+    client.seed(client.cwd, {
+      ...notes("header"),
+      phases: [phase("a", "done"), phase("b", "in-progress"), phase("c", "cancelled")],
+    });
+    render(<ProjectNotes cwd={client.cwd} client={client} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
+    const expectHeader = () => {
+      const dialog = screen.getByRole("dialog", { name: "Your notes" });
+      const describedBy = dialog.getAttribute("aria-describedby");
+      const description = describedBy ? document.getElementById(describedBy) : null;
+      expect(description?.textContent).toBe("Project: header-project · 1 of 2 phases done");
+      const head = dialog.querySelector(".modal-head");
+      const shell = head?.nextElementSibling;
+      expect(shell?.classList.contains("notes-shell")).toBe(true);
+      expect(shell?.querySelector(":scope > .notes-shell-status")).toBeTruthy();
+      expect(head?.querySelector(".notes-shell-status")).toBeNull();
+    };
+    expectHeader();
+    expect(screen.getByText("Loading Notes…")).toBeTruthy();
+    const { NotesModalContent } = await import("./NotesModal");
+    await act(async () => pending.resolve(NotesModalContent));
+    await screen.findByRole("tab", { name: "Overview" });
+    expectHeader();
   });
 
   it("discards a pending editor when the active project changes", async () => {
@@ -1435,8 +1518,13 @@ describe("ProjectNotes", () => {
     expect(document.activeElement).toBe(viewTabs[1]);
     expect(screen.getByRole("heading", { name: "Status and last report" })).toBeTruthy();
 
-    const viewSelector = screen.getByLabelText("Phase view") as HTMLSelectElement;
-    expect(viewSelector.value).toBe("completion");
+    // One tablist at every width: no narrow-width select duplicates the views.
+    expect(screen.queryByRole("combobox")).toBeNull();
+    expect(screen.queryByLabelText("Phase view")).toBeNull();
+    for (const tab of viewTabs) {
+      expect(document.getElementById(tab.getAttribute("aria-controls") ?? "")).not.toBeNull();
+      expect(tab.tabIndex).toBe(tab.getAttribute("aria-selected") === "true" ? 0 : -1);
+    }
     fireEvent.keyDown(viewTabs[1]!, { key: "End" });
     expect(viewTabs[4]?.getAttribute("aria-selected")).toBe("true");
     expect(document.activeElement).toBe(viewTabs[4]);
@@ -1460,18 +1548,18 @@ describe("ProjectNotes", () => {
     expect((screen.getByLabelText("Reminder note (optional)") as HTMLTextAreaElement).value).toBe(
       "Keep this local draft",
     );
-    expect(viewSelector.value).toBe("more");
+    expect(viewTabs[4]?.getAttribute("aria-selected")).toBe("true");
 
-    viewSelector.focus();
-    fireEvent.change(viewSelector, { target: { value: "overview" } });
+    viewTabs[4]?.focus();
+    fireEvent.keyDown(viewTabs[4]!, { key: "Home" });
     expect(viewTabs[0]?.getAttribute("aria-selected")).toBe("true");
     expect(phaseDetail("Phase-local audit")).not.toBeNull();
-    expect(document.activeElement).toBe(viewSelector);
-    fireEvent.change(viewSelector, { target: { value: "more" } });
+    expect(document.activeElement).toBe(viewTabs[0]);
+    fireEvent.keyDown(viewTabs[0]!, { key: "ArrowLeft" });
     expect((screen.getByLabelText("Reminder note (optional)") as HTMLTextAreaElement).value).toBe(
       "Keep this local draft",
     );
-    expect(document.activeElement).toBe(viewSelector);
+    expect(document.activeElement).toBe(viewTabs[4]);
   });
 
   it("describes a claimed in-app reminder as requested in due phase detail", async () => {
@@ -1643,8 +1731,13 @@ describe("ProjectNotes", () => {
     // The card stays concise: goal and criteria belong to the detail presentation.
     expect(card?.querySelector(".notes-roadmap-goal")).toBeNull();
     expect(card?.querySelector(".notes-roadmap-criteria")).toBeNull();
-    expect(card?.querySelector(".notes-phase-status")?.textContent).toBe("In progress");
-    expect(card?.querySelector(".notes-roadmap-card-footer .notes-roadmap-primary")).not.toBeNull();
+    const status = card?.querySelector(".notes-phase-status");
+    expect(status?.textContent).toBe("In progress");
+    expect(status?.querySelector("svg")?.getAttribute("aria-hidden")).toBe("true");
+    const cardAction = card?.querySelector(".notes-roadmap-card-footer .notes-roadmap-card-action");
+    expect(cardAction).not.toBeNull();
+    // Row actions are Quiet so the view keeps a single Primary.
+    expect(cardAction?.classList.contains("notes-btn-quiet")).toBe(true);
 
     fireEvent.click(inspect);
     expect(inspect.getAttribute("aria-expanded")).toBe("true");
@@ -1658,6 +1751,10 @@ describe("ProjectNotes", () => {
     expect(panel?.parentElement).toBe(workspace);
     expect(card?.contains(panel)).toBe(false);
     expect(panel?.querySelector(".notes-phase-detail")).not.toBeNull();
+    // Without a next-phase card, the selected detail's action is the one Primary.
+    const detailAction = panel?.querySelector(".notes-phase-detail-heading .notes-roadmap-primary");
+    expect(detailAction?.classList.contains("notes-btn-primary")).toBe(true);
+    expect(globalThis.document.querySelectorAll(".notes-btn-primary")).toHaveLength(1);
     // Exactly one title, and the criteria remain reachable in detail.
     expect(
       globalThis.document.querySelectorAll(`[id="notes-phase-detail-${alpha.id}"]`),
@@ -1825,7 +1922,10 @@ describe("ProjectNotes", () => {
 
     await openRoadmapPhase("Beta phase");
     selectPhaseView("More");
-    fireEvent.click(screen.getByRole("button", { name: "Delete phase" }));
+    const deletePhase = screen.getByRole("button", { name: "Delete phase" });
+    expect(deletePhase.classList.contains("notes-btn-quiet")).toBe(true);
+    expect(deletePhase.classList.contains("notes-btn-danger")).toBe(true);
+    fireEvent.click(deletePhase);
     const dialog = await screen.findByRole("dialog", { name: "Delete “Beta phase”?" });
     const confirm = await waitFor(() =>
       within(dialog).getByRole("button", { name: "Delete phase" }),
@@ -2004,10 +2104,20 @@ describe("ProjectNotes", () => {
     ).toBe("2 active phases");
 
     await selectNotesTab("Roadmap");
-    expect(screen.getByRole("list", { name: "Roadmap phases" }).children).toHaveLength(4);
+    // Done phases leave the open list for the collapsed Completed group; cancelled stays open.
+    expect(screen.getByRole("list", { name: "Roadmap phases" }).children).toHaveLength(3);
     expect(screen.getByRole("button", { name: "Start phase: Phase planning" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Review phase: Phase review" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Review phase: Phase done" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Review phase: Phase done" })).toBeNull();
+    const completedToggle = screen.getByRole("button", { name: "Completed (1)" });
+    expect(completedToggle.getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(completedToggle);
+    expect(completedToggle.getAttribute("aria-expanded")).toBe("true");
+    const completedList = screen.getByRole("list", { name: "Completed phases" });
+    expect(completedList.children).toHaveLength(1);
+    expect(
+      within(completedList).getByRole("button", { name: "Review phase: Phase done" }),
+    ).toBeTruthy();
     expect(screen.queryByText("Selected phase")).toBeNull();
 
     const singular = notes("updated reference");
@@ -2264,6 +2374,7 @@ describe("ProjectNotes", () => {
 
       fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
       await selectNotesTab("Roadmap");
+      expandCompletedPhases();
       fireEvent.click(
         screen.getByRole("button", {
           name: `${status === "done" ? "Review" : "Inspect"} phase: Compatible Done history`,
@@ -2318,6 +2429,7 @@ describe("ProjectNotes", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
     await selectNotesTab("Roadmap");
+    expandCompletedPhases();
     fireEvent.click(screen.getByRole("button", { name: "Review phase: Completed reconciliation" }));
     selectPhaseView("Activity");
 
@@ -2417,9 +2529,12 @@ describe("ProjectNotes", () => {
     await selectNotesTab("Roadmap");
     fireEvent.click(screen.getByRole("button", { name: "Run /compare" }));
     expect(onRunCommand).toHaveBeenCalledExactlyOnceWith("/Diff");
-    expect(screen.getByRole("button", { name: "Start next phase" })).toBeTruthy();
+    const startNext = screen.getByRole("button", { name: "Start next phase" });
+    // The next-phase card owns the view's one Primary.
+    expect(globalThis.document.querySelectorAll(".notes-btn-primary")).toHaveLength(1);
+    expect(startNext.classList.contains("notes-btn-primary")).toBe(true);
 
-    fireEvent.click(screen.getByRole("button", { name: "Start next phase" }));
+    fireEvent.click(startNext);
     expect(onStartNextPhase).toHaveBeenCalledExactlyOnceWith("checkpoint-next", "next");
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   });
@@ -2461,6 +2576,7 @@ describe("ProjectNotes", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
     await selectNotesTab("Roadmap");
+    expandCompletedPhases();
     fireEvent.click(screen.getByRole("button", { name: "Review phase: Completed foundation" }));
     selectPhaseView("Activity");
     const activity = screen.getByText("Next phase bound automatically.").closest("li");
@@ -3132,9 +3248,7 @@ describe("ProjectNotes", () => {
     const row = screen
       .getByRole("button", { name: "Inspect phase: Prompt draft" })
       .closest(".notes-roadmap-row");
-    expect(row?.querySelector(".notes-phase-saved-prompt-marker")?.textContent).toBe(
-      "Saved prompt",
-    );
+    expect(row?.contains(screen.getByRole("img", { name: "Saved prompt" }))).toBe(true);
   });
 
   it("does not mark or count empty and whitespace-only source prompts", async () => {
@@ -3150,7 +3264,7 @@ describe("ProjectNotes", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
     await selectNotesTab("Roadmap");
-    expect(screen.queryByText("Saved prompt")).toBeNull();
+    expect(screen.queryByRole("img", { name: "Saved prompt" })).toBeNull();
     expect(document.querySelectorAll(".notes-phase-saved-prompt-marker")).toHaveLength(0);
   });
 
@@ -3176,9 +3290,7 @@ describe("ProjectNotes", () => {
     const row = screen
       .getByRole("button", { name: "Inspect phase: Durable prompt" })
       .closest(".notes-roadmap-row");
-    expect(row?.querySelector(".notes-phase-saved-prompt-marker")?.textContent).toBe(
-      "Saved prompt",
-    );
+    expect(row?.contains(screen.getByRole("img", { name: "Saved prompt" }))).toBe(true);
   });
 
   it("marks an existing-phase prompt replacement without changing its reminder", async () => {
@@ -3215,9 +3327,10 @@ describe("ProjectNotes", () => {
     await selectNotesTab("Roadmap");
     const phaseButton = screen.getByRole("button", { name: "Inspect phase: Phase target" });
     expect(
-      phaseButton.closest(".notes-roadmap-row")?.querySelector(".notes-phase-saved-prompt-marker")
-        ?.textContent,
-    ).toBe("Saved prompt");
+      phaseButton
+        .closest(".notes-roadmap-row")
+        ?.contains(screen.getByRole("img", { name: "Saved prompt" })),
+    ).toBe(true);
     fireEvent.click(phaseButton);
     const savedPrompt = document.querySelector(".notes-phase-saved-prompt") as HTMLDetailsElement;
     expect(savedPrompt.open).toBe(false);
@@ -3358,6 +3471,7 @@ describe("ProjectNotes", () => {
 
       fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
       await selectNotesTab("Roadmap");
+      expandCompletedPhases();
       const rowAction = screen.getByRole("button", {
         name: `${expectedAction} phase: ${selected.title}`,
       }) as HTMLButtonElement;
@@ -3568,6 +3682,7 @@ describe("ProjectNotes", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
     await selectNotesTab("Roadmap");
+    expandCompletedPhases();
     const expectedRows = [
       ["Not started phase", "Not started", "Planning", "Start"],
       ["Planning phase", "Planning", "Planning", "Start"],
@@ -3591,7 +3706,7 @@ describe("ProjectNotes", () => {
     expect(screen.getAllByText(/Needs attention: The provider failed/).length).toBeGreaterThan(0);
     expect(screen.getByRole("button", { name: "Pause automation" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Retry phase: Attention phase" })).toBeNull();
-    expect(screen.getAllByRole("combobox")).toEqual([screen.getByLabelText("Phase view")]);
+    expect(screen.queryByRole("combobox")).toBeNull();
 
     const refreshed = structuredClone(populated);
     refreshed.phases[6] = {
@@ -3672,6 +3787,7 @@ describe("ProjectNotes", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
     await selectNotesTab("Roadmap");
     expect(screen.queryByText("Selected phase")).toBeNull();
+    expandCompletedPhases();
     fireEvent.click(screen.getByRole("button", { name: "Review phase: Only phase" }));
     expect(phaseDetail("Only phase")).not.toBeNull();
 
@@ -3958,7 +4074,22 @@ describe("ProjectNotes", () => {
         .getAllByRole("button", { name: /^Inspect phase: /u })
         .map((button) => button.getAttribute("aria-label"));
     expect(activeTitles()).toEqual(["Inspect phase: Alpha", "Inspect phase: Gamma"]);
-    expect(screen.getByText("Deleted phases (2)")).toBeTruthy();
+    await selectNotesTab("Archive");
+    const deletedToggle = screen.getByRole("button", { name: "Deleted phases (2)" });
+    expect(deletedToggle.getAttribute("type")).toBe("button");
+    expect(deletedToggle.getAttribute("aria-expanded")).toBe("false");
+    expect(deletedToggle.hasAttribute("data-phase-focus-fallback")).toBe(true);
+    const deletedRegion = document.getElementById(
+      deletedToggle.getAttribute("aria-controls") ?? "",
+    );
+    expect(deletedRegion?.hidden).toBe(true);
+    fireEvent.click(deletedToggle);
+    expect(deletedToggle.getAttribute("aria-expanded")).toBe("true");
+    expect(deletedRegion?.hidden).toBe(false);
+    expect(screen.getByRole("button", { name: "Recover phase: Tomb 1" })).toBeTruthy();
+    fireEvent.click(deletedToggle);
+    expect(deletedRegion?.hidden).toBe(true);
+    await selectNotesTab("Roadmap");
 
     fireEvent.click(screen.getByRole("button", { name: "Inspect phase: Alpha" }));
     selectPhaseView("More");
@@ -3992,6 +4123,128 @@ describe("ProjectNotes", () => {
     expect((screen.getByRole("button", { name: "Move up" }) as HTMLButtonElement).disabled).toBe(
       false,
     );
+  });
+
+  it("reorders open phases by drag or arrow keys and never ahead of a Done phase", async () => {
+    const cwd = "/work/roadmap-drag-reorder";
+    const client = new FakeProjectNotesClient(cwd);
+    const populated = notes("reference");
+    populated.phases = [
+      { ...phase("alpha", "not-started"), title: "Alpha", order: 0 },
+      { ...phase("finished", "done"), title: "Finished", order: 1 },
+      { ...phase("beta", "not-started"), title: "Beta", order: 2 },
+      { ...phase("gamma", "not-started"), title: "Gamma", order: 3 },
+    ];
+    client.seed(cwd, populated);
+    render(<ProjectNotes cwd={cwd} client={client} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
+    await selectNotesTab("Roadmap");
+    const storedIds = () =>
+      client.snapshots.get(canonicalProjectKey(cwd))!.document.phases.map((item) => item.id);
+
+    // Done phases sit under Completed and get no handle.
+    expect(screen.queryByRole("button", { name: "Reorder phase: Finished" })).toBeNull();
+    const gammaHandle = screen.getByRole("button", { name: "Reorder phase: Gamma" });
+    expect(gammaHandle.getAttribute("draggable")).toBe("true");
+
+    // Drag Gamma onto the top half of Beta: Gamma lands directly before Beta.
+    const betaRow = screen.getByRole("button", { name: "Reorder phase: Beta" }).closest("li")!;
+    vi.spyOn(betaRow, "getBoundingClientRect").mockReturnValue({
+      top: 100,
+      height: 40,
+      bottom: 140,
+      left: 0,
+      right: 300,
+      width: 300,
+      x: 0,
+      y: 100,
+      toJSON: () => ({}),
+    });
+    const dataTransfer = { setData: vi.fn(), dropEffect: "none", effectAllowed: "all" };
+    // jsdom has no DragEvent, so pointer coordinates must be set on the event directly.
+    const dragOver = (row: HTMLElement, clientY: number): void => {
+      const event = createEvent.dragOver(row, { dataTransfer });
+      Object.defineProperty(event, "clientY", { value: clientY });
+      fireEvent(row, event);
+    };
+    fireEvent.dragStart(gammaHandle, { dataTransfer });
+    dragOver(betaRow, 105);
+    expect(betaRow.className).toContain("is-drop-before");
+    fireEvent.drop(betaRow, { dataTransfer });
+    await waitFor(() => expect(storedIds()).toEqual(["alpha", "finished", "gamma", "beta"]));
+    expect(
+      client.snapshots.get(canonicalProjectKey(cwd))!.document.phases.map((item) => item.order),
+    ).toEqual([0, 1, 2, 3]);
+
+    // Arrow keys move one place within the open list.
+    fireEvent.keyDown(screen.getByRole("button", { name: "Reorder phase: Gamma" }), {
+      key: "ArrowDown",
+    });
+    await waitFor(() => expect(storedIds()).toEqual(["alpha", "finished", "beta", "gamma"]));
+
+    // Before Alpha would put Beta ahead of the Done phase: refused, nothing saved.
+    fireEvent.keyDown(screen.getByRole("button", { name: "Reorder phase: Beta" }), {
+      key: "ArrowUp",
+    });
+    expect(await screen.findByText("A phase can’t move ahead of a Done phase.")).toBeTruthy();
+    expect(storedIds()).toEqual(["alpha", "finished", "beta", "gamma"]);
+
+    // Dragging onto Alpha is not offered as a drop target either.
+    const alphaRow = screen.getByRole("button", { name: "Reorder phase: Alpha" }).closest("li")!;
+    fireEvent.dragStart(screen.getByRole("button", { name: "Reorder phase: Gamma" }), {
+      dataTransfer,
+    });
+    dragOver(alphaRow, -1);
+    expect(alphaRow.className).not.toContain("is-drop-");
+  });
+
+  it("keeps Move up/down from moving Done phases or placing a phase ahead of a Done phase", async () => {
+    const cwd = "/work/roadmap-move-done-rules";
+    const client = new FakeProjectNotesClient(cwd);
+    const populated = notes("reference");
+    populated.phases = [
+      { ...phase("alpha", "not-started"), title: "Alpha", order: 0 },
+      { ...phase("finished", "done"), title: "Finished", order: 1 },
+      { ...phase("shipped", "done"), title: "Shipped", order: 2 },
+      { ...phase("beta", "not-started"), title: "Beta", order: 3 },
+    ];
+    client.seed(cwd, populated);
+    render(<ProjectNotes cwd={cwd} client={client} />);
+    const storedIds = () =>
+      client.snapshots.get(canonicalProjectKey(cwd))!.document.phases.map((item) => item.id);
+    const moveButton = (name: "Move up" | "Move down") =>
+      screen.getByRole("button", { name }) as HTMLButtonElement;
+
+    // Done phases never move, even where a Completed-group neighbour exists.
+    await openRoadmapPhase("Finished");
+    selectPhaseView("More");
+    expect(moveButton("Move down").disabled).toBe(true);
+    expect(moveButton("Move down").title).toBe("Done phases can’t be moved.");
+    fireEvent.click(moveButton("Move down"));
+    fireEvent.click(screen.getByRole("button", { name: "Inspect phase: Shipped" }));
+    selectPhaseView("More");
+    expect(moveButton("Move up").disabled).toBe(true);
+    fireEvent.click(moveButton("Move up"));
+    expect(storedIds()).toEqual(["alpha", "finished", "shipped", "beta"]);
+
+    // Beta's visible neighbour is Alpha, but landing before it would sit ahead of Done phases.
+    fireEvent.click(screen.getByRole("button", { name: "Inspect phase: Beta" }));
+    selectPhaseView("More");
+    expect(moveButton("Move up").disabled).toBe(true);
+    expect(moveButton("Move up").title).toBe("A phase can’t move ahead of a Done phase.");
+    fireEvent.click(moveButton("Move up"));
+    expect(storedIds()).toEqual(["alpha", "finished", "shipped", "beta"]);
+
+    // Moving Alpha down past the Done phases stays allowed and matches drag: Alpha lands
+    // directly after Beta, and Beta is not swapped ahead of the Done phases.
+    fireEvent.click(screen.getByRole("button", { name: "Inspect phase: Alpha" }));
+    selectPhaseView("More");
+    expect(moveButton("Move down").disabled).toBe(false);
+    fireEvent.click(moveButton("Move down"));
+    await waitFor(() => expect(storedIds()).toEqual(["finished", "shipped", "beta", "alpha"]));
+    expect(
+      client.snapshots.get(canonicalProjectKey(cwd))!.document.phases.map((item) => item.order),
+    ).toEqual([0, 1, 2, 3]);
   });
 
   it("shows phase cancellation pending and leaves Notes active when cancellation fails", async () => {
@@ -4714,27 +4967,42 @@ describe("ProjectNotes", () => {
     const list = screen.getByRole("list", { name: "Roadmap phases" });
     expect(list.children).toHaveLength(50);
     expect(list.querySelectorAll(".notes-roadmap-row")).toHaveLength(50);
-    expect(screen.getAllByRole("button", { name: /phase: Phase/ })).toHaveLength(100);
+    expect(
+      screen
+        .getAllByRole("button", { name: /phase: Phase/ })
+        .filter((button) => !button.getAttribute("aria-label")?.startsWith("Reorder phase:")),
+    ).toHaveLength(100);
+    expect(screen.getAllByRole("button", { name: /^Reorder phase: Phase/ })).toHaveLength(50);
   });
 
   it("preserves tab, task draft, edit mode, and Archive disclosure through rerenders", async () => {
     const cwd = "/work/mounted-panels";
     const client = new FakeProjectNotesClient(cwd);
     const original = notes("initial reference", 1);
+    // The archived-task disclosure only renders when there is something archived.
+    original.tasks.push({
+      id: "task-archived",
+      text: "Archived task",
+      status: "done",
+      createdAt: NOW,
+      updatedAt: NOW,
+      completedAt: NOW,
+      archivedAt: NOW,
+    });
     client.seed(cwd, original, 1);
     render(<ProjectNotes cwd={cwd} client={client} />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Notes, 1 unfinished task" }));
-    fireEvent.change(screen.getByLabelText("Add a Notes task"), {
+    fireEvent.change(screen.getByLabelText("New task"), {
       target: { value: "Draft survives navigation" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "Edit task: Task 1" }));
+    chooseTaskAction("Task 1", "Edit");
     fireEvent.change(screen.getByLabelText("Edit task: Task 1"), {
       target: { value: "Uncommitted task edit" },
     });
 
     await selectNotesTab("Archive");
-    const archiveToggle = screen.getByRole("button", { name: "Show archived tasks (0)" });
+    const archiveToggle = screen.getByRole("button", { name: "Show archived tasks (1)" });
     fireEvent.click(archiveToggle);
     expect(archiveToggle.getAttribute("aria-expanded")).toBe("true");
     await selectNotesTab("Reference");
@@ -4752,10 +5020,10 @@ describe("ProjectNotes", () => {
 
     await selectNotesTab("Archive");
     expect(
-      screen.getByRole("button", { name: "Hide archived tasks (0)" }).getAttribute("aria-expanded"),
+      screen.getByRole("button", { name: "Hide archived tasks (1)" }).getAttribute("aria-expanded"),
     ).toBe("true");
     await selectNotesTab("Overview");
-    expect((screen.getByLabelText("Add a Notes task") as HTMLInputElement).value).toBe(
+    expect((screen.getByLabelText("New task") as HTMLInputElement).value).toBe(
       "Draft survives navigation",
     );
     expect((screen.getByLabelText("Edit task: Task 1") as HTMLInputElement).value).toBe(
@@ -4770,7 +5038,7 @@ describe("ProjectNotes", () => {
     render(<ProjectNotes cwd={cwd} client={client} />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Notes, 2 unfinished tasks" }));
-    fireEvent.change(screen.getByLabelText("Add a Notes task"), {
+    fireEvent.change(screen.getByLabelText("New task"), {
       target: { value: "Task 3" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Add task" }));
@@ -4778,7 +5046,7 @@ describe("ProjectNotes", () => {
       expect(client.snapshots.get(canonicalProjectKey(cwd))?.document.tasks).toHaveLength(3),
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "Edit task: Task 1" }));
+    chooseTaskAction("Task 1", "Edit");
     fireEvent.change(screen.getByLabelText("Edit task: Task 1"), {
       target: { value: "Edited task" },
     });
@@ -4789,14 +5057,14 @@ describe("ProjectNotes", () => {
       ),
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "Move task up: Task 2" }));
+    chooseTaskAction("Task 2", "Move up");
     await waitFor(() =>
       expect(client.snapshots.get(canonicalProjectKey(cwd))?.document.tasks[0]?.text).toBe(
         "Task 2",
       ),
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "Archive task: Edited task" }));
+    chooseTaskAction("Edited task", "Archive");
     await waitFor(() =>
       expect(
         client.snapshots
@@ -4816,6 +5084,365 @@ describe("ProjectNotes", () => {
       ).toBeNull(),
     );
   });
+
+  it("keeps done tasks in a collapsed Completed section without Move controls", async () => {
+    const cwd = "/work/task-completed-group";
+    const client = new FakeProjectNotesClient(cwd);
+    const document = notes("reference", 2);
+    document.tasks[0] = { ...document.tasks[0]!, status: "done", completedAt: NOW };
+    client.seed(cwd, document);
+    render(<ProjectNotes cwd={cwd} client={client} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Notes, 1 unfinished task" }));
+    const toggle = await screen.findByRole("button", { name: "Completed (1)" });
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(toggle.getAttribute("aria-controls")).toBe("notes-completed-tasks");
+    expect(screen.queryByRole("checkbox", { name: "Reopen task: Task 1" })).toBeNull();
+    // The only open task has no open neighbour, so both Move items are disabled.
+    const openMenu = openTaskMenu("Task 2");
+    for (const name of ["Move up", "Move down"]) {
+      expect((within(openMenu).getByRole("menuitem", { name }) as HTMLButtonElement).disabled).toBe(
+        true,
+      );
+    }
+    fireEvent.keyDown(openMenu, { key: "Escape" });
+
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    expect(screen.getByRole("checkbox", { name: "Reopen task: Task 1" })).toBeTruthy();
+    const doneMenu = openTaskMenu("Task 1");
+    expect(
+      within(doneMenu)
+        .getAllByRole("menuitem")
+        .map((item) => item.textContent),
+    ).toEqual(["Edit", "Archive"]);
+    fireEvent.keyDown(doneMenu, { key: "Escape" });
+
+    // Completing the last open task leaves honest empty copy and keeps focus in the list.
+    fireEvent.click(screen.getByRole("checkbox", { name: "Complete task: Task 2" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Completed (2)" })).toBeTruthy());
+    expect(screen.getByText("All tasks are done.")).toBeTruthy();
+    expect(globalThis.document.activeElement).toBe(screen.getByLabelText("New task"));
+
+    // Reopening moves the row back to the open list and focuses its checkbox there.
+    fireEvent.click(screen.getByRole("checkbox", { name: "Reopen task: Task 2" }));
+    const reopened = await screen.findByRole("checkbox", { name: "Complete task: Task 2" });
+    await waitFor(() => expect(globalThis.document.activeElement).toBe(reopened));
+    expect(screen.queryByText("All tasks are done.")).toBeNull();
+  });
+
+  it("remembers Completed expansion for the session across remounts", async () => {
+    const cwd = "/work/task-completed-memory";
+    const client = new FakeProjectNotesClient(cwd);
+    const document = notes("reference", 2);
+    document.tasks[0] = { ...document.tasks[0]!, status: "done", completedAt: NOW };
+    client.seed(cwd, document);
+    const first = render(<ProjectNotes cwd={cwd} client={client} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Notes, 1 unfinished task" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Completed (1)" }));
+    first.unmount();
+
+    render(<ProjectNotes cwd={cwd} client={client} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Notes, 1 unfinished task" }));
+    expect(
+      (await screen.findByRole("button", { name: "Completed (1)" })).getAttribute("aria-expanded"),
+    ).toBe("true");
+    expect(screen.getByRole("checkbox", { name: "Reopen task: Task 1" })).toBeTruthy();
+  });
+
+  it("puts row actions in one keyboard menu with Archive last and Move bounded", async () => {
+    const cwd = "/work/task-row-menu";
+    const client = new FakeProjectNotesClient(cwd);
+    client.seed(cwd, notes("reference", 3));
+    render(<ProjectNotes cwd={cwd} client={client} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Notes, 3 unfinished tasks" }));
+    expect(
+      screen.queryByRole("button", { name: /^(Move task|Edit task|Archive task)/ }),
+    ).toBeNull();
+    const trigger = screen.getByRole("button", { name: "Task actions: Task 1" });
+    expect(trigger.getAttribute("aria-haspopup")).toBe("menu");
+    expect(trigger.getAttribute("aria-expanded")).toBe("false");
+
+    const first = openTaskMenu("Task 1");
+    expect(trigger.getAttribute("aria-expanded")).toBe("true");
+    expect(trigger.getAttribute("aria-controls")).toBe(first.id);
+    const labels = within(first)
+      .getAllByRole("menuitem")
+      .map((item) => item.querySelector("span")?.textContent);
+    expect(labels).toEqual(["Move up", "Move down", "Edit", "Archive"]);
+    const item = (name: string): HTMLButtonElement =>
+      within(first).getByRole("menuitem", { name }) as HTMLButtonElement;
+    expect(item("Move up").disabled).toBe(true);
+    expect(item("Move up").getAttribute("aria-keyshortcuts")).toBe("Alt+ArrowUp");
+
+    // Focus starts on the first enabled item and arrows skip the disabled one.
+    const active = (): Element | null => globalThis.document.activeElement;
+    expect(active()).toBe(item("Move down"));
+    fireEvent.keyDown(active()!, { key: "ArrowDown" });
+    expect(active()).toBe(item("Edit"));
+    fireEvent.keyDown(active()!, { key: "End" });
+    expect(active()).toBe(item("Archive"));
+    fireEvent.keyDown(active()!, { key: "ArrowDown" });
+    expect(active()).toBe(item("Move down"));
+    fireEvent.keyDown(active()!, { key: "ArrowUp" });
+    expect(active()).toBe(item("Archive"));
+    fireEvent.keyDown(active()!, { key: "Home" });
+    expect(active()).toBe(item("Move down"));
+    fireEvent.keyDown(active()!, { key: "Escape" });
+    expect(screen.queryByRole("menu")).toBeNull();
+
+    const last = openTaskMenu("Task 3");
+    expect(
+      (within(last).getByRole("menuitem", { name: "Move down" }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+    expect(
+      (within(last).getByRole("menuitem", { name: "Move up" }) as HTMLButtonElement).disabled,
+    ).toBe(false);
+  });
+
+  it("moves a task from its menu and keeps focus on that task's trigger", async () => {
+    const cwd = "/work/task-menu-move";
+    const client = new FakeProjectNotesClient(cwd);
+    client.seed(cwd, notes("reference", 3));
+    render(<ProjectNotes cwd={cwd} client={client} />);
+    const order = (): string[] | undefined =>
+      client.snapshots.get(canonicalProjectKey(cwd))?.document.tasks.map((task) => task.text);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Notes, 3 unfinished tasks" }));
+    chooseTaskAction("Task 1", "Move down");
+    await waitFor(() => expect(order()).toEqual(["Task 2", "Task 1", "Task 3"]));
+    await waitFor(() =>
+      expect(globalThis.document.activeElement).toBe(
+        screen.getByRole("button", { name: "Task actions: Task 1" }),
+      ),
+    );
+    expect(globalThis.document.querySelector(".notes-status")?.textContent).toBe(
+      "Moved task down: Task 1",
+    );
+  });
+
+  it("reorders with Alt+Arrow, keeps focus on the moved task and announces bounds", async () => {
+    const cwd = "/work/task-shortcut-move";
+    const client = new FakeProjectNotesClient(cwd);
+    client.seed(cwd, notes("reference", 3));
+    render(<ProjectNotes cwd={cwd} client={client} />);
+    const order = (): string[] | undefined =>
+      client.snapshots.get(canonicalProjectKey(cwd))?.document.tasks.map((task) => task.text);
+    const status = (): string | null | undefined =>
+      globalThis.document.querySelector(".notes-status")?.textContent;
+
+    fireEvent.click(await screen.findByRole("button", { name: "Notes, 3 unfinished tasks" }));
+    const check = screen.getByRole("checkbox", { name: "Complete task: Task 2" });
+    expect(check.getAttribute("aria-keyshortcuts")).toBe("Alt+ArrowUp Alt+ArrowDown");
+
+    // A plain arrow does nothing; only Alt+Arrow moves.
+    fireEvent.keyDown(check, { key: "ArrowUp" });
+    expect(status()).toBe("");
+    fireEvent.keyDown(check, { key: "ArrowUp", altKey: true });
+    await waitFor(() => expect(order()).toEqual(["Task 2", "Task 1", "Task 3"]));
+    const moved = screen.getByRole("checkbox", { name: "Complete task: Task 2" });
+    await waitFor(() => expect(globalThis.document.activeElement).toBe(moved));
+
+    fireEvent.keyDown(moved, { key: "ArrowUp", altKey: true });
+    expect(status()).toBe("Already first: Task 2");
+    fireEvent.keyDown(screen.getByRole("checkbox", { name: "Complete task: Task 3" }), {
+      key: "ArrowDown",
+      altKey: true,
+    });
+    expect(status()).toBe("Already last: Task 3");
+    expect(order()).toEqual(["Task 2", "Task 1", "Task 3"]);
+
+    // The shortcut also works from the row's actions trigger and keeps focus there.
+    const trigger = screen.getByRole("button", { name: "Task actions: Task 3" });
+    fireEvent.keyDown(trigger, { key: "ArrowUp", altKey: true });
+    await waitFor(() => expect(order()).toEqual(["Task 2", "Task 3", "Task 1"]));
+    await waitFor(() =>
+      expect(globalThis.document.activeElement).toBe(
+        screen.getByRole("button", { name: "Task actions: Task 3" }),
+      ),
+    );
+  });
+
+  it("clears a typed task on Escape without closing Notes; Escape on an empty field closes", async () => {
+    const cwd = "/work/task-add-escape";
+    const client = new FakeProjectNotesClient(cwd);
+    client.seed(cwd, notes("reference", 1));
+    render(<ProjectNotes cwd={cwd} client={client} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Notes, 1 unfinished task" }));
+    const input = screen.getByLabelText<HTMLInputElement>("New task");
+    fireEvent.change(input, { target: { value: "Half-typed task" } });
+    fireEvent.keyDown(input, { key: "Escape" });
+
+    expect(input.value).toBe("");
+    expect(screen.getByRole("dialog")).toBeTruthy();
+    expect(globalThis.document.querySelector("[data-exiting]")).toBeNull();
+    expect(client.snapshots.get(canonicalProjectKey(cwd))?.document.tasks).toHaveLength(1);
+
+    fireEvent.keyDown(input, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
+  it("cancels Archive from the row menu with Escape or an outside click", async () => {
+    const cwd = "/work/task-archive-cancel";
+    const client = new FakeProjectNotesClient(cwd);
+    client.seed(cwd, notes("reference", 2));
+    render(<ProjectNotes cwd={cwd} client={client} />);
+    const archived = (): (string | null)[] | undefined =>
+      client.snapshots.get(canonicalProjectKey(cwd))?.document.tasks.map((task) => task.archivedAt);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Notes, 2 unfinished tasks" }));
+    const trigger = screen.getByRole("button", { name: "Task actions: Task 1" });
+    const menu = openTaskMenu("Task 1");
+    const archiveItem = within(menu).getByRole("menuitem", { name: "Archive" });
+    archiveItem.focus();
+    fireEvent.keyDown(archiveItem, { key: "Escape" });
+
+    // Escape closes only the menu: the Notes dialog stays open and nothing is archived.
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(screen.getByRole("dialog")).toBeTruthy();
+    expect(globalThis.document.querySelector("[data-exiting]")).toBeNull();
+    expect(globalThis.document.activeElement).toBe(trigger);
+    expect(trigger.getAttribute("aria-expanded")).toBe("false");
+
+    openTaskMenu("Task 1");
+    fireEvent.pointerDown(screen.getByLabelText("New task"));
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(archived()).toEqual([null, null]);
+    expect(screen.getByRole("checkbox", { name: "Complete task: Task 1" })).toBeTruthy();
+  });
+
+  it("returns focus to the row trigger after editing and to the add field after archiving", async () => {
+    const cwd = "/work/task-edit-focus";
+    const client = new FakeProjectNotesClient(cwd);
+    client.seed(cwd, notes("reference", 2));
+    render(<ProjectNotes cwd={cwd} client={client} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Notes, 2 unfinished tasks" }));
+    chooseTaskAction("Task 1", "Edit");
+    const field = screen.getByLabelText("Edit task: Task 1");
+    expect(globalThis.document.activeElement).toBe(field);
+    fireEvent.change(field, { target: { value: "Renamed" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() =>
+      expect(globalThis.document.activeElement).toBe(
+        screen.getByRole("button", { name: "Task actions: Renamed" }),
+      ),
+    );
+
+    chooseTaskAction("Renamed", "Edit");
+    fireEvent.keyDown(screen.getByLabelText("Edit task: Renamed"), { key: "Escape" });
+    expect(screen.getByRole("dialog")).toBeTruthy();
+    await waitFor(() =>
+      expect(globalThis.document.activeElement).toBe(
+        screen.getByRole("button", { name: "Task actions: Renamed" }),
+      ),
+    );
+
+    chooseTaskAction("Renamed", "Archive");
+    await waitFor(() =>
+      expect(globalThis.document.activeElement).toBe(screen.getByLabelText("New task")),
+    );
+    expect(screen.queryByRole("button", { name: "Task actions: Renamed" })).toBeNull();
+  });
+
+  it("labels the add field once and keeps Current focus to one wrapping line", async () => {
+    const cwd = "/work/task-add-copy";
+    const client = new FakeProjectNotesClient(cwd);
+    client.seed(cwd, notes("reference", 1));
+    render(<ProjectNotes cwd={cwd} client={client} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Notes, 1 unfinished task" }));
+    const add = screen.getByLabelText("New task") as HTMLInputElement;
+    expect(add.getAttribute("placeholder")).toBeNull();
+    expect(screen.queryByText("Add a Notes task")).toBeNull();
+    const submit = screen.getByRole("button", { name: "Add task" }) as HTMLButtonElement;
+    expect(submit.textContent).toBe("");
+    expect(submit.disabled).toBe(true);
+    fireEvent.change(add, { target: { value: "Task via Enter" } });
+    expect(submit.disabled).toBe(false);
+    fireEvent.submit(add.closest("form")!);
+    await waitFor(() =>
+      expect(client.snapshots.get(canonicalProjectKey(cwd))?.document.tasks).toHaveLength(2),
+    );
+
+    const focus = screen.getByLabelText("Current focus") as HTMLTextAreaElement;
+    expect(focus.tagName).toBe("TEXTAREA");
+    expect(fireEvent.keyDown(focus, { key: "Enter" })).toBe(false);
+    fireEvent.change(focus, { target: { value: "Ship the menu\nthen the probes" } });
+    await waitFor(() =>
+      expect(client.snapshots.get(canonicalProjectKey(cwd))?.document.currentFocus).toBe(
+        "Ship the menu then the probes",
+      ),
+    );
+    expect(focus.value).toBe("Ship the menu then the probes");
+  });
+
+  it("shows Roadmap progress from done over total minus cancelled", async () => {
+    const cwd = "/work/roadmap-progress";
+    const client = new FakeProjectNotesClient(cwd);
+    const document = notes("reference");
+    document.phases = [
+      phase("first", "done"),
+      phase("second", "in-progress"),
+      phase("third", "cancelled"),
+      phase("fourth", "not-started"),
+    ].map((item, order) => ({ ...item, order }));
+    client.seed(cwd, document);
+    render(<ProjectNotes cwd={cwd} client={client} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
+    await selectNotesTab("Roadmap");
+    const bar = screen.getByLabelText("Roadmap progress") as HTMLProgressElement;
+    expect(bar.closest("p")?.textContent).toBe("1 of 3 phases done");
+    expect(bar.value).toBe(1);
+    expect(bar.max).toBe(3);
+
+    const allDone = notes("reference");
+    allDone.phases = [phase("first", "done"), phase("second", "done"), phase("fourth", "done")].map(
+      (item, order) => ({ ...item, order }),
+    );
+    act(() => client.publish(cwd, allDone, 2));
+    await waitFor(() =>
+      expect(screen.getByLabelText("Roadmap progress").closest("p")?.textContent).toBe(
+        "3 of 3 phases done",
+      ),
+    );
+    expect(screen.getByText("All phases are done")).toBeTruthy();
+    expect(screen.queryByRole("list", { name: "Roadmap phases" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Completed (3)" })).toBeTruthy();
+
+    const allCancelled = notes("reference");
+    allCancelled.phases = [phase("first", "cancelled"), phase("second", "cancelled")].map(
+      (item, order) => ({ ...item, order }),
+    );
+    act(() => client.publish(cwd, allCancelled, 3));
+    await waitFor(() => expect(screen.queryByLabelText("Roadmap progress")).toBeNull());
+    expect(screen.queryByText(/phases? done/)).toBeNull();
+    expect(screen.queryByRole("button", { name: /^Completed/ })).toBeNull();
+  });
+
+  it("explains Archive and shows honest empty copy instead of zero-count toggles", async () => {
+    const cwd = "/work/archive-copy";
+    const client = new FakeProjectNotesClient(cwd);
+    const document = notes("reference", 1);
+    document.phases = [phase("finished", "done")];
+    client.seed(cwd, document);
+    render(<ProjectNotes cwd={cwd} client={client} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Notes, 1 unfinished task" }));
+    await selectNotesTab("Archive");
+    const archive = screen.getByRole("heading", { name: "Archive", level: 2 }).closest("section");
+    expect(archive?.textContent).toContain(
+      "Archive holds phases and tasks you put away by hand. Finished work stays under Completed in Roadmap and Overview until you archive it.",
+    );
+    // A done phase is Completed, not archived.
+    expect(within(archive!).getByText("No archived phases.")).toBeTruthy();
+    expect(within(archive!).getByText("No archived tasks.")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /archived tasks/ })).toBeNull();
+  });
   it("renders sidecar state and saves edits without dual-writing browser storage", async () => {
     const cwd = "/work/project";
     const client = new FakeProjectNotesClient(cwd);
@@ -4824,7 +5451,7 @@ describe("ProjectNotes", () => {
     render(<ProjectNotes cwd={cwd} client={client} />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Notes, 2 unfinished tasks" }));
-    expect((screen.getByLabelText("Current focus") as HTMLInputElement).value).toBe(
+    expect((screen.getByLabelText("Current focus") as HTMLTextAreaElement).value).toBe(
       "Focus sidecar reference",
     );
     await selectNotesTab("Reference");
@@ -4886,7 +5513,7 @@ describe("ProjectNotes", () => {
     expect(screen.getByRole("tab", { name: "Overview" }).getAttribute("aria-selected")).toBe(
       "true",
     );
-    expect((screen.getByLabelText("Current focus") as HTMLInputElement).value).toBe(
+    expect((screen.getByLabelText("Current focus") as HTMLTextAreaElement).value).toBe(
       "Focus project B",
     );
     await selectNotesTab("Reference");
@@ -4980,20 +5607,23 @@ describe("ProjectNotes", () => {
     await waitFor(() => expect(storageStatus.textContent).toContain("Local fallback"));
     expect(storageStatus.getAttribute("role")).toBe("status");
     expect(storageStatus.textContent).toContain("Stored on this device only");
-    const detail = within(storageStatus).getByText(/stored only in this app on this device/u);
-    expect(detail.hidden).toBe(true);
+    // The explanation sits in the shared Notes disclosure: a stable label, state in aria-expanded.
+    const detail = within(storageStatus)
+      .getByText(/stored only in this app on this device/u)
+      .closest<HTMLElement>(".notes-disclosure-region");
+    expect(detail?.hidden).toBe(true);
 
-    const toggle = within(storageStatus).getByRole("button", { name: "Show details" });
+    const toggle = within(storageStatus).getByRole("button", { name: "Details" });
+    expect(toggle.classList.contains("notes-disclosure-toggle")).toBe(true);
     expect(toggle.getAttribute("aria-expanded")).toBe("false");
-    expect(toggle.getAttribute("aria-controls")).toBe(detail.id);
+    expect(toggle.getAttribute("aria-controls")).toBe(detail?.id);
     fireEvent.click(toggle);
     expect(toggle.getAttribute("aria-expanded")).toBe("true");
-    expect(toggle.textContent).toBe("Hide details");
-    expect(detail.hidden).toBe(false);
+    expect(toggle.textContent).toBe("Details");
+    expect(detail?.hidden).toBe(false);
 
-    expect(screen.getByLabelText("Add a Notes task").getAttribute("placeholder")).toBe(
-      "Describe a task, then press Enter",
-    );
+    // One visible label names the add field; no placeholder repeats it.
+    expect(screen.getByLabelText("New task").getAttribute("placeholder")).toBeNull();
   });
 
   it("explains migration failure and local fallback without leaking the raw error", async () => {

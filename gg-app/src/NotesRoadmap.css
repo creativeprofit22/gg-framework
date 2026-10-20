@@ -44,6 +44,36 @@
   margin: 0 auto;
   padding: var(--space-9) var(--space-12) var(--space-7);
 }
+/* Title + project/progress line on the left, × pinned top-right even when the
+   line wraps. */
+.notes-modal .modal-head:has(.modal-head-text) {
+  align-items: flex-start;
+}
+/* Inline flow, not flex: a long name wraps and progress follows on the same
+   line when it fits. */
+.notes-modal-meta {
+  display: block;
+  min-width: 0;
+}
+/* Never truncated: a long folder name wraps so it stays unambiguous on screen
+   and in the dialog's accessible description. */
+.notes-modal-project {
+  min-width: 0;
+  color: var(--text);
+  font-weight: var(--font-weight-strong);
+  overflow-wrap: anywhere;
+}
+.notes-modal-progress {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+/* Notes meets the 32px pointer floor (44px on touch, below); the negative margin
+   keeps the header the height the shared 26px close button gave it. */
+.notes-modal .modal-close {
+  width: 32px;
+  height: 32px;
+  margin: -3px;
+}
 .notes-shell {
   display: flex;
   flex: 1 1 auto;
@@ -131,6 +161,9 @@
 .notes-panel-rail {
   box-sizing: border-box;
   display: grid;
+  /* One shrinkable column: a long unbroken row (archived phase title plus
+     its actions) must truncate, not widen the rail past a narrow window. */
+  grid-template-columns: minmax(0, 1fr);
   width: min(100%, var(--notes-content-width));
   margin-inline: auto;
   gap: var(--space-7);
@@ -153,26 +186,8 @@
   color: var(--text);
   font-weight: var(--font-weight-strong);
 }
-.notes-roadmap-summary span,
-.notes-roadmap-counts strong {
+.notes-roadmap-summary span {
   font-variant-numeric: tabular-nums;
-}
-.notes-roadmap-counts {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-8) 32px;
-}
-.notes-roadmap-counts p {
-  margin: 0;
-  color: var(--text-secondary);
-  font-size: var(--fs-base);
-  line-height: var(--line-height-sm);
-}
-.notes-roadmap-counts strong {
-  color: var(--text);
-  font-size: var(--fs-2xl);
-  line-height: var(--line-height-xl);
-  font-weight: var(--font-weight-strong);
 }
 .notes-roadmap-section {
   padding: 0;
@@ -223,8 +238,6 @@
 }
 .notes-roadmap-next-phase .notes-roadmap-primary {
   min-width: max-content;
-  background: var(--primary);
-  color: #fff;
 }
 .notes-roadmap-next-phase .notes-roadmap-primary:disabled {
   cursor: default;
@@ -240,8 +253,92 @@
   font-size: var(--fs-base);
   line-height: var(--line-height-sm);
 }
+/* Notes buttons: one shared rule set. The base is the Secondary tier; the
+   .notes-btn-primary / .notes-btn-quiet / .notes-btn-danger modifiers below
+   set the tier. Sizing lives in the per-group rules that follow. */
 .notes-roadmap-new,
 .notes-roadmap-primary,
+.notes-roadmap-card-action,
+.notes-roadmap-next-phase-commands button,
+.notes-phase-detail-heading button,
+.notes-phase-form-actions button,
+.notes-phase-lifecycle-actions button,
+.notes-phase-secondary-actions button,
+.notes-phase-blocker-resolve,
+.notes-phase-archive button,
+.notes-roadmap-proposal-actions button,
+.notes-phase-references-heading > button,
+.notes-phase-reference-option > button,
+.notes-reminder-section button,
+.notes-storage-diagnostics button,
+.notes-add-controls button,
+.notes-task-actions button,
+.notes-task-menu-trigger,
+.notes-archive-toggle,
+.notes-roadmap-reorder-handle {
+  flex: 0 0 auto;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-button);
+  background: var(--gloss-neutral);
+  color: var(--text-secondary);
+  box-shadow: var(--gloss-shadow-neutral);
+  cursor: pointer;
+  font-family: var(--sans);
+  font-size: var(--fs-sm);
+  line-height: var(--line-height-xs);
+  font-weight: var(--font-weight-strong);
+}
+.notes-roadmap-new:hover:not(:disabled),
+.notes-roadmap-primary:hover:not(:disabled),
+.notes-roadmap-card-action:hover:not(:disabled),
+.notes-roadmap-next-phase-commands button:hover:not(:disabled),
+.notes-phase-detail-heading button:hover:not(:disabled),
+.notes-phase-form-actions button:hover:not(:disabled),
+.notes-phase-lifecycle-actions button:hover:not(:disabled),
+.notes-phase-secondary-actions button:hover:not(:disabled),
+.notes-phase-blocker-resolve:hover:not(:disabled),
+.notes-phase-archive button:hover:not(:disabled),
+.notes-roadmap-proposal-actions button:hover:not(:disabled),
+.notes-phase-references-heading > button:hover:not(:disabled),
+.notes-phase-reference-option > button:hover:not(:disabled),
+.notes-reminder-section button:hover:not(:disabled),
+.notes-storage-diagnostics button:hover:not(:disabled),
+.notes-add-controls button:hover:not(:disabled),
+.notes-task-actions button:hover:not(:disabled),
+.notes-task-menu-trigger:hover:not(:disabled),
+.notes-archive-toggle:hover:not(:disabled),
+.notes-roadmap-reorder-handle:hover:not(:disabled) {
+  filter: brightness(1.18);
+  color: var(--text);
+}
+.notes-roadmap-new:disabled,
+.notes-roadmap-primary:disabled,
+.notes-roadmap-card-action:disabled,
+.notes-roadmap-next-phase-commands button:disabled,
+.notes-phase-detail-heading button:disabled,
+.notes-phase-form-actions button:disabled,
+.notes-phase-lifecycle-actions button:disabled,
+.notes-phase-secondary-actions button:disabled,
+.notes-phase-blocker-resolve:disabled,
+.notes-phase-archive button:disabled,
+.notes-roadmap-proposal-actions button:disabled,
+.notes-phase-references-heading > button:disabled,
+.notes-phase-reference-option > button:disabled,
+.notes-reminder-section button:disabled,
+.notes-storage-diagnostics button:disabled,
+.notes-add-controls button:disabled,
+.notes-task-actions button:disabled,
+.notes-task-menu-trigger:disabled,
+.notes-archive-toggle:disabled,
+.notes-roadmap-reorder-handle:disabled {
+  cursor: default;
+  opacity: 0.4;
+}
+/* Roadmap and detail sizing. Task rows keep their own padding further down. */
+.notes-roadmap-new,
+.notes-roadmap-primary,
+.notes-roadmap-card-action,
+.notes-roadmap-next-phase-commands button,
 .notes-phase-detail-heading button,
 .notes-phase-form-actions button,
 .notes-phase-lifecycle-actions button,
@@ -253,47 +350,39 @@
 .notes-phase-reference-option > button,
 .notes-reminder-section button,
 .notes-storage-diagnostics button {
-  flex: 0 0 auto;
-  min-height: 30px;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-button);
-  background: var(--gloss-neutral);
-  color: var(--text-secondary);
-  box-shadow: var(--gloss-shadow-neutral);
+  min-height: 32px;
   padding: var(--space-3) var(--space-5);
-  cursor: pointer;
-  font-family: var(--sans);
-  font-size: var(--fs-sm);
-  line-height: var(--line-height-xs);
-  font-weight: var(--font-weight-strong);
 }
-.notes-roadmap-new:hover,
-.notes-roadmap-primary:hover,
-.notes-phase-detail-heading button:hover,
-.notes-phase-form-actions button:hover:not(:disabled),
-.notes-phase-lifecycle-actions button:hover:not(:disabled),
-.notes-phase-secondary-actions button:hover:not(:disabled),
-.notes-phase-blocker-resolve:hover:not(:disabled),
-.notes-phase-archive button:hover,
-.notes-roadmap-proposal-actions button:hover:not(:disabled),
-.notes-phase-references-heading > button:hover:not(:disabled),
-.notes-phase-reference-option > button:hover:not(:disabled),
-.notes-reminder-section button:hover:not(:disabled),
-.notes-storage-diagnostics button:hover:not(:disabled) {
-  filter: brightness(1.18);
+/* Primary: one per view. --on-primary is the ink paired with --primary in
+   every theme (dark ink on Dark's pale violet, white on Light's deep violet). */
+button.notes-btn-primary {
+  border-color: transparent;
+  background: var(--primary);
+  color: var(--on-primary);
+  box-shadow: none;
+}
+button.notes-btn-primary:hover:not(:disabled) {
+  filter: none;
+  background: var(--primary-hi);
+  color: var(--on-primary);
+}
+/* Quiet: no fill or rim at rest; hover and keyboard focus reveal the
+   Secondary look. Same padding, so the hit area matches. */
+button.notes-btn-quiet {
+  border-color: transparent;
+  background: transparent;
+  color: var(--text-secondary);
+  box-shadow: none;
+}
+button.notes-btn-quiet:is(:hover:not(:disabled), :focus-visible) {
+  border-color: var(--border-strong);
+  background: var(--gloss-neutral);
   color: var(--text);
+  box-shadow: var(--gloss-shadow-neutral);
 }
-.notes-phase-form-actions button:disabled,
-.notes-phase-lifecycle-actions button:disabled,
-.notes-phase-secondary-actions button:disabled,
-.notes-phase-blocker-resolve:disabled,
-.notes-roadmap-proposal-actions button:disabled,
-.notes-phase-references-heading > button:disabled,
-.notes-phase-reference-option > button:disabled,
-.notes-reminder-section button:disabled,
-.notes-storage-diagnostics button:disabled {
-  cursor: default;
-  opacity: 0.4;
+/* Destructive quiet actions take the error ink only once revealed. */
+button.notes-btn-quiet.notes-btn-danger:is(:hover, :focus-visible):not(:disabled) {
+  color: var(--error);
 }
 .notes-phase-form {
   display: grid;
@@ -379,7 +468,7 @@
   gap: var(--space-6);
   padding: var(--space-6) var(--space-6) var(--space-6) 0;
 }
-.notes-roadmap-workspace.has-detail .notes-roadmap-list {
+.notes-roadmap-workspace.has-detail .notes-roadmap-groups {
   padding-inline-start: var(--space-6);
 }
 .notes-roadmap-workspace.has-detail .notes-phase-detail {
@@ -424,8 +513,69 @@
   min-width: 0;
   gap: var(--space-6);
 }
+/* Reorder handle sits before the title; the status badge keeps the far edge. */
+.notes-roadmap-card-heading.has-reorder-handle {
+  justify-content: flex-start;
+  gap: var(--space-3);
+}
+.notes-roadmap-card-heading.has-reorder-handle > :last-child {
+  margin-inline-start: auto;
+}
+.notes-roadmap-reorder-handle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  margin-block: -4px;
+  margin-inline-start: calc(-1 * var(--space-3));
+  padding: 0;
+  cursor: grab;
+}
+.notes-roadmap-reorder-handle:active:not(:disabled) {
+  cursor: grabbing;
+}
+@media (pointer: coarse) {
+  .notes-roadmap-reorder-handle {
+    width: 44px;
+    height: 44px;
+    margin-block: -10px;
+  }
+}
+.notes-roadmap-row.is-dragging {
+  opacity: 0.5;
+}
+/* Drop position: a primary rule on the edge the phase will land against. */
+.notes-roadmap-row.is-drop-before,
+.notes-roadmap-row.is-drop-after {
+  position: relative;
+}
+.notes-roadmap-row.is-drop-before::before,
+.notes-roadmap-row.is-drop-after::before {
+  content: "";
+  position: absolute;
+  inset-inline: 0;
+  height: 3px;
+  background: var(--primary);
+  pointer-events: none;
+}
+.notes-roadmap-row.is-drop-before::before {
+  top: 0;
+}
+.notes-roadmap-row.is-drop-after::before {
+  bottom: 0;
+}
+@media (forced-colors: active) {
+  .notes-roadmap-row.is-drop-before::before,
+  .notes-roadmap-row.is-drop-after::before {
+    background: Highlight;
+  }
+}
 .notes-roadmap-card-title {
+  display: flex;
   min-width: 0;
+  align-items: center;
+  gap: var(--space-3);
   margin: 0;
 }
 .notes-roadmap-title {
@@ -449,46 +599,48 @@
   overflow-wrap: anywhere;
 }
 .notes-phase-saved-prompt-marker {
+  display: inline-flex;
   flex: 0 0 auto;
-  padding: var(--space-1) var(--space-3);
-  color: var(--primary);
-  font-size: var(--fs-sm);
-  font-weight: var(--font-weight-strong);
-  line-height: 1.2;
-  background: color-mix(in srgb, var(--primary) 10%, transparent);
-  border: 1px solid color-mix(in srgb, var(--primary) 30%, var(--border));
-  border-radius: var(--radius-pill);
+  align-items: center;
+  color: var(--text-muted);
+  vertical-align: middle;
 }
 .notes-roadmap-title:hover {
   color: var(--primary);
 }
 .notes-phase-status {
+  display: inline-flex;
   flex: 0 0 auto;
+  align-items: center;
   max-width: 44%;
-  padding: 3px var(--space-4);
+  gap: var(--space-2);
+  padding: var(--space-2) 0;
   overflow-wrap: anywhere;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-pill);
+  background: transparent;
   color: var(--text-secondary);
   font-size: var(--fs-sm);
   font-weight: var(--font-weight-strong);
   line-height: 1.35;
-  text-align: center;
+}
+.notes-phase-status > svg {
+  flex: 0 0 auto;
 }
 .notes-phase-status.is-tone-positive {
-  border-color: var(--success);
   color: var(--success);
 }
 .notes-phase-status.is-tone-active {
-  border-color: var(--primary);
   color: var(--primary);
 }
 .notes-phase-status.is-tone-warning {
-  border-color: var(--warning);
   color: var(--warning);
 }
-.notes-roadmap-attention,
-.notes-roadmap-reconciliation {
+.notes-phase-status.is-tinted {
+  padding: 3px var(--space-4);
+  border: 1px solid transparent;
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, currentColor 14%, transparent);
+}
+.notes-roadmap-attention {
   margin: var(--space-5) 0 0;
   padding-inline-start: var(--space-5);
   border-inline-start: 2px solid var(--warning);
@@ -497,8 +649,7 @@
   line-height: var(--line-height-sm);
   overflow-wrap: anywhere;
 }
-.notes-roadmap-attention strong,
-.notes-roadmap-reconciliation strong {
+.notes-roadmap-attention strong {
   color: var(--warning);
 }
 .notes-roadmap-card-footer {
@@ -520,8 +671,7 @@
 .notes-roadmap-meta span {
   overflow-wrap: anywhere;
 }
-.notes-roadmap-primary {
-  flex: 0 0 auto;
+.notes-roadmap-card-action {
   min-width: 64px;
 }
 .notes-phase-detail {
@@ -625,19 +775,27 @@
   flex: 0 0 auto;
 }
 
+/* Phase sub-views stay a tablist at every width; a narrow pane scrolls the row
+   sideways (NotesTabList keeps the active tab in view) instead of truncating. */
+.notes-phase-views-scroll {
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  border-bottom: 1px solid var(--border);
+  scrollbar-width: thin;
+  overscroll-behavior-inline: contain;
+}
+
 .notes-phase-views {
-  display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  display: flex;
   min-width: 0;
   padding-inline: var(--space-4);
-  border-bottom: 1px solid var(--border);
 }
 
 .notes-phase-views button {
-  min-width: 0;
-  min-height: 30px;
+  flex: 1 0 auto;
+  min-height: 32px;
   padding: var(--space-3) var(--space-4) 5px;
-  overflow: hidden;
   border: 0;
   border-bottom: 2px solid transparent;
   border-radius: 0;
@@ -647,7 +805,6 @@
   font-size: var(--fs-sm);
   line-height: var(--line-height-xs);
   font-weight: var(--font-weight-strong);
-  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
@@ -659,35 +816,6 @@
 .notes-phase-views button[aria-selected="true"] {
   border-bottom-color: var(--primary);
   color: var(--primary);
-}
-
-.notes-phase-view-select {
-  display: none;
-  min-width: 0;
-  padding: var(--space-4) var(--space-5);
-  border-bottom: 1px solid var(--border);
-}
-
-.notes-phase-view-select label {
-  color: var(--text-muted);
-  font-size: var(--fs-sm);
-  font-weight: var(--font-weight-strong);
-  line-height: var(--line-height-xs);
-  white-space: nowrap;
-}
-
-.notes-phase-view-select select {
-  box-sizing: border-box;
-  width: 100%;
-  min-width: 0;
-  height: 34px;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-control);
-  background: var(--surface-2);
-  color: var(--text);
-  font-family: var(--sans);
-  font-size: var(--fs-base);
-  line-height: var(--line-height-sm);
 }
 
 .notes-phase-view-panel,
@@ -1150,6 +1278,7 @@
 }
 .notes-phase-archive ul {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 7px;
   margin: 0;
   padding: 0;
@@ -1250,24 +1379,40 @@
   font-size: var(--fs-sm);
   line-height: var(--line-height-xs);
 }
-.notes-persistence-toggle {
-  min-height: 32px;
-  white-space: nowrap;
+/* The NotesDisclosure wrapper steps aside so its toggle sits on the summary line
+   and its region spans the row below, inside the banner's own grid. */
+.notes-persistence-disclosure {
+  display: contents;
 }
 .notes-persistence-compact .notes-persistence-detail {
   grid-column: 2 / -1;
   margin: 0 0 var(--space-2);
 }
-.notes-persistence-compact .notes-persistence-detail[hidden] {
-  display: none;
+.notes-persistence-compact .notes-persistence-detail > p {
+  margin: 0;
 }
 @media (pointer: coarse) {
-  .notes-persistence-toggle {
+  .notes-tabs button,
+  .notes-phase-views button {
     min-height: 44px;
+  }
+  /* The Saved prompt summary is a native disclosure control (38px at rest). */
+  .notes-phase-saved-prompt summary {
+    min-height: 44px;
+    align-content: center;
+  }
+  .notes-modal .modal-close {
+    width: 44px;
+    height: 44px;
+    margin: -9px;
   }
   /* The add-task row is a primary touch target: field and button meet the 44px floor. */
   .notes-add-controls input,
   .notes-add-controls button {
+    box-sizing: border-box;
+    min-height: 44px;
+  }
+  .notes-roadmap-card-action {
     box-sizing: border-box;
     min-height: 44px;
   }
@@ -1303,7 +1448,6 @@
 }
 .notes-add-controls input,
 .notes-edit-form input,
-.notes-current-focus input,
 .notes-field textarea {
   box-sizing: border-box;
   width: 100%;
@@ -1318,8 +1462,7 @@
   outline: none;
 }
 .notes-add-controls input,
-.notes-edit-form input,
-.notes-current-focus input {
+.notes-edit-form input {
   padding: var(--space-4) var(--space-5);
 }
 .notes-add-controls input {
@@ -1336,6 +1479,15 @@
 .notes-reference-section > .notes-field > textarea {
   min-height: 150px;
   max-height: 300px;
+}
+/* Current focus is one line of text that wraps instead of truncating. It grows with its
+   content where field-sizing is supported; elsewhere rows="2" keeps two lines visible. */
+.notes-current-focus textarea {
+  min-height: 0;
+  max-height: 160px;
+  resize: none;
+  padding: var(--space-4) var(--space-5);
+  field-sizing: content;
 }
 .notes-references {
   min-width: 0;
@@ -1381,7 +1533,7 @@
 .notes-reference-delete button,
 .notes-phase-references-empty button {
   flex: 0 0 auto;
-  min-height: 30px;
+  min-height: 32px;
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-button);
   background: var(--gloss-neutral);
@@ -1865,36 +2017,6 @@
   margin: var(--space-1) 0 0;
   padding-inline-start: var(--space-9);
 }
-.notes-review-readiness.is-ready {
-  background: color-mix(in srgb, var(--success) 9%, transparent);
-}
-.notes-review-readiness.is-ready dd > strong {
-  color: var(--success);
-}
-.notes-review-readiness-evidence {
-  display: grid;
-  gap: var(--space-3);
-  margin-top: var(--space-3) !important;
-}
-.notes-review-readiness-evidence li {
-  padding-inline-start: var(--space-1);
-}
-.notes-review-readiness-evidence li span,
-.notes-review-readiness-evidence li strong {
-  display: block;
-}
-.notes-review-readiness-evidence li strong {
-  margin-top: 1px;
-  font-size: var(--fs-sm) !important;
-  line-height: var(--line-height-xs);
-}
-.notes-completion-unreviewed {
-  display: grid;
-  gap: var(--space-1);
-  margin-top: var(--space-2);
-  padding-top: var(--space-3);
-  border-top: 1px solid var(--border);
-}
 .notes-roadmap-report {
   border-inline-start: 3px solid var(--primary);
   padding-inline-start: var(--space-5);
@@ -2004,8 +2126,7 @@
 .notes-roadmap-history ol > li {
   display: block;
 }
-.notes-phase-references-heading > button,
-.notes-phase-status-control > button {
+.notes-phase-references-heading > button {
   margin-top: var(--space-4);
 }
 .notes-phase-execution {
@@ -2249,7 +2370,7 @@
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-card);
   background: var(--surface-2);
-  box-shadow: 0 12px 34px -12px rgba(0, 0, 0, 0.7);
+  box-shadow: var(--shadow-lg);
   padding: var(--space-7);
   color: var(--text);
   pointer-events: auto;
@@ -2317,33 +2438,11 @@
   cursor: default;
   opacity: 0.45;
 }
+/* Task button sizing; look and tiers come from the shared Notes button rules. */
 .notes-add-controls button,
 .notes-task-actions button,
 .notes-archive-toggle {
-  flex: 0 0 auto;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-button);
-  background: var(--gloss-neutral);
-  color: var(--text-secondary);
-  box-shadow: var(--gloss-shadow-neutral);
-  font-family: var(--sans);
-  font-size: var(--fs-sm);
-  line-height: var(--line-height-xs);
-  font-weight: var(--font-weight-strong);
   padding: 7px 11px;
-  cursor: pointer;
-}
-.notes-add-controls button:hover:not(:disabled),
-.notes-task-actions button:hover:not(:disabled),
-.notes-archive-toggle:hover:not(:disabled) {
-  filter: brightness(1.18);
-  color: var(--text);
-}
-.notes-add-controls button:disabled,
-.notes-task-actions button:disabled,
-.notes-archive-toggle:disabled {
-  cursor: default;
-  opacity: 0.4;
 }
 .notes-task-list {
   display: grid;
@@ -2369,11 +2468,59 @@
   line-height: var(--line-height-sm);
   overflow-wrap: anywhere;
 }
+/* The checkbox is drawn rather than native so its own box can be the 32px hit
+   target (44px on touch) while the visible square stays 14px. Negative margins
+   keep the square and the text where the native box left them. */
 .notes-task-check input {
+  appearance: none;
+  display: inline-grid;
   flex: 0 0 auto;
-  margin-top: 3px;
-  accent-color: var(--primary);
+  place-items: center;
+  box-sizing: border-box;
+  width: 32px;
+  height: 32px;
+  margin: -6px -9px -9px;
+  border-radius: var(--radius-button);
   cursor: pointer;
+}
+.notes-task-check input::before,
+.notes-task-check input::after {
+  content: "";
+  grid-area: 1 / 1;
+}
+.notes-task-check input::before {
+  box-sizing: border-box;
+  width: 14px;
+  height: 14px;
+  border: 1.5px solid var(--text-muted);
+  border-radius: var(--radius-sm);
+  background: var(--surface-1);
+  transition:
+    background-color var(--t-fast),
+    border-color var(--t-fast);
+}
+.notes-task-check input:hover::before {
+  border-color: var(--text);
+}
+.notes-task-check input:checked::before {
+  border-color: var(--primary-fill);
+  background: var(--primary-fill);
+}
+.notes-task-check input::after {
+  width: 4px;
+  height: 8px;
+  margin-top: -2px;
+  border: solid var(--on-primary-fill);
+  border-width: 0 2px 2px 0;
+  opacity: 0;
+  rotate: 45deg;
+}
+.notes-task-check input:checked::after {
+  opacity: 1;
+}
+/* The ring hugs the drawn square, not the larger hit box. */
+.notes-modal .notes-task-check input[type="checkbox"]:focus-visible {
+  outline-offset: -7px;
 }
 .notes-task-row.is-done .notes-task-check span {
   color: var(--text-dim);
@@ -2386,6 +2533,80 @@
   flex-wrap: wrap;
   justify-content: flex-end;
   gap: var(--space-3);
+}
+/* Row actions: one quiet "⋯" trigger per row, so a row never grows past its text.
+   The menu opens below the trigger, right-aligned, with Archive last. */
+.notes-task-row > .notes-task-check {
+  flex: 1 1 0;
+}
+.notes-task-menu {
+  position: relative;
+  flex: 0 0 auto;
+  margin-top: -6px;
+  margin-bottom: -6px;
+}
+/* 32px is the fine-pointer floor for icon-only controls; the negative margins keep
+   the row as tall as its text. */
+.notes-task-menu-trigger {
+  display: inline-grid;
+  place-items: center;
+  box-sizing: border-box;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+}
+.notes-task-menu-list {
+  min-width: 176px;
+}
+.notes-task-menu-list .winlayout-item {
+  justify-content: space-between;
+  min-height: 32px;
+  white-space: nowrap;
+}
+.notes-task-menu-list .winlayout-item:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+.notes-task-menu-hint {
+  color: var(--text-dim);
+  font-family: var(--sans);
+  font-size: var(--fs-sm);
+}
+.notes-task-menu-list .notes-task-menu-danger {
+  color: var(--error);
+}
+/* The add button is a quiet icon on the field's line; Enter also submits. */
+.notes-add-controls .notes-add-submit {
+  display: inline-grid;
+  place-items: center;
+  box-sizing: border-box;
+  min-width: 36px;
+  padding: 0 var(--space-3);
+}
+@media (pointer: coarse) {
+  .notes-task-check input {
+    width: 44px;
+    height: 44px;
+    margin: -12px -15px -15px;
+  }
+  .notes-modal .notes-task-check input[type="checkbox"]:focus-visible {
+    outline-offset: -13px;
+  }
+  .notes-task-menu {
+    margin-top: -12px;
+    margin-bottom: -12px;
+  }
+  .notes-task-menu-trigger,
+  .notes-add-controls .notes-add-submit {
+    min-width: 44px;
+    min-height: 44px;
+  }
+  .notes-task-menu-list .winlayout-item {
+    min-height: 44px;
+  }
+  .notes-current-focus textarea {
+    min-height: 44px;
+  }
 }
 .notes-edit-form {
   display: grid;
@@ -2406,6 +2627,121 @@
   font-size: var(--fs-base);
   line-height: var(--line-height-sm);
   overflow-wrap: anywhere;
+}
+.notes-archive-intro {
+  margin: 0 0 var(--space-6);
+  color: var(--text-muted);
+  font-size: var(--fs-base);
+  line-height: var(--line-height-sm);
+}
+/* Completed groups: open work stays first; finished phases and tasks sit in a quiet
+   disclosure underneath. The toggle reuses the archive toggle's Quiet look. */
+.notes-roadmap-groups {
+  display: grid;
+  min-width: 0;
+  gap: var(--space-5);
+}
+.notes-completed-group {
+  min-width: 0;
+}
+.notes-task-list + .notes-completed-group {
+  margin-top: var(--space-6);
+}
+/* The one Notes disclosure (NotesDisclosure): Completed groups, Deleted phases and
+   archived tasks share this toggle, chevron and region. */
+.notes-disclosure-toggle {
+  display: inline-flex;
+  box-sizing: border-box;
+  min-height: 32px;
+  align-items: center;
+  gap: var(--space-2);
+}
+.notes-disclosure-chevron {
+  flex: 0 0 auto;
+  transition: transform var(--dur-enter) var(--ease-out);
+}
+.notes-disclosure-toggle[aria-expanded="true"] .notes-disclosure-chevron {
+  transform: rotate(90deg);
+}
+.notes-disclosure-region[hidden] {
+  display: none;
+}
+.notes-disclosure-region > .notes-roadmap-list {
+  margin-top: var(--space-5);
+}
+.notes-disclosure-region > .notes-task-list,
+.notes-disclosure-region.notes-task-list {
+  margin-top: var(--space-4);
+}
+/* Roadmap progress: the label carries the value; the bar is a glanceable echo of it. */
+.notes-roadmap-toolbar .notes-roadmap-progress {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-4);
+  margin-top: var(--space-2);
+}
+.notes-roadmap-progress progress {
+  appearance: none;
+  width: 96px;
+  height: 6px;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: var(--surface-3);
+  box-shadow: inset 0 0 0 1px var(--border-strong);
+  overflow: hidden;
+}
+.notes-roadmap-progress progress::-webkit-progress-bar {
+  border-radius: var(--radius-pill);
+  background: var(--surface-3);
+  box-shadow: inset 0 0 0 1px var(--border-strong);
+}
+.notes-roadmap-progress progress::-webkit-progress-value {
+  border-radius: var(--radius-pill);
+  background: var(--success);
+}
+.notes-roadmap-progress progress::-moz-progress-bar {
+  border-radius: var(--radius-pill);
+  background: var(--success);
+}
+@media (pointer: coarse) {
+  .notes-disclosure-toggle {
+    box-sizing: border-box;
+    min-height: 44px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .notes-disclosure-chevron,
+  .notes-task-check input::before {
+    transition: none;
+  }
+}
+@media (forced-colors: active) {
+  .notes-task-check input::before,
+  .notes-task-check input::after {
+    forced-color-adjust: none;
+  }
+  .notes-task-check input::before {
+    border-color: CanvasText;
+    background: Canvas;
+  }
+  .notes-task-check input:checked::before {
+    border-color: Highlight;
+    background: Highlight;
+  }
+  .notes-task-check input::after {
+    border-color: HighlightText;
+  }
+  .notes-roadmap-progress progress {
+    border: 1px solid CanvasText;
+    box-shadow: none;
+  }
+  .notes-roadmap-progress progress::-webkit-progress-value {
+    background: Highlight;
+  }
+  .notes-roadmap-progress progress::-moz-progress-bar {
+    background: Highlight;
+  }
 }
 /* Recoverable phase deletion uses the existing Notes button and surface tokens. */
 .notes-phase-deletion-dialog {
@@ -2432,8 +2768,7 @@
   justify-content: flex-end;
   gap: var(--space-4);
 }
-.notes-phase-deletion-dialog button:focus-visible,
-.notes-deleted-phases summary:focus-visible {
+.notes-phase-deletion-dialog button:focus-visible {
   outline: 2px solid var(--primary);
   outline-offset: 2px;
 }
@@ -2444,15 +2779,6 @@
 .notes-deleted-phases {
   margin-block: var(--space-8);
   color: var(--text-secondary);
-}
-.notes-deleted-phases summary {
-  cursor: pointer;
-  min-height: 30px;
-  padding-block: var(--space-3);
-  color: var(--text-secondary);
-  font-size: var(--fs-sm);
-  font-weight: var(--font-weight-strong);
-  line-height: var(--line-height-xs);
 }
 .notes-deleted-phases ul {
   list-style: none;
@@ -2490,8 +2816,7 @@
   overflow-wrap: anywhere;
 }
 @media (forced-colors: active) {
-  .notes-phase-deletion-dialog button:focus-visible,
-  .notes-deleted-phases summary:focus-visible {
+  .notes-phase-deletion-dialog button:focus-visible {
     outline-color: Highlight;
   }
 }
@@ -2523,6 +2848,11 @@
 }
 .notes-modal input[type="checkbox"]:focus-visible {
   outline-offset: 3px;
+}
+/* Tabs sit inside horizontal scrollers that clip anything outside them, so the
+   focus ring is drawn inside the tab. */
+.notes-modal [role="tab"]:focus-visible {
+  outline-offset: -2px;
 }
 @media (prefers-reduced-motion: reduce) {
   .notes-tabs button,
@@ -2563,9 +2893,17 @@
   .notes-reference-form input,
   .notes-reference-form textarea,
   .notes-edit-form input,
-  .notes-current-focus input,
-  .notes-field textarea {
+  .notes-field textarea,
+  .notes-phase-status.is-tinted {
     border-color: CanvasText;
+  }
+  .notes-phase-status,
+  .notes-phase-saved-prompt-marker {
+    color: CanvasText;
+  }
+  .notes-phase-status svg,
+  .notes-phase-saved-prompt-marker svg {
+    fill: CanvasText;
   }
   .notes-persistence-icon {
     color: CanvasText;
@@ -2613,7 +2951,7 @@
     display: block;
     padding: var(--space-4);
   }
-  .notes-roadmap-workspace.has-detail .notes-roadmap-list {
+  .notes-roadmap-workspace.has-detail .notes-roadmap-groups {
     display: none;
   }
   .notes-roadmap-workspace.has-detail .notes-phase-detail {
@@ -2725,8 +3063,7 @@
   .notes-panel-rail {
     padding: var(--space-7);
   }
-  .notes-add-controls,
-  .notes-task-row,
+  .notes-archived-task,
   .notes-reminder-heading,
   .roadmap-reminder-alert-actions {
     flex-wrap: wrap;
@@ -2750,17 +3087,6 @@
     width: 100%;
   }
 
-  .notes-phase-views {
-    display: none;
-  }
-
-  .notes-phase-view-select {
-    display: grid;
-    grid-template-columns: auto minmax(0, 1fr);
-    align-items: center;
-    gap: var(--space-5);
-  }
-
   .notes-phase-overview-heading {
     grid-template-columns: 1fr;
   }
@@ -2778,14 +3104,17 @@
     gap: 3px;
   }
 
+  /* Rows share one label column sized to the longest label, so a long word
+     such as "Implementation" never breaks mid-word. */
   .notes-phase-overview-completion dl {
-    grid-template-columns: 1fr;
+    grid-template-columns: max-content minmax(0, 1fr);
+    column-gap: var(--space-4);
   }
 
   .notes-phase-overview-completion dl > div {
     display: grid;
-    grid-template-columns: 88px minmax(0, 1fr);
-    gap: var(--space-4);
+    grid-column: 1 / -1;
+    grid-template-columns: subgrid;
     padding: var(--space-3) 0;
     border-block-start: 1px solid var(--border);
     border-inline-start: 0;
@@ -2853,10 +3182,10 @@
   .notes-reference-detail-actions {
     flex: 1 1 100%;
   }
-  .notes-add-controls button,
   .roadmap-reminder-alert-actions button {
     flex: 1 1 auto;
   }
+  /* Edit form and archived rows only; open and completed task rows use the row menu. */
   .notes-task-actions {
     box-sizing: border-box;
     flex: 1 1 100%;
@@ -2867,6 +3196,34 @@
   }
   .notes-edit-form .notes-task-actions {
     padding-left: 0;
+  }
+}
+/* Touch floor for the Roadmap, phase-detail and reference button groups (32px
+   with a mouse, above). After the 560px block so its 36px can't undercut it. */
+@media (pointer: coarse) {
+  .notes-roadmap-new,
+  .notes-roadmap-primary,
+  .notes-phase-detail-actions .notes-roadmap-primary,
+  .notes-roadmap-card-action,
+  .notes-roadmap-next-phase-commands button,
+  .notes-phase-detail-heading button,
+  .notes-phase-form-actions button,
+  .notes-phase-lifecycle-actions button,
+  .notes-phase-secondary-actions button,
+  .notes-phase-blocker-resolve,
+  .notes-phase-archive button,
+  .notes-roadmap-proposal-actions button,
+  .notes-phase-references-heading > button,
+  .notes-phase-reference-option > button,
+  .notes-reminder-section button,
+  .notes-storage-diagnostics button,
+  .notes-reference-new,
+  .notes-reference-form-actions button,
+  .notes-reference-detail-actions button,
+  .notes-reference-open button,
+  .notes-reference-delete button,
+  .notes-phase-references-empty button {
+    min-height: 44px;
   }
 }
 /* End structured Project Notes and Roadmap UI typography scope. */
@@ -2984,4 +3341,36 @@
   .roadmap-edit-tag {
     border-color: CanvasText;
   }
+}
+
+/* Roadmap order before → after (move reviews and drafts that insert phases).
+   Reuses the edit comparison boxes; the changed phase is tagged, not colour-only. */
+.roadmap-order-placement {
+  margin: var(--space-3) 0 0;
+  color: var(--text-secondary);
+  font-size: var(--fs-md);
+  overflow-wrap: anywhere;
+}
+.roadmap-order-placement strong {
+  color: var(--text);
+}
+.roadmap-draft-order {
+  margin-block: var(--space-10) 0;
+}
+.roadmap-order-list {
+  display: grid;
+  gap: var(--space-2);
+  margin: 0;
+  padding-left: var(--space-10);
+  font-size: var(--fs-md);
+  line-height: 1.5;
+}
+.roadmap-order-list li {
+  overflow-wrap: anywhere;
+}
+.roadmap-order-list li > span:first-child {
+  margin-right: var(--space-3);
+}
+.roadmap-order-list li.is-changed > span:first-child {
+  font-weight: 600;
 }

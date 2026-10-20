@@ -170,11 +170,42 @@ describe("narrow-window layout contracts", () => {
       .map((match) => match[1])
       .join("\n");
     expect(phaseViewRules).not.toMatch(/overflow-y:\s*(?:auto|scroll)/);
-    expect(appCss).toMatch(/\.notes-phase-view-select\s*\{\s*display:\s*none;/);
-    expect(appCss).toMatch(/\.notes-phase-view-select label\s*\{[\s\S]*?white-space:\s*nowrap;/);
+    // Phase sub-views stay a tablist at every width: the row scrolls sideways
+    // instead of swapping to a select.
+    expect(appCss).not.toMatch(/\.notes-phase-view-select/);
     expect(appCss).toMatch(
-      /@media \(max-width:\s*560px\)[\s\S]*?\.notes-phase-views\s*\{\s*display:\s*none;[\s\S]*?\.notes-phase-view-select\s*\{\s*display:\s*grid;\s*grid-template-columns:\s*auto minmax\(0,\s*1fr\);/,
+      /\.notes-phase-views-scroll\s*\{[^}]*overflow-x:\s*auto;[^}]*overflow-y:\s*hidden;/,
     );
+    expect(appCss).toMatch(/\.notes-phase-views button\s*\{[^}]*white-space:\s*nowrap;/);
+    expect(appCss).not.toMatch(/\.notes-phase-views button\s*\{[^}]*text-overflow:/);
+    expect(appCss).not.toMatch(/\.notes-phase-views\s*\{\s*display:\s*none;/);
+    // Focus rings are drawn inside tabs so the scrollers cannot clip them.
+    expect(appCss).toMatch(
+      /\.notes-modal \[role="tab"\]:focus-visible\s*\{\s*outline-offset:\s*-2px;/,
+    );
+  });
+
+  it("sizes narrow phase-overview labels to the longest word so none breaks mid-word", () => {
+    const narrow = [...appCss.matchAll(/@media \(max-width:\s*560px\)\s*\{([\s\S]*?)\n\}/g)]
+      .map((block) => block[1])
+      .join("\n");
+    expect(narrow).toMatch(
+      /\.notes-phase-overview-completion dl\s*\{[^}]*grid-template-columns:\s*max-content minmax\(0,\s*1fr\);/,
+    );
+    expect(narrow).toMatch(
+      /\.notes-phase-overview-completion dl > div\s*\{[^}]*grid-column:\s*1 \/ -1;[^}]*grid-template-columns:\s*subgrid;/,
+    );
+    // A fixed label column (88px held "Implementation" at 390px) made the word wrap.
+    expect(narrow).not.toMatch(
+      /\.notes-phase-overview-completion dl > div\s*\{[^}]*grid-template-columns:\s*\d+px/,
+    );
+  });
+
+  it("gives the Saved prompt summary the 44px touch floor on coarse pointers", () => {
+    const coarse = [...appCss.matchAll(/@media \(pointer:\s*coarse\)\s*\{([\s\S]*?)\n\}/g)]
+      .map((block) => block[1])
+      .join("\n");
+    expect(coarse).toMatch(/\.notes-phase-saved-prompt summary\s*\{[^}]*min-height:\s*44px;/);
   });
 
   it("splits Roadmap cards and phase detail with compact, consistently spaced controls", () => {
@@ -186,9 +217,9 @@ describe("narrow-window layout contracts", () => {
     expect(appCss).toMatch(
       /\.notes-roadmap-workspace\.has-detail\s*\{[^}]*grid-template-columns:\s*minmax\(/,
     );
-    // Narrow layouts show the detail instead of the list.
+    // Narrow layouts show the detail instead of the list (the groups wrapper holds the lists).
     expect(appCss).toMatch(
-      /@media \(max-width:\s*760px\)[\s\S]*?\.notes-roadmap-workspace\.has-detail \.notes-roadmap-list\s*\{\s*display:\s*none;/,
+      /@media \(max-width:\s*760px\)[\s\S]*?\.notes-roadmap-workspace\.has-detail \.notes-roadmap-groups\s*\{\s*display:\s*none;/,
     );
     expect(appCss).not.toMatch(/\.notes-roadmap-workspace\s*\{[^}]*grid-template-columns:/);
     expect(appCss).toMatch(
@@ -196,9 +227,55 @@ describe("narrow-window layout contracts", () => {
     );
     expect(appCss).toMatch(/\.notes-phase-detail-actions\s*\{[\s\S]*?gap:\s*8px;/);
     expect(appCss).toMatch(
-      /\.notes-phase-views button\s*\{[\s\S]*?min-height:\s*30px;[\s\S]*?padding:\s*6px 8px 5px;/,
+      /\.notes-phase-views button\s*\{[\s\S]*?min-height:\s*32px;[\s\S]*?padding:\s*6px 8px 5px;/,
     );
-    expect(appCss).toMatch(/\.notes-phase-view-select\s*\{[\s\S]*?padding:\s*8px 10px;/);
+    expect(appCss).toMatch(
+      /@media \(pointer: coarse\)\s*\{[^}]*\.notes-phase-views button\s*\{\s*min-height:\s*44px;/,
+    );
+  });
+
+  it("sizes Roadmap and phase-detail buttons at 32px for mice and 44px for touch", () => {
+    expect(appCss).toMatch(
+      /\.notes-roadmap-new,\s*\.notes-roadmap-primary,[^{]*\.notes-storage-diagnostics button\s*\{\s*min-height:\s*32px;/,
+    );
+    expect(appCss).toMatch(
+      /\.notes-phase-references-empty button\s*\{\s*flex:\s*0 0 auto;\s*min-height:\s*32px;/,
+    );
+    const touchFloor =
+      /@media \(pointer: coarse\)\s*\{\s*\.notes-roadmap-new,\s*\.notes-roadmap-primary,\s*\.notes-phase-detail-actions \.notes-roadmap-primary,\s*\.notes-roadmap-card-action,[^{]*\.notes-phase-detail-heading button,[^{]*\.notes-phase-references-empty button\s*\{\s*min-height:\s*44px;\s*\}\s*\}/;
+    expect(appCss).toMatch(touchFloor);
+    // The 560px block raises these to 36px; the touch floor must come later to win.
+    const narrowRule = appCss.search(
+      /\.notes-phase-references-heading > button\s*\{\s*min-height:\s*36px;/,
+    );
+    expect(narrowRule).toBeGreaterThan(-1);
+    expect(appCss.search(touchFloor)).toBeGreaterThan(narrowRule);
+  });
+
+  it("tiers Notes buttons with paired theme tokens and a focus-revealed Quiet look", () => {
+    const primary = appCss.match(/button\.notes-btn-primary\s*\{([^}]*)\}/)?.[1];
+    expect(primary).toMatch(/background:\s*var\(--primary\);/);
+    expect(primary).toMatch(/color:\s*var\(--on-primary\);/);
+    expect(appCss).toMatch(
+      /button\.notes-btn-primary:hover:not\(:disabled\)\s*\{[^}]*background:\s*var\(--primary-hi\);[^}]*color:\s*var\(--on-primary\);/,
+    );
+    // Keyboard focus reveals Quiet buttons the same way hover does.
+    expect(appCss).toMatch(
+      /button\.notes-btn-quiet:is\([^{]*:focus-visible\)\s*\{[^}]*background:\s*var\(--gloss-neutral\);/,
+    );
+    expect(appCss).toMatch(
+      /button\.notes-btn-quiet\.notes-btn-danger:is\(:hover, :focus-visible\):not\(:disabled\)\s*\{\s*color:\s*var\(--error\);/,
+    );
+    // No Notes button rule hard-codes white ink (it failed contrast on Dark's pale violet).
+    const notesButtonRules = [...appCss.matchAll(/([^{}]+)\{([^{}]*)\}/g)].filter(([, selector]) =>
+      /\.notes-[\w-]*(?:button|btn|primary|card-action|toggle)|\.notes-[\w-]+ button/.test(
+        selector ?? "",
+      ),
+    );
+    expect(notesButtonRules.length).toBeGreaterThan(10);
+    for (const [, , body] of notesButtonRules) {
+      expect(body).not.toMatch(/(?:^|[\s;])color:\s*(?:#fff\b|#ffffff\b|white\b)/i);
+    }
   });
 
   it("lets expanded saved prompts wrap in the Notes panel instead of creating a nested scroller", () => {

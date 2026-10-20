@@ -1,5 +1,9 @@
-import { useCallback, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
+import { useCallback, useLayoutEffect, useRef, useState } from "react";
+import type { RoadmapPhasePlacement } from "@kenkaiiii/gg-core/roadmap-workflow";
 import { Modal } from "./Modal";
+import { NotesDisclosure } from "./NotesDisclosure";
+import { notesModalDescription } from "./NotesModalHeader";
+import { NotesTabList } from "./NotesTabList";
 import { usePhaseDeletion, type PhaseDeletionBridge } from "./notes-roadmap/usePhaseDeletion";
 import { NotesPhaseDeletionDialog } from "./notes-roadmap/NotesPhaseDeletionDialog";
 import { NotesDeletedPhases } from "./notes-roadmap/NotesDeletedPhases";
@@ -44,6 +48,8 @@ const NOTES_TABS: ReadonlyArray<{ id: NotesTab; label: string }> = [
 
 interface Props {
   phaseDeletionBridge?: PhaseDeletionBridge;
+  /** Project folder shown in the modal header; null when no project is open. */
+  projectPath: string | null;
   value: string;
   onChange(value: string): void;
   currentFocus: string;
@@ -72,6 +78,7 @@ interface Props {
   onCreatePhase(input: NotesPhaseInput): void;
   onEditPhase(id: string, input: NotesPhaseInput): void;
   onMovePhase(id: string, direction: "up" | "down"): void;
+  onReorderPhase?(id: string, placement: RoadmapPhasePlacement): void;
   onChangePhaseStatus(id: string, status: NotesPhaseStatus): void;
   onSetPhaseStatusOverride(
     id: string,
@@ -152,7 +159,12 @@ function countLabel(count: number, noun: string): string {
 
 export function NotesModal(props: Props): React.ReactElement {
   return (
-    <Modal title="Your notes" onClose={props.onClose} className="notes-modal">
+    <Modal
+      title="Your notes"
+      description={notesModalDescription(props.projectPath, props.phases)}
+      onClose={props.onClose}
+      className="notes-modal"
+    >
       <NotesModalContent {...props} />
     </Modal>
   );
@@ -188,6 +200,7 @@ export function NotesModalContent({
   onCreatePhase,
   onEditPhase,
   onMovePhase,
+  onReorderPhase,
   onChangePhaseStatus,
   onSetPhaseStatusOverride,
   onArchivePhase,
@@ -238,7 +251,7 @@ export function NotesModalContent({
     deletionCommitted.current = onDeleted ?? null;
     void deletion.begin(phase, "delete");
   };
-  const currentFocusInputRef = useRef<HTMLInputElement>(null);
+  const currentFocusInputRef = useRef<HTMLTextAreaElement>(null);
   const addInputRef = useRef<HTMLInputElement>(null);
   const tabRefs = useRef<Record<NotesTab, HTMLButtonElement | null>>({
     overview: null,
@@ -274,24 +287,21 @@ export function NotesModalContent({
     if (focus) tabRefs.current[tab]?.focus();
   }, []);
 
-  const onTabKeyDown = useCallback(
-    (event: KeyboardEvent<HTMLButtonElement>, tab: NotesTab): void => {
-      const currentIndex = NOTES_TABS.findIndex((item) => item.id === tab);
-      let nextIndex: number | null = null;
-      if (event.key === "ArrowLeft") {
-        nextIndex = (currentIndex - 1 + NOTES_TABS.length) % NOTES_TABS.length;
-      } else if (event.key === "ArrowRight") {
-        nextIndex = (currentIndex + 1) % NOTES_TABS.length;
-      } else if (event.key === "Home") {
-        nextIndex = 0;
-      } else if (event.key === "End") {
-        nextIndex = NOTES_TABS.length - 1;
-      }
-      if (nextIndex === null) return;
-      event.preventDefault();
-      selectTab(NOTES_TABS[nextIndex]!.id, true);
-    },
-    [selectTab],
+  const notesTabs = NOTES_TABS.map((tab) =>
+    tab.id === "roadmap" && activePhaseCount > 0
+      ? {
+          ...tab,
+          adornment: (
+            <span
+              className="notes-tab-count"
+              aria-hidden="true"
+              title={activePhaseCountLabel(activePhaseCount)}
+            >
+              {activePhaseCount}
+            </span>
+          ),
+        }
+      : tab,
   );
 
   return (
@@ -315,45 +325,17 @@ export function NotesModalContent({
         </div>
       )}
       <div className="notes-shell-status">{persistenceStatus}</div>
-      <div className="notes-tabs-scroll">
-        <div
-          className="notes-tabs"
-          role="tablist"
-          aria-label="Notes sections"
-          aria-orientation="horizontal"
-        >
-          {NOTES_TABS.map((tab) => {
-            const selected = activeTab === tab.id;
-            return (
-              <button
-                key={tab.id}
-                ref={(element) => {
-                  tabRefs.current[tab.id] = element;
-                }}
-                id={`notes-tab-${tab.id}`}
-                type="button"
-                role="tab"
-                aria-selected={selected}
-                aria-controls={`notes-panel-${tab.id}`}
-                tabIndex={selected ? 0 : -1}
-                onClick={() => selectTab(tab.id)}
-                onKeyDown={(event) => onTabKeyDown(event, tab.id)}
-              >
-                <span>{tab.label}</span>
-                {tab.id === "roadmap" && activePhaseCount > 0 && (
-                  <span
-                    className="notes-tab-count"
-                    aria-hidden="true"
-                    title={activePhaseCountLabel(activePhaseCount)}
-                  >
-                    {activePhaseCount}
-                  </span>
-                )}
-              </button>
-            );
-          })}
-        </div>
-      </div>
+      <NotesTabList<NotesTab>
+        label="Notes sections"
+        tabs={notesTabs}
+        activeId={activeTab}
+        onSelect={setActiveTab}
+        tabId={(id) => `notes-tab-${id}`}
+        panelId={(id) => `notes-panel-${id}`}
+        className="notes-tabs"
+        scrollClassName="notes-tabs-scroll"
+        tabRefs={tabRefs}
+      />
 
       <div className="notes-panels">
         <div
@@ -393,6 +375,7 @@ export function NotesModalContent({
                 onToggleTask={onToggleTask}
                 onMoveTask={onMoveTask}
                 onArchiveTask={onArchiveTask}
+                disclosureKey={expectedProjectKey}
               />
             </section>
 
@@ -434,6 +417,7 @@ export function NotesModalContent({
                 onCreatePhase={onCreatePhase}
                 onEditPhase={onEditPhase}
                 onMovePhase={onMovePhase}
+                onReorderPhase={onReorderPhase}
                 onChangePhaseStatus={onChangePhaseStatus}
                 onSetPhaseStatusOverride={onSetPhaseStatusOverride}
                 onArchivePhase={onArchivePhase}
@@ -520,7 +504,11 @@ export function NotesModalContent({
               className="notes-section notes-archive"
               aria-labelledby="notes-archive-heading"
             >
-              <h2 id="notes-archive-heading">Done / Archive</h2>
+              <h2 id="notes-archive-heading">Archive</h2>
+              <p className="notes-archive-intro">
+                Archive holds phases and tasks you put away by hand. Finished work stays under
+                Completed in Roadmap and Overview until you archive it.
+              </p>
               <NotesRoadmapArchive
                 phases={phases}
                 onRestorePhase={onRestorePhase}
@@ -532,38 +520,37 @@ export function NotesModalContent({
                 disabled={deletion.pending}
               />
               <h3 className="notes-archive-task-heading">Notes tasks</h3>
-              <button
-                type="button"
-                className="notes-archive-toggle"
-                aria-expanded={showArchived}
-                aria-controls="notes-archive-list"
-                onClick={() => setShowArchived((visible) => !visible)}
-              >
-                {showArchived ? "Hide" : "Show"} archived tasks ({archivedTasks.length})
-              </button>
-              <div id="notes-archive-list" className="notes-task-list" hidden={!showArchived}>
-                {showArchived && (
-                  <>
-                    {archivedTasks.length === 0 && (
-                      <p className="notes-empty">No archived tasks.</p>
-                    )}
-                    {archivedTasks.map((task) => (
-                      <div className="notes-task-row notes-archived-task" key={task.id}>
-                        <span>{task.text}</span>
-                        <div className="notes-task-actions">
-                          <button
-                            type="button"
-                            aria-label={`Restore task: ${task.text}`}
-                            onClick={() => onRestoreTask(task.id)}
-                          >
-                            Restore
-                          </button>
+              {archivedTasks.length === 0 ? (
+                <p className="notes-empty">No archived tasks.</p>
+              ) : (
+                <NotesDisclosure
+                  id="notes-archive-list"
+                  regionClassName="notes-task-list"
+                  label={`${showArchived ? "Hide" : "Show"} archived tasks (${archivedTasks.length})`}
+                  expanded={showArchived}
+                  onToggle={() => setShowArchived((visible) => !visible)}
+                >
+                  {showArchived && (
+                    <>
+                      {archivedTasks.map((task) => (
+                        <div className="notes-task-row notes-archived-task" key={task.id}>
+                          <span>{task.text}</span>
+                          <div className="notes-task-actions">
+                            <button
+                              type="button"
+                              className="notes-btn-quiet"
+                              aria-label={`Restore task: ${task.text}`}
+                              onClick={() => onRestoreTask(task.id)}
+                            >
+                              Restore
+                            </button>
+                          </div>
                         </div>
-                      </div>
-                    ))}
-                  </>
-                )}
-              </div>
+                      ))}
+                    </>
+                  )}
+                </NotesDisclosure>
+              )}
             </section>
           </div>
         </div>

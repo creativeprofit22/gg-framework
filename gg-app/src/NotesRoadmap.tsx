@@ -1,9 +1,24 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { DotsSixVerticalIcon } from "@phosphor-icons/react";
 import { isNotesPhasePresent } from "@kenkaiiii/gg-core/project-notes";
+import {
+  planRoadmapPhaseMove,
+  type RoadmapPhaseOrderRefusal,
+  type RoadmapPhasePlacement,
+} from "@kenkaiiii/gg-core/roadmap-workflow";
 import { notesLifecyclePresentation, notesPhaseStatusLabel } from "./notes-lifecycle-presentation";
 import { openReferenceUrl, type OpenReferenceUrl } from "./notes-open-source";
 import { referenceSourceLabel } from "./notes-reference";
-import { activePhaseCountLabel, isActiveNotesPhase } from "./notes-status";
+import {
+  activePhaseCountLabel,
+  groupNotesPhases,
+  isActiveNotesPhase,
+  isCompletedNotesPhase,
+  roadmapProgressLabel,
+  selectNotesRoadmapProgress,
+} from "./notes-status";
+import { NotesCompletedGroup } from "./NotesCompletedGroup";
+import { NotesPhaseStatusBadge, NotesSavedPromptIndicator } from "./NotesStatusBadge";
 import type { SlashCommand } from "./agent";
 import { NotesPhaseDetail } from "./notes-roadmap/NotesPhaseDetail";
 import { useRoadmapPhaseNavigation } from "./notes-roadmap/useRoadmapPhaseNavigation";
@@ -54,6 +69,8 @@ interface RoadmapProps {
   onCreatePhase(input: NotesPhaseInput): void;
   onEditPhase(id: string, input: NotesPhaseInput): void;
   onMovePhase(id: string, direction: "up" | "down"): void;
+  /** Drag (or arrow-key) reorder of open phases; absent hides the reorder handles. */
+  onReorderPhase?(id: string, placement: RoadmapPhasePlacement): void;
   onChangePhaseStatus(id: string, status: NotesPhaseStatus): void;
   onSetPhaseStatusOverride(
     id: string,
@@ -124,6 +141,18 @@ interface ArchiveProps {
 
 const ROADMAP_CLOCK_FALLBACK_MS = 60_000;
 
+const DONE_PHASE_MOVE_REFUSAL = "Done phases can’t be moved.";
+
+/** User-facing copy for a refused reorder, shared by drag, arrow keys and Move up/down. */
+function describeReorderRefusal(refusal: RoadmapPhaseOrderRefusal): string {
+  if (refusal.reason === "ahead-of-done") return "A phase can’t move ahead of a Done phase.";
+  if (refusal.reason === "no-change") return "The phase is already there.";
+  if (refusal.reason === "phase-not-movable" && refusal.notMovable === "done") {
+    return DONE_PHASE_MOVE_REFUSAL;
+  }
+  return "This phase can’t be moved there.";
+}
+
 export function NotesRoadmap({
   phases,
   references,
@@ -136,6 +165,7 @@ export function NotesRoadmap({
   onCreatePhase,
   onEditPhase,
   onMovePhase,
+  onReorderPhase,
   onChangePhaseStatus,
   onSetPhaseStatusOverride,
   onArchivePhase,
@@ -168,9 +198,14 @@ export function NotesRoadmap({
   onActionSuccess,
   onReconciliationSuccess,
 }: RoadmapProps): React.ReactElement {
-  const visiblePhases = phases.filter(
-    (phase) => isNotesPhasePresent(phase) && phase.archivedAt === null,
+  const phaseGroups = useMemo(() => groupNotesPhases(phases), [phases]);
+  // Display order: open phases, then the Completed group.
+  const visiblePhases = useMemo(
+    () => [...phaseGroups.open, ...phaseGroups.completed],
+    [phaseGroups],
   );
+  const progress = useMemo(() => selectNotesRoadmapProgress(phases), [phases]);
+  const progressLabel = roadmapProgressLabel(progress);
   const currentTime = useRoadmapCurrentTime(phases);
   const [showCreate, setShowCreate] = useState(false);
   const [title, setTitle] = useState("");
@@ -201,10 +236,90 @@ export function NotesRoadmap({
   const advancement = useMemo(() => selectRoadmapAdvancement(phases), [phases]);
   const commandActions = useMemo(() => resolveRoadmapCommandActions(commands), [commands]);
   const [nextPhaseStatus, setNextPhaseStatus] = useState("");
+  const [dragPhaseId, setDragPhaseId] = useState<string | null>(null);
+  const [dropTarget, setDropTarget] = useState<RoadmapPhasePlacement | null>(null);
+  const reorderHandles = useRef(new Map<string, HTMLButtonElement>());
+  const [refocusHandleId, setRefocusHandleId] = useState<string | null>(null);
 
   useEffect(() => {
     if (showCreate) titleInputRef.current?.focus();
   }, [showCreate]);
+
+  // Moving a row can drop focus from its handle; keep keyboard reorder on the same phase.
+  useEffect(() => {
+    if (refocusHandleId === null) return;
+    const handle = reorderHandles.current.get(refocusHandleId);
+    if (handle && document.activeElement !== handle) handle.focus();
+    setRefocusHandleId(null);
+  }, [phases, refocusHandleId]);
+
+  const reorderEnabled =
+    onReorderPhase !== undefined &&
+    !actionDisabled &&
+    pendingPhaseId === null &&
+    phaseGroups.open.length > 1;
+
+  /** Null when allowed; otherwise why this placement is refused. */
+  const reorderRefusal = (phaseId: string, placement: RoadmapPhasePlacement): string | null => {
+    const planned = planRoadmapPhaseMove(phases, phaseId, placement);
+    if (!planned.ok) return describeReorderRefusal(planned.refusal);
+    return isRoadmapTopologyMutationBlocked(phases, { type: "reorder", phaseId, placement })
+      ? "This move would change the target protected by a pending phase advancement."
+      : null;
+  };
+
+  /** Null when Move up/down is allowed; otherwise why. Neighbours come from the phase's group. */
+  const moveRefusal = (
+    phase: NotesPhase,
+    group: readonly NotesPhase[],
+    direction: "up" | "down",
+  ): string | null => {
+    if (phase.status === "done") return DONE_PHASE_MOVE_REFUSAL;
+    const index = group.findIndex((candidate) => candidate.id === phase.id);
+    const neighbour = group[index + (direction === "up" ? -1 : 1)];
+    // First/last bounds are handled by the position-based disabled state.
+    if (index < 0 || !neighbour) return null;
+    const planned = planRoadmapPhaseMove(phases, phase.id, {
+      position: direction === "up" ? "before" : "after",
+      targetPhaseId: neighbour.id,
+    });
+    return planned.ok ? null : describeReorderRefusal(planned.refusal);
+  };
+
+  const titleOf = (phaseId: string): string =>
+    phases.find((phase) => phase.id === phaseId)?.title ?? "phase";
+
+  const commitReorder = (phase: NotesPhase, placement: RoadmapPhasePlacement): void => {
+    if (!onReorderPhase || !reorderEnabled) return;
+    const refusal = reorderRefusal(phase.id, placement);
+    if (refusal) {
+      setAnnouncement(refusal);
+      return;
+    }
+    onReorderPhase(phase.id, placement);
+    setAnnouncement(
+      `Moved ${phase.title} ${placement.position} ${titleOf(placement.targetPhaseId)}`,
+    );
+  };
+
+  const reorderWithKeyboard = (phase: NotesPhase, direction: "up" | "down"): void => {
+    const index = phaseGroups.open.findIndex((candidate) => candidate.id === phase.id);
+    const neighbour = phaseGroups.open[index + (direction === "up" ? -1 : 1)];
+    if (index < 0 || !neighbour) {
+      setAnnouncement(`${phase.title} is already ${direction === "up" ? "first" : "last"}.`);
+      return;
+    }
+    setRefocusHandleId(phase.id);
+    commitReorder(phase, {
+      position: direction === "up" ? "before" : "after",
+      targetPhaseId: neighbour.id,
+    });
+  };
+
+  const endDrag = (): void => {
+    setDragPhaseId(null);
+    setDropTarget(null);
+  };
 
   const closeCreate = (): void => {
     setShowCreate(false);
@@ -314,6 +429,12 @@ export function NotesRoadmap({
     }
   };
 
+  // Position, Move and archive-focus neighbours stay within the selected phase's own group.
+  const selectedGroup =
+    selectedPhase && isCompletedNotesPhase(selectedPhase)
+      ? phaseGroups.completed
+      : phaseGroups.open;
+
   const selectedPhaseDetailProps: NotesPhaseDetailProps | null = selectedPhase
     ? {
         phase: selectedPhase,
@@ -323,14 +444,21 @@ export function NotesRoadmap({
         references,
         authorityReady,
         openSource,
-        position: visiblePhases.findIndex((phase) => phase.id === selectedPhase.id),
-        phaseCount: visiblePhases.length,
+        position: selectedGroup.findIndex((phase) => phase.id === selectedPhase.id),
+        phaseCount: selectedGroup.length,
+        primaryEmphasis: !advancement,
         onClose: closeDetail,
         onEditPhase: (id, input) => {
           onEditPhase(id, input);
           setAnnouncement(`Updated phase: ${input.title.trim()}`);
         },
+        moveRefusal: (direction) => moveRefusal(selectedPhase, selectedGroup, direction),
         onMovePhase: (id, direction) => {
+          const refusal = moveRefusal(selectedPhase, selectedGroup, direction);
+          if (refusal) {
+            setAnnouncement(refusal);
+            return;
+          }
           onMovePhase(id, direction);
           setAnnouncement(`Moved ${selectedPhase.title} ${direction}`);
         },
@@ -360,9 +488,9 @@ export function NotesRoadmap({
           ? () => onDeletePhase(selectedPhase.id, () => clearSelection(null))
           : undefined,
         onArchivePhase: () => {
-          const selectedIndex = visiblePhases.findIndex((phase) => phase.id === selectedPhase.id);
+          const selectedIndex = selectedGroup.findIndex((phase) => phase.id === selectedPhase.id);
           const focusId =
-            visiblePhases[selectedIndex + 1]?.id ?? visiblePhases[selectedIndex - 1]?.id ?? null;
+            selectedGroup[selectedIndex + 1]?.id ?? selectedGroup[selectedIndex - 1]?.id ?? null;
           onArchivePhase(selectedPhase.id);
           setAnnouncement(`Archived phase: ${selectedPhase.title}`);
           clearSelection(focusId);
@@ -427,6 +555,144 @@ export function NotesRoadmap({
       }
     : null;
 
+  const renderPhaseRow = (phase: NotesPhase, reorderable: boolean): React.ReactElement => {
+    const selected = phase.id === selectedId;
+    const action = primaryAction(phase);
+    const actionLabel = phaseActionLabel(phase, action);
+    const lifecycle = notesLifecyclePresentation(phase);
+    const attentionReason = visibleRoadmapAttentionReason(phase);
+    const showHandle = reorderable && onReorderPhase !== undefined && phaseGroups.open.length > 1;
+    const dropPosition =
+      dropTarget?.targetPhaseId === phase.id && dragPhaseId !== phase.id
+        ? dropTarget.position
+        : null;
+    return (
+      <li
+        key={phase.id}
+        className={`notes-roadmap-row${selected ? " is-selected" : ""}${attentionReason ? " is-blocked" : ""}${dragPhaseId === phase.id ? " is-dragging" : ""}${dropPosition ? ` is-drop-${dropPosition}` : ""}`}
+        onDragOver={
+          reorderable && dragPhaseId !== null
+            ? (event) => {
+                const rect = event.currentTarget.getBoundingClientRect();
+                const placement: RoadmapPhasePlacement = {
+                  position: event.clientY < rect.top + rect.height / 2 ? "before" : "after",
+                  targetPhaseId: phase.id,
+                };
+                if (dragPhaseId === phase.id || reorderRefusal(dragPhaseId, placement)) {
+                  if (dropTarget !== null) setDropTarget(null);
+                  return;
+                }
+                // Accepting dragover is what marks this row as a valid drop target.
+                event.preventDefault();
+                event.dataTransfer.dropEffect = "move";
+                if (
+                  dropTarget?.targetPhaseId !== placement.targetPhaseId ||
+                  dropTarget.position !== placement.position
+                ) {
+                  setDropTarget(placement);
+                }
+              }
+            : undefined
+        }
+        onDrop={
+          reorderable && dragPhaseId !== null
+            ? (event) => {
+                event.preventDefault();
+                const dragged = phases.find((candidate) => candidate.id === dragPhaseId);
+                if (dragged && dropTarget?.targetPhaseId === phase.id) {
+                  commitReorder(dragged, dropTarget);
+                }
+                endDrag();
+              }
+            : undefined
+        }
+      >
+        <div className="notes-roadmap-card-summary">
+          <div className={`notes-roadmap-card-heading${showHandle ? " has-reorder-handle" : ""}`}>
+            {showHandle && (
+              <button
+                ref={(element) => {
+                  if (element) reorderHandles.current.set(phase.id, element);
+                  else reorderHandles.current.delete(phase.id);
+                }}
+                type="button"
+                className="notes-roadmap-reorder-handle notes-btn-quiet"
+                draggable={reorderEnabled}
+                aria-label={`Reorder phase: ${phase.title}`}
+                aria-describedby="notes-roadmap-reorder-help"
+                title="Drag to reorder"
+                disabled={!reorderEnabled}
+                onDragStart={(event) => {
+                  event.dataTransfer.setData("text/plain", phase.id);
+                  event.dataTransfer.effectAllowed = "move";
+                  setDragPhaseId(phase.id);
+                }}
+                onDragEnd={endDrag}
+                onKeyDown={(event) => {
+                  if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+                  event.preventDefault();
+                  reorderWithKeyboard(phase, event.key === "ArrowUp" ? "up" : "down");
+                }}
+              >
+                <DotsSixVerticalIcon size={16} aria-hidden="true" />
+              </button>
+            )}
+            <h3 className="notes-roadmap-card-title">
+              <button
+                ref={(element) => registerPhaseTitle(phase.id, element)}
+                type="button"
+                className="notes-roadmap-title"
+                data-phase-focus={phase.id}
+                aria-label={`Inspect phase: ${phase.title}`}
+                aria-expanded={selected}
+                aria-controls={selected ? `notes-phase-panel-${phase.id}` : undefined}
+                disabled={pendingPhaseId !== null}
+                onClick={() => togglePhase(phase.id)}
+              >
+                <span className="notes-roadmap-title-text">{phase.title}</span>
+              </button>
+              {phase.sourcePrompt.trim().length > 0 && <NotesSavedPromptIndicator />}
+            </h3>
+            <NotesPhaseStatusBadge status={phase.status} />
+          </div>
+
+          {attentionReason && (
+            <p className="notes-roadmap-attention">
+              <strong>Needs attention:</strong> {attentionReason}
+            </p>
+          )}
+
+          <div className="notes-roadmap-card-footer">
+            <div className="notes-roadmap-meta">
+              <span>{lifecycle.stage}</span>
+              <span>
+                {phase.referenceIds.length} {phase.referenceIds.length === 1 ? "ref" : "refs"}
+              </span>
+              <span>{reminderRowLabel(phase, currentTime)}</span>
+            </div>
+            {!selected && (
+              <button
+                type="button"
+                className="notes-roadmap-card-action notes-btn-quiet"
+                aria-label={`${actionLabel} phase: ${phase.title}`}
+                disabled={
+                  pendingPhaseId !== null ||
+                  actionDisabled ||
+                  ((action === "Start" || action === "Recover") &&
+                    (startUnavailableReason !== null ||
+                      isRoadmapPhaseStartProtected(phases, phase.id)))
+                }
+                onClick={() => void runCardAction(phase)}
+              >
+                {actionLabel}
+              </button>
+            )}
+          </div>
+        </div>
+      </li>
+    );
+  };
+
   return (
     <div className="notes-roadmap" ref={rootRef}>
       <div className="notes-roadmap-toolbar">
@@ -435,6 +701,12 @@ export function NotesRoadmap({
             Roadmap
           </h2>
           <p>{activePhaseCountLabel(visiblePhases.filter(isActiveNotesPhase).length)}</p>
+          {progressLabel !== null && (
+            <p className="notes-roadmap-progress">
+              <span>{progressLabel}</span>
+              <progress value={progress.done} max={progress.total} aria-label="Roadmap progress" />
+            </p>
+          )}
         </div>
         <button
           ref={newPhaseButtonRef}
@@ -528,7 +800,7 @@ export function NotesRoadmap({
           </div>
           <button
             type="button"
-            className="notes-roadmap-primary"
+            className="notes-roadmap-primary notes-btn-primary"
             disabled={
               !advancement.ready ||
               pendingPhaseId !== null ||
@@ -568,81 +840,35 @@ export function NotesRoadmap({
             <p>Create a phase to capture a goal and its completion criteria.</p>
           </div>
         ) : (
-          <ol className="notes-roadmap-list" aria-label="Roadmap phases">
-            {visiblePhases.map((phase) => {
-              const selected = phase.id === selectedId;
-              const action = primaryAction(phase);
-              const actionLabel = phaseActionLabel(phase, action);
-              const lifecycle = notesLifecyclePresentation(phase);
-              const attentionReason = visibleRoadmapAttentionReason(phase);
-              return (
-                <li
-                  key={phase.id}
-                  className={`notes-roadmap-row${selected ? " is-selected" : ""}${attentionReason ? " is-blocked" : ""}`}
-                >
-                  <div className="notes-roadmap-card-summary">
-                    <div className="notes-roadmap-card-heading">
-                      <h3 className="notes-roadmap-card-title">
-                        <button
-                          ref={(element) => registerPhaseTitle(phase.id, element)}
-                          type="button"
-                          className="notes-roadmap-title"
-                          data-phase-focus={phase.id}
-                          aria-label={`Inspect phase: ${phase.title}`}
-                          aria-expanded={selected}
-                          aria-controls={selected ? `notes-phase-panel-${phase.id}` : undefined}
-                          disabled={pendingPhaseId !== null}
-                          onClick={() => togglePhase(phase.id)}
-                        >
-                          <span className="notes-roadmap-title-text">{phase.title}</span>
-                          {phase.sourcePrompt.trim().length > 0 && (
-                            <span className="notes-phase-saved-prompt-marker">Saved prompt</span>
-                          )}
-                        </button>
-                      </h3>
-                      <span className={`notes-phase-status is-tone-${lifecycle.tone}`}>
-                        {lifecycle.state}
-                      </span>
-                    </div>
-
-                    {attentionReason && (
-                      <p className="notes-roadmap-attention">
-                        <strong>Needs attention:</strong> {attentionReason}
-                      </p>
-                    )}
-
-                    <div className="notes-roadmap-card-footer">
-                      <div className="notes-roadmap-meta">
-                        <span>{lifecycle.stage}</span>
-                        <span>
-                          {phase.referenceIds.length}{" "}
-                          {phase.referenceIds.length === 1 ? "ref" : "refs"}
-                        </span>
-                        <span>{reminderRowLabel(phase, currentTime)}</span>
-                      </div>
-                      {!selected && (
-                        <button
-                          type="button"
-                          className="notes-roadmap-primary"
-                          aria-label={`${actionLabel} phase: ${phase.title}`}
-                          disabled={
-                            pendingPhaseId !== null ||
-                            actionDisabled ||
-                            ((action === "Start" || action === "Recover") &&
-                              (startUnavailableReason !== null ||
-                                isRoadmapPhaseStartProtected(phases, phase.id)))
-                          }
-                          onClick={() => void runCardAction(phase)}
-                        >
-                          {actionLabel}
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                </li>
-              );
-            })}
-          </ol>
+          <div className="notes-roadmap-groups">
+            {phaseGroups.open.length === 0 ? (
+              <div className="notes-roadmap-empty">
+                <strong>All phases are done</strong>
+                <p>
+                  Create a phase when there’s more to plan. Finished phases are under Completed.
+                </p>
+              </div>
+            ) : (
+              <ol className="notes-roadmap-list" aria-label="Roadmap phases">
+                {phaseGroups.open.map((phase) => renderPhaseRow(phase, true))}
+              </ol>
+            )}
+            {onReorderPhase && (
+              <p id="notes-roadmap-reorder-help" className="visually-hidden">
+                Drag to reorder, or press the Up or Down arrow key to move this phase.
+              </p>
+            )}
+            <NotesCompletedGroup
+              id="notes-completed-phases"
+              count={phaseGroups.completed.length}
+              storageKey={expectedProjectKey ? `${expectedProjectKey}:completed-phases` : null}
+              forceOpen={selectedPhase !== null && isCompletedNotesPhase(selectedPhase)}
+            >
+              <ol className="notes-roadmap-list" aria-label="Completed phases">
+                {phaseGroups.completed.map((phase) => renderPhaseRow(phase, false))}
+              </ol>
+            </NotesCompletedGroup>
+          </div>
         )}
 
         {selectedPhaseDetailProps && (
@@ -714,6 +940,7 @@ export function NotesRoadmapArchive({
                 {onDeletePhase && (
                   <button
                     type="button"
+                    className="notes-btn-quiet notes-btn-danger"
                     onClick={() => onDeletePhase(phase.id)}
                     aria-label={`Delete phase: ${phase.title}`}
                   >

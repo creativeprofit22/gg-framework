@@ -357,7 +357,7 @@ it("shows retained deletion date, placement and recovery after remount", () => {
   const deleted = applyNotesPhaseDeletion(phase, request, now);
   const onRecover = vi.fn();
   render(<NotesDeletedPhases phases={[deleted]} onRecover={onRecover} />);
-  fireEvent.click(screen.getByText("Deleted phases (1)"));
+  fireEvent.click(screen.getByRole("button", { name: "Deleted phases (1)" }));
   expect(screen.getByText(/Originally active/)).toBeTruthy();
   fireEvent.click(screen.getByRole("button", { name: `Recover phase: ${phase.title.trim()}` }));
   expect(onRecover).toHaveBeenCalledWith(deleted);

@@ -1014,9 +1014,13 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           }
           const liveEntry = liveToolByIdRef.current.get(id);
           liveToolByIdRef.current.delete(id);
-          // Pull fallback for both create and edit drafts: a missed
+          // Pull fallback for create, edit and move drafts: a missed
           // `roadmap_phase_draft_change` push must not leave the dock empty.
-          if (liveEntry?.name === "roadmap_phase_draft" || liveEntry?.name === "roadmap_phase_edit")
+          if (
+            liveEntry?.name === "roadmap_phase_draft" ||
+            liveEntry?.name === "roadmap_phase_edit" ||
+            liveEntry?.name === "roadmap_phase_move"
+          )
             onRoadmapPhaseDraftRefresh?.();
           const isMcpFailure =
             isError &&

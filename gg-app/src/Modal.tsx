@@ -54,6 +54,12 @@ interface ModalProps {
   /** When false, Escape, the backdrop and × do not dismiss the dialog. */
   canClose?: boolean;
   title: React.ReactNode;
+  /**
+   * Optional supporting header text under the title (dialog form only). It is
+   * the dialog's accessible description, never part of its accessible name.
+   * Without it the header markup is unchanged.
+   */
+  description?: React.ReactNode;
   children: React.ReactNode;
   onClose: () => void;
   /** Extra class on the `.modal` box (e.g. width overrides). */
@@ -106,6 +112,7 @@ function ModalSection({ title, children, className }: ModalProps): React.ReactEl
 
 function ModalDialog({
   title,
+  description,
   children,
   onClose,
   className,
@@ -114,6 +121,8 @@ function ModalDialog({
 }: ModalProps): React.ReactElement {
   const dialogRef = useRef<HTMLDivElement>(null);
   const titleId = useId();
+  const descriptionId = useId();
+  const hasDescription = description !== undefined && description !== null && description !== false;
   // Escape, backdrop, × and ModalDismissButton share dismissal motion.
   // Save/Confirm/navigation remain separate actions owned by the parent.
   const dismiss = (): void => {
@@ -211,12 +220,24 @@ function ModalDialog({
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
+        aria-describedby={hasDescription ? descriptionId : undefined}
         tabIndex={-1}
       >
         <div className="modal-head">
-          <h2 id={titleId} className="modal-title" style={{ color: theme.text }}>
-            {title}
-          </h2>
+          {hasDescription ? (
+            <div className="modal-head-text">
+              <h2 id={titleId} className="modal-title" style={{ color: theme.text }}>
+                {title}
+              </h2>
+              <div id={descriptionId} className="modal-description">
+                {description}
+              </div>
+            </div>
+          ) : (
+            <h2 id={titleId} className="modal-title" style={{ color: theme.text }}>
+              {title}
+            </h2>
+          )}
           <button
             className="modal-close"
             type="button"

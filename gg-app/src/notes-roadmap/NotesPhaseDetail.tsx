@@ -35,6 +35,7 @@ function NotesPhaseDetailBody(): ReactElement {
     phaseStartDisabled,
     startUnavailableReason,
     primaryActionRef,
+    primaryEmphasis,
     runPhaseAction,
     beginEdit,
     cancelEdit,
@@ -53,7 +54,11 @@ function NotesPhaseDetailBody(): ReactElement {
             <button
               ref={primaryActionRef}
               type="button"
-              className="notes-roadmap-primary"
+              className={
+                primaryEmphasis
+                  ? "notes-roadmap-primary notes-btn-primary"
+                  : "notes-roadmap-primary"
+              }
               disabled={controlsDisabled || phaseStartDisabled}
               title={phaseStartDisabled ? (startUnavailableReason ?? undefined) : undefined}
               onClick={() => void runPhaseAction()}

@@ -338,3 +338,83 @@ describe("Roadmap phase edit draft state", () => {
     expect(rejected).toMatchObject({ draft: null, announcement: "Roadmap phase edit rejected." });
   });
 });
+
+const moveDraft = {
+  kind: "move" as const,
+  id: "draft-move-1",
+  projectKey: "/work",
+  basedOnRevision: 3,
+  createdAt: "2026-08-05T12:00:00.000Z",
+  createdBySessionId: "session-1",
+  summary: "Do the last phase first",
+  phaseId: "c",
+  phaseTitle: "Phase c",
+  position: "before" as const,
+  targetPhaseId: "a",
+  targetPhaseTitle: "Phase a",
+  orderPreview: {
+    before: [
+      { phaseId: "a", title: "Phase a" },
+      { phaseId: "c", title: "Phase c" },
+    ],
+    after: [
+      { phaseId: "c", title: "Phase c" },
+      { phaseId: "a", title: "Phase a" },
+    ],
+  },
+  status: "pending" as const,
+};
+
+describe("Roadmap phase move draft state", () => {
+  it("passes valid move drafts through, rejects malformed ones, and describes them", () => {
+    expect(normalizeRoadmapPhaseDraft(moveDraft)).toEqual(moveDraft);
+    expect(normalizeRoadmapPhaseDraft({ ...moveDraft, targetPhaseId: "c" })).toBeNull();
+    expect(describeRoadmapDraft(moveDraft)).toEqual({
+      label: "Roadmap phase move",
+      summary: "Move Phase c · Approval required",
+      triggerLabel: "Review Roadmap phase move for Phase c",
+      count: 1,
+    });
+  });
+
+  it("clears after a moved result and keeps a changed move visible as stale", () => {
+    const received = reduceRoadmapPhaseDraftState(initialRoadmapPhaseDraftState, {
+      type: "event",
+      draft: moveDraft,
+    });
+    expect(received.announcement).toBe("A Roadmap phase move is ready for review.");
+    expect(
+      reduceRoadmapPhaseDraftState(received, {
+        type: "approval-result",
+        result: { status: "moved", revision: 4, phaseId: "c" },
+      }),
+    ).toMatchObject({ draft: null, open: false, announcement: "Moved Roadmap phase." });
+
+    const stale = reduceRoadmapPhaseDraftState(received, {
+      type: "approval-result",
+      result: { status: "phase-changed", phaseId: "c" },
+    });
+    expect(stale).toMatchObject({ draft: { kind: "move", status: "stale" } });
+    expect(stale.announcement).toContain("Roadmap order changed");
+    expect(stale.announcement).toContain("Nothing was saved.");
+    expect(
+      reduceRoadmapPhaseDraftState(received, {
+        type: "approval-result",
+        result: { status: "phase-not-editable", phaseId: "c", reason: "done" },
+      }).announcement,
+    ).toBe("This phase is now Done, so it cannot be moved. Nothing was saved.");
+  });
+
+  it("announces move-specific rejection without saving", () => {
+    const received = reduceRoadmapPhaseDraftState(initialRoadmapPhaseDraftState, {
+      type: "event",
+      draft: moveDraft,
+    });
+    expect(
+      reduceRoadmapPhaseDraftState(received, {
+        type: "rejection-result",
+        result: { status: "rejected" },
+      }),
+    ).toMatchObject({ draft: null, announcement: "Roadmap phase move rejected." });
+  });
+});

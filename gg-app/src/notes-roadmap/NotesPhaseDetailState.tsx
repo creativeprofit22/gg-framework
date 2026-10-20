@@ -68,6 +68,8 @@ export interface NotesPhaseDetailProps {
   onClose(): void;
   onEditPhase(id: string, input: NotesPhaseInput): void;
   onMovePhase(id: string, direction: "up" | "down"): void;
+  /** Null when the Roadmap ordering rules allow the move; otherwise why it is refused. */
+  moveRefusal(direction: "up" | "down"): string | null;
   onChangePhaseStatus(status: NotesPhaseStatus): void;
   onSetPhaseStatusOverride(status: NotesPhaseStatus): Promise<NotesRoadmapMutationResult>;
   onArchivePhase(): void;
@@ -117,6 +119,9 @@ export interface NotesPhaseDetailProps {
   onPendingChange(pending: boolean): void;
   onActionSuccess(): void;
   onReconciliationSuccess(): void;
+  /** Whether the heading action is the view's Primary button. Defaults to true;
+   *  false while another surface (the next-phase card) owns the one Primary. */
+  primaryEmphasis?: boolean;
 }
 
 export interface PhaseEditDraft {
@@ -141,6 +146,7 @@ export interface ReminderDraft {
 }
 
 interface NotesPhaseDetailContextValue extends NotesPhaseDetailProps {
+  primaryEmphasis: boolean;
   editing: boolean;
   activeView: PhaseView;
   setActiveView(view: PhaseView): void;
@@ -520,6 +526,7 @@ export function NotesPhaseDetailProvider({
 
   const value: NotesPhaseDetailContextValue = {
     ...props,
+    primaryEmphasis: props.primaryEmphasis ?? true,
     editing,
     activeView,
     setActiveView,

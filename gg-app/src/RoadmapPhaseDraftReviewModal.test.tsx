@@ -286,3 +286,89 @@ describe("RoadmapPhaseDraftReviewModal phase edits", () => {
     ).toBe(true);
   });
 });
+
+const orderEntries = (ids: string[]) => ids.map((id) => ({ phaseId: id, title: `Phase ${id}` }));
+
+const moveDraft = {
+  kind: "move" as const,
+  id: "draft-move-1",
+  projectKey: "/work",
+  basedOnRevision: 9,
+  createdAt: "2026-08-05T12:00:00.000Z",
+  createdBySessionId: "session-1",
+  summary: "Security work has to land before the UI phases.",
+  phaseId: "c",
+  phaseTitle: "Phase c",
+  position: "before" as const,
+  targetPhaseId: "a",
+  targetPhaseTitle: "Phase a",
+  orderPreview: { before: orderEntries(["a", "b", "c"]), after: orderEntries(["c", "a", "b"]) },
+  status: "pending" as const,
+};
+
+function listedTitles(region: HTMLElement, label: "Before" | "After"): string[] {
+  const box = within(region).getByText(label).parentElement;
+  if (!box) throw new Error(`missing ${label} list`);
+  return within(box)
+    .getAllByRole("listitem")
+    .map((item) => item.querySelector("span")?.textContent ?? "");
+}
+
+describe("RoadmapPhaseDraftReviewModal phase moves and insertions", () => {
+  it("shows the Roadmap order before and after a move, tagging the moved phase", () => {
+    const props = renderModal({ draft: moveDraft });
+
+    const review = screen.getByRole("region", { name: "Review Roadmap phase move" });
+    expect(within(review).getByText(/Move proposed from Project Notes revision 9/)).toBeTruthy();
+    expect(within(review).getByText(moveDraft.summary)).toBeTruthy();
+    const order = within(review).getByRole("region", { name: "Roadmap order" });
+    expect(listedTitles(order, "Before")).toEqual(["Phase a", "Phase b", "Phase c"]);
+    expect(listedTitles(order, "After")).toEqual(["Phase c", "Phase a", "Phase b"]);
+    expect(within(order).getByText("Moved")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Move phase" }));
+    fireEvent.click(screen.getByRole("button", { name: "Reject move" }));
+    expect(props.onApprove).toHaveBeenCalledOnce();
+    expect(props.onReject).toHaveBeenCalledOnce();
+  });
+
+  it("disables applying a stale move but keeps it rejectable", () => {
+    renderModal({ draft: { ...moveDraft, status: "stale" } });
+    expect(screen.getByRole("alert").textContent).toContain("This move is out of date.");
+    expect((screen.getByRole("button", { name: "Move phase" }) as HTMLButtonElement).disabled).toBe(
+      true,
+    );
+    expect(
+      (screen.getByRole("button", { name: "Reject move" }) as HTMLButtonElement).disabled,
+    ).toBe(false);
+  });
+
+  it("shows where inserted phases land and omits the order for plain appends", () => {
+    renderModal({
+      draft: {
+        ...draft,
+        phases: [{ ...draft.phases[0]!, insertBeforePhaseId: "a" }, draft.phases[1]!],
+        orderPreview: {
+          before: orderEntries(["a"]),
+          after: [
+            { phaseId: "phase-1", title: "Atomic backend creation" },
+            { phaseId: "a", title: "Phase a" },
+            { phaseId: "phase-2", title: "Explicit review surface" },
+          ],
+        },
+      },
+    });
+    const order = screen.getByRole("region", { name: "Roadmap order" });
+    expect(listedTitles(order, "Before")).toEqual(["Phase a"]);
+    expect(listedTitles(order, "After")).toEqual([
+      "Atomic backend creation",
+      "Phase a",
+      "Explicit review surface",
+    ]);
+    expect(within(order).getAllByText("New")).toHaveLength(2);
+    cleanup();
+
+    renderModal();
+    expect(screen.queryByRole("region", { name: "Roadmap order" })).toBeNull();
+  });
+});

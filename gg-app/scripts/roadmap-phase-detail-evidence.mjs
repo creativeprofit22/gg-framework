@@ -158,20 +158,66 @@ async function collectGeometry(page, viewport) {
           rect.height > 0
         );
       });
+      // A one-line ellipsis clips inside its own box by design; it is reported
+      // as `truncated`, not as overflow. Anything outside the phase still fails.
+      const isEllipsisClip = (element) => {
+        const style = getComputedStyle(element);
+        return (
+          style.textOverflow === "ellipsis" &&
+          (style.overflowX === "hidden" || style.overflowX === "clip")
+        );
+      };
+      const outsidePhase = (element) => {
+        const rect = element.getBoundingClientRect();
+        return rect.left < phaseRect.left - 1 || rect.right > phaseRect.right + 1;
+      };
+      const describe = (element) => ({
+        className: element.className,
+        tagName: element.tagName,
+        clientWidth: element.clientWidth,
+        scrollWidth: element.scrollWidth,
+        path: [element.parentElement, element.parentElement?.parentElement]
+          .map((ancestor) => (ancestor ? `${ancestor.tagName}.${ancestor.className}` : ""))
+          .join(" < "),
+        text: element.textContent?.slice(0, 40) ?? "",
+      });
+      const truncated = visibleElements
+        .filter(
+          (element) =>
+            element.scrollWidth > element.clientWidth + 1 &&
+            isEllipsisClip(element) &&
+            !outsidePhase(element),
+        )
+        .map(describe);
+      // The phase-view tablist scrolls sideways by design: its contents may sit
+      // past its edge (navigation checks cover the active tab), but the scroller
+      // itself must stay inside the phase.
+      const isHorizontalScroller = (element) =>
+        ["auto", "scroll"].includes(getComputedStyle(element).overflowX);
+      const insideHorizontalScroller = (element) => {
+        for (let node = element.parentElement; node && node !== phase; node = node.parentElement) {
+          if (isHorizontalScroller(node)) return true;
+        }
+        return false;
+      };
       const overflowers = visibleElements
-        .filter((element) => {
-          const rect = element.getBoundingClientRect();
-          return (
-            element.scrollWidth > element.clientWidth + 1 ||
-            rect.left < phaseRect.left - 1 ||
-            rect.right > phaseRect.right + 1
-          );
-        })
+        .filter((element) => !insideHorizontalScroller(element))
+        .filter(
+          (element) =>
+            (element.scrollWidth > element.clientWidth + 1 &&
+              !isEllipsisClip(element) &&
+              !isHorizontalScroller(element)) ||
+            outsidePhase(element),
+        )
         .map((element) => ({
           className: element.className,
           tagName: element.tagName,
           clientWidth: element.clientWidth,
           scrollWidth: element.scrollWidth,
+          path: [element.parentElement, element.parentElement?.parentElement]
+            .map((ancestor) => (ancestor ? `${ancestor.tagName}.${ancestor.className}` : ""))
+            .join(" < "),
+          text: element.textContent?.slice(0, 40) ?? "",
           left: Math.round(element.getBoundingClientRect().left * 10) / 10,
           right: Math.round(element.getBoundingClientRect().right * 10) / 10,
         }));
@@ -203,29 +249,37 @@ async function collectGeometry(page, viewport) {
       const primary = phase.querySelector("button.notes-roadmap-primary");
       const primaryRect = primary?.getBoundingClientRect();
       const prompt = phase.querySelector(".notes-phase-saved-prompt pre");
-      const tablist = phase.querySelector(".notes-phase-views");
-      const viewSelector = phase.querySelector(".notes-phase-view-select");
-      const visibleNavigation = [tablist, viewSelector].filter((element) => {
-        if (!(element instanceof HTMLElement)) return false;
-        const style = getComputedStyle(element);
-        return style.display !== "none" && element.getBoundingClientRect().height > 0;
-      });
+      // Phase sub-views are one scrollable tablist at every width.
+      const tablist = phase.querySelector('.notes-phase-views[role="tablist"]');
+      const scroller = phase.querySelector(".notes-phase-views-scroll");
+      const visibleNavigation = [...phase.querySelectorAll('[role="tablist"], select')].filter(
+        (element) => {
+          if (!(element instanceof HTMLElement)) return false;
+          const style = getComputedStyle(element);
+          return style.display !== "none" && element.getBoundingClientRect().height > 0;
+        },
+      );
       const navigation = visibleNavigation[0];
       const tabRows =
-        tablist instanceof HTMLElement && getComputedStyle(tablist).display !== "none"
+        tablist instanceof HTMLElement
           ? new Set(
               [...tablist.querySelectorAll('[role="tab"]')].map((tab) =>
                 Math.round(tab.getBoundingClientRect().top),
               ),
             ).size
           : null;
-      const selectorLabel = viewSelector?.querySelector("label");
-      const selectorLabelStyle =
-        selectorLabel instanceof HTMLElement ? getComputedStyle(selectorLabel) : null;
-      const selectorLabelLines =
-        selectorLabel instanceof HTMLElement && selectorLabelStyle
-          ? selectorLabel.getBoundingClientRect().height /
-            Number.parseFloat(selectorLabelStyle.lineHeight)
+      const activeTab = tablist?.querySelector('[role="tab"][aria-selected="true"]');
+      const scrollerRect = scroller?.getBoundingClientRect();
+      const activeTabRect = activeTab?.getBoundingClientRect();
+      const activeTabVisible = Boolean(
+        scrollerRect &&
+        activeTabRect &&
+        activeTabRect.left >= scrollerRect.left - 1 &&
+        activeTabRect.right <= scrollerRect.right + 1,
+      );
+      const activeTabFontSize =
+        activeTab instanceof HTMLElement
+          ? Number.parseFloat(getComputedStyle(activeTab).fontSize)
           : null;
       return {
         viewport,
@@ -240,20 +294,17 @@ async function collectGeometry(page, viewport) {
           width: phaseRect.width,
         },
         overflowers,
+        truncated,
         verticalScrollContainers,
         verticalScrollers,
-        navigationKind: navigation === tablist ? "tabs" : "select",
+        navigationKind: navigation && navigation === tablist ? "tabs" : "other",
         navigationCount: visibleNavigation.length,
-        navigationOverflow:
-          navigation instanceof HTMLElement
-            ? navigation.scrollWidth - navigation.clientWidth
-            : null,
+        navigationScrollable:
+          scroller instanceof HTMLElement ? scroller.scrollWidth > scroller.clientWidth + 1 : null,
         navigationHeight: navigation?.getBoundingClientRect().height ?? null,
-        navigationRows: navigation === tablist ? tabRows : selectorLabelLines,
-        selectorValue:
-          viewSelector?.querySelector("select") instanceof HTMLSelectElement
-            ? viewSelector.querySelector("select").value
-            : null,
+        navigationRows: tabRows,
+        activeTabVisible,
+        activeTabFontSize,
         primaryActionCount: primaryActions.length,
         primaryInHeader: Boolean(primary?.closest(".notes-phase-detail-heading")),
         primaryInExecution: Boolean(primary?.closest(".notes-phase-execution")),
@@ -280,7 +331,8 @@ async function openRoadmap(page) {
     const button = [...document.querySelectorAll("button")].find(
       (candidate) => candidate.textContent?.trim() === "Code",
     );
-    return button?.getAttribute("aria-disabled") === "false";
+    // HomeScreen omits aria-disabled once Code is enabled.
+    return button !== undefined && button.getAttribute("aria-disabled") !== "true";
   });
   await codeButton.click();
   await page.locator(".picker-item").first().click();
@@ -296,7 +348,8 @@ async function openPhaseDetail(page) {
     throw new Error(`Phase fixture did not render:\n${await page.locator("body").innerText()}`);
   });
   await inspectPhase.click();
-  await page.getByRole("heading", { name: PHASE_TITLE }).waitFor();
+  // Exact: in split view the card title heading also contains the phase title.
+  await page.getByRole("heading", { name: PHASE_TITLE, exact: true }).waitFor();
 }
 
 async function createPage(browser, { viewport, phaseCount, forcedColors = "none", scale = 1 }) {
@@ -313,8 +366,9 @@ async function createPage(browser, { viewport, phaseCount, forcedColors = "none"
     responses: {
       ...baseResponses,
       agent_state: { ...baseResponses.agent_state, cwd: CWD },
+      // select_project (base: 1) must answer with the generation agent_pane_status
+      // reports, or opening a session waits forever for a ready pane.
       agent_pane_status: { ready: true, error: null, generation: 1, sessionId: "session-audit" },
-      select_project: 2,
       agent_notes_get: notesResponseForCount(phaseCount),
     },
     appVersion: "0.1.0-roadmap-audit",
@@ -377,39 +431,34 @@ async function captureDetailScenario(
 
   const viewGeometry = {};
   const phaseViewTabs = page.locator(".notes-phase-views");
-  const phaseViewSelector = page.getByLabel("Phase view", { exact: true });
-  const usesNativeSelector = viewport.width <= 560;
   for (const view of ["Overview", "Completion", "References", "Activity", "More"]) {
-    let state;
-    if (usesNativeSelector) {
-      await phaseViewSelector.focus();
-      await phaseViewSelector.selectOption({ label: view });
-      state = await phaseViewSelector.evaluate((element) => ({
-        selected: element.value,
-        focused: document.activeElement === element,
-      }));
+    const tab = phaseViewTabs.getByRole("tab", { name: view, exact: true });
+    // Keyboard selection at every width; Home/End reach the edges of a scrolled row.
+    if (view === "Overview") {
+      await phaseViewTabs.getByRole("tab", { selected: true }).focus();
+      await page.keyboard.press("Home");
     } else {
-      const tab = phaseViewTabs.getByRole("tab", { name: view, exact: true });
-      await tab.click();
-      state = await tab.evaluate((element) => ({
-        selected: element.getAttribute("aria-selected"),
-        focused: document.activeElement === element,
-      }));
+      await page.keyboard.press("ArrowRight");
     }
+    const state = await tab.evaluate((element) => ({
+      selected: element.getAttribute("aria-selected"),
+      focused: document.activeElement === element,
+    }));
     const currentGeometry = await collectGeometry(page, viewport);
     viewGeometry[view] = { ...currentGeometry, navigationState: state };
     expectCondition(
-      state.focused &&
-        (usesNativeSelector ? state.selected === view.toLowerCase() : state.selected === "true"),
+      state.focused && state.selected === "true",
       `${view} did not preserve selected-navigation focus`,
       viewGeometry[view],
     );
     expectCondition(
       currentGeometry.navigationCount === 1 &&
-        currentGeometry.navigationKind === (usesNativeSelector ? "select" : "tabs") &&
-        currentGeometry.navigationOverflow <= 1 &&
-        currentGeometry.navigationRows <= 1.05,
-      `${view} navigation wraps or overflows`,
+        currentGeometry.navigationKind === "tabs" &&
+        currentGeometry.activeTabVisible &&
+        currentGeometry.activeTabFontSize !== null &&
+        currentGeometry.activeTabFontSize < 16 &&
+        currentGeometry.navigationRows === 1,
+      `${view} navigation wraps, hides the active tab or uses an outlier size`,
       currentGeometry,
     );
     expectCondition(
@@ -436,17 +485,9 @@ async function captureDetailScenario(
     }
   }
 
-  if (usesNativeSelector) {
-    await phaseViewSelector.focus();
-    await page.keyboard.press("Home");
-    await phaseViewSelector.selectOption("overview");
-  } else {
-    await phaseViewTabs.getByRole("tab", { name: "More", exact: true }).focus();
-    await page.keyboard.press("Home");
-  }
-  const focusTarget = usesNativeSelector
-    ? phaseViewSelector
-    : phaseViewTabs.getByRole("tab", { name: "Overview", exact: true });
+  await phaseViewTabs.getByRole("tab", { name: "More", exact: true }).focus();
+  await page.keyboard.press("Home");
+  const focusTarget = phaseViewTabs.getByRole("tab", { name: "Overview", exact: true });
   const focusEvidence = await collectFocusEvidence(focusTarget);
   expectCondition(
     focusEvidence.focused && focusEvidence.focusVisible && focusEvidence.outlineStyle !== "none",

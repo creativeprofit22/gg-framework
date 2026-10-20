@@ -4,6 +4,10 @@ import {
   type PhaseDeletionRequest,
   type PhaseDeletionOutcome,
 } from "@kenkaiiii/gg-core/project-notes";
+import {
+  planRoadmapPhaseMove,
+  type RoadmapPhasePlacement,
+} from "@kenkaiiii/gg-core/roadmap-workflow";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   canonicalReferenceIdentity,
@@ -11,7 +15,7 @@ import {
   referencePhaseDependencies,
   type NotesReferenceInput,
 } from "./notes-reference";
-import { isNotesHandoffUnread } from "./notes-status";
+import { isCompletedNotesPhase, isCompletedNotesTask, isNotesHandoffUnread } from "./notes-status";
 import {
   arraysEqual,
   chronologicalTimestamp,
@@ -94,6 +98,8 @@ export interface UseProjectNotesResult {
   createPhase(input: NotesPhaseInput): void;
   editPhase(id: string, input: NotesPhaseInput): void;
   movePhase(id: string, direction: "up" | "down"): void;
+  /** Drag reorder: places a phase directly before or after another (same rules as agent moves). */
+  reorderPhase(id: string, placement: RoadmapPhasePlacement): void;
   changePhaseStatus(id: string, status: NotesPhaseStatus): void;
   setPhaseStatusOverride(id: string, status: NotesPhaseStatus): Promise<NotesRoadmapMutationResult>;
   archivePhase(id: string): void;
@@ -955,17 +961,25 @@ export function useProjectNotes(
 
   const moveTask = useCallback(
     (id: string, direction: "up" | "down") => {
-      const activeTasks = documentRef.current.tasks.filter((task) => task.archivedAt === null);
-      const activePosition = activeTasks.findIndex((task) => task.id === id);
+      // Neighbours come from the same displayed group (open or Completed), so a move never
+      // swaps with a task rendered in the other list.
+      const source = documentRef.current.tasks.find((task) => task.id === id);
+      if (!source || source.archivedAt !== null) return;
+      const completed = isCompletedNotesTask(source);
+      const groupTasks = documentRef.current.tasks.filter(
+        (task) => task.archivedAt === null && isCompletedNotesTask(task) === completed,
+      );
+      const activePosition = groupTasks.findIndex((task) => task.id === id);
       const targetPosition = activePosition + (direction === "up" ? -1 : 1);
-      const targetId = activeTasks[targetPosition]?.id;
+      const targetId = groupTasks[targetPosition]?.id;
       if (activePosition === -1 || !targetId) return;
       const now = clock();
       const placeBeforeTarget = direction === "up";
       enqueueMutation({
         evaluate: documentMutation((current) => {
+          // Drop the move if either task left the group it was chosen from.
           const activeIds = current.tasks
-            .filter((task) => task.archivedAt === null)
+            .filter((task) => task.archivedAt === null && isCompletedNotesTask(task) === completed)
             .map((task) => task.id);
           const sourcePosition = activeIds.indexOf(id);
           const anchorPosition = activeIds.indexOf(targetId);
@@ -1080,17 +1094,31 @@ export function useProjectNotes(
     (id: string, direction: "up" | "down") => {
       // Same predicate as the active Roadmap list: deleted tombstones and archived phases keep
       // their stored slots and are never treated as visible neighbours.
-      const visiblePhases = documentRef.current.phases.filter(isActiveVisiblePhase);
+      // Neighbours also come from the same displayed group (open or Completed).
+      const source = documentRef.current.phases.find((phase) => phase.id === id);
+      if (!source || !isActiveVisiblePhase(source)) return;
+      const completed = isCompletedNotesPhase(source);
+      const inGroup = (phase: NotesDocumentV3["phases"][number]): boolean =>
+        isActiveVisiblePhase(phase) && isCompletedNotesPhase(phase) === completed;
+      const visiblePhases = documentRef.current.phases.filter(inGroup);
       const visiblePosition = visiblePhases.findIndex((phase) => phase.id === id);
       const targetId = visiblePhases[visiblePosition + (direction === "up" ? -1 : 1)]?.id;
       if (visiblePosition === -1 || !targetId) return;
-      const now = clock();
       const placeBeforeTarget = direction === "up";
+      // Same rules as drag reorder and the agent move tool: Done, archived and deleted phases
+      // stay put, and no phase may land ahead of a Done phase on the Roadmap.
+      const placement: RoadmapPhasePlacement = {
+        position: placeBeforeTarget ? "before" : "after",
+        targetPhaseId: targetId,
+      };
+      if (!planRoadmapPhaseMove(documentRef.current.phases, id, placement).ok) return;
+      const now = clock();
       enqueueMutation({
         evaluate: documentMutation((current) => {
           // Replay stays anchored to the originally chosen neighbour; if either phase was
-          // deleted or archived meanwhile, drop the move rather than substitute a hidden phase.
-          const visiblePhases = current.phases.filter(isActiveVisiblePhase);
+          // deleted, archived or moved to the other group meanwhile, drop the move rather than
+          // substitute a hidden phase.
+          const visiblePhases = current.phases.filter(inGroup);
           const sourcePosition = visiblePhases.findIndex((phase) => phase.id === id);
           const anchorPosition = visiblePhases.findIndex((phase) => phase.id === targetId);
           if (sourcePosition === -1 || anchorPosition === -1) return null;
@@ -1100,23 +1128,34 @@ export function useProjectNotes(
           ) {
             return null;
           }
+          const planned = planRoadmapPhaseMove(current.phases, id, placement);
+          if (!planned.ok) return null;
 
-          const reorderedVisiblePhases = [...visiblePhases];
-          const [movedPhase] = reorderedVisiblePhases.splice(sourcePosition, 1);
-          if (!movedPhase) return null;
-          const targetPosition = reorderedVisiblePhases.findIndex((phase) => phase.id === targetId);
-          if (targetPosition === -1) return null;
-          reorderedVisiblePhases.splice(
-            placeBeforeTarget ? targetPosition : targetPosition + 1,
-            0,
-            movedPhase,
-          );
-
-          let visibleIndex = 0;
+          // Take the Roadmap order from the plan (the same result drag and the agent tool
+          // produce) but write it back into the Roadmap's own slots only, so hidden deleted and
+          // archived phases keep their stored positions.
+          const roadmapOrder = planned.phases.filter(isActiveVisiblePhase);
+          let roadmapIndex = 0;
           const phases = current.phases.map((phase) =>
-            isActiveVisiblePhase(phase) ? reorderedVisiblePhases[visibleIndex++]! : phase,
+            isActiveVisiblePhase(phase) ? (roadmapOrder[roadmapIndex++] ?? phase) : phase,
           );
           return { ...current, phases: normalizePhaseOrder(phases), updatedAt: now };
+        }),
+      });
+    },
+    [clock, enqueueMutation],
+  );
+
+  const reorderPhase = useCallback(
+    (id: string, placement: RoadmapPhasePlacement) => {
+      if (!planRoadmapPhaseMove(documentRef.current.phases, id, placement).ok) return;
+      const now = clock();
+      enqueueMutation({
+        evaluate: documentMutation((current) => {
+          // Replay re-checks every rule against the latest document and drops a move that
+          // no longer applies rather than placing the phase somewhere the user didn't choose.
+          const planned = planRoadmapPhaseMove(current.phases, id, placement);
+          return planned.ok ? { ...current, phases: planned.phases, updatedAt: now } : null;
         }),
       });
     },
@@ -1663,6 +1702,7 @@ export function useProjectNotes(
     createPhase,
     editPhase,
     movePhase,
+    reorderPhase,
     changePhaseStatus,
     setPhaseStatusOverride,
     archivePhase,

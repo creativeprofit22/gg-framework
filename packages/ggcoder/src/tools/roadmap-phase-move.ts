@@ -102,7 +102,8 @@ export function createRoadmapPhaseMoveTool(
       'Call roadmap_inspect with scope "roadmap" immediately first and pass its revision as expected_revision. ' +
       "Set phase_id and exactly one of before_phase_id or after_phase_id. Done, archived, and deleted phases cannot be moved, and nothing can be moved ahead of a Done phase. " +
       "To change the order of phases, use this tool; never delete and redraft a phase. " +
-      "Nothing is saved until the user approves. After submitting, stop because the move is pending user approval.",
+      "Nothing is saved until the user approves. After submitting, stop because the move is pending user approval. " +
+      "To revise your own pending proposal (for example after reviewer feedback), call this again; it replaces that proposal in place, so never ask the user to reject it first.",
     parameters: RoadmapPhaseMoveParams,
     rawInputSchema: roadmapPhaseMoveInputSchema,
     executionMode: "sequential",

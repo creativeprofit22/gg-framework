@@ -127,11 +127,8 @@ export class AppSidecarRoadmapDraftCoordinator {
       };
     }
     const projectKey = canonicalProjectKey(input.cwd);
-    const existing = this.pendingByProject.get(projectKey);
-    if (existing) {
-      this.emit(projectKey, existing);
-      return { status: "proposal-pending", draft: cloneDraft(existing)! };
-    }
+    const blocking = this.blockingProposal(projectKey, input.sessionId);
+    if (blocking) return { status: "proposal-pending", draft: blocking };
 
     const draftId = this.createId();
     const referenceIdsByKey = new Map<string, string>();
@@ -213,11 +210,8 @@ export class AppSidecarRoadmapDraftCoordinator {
     }
     const request = validated.value;
     const projectKey = canonicalProjectKey(input.cwd);
-    const existing = this.pendingByProject.get(projectKey);
-    if (existing) {
-      this.emit(projectKey, existing);
-      return { status: "proposal-pending", draft: cloneDraft(existing)! };
-    }
+    const blocking = this.blockingProposal(projectKey, input.sessionId);
+    if (blocking) return { status: "proposal-pending", draft: blocking };
     const placement = roadmapPhaseMovePlacement(request);
     const planned = planRoadmapPhaseMove(input.currentPhases, request.phaseId, placement);
     if (!planned.ok) return { status: "order-refused", refusal: planned.refusal };
@@ -281,11 +275,8 @@ export class AppSidecarRoadmapDraftCoordinator {
       };
     }
     const projectKey = canonicalProjectKey(input.cwd);
-    const existing = this.pendingByProject.get(projectKey);
-    if (existing) {
-      this.emit(projectKey, existing);
-      return { status: "proposal-pending", draft: cloneDraft(existing)! };
-    }
+    const blocking = this.blockingProposal(projectKey, input.sessionId);
+    if (blocking) return { status: "proposal-pending", draft: blocking };
     const reason = classifyRoadmapPhaseEditability(input.phase);
     if (reason !== null) {
       return { status: "phase-not-editable", phaseId: request.phaseId, reason };
@@ -319,7 +310,24 @@ export class AppSidecarRoadmapDraftCoordinator {
     return { status: "drafted", draft: cloneEditDraft(checked.value) };
   }
 
+  /**
+   * The pending proposal that keeps a new one out, re-announced for a missed
+   * notification. The creating session may revise its own proposal in place
+   * (like a resubmitted plan), unless an approval of it is already in flight;
+   * another session's proposal is never replaced.
+   */
+  private blockingProposal(projectKey: string, sessionId: string): RoadmapPhaseDraft | null {
+    const existing = this.pendingByProject.get(projectKey);
+    if (!existing) return null;
+    if (existing.createdBySessionId === sessionId && !this.approvals.has(existing.id)) return null;
+    this.emit(projectKey, existing);
+    return cloneDraft(existing);
+  }
+
   private store(projectKey: string, draft: RoadmapPhaseDraft): void {
+    // A revision supersedes the creator's earlier proposal; its ID becomes unknown.
+    const superseded = this.pendingByProject.get(projectKey);
+    if (superseded && superseded.id !== draft.id) this.projectByDraftId.delete(superseded.id);
     this.pendingByProject.set(projectKey, draft);
     this.projectByDraftId.set(draft.id, projectKey);
     this.emit(projectKey, draft);

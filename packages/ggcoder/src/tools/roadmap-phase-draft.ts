@@ -325,6 +325,7 @@ export function createRoadmapPhaseDraftTool(
       'Call roadmap_inspect with scope "roadmap" immediately first and pass its revision as expected_revision. Draft only flat peer phases, never nested or parent/child phases. ' +
       "New phases are added at the end. When a phase must come before existing phases, set its insert_before_phase_id to that phase's id; phases sharing a target keep their draft order. Nothing can be inserted ahead of a Done phase. " +
       "After submitting the draft, stop because it is pending user approval; do not implement it. " +
+      "To revise your own pending proposal (for example after reviewer feedback), call this again with the corrected draft; it replaces that proposal in place, so never ask the user to reject it first. " +
       "Use roadmap_status for execution progress on approved phases. Ordinary coding requests need no Roadmap action. " +
       "Cite external code that informed the phases in proposed_references (commit permalink as canonical_url) and link it via each phase's reference_keys; " +
       `if corpus code was retrieved this session but did not inform the phases, set sources_not_cited to a reason of at least ${MIN_NO_SOURCES_REASON_LENGTH} characters instead.`,

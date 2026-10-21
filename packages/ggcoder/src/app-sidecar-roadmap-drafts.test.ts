@@ -173,6 +173,70 @@ describe("AppSidecarRoadmapDraftCoordinator", () => {
     expect(second).toMatchObject({ status: "proposal-pending", draft: { basedOnRevision: 3 } });
   });
 
+  it("lets the creating session revise its own pending proposal in place", async () => {
+    const { value, onChange } = coordinator();
+    const first = value.create({ cwd: "/work/app", sessionId: "s1", request });
+    if (first.status !== "drafted") throw new Error("expected draft");
+    onChange.mockClear();
+    const revised = value.create({
+      cwd: "/work/app",
+      sessionId: "s1",
+      request: { ...request, summary: "Create two corrected peer phases" },
+    });
+    if (revised.status !== "drafted") throw new Error("expected a revised draft");
+    expect(revised.draft.id).not.toBe(first.draft.id);
+    expect(revised.draft.summary).toBe("Create two corrected peer phases");
+    expect(value.pending("/work/app")).toEqual(revised.draft);
+    expect(onChange).toHaveBeenCalledExactlyOnceWith("/work/app", revised.draft);
+    const commit = vi.fn();
+    await expect(value.approve("/work/app", first.draft.id, commit)).resolves.toEqual({
+      status: "proposal-not-found",
+    });
+    await expect(value.reject("/work/app", first.draft.id)).resolves.toEqual({
+      status: "proposal-not-found",
+    });
+    expect(commit).not.toHaveBeenCalled();
+    expect(value.pending("/work/app")).toEqual(revised.draft);
+
+    const edited = value.createEdit({
+      cwd: "/work/app",
+      sessionId: "s1",
+      request: editRequest,
+      phase: phase(),
+    });
+    expect(edited.status).toBe("drafted");
+    expect(value.create({ cwd: "/work/app", sessionId: "s2", request })).toMatchObject({
+      status: "proposal-pending",
+      draft: { kind: "edit" },
+    });
+  });
+
+  it("keeps the pending proposal when a revision is invalid or an approval is in flight", async () => {
+    const { value } = coordinator();
+    const first = value.create({ cwd: "/work/app", sessionId: "s1", request });
+    if (first.status !== "drafted") throw new Error("expected draft");
+    expect(
+      value.create({ cwd: "/work/app", sessionId: "s1", request: { ...request, phases: [] } }),
+    ).toMatchObject({ status: "invalid-proposal" });
+    expect(value.pending("/work/app")).toEqual(first.draft);
+
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const approval = value.approve("/work/app", first.draft.id, async () => {
+      await gate;
+      return { status: "created" as const, revision: 4, phaseIds: ["id-2", "id-3"] };
+    });
+    expect(value.create({ cwd: "/work/app", sessionId: "s1", request })).toEqual({
+      status: "proposal-pending",
+      draft: first.draft,
+    });
+    release();
+    await expect(approval).resolves.toMatchObject({ status: "created" });
+    expect(value.pending("/work/app")).toBeNull();
+  });
+
   it("isolates different projects", () => {
     const { value } = coordinator();
     expect(value.create({ cwd: "/work/one", sessionId: "s1", request }).status).toBe("drafted");

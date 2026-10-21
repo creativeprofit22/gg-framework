@@ -113,7 +113,8 @@ export function createRoadmapPhaseEditTool(
       "To change sourcePrompt, first call roadmap_inspect with that phase_id to read the current prompt. " +
       "Include only the fields that change; doneWhen replaces the whole list. Done, archived, and deleted phases cannot be edited. " +
       "Never delete and redraft, or add a duplicate phase, to change an existing phase. Never loosen completion criteria to satisfy a Done transition. " +
-      "Nothing is saved until the user approves. After submitting, stop because the edit is pending user approval.",
+      "Nothing is saved until the user approves. After submitting, stop because the edit is pending user approval. " +
+      "To revise your own pending proposal (for example after reviewer feedback), call this again; it replaces that proposal in place, so never ask the user to reject it first.",
     parameters: RoadmapPhaseEditParams,
     rawInputSchema: roadmapPhaseEditInputSchema,
     executionMode: "sequential",

@@ -733,15 +733,19 @@ describe("roadmap_phase_edit proposals", () => {
     );
   });
 
-  it("returns the existing draft ID when a proposal is already pending", async () => {
+  it("revises this session's own pending proposal in place instead of reporting it pending", async () => {
     const { value } = host(async () => twoPhases());
     await value.inspect();
     const first = await value.proposeEdit(editRequest);
     if (first.status !== "drafted") throw new Error("expected a drafted edit");
-    await expect(value.proposeEdit({ ...editRequest, title: "Renamed phase" })).resolves.toEqual({
-      status: "proposal-pending",
-      draftId: first.draft.id,
-    });
+    const revised = await value.proposeEdit({ ...editRequest, title: "Renamed phase" });
+    if (revised.status !== "drafted") throw new Error("expected a revised edit");
+    expect(revised.draft.id).not.toBe(first.draft.id);
+    expect(revised.draft.changes).toContainEqual(
+      expect.objectContaining({ field: "title", after: "Renamed phase" }),
+    );
+    expect(APP_SIDECAR_ROADMAP_DRAFT_SYSTEM_PROMPT).toContain("never ask the user to reject it");
+    expect(APP_SIDECAR_ROADMAP_PHASE_SYSTEM_PROMPT).toContain("never ask the user to reject it");
   });
 
   it("names the edit tool and its boundaries in both system prompts", () => {

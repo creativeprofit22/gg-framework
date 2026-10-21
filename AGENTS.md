@@ -39,6 +39,7 @@ pnpm monorepo for GG Coder: a multi-provider coding agent shipped as the `ggcode
 - Upstream sync: `pnpm app:update:local-fixes` (`gg-app/scripts/update-with-local-fixes.mjs`); default is `--check`, never pushes without `--push`, which forbids `--no-build`/`--no-check`. Local installer: `app:build:local-patched`.
 - Dev smoke windows: `GG_APP_DEV_SMOKE_WINDOW` = `minimized|visible`. Fixture launchers start minimized; pass `--visual` only when visible UI/focus matters (`programmatic-execution-dev-smoke.mjs` asserts minimization unless `--allow-normal-window`).
 - Vite dev server is fixed at port 1420 (`strictPort`).
+- Comparing candidates (engines, libraries, CLIs, agents): use the bench kit (`/setup-bench`, then `/bench`); see `docs/bench/README.md`. Kit tests: `pnpm test:bench-kit`, `pnpm test:setup-bench-command`.
 - Release: push tag `vX.Y.Z[-pre]` whose commit is in `origin/main` and has green CI (`scripts/verify-release-ci.mjs`). Ships Windows + Apple Silicon macOS only; needs Tauri updater signing and Apple signing/notarization secrets; nested macOS Node/native binaries are signed before Tauri bundles. Windows CI also builds and launches the MSI.
 
 <!-- gg:init:end -->

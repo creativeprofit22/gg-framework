@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "description": "Sample task: fix add() for a negative second number.",
+  "failToPass": ["add handles a negative second number"],
+  "passToPass": ["add handles positive numbers", "sub subtracts"],
+  "allowedPaths": ["src/**"],
+  "canaries": ["config/keep.json"],
+  "git": false,
+  "testCommand": "node --test --test-reporter=tap oracle/add.check.mjs",
+  "testFormat": "tap",
+  "oracleMount": "oracle"
+}

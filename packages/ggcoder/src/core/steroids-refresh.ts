@@ -8,6 +8,11 @@
 // with a per-pass cap. Each batch takes and releases the corpus write lock,
 // so agent searches and adds interleave. Order is deterministic: oldest
 // indexed first, then by name.
+//
+// Moved repositories that a capped or interrupted pass did not reach are kept
+// in a pending queue. The hourly retry works through that queue without
+// re-reading every HEAD; the daily check puts the queue ahead of anything it
+// newly finds.
 import { execFile } from "node:child_process";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import os from "node:os";
@@ -49,8 +54,12 @@ const StateSchema = z.object({
   lastStartedAt: z.number().optional(),
   lastFinishedAt: z.number().optional(),
   lastCompletedAt: z.number().optional(),
+  /** When a pass last read every repository's upstream HEAD. */
+  lastCheckedAt: z.number().optional(),
   /** Repos whose upstream HEAD was confirmed equal to the indexed commit. */
   verified: z.record(z.string(), VerifiedSchema).optional(),
+  /** Moved upstream but not yet re-downloaded, in refresh order. */
+  pending: z.array(z.string()).optional(),
 });
 export type RefreshState = z.infer<typeof StateSchema>;
 export type VerifiedHeads = NonNullable<RefreshState["verified"]>;
@@ -79,6 +88,50 @@ export function isRefreshDue(state: RefreshState, now: number): boolean {
   const completed = state.lastCompletedAt;
   if (completed === undefined) return true;
   return now - completed >= REFRESH_INTERVAL_MS || finished > completed;
+}
+
+/** Order kept, each repo once, malformed names dropped. */
+function uniqueRepos(repos: readonly string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const repo of repos) {
+    if (!REPO_NAME.test(repo) || seen.has(repo)) continue;
+    seen.add(repo);
+    out.push(repo);
+  }
+  return out;
+}
+
+/**
+ * A retry works the pending queue instead of re-checking every HEAD, as long
+ * as the check that planned it is under a day old; after that the daily check
+ * runs and carries the queue forward.
+ */
+export function isResumePass(state: RefreshState, now: number): boolean {
+  const checked = state.lastCheckedAt;
+  return (
+    (state.pending?.length ?? 0) > 0 && checked !== undefined && now - checked < REFRESH_INTERVAL_MS
+  );
+}
+
+/**
+ * Pure: the refresh queue after a full check. Still-pending repos keep their
+ * place ahead of newly moved ones; a pending repo leaves the queue only when it
+ * left the corpus or its upstream HEAD now matches the indexed commit.
+ */
+export function queueAfterCheck(
+  pending: readonly string[],
+  rows: readonly CorpusRow[],
+  heads: ReadonlyMap<string, string | null>,
+  changed: readonly string[],
+): string[] {
+  const commits = new Map(rows.map((r) => [r.repo, r.commit]));
+  const kept = pending.filter((repo) => {
+    if (!commits.has(repo)) return false;
+    const head = heads.get(repo) ?? null;
+    return head === null || head !== commits.get(repo);
+  });
+  return uniqueRepos([...kept, ...changed]);
 }
 
 /** HEAD's commit from a git smart-HTTP ref advertisement (pkt-line framed), or null. */
@@ -228,6 +281,8 @@ function execWith(bin: string): SteroidsExec {
 
 export interface RefreshOutcome {
   status: "completed" | "partial" | "offline" | "aborted" | "failed";
+  /** `resume` worked the pending queue without re-reading every HEAD. */
+  mode: "full" | "resume";
   repos: number;
   unchanged: number;
   changed: number;
@@ -235,6 +290,8 @@ export interface RefreshOutcome {
   failedBatches: number;
   deferred: number;
   unreachable: number;
+  /** Left in the pending queue when the pass ended. */
+  pending: number;
   error?: string;
 }
 
@@ -247,14 +304,24 @@ export interface RefreshOptions {
   exec?: SteroidsExec;
 }
 
-/** One pass: list, check heads, re-download what moved in batches, compact, record. */
+/**
+ * One pass: list, then either work the pending queue (resume) or check every
+ * HEAD (full), re-download in batches, compact, record. The pending queue is
+ * re-planned once the repos are listed (and, in a full pass, after the HEAD
+ * check); planning drops only entries that left the corpus or whose upstream
+ * HEAD now matches the indexed commit. After that, an entry leaves the queue
+ * only when its batch succeeds, so a failed listing, an offline check, a failed
+ * batch or a cancel never loses an entry that still needs a refresh.
+ */
 export async function runSteroidsRefresh(opts: RefreshOptions): Promise<RefreshOutcome> {
   const now = opts.now ?? Date.now;
   const exec = opts.exec ?? execWith(opts.bin);
   const fetchFn = opts.fetchFn ?? fetch;
   const { signal, statePath } = opts;
+  const state = await readRefreshState(statePath);
   const outcome: RefreshOutcome = {
     status: "failed",
+    mode: isResumePass(state, now()) ? "resume" : "full",
     repos: 0,
     unchanged: 0,
     changed: 0,
@@ -262,12 +329,15 @@ export async function runSteroidsRefresh(opts: RefreshOptions): Promise<RefreshO
     failedBatches: 0,
     deferred: 0,
     unreachable: 0,
+    pending: 0,
   };
-  const state = await readRefreshState(statePath);
+  state.pending = uniqueRepos(state.pending ?? []);
   state.lastStartedAt = now();
   await writeRefreshState(statePath, state);
   const finish = async (status: RefreshOutcome["status"]): Promise<RefreshOutcome> => {
     outcome.status = status;
+    outcome.pending = state.pending?.length ?? 0;
+    if (outcome.pending === 0) delete state.pending;
     state.lastFinishedAt = now();
     if (status === "completed") state.lastCompletedAt = state.lastFinishedAt;
     await writeRefreshState(statePath, state);
@@ -286,35 +356,57 @@ export async function runSteroidsRefresh(opts: RefreshOptions): Promise<RefreshO
     return finish("failed");
   }
   outcome.repos = rows.length;
+  const pending = state.pending ?? [];
 
-  const results = await mapLimit(rows, CHECK_CONCURRENCY, (r) =>
-    fetchHeadCommit(r.repo, fetchFn, signal),
-  );
-  if (signal.aborted) return finish("aborted");
-  const heads = new Map(rows.map((r, i) => [r.repo, results[i] ?? null]));
-  const plan = planRefresh(rows, heads, state.verified ?? {}, now());
-  state.verified = plan.verified;
-  outcome.unchanged = plan.unchanged;
-  outcome.unreachable = plan.unreachable;
-  outcome.changed = plan.changed.length;
-  if (rows.length > 0 && plan.unreachable === rows.length) return finish("offline");
+  let queue: string[];
+  if (outcome.mode === "resume") {
+    // The last check already planned this work; repos removed from the corpus drop out.
+    const inCorpus = new Set(rows.map((r) => r.repo));
+    queue = pending.filter((repo) => inCorpus.has(repo));
+  } else {
+    const results = await mapLimit(rows, CHECK_CONCURRENCY, (r) =>
+      fetchHeadCommit(r.repo, fetchFn, signal),
+    );
+    if (signal.aborted) return finish("aborted");
+    const heads = new Map(rows.map((r, i) => [r.repo, results[i] ?? null]));
+    const plan = planRefresh(rows, heads, state.verified ?? {}, now());
+    state.verified = plan.verified;
+    outcome.unchanged = plan.unchanged;
+    outcome.unreachable = plan.unreachable;
+    if (rows.length > 0 && plan.unreachable === rows.length) return finish("offline");
+    state.lastCheckedAt = now();
+    queue = queueAfterCheck(pending, rows, heads, plan.changed);
+  }
+  outcome.changed = queue.length;
+  state.pending = queue;
+  await writeRefreshState(statePath, state);
 
-  const selected = plan.changed.slice(0, MAX_UPDATES_PER_PASS);
-  outcome.deferred = plan.changed.length - selected.length;
+  const selected = queue.slice(0, MAX_UPDATES_PER_PASS);
+  outcome.deferred = queue.length - selected.length;
+  const refreshed = new Set<string>();
   for (let i = 0; i < selected.length; i += BATCH_SIZE) {
     if (signal.aborted) return finish("aborted");
     const batch = selected.slice(i, i + BATCH_SIZE);
     // `add` replaces each repo at its latest commit (tags kept) and indexes what landed.
     const res = await exec(["add", "--", ...batch], ADD_TIMEOUT_MS, signal);
-    if (res.ok) outcome.updated += batch.length;
-    else outcome.failedBatches++;
+    if (!res.ok) {
+      // The batch stays queued in place for the next pass.
+      outcome.failedBatches++;
+      continue;
+    }
+    outcome.updated += batch.length;
+    for (const repo of batch) refreshed.add(repo);
+    // Persist per batch so a crash or kill mid-pass loses no progress either.
+    state.pending = queue.filter((repo) => !refreshed.has(repo));
+    await writeRefreshState(statePath, state);
   }
   if (signal.aborted) return finish("aborted");
   // Replaced repos orphan their old bytes; reclaim them as `update` does.
   if (selected.length > 0) await exec(["compact"], COMPACT_TIMEOUT_MS, signal);
   if (signal.aborted) return finish("aborted");
-  // Only deferred work resumes on the next tick; a failed batch is retried by
-  // the next daily pass, so one broken repo cannot cause hourly re-checks.
+  // Only deferred work resumes on the next tick. A failed batch stays queued
+  // but waits for the next daily pass, so one broken repo cannot cause hourly
+  // retries.
   return finish(outcome.deferred > 0 ? "partial" : "completed");
 }
 
@@ -344,6 +436,7 @@ export function startSteroidsRefresh(opts: RefreshSchedulerOptions): { dispose()
       const r = await runPass({ bin, statePath, signal: controller.signal });
       opts.log(r.status === "failed" ? "WARN" : "INFO", "steroids refresh pass", {
         status: r.status,
+        mode: r.mode,
         repos: String(r.repos),
         unchanged: String(r.unchanged),
         changed: String(r.changed),
@@ -351,6 +444,7 @@ export function startSteroidsRefresh(opts: RefreshSchedulerOptions): { dispose()
         deferred: String(r.deferred),
         failedBatches: String(r.failedBatches),
         unreachable: String(r.unreachable),
+        pending: String(r.pending),
         ...(r.error ? { error: r.error } : {}),
       });
       try {

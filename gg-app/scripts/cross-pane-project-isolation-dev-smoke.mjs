@@ -220,6 +220,15 @@ function stateScene(name) {
       ...Array.from({ length: 40 }, (_, i) => chunks(`Paragraph ${i + 1} of a long streaming reply that keeps arriving while panes move around.\n\n`, 40)).flat(),
       ...chunks("LONG-MARKER"), ["run_end", { outcome: "completed" }],
     ];
+    case "trophy": {
+      // One earned trophy, sent only to the session whose prompt earned it.
+      const trophy = { id: "fixture-trophy", title: "Fixture Trophy TROPHY-MARKER", tier: "gold", category: "fixture", description: "Earned by the trophy smoke.", hint: "Run the trophy smoke.", goal: 1, current: 1, unlockedAt: new Date().toISOString(), secret: false };
+      return [
+        ["run_start", {}], ...chunks("Earning a trophy."),
+        ["trophies", { trophies: [trophy], categories: [{ id: "fixture", label: "Fixture" }], earned: 1, total: 1, unlocked: [trophy.id], eventNonce: `fixture-${Date.now()}-${Math.random()}`, origin: true }],
+        ["run_end", { outcome: "completed" }],
+      ];
+    }
     default: return [];
   }
 }

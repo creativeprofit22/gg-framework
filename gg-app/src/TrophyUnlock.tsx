@@ -28,10 +28,11 @@ export function trophyTimeline(tier: Trophy["tier"]) {
 }
 
 /**
- * The trophy unlock ("Charge"): a card lands face down in the corner where
- * toasts live, powers up (light racing round its edge, energy drawn in, arcs
- * crackling), then lets go in a spin of one to four turns, by tier, and lands
- * face up. It never blocks work. After a few seconds, or on dismiss, it files
+ * The trophy unlock ("Charge"): a card rises face down in the pane's dock, in
+ * flow just above the deck (it takes its room from the conversation via
+ * --dock-h rather than covering the message box), powers up (light racing
+ * round its edge, energy drawn in, arcs crackling), then lets go in a spin of
+ * one to four turns, by tier, and lands face up. It never blocks work. After a few seconds, or on dismiss, it files
  * itself into the trophies key on the deck. Reduced motion: it simply fades in
  * face up, with the chime alone.
  */
@@ -122,6 +123,9 @@ export function TrophyUnlock({
       if (leaving) return;
       leaving = true;
       wrap.inert = true;
+      // Local Fork: the card rests under the deck's layer; lift it so the
+      // flight into the deck's trophies key isn't hidden behind the deck.
+      wrap.parentElement?.setAttribute("data-leaving", "");
       const key = (keyScopeRef.current?.() ?? document).querySelector<HTMLElement>(
         "[data-trophy-key]",
       );
@@ -350,8 +354,10 @@ const TIER_COLORS: Readonly<Record<Trophy["tier"], readonly string[]>> = {
 };
 
 /**
- * The charge's particles on a fixed, window-sized canvas: energy drawn in
- * while it charges, arcs across the card, a glow under it, and sparks plus a
+ * The charge's particles on the `.tu-fx` canvas. It is position: fixed, but
+ * the pane slot (container-type) is its containing block, so it covers and is
+ * clipped to the pane, not the window. It draws energy pulled in while the
+ * card charges, arcs across the card, a glow under it, and sparks plus a
  * shockwave on release. One-shot: the loop ends a couple of seconds after the
  * card lands. Returns a function that stops it early.
  */

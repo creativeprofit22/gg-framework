@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 
@@ -111,5 +112,33 @@ describe("trophyTimeline", () => {
     expect(platinum.turns).toBe(4);
     expect(platinum.chargeFor).toBeGreaterThan(bronze.chargeFor);
     expect(platinum.end).toBeGreaterThan(bronze.end);
+  });
+});
+
+describe("trophy unlock layering", () => {
+  // Regression: the card was a pane-root child styled `position: fixed`, but
+  // App.css's later `.app > * { position: relative }` won, so it sat in flow
+  // under the pane's chat dock; fixed instead covered the message box. It is
+  // now a dock row above the deck, taking its room from the conversation.
+  it("rests in flow in the dock, above the deck, never over the message box", () => {
+    const css = readFileSync("src/Trophies.css", "utf8");
+    const rule = /(^|\n)\.app > \.dock > \.trophy-unlock\s*\{([^}]*)\}/.exec(css)?.[2] ?? "";
+    expect(rule).toMatch(/position:\s*relative;/);
+    expect(rule).not.toMatch(/position:\s*(fixed|absolute)/);
+    expect(rule).not.toMatch(/\b(top|right|bottom|left|inset):/);
+    expect(css).not.toMatch(/(^|\n)(\.app > )?\.trophy-unlock\s*\{/);
+    // Lifted over the deck (z-index 3) only while filing into its trophies key.
+    expect(css).toMatch(/\.app > \.dock > \.trophy-unlock\[data-leaving\]\s*\{\s*z-index:\s*4;/);
+    expect(css).toMatch(/\.tu-wrap\s*\{[^}]*width:\s*min\(360px, 100%\);/);
+
+    const pane = readFileSync("src/AgentPane.tsx", "utf8");
+    const dock = pane.indexOf('<div ref={dockRef} className="dock">');
+    const unlock = pane.indexOf("<TrophyUnlock");
+    const deck = pane.indexOf("<Deck", unlock);
+    expect(dock).toBeGreaterThan(-1);
+    // Inside the dock, directly before the deck (no other element between).
+    expect(unlock).toBeGreaterThan(dock);
+    expect(pane.slice(unlock, deck)).toMatch(/^<TrophyUnlock[^<]*\/>\s*\)\}\s*$/);
+    expect(pane.indexOf("<TrophyUnlock", unlock + 1)).toBe(-1);
   });
 });

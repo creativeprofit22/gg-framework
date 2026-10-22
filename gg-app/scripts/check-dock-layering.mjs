@@ -51,8 +51,6 @@ const allowedRootChildren = [
   (el) => el.tag === "Activity",
   (el) => el.tag === "WorkspaceHeader",
   (el) => el.tag === "Confetti",
-  // Local Fork: the trophy unlock card is position: fixed in its corner.
-  (el) => el.tag === "TrophyUnlock",
   (el) => el.tag === "Toaster",
   (el) => /Modal$/.test(el.tag),
   (el) => el.classes.includes("visually-hidden") || el.classes.includes("sr-only"),

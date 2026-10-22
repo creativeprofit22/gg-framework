@@ -5180,6 +5180,25 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
             {!toolsHidden && <LiveToolPanel entries={liveToolFeed} />}
           </div>
 
+          {/* One trophy at a time, in the order earned; it files itself into this
+            pane's deck trophies key. Only the pane whose action earned it queues it.
+            Local Fork: in the dock, in flow just above the deck, so it takes its
+            room from the conversation (--dock-h) instead of covering the input.
+            By design, while the Goal Workers view is open this chat Activity is
+            hidden (effects suspended, deck key hidden too), so an earned trophy
+            stays queued in useTrophies and its card, motion and chime play on
+            return to chat. Locked in by trophies-panes.test.tsx. */}
+          {trophies.queue[0] && (
+            <TrophyUnlock
+              key={trophies.queue[0].id}
+              trophy={trophies.queue[0]}
+              snapshot={trophies.snapshot}
+              onOpenTrophies={() => setDeckPanel("trophies")}
+              onDone={trophies.shift}
+              keyScope={trophyKeyScope}
+            />
+          )}
+
           <Deck
             focused={props.focused !== false}
             state={state}
@@ -5915,19 +5934,6 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
           (Home, picker, workspace) because the tray targets a WINDOW and can't
           know which of the three it is showing. */}
       {showTraySettings && <SettingsModal onClose={closeTraySettings} />}
-
-      {/* One trophy at a time, in the order earned; it files itself into this
-          pane's deck trophies key. Only the pane whose action earned it queues it. */}
-      {trophies.queue[0] && (
-        <TrophyUnlock
-          key={trophies.queue[0].id}
-          trophy={trophies.queue[0]}
-          snapshot={trophies.snapshot}
-          onOpenTrophies={() => setDeckPanel("trophies")}
-          onDone={trophies.shift}
-          keyScope={trophyKeyScope}
-        />
-      )}
     </div>
   );
   return <PaneIdProvider value={paneId}>{content}</PaneIdProvider>;

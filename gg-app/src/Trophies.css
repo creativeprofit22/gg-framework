@@ -216,14 +216,24 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* ── Unlock card ── */
-.trophy-unlock {
-  position: fixed;
-  right: 18px;
-  bottom: 18px;
-  /* Above toasts: it lands in their corner and is rarer than they are. */
-  z-index: calc(var(--z-toast) + 1);
+/* ── Unlock card ──
+   Local Fork: a row of the pane's dock, in flow just above the deck, right
+   edge on the deck's. The dock's height is reserved by the conversation
+   (--dock-h), so the card takes its room from the messages instead of
+   floating over the message box (a fixed corner card covered it, and in a
+   split pane sat under the dock or over the neighbouring pane). The deck
+   (z-index 3) paints over it, so it rises from behind the message box; while
+   it files itself into the deck's trophies key it lifts above the deck. */
+.app > .dock > .trophy-unlock {
+  position: relative;
+  flex: 0 0 auto;
+  display: flex;
+  justify-content: flex-end;
+  margin: var(--space-2) var(--gutter);
   pointer-events: none;
+}
+.app > .dock > .trophy-unlock[data-leaving] {
+  z-index: 4;
 }
 .tu-fx {
   position: fixed;
@@ -235,7 +245,8 @@
 .tu-wrap {
   --depth: 5px;
   position: relative;
-  width: min(360px, calc(100vw - 36px));
+  /* The dock row's width, so a narrow split pane's card still fits. */
+  width: min(360px, 100%);
   height: 152px;
   perspective: 1200px;
   pointer-events: auto;

@@ -11,9 +11,11 @@ import {
   screen,
   waitFor,
 } from "@testing-library/react";
+import { Activity } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("./trophy-sound", () => ({ playTrophyUnlock: () => () => {} }));
+const sound = vi.hoisted(() => ({ play: vi.fn(() => () => {}) }));
+vi.mock("./trophy-sound", () => ({ playTrophyUnlock: sound.play }));
 
 import type { SidecarEvent, Trophy, TrophySnapshot } from "./agent";
 import { TrophyUnlock } from "./TrophyUnlock";
@@ -150,5 +152,78 @@ describe("TrophyUnlock in split panes", () => {
     expect(document.getElementById("pane-1-key")?.hasAttribute("data-trophy-lit")).toBe(false);
     other.remove();
     earning.remove();
+  });
+});
+
+// By design (AgentPane dock comment): while a Goal's Workers view is open the
+// chat Activity is hidden, so a trophy earned then waits in the queue and plays
+// on return to chat. Rendering the full AgentPane with a goal needs the ~400
+// lines of mocks in AgentPane.test.tsx, so this mirrors the dock's wiring
+// instead: the same `<Activity mode={goalWorldOpen ? "hidden" : "visible"}>`
+// around `trophies.queue[0] && <TrophyUnlock … onDone={trophies.shift} />`.
+describe("TrophyUnlock while the Goal Workers view is open", () => {
+  function Dock({
+    client,
+    goalWorldOpen,
+  }: {
+    client: ReturnType<typeof paneClient>;
+    goalWorldOpen: boolean;
+  }) {
+    const trophies = useTrophies(client);
+    return (
+      <>
+        <span data-testid="queued">{trophies.queue.length}</span>
+        <Activity mode={goalWorldOpen ? "hidden" : "visible"}>
+          <div className="dock">
+            {trophies.queue[0] && (
+              <TrophyUnlock
+                key={trophies.queue[0].id}
+                trophy={trophies.queue[0]}
+                snapshot={trophies.snapshot}
+                onOpenTrophies={() => {}}
+                onDone={trophies.shift}
+              />
+            )}
+          </div>
+        </Activity>
+      </>
+    );
+  }
+
+  /** The card is on screen: mounted and not inside a subtree Activity hid. */
+  const visibleCard = (): Element | null => {
+    const card = document.querySelector(".trophy-unlock");
+    for (let el: Element | null = card; el; el = el.parentElement) {
+      if (el instanceof HTMLElement && el.style.display === "none") return null;
+    }
+    return card;
+  };
+
+  const original = Element.prototype.animate;
+  beforeEach(() => {
+    sound.play.mockClear();
+    Element.prototype.animate = vi.fn(
+      () => ({ finished: Promise.resolve(), cancel: vi.fn() }) as unknown as Animation,
+    );
+  });
+  afterEach(() => {
+    Element.prototype.animate = original;
+  });
+
+  it("keeps the earned trophy queued and silent, then plays it on return to chat", async () => {
+    const client = paneClient(snapshot());
+    const view = render(<Dock client={client} goalWorldOpen />);
+    await waitFor(() => expect(client.getTrophies).toHaveBeenCalled());
+
+    act(() => client.emit(snapshot({ unlocked: ["slash"], eventNonce: "w1", origin: true })));
+    expect(screen.getByTestId("queued").textContent).toBe("1");
+    expect(visibleCard()).toBeNull();
+    expect(sound.play).not.toHaveBeenCalled();
+
+    view.rerender(<Dock client={client} goalWorldOpen={false} />);
+    await waitFor(() => expect(visibleCard()).not.toBeNull());
+    expect(screen.getByRole("status").textContent).toContain("Shortcut");
+    expect(sound.play).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId("queued").textContent).toBe("1");
   });
 });

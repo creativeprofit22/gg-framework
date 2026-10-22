@@ -22,6 +22,21 @@ export interface ChangelogEntry {
 /** Newest first. Prepended by the `/release` flow. */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.95.0",
+    date: "2026-10-21",
+    items: [
+      "Trophies are here, and there are `144` of them to hunt. Every one you earn teaches you something GG can do, from your first slash command and a polished `Enhance` prompt all the way up to a `365`-day streak. Each unlock lands in the corner as a card that charges up, crackles with light and spins over, with its own sound, then files itself away. Open the context key on the deck and hit the trophy button beside your level to see what you've won, what's still out there and exactly how to get it. Everyone starts from zero today, so the race is wide open.",
+    ],
+  },
+  {
+    version: "0.94.3",
+    date: "2026-10-21",
+    items: [
+      "No more surprise sign-outs. When several windows refreshed your login at the same moment, one could wipe out the fresh login another had just saved, and every chat suddenly said `Not logged in`. Now GG notices the newer login and keeps using it, so your sessions stay connected through the night.",
+      "GG keeps its flight recorder running no matter how long the app stays open. It used to go quiet after just `15 minutes` when the log file was nearly full, so when something went wrong a day later there was nothing to look at. Now it rolls over to a fresh file and keeps recording, so I can track down real problems fast.",
+    ],
+  },
+  {
     version: "0.94.2",
     date: "2026-10-19",
     items: [

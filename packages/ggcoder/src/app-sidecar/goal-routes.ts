@@ -306,6 +306,7 @@ export function handleGoalRoutes(
         const payload = { id: updated.id, phase: goalPhase(updated), paused: true };
         ctx.broadcast("goal_state", payload);
         json(res, 200, payload);
+        void ctx.trophies.count("goalPauses", ctx.sessionId);
       })
       .catch((err: unknown) => {
         log("ERROR", "app-sidecar", "pause goal failed", {

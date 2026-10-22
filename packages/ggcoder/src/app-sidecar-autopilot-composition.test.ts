@@ -103,6 +103,7 @@ async function pane(
     json: (res: { resolve: (body: unknown) => void }, _status: number, body: unknown) =>
       res.resolve(body),
     saveAutopilot: async () => {},
+    trophies: { count: async () => {} },
     lastNewSessionReset: null,
     chatAgent: null,
     running: false,

@@ -14,6 +14,7 @@ const FILES = [
   "Deck.css",
   "ChecklistScreen.css",
   "ChatErrorNotice.css",
+  "Trophies.css",
 ];
 const read = (path) => readFileSync(new URL(path, import.meta.url), "utf8");
 const sheets = FILES.map((name) => ({
@@ -122,6 +123,9 @@ const MIRRORS = [
   ["transcript-motion.ts", "EASE_IN", "--ease-in", "equal"],
   ["critter-fx.ts", "POP", "--ease-pop", "equal"],
   ["ActionDial.tsx", "HOLD_MS", "--dur-dial-hold", "equal"],
+  ["TrophyUnlock.tsx", "EASE_OUT", "--ease-out", "equal"],
+  ["TrophyUnlock.tsx", "EASE_EXPO", "--ease-expo", "equal"],
+  ["TrophyUnlock.tsx", "EASE_IN", "--ease-in", "equal"],
 ];
 
 describe("motion tokens", () => {

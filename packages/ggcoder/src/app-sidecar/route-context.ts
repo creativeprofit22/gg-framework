@@ -3,6 +3,7 @@ import type { AuthStorage } from "../core/auth-storage.js";
 import type { GoalRecord } from "../core/goals-store.js";
 import type { RunClaim } from "../core/run-claim.js";
 import type { AppPaths } from "../config.js";
+import type { TrophyManager } from "./trophy-manager.js";
 
 /**
  * Local Fork adapter: the narrow slice of upstream's SessionRouteContext that
@@ -16,6 +17,7 @@ export interface SessionRouteContext {
   readonly autopilotActive: boolean;
   readonly runClaim: RunClaim;
   readonly auth: AuthStorage;
+  readonly trophies: TrophyManager;
   readonly sessionId: string;
   readonly sessionIdsAt: (cwd: string) => string[];
   readonly busyAt: (cwd: string) => boolean;

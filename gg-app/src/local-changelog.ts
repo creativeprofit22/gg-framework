@@ -53,10 +53,25 @@ export const CURRENT_LOCAL_RELEASE_NOTES = requireCurrentReleaseNotes(releaseNot
 /** Newest first. Maintained only by the Local Fork release flow. */
 export const LOCAL_CHANGELOG: LocalChangelogEntry[] = [
   {
-    id: "local-2026-10-19-upstream-0942-safe-installs-and-guarded-tools",
+    id: "local-2026-10-21-upstream-0950-trophies-and-steady-logins",
     label: CURRENT_LOCAL_RELEASE_NOTES.label,
     date: CURRENT_LOCAL_RELEASE_NOTES.date,
     items: CURRENT_LOCAL_RELEASE_NOTES.sections.flatMap(({ items }) => items),
+  },
+  {
+    id: "local-2026-10-19-upstream-0942-safe-installs-and-guarded-tools",
+    label: "Upstream 0.94.2, with installs your agent can't be tricked into",
+    date: "2026-10-19",
+    items: [
+      "Safety blocks show up in the pane where they happened. When GG stops a risky install or a booby-trapped instruction, that pane's chat gets one plain line saying what was stopped, and repeats fold into a single row instead of piling up. Reopening the session brings the same rows back, so you can always see what got blocked and why.",
+      "Your `MCP` list now tells you when a server's tool was hidden for looking dangerous. You'll see a short note under that server, right next to the sign-in and connection messages you already get.",
+      "Your agent can no longer install a hijacked package. GG skips any release younger than `2 days`, checks every install against a public malware list that refreshes itself daily, and quietly moves ancient versions with known serious holes, like `axios@0.21.1`, to the fixed release in the same line. If something already in your project gets flagged later, GG spots it and makes sure future sessions steer clear.",
+      "Poisoned skills, sneaky `MCP` servers and booby-trapped web pages can't turn your agent against you. Skills carrying malware never load, MCP tools with hidden orders stay hidden, and a README that tries to make your agent leak your keys or switch off its own safety gets stopped cold.",
+      "Work whose tests passed now shows as verified. Your agent often runs tests inside a bigger command, which GG couldn't count as proof, so finished work could still look `incomplete`. Now GG quietly re-runs just those tests on their own, and the badge tells you the truth.",
+      "GG got leaner. Web search only loads when you actually ask about the web, searches hand back less clutter, and one unlucky search over minified files can no longer flood your chat, since oversized output is held to its `50 KB` cap. After your agent changes code, you get a short summary instead of a long report.",
+      "Research-heavy sessions keep flowing. A web search and page fetch right before your chat got tidied up could make every later message bounce back with a `400` error. That's fixed at the root, and a session already stuck that way recovers on your next message.",
+      "The titlebar stops calling your project `not a git repo` just because git was slow to answer on a busy machine. GG waits it out in the background and shows the real state.",
+    ],
   },
   {
     id: "local-2026-10-17-upstream-0934-renames-and-no-surprise-bills",

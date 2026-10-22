@@ -19,7 +19,7 @@ import { nativeDevAuthFile, isNativeManagedAuthProvider } from "./app-sidecar-na
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
 import {
   GGAIError,
@@ -298,6 +298,8 @@ import { runJsonModeIfRequested } from "./app-sidecar/json-mode.js";
 import { daemonJson, daemonReadBody, json, readBody } from "./app-sidecar/http.js";
 import { createUsageService } from "./app-sidecar/usage.js";
 import { type ProgressManager, createProgressManager } from "./app-sidecar/progress-manager.js";
+import { type TrophyManager, createTrophyManager } from "./app-sidecar/trophy-manager.js";
+import { localTrophyDate, mentionedPaths, slashCommandName } from "./core/trophies/engine.js";
 import {
   RADIO_STATIONS,
   getCurrentStation,
@@ -779,6 +781,25 @@ async function main(): Promise<void> {
       ctx.broadcast("progress", { ...snapshot, origin: ctx.id === originId });
   });
 
+  // Trophies — daemon-level like progress. XP totals (commits, streak, level)
+  // come from the progress snapshot rather than being counted twice.
+  const trophies = await createTrophyManager(
+    () => {
+      const p = progress.snapshot();
+      return {
+        prompts: p.totals.prompts,
+        commits: p.totals.commits,
+        linesShipped: p.totals.linesShipped,
+        level: p.level,
+      };
+    },
+    (snapshot, originId) => {
+      for (const ctx of sessions.values())
+        ctx.broadcast("trophies", { ...snapshot, origin: ctx.id === originId });
+    },
+    paths.trophiesFile,
+  );
+
   const { subscriptionUsage } = createUsageService(auth);
 
   const server = http.createServer(
@@ -878,6 +899,7 @@ async function main(): Promise<void> {
                 nativeAuthorityToken: daemonAuthToken,
                 paths,
                 progress,
+                trophies,
                 memoryStore,
                 jiwaStore,
                 broadcastAll,
@@ -999,6 +1021,12 @@ async function main(): Promise<void> {
       // session exists; per-session callers still work through the same endpoint.
       if (method === "GET" && url === "/progress") {
         daemonJson(res, 200, progress.snapshot());
+        return;
+      }
+
+      // Trophies are app-wide too: earned anywhere, shown in every window.
+      if (method === "GET" && url === "/trophies") {
+        daemonJson(res, 200, trophies.snapshot());
         return;
       }
 
@@ -1236,6 +1264,7 @@ async function createSession(
     nativeAuthorityToken: string;
     paths: Awaited<ReturnType<typeof ensureAppDirs>>;
     progress: ProgressManager;
+    trophies: TrophyManager;
     memoryStore: MemoryStore;
     jiwaStore: JiwaStore;
     /** Fan one frame out to EVERY window, not just this session's. */
@@ -1280,6 +1309,7 @@ async function createSession(
     auth,
     nativeAuthorityToken,
     progress,
+    trophies,
     memoryStore,
     jiwaStore,
     broadcastAll,
@@ -1571,6 +1601,7 @@ async function createSession(
     if (started) {
       goal = { dir: current.dir, record: started };
       broadcast("goal_state", { id: started.id, phase: goalPhase(started) });
+      void trophies.count("goalsStarted", opts.id);
     }
   };
   const askUserTool = createAskUserTool(async (request) => {
@@ -2514,6 +2545,10 @@ async function createSession(
           .catch((error) => captureSidecarError(error, "app-sidecar.phase-lease-handoff"));
       }
     });
+    // Separate from the lease hand-off listener above so that wiring stays self-contained.
+    target.eventBus.on("compaction_end", (data) => {
+      if (data.compacted) void trophies.count("compactions", opts.id);
+    });
     // Cold-prompt-cache notice: push the fresh TTL anchor + context size whenever
     // a run or compaction settles. Expiry itself is time-based, so the webview
     // also re-reads `cacheExpiry` from /state when the user returns or types.
@@ -2734,6 +2769,7 @@ async function createSession(
         asks.pendingRequests,
       ),
     replyText: (ken) => lastAssistantText(ken.getMessages()),
+    onTurnPersisted: () => void trophies.count("kenQuestions", opts.id),
     listen: (ken, publish) => {
       const off = [
         ken.eventBus.on("text_delta", (d) => {
@@ -3012,6 +3048,7 @@ async function createSession(
     const runStartedAt = Date.now();
     const cancelGenAtStart = cancelGeneration;
     const assistantsBeforeRun = countAssistantMessages(session.getMessages());
+    const messagesBeforeRun = session.getMessages().length;
     let runSucceeded = false;
     let programmaticSettlement: ReturnType<typeof settleProgrammaticRun>;
     broadcast("run_start", {
@@ -3045,7 +3082,26 @@ async function createSession(
         countAssistantMessages(session.getMessages()) > assistantsBeforeRun
       ) {
         // Fire-and-forget — XP must never delay or break run teardown.
-        void progress.awardRun(cwd, runStartedAt, opts.id);
+        // Trophies follow the award so they see this run's commits and level.
+        const st = session.getState();
+        const now = new Date();
+        const runFacts = {
+          mode,
+          chatAgent: mode === "chat" ? chatAgent : undefined,
+          goal: goal !== null,
+          provider: st.provider,
+          model: st.model,
+          tools: extractTurnToolCalls(session.getMessages(), messagesBeforeRun),
+          durationMs: Date.now() - runStartedAt,
+          hour: now.getHours(),
+          day: now.getDay(),
+          date: localTrophyDate(now),
+          // A hash, so the trophies file never holds project paths.
+          project: createHash("sha256").update(path.resolve(cwd)).digest("hex").slice(0, 16),
+        };
+        void progress
+          .awardRun(cwd, runStartedAt, opts.id)
+          .then(() => trophies.recordRun(runFacts, opts.id));
       }
       // A run may have switched branches, changed files, or spawned/finished
       // background tasks. Refresh the workspace extras once it settles.
@@ -4209,7 +4265,11 @@ async function createSession(
       planMode: session.getPlanMode(),
       planPending: planGate.pending() !== null,
     }),
-    review: runAutopilotCycle,
+    review: async (originalRequest) => {
+      const outcome = await runAutopilotCycle(originalRequest);
+      if (!autopilotCancelled) void trophies.count("autopilotReviews", opts.id);
+      return outcome;
+    },
     drainQueue: runStrandedQueue,
     decision: (decision) => {
       if (decision.start) {
@@ -4363,6 +4423,57 @@ async function createSession(
     };
   }
 
+  /**
+   * Count a sent prompt toward trophies: a slash command (and whether it's the
+   * user's own), Enhance, images, `@file` mentions that point at real files,
+   * and steering. Best-effort and off the request path.
+   */
+  async function recordPromptTrophies(input: {
+    text: string;
+    attachments: number;
+    enhanced: boolean;
+    steer: boolean;
+    expands: boolean;
+  }): Promise<void> {
+    try {
+      const name = input.attachments === 0 ? slashCommandName(input.text) : null;
+      const command = name && (input.expands || name === "add-dir") ? name : null;
+      const customCommand =
+        command !== null &&
+        !PROMPT_COMMANDS.some((c) => c.name === command || c.aliases.includes(command)) &&
+        (await session.loadCustomCommands()).some((c) => c.name.toLowerCase() === command);
+      const root = path.resolve(cwd);
+      let fileMentions = 0;
+      for (const rel of mentionedPaths(input.text)) {
+        const abs = path.resolve(root, rel);
+        // Only paths inside the project count; the check is a stat, nothing is read.
+        if (abs !== root && !abs.startsWith(root + path.sep)) continue;
+        if (
+          await fs.stat(abs).then(
+            () => true,
+            () => false,
+          )
+        )
+          fileMentions++;
+      }
+      await trophies.recordPrompt(
+        {
+          command,
+          customCommand,
+          enhanced: input.enhanced,
+          attachments: input.attachments,
+          fileMentions,
+          steer: input.steer,
+        },
+        opts.id,
+      );
+    } catch (err) {
+      log("DEBUG", "app-sidecar", "prompt trophies failed", {
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
   // Narrow adapter for upstream's Goal routes. Getters read the live closure
   // state, so a goal started or a run begun after creation is visible.
   const goalRouteCtx: SessionRouteContext = {
@@ -4378,6 +4489,7 @@ async function createSession(
     },
     runClaim,
     auth,
+    trophies,
     sessionId: opts.id,
     sessionIdsAt,
     busyAt,
@@ -4802,6 +4914,7 @@ async function createSession(
         { toolDetail: parseToolDetail(query.get("tools")) },
       );
       json(res, 200, { filename, markdown });
+      void trophies.count("exports", opts.id);
       return;
     }
 
@@ -5462,6 +5575,14 @@ async function createSession(
                 const messages = session.listQueuedMessages();
                 broadcast("queued", { count: messages.length, messages });
                 json(res, 202, { queued: true, count, queueId, steers });
+                void recordPromptTrophies({
+                  text,
+                  attachments: attachments.length,
+                  enhanced: Array.isArray(meta?.enhancements) && meta.enhancements.length > 0,
+                  // A scheduled prompt that queued behind a run isn't the user steering.
+                  steer: !scheduled,
+                  expands: false,
+                });
                 // Preparing the entry awaited; if the run ended meanwhile, its
                 // final drain already passed, so hand the entry to the stranded drain.
                 if (!isAppSidecarSessionBusy(sessionBusyState())) {
@@ -5503,6 +5624,17 @@ async function createSession(
               // later bubble with the wrong `/name`.
               const expandsToTemplate =
                 attachments.length === 0 && (await session.willExpandPromptTemplate(text));
+              if (scheduled) {
+                void trophies.count("scheduledRuns", opts.id);
+              } else {
+                void recordPromptTrophies({
+                  text,
+                  attachments: attachments.length,
+                  enhanced: Array.isArray(meta?.enhancements) && meta.enhancements.length > 0,
+                  steer: false,
+                  expands: expandsToTemplate,
+                });
+              }
               // Webview display hint for this prompt's user bubble (kenSent shimmer
               // label / enhancer highlight segments / the `/name` a command was typed
               // as). Anchored +1 so it attaches to the user message the prompt below
@@ -5666,6 +5798,7 @@ async function createSession(
         }
         projectAutopilot.set(cwd, enabled);
         await saveAutopilot(cwd, enabled);
+        if (enabled) void trophies.count("autopilotOn", opts.id);
         log("INFO", "app-sidecar", "autopilot toggled", { enabled: String(enabled) });
         json(res, 200, { autopilot: projectAutopilot.isEnabled(cwd) });
       });
@@ -5804,6 +5937,7 @@ async function createSession(
           return;
         }
         json(res, 200, { current: getCurrentStation() });
+        void trophies.record({ count: { radioPlays: 1 }, add: { radioStations: [station] } }, opts.id);
       });
       return;
     }
@@ -5858,6 +5992,7 @@ async function createSession(
           return;
         }
         json(res, 202, { accepted: true });
+        void trophies.count("tasksRun", opts.id);
         void runTasks(id, all)
           .catch((error) => {
             // Provider failures are reported and swallowed by runAgent; this is
@@ -6046,6 +6181,7 @@ async function createSession(
         // the footer's context meter rescales immediately.
         broadcast("extras", footerExtras());
         json(res, 200, { provider: target.provider, model: target.id, ...payload });
+        void trophies.count("modelSwitches", opts.id);
       });
       return;
     }
@@ -6133,6 +6269,7 @@ async function createSession(
             provider: target.provider,
             model: target.id,
           });
+          void trophies.count("kenPins", opts.id);
         }
         const payload = kenStatePayload();
         broadcast("ken_model_change", payload);
@@ -6173,6 +6310,7 @@ async function createSession(
           ...(cancelled ? { cancelledId: id } : {}),
         });
         json(res, 200, { cancelled, queued });
+        if (cancelled) void trophies.count("queueCancels", opts.id);
       });
       return;
     }
@@ -6195,6 +6333,7 @@ async function createSession(
         // Push the updated task list right away rather than waiting for the poll.
         broadcast("tasks", { tasks: session.listBackgroundProcesses() });
         json(res, 200, { message });
+        void trophies.count("processKills", opts.id);
       });
       return;
     }
@@ -6221,6 +6360,7 @@ async function createSession(
           ...(body.cwd ? { cwd: body.cwd } : {}),
         });
         json(res, result.ok ? 200 : 400, result);
+        if (result.ok) void trophies.count("transcriptImports", opts.id);
       });
       return;
     }
@@ -6267,6 +6407,7 @@ async function createSession(
           };
           broadcast("thinking_change", payload);
           json(res, 200, payload);
+          void trophies.count("thinkingChanges", opts.id);
         } catch (error) {
           session.setThinkingLevel(previous);
           log("ERROR", "app-sidecar", "thinking preference persistence failed", {
@@ -6311,6 +6452,7 @@ async function createSession(
             runState: result.runState,
             drained: result.drained,
           });
+          if (result.status === "cancelled") void trophies.count("cancels", opts.id);
         })
         .catch((error) => {
           captureSidecarError(error, "app-sidecar.run.cancel");
@@ -6342,6 +6484,7 @@ async function createSession(
           captureSidecarError(result.error, "app-sidecar.session.new");
         }
         json(res, result.status, result.body);
+        if (result.status === 200) void trophies.count("newSessions", opts.id);
       });
       return;
     }
@@ -6420,6 +6563,7 @@ async function createSession(
             planTotal,
             operationId: mutation.operationId,
           } satisfies PlanAcceptResult);
+          void trophies.count("plansApproved", opts.id);
         } catch (err) {
           captureSidecarError(err, "app-sidecar.plan.accept");
           const activePhase = session.getActivePhaseContext();
@@ -6778,6 +6922,7 @@ async function createSession(
           answered: result.action === "answer" ? Object.keys(result.answers).length : 0,
         });
         json(res, 200, { ok: true } satisfies AskUserAcknowledgement);
+        if (result.action === "answer") void trophies.count("questionsAnswered", opts.id);
       });
       return;
     }
@@ -6868,6 +7013,7 @@ async function createSession(
             endpoint: { id: endpoint.id, label: endpoint.label },
             ...localStatePayload(),
           });
+          void trophies.count("localEndpoints", opts.id);
         } catch (err) {
           // Validation errors are the user's typo, not a system fault — 400 with
           // the exact reason, and nothing in the transcript.
@@ -6960,6 +7106,7 @@ async function createSession(
         }
         try {
           json(res, 200, await startHfPull(repo));
+          void trophies.count("modelsPulled", opts.id);
         } catch (err) {
           const status =
             err instanceof Error && "status" in err && typeof err.status === "number"
@@ -7025,6 +7172,7 @@ async function createSession(
         }
         await saveTelegramConfig({ botToken, userId });
         json(res, 200, { ok: true, userId, username: verified.username ?? null });
+        void trophies.count("telegramSetups", opts.id);
       });
       return;
     }
@@ -7062,6 +7210,7 @@ async function createSession(
           broadcast("serve_change", { running: true });
           log("INFO", "app-sidecar", "serve started", { userId: cfg.userId });
           json(res, 200, { running: true });
+          void trophies.count("remoteStarts", opts.id);
         } catch (err) {
           serveController = null;
           json(res, 400, { error: err instanceof Error ? err.message : String(err) });
@@ -7173,6 +7322,7 @@ async function createSession(
           if (scope === "project") {
             await session.trustProject(targetCwd);
           }
+          void trophies.count("mcpServersAdded", opts.id);
           json(res, 200, {
             ok: true,
             name: config.name,

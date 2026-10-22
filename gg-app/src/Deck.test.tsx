@@ -141,6 +141,7 @@ describe("deck Escape across split panes", () => {
       projectHealth: null,
       usageExtras: null,
       progress: null,
+      trophies: null,
       tools: {},
       ...over,
     };

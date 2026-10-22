@@ -55,6 +55,7 @@ export function fakePaneClient(
     listHistory: vi.fn(async () => []),
     getChecklist: vi.fn(async () => null),
     getProgress: vi.fn(async () => null),
+    getTrophies: vi.fn(async () => null),
     listMemories: vi.fn(),
     deleteMemory: vi.fn(),
     listJiwa: vi.fn(),

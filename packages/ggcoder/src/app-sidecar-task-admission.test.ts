@@ -102,6 +102,8 @@ async function harness(provider = "anthropic") {
       res.resolve(status);
     },
     log: vi.fn(),
+    trophies: { count: async () => {} },
+    opts: { id: "pane" },
     cwd: "project",
     formatSidecarError,
     desktopGuidance: (text: string) => text,

@@ -225,6 +225,7 @@ pub fn run() {
             commands::agent::agent_jiwa,
             commands::agent::agent_delete_jiwa,
             commands::agent::agent_progress,
+            commands::agent::agent_trophies,
             commands::agent::agent_keep_awake_get,
             commands::agent::agent_keep_awake_set,
             commands::agent::agent_usage,

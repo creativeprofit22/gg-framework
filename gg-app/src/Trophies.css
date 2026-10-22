@@ -1,0 +1,523 @@
+/* ── Trophies: the trophies key, its panel, and the unlock card ──
+   Each tier is a metal: a light, mid and dark stop, plus the dark ink drawn on
+   it. The metals are materials, not theme colours, so they read the same in
+   light and dark; text never sits on them except that ink. */
+
+@property --tu-a {
+  syntax: "<angle>";
+  inherits: false;
+  initial-value: 0deg;
+}
+
+[data-tier="bronze"] {
+  --m1: #f6cfa8;
+  --m2: #c98a55;
+  --m3: #7a4523;
+  --m-ink: #2a1206;
+}
+[data-tier="silver"] {
+  --m1: #f7f9fb;
+  --m2: #bcc5cf;
+  --m3: #69737f;
+  --m-ink: #151a20;
+}
+[data-tier="gold"] {
+  --m1: #fff2c0;
+  --m2: #f0c75e;
+  --m3: #a2701a;
+  --m-ink: #2a1c02;
+}
+[data-tier="platinum"] {
+  --m1: #eef2ff;
+  --m2: #a9b8ff;
+  --m3: #4f61c9;
+  --m-ink: #050a2e;
+}
+
+/* The deck key an unlock card files into lights up for a moment as it lands. */
+[data-trophy-key][data-trophy-lit] {
+  color: var(--text);
+  box-shadow:
+    inset 0 1px 0 var(--key-hi),
+    0 0 0 1.5px var(--primary),
+    0 0 14px -2px var(--primary);
+  transition: box-shadow var(--t-out);
+}
+
+/* ── Medal ── */
+.trophy-medal {
+  --size: 40px;
+  position: relative;
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: var(--size);
+  height: var(--size);
+  border-radius: 50%;
+  overflow: hidden;
+  color: var(--m-ink);
+  background: radial-gradient(circle at 32% 26%, var(--m1) 0%, var(--m2) 48%, var(--m3) 100%);
+  box-shadow:
+    inset 0 0 0 1.5px rgb(255 255 255 / 0.28),
+    inset 0 -3px 6px rgb(0 0 0 / 0.28),
+    0 2px 5px rgb(0 0 0 / 0.35);
+}
+.trophy-medal[data-tier="platinum"] {
+  background:
+    radial-gradient(circle at 32% 26%, rgb(255 255 255 / 0.85) 0%, transparent 40%),
+    conic-gradient(from 210deg, #a9b8ff, #62e8d8, #eef2ff, #ff8fd0, #a9b8ff, #6f81e6, #a9b8ff);
+}
+.trophy-medal::before {
+  content: "";
+  position: absolute;
+  inset: 11%;
+  border-radius: 50%;
+  border: 1px solid rgb(0 0 0 / 0.2);
+  box-shadow: 0 1px 0 rgb(255 255 255 / 0.35);
+}
+.trophy-medal svg {
+  position: relative;
+  width: 50%;
+  height: 50%;
+}
+/* Still to earn: the same medal, unlit, so its tier still shows. */
+.trophy-medal[data-locked] {
+  filter: grayscale(1) brightness(0.7);
+  opacity: 0.55;
+  box-shadow: inset 0 0 0 1.5px rgb(255 255 255 / 0.12);
+}
+.tier-dot[data-tier] {
+  display: inline-block;
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--m2);
+  box-shadow: inset 0 0 0 1px rgb(0 0 0 / 0.25);
+}
+
+/* ── Panel ── */
+.trophies-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+}
+.trophy-group-title {
+  margin: 0 0 var(--space-3);
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  line-height: 1.3;
+  text-transform: uppercase;
+}
+/* Two columns in every tab; rows in a line share a height so the grid stays
+   even. One column once the deck is too narrow for two readable rows. */
+.trophy-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-3);
+}
+@container deck (max-width: 620px) {
+  .trophy-list {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+.trophy-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: var(--space-6);
+  padding: var(--space-5) var(--space-6);
+  border-radius: var(--radius-card);
+  background: var(--key);
+  color: var(--text);
+  box-shadow:
+    inset 0 1px 0 var(--key-hi),
+    0 1px 0 var(--key-edge);
+}
+/* Unearned rows sink into a well: present, readable, not yet yours. */
+.trophy-row:not([data-earned]) {
+  background: var(--well);
+  box-shadow: inset 0 1px 2px var(--well-shadow);
+}
+.trophy-main {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+}
+.trophy-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-4);
+  min-width: 0;
+}
+.trophy-title {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-size: var(--fs-md);
+  font-weight: 650;
+  line-height: 1.3;
+}
+.trophy-tier {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: var(--space-3);
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  line-height: 1.3;
+}
+.trophy-desc,
+.trophy-hint,
+.trophy-meta {
+  margin: 0;
+  font-size: var(--fs-sm);
+  line-height: 1.45;
+}
+.trophy-desc {
+  color: var(--text-secondary);
+}
+.trophy-hint {
+  color: var(--text-secondary);
+}
+.trophy-how {
+  color: var(--text);
+  font-weight: 600;
+}
+.trophy-meta {
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+}
+.trophy-progress {
+  display: flex;
+  align-items: center;
+  gap: var(--space-5);
+  margin-top: var(--space-2);
+}
+.trophy-progress .sc-bar {
+  flex: 1;
+  height: 8px;
+  --rank-a: var(--m3);
+  --rank-b: var(--m2);
+}
+.trophy-count {
+  flex: none;
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Unlock card ── */
+.trophy-unlock {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  /* Above toasts: it lands in their corner and is rarer than they are. */
+  z-index: calc(var(--z-toast) + 1);
+  pointer-events: none;
+}
+.tu-fx {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  pointer-events: none;
+}
+.tu-wrap {
+  --depth: 5px;
+  position: relative;
+  width: min(360px, calc(100vw - 36px));
+  height: 152px;
+  perspective: 1200px;
+  pointer-events: auto;
+}
+.tu-shadow {
+  position: absolute;
+  left: 6%;
+  right: 6%;
+  bottom: -10px;
+  height: 26px;
+  border-radius: 50%;
+  background: radial-gradient(ellipse, rgb(0 0 0 / 0.5), transparent 70%);
+  filter: blur(4px);
+}
+.tu-card,
+.tu-edge {
+  position: absolute;
+  inset: 0;
+  transform-style: preserve-3d;
+}
+.tu-edge i {
+  position: absolute;
+  inset: 0;
+  border-radius: var(--radius-card);
+  background: linear-gradient(90deg, var(--m3), var(--m2) 50%, var(--m3));
+  transform: translateZ(calc(var(--depth) * var(--k)));
+}
+.tu-front,
+.tu-back {
+  position: absolute;
+  inset: 0;
+  border-radius: var(--radius-card);
+  overflow: hidden;
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
+}
+.tu-front {
+  transform: translateZ(calc(var(--depth) / 2 + 0.5px));
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-rows: auto 1fr auto;
+  column-gap: var(--space-7);
+  padding: var(--space-7) var(--space-7) var(--space-6);
+  background: var(--surface-2);
+  color: var(--text);
+  border: 1px solid var(--border-strong);
+  box-shadow:
+    inset 0 1px 0 var(--key-hi),
+    var(--shadow-lg);
+}
+/* The tier's metal as a hairline along the top edge. */
+.tu-front::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 2px;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    var(--m3) 15%,
+    var(--m1) 50%,
+    var(--m3) 85%,
+    transparent
+  );
+}
+/* Face up for good: leave 3D, so the text renders crisp instead of resampled. */
+.tu-wrap[data-flat] {
+  perspective: none;
+}
+.tu-wrap[data-flat] .tu-card {
+  transform-style: flat;
+}
+.tu-wrap[data-flat] .tu-front {
+  transform: none;
+}
+.tu-wrap[data-flat] .tu-edge,
+.tu-wrap[data-flat] .tu-back {
+  display: none;
+}
+.tu-medal-wrap {
+  grid-row: span 2;
+}
+.tu-medal {
+  --size: 52px;
+}
+.tu-head {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: var(--space-4);
+  min-width: 0;
+}
+.tu-id {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+.tu-eyebrow {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  line-height: 1.3;
+}
+.tu-title {
+  overflow: hidden;
+  color: var(--text);
+  font-size: var(--fs-md);
+  font-weight: 700;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tu-desc {
+  margin: var(--space-2) 0 0;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  /* The clamp alone can leak a third line inside the grid; the height can't. */
+  max-height: calc(var(--fs-sm) * 1.4 * 2);
+  color: var(--text-secondary);
+  font-size: var(--fs-sm);
+  line-height: 1.4;
+}
+.tu-foot {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-5);
+  margin-top: var(--space-5);
+  padding-top: var(--space-4);
+  border-top: 1px dashed var(--border-strong);
+}
+.tu-count {
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  line-height: 1.3;
+  font-variant-numeric: tabular-nums;
+}
+.tu-link {
+  margin-left: auto;
+  padding: var(--space-1) var(--space-2);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--primary);
+  font: inherit;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  line-height: 1.3;
+  cursor: pointer;
+  transition: background-color var(--t-in);
+}
+.tu-link:hover {
+  background: rgb(var(--ink-rgb) / 0.06);
+}
+.tu-link:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+/* The back: graphite with engine-turned rings and an engraved GG. A material,
+   dark in both themes, with its own light ink. */
+.tu-back {
+  transform: rotateY(180deg) translateZ(calc(var(--depth) / 2 + 0.5px));
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: var(--space-1);
+  background:
+    radial-gradient(circle at 50% 50%, rgb(143 163 255 / 0.2), transparent 55%),
+    repeating-radial-gradient(
+      circle at 50% 50%,
+      rgb(255 255 255 / 0.05) 0 1px,
+      transparent 1px 6px
+    ),
+    linear-gradient(150deg, #33383e, #1a1d21 55%, #24282d);
+  border: 1px solid rgb(255 255 255 / 0.14);
+  color: #e8ebef;
+}
+.tu-back::before {
+  content: "";
+  position: absolute;
+  inset: 7px;
+  border-radius: 9px;
+  border: 1px solid rgb(255 255 255 / 0.12);
+}
+.tu-mono {
+  position: relative;
+  color: #d8dde3;
+  font-size: 42px;
+  font-weight: 800;
+  line-height: 1;
+  letter-spacing: -0.05em;
+  text-shadow:
+    0 1px 0 rgb(255 255 255 / 0.25),
+    0 -1px 0 rgb(0 0 0 / 0.8),
+    0 0 24px rgb(143 163 255 / 0.45);
+}
+.tu-cap {
+  position: relative;
+  color: #a1a8b1;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.24em;
+  line-height: 1.3;
+}
+/* Light racing round the edge while it charges (back) and after it lands (front). */
+.tu-trace {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  padding: 2px;
+  border-radius: inherit;
+  opacity: 0;
+  pointer-events: none;
+  background: conic-gradient(
+    from var(--tu-a),
+    transparent 0 28%,
+    var(--m3) 38%,
+    var(--m1) 46%,
+    #fff 49%,
+    transparent 51% 78%,
+    var(--m3) 88%,
+    var(--m1) 96%,
+    #fff 99%,
+    transparent 100%
+  );
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask:
+    linear-gradient(#000 0 0) content-box exclude,
+    linear-gradient(#000 0 0);
+}
+.tu-core {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  border-radius: inherit;
+  opacity: 0;
+  pointer-events: none;
+  background: radial-gradient(
+    ellipse at 50% 50%,
+    color-mix(in srgb, var(--m1) 70%, transparent),
+    transparent 70%
+  );
+  mix-blend-mode: screen;
+}
+.tu-glare {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    105deg,
+    transparent 35%,
+    rgb(255 255 255 / 0.16) 48%,
+    rgb(255 255 255 / 0.04) 54%,
+    transparent 62%
+  );
+  transform: translateX(-110%);
+  pointer-events: none;
+}
+.tu-medal .tu-shine {
+  position: absolute;
+  inset: -30%;
+  background: linear-gradient(105deg, transparent 38%, rgb(255 255 255 / 0.8) 50%, transparent 62%);
+  transform: translateX(-130%);
+}
+
+@media (forced-colors: active) {
+  .tu-front,
+  .tu-back,
+  .trophy-medal {
+    border: 1px solid CanvasText;
+  }
+}

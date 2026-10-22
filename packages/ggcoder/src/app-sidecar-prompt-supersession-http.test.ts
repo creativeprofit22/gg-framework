@@ -74,7 +74,15 @@ it.each(["research", "attachment", "accepted"] as const)(
 
 // Exercise otherwise transient lifecycle states without adding production test routes.
 // Extract the ENTIRE controller callback, including all supersession side effects.
-async function promptController(bindings: Record<string, unknown>) {
+async function promptController(controllerBindings: Record<string, unknown>) {
+  // Trophy counting is fire-and-forget telemetry inside the controller.
+  const bindings = {
+    recordPromptTrophies: async () => {},
+    trophies: { count: async () => {} },
+    opts: { id: "pane" },
+    scheduled: false,
+    ...controllerBindings,
+  };
   const source = ts.createSourceFile(
     "app-sidecar.ts",
     await fs.readFile(new URL("./app-sidecar.ts", import.meta.url), "utf8"),

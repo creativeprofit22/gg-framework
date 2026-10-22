@@ -508,6 +508,7 @@ function client(paneId: string, generation: number): PaneAgentClient {
     listTasks: vi.fn(async () => []),
     listHistory: vi.fn(async () => []),
     getProgress: vi.fn(async () => null),
+    getTrophies: vi.fn(async () => null),
     listMemories: vi.fn(),
     deleteMemory: vi.fn(),
     listJiwa: vi.fn(),

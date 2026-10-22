@@ -19,6 +19,8 @@ interface KenLifecycleDependencies<Build extends BuildSession, Ken extends KenSe
   ensureSession(signal: AbortSignal): Promise<Ken>;
   buildContext(build: Build, text: string): Promise<string>;
   replyText(ken: Ken): string;
+  /** A non-empty answer was appended to the build transcript. Must not throw. */
+  onTurnPersisted?(): void;
   listen(ken: Ken, publish: (type: string, data: object) => boolean): () => void;
   footerExtras(): object;
   broadcast(type: string, data: unknown): void;
@@ -262,6 +264,7 @@ export function createAppSidecarKenLifecycle<
           if (destination.getConversationIdentity().conversationId !== run.identity.conversationId)
             return;
           await destination.persistKenTurn(text, reply);
+          deps.onTurnPersisted?.();
           publish(run, "extras", deps.footerExtras());
         } finally {
           append.release();

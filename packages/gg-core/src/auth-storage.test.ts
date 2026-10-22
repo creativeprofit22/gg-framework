@@ -219,6 +219,50 @@ describe("AuthStorage — shared-file concurrency", () => {
     expect(refreshed.accessToken).toBe("token-fresh");
     expect(refreshOpenAIToken).toHaveBeenCalledTimes(1);
   });
+
+  it("keeps a sibling's newer login when its own refresh is rejected mid-request", async () => {
+    const filePath = await tempAuthFile();
+    tmpFiles.push(filePath);
+    const session = new AuthStorage(filePath);
+    await session.setCredentials("openai", oauthCreds("token-a"));
+    await session.setCredentials("anthropic", oauthCreds("anthropic-token"));
+
+    // While this refresh is in flight, a sibling (which broke the file lock)
+    // refreshes the same grant and saves token-b; ours is then rejected as reused.
+    refreshOpenAIToken.mockImplementation(async () => {
+      const disk = JSON.parse(await fs.readFile(filePath, "utf-8"));
+      disk.openai = oauthCreds("token-b");
+      await fs.writeFile(filePath, JSON.stringify(disk));
+      throw new Error("OpenAI token refresh failed (400): invalid_grant");
+    });
+
+    const recovered = await session.resolveCredentials("openai", { forceRefresh: true });
+
+    // Deleting from the pre-request snapshot used to wipe token-b from disk and
+    // sign every window out ("Not logged in"), forcing a manual re-login.
+    expect(recovered.accessToken).toBe("token-b");
+    const onDisk = JSON.parse(await fs.readFile(filePath, "utf-8"));
+    expect(onDisk.openai.accessToken).toBe("token-b");
+    expect(onDisk.anthropic.accessToken).toBe("anthropic-token");
+  });
+
+  it("still signs out when the rejected refresh token is the one on disk", async () => {
+    const filePath = await tempAuthFile();
+    tmpFiles.push(filePath);
+    const session = new AuthStorage(filePath);
+    await session.setCredentials("openai", oauthCreds("token-a"));
+    await session.setCredentials("anthropic", oauthCreds("anthropic-token"));
+    refreshOpenAIToken.mockRejectedValue(
+      new Error("OpenAI token refresh failed (400): invalid_grant"),
+    );
+
+    await expect(session.resolveCredentials("openai", { forceRefresh: true })).rejects.toThrow(
+      NotLoggedInError,
+    );
+    const onDisk = JSON.parse(await fs.readFile(filePath, "utf-8"));
+    expect(onDisk.openai).toBeUndefined();
+    expect(onDisk.anthropic.accessToken).toBe("anthropic-token");
+  });
 });
 
 describe("AuthStorage — proactive refresh threshold (kimi-code parity)", () => {

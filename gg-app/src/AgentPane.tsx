@@ -198,8 +198,11 @@ import { DeckMenu, TitleBarActions } from "./WorkspaceHeaderActions";
 import { Deck, type DeckPanelId } from "./Deck";
 import { ContextMeter } from "./ContextMeter";
 import "./Deck.css";
+import "./Trophies.css";
 import { formatWorkspaceTitle } from "./workspace-title";
 import { useProgress } from "./useProgress";
+import { useTrophies } from "./useTrophies";
+import { TrophyUnlock } from "./TrophyUnlock";
 import { SettingsScreen, type SettingsTabId } from "./SettingsScreen";
 import { KenPromptActionProvider, Markdown } from "./LazyMarkdown";
 import { PaneIdContext, PaneIdProvider } from "./pane-context";
@@ -712,6 +715,10 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   // shared setItems/nextId pattern as useKenMentor.
   const { autopilotReviewing, handleAutopilotEvent } = useAutopilot({ setItems, nextId });
   const { snapshot: progress, levelUp, levelUpNonce, levelUpOrigin } = useProgress(client);
+  const trophies = useTrophies(client);
+  // The unlock files into THIS pane's trophies key, not another split pane's.
+  const paneRootRef = useRef<HTMLDivElement>(null);
+  const trophyKeyScope = useCallback(() => paneRootRef.current, []);
   const [xpChips, setXpChips] = useState<Array<{ id: string; label: string }>>([]);
   const lastProgressXpRef = useRef<number | null>(null);
   const [confettiNonce, setConfettiNonce] = useState<string | null>(null);
@@ -4865,6 +4872,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       onDragOver={handleWindowDragOver}
       onDragLeave={handleWindowDragLeave}
       onDrop={handleWindowDrop}
+      ref={paneRootRef}
     >
       {confettiNonce && <Confetti key={confettiNonce} />}
 
@@ -5311,6 +5319,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
                   : undefined,
             }}
             progress={progress}
+            trophies={trophies.snapshot}
             usageExtras={
               windowTotal > 1 &&
               windowIndex !== null && (
@@ -5906,6 +5915,19 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
           (Home, picker, workspace) because the tray targets a WINDOW and can't
           know which of the three it is showing. */}
       {showTraySettings && <SettingsModal onClose={closeTraySettings} />}
+
+      {/* One trophy at a time, in the order earned; it files itself into this
+          pane's deck trophies key. Only the pane whose action earned it queues it. */}
+      {trophies.queue[0] && (
+        <TrophyUnlock
+          key={trophies.queue[0].id}
+          trophy={trophies.queue[0]}
+          snapshot={trophies.snapshot}
+          onOpenTrophies={() => setDeckPanel("trophies")}
+          onDone={trophies.shift}
+          keyScope={trophyKeyScope}
+        />
+      )}
     </div>
   );
   return <PaneIdProvider value={paneId}>{content}</PaneIdProvider>;

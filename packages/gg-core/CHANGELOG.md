@@ -1,5 +1,23 @@
 # @kenkaiiii/gg-core
 
+## 5.85.0
+
+### Minor Changes
+
+- Add Trophies: 144 achievements earned by using GG Coder, from a first slash command to a 365-day streak. The app sidecar records them in `~/.gg/trophies.json` (counting only what happens from now on), serves `GET /trophies`, and broadcasts a `trophies` event when one is earned. `getAppPaths()` gains `trophiesFile`.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.85.0
+
+## 5.84.3
+
+### Patch Changes
+
+- dd2c2e6: Stop a rejected OAuth token refresh from signing every window out: re-read auth.json before deleting the credential, and adopt a newer login that another gg process saved while the refresh was in flight.
+- dd2c2e6: Keep long-lived processes logging: rotate the debug log mid-run when the shared file fills, and count the 10 MB cap against this process's own writes instead of the whole file. The app daemon previously went dark within minutes when it started next to a nearly full log.
+  - @kenkaiiii/gg-ai@5.84.3
+
 ## 5.84.2
 
 ### Patch Changes

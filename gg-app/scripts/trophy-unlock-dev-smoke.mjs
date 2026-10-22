@@ -15,11 +15,16 @@ import { runCrossPaneProjectIsolationSmoke } from "./cross-pane-project-isolatio
 
 const out = resolve(
   process.env.GG_TROPHY_SMOKE_EVIDENCE ??
-    resolve(fileURLToPath(new URL("../..", import.meta.url)), ".gg/eyes/out/trophy-unlock-dev", String(Date.now())),
+    resolve(
+      fileURLToPath(new URL("../..", import.meta.url)),
+      ".gg/eyes/out/trophy-unlock-dev",
+      String(Date.now()),
+    ),
 );
 await mkdir(out, { recursive: true });
 const evidence = {
-  boundary: "Isolated Windows developer Tauri WebView2, real Rust IPC/session routing and SSE forwarding, controlled credential-free fixture daemon. CSS viewport emulation for the narrow case, not OS window resizing, installed app or real trophy engine.",
+  boundary:
+    "Isolated Windows developer Tauri WebView2, real Rust IPC/session routing and SSE forwarding, controlled credential-free fixture daemon. CSS viewport emulation for the narrow case, not OS window resizing, installed app or real trophy engine.",
   checks: [],
   measurements: [],
   cleanup: { status: "not-reached" },
@@ -82,10 +87,18 @@ const measure = (pane) => `(() => {
 })()`;
 
 async function earnAndCheck(client, label, pane = PANE) {
-  await client.evaluate(`window.__TAURI_INTERNALS__.invoke("agent_prompt", { paneId: ${JSON.stringify(pane)}, text: "scene:trophy", attachments: [], meta: null })`);
-  await waitFor(client, `Boolean(document.querySelector("#workspace-pane-${pane} .trophy-unlock .tu-wrap[data-flat]"))`, `${label}: face-up trophy card`);
+  await client.evaluate(
+    `window.__TAURI_INTERNALS__.invoke("agent_prompt", { paneId: ${JSON.stringify(pane)}, text: "scene:trophy", attachments: [], meta: null })`,
+  );
+  await waitFor(
+    client,
+    `Boolean(document.querySelector("#workspace-pane-${pane} .trophy-unlock .tu-wrap[data-flat]"))`,
+    `${label}: face-up trophy card`,
+  );
   // Hold it face up while we look (hover/focus pauses the auto-dismiss).
-  await client.evaluate(`document.querySelector("#workspace-pane-${pane} .tu-wrap button")?.focus(); true`);
+  await client.evaluate(
+    `document.querySelector("#workspace-pane-${pane} .tu-wrap button")?.focus(); true`,
+  );
   const m = await client.evaluate(measure(pane));
   const image = await client.send("Page.captureScreenshot", { format: "png" });
   await writeFile(resolve(out, `${label}.png`), Buffer.from(image.data, "base64"));
@@ -96,12 +109,26 @@ async function earnAndCheck(client, label, pane = PANE) {
   assert.ok(m.inDock, `${label}: card is a dock row`);
   assert.ok(m.insidePane, `${label}: card fits inside its pane ${JSON.stringify(m)}`);
   assert.ok(m.aboveDeck, `${label}: card does not cover the message box ${JSON.stringify(m)}`);
-  assert.equal(m.reservedDockPx, m.dockPx, `${label}: conversation reserves the dock, card included`);
-  assert.ok(m.hits.every((hit) => hit.onCard), `${label}: card paints on top ${JSON.stringify(m.hits)}`);
-  evidence.checks.push(`${label} (${pane}): in dock above the message box (gap ${m.deck.top - m.card.bottom}px), inside ${m.pane.right - m.pane.left}x${m.pane.bottom - m.pane.top} pane, topmost at 5 points, --dock-h ${m.reservedDockPx}px reserved`);
+  assert.equal(
+    m.reservedDockPx,
+    m.dockPx,
+    `${label}: conversation reserves the dock, card included`,
+  );
+  assert.ok(
+    m.hits.every((hit) => hit.onCard),
+    `${label}: card paints on top ${JSON.stringify(m.hits)}`,
+  );
+  evidence.checks.push(
+    `${label} (${pane}): in dock above the message box (gap ${m.deck.top - m.card.bottom}px), inside ${m.pane.right - m.pane.left}x${m.pane.bottom - m.pane.top} pane, topmost at 5 points, --dock-h ${m.reservedDockPx}px reserved`,
+  );
   // Let it file away before the next one.
   await client.evaluate(`document.activeElement?.blur(); true`);
-  await waitFor(client, `!document.querySelector("#workspace-pane-${pane} .trophy-unlock")`, `${label}: card files away`, 20000);
+  await waitFor(
+    client,
+    `!document.querySelector("#workspace-pane-${pane} .trophy-unlock")`,
+    `${label}: card files away`,
+    20000,
+  );
 }
 
 async function verifyWorkspace({ client, projectA, projectB }) {
@@ -109,22 +136,44 @@ async function verifyWorkspace({ client, projectA, projectB }) {
   const layout = {
     version: 9,
     focusedPaneId: "primary",
-    root: { type: "split", direction: "horizontal", size: { type: "ratio", value: 50 }, first: leaf("primary"), second: leaf(PANE) },
+    root: {
+      type: "split",
+      direction: "horizontal",
+      size: { type: "ratio", value: 50 },
+      first: leaf("primary"),
+      second: leaf(PANE),
+    },
     panes: {
       primary: { kind: "agent", mode: "code", cwd: projectA, sessionPath: null },
       [PANE]: { kind: "agent", mode: "code", cwd: projectB, sessionPath: null },
     },
   };
-  await client.evaluate(`localStorage.setItem('gg-workspace-layout-recursive:main', ${JSON.stringify(JSON.stringify(layout))}); location.reload(); true`);
-  await waitFor(client, `document.querySelectorAll('[data-pane-id]').length === 2 && document.querySelectorAll('[data-pane-id] textarea').length === 2`, "two developer panes");
+  await client.evaluate(
+    `localStorage.setItem('gg-workspace-layout-recursive:main', ${JSON.stringify(JSON.stringify(layout))}); location.reload(); true`,
+  );
+  await waitFor(
+    client,
+    `document.querySelectorAll('[data-pane-id]').length === 2 && document.querySelectorAll('[data-pane-id] textarea').length === 2`,
+    "two developer panes",
+  );
   try {
     await earnAndCheck(client, "wide");
     await earnAndCheck(client, "wide-left", "primary");
-    await client.send("Emulation.setDeviceMetricsOverride", { width: 640, height: 720, deviceScaleFactor: 1, mobile: false });
+    await client.send("Emulation.setDeviceMetricsOverride", {
+      width: 640,
+      height: 720,
+      deviceScaleFactor: 1,
+      mobile: false,
+    });
     await new Promise((done) => setTimeout(done, 400));
     await earnAndCheck(client, "narrow");
     await earnAndCheck(client, "narrow-left", "primary");
-    await client.send("Emulation.setDeviceMetricsOverride", { width: 900, height: 480, deviceScaleFactor: 1, mobile: false });
+    await client.send("Emulation.setDeviceMetricsOverride", {
+      width: 900,
+      height: 480,
+      deviceScaleFactor: 1,
+      mobile: false,
+    });
     await new Promise((done) => setTimeout(done, 400));
     await earnAndCheck(client, "short");
     await earnAndCheck(client, "short-left", "primary");
@@ -150,11 +199,20 @@ try {
 } catch (error) {
   evidence.status = "failed";
   // The shared launcher's error carries raw developer logs and profile paths; keep ours only.
-  evidence.error = evidence.assertion ?? "Native fixture failed before the trophy checks; inspect the retained fixture log.";
+  evidence.error =
+    evidence.assertion ??
+    "Native fixture failed before the trophy checks; inspect the retained fixture log.";
   // Console only, first line: enough to tell a build timeout from a failed check.
   console.error(String(error instanceof Error ? error.message : error).split("\n")[0]);
   process.exitCode = 1;
 } finally {
   await writeFile(resolve(out, "result.json"), JSON.stringify(evidence, null, 2));
-  console.log(JSON.stringify({ status: evidence.status, output: out, error: evidence.error, checks: evidence.checks }));
+  console.log(
+    JSON.stringify({
+      status: evidence.status,
+      output: out,
+      error: evidence.error,
+      checks: evidence.checks,
+    }),
+  );
 }

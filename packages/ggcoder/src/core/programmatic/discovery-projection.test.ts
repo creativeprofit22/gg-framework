@@ -35,6 +35,19 @@ const choices = [
   { kind: "missing-capability", proposal: requirement },
   { kind: "reuse-command", availability },
   { kind: "extend-command", availability, proposedChanges: ["Add report"], requirement },
+  {
+    kind: "generate-from-reference",
+    generator: {
+      version: 1,
+      familyId: "0123456789abcdef",
+      members: ["records/a", "records/b", "records/c"],
+      sharedShape: ["Same record layout"],
+      varyingInputs: ["Record name"],
+      reference: { kind: "existing-member", path: "records/b", reason: "Most complete record" },
+      risks: ["Overrides may be lost"],
+      verificationExpectations: ["Generated records match the reference layout"],
+    },
+  },
 ];
 function accepted(choice: unknown) {
   return programmaticAssessmentResultV2Schema.parse({
@@ -86,6 +99,48 @@ it.each(choices)("projects $kind without transferring domain authority", (choice
   expect(projectDiscovery(id, result).projection.candidates[0]!.candidateId).not.toBe(
     projection.candidates[0]!.candidateId,
   );
+});
+it("shows generator advice in plain words for current and saved suggestions", () => {
+  const choice = choices.at(-1)!;
+  const result = accepted(choice);
+  const display = projectDiscovery(randomUUID(), result).projection.candidates[0]!;
+  expect(display).toMatchObject({
+    choice: "generate-from-reference",
+    details: [
+      "Reference: records/b (inspected, not verified to work)",
+      "Most complete record",
+      "Same record layout",
+      "Record name",
+      "records/a",
+      "records/b",
+      "records/c",
+    ],
+    risks: ["Overrides may be lost"],
+    nextStep: {
+      available: true,
+      reason:
+        "Review generator creation without making changes. Creating, checking and running a generator each need separate review and approval.",
+    },
+  });
+  expect(display.availability).toBeUndefined();
+  const recommendation = result.recommendations[0]!;
+  const historical = projectHistoricalDiscovery(
+    {
+      ...recommendation,
+      version: 1,
+      id: randomUUID(),
+      assessmentId: randomUUID(),
+      candidateId: randomUUID(),
+      evidence: [],
+      alternatives: [{ kind: "manual", reasonNotSelected: "Repeated work" }],
+      choice: recommendation.choice as RecommendationObservationV1["choice"],
+    },
+    2,
+  );
+  expect(historical).toMatchObject({ choice: "generate-from-reference", details: display.details });
+  expect(historical?.nextStep.available).toBe(false);
+  const rendered = JSON.stringify([display.details, display.nextStep, historical?.nextStep]);
+  expect(rendered).not.toMatch(/fingerprint|digest|lifecycle/i);
 });
 it("projects only bounded availability evidence for an available command", () => {
   const result = accepted({

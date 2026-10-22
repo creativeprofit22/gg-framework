@@ -319,7 +319,7 @@ Report that /commit now commits all uncommitted work in the repository (from thi
 
 ${renderProgrammaticAdvisoryPolicy()}
 
-1. Assess project needs and workflows using the bounded supplied evidence and permitted local read/navigation tools, including unfamiliar or manifest-free projects. Samples are not complete coverage; use delivered receipts for observations and state uncertainty.
+1. Assess project needs and workflows using the bounded supplied evidence and permitted local read/navigation tools, including unfamiliar or manifest-free projects. Samples are not complete coverage; use delivered receipts for observations and state uncertainty. \`item_families\` are path-derived structural groupings (possibly "build one reference, generate the rest"), not proof of shared behaviour; verify with permitted reads before recommending.
 2. The host already collected exact \`programmatic_profile\` inspection facts. Do not repeat inspection or discover tools. Submit bounded needs recommendations through \`programmatic_advisory_result\`; no scan is required or permitted in setup.
 3. Keep the exact inventory, configuration fingerprint, profile, routes, exclusions, drift inputs and fixed profile path unchanged in tool data and approval review; do not recite these raw details in the setup transcript. Give a brief user-facing outcome, inspection limits and next permitted action instead. Do not repeat rendered accepted advice.
 4. State explicitly that setup performed no writes.

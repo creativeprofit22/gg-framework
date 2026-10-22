@@ -1,5 +1,8 @@
 import { z } from "zod";
 import {
+  ADVISORY_ALTERNATIVES_MAX,
+  advisoryChoiceKindSchema,
+  POSITIVE_ADVISORY_CHOICES,
   programmaticAssessmentResultV2Schema,
   programmaticAssessmentInputV1Schema,
   programmaticCommandReferenceV1Schema,
@@ -42,7 +45,6 @@ export const recommendationEvidenceV1Schema = z.strictObject({
   external: z.strictObject({ url: externalUrl, revision: z.string().min(1).max(100).optional(), location: location.optional() }).optional(),
   snapshotSha256: digest.optional(),
 });
-const choiceKind = z.enum(["reuse-command", "extend-command", "missing-capability", "manual", "needs-more-evidence"]);
 const source = programmaticRecommendationV2Schema.shape;
 const choices = source.choice.options;
 // Reuse validated advisory descriptions, but project current availability into inert references.
@@ -50,17 +52,17 @@ const choice = z.discriminatedUnion("kind", [
   z.strictObject({ kind: z.literal("reuse-command"), reference: recommendationReferenceV1Schema.options[0] }),
   z.strictObject({ kind: z.literal("extend-command"), reference: recommendationReferenceV1Schema.options[0],
     proposedChanges: choices[1].shape.proposedChanges, requirement: choices[1].shape.requirement }),
-  choices[2], choices[3], choices[4],
+  choices[2], choices[3], choices[4], choices[5],
 ]);
 export const recommendationObservationV1Schema = z.strictObject({
   version: z.literal(1), id, assessmentId: id, candidateId: id,
   workflow: programmaticWorkflowV2Schema, outcome: source.outcome, rationale: source.rationale,
   uncertainty: source.uncertainty, choice,
-  alternatives: z.array(z.strictObject({ kind: choiceKind, reasonNotSelected: source.outcome,
-    reference: recommendationReferenceV1Schema.options[0].optional() })).max(4),
+  alternatives: z.array(z.strictObject({ kind: advisoryChoiceKindSchema, reasonNotSelected: source.outcome,
+    reference: recommendationReferenceV1Schema.options[0].optional() })).max(ADVISORY_ALTERNATIVES_MAX),
   evidence: z.array(recommendationEvidenceV1Schema).max(50),
 }).refine((value) => {
-  const positive = ["reuse-command", "extend-command", "missing-capability"].includes(value.choice.kind);
+  const positive = POSITIVE_ADVISORY_CHOICES.includes(value.choice.kind);
   return (!positive || (value.alternatives.length > 0 && value.workflow.repeatability.basis !== "assumed")) &&
     value.alternatives.every((option) => option.kind !== value.choice.kind) &&
     new Set(value.alternatives.map((option) => option.kind)).size === value.alternatives.length &&

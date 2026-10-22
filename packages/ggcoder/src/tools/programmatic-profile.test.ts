@@ -73,6 +73,10 @@ interface InspectOutput {
   configuration_fingerprint: ConfigurationFingerprintV1;
   configuration_inputs: Array<{ path: string; sha256: string }>;
   exclusions: string[];
+  item_families: {
+    basis: string;
+    families: Array<{ kind: string; parent: string; memberCount: number }>;
+  };
   profile: ProgrammaticProfileV1;
   profile_path: string;
   routes: Array<{ detector_id: string; resolution: { status: string } }>;
@@ -221,6 +225,34 @@ describe("Targeted automated tests prove discovery-only behavior, approval separ
         (command) => command.name,
       ),
     ).toEqual(["setup-programmatic", "programmatic"]);
+  });
+
+  it("inspect reports path-derived item families as advisory facts without changing the proposal binding", async () => {
+    const root = await repository();
+    const plain = await inspect(root);
+    expect(plain.item_families).toMatchObject({ basis: "observed-paths", families: [] });
+    for (const name of ["stripe", "paypal", "square"]) {
+      await fs.mkdir(path.join(root, "integrations", name, "tests"), { recursive: true });
+      await fs.writeFile(path.join(root, "integrations", name, "client.py"), "pass\n");
+      await fs.writeFile(
+        path.join(root, "integrations", name, "tests", `test_${name}.py`),
+        "pass\n",
+      );
+    }
+    const result = await inspect(root);
+    expect(result.item_families.families).toEqual([
+      expect.objectContaining({
+        kind: "sibling-directories",
+        parent: "integrations",
+        memberCount: 3,
+      }),
+    ]);
+    expect(result.configuration_fingerprint).toEqual(plain.configuration_fingerprint);
+    expect(result.profile).toEqual(plain.profile);
+    expect(result.routes).toEqual(plain.routes);
+    expect(getPromptCommand("setup-programmatic")?.prompt).toContain(
+      "`item_families` are path-derived structural groupings",
+    );
   });
 
   it("A separate explicit generation action writes only a validated, versioned declarative profile under .gg/programmatic/ using repository-relative paths and atomic replacement", async () => {

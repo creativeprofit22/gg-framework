@@ -549,8 +549,10 @@ async function runProgrammaticAssessment(
                     )[0]!
                 : raw;
               const facts = JSON.parse(body);
-              if (mode === "setup") setupFacts = facts;
-              else {
+              if (mode === "setup") {
+                setupFacts = facts;
+                coordinator!.scope.turn.recordFamilies(facts?.item_families);
+              } else {
                 scanFacts = facts;
                 if (facts?.ok === true) {
                   scanCounts = facts.scan_counts;

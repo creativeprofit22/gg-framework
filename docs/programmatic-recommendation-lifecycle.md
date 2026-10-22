@@ -36,7 +36,7 @@ Once correspondence is confirmed, its workflow spellings can exactly match the c
 
 ## Observations, evidence and coverage
 
-Exact-workflow replay appends an observation when evidence or the five-choice recommendation changes. Older observations are not rewritten or retroactively verified. All five choices remain distinct: reuse, extension, missing capability, manual work, and needs more evidence. Available/unavailable command reports are historical attribution only.
+Exact-workflow replay appends an observation when evidence or the six-choice recommendation changes. Older observations are not rewritten or retroactively verified. All six choices remain distinct: reuse, extension, missing capability, manual work, needs more evidence, and generate from a reference. Available/unavailable command reports are historical attribution only.
 
 Persistence projects validated advisory descriptions and bounded evidence summaries, not raw tool output, source bodies, command bodies, tool-call IDs or reusable receipt IDs. Local locations must be normalized relative paths. External attribution removes URL credentials, query strings and fragments and accepts only HTTP(S) metadata. Arbitrary secrets cannot be inferred reliably from prose: summaries remain untrusted project data, not a secret-scanning guarantee. Do not put credentials in recommendations or their summaries.
 

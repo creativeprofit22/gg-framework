@@ -11,7 +11,8 @@ import {
   ADVISORY_LIMITS,
   renderAdvisoryResult,
 } from "./advisory.js";
-import { programmaticAssessmentResultV2Schema } from "./contracts.js";
+import { inventoryV1Schema, programmaticAssessmentResultV2Schema } from "./contracts.js";
+import { detectProgrammaticItemFamilies } from "./item-families.js";
 import { projectAdvisoryCommands, type CommandDiscovery } from "../command-discovery.js";
 
 afterEach(() => {
@@ -1550,6 +1551,182 @@ describe("needs-first host submission", () => {
       expect(turn.acceptedResult).toBeUndefined();
     },
   );
+});
+
+describe("generate-from-reference host submission", () => {
+  const REGIONS = ["ap-south", "eu-west", "us-east"];
+  const regionFiles = (regions: readonly string[]) =>
+    regions.flatMap((region) =>
+      ["deploy.yaml", "secrets.example", "README.md"].map(
+        (file) => `config/regions/${region}/${file}`,
+      ),
+    );
+  /** Real detector output on a bounded path-only inventory. */
+  function families(paths: readonly string[]) {
+    return detectProgrammaticItemFamilies(
+      inventoryV1Schema.parse({
+        version: 1,
+        configurationFingerprint: { version: 1, sha256: "a".repeat(64) },
+        scanners: [],
+        entries: [...paths].sort().map((entry) => ({ path: entry, bytes: entry.length })),
+      }),
+    );
+  }
+  const commandSnapshot = {
+    version: 1,
+    command: { version: 1, name: "gen-region", source: "project-custom", invocationKind: "prompt" },
+    capabilityKind: "prompt-only",
+    ownerSha256: "c".repeat(64),
+    bodySha256: "d".repeat(64),
+    helpers: [],
+  };
+  function fixture(
+    options: { mode?: "setup" | "configured"; regions?: string[]; inspected?: string } = {},
+  ) {
+    const evidence = new AdvisoryEvidence();
+    const turn =
+      options.mode === "configured"
+        ? scannedTurn(evidence)
+        : new ProgrammaticAdvisoryTurn(evidence, { mode: "setup" });
+    const detected = families([...regionFiles(options.regions ?? REGIONS), "package.json"]);
+    if (options.mode !== "configured") turn.recordFamilies(detected);
+    const family = detected.families[0];
+    const inspected = options.inspected ?? "config/regions/us-east/deploy.yaml";
+    const receipt = evidence.observe(
+      process.cwd(),
+      "read",
+      { file_path: inspected },
+      "reference",
+      "1\tregion: us-east",
+    );
+    // Contract fixture supplies host classification; real delivery is covered in advisory-tools.test.ts.
+    receipt.localSources = [{ path: inspected, purpose: "independent" }];
+    const members = family?.members.map((member) => member.path) ?? [
+      "config/regions/eu-west",
+      "config/regions/us-east",
+      "config/regions/ap-south",
+    ];
+    const generator = {
+      version: 1,
+      familyId: family?.id ?? "0123456789abcdef",
+      members,
+      sharedShape: ["deploy.yaml, secrets.example and README.md with the same keys"],
+      varyingInputs: ["Region name", "Endpoint URL", "Credential reference"],
+      reference: {
+        kind: "existing-member",
+        path: "config/regions/us-east",
+        reason: "The most complete region configuration",
+      },
+      risks: ["Region-specific overrides may be lost"],
+      verificationExpectations: ["Generated files differ from the reference only in listed inputs"],
+    };
+    const recommendation = {
+      ...manualAssessment.recommendations[0]!,
+      outcome: "Add new regions from one reference configuration",
+      rationale: "Each region repeats the same files with different names and endpoints",
+      evidence: {
+        version: 1,
+        items: [
+          {
+            basis: "observed",
+            source: receipt.id,
+            code: "reference",
+            severity: "info",
+            message: "The reference region contains every shared file",
+          },
+        ],
+      },
+      alternatives: [
+        { kind: "reuse-command", reasonNotSelected: "No existing command creates regions" },
+        { kind: "extend-command", reasonNotSelected: "No command partially fits this setup" },
+        { kind: "manual", reasonNotSelected: "New regions are added often enough to drift" },
+      ],
+      choice: { kind: "generate-from-reference", generator } as Record<string, unknown>,
+    };
+    const input = { ...manualAssessment, recommendations: [recommendation] };
+    const checks = {
+      snapshot: vi.fn(async () => true),
+      page: async () => ({}),
+      signal: new AbortController().signal,
+    };
+    return { turn, input, recommendation, generator, checks };
+  }
+
+  it("suggests generation for a real detected family with an inspected reference, without starting work", async () => {
+    const { turn, input, generator, checks } = fixture();
+    expect(generator.members).toEqual(REGIONS.map((region) => `config/regions/${region}`));
+    const output = await turn.submit(input, checks);
+    for (const value of [
+      "Reference: config/regions/us-east",
+      "Inspected, not verified to work.",
+      ...generator.members,
+      ...generator.sharedShape,
+      ...generator.varyingInputs,
+      ...generator.risks,
+      ...generator.verificationExpectations,
+      "Next: review generator creation. Creating, checking and running it each need separate approval.",
+    ])
+      expect(output).toContain(value);
+    expect(output).not.toMatch(/fingerprint|digest|lifecycle|receipt-/i);
+    const display = projectDiscovery(randomUUID(), turn.acceptedResult!).projection.candidates[0]!;
+    expect(display.choice).toBe("generate-from-reference");
+    expect(display.nextStep.reason).toContain("Review generator creation");
+  });
+
+  it("accepts building one by hand first without an inspected member", async () => {
+    const { turn, input, generator, checks } = fixture({ inspected: "package.json" });
+    generator.reference = {
+      kind: "build-by-hand-first",
+      reason: "No region is complete yet",
+    } as never;
+    await expect(turn.submit(input, checks)).resolves.toContain(
+      "Reference: build one example by hand first",
+    );
+  });
+
+  it("rejects an existing reference that was not inspected", async () => {
+    const { turn, input, checks } = fixture({ inspected: "package.json" });
+    await expect(turn.submit(input, checks)).rejects.toThrow("must be inspected in this turn");
+    expect(turn.submitted).toBe(false);
+  });
+
+  it("rejects a too-small group the detector did not report", async () => {
+    const { turn, input, checks } = fixture({ regions: ["eu-west", "us-east"] });
+    await expect(turn.submit(input, checks)).rejects.toThrow("too-small or undetected group");
+  });
+
+  it("rejects a mixed group with members outside the detected family", async () => {
+    const { turn, input, generator, checks } = fixture();
+    generator.members = [...generator.members.slice(1), "src/handlers"];
+    await expect(turn.submit(input, checks)).rejects.toThrow("do not mix items");
+  });
+
+  it("rejects generation in configured mode, where no families are delivered", async () => {
+    const { turn, input, checks } = fixture({ mode: "configured" });
+    await expect(turn.submit(input, checks)).rejects.toThrow("too-small or undetected group");
+  });
+
+  it("reuses an existing generator command, listing generation as the alternative", async () => {
+    const { turn, input, recommendation, checks } = fixture({ mode: "configured" });
+    turn.observeCommand(JSON.stringify({ status: "prompt", snapshot: commandSnapshot }));
+    Object.assign(recommendation, {
+      choice: {
+        kind: "reuse-command",
+        availability: { status: "available", snapshot: commandSnapshot },
+      },
+      alternatives: [
+        {
+          kind: "generate-from-reference",
+          reasonNotSelected: "/gen-region already generates region configuration",
+        },
+      ],
+    });
+    await turn.submit(input, checks);
+    expect(turn.acceptedResult?.recommendations[0]).toMatchObject({
+      choice: { kind: "reuse-command" },
+      alternatives: [{ kind: "generate-from-reference" }],
+    });
+  });
 });
 
 describe("advisory extension regression fixtures", () => {

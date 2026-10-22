@@ -52,6 +52,45 @@ it("inspects without writes and keeps current setup non-approvable across source
   }
 });
 
+it("reports path-derived item families without changing setup binding, routes or drift", async () => {
+  const root = await fixture();
+  await approve(root);
+  const before = await buildProgrammaticProfileProposal(root);
+  expect(before.itemFamilies.families).toEqual([]);
+  for (const name of ["alpha", "beta", "gamma"]) {
+    await fs.mkdir(path.join(root, "plugins", name), { recursive: true });
+    await fs.writeFile(
+      path.join(root, "plugins", name, "index.ts"),
+      `export const id = "${name}";\n`,
+    );
+    await fs.writeFile(path.join(root, "plugins", name, "README.md"), `# ${name}\n`);
+  }
+  const after = await buildProgrammaticProfileProposal(root);
+  expect(after.itemFamilies).toMatchObject({
+    basis: "observed-paths",
+    families: [
+      {
+        kind: "sibling-directories",
+        parent: "plugins",
+        memberCount: 3,
+        shape: ["README.md", "index.ts"],
+      },
+    ],
+  });
+  const bound = (proposal: typeof before) => ({
+    operation: proposal.operation,
+    configurationFingerprint: proposal.configurationFingerprint,
+    configurationSnapshot: proposal.configurationSnapshot,
+    profile: proposal.profile,
+    routes: proposal.routes,
+    drift: proposal.drift,
+    expectedPriorProfileDigest: proposal.expectedPriorProfileDigest,
+  });
+  expect(bound(after)).toEqual(bound(before));
+  expect(after.operation).toBe("current");
+  expect((await assessProgrammaticSetup(root)).status).toBe("current");
+});
+
 it("requires a matching prior-byte digest for refresh and preserves lifecycle bytes", async () => {
   const root = await fixture();
   await approve(root);

@@ -543,13 +543,58 @@ export const programmaticAssessmentResultV1Schema = z.strictObject({
   ]),
 });
 
-const advisoryChoiceKindSchema = z.enum([
+/** The one ggcoder owner of the advisory decision list; other modules import it. */
+export const advisoryChoiceKindSchema = z.enum([
   "reuse-command",
   "extend-command",
   "missing-capability",
   "manual",
   "needs-more-evidence",
+  "generate-from-reference",
 ]);
+type AdvisoryChoiceKind = z.infer<typeof advisoryChoiceKindSchema>;
+/** Every unselected choice may be listed once. */
+export const ADVISORY_ALTERNATIVES_MAX = advisoryChoiceKindSchema.options.length - 1;
+/** Choices that propose automation: they need alternatives and supported repeatability. */
+export const POSITIVE_ADVISORY_CHOICES: readonly AdvisoryChoiceKind[] = Object.freeze([
+  "reuse-command",
+  "extend-command",
+  "missing-capability",
+  "generate-from-reference",
+]);
+// Literal bounds mirror ITEM_FAMILY_LIMITS (importing item-families here would be circular).
+export const FAMILY_GENERATOR_MEMBER_BOUNDS = Object.freeze({ min: 3, max: 12 });
+/**
+ * Advice to inspect or hand-build one reference member and generate the rest of a
+ * detected family. Proposal data only: it creates, approves and runs nothing.
+ */
+const programmaticFamilyGeneratorV1Schema = z
+  .strictObject({
+    version: z.literal(1),
+    familyId: z.string().regex(/^[a-f0-9]{16}$/, "must be a detected item family id"),
+    members: z
+      .array(extensionPathSchema)
+      .min(FAMILY_GENERATOR_MEMBER_BOUNDS.min)
+      .max(FAMILY_GENERATOR_MEMBER_BOUNDS.max)
+      .refine((paths) => new Set(paths).size === paths.length, "members must be unique"),
+    sharedShape: extensionTextsSchema,
+    varyingInputs: extensionTextsSchema,
+    reference: z.discriminatedUnion("kind", [
+      z.strictObject({
+        kind: z.literal("existing-member"),
+        path: extensionPathSchema,
+        reason: extensionTextSchema,
+      }),
+      z.strictObject({ kind: z.literal("build-by-hand-first"), reason: extensionTextSchema }),
+    ]),
+    risks: extensionTextsSchema,
+    verificationExpectations: extensionTextsSchema,
+  })
+  .refine(
+    (value) =>
+      value.reference.kind !== "existing-member" || value.members.includes(value.reference.path),
+    "an existing reference must be one of the family members",
+  );
 export const programmaticWorkflowV2Schema = z.strictObject({
   trigger: extensionTextSchema,
   representativeCase: extensionTextSchema,
@@ -592,7 +637,7 @@ export const programmaticRecommendationV2Schema = z
             "only command alternatives may name a concrete command",
           ),
       )
-      .max(4),
+      .max(ADVISORY_ALTERNATIVES_MAX),
     choice: z.discriminatedUnion("kind", [
       z.strictObject({
         kind: z.literal("reuse-command"),
@@ -614,12 +659,14 @@ export const programmaticRecommendationV2Schema = z
         missingEvidence: extensionTextsSchema,
         nextInspectionSteps: extensionTextsSchema,
       }),
+      z.strictObject({
+        kind: z.literal("generate-from-reference"),
+        generator: programmaticFamilyGeneratorV1Schema,
+      }),
     ]),
   })
   .refine((value) => {
-    const positive = ["reuse-command", "extend-command", "missing-capability"].includes(
-      value.choice.kind,
-    );
+    const positive = POSITIVE_ADVISORY_CHOICES.includes(value.choice.kind);
     return (
       (!positive ||
         (value.alternatives.length > 0 && value.workflow.repeatability.basis !== "assumed")) &&

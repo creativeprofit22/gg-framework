@@ -382,6 +382,38 @@ describe("conservative recommendation reconciliation", () => {
         ).toThrow(/Incomplete/);
     },
   );
+  it("keeps an omitted generator suggestion open and its saved display inert", () => {
+    const input = capture();
+    Object.assign(input.observations[0]!, {
+      choice: {
+        kind: "generate-from-reference",
+        generator: {
+          version: 1,
+          familyId: "0123456789abcdef",
+          members: ["config/a", "config/b", "config/c"],
+          sharedShape: ["Same keys"],
+          varyingInputs: ["Name"],
+          reference: { kind: "existing-member", path: "config/a", reason: "Complete" },
+          risks: ["Overrides may be lost"],
+          verificationExpectations: ["Compare generated files"],
+        },
+      },
+      alternatives: [{ kind: "manual", reasonNotSelected: "Items are added often" }],
+    });
+    const history = reconcileRecommendations(emptyRecommendationHistory(), input).history;
+    const omitted = capture();
+    omitted.observations = [];
+    const next = reconcileRecommendations(history, omitted).history;
+    expect(next.candidates).toEqual(history.candidates);
+    expect(next.observations).toEqual(history.observations);
+    expect(next.decisions).toEqual([]);
+    const detail = recommendationDetail(next, next.candidates[0]!.id, 0)!;
+    expect(isRecommendationDetail(detail)).toBe(true);
+    expect(detail.discovery).toMatchObject({
+      choice: "generate-from-reference",
+      nextStep: { available: false },
+    });
+  });
   it("records explicit reopen and separates user completion from referenced verification", () => {
     let history = first();
     const id = history.candidates[0]!.id;

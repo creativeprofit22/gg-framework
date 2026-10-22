@@ -1,11 +1,12 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import type { z } from "zod";
+import type { advisoryChoiceKindSchema } from "../core/programmatic/contracts.js";
 
 // Synthetic inputs only. Grading expectations below are never written into a project.
 export interface EvaluationNeed {
   outcome: string;
-  kind:
-    "reuse-command" | "extend-command" | "missing-capability" | "manual" | "needs-more-evidence";
+  kind: z.infer<typeof advisoryChoiceKindSchema>;
   rationale: string;
   sources: string[];
   command?: string;

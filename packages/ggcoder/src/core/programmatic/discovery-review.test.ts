@@ -98,6 +98,37 @@ it.each([
   expect(review.allows(name)).toBe(false);
   expect(() => review.claim(name, {}, false)).toThrow();
 });
+it("keeps generator review read-only: re-inspection prepares it, nothing is created", () => {
+  const generatorCandidate: DiscoveryCandidate = {
+    ...candidate,
+    choice: "generate-from-reference",
+    alternatives: [{ kind: "manual", reasonNotSelected: "New items are frequent" }],
+  };
+  const review = new DiscoveryReviewBoundary(generatorCandidate, new Set(["WORKFLOW"]), {
+    kind: "generate-from-reference",
+    generator: {
+      version: 1,
+      familyId: "0123456789abcdef",
+      members: ["records/a", "records/b", "records/c"],
+      sharedShape: ["Same layout"],
+      varyingInputs: ["Name"],
+      reference: { kind: "build-by-hand-first", reason: "No complete record" },
+      risks: ["Overrides may be lost"],
+      verificationExpectations: ["Compare generated records"],
+    },
+  });
+  expect(review.allows("programmatic_command")).toBe(false);
+  for (const action of ["inspect", "create", "run"])
+    expect(() => review.claim("programmatic_command", { action }, false)).toThrow();
+  for (const name of ["write", "edit", "bash"]) expect(review.allows(name)).toBe(false);
+  expect(review.prepared).toBe(false);
+  inspect(review);
+  expect(review.prepared).toBe(true);
+  expect(review.allows("programmatic_command")).toBe(false);
+  expect(discoveryReviewPrompt(generatorCandidate)).toContain(
+    "re-inspect the reference and the listed family members",
+  );
+});
 it("requires relevant local evidence and catalog, refuses failed reads and external replacements", () => {
   const review = boundary();
   review.observe(process.cwd(), "read", { file_path: "OTHER" }, "1\tOther", "unrelated");

@@ -496,6 +496,7 @@ it.each([
   "reuse-command",
   "extend-command",
   "missing-capability",
+  "generate-from-reference",
 ] as const)("shows honest %s detail and preserves it while refreshing", (choice) => {
   const props = fixture({
     ...candidate,
@@ -511,9 +512,11 @@ it.each([
   const { rerender } = render(<ProgrammaticChat {...props} state={selected} />);
   expect(screen.getByRole("region", { name: "Selected opportunity" })).toBeTruthy();
   const reviewName =
-    choice === "reuse-command" || choice === "extend-command"
-      ? "Reinspect command (read-only)"
-      : "Review this task";
+    choice === "generate-from-reference"
+      ? "Review generator creation"
+      : choice === "reuse-command" || choice === "extend-command"
+        ? "Reinspect command (read-only)"
+        : "Review this task";
   if (choice === "manual") {
     expect(screen.queryByRole("button", { name: reviewName })).toBeNull();
   } else {
@@ -548,6 +551,42 @@ it.each([
         }) as HTMLButtonElement
       ).disabled,
     ).toBe(true);
+});
+it("shows a generator suggestion in plain words and selecting it starts nothing", () => {
+  const item: DiscoveryCandidate = {
+    ...candidate,
+    outcome: "Add new regions from one reference configuration",
+    choice: "generate-from-reference",
+    details: [
+      "Reference: config/regions/us-east (inspected, not verified to work)",
+      "config/regions/ap-south",
+    ],
+    nextStep: {
+      available: true,
+      reason:
+        "Review generator creation without making changes. Creating, checking and running a generator each need separate review and approval.",
+    },
+  };
+  const props = fixture(item);
+  const view = render(<ProgrammaticChat {...props} />);
+  fireEvent.click(screen.getByText("Browse suggested tasks (1)"));
+  fireEvent.click(screen.getByRole("button", { name: item.outcome }));
+  expect(props.onSelectCandidate).toHaveBeenCalledExactlyOnceWith("current", item.candidateId);
+  expect(props.onAction).not.toHaveBeenCalled();
+  expect(props.onRun).not.toHaveBeenCalled();
+  const selected = programmaticChatReducer(props.state, {
+    type: "select-candidate",
+    source: "current",
+    id: item.candidateId,
+  });
+  view.rerender(<ProgrammaticChat {...props} state={selected} />);
+  expect(screen.getAllByText(/Build one example, then generate the rest/).length).toBeGreaterThan(
+    0,
+  );
+  expect(screen.getByRole("button", { name: "Review generator creation" })).toBeTruthy();
+  expect(props.onAction).not.toHaveBeenCalled();
+  expect(props.onRun).not.toHaveBeenCalled();
+  expect(document.body.textContent).not.toMatch(/fingerprint|digest|lifecycle/i);
 });
 it("retains user selection and focus through unrelated rerenders without automatic actions", () => {
   const props = fixture();

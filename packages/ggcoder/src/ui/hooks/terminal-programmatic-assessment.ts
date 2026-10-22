@@ -98,8 +98,11 @@ export async function prepareTerminalProgrammaticAssessment(
           const raw = typeof output === "string" ? output : output.content;
           if (typeof raw !== "string") throw new Error("Non-text host facts.");
           const value = JSON.parse(raw);
-          if (input.mode === "setup") facts.setupFacts = value;
-          else {
+          if (input.mode === "setup") {
+            facts.setupFacts = value;
+            // Host-owned: only families from this host-run inspection may back a generator.
+            turn.recordFamilies(value?.item_families);
+          } else {
             facts.scanFacts = value;
             if (value?.ok === true) coordinator.recordScanCounts(value.scan_counts);
           }

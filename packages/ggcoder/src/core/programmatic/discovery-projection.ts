@@ -45,6 +45,14 @@ function details(choice: DiscoveryRecord["recommendation"]["choice"] | Recommend
       nextStep: choice.proposal.capabilityKind === "app-backed"
         ? step(false, "Requires application development. A prompt alone cannot provide this functionality.")
         : step(true, "Review a proposal without making changes. Creating, checking and running it each need separate review and approval.") };
+    case "generate-from-reference": {
+      const { generator } = choice;
+      const reference = generator.reference.kind === "existing-member"
+        ? `Reference: ${generator.reference.path} (inspected, not verified to work)` : "Build one example by hand first";
+      return { details: [reference, generator.reference.reason, ...generator.sharedShape, ...generator.varyingInputs, ...generator.members],
+        risks: generator.risks,
+        nextStep: step(true, "Review generator creation without making changes. Creating, checking and running a generator each need separate review and approval.") };
+    }
     case "reuse-command":
     case "extend-command": {
       const availability = "availability" in choice ? choice.availability : undefined;

@@ -1,6 +1,14 @@
+/** The one gg-core owner of the decision list; display only, never authority. */
+export const DISCOVERY_CHOICES = Object.freeze([
+  "reuse-command",
+  "extend-command",
+  "missing-capability",
+  "manual",
+  "needs-more-evidence",
+  "generate-from-reference",
+] as const);
 /** Host projection only. No command body, tool arguments, receipt or approval token. */
-export type DiscoveryChoice =
-  "reuse-command" | "extend-command" | "missing-capability" | "manual" | "needs-more-evidence";
+export type DiscoveryChoice = (typeof DISCOVERY_CHOICES)[number];
 /** Display evidence only; available never grants execution authority. */
 export interface DiscoveryAvailability {
   status: "available" | "unavailable" | "reinspection-required";
@@ -93,13 +101,7 @@ function object(
     )
   );
 }
-const choice: Guard = oneOf(
-  "reuse-command",
-  "extend-command",
-  "missing-capability",
-  "manual",
-  "needs-more-evidence",
-);
+const choice: Guard = oneOf(...DISCOVERY_CHOICES);
 const availability: Guard = (value) =>
   object(value, {
     status: oneOf("available", "unavailable", "reinspection-required"),
@@ -138,7 +140,7 @@ export function isDiscoveryCandidate(value: unknown): value is DiscoveryCandidat
         evidence: list((item) => object(item, { basis, message: text, source: text }), 50),
         alternatives: list(
           (item) => object(item, { kind: choice, reasonNotSelected: text }, { availability }),
-          4,
+          DISCOVERY_CHOICES.length - 1,
         ),
         risks: list(text, 50),
         details: list(text, 64),

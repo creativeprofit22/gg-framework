@@ -230,6 +230,51 @@ describe("independent recommendation history contracts", () => {
         }).success,
       ).toBe(false);
   });
+  it("records generator advice as an inert positive observation beside unchanged history", () => {
+    const value = fixture();
+    const observation = {
+      ...value.observations[0]!,
+      choice: {
+        kind: "generate-from-reference",
+        generator: {
+          version: 1,
+          familyId: "0123456789abcdef",
+          members: ["config/a", "config/b", "config/c"],
+          sharedShape: ["Same config keys"],
+          varyingInputs: ["Region name"],
+          reference: { kind: "build-by-hand-first", reason: "No member is complete" },
+          risks: ["Overrides may be lost"],
+          verificationExpectations: ["Compare generated files"],
+        },
+      },
+      alternatives: [
+        "reuse-command",
+        "extend-command",
+        "missing-capability",
+        "manual",
+        "needs-more-evidence",
+      ].map((kind) => ({ kind, reasonNotSelected: "Does not fit this family" })),
+    };
+    expect(recommendationObservationV1Schema.safeParse(observation).success).toBe(true);
+    expect(
+      recommendationHistoryV1Schema.safeParse({ ...value, observations: [observation] }).success,
+    ).toBe(true);
+    // Positive like other automation: alternatives and supported repeatability are required.
+    expect(
+      recommendationObservationV1Schema.safeParse({ ...observation, alternatives: [] }).success,
+    ).toBe(false);
+    expect(
+      recommendationObservationV1Schema.safeParse({
+        ...observation,
+        choice: {
+          ...observation.choice,
+          generator: { ...observation.choice.generator, approved: true },
+        },
+      }).success,
+    ).toBe(false);
+    // Existing five-choice history stays valid.
+    expect(recommendationHistoryV1Schema.safeParse(fixture()).success).toBe(true);
+  });
   it("keeps references inert and completion explicitly user-owned", () => {
     const reference = { kind: "execution-result", resultId: randomUUID() };
     expect(recommendationReferenceV1Schema.safeParse(reference).success).toBe(true);

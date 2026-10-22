@@ -470,8 +470,16 @@ describe("prompt commands", () => {
         "missing-capability",
         "manual",
         "needs-more-evidence",
+        "generate-from-reference",
       ])
         expect(prompt).toContain(`- ${choice}:`);
+      expect(prompt).toContain("Never use it for a mixed or too-small group");
+      expect(prompt).toContain(
+        "Never claim the reference, template or generator works before verification",
+      );
+      expect(prompt).toContain(
+        "Prefer reuse-command when an existing generator or command already fits",
+      );
       expect(prompt).toContain("Never invent usage counts, frequency or time savings");
       expect(prompt).toContain("Consolidate duplicate proposals");
       expect(prompt).toContain("allow honest empty recommendations");

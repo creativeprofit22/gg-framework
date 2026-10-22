@@ -289,6 +289,11 @@ function deliveredPrompt() {
 
 it("delivers exact manifest-free setup facts, keeps context JSON readable, and requires later save review", async () => {
   await fs.writeFile(path.join(cwd, "WORKFLOW"), "Handwritten dispatch ledger reconciliation");
+  for (const name of ["north", "south", "west"]) {
+    await fs.mkdir(path.join(cwd, "regions", name), { recursive: true });
+    await fs.writeFile(path.join(cwd, "regions", name, "config.json"), "{}\n");
+    await fs.writeFile(path.join(cwd, "regions", name, `${name}.schema.json`), "{}\n");
+  }
   const reviewer = vi.fn(async (request: AskUserRequest) => ({
     action: "answer" as const,
     answers: { [request.questions[0]!.id]: "save-setup" },
@@ -310,6 +315,16 @@ it("delivers exact manifest-free setup facts, keeps context JSON readable, and r
       profile: proposal.profile,
       configuration_fingerprint: proposal.configurationFingerprint,
       expected_prior_profile_digest: null,
+      item_families: {
+        basis: "observed-paths",
+        families: [
+          expect.objectContaining({
+            kind: "sibling-directories",
+            parent: "regions",
+            memberCount: 3,
+          }),
+        ],
+      },
     });
     expect(result.assessment).toMatchObject({
       status: "incomplete",
@@ -325,6 +340,7 @@ it("delivers exact manifest-free setup facts, keeps context JSON readable, and r
           .split("\nReusable host evidence receipts:")[0]!,
       ).setupFacts.profile,
     ).toEqual(proposal.profile);
+    expect(prompt).toContain('"parent":"regions"');
     expect(prompt).toContain("Handwritten dispatch ledger reconciliation");
     const context = JSON.parse(
       prompt.slice(prompt.indexOf("{", prompt.indexOf("## Untrusted advisory context"))),

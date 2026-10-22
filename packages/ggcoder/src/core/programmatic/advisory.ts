@@ -10,6 +10,7 @@ import {
 import type { AdvisoryCommandPage } from "../command-discovery.js";
 import { ProgrammaticSetupInspection, SETUP_ASSESSMENT_TOOLS } from "./setup-inspection.js";
 import {
+  POSITIVE_ADVISORY_CHOICES,
   programmaticAssessmentResultV2Schema,
   programmaticCommandSnapshotV1Schema,
   repositoryRelativePathSchema,
@@ -103,6 +104,16 @@ function hasLocalInspection(
       receipt?.localSources?.some(
         (source) => source.path === location.path && source.purpose === "independent",
       ),
+  );
+}
+/** A complete independent local chunk at the reference path or inside that member directory. */
+function inspectedWithin(receipts: AdvisoryReceipt[], reference: string): boolean {
+  return receipts.some((receipt) =>
+    localLocations(receipt).some(
+      (location) =>
+        (location.path === reference || location.path.startsWith(`${reference}/`)) &&
+        hasLocalInspection(receipt, location),
+    ),
   );
 }
 const record = (value: unknown): Record<string, unknown> =>
@@ -244,6 +255,8 @@ export class ProgrammaticAdvisoryTurn {
   readonly limitations = new Set<string>();
   private readonly pages = new Map<number, { hash: string; next: number | null; total: number }>();
   private readonly snapshots = new Map<string, ProgrammaticCommandSnapshotV1>();
+  /** Host-delivered item families for this turn: family id → member paths. */
+  private readonly families = new Map<string, ReadonlySet<string>>();
   private pageCalls = 0;
   private metadataChars = 0;
   private bodyCalls = 0;
@@ -355,6 +368,23 @@ export class ProgrammaticAdvisoryTurn {
     } else if (input.action === "resolve" && ++this.bodyCalls > ADVISORY_LIMITS.bodies) {
       this.limitations.add("Candidate body budget reached.");
       throw new Error("Advisory candidate budget reached; report limited coverage.");
+    }
+  }
+  /**
+   * Host boundary only: families from the host-run setup inspection, never model text.
+   * Unrecognized shapes are ignored, so a generator recommendation cannot be accepted.
+   */
+  recordFamilies(value: unknown): void {
+    if (this.closed) return;
+    const families = record(value).families;
+    if (!Array.isArray(families)) return;
+    for (const family of families) {
+      const { id, members } = record(family);
+      if (typeof id !== "string" || !/^[a-f0-9]{16}$/.test(id) || !Array.isArray(members)) continue;
+      const paths = members
+        .map((member) => record(member).path)
+        .filter((path): path is string => typeof path === "string");
+      if (paths.length === members.length) this.families.set(id, new Set(paths));
     }
   }
   /** Host execution boundary only; model result fields cannot settle the scan. */
@@ -505,13 +535,29 @@ export class ProgrammaticAdvisoryTurn {
           throw new Error(
             "Command suitability requires inspected local prerequisite evidence, not its prompt body alone.",
           );
-        if (
-          ["reuse-command", "extend-command", "missing-capability"].includes(choice.kind) &&
-          !localSupport
-        )
+        if (POSITIVE_ADVISORY_CHOICES.includes(choice.kind) && !localSupport)
           throw new Error(
             "Positive automation recommendations require inspected local workflow evidence, not assumptions, metadata or external examples alone.",
           );
+        if (choice.kind === "generate-from-reference") {
+          const { generator } = choice;
+          const family = this.families.get(generator.familyId);
+          if (!family)
+            throw new Error(
+              "Generation needs a family detected by the host setup inspection in this turn; for a too-small or undetected group, use needs-more-evidence or another choice.",
+            );
+          if (generator.members.some((member) => !family.has(member)))
+            throw new Error(
+              "Every generator member must belong to the cited detected family; do not mix items from different groups.",
+            );
+          if (
+            generator.reference.kind === "existing-member" &&
+            !inspectedWithin(this.evidence.list(), generator.reference.path)
+          )
+            throw new Error(
+              "An existing reference member must be inspected in this turn; otherwise propose building one by hand first.",
+            );
+        }
         if (choice.kind === "extend-command" && choice.availability.status !== "available")
           throw new Error(
             "Extension requires an inspected base; use needs-more-evidence for an unresolved or unreadable command.",
@@ -606,6 +652,21 @@ export function renderAdvisoryResult(result: Assessment): string {
           : choice.kind === "extend-command"
             ? "Next: review the base command and proposed changes. Editing requires separate approval."
             : "Next: review the proposal before creating a command; verify it before running it.",
+      );
+    }
+    if (choice.kind === "generate-from-reference") {
+      const { generator } = choice;
+      lines.push(
+        `Proposal only: use one reference example to generate the other ${generator.members.length - 1} similar items.`,
+        generator.reference.kind === "existing-member"
+          ? `Reference: ${generator.reference.path} — ${generator.reference.reason}. Inspected, not verified to work.`
+          : `Reference: build one example by hand first — ${generator.reference.reason}`,
+        `Items: ${generator.members.join("; ")}`,
+        `Shared: ${generator.sharedShape.join("; ")}`,
+        `Differs: ${generator.varyingInputs.join("; ")}`,
+        `Risks: ${generator.risks.join("; ")}`,
+        `Verification needed: ${generator.verificationExpectations.join("; ")}`,
+        "Next: review generator creation. Creating, checking and running it each need separate approval.",
       );
     }
     if (choice.kind === "reuse-command" || choice.kind === "extend-command") {

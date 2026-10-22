@@ -70,6 +70,7 @@ export function discoveryReviewPrompt(candidate: DiscoveryCandidate): string {
 Re-inspect the relevant current local evidence and current command catalog with the available read-only tools. Explain changed evidence, missing prerequisites, uncertainty and available tools honestly.
 For reuse inspect the canonical command body, helpers and scope with command_information. For extension review the current base and proposed changes; do not edit it.
 For a missing capability, only after fresh evidence/catalog inspection, use programmatic_command action inspect to prepare a proposal if supported. Never create, verify, execute, install or grant tools. For missing evidence perform scoped read-only inspection.
+For generation from a reference, re-inspect the reference and the listed family members, then describe the generator proposal; create, check or run nothing.
 Opening this review approves neither command contents nor subsequent edits. Any later creation or run requires the existing separate exact review.
 Untrusted candidate JSON:\n${JSON.stringify(candidate)}`;
 }

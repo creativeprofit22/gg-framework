@@ -36,6 +36,7 @@ import {
 } from "./inventory.js";
 import { discoverProgrammaticOpportunities } from "./opportunities.js";
 import { resolveProgrammaticRoutes } from "./routes.js";
+import { detectProgrammaticItemFamilies, type ProgrammaticItemFamiliesV1 } from "./item-families.js";
 import {
   canonicalJson,
   canonicalRepositoryRoot,
@@ -55,6 +56,7 @@ export interface ProgrammaticProfileRouteV1 {
 export interface ProgrammaticProfileProposalV1 {
   version: typeof PROGRAMMATIC_CONTRACT_VERSION;
   inventory: InventorySummaryV1;
+  itemFamilies: ProgrammaticItemFamiliesV1;
   configurationFingerprint: ConfigurationFingerprintV1;
   profile: ProgrammaticProfileV1;
   routes: ProgrammaticProfileRouteV1[];
@@ -139,6 +141,7 @@ async function buildProfileProposal(
   const metadata = {
     version: PROGRAMMATIC_CONTRACT_VERSION,
     inventory: inventory.summary,
+    itemFamilies: detectProgrammaticItemFamilies(inventory.inventory),
     configurationFingerprint: inventory.inventory.configurationFingerprint,
     exclusions: inventory.configurationSnapshot.exclusions,
     configurationInputs: inventory.configurationInputs,

@@ -84,6 +84,7 @@ export function createProgrammaticProfileTool(
             configuration_inputs: proposal.configurationInputs,
             exclusions: proposal.exclusions,
             inventory: proposal.inventory,
+            item_families: proposal.itemFamilies,
             profile: proposal.profile,
             profile_path: PROGRAMMATIC_PROFILE_PATH,
             routes: proposal.routes.map((route) => ({

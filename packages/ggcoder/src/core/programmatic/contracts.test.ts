@@ -53,7 +53,9 @@ import {
   routeEnvelopeV1Schema,
   routableOpportunityRouteV1Schema,
   scannerProfileV1Schema,
+  FAMILY_GENERATOR_MEMBER_BOUNDS,
 } from "./contracts.js";
+import { ITEM_FAMILY_LIMITS } from "./item-families.js";
 
 const configurationFingerprint = { version: 1, sha256: "a".repeat(64) };
 const scannerProfile = {
@@ -1457,6 +1459,21 @@ describe("needs-first V2 advisory contracts", () => {
     risks: ["Dynamic callers may be missed"],
     verificationExpectations: ["Compare against known callers"],
   };
+  const members = ["config/regions/ap-south", "config/regions/eu-west", "config/regions/us-east"];
+  const generator = {
+    version: 1,
+    familyId: "0123456789abcdef",
+    members,
+    sharedShape: ["deploy.yaml and secrets.example with the same keys"],
+    varyingInputs: ["Region name", "Endpoint URL", "Credential reference"],
+    reference: {
+      kind: "existing-member",
+      path: members[2],
+      reason: "Complete and recently reviewed",
+    },
+    risks: ["Region-specific overrides may be lost"],
+    verificationExpectations: ["Generated files match the reference except listed inputs"],
+  };
   const choices = [
     { kind: "reuse-command", availability },
     {
@@ -1472,6 +1489,7 @@ describe("needs-first V2 advisory contracts", () => {
       missingEvidence: ["Caller inventory"],
       nextInspectionSteps: ["Inspect package exports"],
     },
+    { kind: "generate-from-reference", generator },
   ];
   const recommendation = (choice = choices[0]!) => ({
     version: 2,
@@ -1616,6 +1634,42 @@ describe("needs-first V2 advisory contracts", () => {
       programmaticRecommendationV2Schema.safeParse({ ...recommendation(choices[3]), alternatives })
         .success,
     ).toBe(true);
+  });
+
+  it("bounds generator proposals to one detected family and a named reference", () => {
+    const withGenerator = (change: Record<string, unknown>) =>
+      programmaticRecommendationV2Schema.safeParse(
+        recommendation({ kind: "generate-from-reference", generator: { ...generator, ...change } }),
+      ).success;
+    expect(
+      withGenerator({
+        reference: { kind: "build-by-hand-first", reason: "No member is complete" },
+      }),
+    ).toBe(true);
+    expect(withGenerator({ members: [...members, "config/regions/sa-east"] })).toBe(true);
+    for (const change of [
+      { reference: { kind: "existing-member", path: "config/other", reason: "Outside" } },
+      { reference: { kind: "build-by-hand-first", path: members[0], reason: "Mixed" } },
+      { reference: { kind: "build-by-hand-first" } },
+      { members: members.slice(0, 2), reference: { kind: "build-by-hand-first", reason: "Small" } },
+      { members: [members[0], members[0], members[2]] },
+      { members: [...members, ...Array.from({ length: 10 }, (_, index) => `config/x${index}`)] },
+      { members: [...members.slice(0, 2), "C:/abs"] },
+      { familyId: "not-a-family" },
+      { varyingInputs: [] },
+      { sharedShape: [" "] },
+      { verificationExpectations: [] },
+      { version: 2 },
+      { approved: true },
+    ])
+      expect(withGenerator(change)).toBe(false);
+  });
+
+  it("keeps generator member bounds equal to the family detector limits", () => {
+    expect(FAMILY_GENERATOR_MEMBER_BOUNDS).toEqual({
+      min: ITEM_FAMILY_LIMITS.minMembers,
+      max: ITEM_FAMILY_LIMITS.maxMembersPerFamily,
+    });
   });
 
   it("rejects unknown authority fields at every new boundary", () => {
@@ -1992,7 +2046,8 @@ describe("Phase 1 structural bloat audit", () => {
       programmaticAssessmentInputV1Schema: "optional non-authorizing focus",
       programmaticAssessmentResultV1Schema: "bounded advice and explicit coverage",
       programmaticWorkflowV2Schema: "required needs-first workflow and repeatability contract",
-      programmaticRecommendationV2Schema: "five advisory decisions with bounded alternatives",
+      programmaticRecommendationV2Schema: "six advisory decisions with bounded alternatives",
+      FAMILY_GENERATOR_MEMBER_BOUNDS: "generator member limits pinned to the family detector",
       programmaticRecommendationV1Schema: "advisory choices separate from discovery",
       programmaticCommandReferenceV1Schema: "source-aware advisory identity",
       programmaticCommandSnapshotV1Schema: "body/helper content identity",

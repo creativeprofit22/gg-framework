@@ -4,6 +4,7 @@ import {
   isDiscoveryProjection,
   type DiscoveryCandidate,
 } from "./programmatic-recommendation-contract.js";
+import { DISCOVERY_CHOICES } from "./programmatic-discovery-contract.js";
 import { isProgrammaticAssessment } from "./programmatic-assessment-contract.js";
 import {
   isProgrammaticChatRequest,
@@ -73,6 +74,7 @@ describe("discovery display and review boundary", () => {
     "missing-capability",
     "manual",
     "needs-more-evidence",
+    "generate-from-reference",
   ] as const)("accepts proposal-only %s display", (choice) => {
     const item = {
       ...candidate,
@@ -82,6 +84,22 @@ describe("discovery display and review boundary", () => {
     };
     expect(isDiscoveryCandidate(item)).toBe(true);
     expect(isDiscoveryProjection({ assessmentId, candidates: [item] })).toBe(true);
+  });
+  it("bounds generator display with the shared decision list", () => {
+    const item = { ...candidate, choice: "generate-from-reference" };
+    const alternatives = DISCOVERY_CHOICES.filter((kind) => kind !== item.choice).map((kind) => ({
+      kind,
+      reasonNotSelected: "Does not fit",
+    }));
+    expect(DISCOVERY_CHOICES).toHaveLength(6);
+    expect(isDiscoveryCandidate({ ...item, alternatives })).toBe(true);
+    for (const invalid of [
+      { ...item, alternatives: [{ kind: item.choice, reasonNotSelected: "Same" }] },
+      { ...item, choice: "generate", alternatives: [] },
+      { ...item, generator: { familyId: "0123456789abcdef" } },
+      { ...item, alternatives: [...alternatives, alternatives[0]] },
+    ])
+      expect(isDiscoveryCandidate(invalid)).toBe(false);
   });
   it("accepts compact current/history review requests and scanner-independent discovery", () => {
     expect(isProgrammaticChatRequest({ version: 1, action: "discover" })).toBe(true);

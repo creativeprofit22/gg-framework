@@ -19,13 +19,16 @@ const labels: Record<DiscoveryChoice, string> = {
   "missing-capability": "New automation would need to be built",
   "needs-more-evidence": "More information is needed before choosing automation",
   manual: "Keep this manual",
+  "generate-from-reference": "Build one example, then generate the rest",
 };
 const isCommand = (item: DiscoveryCandidate) =>
   item.choice === "reuse-command" || item.choice === "extend-command";
 const reviewLabel = (item: DiscoveryCandidate) =>
-  isCommand(item) && item.availability?.status !== "available"
-    ? "Reinspect command (read-only)"
-    : "Review this task";
+  item.choice === "generate-from-reference"
+    ? "Review generator creation"
+    : isCommand(item) && item.availability?.status !== "available"
+      ? "Reinspect command (read-only)"
+      : "Review this task";
 const decisionLabels: Record<RecommendationSummary["decision"], string> = {
   open: "Still open",
   dismissed: "Dismissed",

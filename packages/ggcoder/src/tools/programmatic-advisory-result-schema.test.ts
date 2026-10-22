@@ -57,7 +57,7 @@ it("preserves V2 validation hints through the existing Responses strict-mode fal
                   "repeatability",
                 ],
               },
-              alternatives: { type: "array", maxItems: 4 },
+              alternatives: { type: "array", maxItems: 5 },
               choice: {
                 oneOf: expect.arrayContaining([
                   ...[
@@ -66,6 +66,7 @@ it("preserves V2 validation hints through the existing Responses strict-mode fal
                     "missing-capability",
                     "manual",
                     "needs-more-evidence",
+                    "generate-from-reference",
                   ].map((kind) =>
                     expect.objectContaining({
                       properties: expect.objectContaining({
@@ -106,4 +107,13 @@ it("preserves V2 validation hints through the existing Responses strict-mode fal
     expect(pattern).not.toMatch(/\(\?(?:[=!]|<[=!])/);
     expect(() => new RegExp(pattern, "u")).not.toThrow();
   }
+});
+
+it("lists generate-from-reference as a proposal-only advisory choice in the tool description", () => {
+  const { description } = createProgrammaticAdvisoryResultTool(() => undefined);
+  expect(description).toContain("generate-from-reference");
+  expect(description).toContain("needs-more-evidence, or generate-from-reference");
+  expect(description).toContain(
+    "creating, checking and running a generator each need separate approval",
+  );
 });

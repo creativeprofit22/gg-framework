@@ -77,6 +77,13 @@ describe("dock layering build gate", () => {
     expect(problems.join("\n")).not.toMatch(/NewThingModal/);
   });
 
+  it("allows GG Royale's fixed full-window overlay at the pane root", () => {
+    const problems = checkDockLayering(
+      pane({ root: '{showRoyale && <div className="royale-overlay"><RoyaleScreen /></div>}' }),
+    );
+    expect(problems).toEqual([]);
+  });
+
   it("fails closed when the dock can't be found", () => {
     expect(checkDockLayering(pane().replace('className="dock"', 'className="bottom"'))).toEqual([
       expect.stringMatching(/expected exactly one floating dock/),

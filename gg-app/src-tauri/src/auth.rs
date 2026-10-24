@@ -100,6 +100,12 @@ pub(crate) struct ProviderMeta {
 
 /// The provider catalog (single source of truth for app_auth_status +
 /// app_auth_apikey). Order is the display order in the login hub.
+/// Providers left out of the app's provider list (and so its login and
+/// settings screens). Their rows stay below so logout and stored keys still
+/// resolve. Mirrors gg-core's `HIDDEN_PROVIDERS` (hidden-providers.ts) — keep
+/// in sync. Gemini: Google no longer serves personal accounts over sign-in.
+pub(crate) const HIDDEN_PROVIDERS: &[&str] = &["gemini"];
+
 pub(crate) const AUTH_PROVIDERS: &[ProviderMeta] = &[
     ProviderMeta {
         value: "qwen-cloud",
@@ -415,6 +421,7 @@ pub(crate) fn auth_provider_status(
     let now_ms = current_unix_millis();
     let list: Vec<serde_json::Value> = AUTH_PROVIDERS
         .iter()
+        .filter(|p| !HIDDEN_PROVIDERS.contains(&p.value))
         .map(|p| {
             let oauth = has_oauth(p);
             let api_key = has_api_key(p);
@@ -844,6 +851,21 @@ mod tests {
                 );
             }
             assert!(guard_generic_logout(provider).is_err());
+        }
+    }
+
+    #[test]
+    fn auth_status_omits_hidden_providers() {
+        let status = auth_provider_status(None, false);
+        let values: Vec<&str> = status["providers"]
+            .as_array()
+            .expect("providers array")
+            .iter()
+            .filter_map(|p| p["value"].as_str())
+            .collect();
+        assert!(values.contains(&"anthropic"));
+        for hidden in HIDDEN_PROVIDERS {
+            assert!(!values.contains(hidden), "{hidden} is still listed");
         }
     }
 

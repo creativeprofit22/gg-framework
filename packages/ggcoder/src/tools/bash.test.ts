@@ -309,6 +309,8 @@ describe("createBashTool shell snapshot", () => {
     // file); a tail-only promise made it re-read or rerun to dodge truncation.
     expect(tool.description).toContain("full text saved to a file");
     expect(tool.description).not.toContain("tail is kept");
+    // Host-process safety moved out of the lean skill so it is always on.
+    expect(tool.description).toContain("never by name or pattern");
   });
 });
 

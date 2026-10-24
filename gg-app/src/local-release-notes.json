@@ -1,22 +1,26 @@
 {
   "schemaVersion": 1,
-  "date": "2026-10-21",
-  "label": "Upstream 0.95.0, with trophies in every pane",
+  "date": "2026-10-24",
+  "label": "Upstream 0.96.1, with GG Royale and a pixel-art Home",
   "sections": [
     {
       "title": "In your workspace",
       "items": [
-        "Trophies know which pane earned them. With panes side by side, the unlock card rises just above the message box of the pane where you did the thing, so it never covers what you're typing, then flies into that pane's own trophy key. Every pane still keeps its trophy count up to date, so the number you see is always right.",
-        "Roadmap proposals stay fresh. When your agent drafts a Roadmap change and then improves it, the new version replaces its own pending proposal right where you're reviewing it, so you no longer have to hit `Reject draft` just to let it try again. A proposal from another chat is never overwritten, and once you approve one it stays put."
+        "Home got the new pixel-art look, with your name on it. The hand-lettered gold title spells `Supah Coder` on Home and at the top of `What's new`, and the little coloured dots beside `What's new` still tell you whether the Local Fork or upstream has notes you haven't read.",
+        "`What's new` keeps its `Local Fork`, `Upstream` and `Decisions` tabs, now sitting on the new notes board in the same pixel lettering. In a narrow window the tabs shrink to fit on one line instead of wrapping.",
+        "`GG Royale` opens from any pane. Press `Royale` on Home, or the `Royale` key in a workspace's usage panel, and the game fills the window. `Back` takes you straight back to where you were, and your session keeps running underneath."
       ]
     },
     {
-      "title": "Also from upstream 0.95.0",
+      "title": "Also from upstream 0.96.0 and 0.96.1",
       "items": [
-        "Trophies are here, and there are `144` of them to hunt. Every one you earn teaches you something GG can do, from your first slash command and a polished `Enhance` prompt all the way up to a `365`-day streak. Each unlock rises into view as a card that charges up, crackles with light and spins over, with its own sound, then files itself away.",
-        "Open the context key on the deck and hit the trophy button beside your level to see what you've won, what's still out there and exactly how to get it. Everyone starts from zero today.",
-        "No more surprise sign-outs. When several windows refreshed your login at the same moment, one could wipe out the fresh login another had just saved, and every chat suddenly said `Not logged in`. Now GG notices the newer login and keeps using it, so your sessions stay connected through the night.",
-        "GG keeps its flight recorder running no matter how long the app stays open. It used to go quiet after just `15 minutes` when the log file was nearly full, so when something went wrong a day later there was nothing to look at. Now it rolls over to a fresh file and keeps recording."
+        "Meet `GG Royale`, an online blackjack table played with chips you earn by coding: finished runs, commits, squashed bugs and deploys all pay out, and you can sit at a table and chat with other players. There's no real money anywhere. Nothing is sent until you open it and agree to link, and even then it only hears that something happened, never your code, files or prompts. You can delete all your Royale data any time.",
+        "Home is now an evening clearing in the pines that follows your local time of day, with fireflies, chunky plate buttons and pixel tooltips. The `What's new` window opens beside a little campfire to match.",
+        "Fewer long stalls when the AI goes quiet. If a reply on a warmed-up conversation hasn't started in about `30 seconds`, GG quietly sends one backup request and keeps whichever answers first, so a stuck request no longer costs you minutes of `Retrying…`. A slow but healthy reply is never cut off.",
+        "Your agent reads routine command output in fewer tokens. Folder listings and long `git log` or `git status` output are trimmed to the facts, while failures and error messages always come through in full.",
+        "`Gemini` is gone from the login list, the model picker and startup, because Google is suspending accounts that use its Gemini subscription through third-party tools. That includes the `Gemini API key` option added earlier. If you were signed in, GG simply moves you to another provider.",
+        "Grok subscription chats now introduce themselves as the latest `Grok CLI` version, after xAI started turning older clients away with an `HTTP 426` error.",
+        "The built-in skills for security, privacy law, databases, UI design, speed and debugging are leaner and more up to date, so they kick in at the right moments with less wasted effort."
       ]
     }
   ]

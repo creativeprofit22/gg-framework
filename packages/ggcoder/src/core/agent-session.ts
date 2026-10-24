@@ -129,10 +129,10 @@ import {
   assertOpenAICodexContextProfileFitsUsage,
   getAuthStorageKeys,
   getContextWindow,
+  getListedModels,
   getModel,
   getModelDisplayId,
   getToolResultCharLimit,
-  MODELS,
   resolveTransportModel,
   type OpenAICodexContextProfile,
 } from "./model-registry.js";
@@ -7309,10 +7309,12 @@ export class AgentSession {
       },
       getModelList: () => {
         const current = `Current: ${this.provider}:${getModelDisplayId(this.model)}\n\nAvailable models:\n`;
-        const list = MODELS.map(
-          (model) =>
-            `  ${model.provider}:${getModelDisplayId(model.id)} — ${model.name} (${model.costTier})`,
-        ).join("\n");
+        const list = getListedModels()
+          .map(
+            (model) =>
+              `  ${model.provider}:${getModelDisplayId(model.id)} — ${model.name} (${model.costTier})`,
+          )
+          .join("\n");
         return current + list;
       },
       quit: () => {

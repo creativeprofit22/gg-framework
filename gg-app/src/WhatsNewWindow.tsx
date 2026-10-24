@@ -2,7 +2,6 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { error as logError } from "@tauri-apps/plugin-log";
-import { XIcon } from "@phosphor-icons/react";
 import { createSafeTauriUnlisten, type SafeTauriUnlisten } from "./tauri-listener";
 import { appBuildInfo } from "./build-info";
 import { Badge } from "./Badge";
@@ -16,7 +15,7 @@ import {
 } from "./whats-new-status";
 import { availableWhatsNewFeeds, type WhatsNewEntry } from "./whats-new";
 import { shortDate, type WhatsNewMode } from "./whatsnew-content";
-import { CampfireStories, WhatsNewCampfire } from "./WhatsNewCampfire";
+import { LoungeStories, WhatsNewLounge } from "./WhatsNewLounge";
 import { releaseText } from "./WhatsNewParts";
 import "./WhatsNew.css";
 
@@ -27,9 +26,11 @@ export { releaseText } from "./WhatsNewParts";
  * Tauri window built by Rust `open_whatsnew_window`, reached via the
  * `?whatsnew=1` flag in main.tsx). Two moods share one window:
  *   - `hype`: the one-time show right after an update relaunch.
- *   - `calm`: the same campfire, settled, for the home screen's button.
- * Local Fork builds add source tabs (Local Fork, Upstream, Decisions) under the
- * campfire banner; each tab's panel scrolls inside the same window.
+ *   - `calm`: the same lounge, settled, for the home screen's button.
+ * The window owns opening and closing (Escape, ×, the footer button); the
+ * lounge design owns the banner, the new features and the history.
+ * Local Fork builds add source tabs (Local Fork, Upstream, Decisions) at the top
+ * of the lounge's board; each tab's panel scrolls inside the same board.
  *
  * Opening: Rust builds the window hidden. Once this has rendered, it asks Rust
  * to show it (`reveal_whatsnew_window`; Rust closes a never-revealed window),
@@ -75,25 +76,31 @@ function ReleaseFeed({
           <time dateTime={latest.date}>{dateText(latest.date)}</time>
           <Badge>Latest</Badge>
         </h2>
-        <ol className="wn-camp-stories" aria-label={latest.label}>
+        <ol className="wn-rows" aria-label={latest.label}>
           {latest.items.map((item, i) => (
             <li
               key={`${latest.id}-${i}`}
-              className="wn-camp-story wn-rise whatsnew-item"
-              style={{ "--d": `${i * 0.05}s` } as CSSProperties}
+              className="wn-row wn-row-in whatsnew-item"
+              style={{ "--i": i } as CSSProperties}
             >
-              {/* Same two-column story layout as upstream's campfire: number, then copy. */}
-              <span className="wn-camp-num" aria-hidden="true">
-                {String(i + 1).padStart(2, "0")}
+              {/* Same two-column row as upstream's lounge board: number tag, then copy. */}
+              <span className="wn-tag" aria-hidden="true">
+                {i + 1}
               </span>
               {/* One element per note keeps the exact copy readable and matchable. */}
-              <p className="wn-body">{releaseText(item)}</p>
+              <div className="wn-row-copy">
+                <p className="wn-body">{releaseText(item)}</p>
+              </div>
             </li>
           ))}
         </ol>
       </section>
       {earlier.length > 0 && (
-        <section className="wn-history wn-rise" aria-label="Previous updates">
+        <section
+          className="wn-history wn-row-in"
+          aria-label="Previous updates"
+          style={{ "--i": latest.items.length } as CSSProperties}
+        >
           <h2 className="wn-history-title">
             <span>Previous updates</span>
           </h2>
@@ -194,8 +201,6 @@ function panelId(id: WhatsNewTabId): string {
 
 interface WhatsNewWindowProps {
   mode?: WhatsNewMode;
-  /** Picks this opening's critters; injectable for tests. */
-  random?: () => number;
   localPatched?: boolean;
   sourceRoot?: string;
   storage?: Storage;
@@ -204,7 +209,6 @@ interface WhatsNewWindowProps {
 
 export function WhatsNewWindow({
   mode = "calm",
-  random = Math.random,
   localPatched = appBuildInfo.localPatched,
   sourceRoot = appBuildInfo.sourceRoot,
   storage = typeof localStorage === "undefined" ? undefined : localStorage,
@@ -254,10 +258,12 @@ export function WhatsNewWindow({
     window.setTimeout(closeWindow, CLOSE_MS);
   }, []);
 
-  // Escape closes the window (the borderless window has no native chrome).
+  // Escape closes the window (the borderless window has no native chrome), and
+  // so does Enter, unless a focused control (a tab, the close key, the plate) takes it.
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
-      if (e.key === "Escape") close();
+      const onControl = e.target instanceof HTMLElement && e.target.closest("button, a") !== null;
+      if (e.key === "Escape" || (e.key === "Enter" && !onControl)) close();
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
@@ -357,7 +363,7 @@ export function WhatsNewWindow({
     <p className="whatsnew-source">{tabs[0]?.label ?? "Upstream"}</p>
   );
 
-  // Upstream keeps the campfire's own stories; Local Fork and Decisions reuse
+  // Upstream keeps the lounge's own rows; Local Fork and Decisions reuse
   // the same story/history parts inside their tab panels.
   const panels = hasTabs ? (
     <>
@@ -371,7 +377,7 @@ export function WhatsNewWindow({
           hidden={feed.id !== selectedFeedId}
         >
           {feed.id === "upstream" ? (
-            <CampfireStories latest={latest} earlier={earlier} hype={hype} />
+            <LoungeStories latest={latest} earlier={earlier} hype={hype} />
           ) : (
             <ReleaseFeed entries={feed.entries} />
           )}
@@ -396,23 +402,17 @@ export function WhatsNewWindow({
 
   return (
     <div className={`whatsnew-window feed-${selectedFeedId}`} data-mode={mode} data-phase={phase}>
-      <WhatsNewCampfire
+      <WhatsNewLounge
         latest={latest}
         earlier={earlier}
         mode={mode}
-        random={random}
         onClose={close}
         tabs={tablist}
         panels={panels}
       />
-      <button
-        className="modal-close wn-close"
-        type="button"
-        aria-label="Close"
-        title="Close"
-        onClick={close}
-      >
-        <XIcon size={14} weight="bold" aria-hidden="true" />
+      <button className="wn-close" type="button" aria-label="Close" title="Close" onClick={close}>
+        {/* A 5×5 pixel x, drawn rather than typed so it sits dead centre. */}
+        <span className="wn-close-x" aria-hidden="true" />
       </button>
     </div>
   );

@@ -181,6 +181,7 @@ import { ChatPicker } from "./ChatPicker";
 import { BackButton } from "./BackButton";
 import { Badge } from "./Badge";
 import { HomeScreen } from "./HomeScreen";
+import { RoyaleScreen } from "./RoyaleScreen";
 // Lazy: Goals is an opt-in surface; keep its picker out of the startup bundle.
 const GoalPicker = lazy(() =>
   import("./GoalPicker").then((module) => ({ default: module.GoalPicker })),
@@ -336,7 +337,7 @@ const PLACEHOLDER_SHUFFLE_FRAME_MS = 24;
 // video analysis. Shared by the live send path and history restore so the
 // resumed transcript matches the live one exactly.
 const VIDEO_CAPABILITY_WARNING =
-  "This model can't watch video directly. The agent can still extract frames or audio with ffmpeg if needed — switch to a video-capable model (Gemini, Kimi, MiniMax) for native video analysis.";
+  "This model can't watch video directly. The agent can still extract frames or audio with ffmpeg if needed — switch to a video-capable model (Kimi, MiniMax, MiMo) for native video analysis.";
 
 const ALL_CLEAR_VARIATIONS = [
   "All clear. Looks good to me.",
@@ -1056,9 +1057,13 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   const [restoreChecked, setRestoreChecked] = useState(false);
   // Every window starts from the mode-neutral home screen before choosing Code or Chat.
   const [entryView, setEntryView] = useState<EntryView>(initialEntryView(kind === "auxiliary"));
+  // GG Royale has faded in over Home (Home holds its Royale plate down until then).
+  const [royaleShown, setRoyaleShown] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTabId>("general");
   // Re-open the matching session picker over an already-open workspace.
   const [showPicker, setShowPicker] = useState(false);
+  // GG Royale over a workspace (from the Deck's Royale key); Back returns here.
+  const [showRoyale, setShowRoyale] = useState(false);
   // Bumped on each workspace/session choice to force re-hydration.
   const [hydrateNonce, setHydrateNonce] = useState(0);
   const { activity, handleActivityEvent } = useTaskActivity(hydrateNonce);
@@ -4618,7 +4623,10 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   if (needsProject) {
     return (
       <div className="app" style={{ background: theme.background }}>
-        {entryView === "home" ? (
+        {/* GG Royale opens OVER Home (as it does over a workspace), so Home
+            stays put underneath while the game fades in, and Back fades
+            straight back to it. */}
+        {entryView === "home" || entryView === "royale" ? (
           <HomeScreen
             onProjects={() => {
               setWorkspaceMode("code");
@@ -4636,6 +4644,8 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
               setWorkspaceMode("code");
               setEntryView("goals");
             }}
+            onRoyale={() => setEntryView("royale")}
+            royaleShown={royaleShown}
             onSettings={(tab) => {
               setSettingsTab(tab ?? "general");
               setEntryView("settings");
@@ -4694,6 +4704,17 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
             showWindowControls={kind === "primary"}
             onClose={() => setEntryView("home")}
           />
+        )}
+        {entryView === "royale" && (
+          <div className="royale-overlay">
+            <RoyaleScreen
+              onShown={() => setRoyaleShown(true)}
+              onClose={() => {
+                setRoyaleShown(false);
+                setEntryView("home");
+              }}
+            />
+          </div>
         )}
         {showTraySettings && <SettingsModal onClose={closeTraySettings} />}
         <Toaster />
@@ -5297,8 +5318,10 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
                       ),
                     }
                   : undefined,
+              // Goal windows show the attached project's score too (Usage →
+              // Project Health), so the breakdown must open there as well.
               health:
-                workspaceMode === "code" && !state?.goal
+                workspaceMode === "code"
                   ? {
                       title: "Project Health",
                       body: (
@@ -5341,6 +5364,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
             }}
             progress={progress}
             trophies={trophies.snapshot}
+            onOpenRoyale={() => setShowRoyale(true)}
             usageExtras={
               windowTotal > 1 &&
               windowIndex !== null && (
@@ -5931,6 +5955,14 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       {/* Always mounted: an MCP server can ask for input at any moment, in any
           workspace mode, and its tool call stays blocked until we answer. */}
       <McpElicitModal />
+
+      {/* GG Royale over this workspace, full window. The session keeps running
+          underneath; Back comes straight back to it. */}
+      {showRoyale && (
+        <div className="royale-overlay">
+          <RoyaleScreen onClose={() => setShowRoyale(false)} />
+        </div>
+      )}
 
       {/* Settings reached from the menu-bar tray. Rendered in every view branch
           (Home, picker, workspace) because the tray targets a WINDOW and can't

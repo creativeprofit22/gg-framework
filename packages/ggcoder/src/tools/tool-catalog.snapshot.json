@@ -3,7 +3,7 @@
   "tools": [
     {
       "name": "bash",
-      "description": "Run a non-interactive bash command (TERM=dumb, pipefail) in the project root. Long output is compressed (head, tail, errors kept); full text saved to a file. Runs past the soft limit (default 2 min) hand off to a background task, not killed: continue with task_output id + wait_ms. Servers/watchers/REPLs: run_in_background + wake.pattern, then task_output wait_ms; never `&`, nohup or sleep. Leave servers running. Kill by exact PID.",
+      "description": "Run a non-interactive bash command (TERM=dumb, pipefail) in the project root. Long output is compressed (head, tail, errors kept); full text saved to a file. Runs past the soft limit (default 2 min) hand off to a background task, not killed: continue with task_output id + wait_ms. Servers/watchers/REPLs: run_in_background + wake.pattern, then task_output wait_ms; never `&`, nohup or sleep. Leave servers running. Kill by exact PID, never by name or pattern (pkill, killall, taskkill /IM): you run inside a host process.",
       "schema": {
         "type": "object",
         "properties": {
@@ -47,7 +47,7 @@
           "command"
         ]
       },
-      "hash": "48bfdd10befe15e19f08a5ceb783825a738a617fa6a199a8947c2a0007d890ec"
+      "hash": "331a29db2c3cb5f7a7bebfd0dc4ed1310e05cc1c10d7bec9119f021b3ecefa0a"
     },
     {
       "name": "checklist",

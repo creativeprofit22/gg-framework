@@ -22,6 +22,25 @@ export interface ChangelogEntry {
 /** Newest first. Prepended by the `/release` flow. */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.96.1",
+    date: "2026-10-24",
+    items: [
+      "Heads up on `Gemini`: Google is suspending accounts for using their Gemini subscription through third-party harnesses. That's any third-party tool, not just GG Coder. I'm not supporting that trash here, so Gemini is gone from the login list, the model picker and startup. If you were signed in, GG simply moves you to another provider and your account stays safe.",
+      "Grok subscription chats are back. xAI started rejecting older clients with an `HTTP 426` error, so I updated GG to speak their latest `Grok CLI` version and your Grok plan works again right away.",
+      "Your agent now reads routine command output in far fewer tokens. Long `git log` and `git status` output, folder listings and all-green test runs get trimmed down to just the facts, so every session runs a little cheaper and a little faster. Failures always come through in full.",
+    ],
+  },
+  {
+    version: "0.96.0",
+    date: "2026-10-24",
+    items: [
+      "Welcome to `GG Royale`, an online blackjack table built right into GG Coder. You play with chips you earn by actually coding: finished runs, commits, bugs you squash and deploys that go live all pay out, and you can sit at a table with other players and chat. There is no real money anywhere. Linking only shares that something happened, never your code, files or prompts, and you can wipe all your Royale data any time.",
+      "Home got a full pixel-art makeover. A hand-lettered gold `GG Coder` title now sits over an evening clearing in the pines that follows your local time of day, with drifting mist, sunbeams and fireflies, plus chunky new plate buttons and tooltips to match. Even this `What's new` window now opens beside a little campfire.",
+      "No more two-minute stalls when the AI goes quiet. If a reply hasn't started when it should, GG quietly fires a backup request and takes whichever answers first, so a stuck request costs you seconds instead of a long `Retrying…`, and a slow but healthy reply is never cut off.",
+      "I sharpened the built-in skills GG leans on for security, privacy law, databases, UI design, speed and debugging. They are leaner, more up to date and kick in at the right moments, so you get better answers with less wasted effort.",
+    ],
+  },
+  {
     version: "0.95.0",
     date: "2026-10-21",
     items: [

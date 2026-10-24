@@ -53,10 +53,23 @@ export const CURRENT_LOCAL_RELEASE_NOTES = requireCurrentReleaseNotes(releaseNot
 /** Newest first. Maintained only by the Local Fork release flow. */
 export const LOCAL_CHANGELOG: LocalChangelogEntry[] = [
   {
-    id: "local-2026-10-21-upstream-0950-trophies-and-steady-logins",
+    id: "local-2026-10-24-upstream-0961-royale-and-pixel-home",
     label: CURRENT_LOCAL_RELEASE_NOTES.label,
     date: CURRENT_LOCAL_RELEASE_NOTES.date,
     items: CURRENT_LOCAL_RELEASE_NOTES.sections.flatMap(({ items }) => items),
+  },
+  {
+    id: "local-2026-10-21-upstream-0950-trophies-and-steady-logins",
+    label: "Upstream 0.95.0, with trophies in every pane",
+    date: "2026-10-21",
+    items: [
+      "Trophies know which pane earned them. With panes side by side, the unlock card rises just above the message box of the pane where you did the thing, so it never covers what you're typing, then flies into that pane's own trophy key. Every pane still keeps its trophy count up to date, so the number you see is always right.",
+      "Roadmap proposals stay fresh. When your agent drafts a Roadmap change and then improves it, the new version replaces its own pending proposal right where you're reviewing it, so you no longer have to hit `Reject draft` just to let it try again. A proposal from another chat is never overwritten, and once you approve one it stays put.",
+      "Trophies are here, and there are `144` of them to hunt. Every one you earn teaches you something GG can do, from your first slash command and a polished `Enhance` prompt all the way up to a `365`-day streak. Each unlock rises into view as a card that charges up, crackles with light and spins over, with its own sound, then files itself away.",
+      "Open the context key on the deck and hit the trophy button beside your level to see what you've won, what's still out there and exactly how to get it. Everyone starts from zero today.",
+      "No more surprise sign-outs. When several windows refreshed your login at the same moment, one could wipe out the fresh login another had just saved, and every chat suddenly said `Not logged in`. Now GG notices the newer login and keeps using it, so your sessions stay connected through the night.",
+      "GG keeps its flight recorder running no matter how long the app stays open. It used to go quiet after just `15 minutes` when the log file was nearly full, so when something went wrong a day later there was nothing to look at. Now it rolls over to a fresh file and keeps recording.",
+    ],
   },
   {
     id: "local-2026-10-19-upstream-0942-safe-installs-and-guarded-tools",

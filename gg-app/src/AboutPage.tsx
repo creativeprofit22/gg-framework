@@ -138,6 +138,8 @@ export function AboutPage(): React.ReactElement {
           </div>
         </section>
       )}
+      {/* Credit the pixel fonts (Alagard asks for it; m5x7 is CC0, credited anyway). */}
+      <p className="about-credits">Pixel fonts: m5x7 by Daniel Linssen, Alagard by Hewett Tsoi.</p>
     </div>
   );
 }

@@ -20,6 +20,7 @@ import {
 } from "./foreground-limits.js";
 import { truncateTail, MAX_BYTES, describeCompressed } from "./truncate.js";
 import { compressToolOutput } from "./compress.js";
+import { compactRoutineOutput } from "./routine-output.js";
 import { writeOverflow } from "./overflow.js";
 import { localOperations, type ToolOperations } from "./operations.js";
 import { getSafeToolEnv } from "./safe-env.js";
@@ -130,7 +131,9 @@ const GUESSED_WAIT_SECONDS = 10;
  */
 export async function renderBashOutput(rawOutput: string): Promise<string> {
   const result = truncateTail(rawOutput);
-  if (!result.truncated) return result.content;
+  // Under the limit: drop routine boilerplate (git log/status labels, ls
+  // owner columns, green per-file test lines) — see routine-output.ts.
+  if (!result.truncated) return compactRoutineOutput(result.content);
   const overflowPath =
     Buffer.byteLength(rawOutput, "utf-8") > MAX_BYTES
       ? await writeOverflow(rawOutput, "bash").catch(() => null)
@@ -901,7 +904,10 @@ export function createBashTool(
     description:
       description +
       " Servers/watchers/REPLs: run_in_background + wake.pattern, then task_output wait_ms; " +
-      "never `&`, nohup or sleep. Leave servers running. Kill by exact PID.",
+      // "Never by name or pattern" moved here from the lean skill, which only
+      // loads for perf work: a pattern kill took down the host daemon and every
+      // sibling session.
+      "never `&`, nohup or sleep. Leave servers running. Kill by exact PID, never by name or pattern (pkill, killall, taskkill /IM): you run inside a host process.",
     parameters: BashParams,
     executionMode: "sequential",
     // Bash owns its limits (yield hand-off, inactivity, hard backstop); the

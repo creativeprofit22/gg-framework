@@ -3209,6 +3209,11 @@ describe("AgentPane swap reading anchors", () => {
   );
 });
 
+/** Setup and saved check results live on the Opportunities panel's Checks tab. */
+async function openChecksTab(): Promise<void> {
+  fireEvent.click(await screen.findByRole("tab", { name: /^Checks/ }));
+}
+
 describe("AgentPane lifecycle", () => {
   it("rehydrates a durable accessible MCP failure transcript row", async () => {
     const pane = client("pane-1", 1);
@@ -4611,6 +4616,7 @@ describe("AgentPane lifecycle", () => {
       render(<AgentPane client={pane} target={target} />);
       await waitFor(() => expect(pane.listCommands).toHaveBeenCalled());
       fireEvent.click(screen.getByRole("button", { name: "Opportunities" }));
+      await openChecksTab();
       fireEvent.click(await screen.findByRole("button", { name: "Review setup" }));
       await screen.findByRole("button", { name: "Approve and save setup" });
       const prior = vi.mocked(pane.listCommands).mock.calls.length;
@@ -4628,6 +4634,7 @@ describe("AgentPane lifecycle", () => {
     render(<AgentPane client={pane} target={target} />);
     await waitFor(() => expect(pane.listCommands).toHaveBeenCalled());
     fireEvent.click(screen.getByRole("button", { name: "Opportunities" }));
+    await openChecksTab();
     const review = (await screen.findByRole("button", {
       name: "Review setup",
     })) as HTMLButtonElement;
@@ -4718,6 +4725,7 @@ describe("AgentPane lifecycle", () => {
     await waitFor(() => expect(pane.listCommands).toHaveBeenCalled());
     fireEvent.click(screen.getByRole("button", { name: "Opportunities" }));
     await screen.findByText("Saved settings cannot be read.");
+    await openChecksTab();
     const review = screen.getByRole("button", { name: "Review setup" }) as HTMLButtonElement;
     expect(review.disabled).toBe(false);
     fireEvent.click(review);
@@ -4725,7 +4733,7 @@ describe("AgentPane lifecycle", () => {
       await screen.findByText("Read-only project evidence despite unreadable settings."),
     ).toBeTruthy();
     expect(screen.getByRole("alert").textContent).toBe(
-      "This request did not finish. You can retry it when the current work has stopped.",
+      "That didn't finish. Try again when nothing else is running.",
     );
     const errorDetails = screen.getByText("Error details");
     expect(errorDetails.closest("details")!.open).toBe(false);
@@ -4785,15 +4793,16 @@ describe("AgentPane lifecycle", () => {
       render(<AgentPane client={pane} target={target} />);
       await waitFor(() => expect(pane.listCommands).toHaveBeenCalled());
       fireEvent.click(screen.getByRole("button", { name: "Opportunities" }));
+      await openChecksTab();
       const check = await screen.findByRole("button", { name: "Run project checks" });
       await waitFor(() => expect((check as HTMLButtonElement).disabled).toBe(false));
       fireEvent.click(check);
-      expect(await screen.findByText("3 enabled checks; 2 applicable checks.")).toBeTruthy();
+      expect(await screen.findByText("3 checks set up, 2 applied.")).toBeTruthy();
       const identity = { conversationId: "conversation-1", sessionId: "session-1", sequence: 2 };
       act(() => emit("run_start", {}));
       act(() => emit("programmatic_assessment", { ...identity, phase: "started" }));
       // Previous assessment stays readable during refresh; completion replaces its counts.
-      expect(screen.getByText("3 enabled checks; 2 applicable checks.")).toBeTruthy();
+      expect(screen.getByText("3 checks set up, 2 applied.")).toBeTruthy();
       const assessment = {
         ...success,
         status: status === "failed" ? "incomplete" : status,
@@ -4804,16 +4813,16 @@ describe("AgentPane lifecycle", () => {
       act(() => emit("run_end", { outcome: "completed", runState: "idle" }));
       expect(
         await screen.findByRole("heading", {
-          name: `Project assessment: ${status === "failed" ? "Incomplete" : status === "cancelled" ? "Cancelled" : "Unavailable"}`,
+          name: `Idea search: ${status === "failed" ? "Not finished" : status === "cancelled" ? "Stopped" : "Not available"}`,
         }),
       ).toBeTruthy();
-      const details = within(screen.getByRole("region", { name: "Project assessment" })).getByText(
+      const details = within(screen.getByRole("region", { name: "Idea search" })).getByText(
         "Details",
       );
       if (!details.closest("details")!.open) fireEvent.click(details);
       expect(
         screen.getByRole("heading", {
-          name: `Saved checks: ${status === "failed" ? "Failed" : status === "cancelled" ? "Cancelled" : "Unavailable"}`,
+          name: `Checks: ${status === "failed" ? "Failed" : status === "cancelled" ? "Stopped" : "Not available"}`,
         }),
       ).toBeTruthy();
       act(() =>
@@ -4833,7 +4842,7 @@ describe("AgentPane lifecycle", () => {
           assessment: success,
         }),
       );
-      expect(screen.queryByText("3 enabled checks; 2 applicable checks.")).toBeNull();
+      expect(screen.queryByText("3 checks set up, 2 applied.")).toBeNull();
     },
   );
 
@@ -4881,7 +4890,7 @@ describe("AgentPane lifecycle", () => {
       render(<AgentPane client={pane} target={target} />);
       await waitFor(() => expect(pane.listCommands).toHaveBeenCalled());
       fireEvent.click(screen.getByRole("button", { name: "Opportunities" }));
-      const discover = await screen.findByRole("button", { name: "Find tasks to automate" });
+      const discover = await screen.findByRole("button", { name: "Find ideas" });
       await waitFor(() => expect((discover as HTMLButtonElement).disabled).toBe(false));
       fireEvent.click(discover);
       const request = vi
@@ -4896,11 +4905,11 @@ describe("AgentPane lifecycle", () => {
         requestId: request.requestId,
       };
       act(() => emit("programmatic_assessment", { ...lifecycle, phase: "started" }));
-      expect(await screen.findByText(/Discovery is in progress/)).toBeTruthy();
+      expect(await screen.findByText(/Looking for ideas/)).toBeTruthy();
       // No completed event is delivered. No new provider request is allowed to repair it.
       if (outcome === "transport-lost") {
         await act(async () => receipt.reject(new Error("Transport cancelled")));
-        expect(await screen.findByText(/Discovery completion could not be confirmed/)).toBeTruthy();
+        expect(await screen.findByText(/We couldn't tell if the search finished/)).toBeTruthy();
       } else {
         const candidate = {
           assessmentId: "54df729b-2d8c-4a9f-abdc-ae6584a70742",
@@ -4948,13 +4957,15 @@ describe("AgentPane lifecycle", () => {
         );
         fireEvent.click(await screen.findByRole("button", { name: candidate.outcome }));
         expect(
-          (screen.getByRole("button", { name: "Review this task" }) as HTMLButtonElement).disabled,
+          (screen.getByRole("button", { name: "Review this idea" }) as HTMLButtonElement).disabled,
         ).toBe(false);
         expect(screen.getAllByText(candidate.rationale)).toHaveLength(1);
         expect(document.activeElement).toBe(
           document.querySelector("[data-programmatic-selection]"),
         );
-        expect(screen.getByText("Browse suggested tasks (1)").closest("details")!.open).toBe(false);
+        expect(
+          screen.getByRole("button", { name: candidate.outcome }).getAttribute("aria-pressed"),
+        ).toBe("true");
         expect(vi.mocked(pane.programmatic).mock.calls.map(([request]) => request.action)).toEqual([
           "report",
           "discover",
@@ -4969,7 +4980,7 @@ describe("AgentPane lifecycle", () => {
             summary: "Review prepared without execution",
           },
         });
-        fireEvent.click(screen.getByRole("button", { name: "Review this task" }));
+        fireEvent.click(screen.getByRole("button", { name: "Review this idea" }));
         await waitFor(() =>
           expect(pane.programmatic).toHaveBeenLastCalledWith({
             version: 1,
@@ -4981,12 +4992,10 @@ describe("AgentPane lifecycle", () => {
             expectedRevision: candidate.revision,
           }),
         );
-        expect(
-          await screen.findByText("Review prepared. Nothing has been created, changed or run."),
-        ).toBeTruthy();
+        expect(await screen.findByText("Review ready. Nothing was changed.")).toBeTruthy();
         expect(screen.getAllByText(candidate.rationale)).toHaveLength(1);
       }
-      expect(screen.queryByText(/Discovery is in progress/)).toBeNull();
+      expect(screen.queryByText(/Looking for ideas/)).toBeNull();
       expect(vi.mocked(pane.programmatic).mock.calls.map(([request]) => request.action)).toEqual(
         outcome === "success" ? ["report", "discover", "review-candidate"] : ["report", "discover"],
       );
@@ -5014,6 +5023,7 @@ describe("AgentPane lifecycle", () => {
       render(<AgentPane client={pane} target={target} />);
       await waitFor(() => expect(pane.listCommands).toHaveBeenCalled());
       fireEvent.click(screen.getByRole("button", { name: "Opportunities" }));
+      await openChecksTab();
       const review = await screen.findByRole("button", { name: "Review setup" });
       await waitFor(() => expect((review as HTMLButtonElement).disabled).toBe(false));
       fireEvent.click(review);
@@ -5090,7 +5100,7 @@ describe("AgentPane lifecycle", () => {
       // Duplicate delivery cannot invalidate the exact response or claim approval.
       complete();
       expect(await screen.findByText("exact reviewed settings")).toBeTruthy();
-      expect(screen.getByRole("heading", { name: "Project assessment: Unavailable" })).toBeTruthy();
+      expect(screen.getByRole("heading", { name: "Idea search: Not available" })).toBeTruthy();
       expect(
         (screen.getByRole("button", { name: "Approve and save setup" }) as HTMLButtonElement)
           .disabled,
@@ -5116,6 +5126,7 @@ describe("AgentPane lifecycle", () => {
     expect(screen.getAllByRole("heading", { name: "Opportunities" })).toHaveLength(1);
     expect((input as HTMLTextAreaElement).value).toBe("Keep this draft");
     expect(pane.sendPrompt).not.toHaveBeenCalled();
+    await openChecksTab();
     fireEvent.click(screen.getByRole("button", { name: "Refresh results" }));
     await waitFor(() => expect(pane.programmatic).toHaveBeenCalledTimes(2));
     expect(screen.getAllByRole("heading", { name: "Opportunities" })).toHaveLength(1);
@@ -5323,7 +5334,7 @@ describe("AgentPane lifecycle", () => {
     await waitFor(() => expect(pane.programmatic).toHaveBeenCalledTimes(1));
     expect(await screen.findByRole("heading", { name: "Opportunities" })).toBeTruthy();
     fireEvent.click(await screen.findByRole("button", { name: /Review packaging/ }));
-    const run = await screen.findByRole("button", { name: "Review task approval" });
+    const run = await screen.findByRole("button", { name: "Review and run" });
     await waitFor(() => expect((run as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(run);
     expect(pane.sendPrompt).toHaveBeenCalledExactlyOnceWith(`/programmatic-run ${id} ${id}`);
@@ -5409,12 +5420,11 @@ describe("AgentPane lifecycle", () => {
         ),
       );
       expect(
-        await screen.findByText("Run rejected: Wait for the current run to finish."),
+        await screen.findByText("Couldn't start: Wait for the current run to finish."),
       ).toBeTruthy();
-      expect(screen.queryByText(/We could not confirm whether the task started/)).toBeNull();
+      expect(screen.queryByText(/We couldn't tell if it started/)).toBeNull();
       expect(
-        (screen.getByRole("button", { name: "Review task approval" }) as HTMLButtonElement)
-          .disabled,
+        (screen.getByRole("button", { name: "Review and run" }) as HTMLButtonElement).disabled,
       ).toBe(false);
       expect(pane.programmatic).toHaveBeenCalledTimes(2);
       expect(pane.sendPrompt).toHaveBeenCalledTimes(1);
@@ -5426,10 +5436,9 @@ describe("AgentPane lifecycle", () => {
     async (message) => {
       const { pane, receipt } = await deferredOpportunityRun(false);
       await act(async () => receipt.reject(new PromptSubmissionError(new Error(message))));
-      expect(await screen.findByText(/We could not confirm whether the task started/)).toBeTruthy();
+      expect(await screen.findByText(/We couldn't tell if it started/)).toBeTruthy();
       expect(
-        (screen.getByRole("button", { name: "Review task approval" }) as HTMLButtonElement)
-          .disabled,
+        (screen.getByRole("button", { name: "Review and run" }) as HTMLButtonElement).disabled,
       ).toBe(true);
       expect(pane.sendPrompt).toHaveBeenCalledTimes(1);
     },
@@ -5441,9 +5450,7 @@ describe("AgentPane lifecycle", () => {
     await waitFor(() => expect(pane.programmatic).toHaveBeenCalledTimes(4));
     expect(await screen.findByText("Verified completion")).toBeTruthy();
     expect(
-      screen
-        .getByRole("button", { name: /Review packaging.*Completed/ })
-        .getAttribute("aria-pressed"),
+      screen.getByRole("button", { name: /Review packaging.*Done/ }).getAttribute("aria-pressed"),
     ).toBe("true");
     expect(vi.mocked(pane.programmatic).mock.calls.map(([request]) => request)).toEqual([
       { version: 1, action: "report", offset: 0 },

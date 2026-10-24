@@ -1,0 +1,779 @@
+/* ── Instrument material ──────────────────────────────────────────────────
+   Fork-only, reusable material layer: graphite chassis, recessed modules,
+   brushed-alloy key, status lamps, engraved plates, spec readouts and a
+   selector-style tab strip. Opt in with `.instrument` on a surface root, then
+   use the `inst-*` primitives inside it. Feature layout stays in its own
+   sheet (Programmatic.css); this file never names a feature.
+
+   Light (one source, top, 62° elevation) comes from the uimaxxxing world core:
+   regionCss(".instrument", { azimuth: 0, elevation: 62, intensity: 0.5,
+   temperature: 6800 }) + fallbackCss(".instrument"), core 1.1.0.
+   Regenerate rather than hand-edit the GENERATED block. see sources#world-core */
+
+/* GENERATED: uimaxxxing world core 1.1.0 — begin */
+.instrument {
+  --world-light-azimuth: 0deg;
+  --world-light-elevation: 62deg;
+  --world-light-intensity: 0.5;
+  --world-light-temperature: 6800;
+  --world-light-dx: 0;
+  --world-light-dy: 0.5317;
+  --world-light-tint: rgb(250 246 255);
+  --world-highlight: rgb(250 246 255 / 0.3);
+  --world-shade: rgb(0 0 0 / 0.25);
+  --world-highlight-solid: color-mix(in srgb, rgb(250 246 255) 30%, var(--world-surface, Canvas));
+  --world-shade-solid: color-mix(in srgb, rgb(0 0 0) 25%, var(--world-surface, Canvas));
+  --world-depth: 2;
+  --world-edge: none;
+  --world-shadow-raised:
+    inset calc(var(--world-light-dx) * 2px) calc(var(--world-light-dy) * 2px) 0 0
+      var(--world-highlight),
+    inset calc(var(--world-light-dx) * -2px) calc(var(--world-light-dy) * -2px) 0 0
+      var(--world-shade),
+    calc(var(--world-light-dx) * var(--world-depth) * 1px)
+      calc(var(--world-light-dy) * var(--world-depth) * 1px) calc(var(--world-depth) * 2px) 0
+      var(--world-shade);
+  --world-shadow-carved:
+    inset calc(var(--world-light-dx) * 2px) calc(var(--world-light-dy) * 2px) 0 0 var(--world-shade),
+    inset calc(var(--world-light-dx) * -2px) calc(var(--world-light-dy) * -2px) 0 0
+      var(--world-highlight);
+  --world-shadow-pressed: inset calc(var(--world-light-dx) * 1px) calc(var(--world-light-dy) * 1px)
+    calc(var(--world-depth) * 1.5px) 0 var(--world-shade);
+  --world-text-depth: calc(var(--world-depth) * 0.5px);
+  --world-text-floor: 15%;
+  --world-text-shadow-cut:
+    calc(var(--world-light-dx) * var(--world-text-depth) * -1)
+      calc(var(--world-light-dy) * var(--world-text-depth) * -1) 0px var(--world-shade),
+    calc(var(--world-light-dx) * var(--world-text-depth) * 1)
+      calc(var(--world-light-dy) * var(--world-text-depth) * 1) 0px var(--world-highlight);
+  --world-text-shadow-cut-deep:
+    calc(var(--world-light-dx) * var(--world-text-depth) * -1.5)
+      calc(var(--world-light-dy) * var(--world-text-depth) * -1.5) 0px var(--world-shade),
+    calc(var(--world-light-dx) * var(--world-text-depth) * -3)
+      calc(var(--world-light-dy) * var(--world-text-depth) * -3) 0px var(--world-shade),
+    calc(var(--world-light-dx) * var(--world-text-depth) * -4.5)
+      calc(var(--world-light-dy) * var(--world-text-depth) * -4.5) 0px var(--world-shade),
+    calc(var(--world-light-dx) * var(--world-text-depth) * 1.5)
+      calc(var(--world-light-dy) * var(--world-text-depth) * 1.5) 0px var(--world-highlight),
+    calc(var(--world-light-dx) * var(--world-text-depth) * 3)
+      calc(var(--world-light-dy) * var(--world-text-depth) * 3) 0px var(--world-highlight);
+  --world-text-shadow-raised:
+    calc(var(--world-light-dx) * var(--world-text-depth) * -1)
+      calc(var(--world-light-dy) * var(--world-text-depth) * -1) 0px var(--world-highlight),
+    calc(var(--world-light-dx) * var(--world-text-depth) * 1.5)
+      calc(var(--world-light-dy) * var(--world-text-depth) * 1.5)
+      calc(var(--world-text-depth) * 0.5) var(--world-shade);
+  --world-text-shadow-cast: calc(var(--world-light-dx) * var(--world-text-depth) * 2)
+    calc(var(--world-light-dy) * var(--world-text-depth) * 2) calc(var(--world-text-depth) * 1)
+    var(--world-shade);
+  --world-text-shadow-inlaid: 0px 0px calc(var(--world-text-depth) * 0.5) var(--world-shade);
+}
+
+@media (forced-colors: active) {
+  .instrument {
+    --world-shadow-raised: none;
+    --world-shadow-carved: none;
+    --world-shadow-pressed: none;
+    --world-text-shadow-cut: none;
+    --world-text-shadow-cut-deep: none;
+    --world-text-shadow-raised: none;
+    --world-text-shadow-cast: none;
+    --world-text-shadow-inlaid: none;
+    --world-text-floor: 0%;
+    --world-edge: 1px solid CanvasText;
+  }
+}
+
+@media print {
+  .instrument {
+    --world-shadow-raised: none;
+    --world-shadow-carved: none;
+    --world-shadow-pressed: none;
+    --world-text-shadow-cut: none;
+    --world-text-shadow-cut-deep: none;
+    --world-text-shadow-raised: none;
+    --world-text-shadow-cast: none;
+    --world-text-shadow-inlaid: none;
+    --world-text-floor: 0%;
+    --world-edge: 1px solid currentColor;
+  }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .instrument {
+    --world-highlight: var(--world-highlight-solid);
+    --world-shade: var(--world-shade-solid);
+  }
+}
+/* GENERATED: uimaxxxing world core 1.1.0 — end */
+
+/* Material tokens. Dark is the designed look; Light stays flat (below). */
+.instrument {
+  --inst-chassis: color-mix(in srgb, var(--bg) 82%, black);
+  --inst-module: color-mix(in srgb, var(--bg) 66%, black);
+  --inst-module-open: color-mix(in srgb, var(--bg) 88%, var(--surface-1));
+  --inst-edge: var(--border);
+  --inst-edge-lit: var(--border-strong);
+  --inst-tracking: 0.12em;
+  --inst-alloy-hi: #eef1f5;
+  --inst-alloy-mid: #c7ccd4;
+  --inst-alloy-lo: #a9afb9;
+  --inst-alloy-ink: #15171a;
+  /* Darker steel for engaged selectors; alloy is reserved for the one key. */
+  --inst-steel-hi: #4f5667;
+  --inst-steel-mid: #3d4351;
+  --inst-steel-lo: #2f343f;
+  /* Graphite: secondary keys, darker than engaged steel (alloy > steel > graphite). */
+  /* Rim light (bloub): key light on the top edge, a faint cool bounce on the
+     bottom edge. The bounce is what lifts a dark surface off a dark ground. */
+  --inst-rim: linear-gradient(
+    180deg,
+    rgb(255 255 255 / 0.16),
+    rgb(255 255 255 / 0.03) 30%,
+    transparent 55%,
+    color-mix(in srgb, var(--primary) 22%, transparent)
+  );
+  /* Specular shine: a broad soft highlight under the top-left of a surface. */
+  --inst-shine: radial-gradient(120% 70% at 18% 0%, rgb(255 255 255 / 0.05), transparent 62%);
+  /* Glass orb (bloub's shell, retinted to the app primary). */
+  --inst-glass-core: color-mix(in srgb, var(--primary) 46%, #10142c);
+  --inst-glass-mid: color-mix(in srgb, var(--primary) 22%, #0b0e20);
+  --inst-glass-deep: #070913;
+  --inst-glass-band: color-mix(in srgb, var(--primary) 26%, #10142c);
+  --inst-glass-rim: color-mix(in srgb, var(--primary) 52%, #1a1f3d);
+  --inst-glass-smoke: #e6eaff;
+  /* One-shot hover sheen on alloy keys (kinetics sheen-sweep, conformed). */
+  --inst-sheen-duration: 700ms;
+  --inst-sheen-ease: cubic-bezier(0.16, 1, 0.3, 1);
+  --inst-graphite-hi: #383c44;
+  --inst-graphite-mid: #2c2f35;
+  --inst-graphite-lo: #23252a;
+  --inst-alloy-fill:
+    var(--inst-brush-image),
+    linear-gradient(180deg, var(--inst-alloy-hi), var(--inst-alloy-mid) 56%, var(--inst-alloy-lo));
+  --inst-graphite-fill:
+    var(--inst-brush-image),
+    linear-gradient(
+      180deg,
+      var(--inst-graphite-hi),
+      var(--inst-graphite-mid) 52%,
+      var(--inst-graphite-lo)
+    );
+  /* Small raised key: ring, lit top lip, shaded bottom lip, short cast shadow. */
+  /* Volume (bloub's sphere shading, applied to rounded rectangles): a lit upper
+     body, a falloff toward the lower edge and a dark band just inside the rim,
+     which the 1px rim light then lifts. Convex for raised parts, concave for
+     recessed ones. All static inset shadows: no blur filters, no repaints. */
+  --inst-volume-convex:
+    inset 0 14px 22px -16px rgb(255 255 255 / 0.07), inset 0 -18px 26px -14px rgb(0 0 0 / 0.5),
+    inset 0 0 10px rgb(0 0 0 / 0.32);
+  --inst-volume-convex-small:
+    inset 0 8px 10px -8px rgb(255 255 255 / 0.12), inset 0 -8px 10px -6px rgb(0 0 0 / 0.45);
+  --inst-volume-concave:
+    inset 0 6px 10px -4px rgb(0 0 0 / 0.62), inset 0 -6px 10px -8px rgb(255 255 255 / 0.06);
+  /* Small raised key: ring, lit top lip, shaded bottom lip, volume, short cast shadow. */
+  --inst-depth-key:
+    0 0 0 1px rgb(0 0 0 / 0.6), inset 0 1px 0 rgb(255 255 255 / 0.12),
+    inset 0 -1px 0 rgb(0 0 0 / 0.4), var(--inst-volume-convex-small),
+    calc(var(--world-light-dx) * 4px) calc(var(--world-light-dy) * 4px) 6px -1px rgb(0 0 0 / 0.6);
+  /* Depth stacks: dark groove ring, lit top lip, shaded bottom lip, volume, then a
+     cast shadow offset along the world light (dx/dy) so world-light stays consistent. */
+  --inst-depth-chassis:
+    0 0 0 1px rgb(0 0 0 / 0.6), inset 0 1px 0 rgb(255 255 255 / 0.06),
+    inset 0 40px 60px -44px rgb(255 255 255 / 0.05), inset 0 -60px 80px -40px rgb(0 0 0 / 0.45),
+    inset 0 0 24px rgb(0 0 0 / 0.35),
+    calc(var(--world-light-dx) * 28px) calc(var(--world-light-dy) * 28px) 48px -16px
+      rgb(0 0 0 / 0.85);
+  --inst-depth-module:
+    0 0 0 1px rgb(0 0 0 / 0.55), inset 0 1px 0 rgb(255 255 255 / 0.075),
+    inset 0 -1px 0 rgb(0 0 0 / 0.5), var(--inst-volume-convex),
+    calc(var(--world-light-dx) * 10px) calc(var(--world-light-dy) * 10px) 18px -6px
+      rgb(0 0 0 / 0.75);
+  --inst-depth-lifted:
+    0 0 0 1px rgb(0 0 0 / 0.6), inset 0 1px 0 rgb(255 255 255 / 0.1),
+    inset 0 -1px 0 rgb(0 0 0 / 0.55), inset 0 18px 28px -18px rgb(255 255 255 / 0.09),
+    inset 0 -22px 32px -16px rgb(0 0 0 / 0.5), inset 0 0 12px rgb(0 0 0 / 0.3),
+    calc(var(--world-light-dx) * 20px) calc(var(--world-light-dy) * 20px) 32px -10px
+      rgb(0 0 0 / 0.85);
+  --inst-depth-engraved: var(--inst-volume-concave), 0 1px 0 rgb(255 255 255 / 0.06);
+  --inst-depth-channel:
+    inset 0 1px 2px rgb(0 0 0 / 0.5), inset 0 -1px 0 rgb(255 255 255 / 0.03),
+    0 1px 0 rgb(255 255 255 / 0.06);
+  --inst-depth-steel:
+    0 0 0 1px rgb(0 0 0 / 0.65), inset 0 1px 0 rgb(255 255 255 / 0.24),
+    inset 0 -1px 0 rgb(0 0 0 / 0.35), var(--inst-volume-convex-small),
+    calc(var(--world-light-dx) * 5px) calc(var(--world-light-dy) * 5px) 6px -1px rgb(0 0 0 / 0.65);
+  /* Grain strength 0–1; brushed micro-texture over chassis and modules. */
+  --inst-grain: 0.22;
+  --inst-grain-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='1600' height='480'%3E%3Cfilter id='g' x='0' y='0'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.0025 0.75' numOctaves='3' seed='7' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 0.55 0 0 0 -0.24'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23g)'/%3E%3C/svg%3E");
+  --inst-brush-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='320' height='64'%3E%3Cfilter id='b'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.006 1.1' numOctaves='2' seed='3' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0.55 0 0 0 -0.16'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23b)'/%3E%3C/svg%3E");
+  position: relative;
+  isolation: isolate;
+  background:
+    radial-gradient(120% 55% at 24% 0%, rgb(255 255 255 / 0.035), transparent 62%),
+    var(--inst-chassis);
+  border: 1px solid var(--inst-edge);
+  border-radius: var(--radius-card);
+  box-shadow: var(--inst-depth-chassis);
+  outline: var(--world-edge);
+}
+
+/* Opaque, so the highlight keeps its contrast over any surface or tint beneath it. */
+.instrument ::selection {
+  background: color-mix(in srgb, var(--primary) 34%, var(--inst-chassis));
+  color: var(--text);
+}
+/* Controls sit on fills the page highlight cannot read against; tint toward the chassis. */
+.instrument button::selection,
+.instrument button *::selection {
+  background: color-mix(in srgb, var(--primary) 32%, var(--inst-chassis));
+  color: var(--text);
+}
+.instrument .inst-key::selection {
+  background: color-mix(in srgb, var(--primary) 30%, white);
+  color: var(--inst-alloy-ink);
+}
+
+/* Rim light: a 1px gradient ring cut out with a mask, above grain, under content. */
+:root:not([data-appearance-theme="light"]) .instrument .inst-module::after,
+:root:not([data-appearance-theme="light"])
+  .instrument
+  .inst-tabs
+  > [role="tab"][aria-selected="true"]::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  padding: 1px;
+  border-radius: inherit;
+  background: var(--inst-rim);
+  mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  mask-composite: exclude;
+  pointer-events: none;
+}
+:root:not([data-appearance-theme="light"])
+  .instrument
+  .inst-tabs
+  > [role="tab"][aria-selected="true"] {
+  position: relative;
+  isolation: isolate;
+}
+
+/* Grain sits between each surface's fill and its content. */
+.instrument::before,
+.instrument .inst-module::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: inherit;
+  background-image: var(--inst-grain-image);
+  background-size: 1600px 480px;
+  opacity: var(--inst-grain);
+  pointer-events: none;
+}
+
+.inst-module {
+  position: relative;
+  isolation: isolate;
+  min-width: 0;
+  /* A faint top-lit falloff so each plate reads as a surface, not a flat fill. */
+  background:
+    var(--inst-shine),
+    linear-gradient(180deg, color-mix(in srgb, var(--inst-module) 94%, white), transparent 72px)
+      var(--inst-module);
+  border: 1px solid rgb(255 255 255 / 0.06);
+  border-radius: var(--radius-button);
+  box-shadow: var(--inst-depth-module);
+  outline: var(--world-edge);
+}
+.inst-module[data-open] {
+  background: linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--inst-module-open) 92%, white),
+      transparent 96px
+    )
+    var(--inst-module-open);
+  border-color: rgb(255 255 255 / 0.09);
+  box-shadow: var(--inst-depth-lifted);
+}
+
+/* Brushed-alloy key: the one raised, lit object on an instrument surface. */
+.inst-key {
+  position: relative;
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  min-height: 40px;
+  max-width: 100%;
+  padding: 0 28px;
+  border: 1px solid color-mix(in srgb, var(--primary) 82%, black);
+  border-radius: var(--radius-button);
+  /* Solid alloy first: the key stays readable if the gradient or brush image fails. */
+  background-color: var(--inst-alloy-mid);
+  background-image: var(--inst-alloy-fill);
+  background-position: center;
+  background-size:
+    320px 64px,
+    auto;
+  color: var(--inst-alloy-ink);
+  font: 600 var(--fs-lg) / 1.2 var(--sans);
+  white-space: normal;
+  text-align: center;
+  cursor: pointer;
+  user-select: none;
+  box-shadow:
+    0 0 0 1px rgb(0 0 0 / 0.55),
+    0 0 18px -4px color-mix(in srgb, var(--primary) 70%, transparent),
+    inset 0 1px 0 rgb(255 255 255 / 0.85),
+    inset 0 -1px 0 rgb(0 0 0 / 0.22),
+    calc(var(--world-light-dx) * 8px) calc(var(--world-light-dy) * 8px) 12px -2px rgb(0 0 0 / 0.7);
+  transition:
+    filter var(--t-fast, 120ms) ease,
+    transform var(--t-fast, 120ms) ease;
+}
+.inst-key[data-quiet] {
+  border-color: var(--inst-edge-lit);
+  box-shadow:
+    0 0 0 1px rgb(0 0 0 / 0.55),
+    inset 0 1px 0 rgb(255 255 255 / 0.85),
+    inset 0 -1px 0 rgb(0 0 0 / 0.22),
+    calc(var(--world-light-dx) * 8px) calc(var(--world-light-dy) * 8px) 12px -2px rgb(0 0 0 / 0.7);
+}
+@media (hover: hover) and (pointer: fine) {
+  .inst-key:hover:not(:disabled) {
+    filter: brightness(1.06);
+  }
+}
+.inst-key:active:not(:disabled) {
+  transform: translateY(1px);
+  filter: brightness(0.96);
+}
+.inst-key:disabled {
+  cursor: not-allowed;
+  filter: saturate(0.4) brightness(0.72);
+  box-shadow: 0 0 0 1px rgb(0 0 0 / 0.55);
+}
+.inst-key:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 3px;
+}
+
+/* Hover sheen on alloy keys: one sweep per hover (fine pointer only), instant
+   reset on leave, none under reduced motion. Decorative; the hover state is
+   also shown by brightness. Kinetics sheen-sweep, conformed (see sources). */
+.inst-key,
+:root:not([data-appearance-theme="light"]) .instrument .btn-primary {
+  overflow: hidden;
+}
+.inst-key::after,
+:root:not([data-appearance-theme="light"]) .instrument .btn-primary::after {
+  content: "";
+  position: absolute;
+  inset-block: 0;
+  inset-inline-start: -60%;
+  inline-size: 50%;
+  background: linear-gradient(100deg, transparent, rgb(255 255 255 / 0.4), transparent);
+  transform: skewX(-18deg);
+  pointer-events: none;
+}
+@media (hover: hover) and (pointer: fine) and (prefers-reduced-motion: no-preference) {
+  .inst-key:hover:not(:disabled)::after,
+  :root:not([data-appearance-theme="light"]) .instrument .btn-primary:hover:not(:disabled)::after {
+    inset-inline-start: 120%;
+    transition: inset-inline-start var(--inst-sheen-duration) var(--inst-sheen-ease);
+  }
+}
+:root[data-appearance-theme="light"] .instrument .inst-key::after {
+  display: none;
+}
+
+/* Glass orb: the panel's identity lamp; smoke drifts only while searching. */
+.inst-glass {
+  display: block;
+  flex: none;
+  overflow: visible;
+  filter: drop-shadow(
+    calc(var(--world-light-dx) * 6px) calc(var(--world-light-dy) * 6px) 6px rgb(0 0 0 / 0.55)
+  );
+}
+.inst-glass[data-active] {
+  filter: drop-shadow(
+      calc(var(--world-light-dx) * 6px) calc(var(--world-light-dy) * 6px) 6px rgb(0 0 0 / 0.55)
+    )
+    drop-shadow(0 0 10px color-mix(in srgb, var(--primary) 45%, transparent));
+}
+
+/* Shared app buttons on an instrument surface. Dark only: Light keeps the flat
+   app buttons. Primary actions become alloy keys, secondary actions graphite
+   keys; result rows keep the module look. Rings are box-shadows, not borders,
+   so sizes match the app's buttons exactly. */
+:root:not([data-appearance-theme="light"]) .instrument .btn-primary,
+:root:not([data-appearance-theme="light"]) .instrument .btn-primary:hover:not(:disabled) {
+  background-color: var(--inst-alloy-mid);
+  background-image: var(--inst-alloy-fill);
+  background-size:
+    320px 64px,
+    auto;
+  color: var(--inst-alloy-ink);
+  user-select: none;
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--primary) 82%, black),
+    0 0 0 2px rgb(0 0 0 / 0.45),
+    inset 0 1px 0 rgb(255 255 255 / 0.85),
+    inset 0 -1px 0 rgb(0 0 0 / 0.22),
+    calc(var(--world-light-dx) * 5px) calc(var(--world-light-dy) * 5px) 8px -2px rgb(0 0 0 / 0.65);
+}
+:root:not([data-appearance-theme="light"]) .instrument .btn-ghost:not(.programmatic-row),
+:root:not([data-appearance-theme="light"])
+  .instrument
+  .btn-ghost:not(.programmatic-row):hover:not(:disabled) {
+  background-color: var(--inst-graphite-mid);
+  background-image: var(--inst-graphite-fill);
+  background-size:
+    320px 64px,
+    auto;
+  user-select: none;
+  box-shadow: var(--inst-depth-key);
+}
+:root:not([data-appearance-theme="light"]) .instrument .btn-ghost:not(.programmatic-row) {
+  color: var(--text-secondary);
+}
+@media (hover: hover) and (pointer: fine) {
+  :root:not([data-appearance-theme="light"]) .instrument .btn-primary:hover:not(:disabled) {
+    filter: brightness(1.06);
+  }
+  :root:not([data-appearance-theme="light"])
+    .instrument
+    .btn-ghost:not(.programmatic-row):hover:not(:disabled) {
+    color: var(--text);
+    filter: brightness(1.15);
+  }
+}
+
+/* Status lamp: tone colour plus a soft bloom. Always paired with text. */
+.inst-lamp {
+  --lamp: var(--text-dim);
+  display: inline-block;
+  flex: none;
+  inline-size: 10px;
+  block-size: 10px;
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at 32% 26%, rgb(255 255 255 / 0.9) 0 9%, transparent 26%),
+    radial-gradient(
+      circle at 40% 36%,
+      color-mix(in srgb, var(--lamp) 70%, white) 0,
+      var(--lamp) 40%,
+      color-mix(in srgb, var(--lamp) 45%, black) 74%,
+      color-mix(in srgb, var(--lamp) 60%, white) 100%
+    );
+  box-shadow:
+    0 0 0 1px rgb(0 0 0 / 0.5),
+    0 0 8px 1px color-mix(in srgb, var(--lamp) 55%, transparent);
+}
+.inst-lamp[data-tone="primary"] {
+  --lamp: var(--primary);
+}
+.inst-lamp[data-tone="success"] {
+  --lamp: var(--success);
+}
+.inst-lamp[data-tone="warning"] {
+  --lamp: var(--warning);
+}
+.inst-lamp[data-tone="neutral"] {
+  --lamp: var(--text-dim);
+  box-shadow: 0 0 0 1px rgb(0 0 0 / 0.5);
+}
+
+/* Engraved plate and mono-caps label: the instrument's small type voice. */
+.inst-plate,
+.inst-label {
+  font-family: var(--mono);
+  font-size: var(--fs-sm);
+  letter-spacing: var(--inst-tracking);
+  text-transform: uppercase;
+}
+.inst-plate {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 0 var(--space-4);
+  border: 1px solid rgb(255 255 255 / 0.07);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--surface-2) 40%, var(--inst-module));
+  color: var(--text-secondary);
+  line-height: 1;
+  box-shadow: var(--inst-depth-engraved);
+}
+.inst-label {
+  color: var(--text-dim);
+  line-height: 1.4;
+}
+
+/* Spec readout: mono-caps terms, a hairline, then plain-sentence values. */
+.inst-spec {
+  display: grid;
+  grid-template-columns: minmax(7.5em, max-content) minmax(0, 1fr);
+  gap: var(--space-4) var(--space-10);
+  margin: 0;
+}
+.inst-spec-row {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: subgrid;
+  align-items: baseline;
+}
+.inst-spec dt {
+  font-family: var(--mono);
+  font-size: var(--fs-sm);
+  letter-spacing: var(--inst-tracking);
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.inst-spec dd {
+  min-width: 0;
+  margin: 0;
+  padding-inline-start: var(--space-7);
+  border-inline-start: 1px solid var(--inst-edge);
+  color: var(--text-secondary);
+}
+.inst-spec-items {
+  display: grid;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0 !important;
+  list-style: none;
+}
+.inst-spec-items > li {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-4);
+}
+.inst-spec-items .inst-lamp {
+  inline-size: 8px;
+  block-size: 8px;
+  transform: translateY(-1px);
+}
+
+/* Selector strip for NotesTabList: a recessed channel; the engaged tab is a raised
+   brushed-steel key with a lit lamp. Selection never relies on the accent colour. */
+.inst-tabs-scroll {
+  max-width: 100%;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+/* A segmented bezel: equal segments sized by the longest label, a 2px lip and
+   tight corners. Inactive segments are a dark key face, not a black hole. */
+.inst-tabs {
+  display: inline-grid;
+  grid-auto-columns: 1fr;
+  grid-auto-flow: column;
+  padding: 2px;
+  border: 1px solid rgb(0 0 0 / 0.6);
+  border-radius: var(--radius-control);
+  background:
+    linear-gradient(180deg, rgb(255 255 255 / 0.02), transparent 70%),
+    color-mix(in srgb, var(--bg) 90%, var(--surface-2));
+  box-shadow: var(--inst-depth-channel);
+}
+.inst-tabs > [role="tab"] {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-6);
+  min-height: 32px;
+  padding: 0 var(--space-10);
+  border: 0;
+  border-radius: calc(var(--radius-control) - 2px);
+  background: transparent;
+  color: var(--text-dim);
+  font: 500 var(--fs-xs) / 1 var(--mono);
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  cursor: pointer;
+  user-select: none;
+}
+.inst-tabs > [role="tab"]::before {
+  content: "";
+  flex: none;
+  inline-size: 6px;
+  block-size: 6px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--text-dim) 55%, black);
+  box-shadow: 0 0 0 1px rgb(0 0 0 / 0.45);
+}
+.inst-tabs > [role="tab"]:not([aria-selected="true"]) + [role="tab"]:not([aria-selected="true"]) {
+  background: linear-gradient(
+    90deg,
+    rgb(0 0 0 / 0.45) 0 1px,
+    rgb(255 255 255 / 0.05) 1px 2px,
+    transparent 2px
+  );
+}
+.inst-tabs > [role="tab"][aria-selected="true"] {
+  color: var(--text);
+  background-color: var(--inst-steel-mid);
+  background-image:
+    var(--inst-brush-image),
+    linear-gradient(180deg, var(--inst-steel-hi), var(--inst-steel-mid) 52%, var(--inst-steel-lo));
+  background-size:
+    320px 64px,
+    auto;
+  box-shadow: var(--inst-depth-steel);
+}
+.inst-tabs > [role="tab"][aria-selected="true"]::before {
+  background: var(--primary);
+  box-shadow:
+    0 0 0 1px rgb(0 0 0 / 0.45),
+    0 0 7px 1px color-mix(in srgb, var(--primary) 60%, transparent);
+}
+@media (hover: hover) and (pointer: fine) {
+  .inst-tabs > [role="tab"]:hover:not([aria-selected="true"]) {
+    color: var(--text-secondary);
+  }
+}
+/* Keyboard focus only (mouse clicks don't show it); neutral so it never reads as selection. */
+.inst-tabs > [role="tab"]:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--text) 78%, transparent);
+  outline-offset: 0;
+}
+/* Same ink as its label: inactive labels already sit at the contrast floor.
+   Pulled back from the lamp gap so the count reads as "IDEAS 3", one space apart. */
+.inst-tab-count {
+  margin-inline-start: calc(var(--space-4) - var(--space-6));
+  color: inherit;
+}
+
+@media (pointer: coarse) {
+  .inst-key,
+  .inst-tabs > [role="tab"] {
+    min-height: 44px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .inst-key {
+    transition: none;
+  }
+  .inst-key:active:not(:disabled) {
+    transform: none;
+  }
+}
+@media (prefers-reduced-transparency: reduce) {
+  .instrument {
+    --inst-grain: 0;
+  }
+}
+@media print {
+  .instrument {
+    --inst-grain: 0;
+    --inst-depth-chassis: none;
+    --inst-depth-module: none;
+    --inst-depth-lifted: none;
+    --inst-depth-engraved: none;
+    --inst-depth-channel: none;
+    --inst-depth-steel: none;
+  }
+}
+@media (forced-colors: active) {
+  .instrument {
+    --inst-grain: 0;
+    --inst-depth-chassis: none;
+    --inst-depth-module: none;
+    --inst-depth-lifted: none;
+    --inst-depth-engraved: none;
+    --inst-depth-channel: none;
+    --inst-depth-steel: none;
+  }
+  .inst-key,
+  :root:not([data-appearance-theme="light"]) .instrument .btn-primary,
+  :root:not([data-appearance-theme="light"]) .instrument .btn-ghost:not(.programmatic-row) {
+    background: ButtonFace;
+    color: ButtonText;
+    border: 1px solid ButtonText;
+    box-shadow: none;
+    filter: none;
+  }
+  .inst-key:focus-visible,
+  .inst-tabs > [role="tab"]:focus-visible {
+    outline-color: Highlight;
+  }
+  .inst-glass,
+  .inst-key::after,
+  .instrument .btn-primary::after,
+  .instrument .inst-module::after,
+  .instrument .inst-tabs > [role="tab"]::after {
+    display: none;
+  }
+  .inst-lamp,
+  .inst-tabs > [role="tab"]::before {
+    background: CanvasText;
+    box-shadow: none;
+  }
+  .inst-tabs > [role="tab"][aria-selected="true"] {
+    background: Highlight;
+    color: HighlightText;
+  }
+}
+
+/* Light theme: same structure, flat material (no grain, relief or alloy). */
+:root[data-appearance-theme="light"] .instrument {
+  --inst-grain: 0;
+  --inst-chassis: var(--surface-1);
+  --inst-module: color-mix(in srgb, var(--surface-1) 45%, white);
+  --inst-module-open: color-mix(in srgb, var(--surface-1) 25%, white);
+  --world-shadow-raised: none;
+  --world-shadow-carved: none;
+  --world-shadow-pressed: none;
+  --inst-depth-chassis: var(--shadow-sm);
+  --inst-depth-module: 0 1px 2px rgb(30 45 70 / 0.08);
+  --inst-depth-lifted: var(--shadow-sm);
+  --inst-depth-engraved: none;
+  --inst-depth-channel: inset 0 0 0 1px var(--border);
+  --inst-depth-steel: 0 0 0 1px var(--border-strong);
+}
+:root[data-appearance-theme="light"] .instrument .inst-module {
+  background: var(--inst-module);
+  border-color: var(--border);
+}
+:root[data-appearance-theme="light"] .instrument .inst-module[data-open] {
+  background: var(--inst-module-open);
+  border-color: var(--border-strong);
+}
+:root[data-appearance-theme="light"] .instrument .inst-key {
+  background: var(--primary-fill);
+  background-image: none;
+  color: var(--on-primary-fill);
+  border-color: transparent;
+  box-shadow: var(--shadow-sm);
+}
+:root[data-appearance-theme="light"] .instrument .inst-key[data-quiet] {
+  background: var(--surface-2);
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+:root[data-appearance-theme="light"] .instrument .inst-lamp {
+  box-shadow: 0 0 0 1px rgb(0 0 0 / 0.18);
+}
+:root[data-appearance-theme="light"] .instrument .inst-plate {
+  background: var(--surface-2);
+  border-color: var(--border);
+}
+:root[data-appearance-theme="light"] .instrument .inst-tabs {
+  background: var(--surface-2);
+  border-color: var(--border);
+}
+:root[data-appearance-theme="light"]
+  .instrument
+  .inst-tabs
+  > [role="tab"]:not([aria-selected="true"])
+  + [role="tab"]:not([aria-selected="true"]) {
+  background: linear-gradient(90deg, var(--border) 0 1px, transparent 1px);
+}
+:root[data-appearance-theme="light"] .instrument .inst-tabs > [role="tab"][aria-selected="true"] {
+  background: color-mix(in srgb, var(--surface-1) 30%, white);
+}

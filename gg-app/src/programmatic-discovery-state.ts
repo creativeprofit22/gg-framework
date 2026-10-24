@@ -272,20 +272,18 @@ export function discoveryResponse(
         candidateDetail: response.detail?.discovery ?? state.candidateDetail,
         candidateStale: true,
         notice: response.detail
-          ? "Historical proposal. Fresh inspection is required before review."
-          : "This historical candidate is unavailable; previous detail is retained.",
+          ? "This is a past idea. Search again before reviewing it."
+          : "This past idea isn't available. Its last details are still shown.",
       };
     }
     case "history-inspect-decision":
     case "history-inspect-correspondence":
-      return { ...state, notice: "History decision inspection returned; no decision was applied." };
+      return { ...state, notice: "Nothing changed." };
     case "history-apply":
       return {
         ...state,
         candidateStale: true,
-        notice: response.changed
-          ? "History decision saved. Reload the selected historical detail."
-          : "No history decision changed.",
+        notice: response.changed ? "Saved. Reload this idea to see it." : "Nothing changed.",
       };
   }
 }

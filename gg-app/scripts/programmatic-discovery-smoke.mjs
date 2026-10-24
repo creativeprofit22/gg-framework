@@ -10,7 +10,7 @@ import {
 } from "./programmatic-discovery-observer.mjs";
 
 export const discoveryOutcome = "NATIVE DISCOVERY: reconcile fixture records";
-export const discoveryRequestCount = 10;
+export const discoveryRequestCount = 9;
 const requirement = {
   version: 1,
   desiredOutcome: "Reconcile fixture records",
@@ -121,17 +121,16 @@ export function discoveryWorkflowStep(number, body) {
         ],
       });
     }
+    // An accepted advisory result ends the run, so review starts at request 4.
     case 4:
       assert.ok(output("discovery-submit").includes("Recommendations"));
-      return "NATIVE DISCOVERY SETTLED: proposal only.";
-    case 5:
       return tool("review-read", "read", { file_path: "package.json" });
-    case 6:
+    case 5:
       assert.ok(output("review-read").includes("harmless-isolated-fixture"));
       return tool("review-catalog", "command_information", { action: "list" });
-    case 7:
+    case 6:
       return tool("review-inspect", "programmatic_command", { action: "inspect", proposal });
-    case 8: {
+    case 7: {
       const initial = JSON.parse(output("review-inspect"));
       assert.equal(initial.status, "review-required");
       assert.match(initial.catalog.sha256, /^[a-f0-9]{64}$/);
@@ -147,7 +146,7 @@ export function discoveryWorkflowStep(number, body) {
         },
       });
     }
-    case 9: {
+    case 8: {
       const inspected = JSON.parse(output("review-proposal"));
       assert.equal(inspected.status, "proposal");
       assert.match(inspected.handle, /^[a-f0-9-]{36}$/);
@@ -172,7 +171,7 @@ export function discoveryWorkflowStep(number, body) {
         handle: inspected.handle,
       });
     }
-    case 10:
+    case 9:
       assert.ok(output("review-refused-create").includes("no creation, verification or run"));
       return "NATIVE DISCOVERY REVIEW SETTLED: inspected only; creation rejected.";
   }
@@ -187,16 +186,16 @@ export async function runDiscoverySmoke({ client, click, waitFor, requests, inpu
       `Array.from(document.querySelectorAll('.programmatic-chat button')).some(b=>b.textContent.trim()===${JSON.stringify(discoveryOutcome)})`,
     ),
   );
-  assert.equal(requests.length, 4);
+  assert.equal(requests.length, 3);
   await click(discoveryOutcome);
-  assert.equal(requests.length, 4, "Selection does not dispatch review");
+  assert.equal(requests.length, 3, "Selection does not dispatch review");
   await observe?.("discovery-selected");
   if (input) {
     const layout = async (name) => {
       // Traverse after resize/zoom instead of mistaking retained off-screen focus for a new keyboard visit.
       await input.key("Tab", "Tab", 9, 8);
       await input.focus(
-        "document.querySelector('[aria-label=\"Selected opportunity\"] summary')",
+        "document.querySelector('[aria-label=\"Selected idea\"] summary')",
         `${name}: evidence`,
       );
       const measured =
@@ -212,13 +211,11 @@ export async function runDiscoverySmoke({ client, click, waitFor, requests, inpu
       await input.capture(name);
     };
     await input.activate(
-      "document.querySelector('[aria-label=\"Selected opportunity\"] summary')",
+      "document.querySelector('[aria-label=\"Selected idea\"] summary')",
       "Open task details",
     );
     assert.equal(
-      await client.evaluate(
-        `document.querySelector('[aria-label="Selected opportunity"] details').open`,
-      ),
+      await client.evaluate(`document.querySelector('[aria-label="Selected idea"] details').open`),
       true,
     );
     await layout("discovery-desktop");
@@ -259,7 +256,7 @@ export async function runDiscoverySmoke({ client, click, waitFor, requests, inpu
       `document.body.innerText.includes('NATIVE DISCOVERY REVIEW SETTLED') && !!(${smokeButton(smokeLabels.review)}) && !(${smokeButton(smokeLabels.review)}).disabled`,
     ),
   );
-  // Find more tasks is collapsed once suggestions exist. Reveal before keyboard/AX checks.
+  // Find more ideas is collapsed once suggestions exist. Reveal before keyboard/AX checks.
   await revealSmokeTarget(
     client,
     smokeButton(smokeLabels.discover),
@@ -281,13 +278,13 @@ export async function runDiscoverySmoke({ client, click, waitFor, requests, inpu
   assert.equal(requests.length, discoveryRequestCount);
   assert.equal(
     await client.evaluate(
-      `document.querySelector('[aria-label="Selected opportunity"]')?.textContent.includes(${JSON.stringify(discoveryOutcome)})`,
+      `document.querySelector('[aria-label="Selected idea"]')?.textContent.includes(${JSON.stringify(discoveryOutcome)})`,
     ),
     true,
   );
   assert.equal(
     await client.evaluate(
-      `document.querySelector('.programmatic-chat')?.textContent.includes('Setup is read-only; saved checks were not run.')`,
+      `document.querySelector('.programmatic-chat')?.textContent.includes('Setup only looks, so checks didn't run.')`,
     ),
     true,
   );
@@ -304,7 +301,7 @@ export async function runDiscoverySmoke({ client, click, waitFor, requests, inpu
   );
   assert.equal(
     await client.evaluate(
-      `document.querySelector('[aria-label="Selected opportunity"]')?.textContent.includes(${JSON.stringify(discoveryOutcome)})`,
+      `document.querySelector('[aria-label="Selected idea"]')?.textContent.includes(${JSON.stringify(discoveryOutcome)})`,
     ),
     true,
   );

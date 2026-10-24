@@ -124,8 +124,7 @@ export function programmaticChatReducer(
       ...state,
       operation: null,
       detailSnapshot: null,
-      notice:
-        "Task requested. Review the separate approval prompt in this chat before work starts.",
+      notice: "Answer the approval prompt in this chat to start.",
     };
   const response = event.response;
   const responseDisplay = assessmentResponse(state, response);
@@ -150,7 +149,7 @@ export function programmaticChatReducer(
       return {
         ...base,
         ...responseDisplay,
-        notice: "Suggestions received. No suggested task has been started.",
+        notice: "Ideas are ready. Nothing has started.",
       };
     case "review-candidate":
     case "history-report":
@@ -194,10 +193,10 @@ export function programmaticChatReducer(
           response.proposal.handle !== null && response.proposal.operation !== "current",
         notice:
           response.proposal.operation === "current"
-            ? "Saved settings are up to date. Nothing needs to be saved."
+            ? "Setup is up to date. Nothing to save."
             : response.proposal.operation === "refresh"
-              ? "Setup refresh is ready to review. No files have been changed."
-              : "Setup is ready to review. No files have been changed.",
+              ? "Updated setup is ready to review. Nothing has changed yet."
+              : "Setup is ready to review. Nothing has changed yet.",
       };
     case "approve-setup":
       return {
@@ -210,13 +209,13 @@ export function programmaticChatReducer(
       return {
         ...base,
         ...responseDisplay,
-        notice: "Loading saved check results.",
+        notice: "Loading results.",
       };
     case "dismiss":
       return {
         ...base,
         detailSnapshot: null,
-        notice: "Dismissal saved. Reloading results to show the current status.",
+        notice: "Dismissed. Reloading results.",
       };
   }
 }

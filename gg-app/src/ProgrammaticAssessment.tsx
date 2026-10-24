@@ -2,43 +2,43 @@ import type { ProgrammaticAssessment as Assessment } from "@kenkaiiii/gg-core/pr
 
 const historyLabels: Record<NonNullable<Assessment["history"]>["status"], string> = {
   saved: "saved",
-  disabled: "saving disabled",
-  "setup-not-saved": "setup assessment not saved",
+  disabled: "off",
+  "setup-not-saved": "not saved during setup",
   unsaved: "not saved",
-  "acknowledgement-unknown": "save not confirmed",
+  "acknowledgement-unknown": "not sure it saved",
 };
 
 const statusLabels: Record<Assessment["status"], string> = {
-  completed: "Finished",
-  incomplete: "Incomplete",
-  cancelled: "Cancelled",
-  unavailable: "Unavailable",
+  completed: "Done",
+  incomplete: "Not finished",
+  cancelled: "Stopped",
+  unavailable: "Not available",
 };
 const checkLabels: Record<Assessment["deterministic"]["status"], string> = {
-  succeeded: "Finished",
+  succeeded: "Done",
   "not-run": "Not run",
-  unavailable: "Unavailable",
+  unavailable: "Not available",
   denied: "Not allowed",
-  cancelled: "Cancelled",
+  cancelled: "Stopped",
   failed: "Failed",
 };
 const checkExplanations: Record<
   Exclude<Assessment["deterministic"]["status"], "succeeded" | "not-run">,
   string
 > = {
-  unavailable: "Saved checks were unavailable. Their results could not be assessed.",
-  denied: "Saved checks were not allowed to run. Their results could not be assessed.",
-  cancelled: "Saved checks were cancelled. Their results are incomplete.",
-  failed: "Saved checks failed. Their results are incomplete; see Details for the recorded reason.",
+  unavailable: "Your checks couldn't run.",
+  denied: "Your checks weren't allowed to run.",
+  cancelled: "Your checks were stopped, so results are incomplete.",
+  failed: "Your checks failed. See Details for why.",
 };
 const coverageLabels: Record<Assessment["coverage"][number]["status"], string> = {
   inspected: "Checked",
   uninspected: "Not checked",
-  "budget-limited": "Only partly checked",
-  unreadable: "Could not be read",
-  unsafe: "Not safe to inspect",
-  nonmatching: "Did not match",
-  "not-applicable": "Did not apply",
+  "budget-limited": "Partly checked",
+  unreadable: "Couldn't read",
+  unsafe: "Skipped for safety",
+  nonmatching: "Didn't match",
+  "not-applicable": "Didn't apply",
 };
 
 /** Plain-text assessment presentation; actions remain in the parent chat. */
@@ -52,13 +52,10 @@ export function ProgrammaticAssessment({
   const history = assessment.history;
   const checks = assessment.deterministic;
   return (
-    <section aria-label="Project assessment">
-      <h3>Project assessment: {statusLabels[assessment.status]}</h3>
+    <section aria-label="Idea search">
+      <h3>Idea search: {statusLabels[assessment.status]}</h3>
       {previous && (
-        <p>
-          Previous assessment, retained for reference. New discovery or inspection is needed before
-          review.
-        </p>
+        <p>This is an older search, kept for reference. Search again before reviewing an idea.</p>
       )}
       <p>{assessment.summary}</p>
 
@@ -73,28 +70,26 @@ export function ProgrammaticAssessment({
         <p role="alert">{checkExplanations[checks.status]}</p>
       )}
       {checks.status === "succeeded" && checks.applicableCount === 0 && (
-        <p>No saved checks applied. This does not mean there are no useful improvements.</p>
+        <p>None of your checks applied. There may still be things to improve.</p>
       )}
       {history?.status === "unsaved" && (
-        <p role="alert">
-          These suggestions were not saved to history. The assessment results remain here.
-        </p>
+        <p role="alert">These ideas weren't saved to Past ideas. They're still shown here.</p>
       )}
       {history?.status === "acknowledgement-unknown" && (
         <p role="alert">
-          History may already have been saved, but this could not be confirmed. Read current history
-          before retrying the save. Do not rerun the assessment or its checks just to save history.
+          We're not sure these ideas were saved. Open Past ideas to check. Don't search again just
+          to save them.
         </p>
       )}
       <details>
         <summary>Details</summary>
         {assessment.coverage.length > 0 && (
           <>
-            <h4>What was checked</h4>
+            <h4>What AI looked at</h4>
             <ul>
               {assessment.coverage.map((item, index) => (
                 <li key={index}>
-                  {item.scope === "project" ? "Project" : "Available commands"}:{" "}
+                  {item.scope === "project" ? "Your project" : "Your commands"}:{" "}
                   {coverageLabels[item.status]} — {item.summary}
                 </li>
               ))}
@@ -102,29 +97,27 @@ export function ProgrammaticAssessment({
           </>
         )}
         {history && (
-          <section aria-label="Recommendation history">
-            <h4>Recommendation history: {historyLabels[history.status]}</h4>
-            {history.status === "disabled" && <p>Automatic history saving is not enabled.</p>}
-            {history.status === "setup-not-saved" && (
-              <p>Setup assessments are read-only and are not saved to recommendation history.</p>
-            )}
+          <section aria-label="Past ideas">
+            <h4>Past ideas: {historyLabels[history.status]}</h4>
+            {history.status === "disabled" && <p>Saving past ideas is off.</p>}
+            {history.status === "setup-not-saved" && <p>Ideas found during setup aren't saved.</p>}
             {"reason" in history && (
               <p style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{history.reason}</p>
             )}
           </section>
         )}
-        <h4>Saved checks: {checkLabels[checks.status]}</h4>
+        <h4>Checks: {checkLabels[checks.status]}</h4>
         {assessment.deterministic.status === "succeeded" ? (
           <>
             <p>
-              {assessment.deterministic.enabledCount} enabled checks;{" "}
-              {assessment.deterministic.applicableCount} applicable checks.
+              {assessment.deterministic.enabledCount} checks set up,{" "}
+              {assessment.deterministic.applicableCount} applied.
             </p>
           </>
         ) : (
           <p>
             {assessment.deterministic.status === "not-run"
-              ? "Setup is read-only; saved checks were not run."
+              ? "Setup only looks, so checks didn't run."
               : assessment.deterministic.reason}
           </p>
         )}

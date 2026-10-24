@@ -42,9 +42,9 @@ export function bindProgrammaticAssessmentEvents(
 export type ProgrammaticChatAssessment = (mode: "setup" | "configured", requestId?: string) => ReturnType<AgentSession["assessProgrammatic"]>;
 
 function unavailableAssessment(mode: "setup" | "configured", deterministic: ProgrammaticAssessment["deterministic"]): ProgrammaticAssessment {
-  return { version: 1, mode, status: "unavailable", summary: "Needs assessment unavailable; host settings and deterministic results remain independent.",
-    limitations: ["No current-session assessment provider is available."], observations: [],
-    coverage: [{ scope: "project", status: "uninspected", summary: "Host configuration facts do not establish project understanding." }], deterministic };
+  return { version: 1, mode, status: "unavailable", summary: "AI couldn't look for ideas. Your checks still work.",
+    limitations: ["No AI provider is available in this chat."], observations: [],
+    coverage: [{ scope: "project", status: "uninspected", summary: "Your project wasn't read." }], deterministic };
 }
 
 /** A review appends transcript leaves under the held run claim; those leaves are
@@ -159,7 +159,7 @@ export class AppSidecarProgrammaticChat {
           if (!current()) return fail(409, "The project or chat changed. Discover opportunities again.");
           const mode = proposal?.configuration.status === "current" ? "configured" : "setup";
           const assessment = this.assess ? (await this.assess(mode, input.requestId)).assessment
-            : unavailableAssessment(mode, mode === "setup" ? { status: "not-run", reason: "setup" } : { status: "unavailable", reason: "Assessment provider unavailable." });
+            : unavailableAssessment(mode, mode === "setup" ? { status: "not-run", reason: "setup" } : { status: "unavailable", reason: "No AI provider is available." });
           if (!current()) return fail(409, "The project or chat changed. Discover opportunities again.");
           body = { version: 1, action: "discover", ok: true, assessment };
           break;
@@ -257,7 +257,7 @@ export class AppSidecarProgrammaticChat {
               true,
             );
           body = { version: 1, action: "scan", ok: true, changed: result.changed,
-            assessment: unavailableAssessment("configured", result.scanCounts ? { status: "succeeded", ...result.scanCounts } : { status: "unavailable", reason: "Host scan completed without authoritative enabled/applicable counts." }) };
+            assessment: unavailableAssessment("configured", result.scanCounts ? { status: "succeeded", ...result.scanCounts } : { status: "unavailable", reason: "The checks finished but didn't say how many ran." }) };
           break;
         }
         case "dismiss": {

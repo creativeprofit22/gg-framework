@@ -1670,7 +1670,9 @@ describe("generate-from-reference host submission", () => {
     expect(output).not.toMatch(/fingerprint|digest|lifecycle|receipt-/i);
     const display = projectDiscovery(randomUUID(), turn.acceptedResult!).projection.candidates[0]!;
     expect(display.choice).toBe("generate-from-reference");
-    expect(display.nextStep.reason).toContain("Review generator creation");
+    expect(display.nextStep.reason).toBe(
+      "Look over the plan. Nothing changes. Making, testing and running it each need your OK.",
+    );
   });
 
   it("accepts building one by hand first without an inspected member", async () => {

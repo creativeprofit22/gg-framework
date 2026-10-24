@@ -107,7 +107,7 @@ it("shows generator advice in plain words for current and saved suggestions", ()
   expect(display).toMatchObject({
     choice: "generate-from-reference",
     details: [
-      "Reference: records/b (inspected, not verified to work)",
+      "Example to copy: records/b (looked at, not tested)",
       "Most complete record",
       "Same record layout",
       "Record name",
@@ -119,7 +119,7 @@ it("shows generator advice in plain words for current and saved suggestions", ()
     nextStep: {
       available: true,
       reason:
-        "Review generator creation without making changes. Creating, checking and running a generator each need separate review and approval.",
+        "Look over the plan. Nothing changes. Making, testing and running it each need your OK.",
     },
   });
   expect(display.availability).toBeUndefined();
@@ -160,8 +160,7 @@ it("projects only bounded availability evidence for an available command", () =>
   const candidate = projectDiscovery(randomUUID(), result).projection.candidates[0]!;
   expect(candidate.availability).toEqual({
     status: "available",
-    reason:
-      "The command was available when assessed. Review and approval are still needed before running it.",
+    reason: "The command was there when AI looked. You still review and approve it before it runs.",
   });
   expect(candidate.nextStep.available).toBe(true);
   expect(JSON.stringify(candidate)).not.toContain("Sha256");
@@ -210,8 +209,7 @@ it.each(["available", "unavailable", undefined] as const)(
         ? { status: "unavailable", reason: availability.reason }
         : {
             status: "reinspection-required",
-            reason:
-              "This saved command has not been checked again. Inspect it without making changes before using it.",
+            reason: "This command hasn't been checked since. Check it again before using it.",
           },
     );
     expect(candidate.alternatives[0]!.availability).toEqual({
@@ -310,5 +308,5 @@ it("keeps unsupported native proposals non-executable", () => {
     }),
   );
   expect(projection.candidates[0]!.nextStep).toMatchObject({ available: false });
-  expect(projection.candidates[0]!.nextStep.reason).toContain("application development");
+  expect(projection.candidates[0]!.nextStep.reason).toContain("a change to the GG app itself");
 });

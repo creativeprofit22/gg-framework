@@ -40,7 +40,7 @@ const state = {
   proposalApprovable: false,
   report: {
     status: "current",
-    reason: "Saved check settings match the project.",
+    reason: "Your checks are up to date.",
     fingerprint: hash,
     snapshot: hash,
     offset: 0,
@@ -117,7 +117,7 @@ window.renderFixture(${JSON.stringify(state)});
   );
   await page.goto(`${origin}/__programmatic-preview`);
   await page.getByRole("heading", { name: "Opportunities", exact: true }).waitFor();
-  await page.getByText("Why this was suggested and how to check it", { exact: true }).click();
+  await page.getByText("Why this came up", { exact: true }).click();
   const capture = async (name) => {
     await page.screenshot({ path: `${output}/${name}.png`, fullPage: true });
     results.screenshots.push(`${name}.png`);
@@ -261,11 +261,10 @@ window.renderFixture(${JSON.stringify(state)});
         total: 0,
         scan: {
           available: false,
-          reason: "Review and approve setup before checking for opportunities.",
+          reason: "Set up checks first.",
         },
         fingerprint: null,
-        reason:
-          "Choose Review setup to see which checks can be enabled. Reviewing changes no files.",
+        reason: "Choose Review setup to pick your checks. Nothing changes until you save.",
       },
     },
     error: {

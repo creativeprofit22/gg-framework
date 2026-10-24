@@ -1,0 +1,451 @@
+/* ── Opportunities panel layout ───────────────────────────────────────────
+   Fork-only. Loaded after Instrument.css, which owns the material (surfaces,
+   key, lamps, plates, spec readout, tab strip). This sheet owns placement,
+   spacing, type scale and narrow-pane behaviour for the in-thread panel.
+   Moved out of App.css so the upstream sheet carries no fork feature rules. */
+
+.programmatic-chat {
+  container: opportunities / inline-size;
+  min-width: 0;
+  margin-block: var(--space-8);
+  padding: clamp(14px, 4%, 24px);
+  color: var(--text-secondary);
+  font-family: var(--sans);
+  font-size: var(--fs-md);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.programmatic-chat [data-programmatic-selection] {
+  scroll-margin-block: 16px;
+}
+.programmatic-chat h2,
+.programmatic-chat h3,
+.programmatic-chat h4,
+.programmatic-chat h5 {
+  margin-block: 0;
+  color: var(--text);
+  font-size: inherit;
+  font-weight: 600;
+}
+.programmatic-chat p {
+  margin-block: var(--space-4);
+}
+.programmatic-chat ul {
+  margin-block: var(--space-4);
+  padding-inline-start: var(--space-10);
+}
+.programmatic-chat .inst-spec-items {
+  margin-block: 0;
+  padding-inline-start: 0;
+}
+.programmatic-chat pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: var(--fs-sm) / 1.5 var(--mono);
+  background: var(--surface-1);
+  border-radius: var(--radius-button);
+  padding: var(--space-6);
+}
+.programmatic-chat code {
+  font-family: var(--mono);
+  font-size: 0.9em;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.programmatic-chat summary {
+  cursor: pointer;
+  min-height: 32px;
+  padding-block: var(--space-3);
+}
+.programmatic-chat .btn {
+  white-space: normal;
+  min-height: 32px;
+  max-width: 100%;
+}
+.programmatic-chat :focus:not(:focus-visible) {
+  outline: none;
+}
+.programmatic-chat :focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 3px;
+}
+.programmatic-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-4);
+  margin-block: var(--space-6);
+}
+
+/* Header: title + mono telemetry line, the alloy key on the right. */
+.opp-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+}
+.opp-head-text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.programmatic-chat .opp-head h2 {
+  font-size: var(--fs-4xl);
+  line-height: 1.2;
+  letter-spacing: -0.01em;
+}
+.programmatic-chat .opp-meta {
+  margin: var(--space-3) 0 0;
+  color: var(--text-dim);
+  font: var(--fs-sm) / 1.4 var(--mono);
+  letter-spacing: var(--inst-tracking);
+  text-transform: uppercase;
+}
+.programmatic-chat .opp-status {
+  margin: 0;
+}
+.programmatic-chat .opp-status:not(:empty) {
+  margin-block-start: var(--space-6);
+  color: var(--text-dim);
+  font-size: var(--fs-sm);
+}
+.programmatic-chat > .opp-notice {
+  margin-block-start: var(--space-6);
+}
+.programmatic-chat .inst-tabs-scroll {
+  margin-block: var(--space-10) var(--space-8);
+}
+
+/* Panels: one column of modules with a steady 12px rhythm. */
+.opp-panel {
+  display: grid;
+  gap: var(--space-6);
+}
+.opp-panel[hidden] {
+  display: none;
+}
+.programmatic-chat .opp-panel > * {
+  margin-block: 0;
+}
+
+/* Idea cards. The head is one stretched hit area; the open card reads first. */
+.programmatic-chat .opp-cards {
+  display: grid;
+  gap: var(--space-6);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.opp-card {
+  padding: var(--space-8) var(--space-10);
+}
+.opp-card[data-open] {
+  padding: var(--space-10) var(--space-12);
+}
+.opp-card-head {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-4) var(--space-6);
+}
+.opp-card-kind {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-5);
+  min-width: 0;
+}
+.opp-card-meta {
+  color: var(--text-dim);
+  font: var(--fs-sm) / 1.4 var(--mono);
+  letter-spacing: var(--inst-tracking);
+  text-transform: uppercase;
+}
+.programmatic-chat .opp-card-title {
+  grid-column: 1;
+  min-width: 0;
+  font-size: var(--fs-xl);
+  line-height: 1.35;
+}
+.programmatic-chat .opp-card[data-open] .opp-card-title {
+  font-size: var(--fs-2xl);
+}
+.opp-card-toggle {
+  appearance: none;
+  display: block;
+  width: 100%;
+  min-height: 32px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  letter-spacing: inherit;
+  text-align: start;
+  cursor: pointer;
+}
+.opp-card-toggle::after {
+  content: "";
+  position: absolute;
+  inset: calc(var(--space-8) * -1) calc(var(--space-10) * -1);
+}
+.opp-card[data-open] .opp-card-toggle {
+  cursor: default;
+}
+.opp-card[data-open] .opp-card-toggle::after {
+  inset: calc(var(--space-10) * -1) calc(var(--space-12) * -1);
+}
+/* The ring sits on the button itself (full-width title row), offset clear of the text. */
+.programmatic-chat .opp-card-toggle:focus-visible {
+  border-radius: var(--radius-control);
+  outline: 2px solid var(--primary);
+  outline-offset: 4px;
+}
+.opp-card-chevron {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  color: var(--text-dim);
+  font-size: var(--fs-3xl);
+  line-height: 1;
+  transform: rotate(90deg);
+}
+@media (hover: hover) and (pointer: fine) {
+  .opp-card:not([data-open]):hover {
+    border-color: var(--inst-edge-lit);
+  }
+  .opp-card:not([data-open]):hover .opp-card-chevron {
+    color: var(--text-secondary);
+  }
+}
+
+/* Open card body: lede, readout, then details on the left and the action right. */
+.opp-detail {
+  display: grid;
+  gap: var(--space-8);
+  margin-block-start: var(--space-4);
+}
+.programmatic-chat .opp-lede {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: var(--fs-md);
+  line-height: 1.55;
+}
+.opp-detail > .inst-spec {
+  padding-block-start: var(--space-8);
+  border-block-start: 1px solid var(--inst-edge);
+}
+.opp-detail-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--space-6) var(--space-8);
+}
+.opp-more {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.opp-more[open] {
+  flex-basis: 100%;
+}
+.programmatic-chat .opp-more > summary {
+  display: inline-flex;
+  align-items: center;
+  color: var(--primary);
+  font: var(--fs-sm) / 1.4 var(--mono);
+  letter-spacing: 0.04em;
+}
+.programmatic-chat .opp-more h5 {
+  margin-block-start: var(--space-6);
+  font-size: var(--fs-base);
+}
+.opp-detail-action {
+  display: grid;
+  justify-items: end;
+  gap: var(--space-3);
+  margin-inline-start: auto;
+  text-align: end;
+}
+.programmatic-chat .opp-caption {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: var(--fs-sm);
+}
+
+/* Inline notices: one quiet strip, tone on the leading edge, never colour alone. */
+.programmatic-chat .opp-notice {
+  margin: 0;
+  padding: var(--space-5) var(--space-7);
+  border: 1px solid var(--inst-edge);
+  border-inline-start-width: 3px;
+  border-radius: var(--radius-control);
+  background: color-mix(in srgb, var(--inst-module) 70%, transparent);
+  box-shadow: var(--inst-depth-engraved);
+  color: var(--text-secondary);
+  font-size: var(--fs-base);
+}
+.opp-notice[data-tone="primary"] {
+  border-inline-start-color: var(--primary);
+}
+.opp-notice[data-tone="warning"] {
+  border-inline-start-color: var(--warning);
+}
+.opp-notice[data-tone="error"] {
+  border-inline-start-color: var(--error);
+}
+.opp-empty,
+.opp-search {
+  padding: var(--space-8) var(--space-10);
+}
+.programmatic-chat .opp-empty p {
+  margin: 0;
+}
+.programmatic-chat .opp-search h3 {
+  font-size: var(--fs-md);
+}
+
+/* Checks tab: results and setup are modules with the same rhythm as cards. */
+.programmatic-stage {
+  padding: var(--space-8) var(--space-10);
+}
+.programmatic-chat .programmatic-stage > h3:first-child,
+.programmatic-chat .opp-section-title {
+  font-size: var(--fs-xl);
+}
+.programmatic-chat .programmatic-stage h4 {
+  margin-block: var(--space-6) var(--space-3);
+}
+.programmatic-chat .programmatic-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.programmatic-list > li {
+  margin-block: var(--space-4);
+}
+.programmatic-chat .programmatic-row {
+  width: 100%;
+  justify-content: flex-start;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+  padding: var(--space-6);
+  border-radius: var(--radius-button);
+  text-align: start;
+}
+.programmatic-row[aria-pressed="true"] {
+  border-color: var(--primary);
+}
+.programmatic-proposal,
+.programmatic-detail {
+  margin-block-start: var(--space-8);
+}
+.programmatic-detail {
+  padding: var(--space-8) var(--space-10);
+}
+
+/* Past ideas tab. */
+.opp-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4) var(--space-8);
+}
+.programmatic-chat .opp-rows {
+  display: grid;
+  gap: var(--space-4);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.opp-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-5) var(--space-7);
+}
+
+/* Narrow panes (quad and six-pane layouts, phones): stack, keep reading size. */
+@container opportunities (max-width: 560px) {
+  /* Orb and title share the first row; the key takes its own full row. */
+  .opp-head {
+    flex-wrap: wrap;
+    gap: var(--space-6) var(--space-7);
+  }
+  .opp-head .inst-glass {
+    inline-size: 32px;
+    block-size: 32px;
+  }
+  .opp-head .inst-key {
+    flex-basis: 100%;
+  }
+  .programmatic-chat .opp-head h2 {
+    font-size: var(--fs-3xl);
+  }
+  .programmatic-chat .inst-tabs {
+    display: grid;
+    min-width: 100%;
+  }
+  .programmatic-chat .inst-tabs > [role="tab"] {
+    padding-inline: var(--space-5);
+  }
+  .opp-card,
+  .opp-card[data-open],
+  .programmatic-stage,
+  .programmatic-detail,
+  .opp-empty,
+  .opp-search {
+    padding: var(--space-7) var(--space-8);
+  }
+  .opp-card-toggle::after,
+  .opp-card[data-open] .opp-card-toggle::after {
+    inset: calc(var(--space-7) * -1) calc(var(--space-8) * -1);
+  }
+  .inst-spec {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--space-2);
+  }
+  .inst-spec-row + .inst-spec-row {
+    margin-block-start: var(--space-4);
+  }
+  .inst-spec dd {
+    padding-inline-start: 0;
+    border-inline-start: 0;
+  }
+  .opp-detail-action {
+    justify-items: stretch;
+    width: 100%;
+    margin-inline-start: 0;
+    text-align: start;
+  }
+}
+
+@media (pointer: coarse) {
+  .programmatic-chat .btn,
+  .programmatic-chat summary,
+  .opp-card-toggle {
+    min-height: 44px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .programmatic-chat * {
+    animation: none !important;
+    transition: none !important;
+  }
+}
+@media (forced-colors: active) {
+  .programmatic-chat :focus-visible {
+    outline-color: Highlight;
+  }
+  .programmatic-chat .programmatic-row[aria-pressed="true"] {
+    border: 2px solid Highlight;
+  }
+  .programmatic-chat .btn {
+    border: 1px solid ButtonText;
+  }
+  .opp-card[data-open] {
+    border: 2px solid Highlight;
+  }
+}

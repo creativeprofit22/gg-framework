@@ -537,7 +537,7 @@ describe("programmatic state", () => {
       },
     });
     expect(current.proposalApprovable).toBe(false);
-    expect(current.notice).toBe("Saved settings are up to date. Nothing needs to be saved.");
+    expect(current.notice).toBe("Setup is up to date. Nothing to save.");
     const changed = programmaticChatReducer(reviewed, {
       type: "response",
       generation: "one",

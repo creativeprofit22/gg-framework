@@ -12,321 +12,200 @@ import {
   canReviewProgrammaticCandidate,
   type ProgrammaticChatState,
 } from "./programmatic-chat-state";
+import { evidenceBasisLabel } from "./ProgrammaticExecutionEvidence";
+import { DataPlate, SpecList, StatusLamp, type LampTone, type SpecRow } from "./InstrumentParts";
 
+/** Sentence form, used where the kind reads inside a sentence (Other options). */
 const labels: Record<DiscoveryChoice, string> = {
-  "reuse-command": "An existing command may handle this task",
-  "extend-command": "An existing command would need changes",
-  "missing-capability": "New automation would need to be built",
-  "needs-more-evidence": "More information is needed before choosing automation",
-  manual: "Keep this manual",
-  "generate-from-reference": "Build one example, then generate the rest",
+  "reuse-command": "You already have a command for this",
+  "extend-command": "A command you have could do this with changes",
+  "missing-capability": "Needs a new command",
+  "needs-more-evidence": "Needs a closer look first",
+  manual: "Better done by hand",
+  "generate-from-reference": "Make one, then copy it for the rest",
+};
+/** Plate form: the short kind shown on every idea card. */
+const plateLabels: Record<DiscoveryChoice, string> = {
+  "reuse-command": "You have this",
+  "extend-command": "Change a command",
+  "missing-capability": "New command",
+  "needs-more-evidence": "Look closer",
+  manual: "By hand",
+  "generate-from-reference": "Make one, copy the rest",
+};
+const lampTones: Record<DiscoveryChoice, LampTone> = {
+  "reuse-command": "success",
+  "extend-command": "primary",
+  "missing-capability": "primary",
+  "needs-more-evidence": "warning",
+  manual: "neutral",
+  "generate-from-reference": "primary",
 };
 const isCommand = (item: DiscoveryCandidate) =>
   item.choice === "reuse-command" || item.choice === "extend-command";
 const reviewLabel = (item: DiscoveryCandidate) =>
-  item.choice === "generate-from-reference"
-    ? "Review generator creation"
-    : isCommand(item) && item.availability?.status !== "available"
-      ? "Reinspect command (read-only)"
-      : "Review this task";
+  isCommand(item) && item.availability?.status !== "available"
+    ? "Check the command again"
+    : "Review this idea";
 const decisionLabels: Record<RecommendationSummary["decision"], string> = {
   open: "Still open",
   dismissed: "Dismissed",
-  completed: "Marked complete",
+  completed: "Done",
 };
 const historyLabels: Record<RecommendationHistoryReport["status"], string> = {
-  disabled: "History saving is off",
-  missing: "No saved history found",
-  ready: "Saved history loaded",
-  recovered: "History recovered; some records may be missing",
-  unavailable: "Saved history could not be loaded",
+  disabled: "Saving past ideas is off",
+  missing: "No past ideas yet",
+  ready: "Past ideas loaded",
+  recovered: "Past ideas loaded, but some may be missing",
+  unavailable: "Couldn't load past ideas",
 };
 const reviewStatusLabels: Record<DiscoveryReview["status"], string> = {
-  prepared: "Review prepared. Nothing has been created, changed or run.",
-  "reinspection-required": "The command needs a fresh inspection before review can continue.",
-  unsupported: "A review cannot be prepared for this suggestion.",
+  prepared: "Review ready. Nothing was changed.",
+  "reinspection-required": "This command needs another check first.",
+  unsupported: "This idea can't be reviewed here.",
 };
 const availabilityLabel = (
   status: NonNullable<DiscoveryCandidate["availability"]>["status"] | undefined,
 ) =>
   status === "available"
-    ? "Available at assessment"
+    ? "Command found"
     : status === "unavailable"
-      ? "Command unavailable"
-      : "Command needs reinspection";
+      ? "Command not found"
+      : "Command needs another check";
+
 function HistoryStatus({ item }: { item: RecommendationSummary }) {
   return item.canonicalId ? (
-    <span>Linked to an earlier candidate · Not a separate outstanding need</span>
+    <span>Same as an earlier idea</span>
   ) : (
     <>
-      <span>Recorded decision: {decisionLabels[item.decision]}</span>
-      {item.ambiguity === "exact-workflow-duplicate" && (
-        <p>Possible duplicate · Same workflow; relationship not confirmed</p>
-      )}
+      <span>Status: {decisionLabels[item.decision]}</span>
+      {item.ambiguity === "exact-workflow-duplicate" && <p>Might be the same as another idea</p>}
     </>
   );
 }
-export function ProgrammaticDiscovery({
-  state,
-  locked,
-  planMode,
-  onRequest,
-  onSelect,
-}: {
+
+interface PanelProps {
   state: ProgrammaticChatState;
   locked: boolean;
   planMode: boolean;
   onRequest(request: ProgrammaticChatRequest): void;
   onSelect(source: "current" | "history", id: string): void;
-}) {
+}
+
+/** The selected idea's explanation, shared by the Ideas and Past ideas tabs. */
+function CandidateDetail({
+  state,
+  candidate,
+  locked,
+  planMode,
+  onRequest,
+}: Omit<PanelProps, "onSelect"> & { candidate: DiscoveryCandidate }) {
   const reasonId = useId();
-  const candidate = state.selection?.source !== "deterministic" ? state.candidateDetail : null;
-  const current = state.discovery;
-  const history = state.historyReport;
-  const historical =
-    state.selection?.source === "history" &&
-    state.historyDetail?.candidate.id === state.selection.id
-      ? state.historyDetail.candidate
-      : null;
   const reason = state.candidateStale
-    ? "This suggestion is from an earlier check. Check again before reviewing it as a current task."
+    ? "This idea is from an earlier search. Search again first."
     : planMode
-      ? "Leave plan mode before asking AI to review this task."
+      ? "Turn off plan mode to review this idea."
       : locked
-        ? "Wait for current work to finish or stop it in this chat."
+        ? "Wait for the current work to finish, or stop it."
         : state.reconcile
-          ? "Refresh results to confirm the previous response before requesting another review."
-          : candidate?.nextStep.available
-            ? "Review only: this does not create, change or run automation."
-            : "This suggestion is not ready for review.";
-  return (
-    <>
-      <details
-        open={
-          !current?.candidates.length ||
-          state.discoveryStale ||
-          state.assessmentPending ||
-          state.assessmentUncertain
-        }
-      >
-        <summary>
-          {current?.candidates.length ? "Find more tasks" : "Find tasks to automate"}
-        </summary>
-        <div className="programmatic-actions">
-          <button
-            className="btn btn-primary btn-sm"
-            disabled={locked || planMode || state.reconcile}
-            onClick={() => onRequest({ version: 1, action: "discover" })}
-          >
-            {state.discoveryStale && current ? "Check again" : "Find tasks to automate"}
-          </button>
-        </div>
-        <p>
-          Ask AI to find repeatable project work and suggest automation. This uses your selected
-          provider, needs no saved checks, and does not create or run a command.
-        </p>
-      </details>
-      {state.assessmentPending && (
-        <p>Discovery is in progress. Previous evidence remains below for reference only.</p>
-      )}
-      {state.assessmentUncertain && (
-        <p>
-          Discovery completion could not be confirmed. Previous evidence is for reference only. No
-          work was retried. Once this chat is idle, you can explicitly discover again.
-        </p>
-      )}
-      {state.discoveryStale && current && (
-        <p>These suggestions are from an earlier check. Check again before reviewing a task.</p>
-      )}
-      {current && !current.candidates.length && !state.discoveryStale && (
-        <p>
-          No tasks were suggested from the information checked. This was not a complete project
-          check; review the limits below.
-        </p>
-      )}
-      {!current && state.assessment && (
-        <p>
-          Candidate detail is unavailable for this assessment. This does not mean no useful needs
-          exist.
-        </p>
-      )}
-      {!!current?.candidates.length && (
-        <section aria-label="Discovered candidates">
-          <h3>Suggested tasks</h3>
-          <details key={candidate?.candidateId ?? "unselected"} open={!candidate}>
-            <summary>Browse suggested tasks ({current.candidates.length})</summary>
-            {!state.discoveryStale &&
-              !state.assessmentPending &&
-              !state.assessmentUncertain &&
-              current.candidates.every(
-                (item) =>
-                  item.choice === "reuse-command" && item.availability?.status === "available",
-              ) && <p>The identified needs have existing automation to review.</p>}
-            <ul className="programmatic-list">
-              {current.candidates.map((item) => (
-                <li key={item.candidateId}>
-                  <button
-                    className="btn btn-ghost btn-sm"
-                    aria-pressed={
-                      state.selection?.source === "current" &&
-                      state.selection.id === item.candidateId
-                    }
-                    onClick={() => onSelect("current", item.candidateId)}
-                  >
-                    {item.outcome}
-                  </button>
-                  {candidate?.candidateId !== item.candidateId && (
-                    <span>
-                      {labels[item.choice]} · Proposal
-                      {isCommand(item) ? ` · ${availabilityLabel(item.availability?.status)}` : ""}
-                    </span>
-                  )}
-                </li>
-              ))}
-            </ul>
-          </details>
-        </section>
-      )}
-      {historical && (
-        <section aria-label="Selected history record">
-          <h3>Saved recommendation</h3>
-          {state.historyDetailStale && (
-            <>
-              <p role="status">
-                This saved recommendation may be out of date. Its recorded decision and observation
-                count are from an earlier read.
-              </p>
-              <button
-                className="btn btn-ghost btn-sm"
-                disabled={locked}
-                onClick={() =>
-                  onRequest({
-                    version: 1,
-                    action: "history-detail",
-                    candidateId: historical.id,
-                    offset: state.historyDetail?.offset ?? 0,
-                  })
-                }
-              >
-                Reload selected history (read-only)
-              </button>
-            </>
-          )}
-          <HistoryStatus item={historical} />
-          {historical.canonicalId && (
-            <>
-              <p>
-                This record is retained for its history. View the earlier candidate for its recorded
-                decision; decisions are not copied between records.
-              </p>
-              <button
-                className="btn btn-ghost btn-sm"
-                disabled={locked}
-                onClick={() => onSelect("history", historical.canonicalId!)}
-              >
-                View earlier candidate
-              </button>
-            </>
-          )}
-          <p>
-            {historical.observationCount} saved{" "}
-            {historical.observationCount === 1 ? "observation" : "observations"}. Historical
-            evidence only; not current approval.
-          </p>
-        </section>
-      )}
-      {candidate && (
-        <section aria-label="Selected opportunity">
-          <h3 tabIndex={-1} data-programmatic-selection>
-            {candidate.outcome}
-          </h3>
-          <p>
-            {labels[candidate.choice]}
-            {state.selection?.source === "history" && " (saved suggestion)"}
-          </p>
-          {isCommand(candidate) && candidate.availability?.status !== "available" && (
-            <>
-              <p>{availabilityLabel(candidate.availability?.status)}</p>
-              <p>
-                {candidate.availability?.reason ??
-                  "Command availability was not recorded. Fresh read-only inspection is required."}
-              </p>
-            </>
-          )}
-          <p>{candidate.rationale}</p>
-          <p>Uncertainty: {candidate.uncertainty}</p>
-          <p>Scope: {candidate.workflow.scope}</p>
-          <p>Proposed changes, not permission: {candidate.workflow.mutationBoundary}</p>
-          {!candidate.nextStep.available && <p>Review limitation: {candidate.nextStep.reason}</p>}
-          <h4>Risks</h4>
-          {candidate.risks.length ? (
-            <ul>
-              {candidate.risks.map((text, index) => (
-                <li key={index}>{text}</li>
-              ))}
-            </ul>
-          ) : (
-            <p>No risks were listed. This does not establish that the task is safe.</p>
-          )}
-          {!!candidate.details.length && (
-            <>
-              <h4>Requirements and considerations</h4>
-              <ul>
+          ? "Refresh results to see what was saved, then try again."
+          : candidate.nextStep.available
+            ? "Reviewing doesn't change anything."
+            : "This idea isn't ready to review.";
+  const risks = candidate.risks.length ? (
+    <ul className="inst-spec-items">
+      {candidate.risks.map((text, index) => (
+        <li key={index}>
+          <StatusLamp tone="warning" />
+          {text}
+        </li>
+      ))}
+    </ul>
+  ) : (
+    "None listed. That doesn't mean it's safe."
+  );
+  const rows: SpecRow[] = [
+    { term: "Changes", value: candidate.workflow.mutationBoundary },
+    { term: "Where", value: candidate.workflow.scope },
+    { term: "Not sure", value: candidate.uncertainty },
+    { term: "Risk", value: risks },
+    ...(candidate.details.length
+      ? [
+          {
+            term: "Good to know",
+            value: (
+              <ul className="inst-spec-items">
                 {candidate.details.map((text, index) => (
                   <li key={index}>{text}</li>
                 ))}
               </ul>
-            </>
+            ),
+          },
+        ]
+      : []),
+  ];
+  return (
+    <div className="opp-detail">
+      <p className="opp-lede">{candidate.rationale}</p>
+      {isCommand(candidate) && candidate.availability?.status !== "available" && (
+        <p className="opp-notice">
+          <strong>{availabilityLabel(candidate.availability?.status)}.</strong>{" "}
+          {candidate.availability?.reason ??
+            "We don't know if this command still exists. Check it again."}
+        </p>
+      )}
+      <SpecList rows={rows} label="About this idea" />
+      {!candidate.nextStep.available && (
+        <p className="opp-notice">Why you can't review it: {candidate.nextStep.reason}</p>
+      )}
+      <div className="opp-detail-foot">
+        <details className="opp-more">
+          <summary>More details</summary>
+          {isCommand(candidate) && candidate.availability?.status === "available" && (
+            <p>{candidate.availability.reason}</p>
           )}
-          <details>
-            <summary>Details</summary>
-            {isCommand(candidate) && candidate.availability?.status === "available" && (
-              <p>{candidate.availability.reason}</p>
+          <p>Result: {candidate.workflow.output}</p>
+          <p>How to tell it worked: {candidate.workflow.successCheck}</p>
+          {candidate.nextStep.available && <p>Next step: {candidate.nextStep.reason}</p>}
+          {state.candidateReview && <p>{state.candidateReview.summary}</p>}
+          <p>When it comes up: {candidate.workflow.trigger}</p>
+          <p>Example: {candidate.workflow.representativeCase}</p>
+          <p>
+            How often ({evidenceBasisLabel(candidate.workflow.repeatability.basis).toLowerCase()}):{" "}
+            {candidate.workflow.repeatability.explanation}
+          </p>
+          <h5>What it uses and how it's done now</h5>
+          <ul>
+            {[...candidate.workflow.inputs, ...candidate.workflow.currentProcess].map(
+              (text, index) => (
+                <li key={index}>{text}</li>
+              ),
             )}
-            <p>Expected output: {candidate.workflow.output}</p>
-            <p>Success check: {candidate.workflow.successCheck}</p>
-            {candidate.nextStep.available && (
-              <p>Recorded review reason: {candidate.nextStep.reason}</p>
-            )}
-            {state.candidateReview && <p>{state.candidateReview.summary}</p>}
-            <p>Trigger: {candidate.workflow.trigger}</p>
-            <p>Example: {candidate.workflow.representativeCase}</p>
-            <p>
-              Repeatability ({candidate.workflow.repeatability.basis}):{" "}
-              {candidate.workflow.repeatability.explanation}
-            </p>
-            <h4>Inputs and current process</h4>
-            <ul>
-              {[...candidate.workflow.inputs, ...candidate.workflow.currentProcess].map(
-                (text, index) => (
-                  <li key={index}>{text}</li>
-                ),
-              )}
-            </ul>
-            <h4>Evidence</h4>
-            <ul>
-              {candidate.evidence.map((item, index) => (
-                <li key={index}>
-                  {item.basis}: {item.message} ({item.source})
-                </li>
-              ))}
-            </ul>
-            <h4>Alternatives</h4>
-            <ul>
-              {candidate.alternatives.map((item) => (
-                <li key={item.kind}>
-                  {labels[item.kind]}: {item.reasonNotSelected}
-                  {item.availability && (
-                    <>
-                      <p>{availabilityLabel(item.availability.status)}</p>
-                      <p>{item.availability.reason}</p>
-                    </>
-                  )}
-                </li>
-              ))}
-            </ul>
-          </details>
-          <p id={reasonId}>{reason}</p>
+          </ul>
+          <h5>What AI found</h5>
+          <ul>
+            {candidate.evidence.map((item, index) => (
+              <li key={index}>
+                {evidenceBasisLabel(item.basis)}: {item.message} ({item.source})
+              </li>
+            ))}
+          </ul>
+          <h5>Other options</h5>
+          <ul>
+            {candidate.alternatives.map((item) => (
+              <li key={item.kind}>
+                {labels[item.kind]}: {item.reasonNotSelected}
+                {item.availability && (
+                  <>
+                    <p>{availabilityLabel(item.availability.status)}</p>
+                    <p>{item.availability.reason}</p>
+                  </>
+                )}
+              </li>
+            ))}
+          </ul>
+        </details>
+        <div className="opp-detail-action">
           {candidate.choice !== "manual" && (
             <button
               className="btn btn-ghost btn-sm"
@@ -347,20 +226,148 @@ export function ProgrammaticDiscovery({
               {reviewLabel(candidate)}
             </button>
           )}
+          <p id={reasonId} className="opp-caption">
+            {reason}
+          </p>
+        </div>
+      </div>
+      {state.candidateReview && (
+        <p className="opp-notice" role="status">
+          {reviewStatusLabels[state.candidateReview.status]}
+        </p>
+      )}
+    </div>
+  );
+}
 
-          {state.candidateReview && <p>{reviewStatusLabels[state.candidateReview.status]}</p>}
+/** Ideas tab: search notices, then one card per idea; the selected card opens in place. */
+export function ProgrammaticIdeas({ state, locked, planMode, onRequest, onSelect }: PanelProps) {
+  const candidate = state.selection?.source === "current" ? state.candidateDetail : null;
+  const current = state.discovery;
+  return (
+    <>
+      {state.assessmentPending && (
+        <p className="opp-notice" data-tone="primary">
+          Looking for ideas… Older results below are only for reference.
+        </p>
+      )}
+      {state.assessmentUncertain && (
+        <p className="opp-notice" data-tone="warning">
+          We couldn't tell if the search finished. Nothing was retried. When the chat is free, you
+          can search again.
+        </p>
+      )}
+      {state.discoveryStale && current && (
+        <p className="opp-notice" data-tone="warning">
+          These ideas are from an earlier search. Search again before reviewing one.
+        </p>
+      )}
+      {!current && !state.assessment && (
+        <div className="opp-empty inst-module">
+          <p>
+            AI reads your project and suggests work you could automate. It uses your AI provider and
+            doesn't change anything.
+          </p>
+        </div>
+      )}
+      {current && !current.candidates.length && !state.discoveryStale && (
+        <div className="opp-empty inst-module">
+          <p>No ideas this time. AI only looked at part of your project; see what it read below.</p>
+        </div>
+      )}
+      {!current && state.assessment && (
+        <p className="opp-notice">
+          Ideas from this search can't be shown. That doesn't mean there's nothing to improve.
+        </p>
+      )}
+      {!!current?.candidates.length && (
+        <section aria-label="Idea list">
+          {!state.discoveryStale &&
+            !state.assessmentPending &&
+            !state.assessmentUncertain &&
+            current.candidates.every(
+              (item) =>
+                item.choice === "reuse-command" && item.availability?.status === "available",
+            ) && <p className="opp-caption">You already have commands for everything found.</p>}
+          <ul className="opp-cards">
+            {current.candidates.map((item) => {
+              const open = candidate?.candidateId === item.candidateId ? candidate : null;
+              const body = (
+                <>
+                  <div className="opp-card-head">
+                    <div className="opp-card-kind">
+                      <StatusLamp tone={lampTones[item.choice]} />
+                      <DataPlate>{plateLabels[item.choice]}</DataPlate>
+                      {isCommand(item) && (
+                        <span className="opp-card-meta">
+                          {availabilityLabel(item.availability?.status)}
+                        </span>
+                      )}
+                    </div>
+                    <h3 className="opp-card-title">
+                      <button
+                        type="button"
+                        className="opp-card-toggle"
+                        aria-pressed={!!open}
+                        data-programmatic-selection={open ? "" : undefined}
+                        onClick={() => onSelect("current", item.candidateId)}
+                      >
+                        {item.outcome}
+                      </button>
+                    </h3>
+                    {!open && (
+                      <span className="opp-card-chevron" aria-hidden="true">
+                        ›
+                      </span>
+                    )}
+                  </div>
+                  {open && (
+                    <CandidateDetail
+                      state={state}
+                      candidate={open}
+                      locked={locked}
+                      planMode={planMode}
+                      onRequest={onRequest}
+                    />
+                  )}
+                </>
+              );
+              return (
+                <li
+                  key={item.candidateId}
+                  className="opp-card inst-module"
+                  data-open={open ? "" : undefined}
+                >
+                  {open ? <section aria-label="Selected idea">{body}</section> : body}
+                </li>
+              );
+            })}
+          </ul>
         </section>
       )}
-      <details>
-        <summary>Browse recommendation history</summary>
-        <p>Saved proposals are historical evidence, not permission to create, edit or execute.</p>
-        {state.historyReportStale && (
-          <p role="status">
-            This history list may be out of date. Candidate counts and recorded decisions are from
-            an earlier read. Reloading only reads saved history; it does not rerun discovery or
-            retry a save.
-          </p>
-        )}
+    </>
+  );
+}
+
+/** Past ideas tab: the saved record, read on request, plus the selected past idea. */
+export function ProgrammaticPastIdeas({
+  state,
+  locked,
+  planMode,
+  onRequest,
+  onSelect,
+}: PanelProps) {
+  const candidate = state.selection?.source === "history" ? state.candidateDetail : null;
+  const history = state.historyReport;
+  const historical =
+    state.selection?.source === "history" &&
+    state.historyDetail?.candidate.id === state.selection.id
+      ? state.historyDetail.candidate
+      : null;
+  return (
+    <>
+      <div className="opp-toolbar">
+        <p className="opp-caption">Past ideas are a record only. They don't approve anything.</p>
         <button
           className="btn btn-ghost btn-sm"
           disabled={locked}
@@ -368,69 +375,136 @@ export function ProgrammaticDiscovery({
             onRequest({ version: 1, action: "history-report", offset: history?.offset ?? 0 })
           }
         >
-          {state.historyReportStale ? "Reload history (read-only)" : "Load history"}
+          {state.historyReportStale ? "Reload past ideas" : "Show past ideas"}
         </button>
-        {history && (
-          <>
-            <p>
-              {historyLabels[history.status]}. {history.total} saved suggestions. {history.warning}
-            </p>
-            <ul>
-              {history.candidates.map((item) => (
-                <li key={item.id}>
-                  <button
-                    className="btn btn-ghost btn-sm"
-                    disabled={locked}
-                    aria-pressed={
-                      state.selection?.source === "history" && state.selection.id === item.id
-                    }
-                    onClick={() => onSelect("history", item.id)}
-                  >
-                    {item.outcome}
-                  </button>{" "}
-                  <HistoryStatus item={item} />
-                </li>
-              ))}
-            </ul>
-            <div className="programmatic-actions">
-              <button
-                className="btn btn-ghost btn-sm"
-                disabled={locked || history.offset === 0}
-                onClick={() =>
-                  onRequest({
-                    version: 1,
-                    action: "history-report",
-                    offset: Math.max(0, history.offset - RECOMMENDATION_HISTORY_PAGE_SIZE),
-                  })
-                }
-              >
-                Previous history
-              </button>
-              <button
-                className="btn btn-ghost btn-sm"
-                disabled={
-                  locked || history.offset + RECOMMENDATION_HISTORY_PAGE_SIZE >= history.total
-                }
-                onClick={() =>
-                  onRequest({
-                    version: 1,
-                    action: "history-report",
-                    offset: history.offset + RECOMMENDATION_HISTORY_PAGE_SIZE,
-                  })
-                }
-              >
-                Next history
-              </button>
-            </div>
-          </>
-        )}
-        {state.selection?.source === "history" && !candidate && (
-          <p>
-            Typed historical detail is not available yet. Load the selected record or discover
-            again; raw history is never interpreted as an action.
+      </div>
+      {state.historyReportStale && (
+        <p className="opp-notice" role="status">
+          This list may be out of date. Reloading only reads it again.
+        </p>
+      )}
+      {history && (
+        <>
+          <p className="opp-caption">
+            {historyLabels[history.status]}. {history.total} saved. {history.warning}
           </p>
-        )}
-      </details>
+          <ul className="opp-rows">
+            {history.candidates.map((item) => (
+              <li key={item.id} className="opp-row inst-module">
+                <button
+                  className="btn btn-ghost btn-sm"
+                  disabled={locked}
+                  aria-pressed={
+                    state.selection?.source === "history" && state.selection.id === item.id
+                  }
+                  onClick={() => onSelect("history", item.id)}
+                >
+                  {item.outcome}
+                </button>{" "}
+                <HistoryStatus item={item} />
+              </li>
+            ))}
+          </ul>
+          <div className="programmatic-actions">
+            <button
+              className="btn btn-ghost btn-sm"
+              disabled={locked || history.offset === 0}
+              onClick={() =>
+                onRequest({
+                  version: 1,
+                  action: "history-report",
+                  offset: Math.max(0, history.offset - RECOMMENDATION_HISTORY_PAGE_SIZE),
+                })
+              }
+            >
+              Previous page
+            </button>
+            <button
+              className="btn btn-ghost btn-sm"
+              disabled={
+                locked || history.offset + RECOMMENDATION_HISTORY_PAGE_SIZE >= history.total
+              }
+              onClick={() =>
+                onRequest({
+                  version: 1,
+                  action: "history-report",
+                  offset: history.offset + RECOMMENDATION_HISTORY_PAGE_SIZE,
+                })
+              }
+            >
+              Next page
+            </button>
+          </div>
+        </>
+      )}
+      {historical && (
+        <section aria-label="Selected past idea" className="opp-card inst-module" data-open="">
+          <h3>Past idea</h3>
+          {state.historyDetailStale && (
+            <>
+              <p role="status">This past idea may be out of date.</p>
+              <button
+                className="btn btn-ghost btn-sm"
+                disabled={locked}
+                onClick={() =>
+                  onRequest({
+                    version: 1,
+                    action: "history-detail",
+                    candidateId: historical.id,
+                    offset: state.historyDetail?.offset ?? 0,
+                  })
+                }
+              >
+                Reload this idea
+              </button>
+            </>
+          )}
+          <HistoryStatus item={historical} />
+          {historical.canonicalId && (
+            <>
+              <p>This is a copy of an earlier idea. Open the earlier one to see its status.</p>
+              <button
+                className="btn btn-ghost btn-sm"
+                disabled={locked}
+                onClick={() => onSelect("history", historical.canonicalId!)}
+              >
+                Open the earlier idea
+              </button>
+            </>
+          )}
+          <p>
+            Seen {historical.observationCount}{" "}
+            {historical.observationCount === 1 ? "time" : "times"}. This is a record, not an
+            approval.
+          </p>
+        </section>
+      )}
+      {candidate && (
+        <section aria-label="Selected idea" className="opp-card inst-module" data-open="">
+          <div className="opp-card-head">
+            <div className="opp-card-kind">
+              <StatusLamp tone={lampTones[candidate.choice]} />
+              <DataPlate>{plateLabels[candidate.choice]}</DataPlate>
+              <span className="opp-card-meta">Past idea</span>
+            </div>
+            <h3 className="opp-card-title" tabIndex={-1} data-programmatic-selection>
+              {candidate.outcome}
+            </h3>
+          </div>
+          <CandidateDetail
+            state={state}
+            candidate={candidate}
+            locked={locked}
+            planMode={planMode}
+            onRequest={onRequest}
+          />
+        </section>
+      )}
+      {state.selection?.source === "history" && !candidate && (
+        <p className="opp-notice">
+          Details for this past idea aren't loaded yet. Reload it or search for ideas again.
+        </p>
+      )}
     </>
   );
 }

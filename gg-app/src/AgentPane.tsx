@@ -288,6 +288,8 @@ import "./App.css";
 import "./WorkspaceShell.css";
 import "./NotesRoadmap.css";
 import "./LocalUpdateSummaryOption.css";
+import "./Instrument.css";
+import "./Programmatic.css";
 // Liquid glass layer from upstream. Delete this line to revert.
 import "./glass.css";
 

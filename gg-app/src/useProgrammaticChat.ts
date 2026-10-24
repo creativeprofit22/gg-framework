@@ -263,7 +263,7 @@ export function useProgrammaticChatActions({
           type: "error",
           generation,
           epoch: programmaticEpochRef.current,
-          error: "The request failed. Reload results to check what happened before trying again.",
+          error: "That didn't work. Refresh results to see what happened, then try again.",
           reconcile: [
             "approve-setup",
             "scan",
@@ -340,8 +340,8 @@ export function useProgrammaticChatActions({
           generation,
           epoch,
           error: rejected
-            ? `Run rejected: ${error.message}`
-            : "We could not confirm whether the task started. Reload results before trying again.",
+            ? `Couldn't start: ${error.message}`
+            : "We couldn't tell if it started. Refresh results before trying again.",
           reconcile: !rejected,
         });
     } finally {

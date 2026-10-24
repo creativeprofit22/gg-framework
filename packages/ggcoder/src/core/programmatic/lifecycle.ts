@@ -594,14 +594,14 @@ async function readChatContext(repositoryRoot: string, options: RunProgrammaticS
   // Inspect the full validated snapshot, not the displayed page or selected record.
   const conflictReason = loaded?.state.records.some(
     (record) => record.lifecycle.state === "running" || record.lifecycle.runId,
-  ) ? "A task is running in this project. Choose Refresh results after it finishes." : null;
+  ) ? "A task is running. Refresh results when it's done." : null;
   let status: ProgrammaticChatReport["status"] = loaded ? "stale" : "setup-required";
   let reason =
     scanFailed && profile.status === "missing"
-      ? "This project could not be checked. See Setup error details."
+      ? "This project couldn't be checked. See Setup error details."
       : profile.status === "missing"
-      ? "Choose Review setup to see which checks can be enabled. Reviewing changes no files."
-      : "Saved settings cannot be read. Any results shown are from an earlier check.";
+      ? "Choose Review setup to pick your checks. Nothing changes until you save."
+      : "Your saved setup can't be read. Any results shown are old.";
   let scanAvailable = false;
   if (profile.status === "valid") {
     try {
@@ -615,17 +615,17 @@ async function readChatContext(repositoryRoot: string, options: RunProgrammaticS
       ) {
         status = state.recovered ? "recovered" : "current";
         reason = state.recovered
-          ? "Showing older saved results. Choose Run project checks to get current results."
-          : "Saved check settings match the project.";
+          ? "These results are old. Choose Run project checks to update them."
+          : "Your checks are up to date.";
       } else
         reason =
-          "Saved settings match the project, but these results are older. Choose Run project checks before starting a task.";
+          "These results are old. Choose Run project checks before starting a task.";
     } catch {
       status = "stale";
       reason = assessment.status === "unreadable" ? assessment.diagnostic!
         : assessment.baselineUnavailable
-          ? "Saved setup uses an older format, so earlier file settings cannot be compared. Choose Review setup."
-          : "Project settings changed. Choose Review setup before checking for opportunities or starting a task.";
+          ? "Your setup is from an older version. Choose Review setup."
+          : "Your project settings changed. Choose Review setup before running checks or tasks.";
     }
   }
   return {
@@ -639,8 +639,8 @@ async function readChatContext(repositoryRoot: string, options: RunProgrammaticS
     scan: {
       available: scanAvailable && conflictReason === null,
       reason: conflictReason ?? (scanAvailable
-        ? "Run project checks updates the saved results. It does not start any task."
-        : "Review and approve setup before checking for opportunities."),
+        ? "Run project checks updates the results. It doesn't start any work."
+        : "Set up checks first."),
     },
     snapshot: loaded ? sha256(loaded.bytes) : sha256(canonicalJson(null)),
     fingerprint:

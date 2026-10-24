@@ -183,8 +183,8 @@ it("explains project-size failures instead of blaming saved setup", async () => 
   expect(assessment.stored).toBeNull();
   const report = await readProgrammaticChatReport(root);
   expect(report.configuration).toMatchObject({ status: "unreadable", failure: "inventory" });
-  expect(report.reason).toBe("This project could not be checked. See Setup error details.");
-  expect(report.reason).not.toContain("Saved settings cannot be read");
+  expect(report.reason).toBe("This project couldn't be checked. See Setup error details.");
+  expect(report.reason).not.toContain("Your saved setup can't be read");
   expect(report.reason).not.toContain(root);
   expect(isProgrammaticChatResponse({ version: 1, action: "report", ok: true, report })).toBe(true);
 });
@@ -198,9 +198,7 @@ it("keeps the repair message for unreadable saved setup", async () => {
   expect(assessment.failure).toBe("stored");
   const report = await readProgrammaticChatReport(root);
   expect(report.configuration?.failure).toBe("stored");
-  expect(report.reason).toBe(
-    "Saved settings cannot be read. Any results shown are from an earlier check.",
-  );
+  expect(report.reason).toBe("Your saved setup can't be read. Any results shown are old.");
 });
 
 it.each(["writeFile", "rename"] as const)(

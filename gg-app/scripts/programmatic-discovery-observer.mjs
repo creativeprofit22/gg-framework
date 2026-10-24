@@ -81,7 +81,7 @@ export function readDiscoverySummary(doc, review) {
     !review.summary.trim()
   )
     throw new Error("Missing host review summary");
-  const section = doc.querySelector('[aria-label="Selected opportunity"]');
+  const section = doc.querySelector('[aria-label="Selected idea"]');
   if (!section) return null;
   const count = Array.from(section.querySelectorAll("p")).filter(
     (p) => p.textContent === review.summary,

@@ -18,6 +18,8 @@ import "./App.css";
 import "./WorkspaceShell.css";
 import "./NotesRoadmap.css";
 import "./LocalUpdateSummaryOption.css";
+import "./Instrument.css";
+import "./Programmatic.css";
 import "./appearance.css";
 
 // Apply saved document-wide preferences before either React entry renders.

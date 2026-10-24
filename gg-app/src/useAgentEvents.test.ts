@@ -407,9 +407,9 @@ describe("programmatic execution evidence", () => {
     const evidence = getItems().filter((item) => item.kind === "programmatic_execution_evidence");
     expect(evidence).toHaveLength(1);
     render(createElement(ProgrammaticExecutionEvidenceView, { items: evidence[0]!.items }));
-    expect(screen.getByRole("region", { name: "Task execution evidence" })).toBeTruthy();
+    expect(screen.getByRole("region", { name: "What the task found" })).toBeTruthy();
     for (const item of items) expect(screen.getByText(item.message)).toBeTruthy();
-    expect(screen.getByText("Inferred, not confirmed")).toBeTruthy();
+    expect(screen.getByText("Best guess")).toBeTruthy();
     expect(screen.getByText("package.json:1–3")).toBeTruthy();
     expect(screen.getAllByText("Warning:").length).toBeGreaterThan(0);
     expect(screen.queryByText(executionResult.summary)).toBeNull();

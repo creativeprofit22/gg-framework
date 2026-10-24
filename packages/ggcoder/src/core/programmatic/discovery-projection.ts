@@ -11,7 +11,7 @@ export interface DiscoveryRecord {
   recommendation: Accepted["recommendations"][number];
 }
 function step(available: boolean, reason: string) { return { available, reason }; }
-const unavailable = step(false, "Check this saved suggestion again before using it. Earlier inspections and approvals cannot be reused.");
+const unavailable = step(false, "Search again before using this past idea. Earlier reviews and approvals don't carry over.");
 
 function sharedDetails(value: DiscoveryRecord["recommendation"] | RecommendationObservationV1) {
   const { outcome, rationale, uncertainty, choice, alternatives } = value;
@@ -27,45 +27,45 @@ type CommandChoice = Extract<Accepted["recommendations"][number]["choice"], { ki
 type HistoricalCommand = Extract<RecommendationObservationV1["choice"], { kind: "reuse-command" }>;
 function commandAvailability(value: { availability?: CommandChoice["availability"]; reference?: HistoricalCommand["reference"] }): DiscoveryCandidate["availability"] {
   if (value.availability) return value.availability.status === "available"
-    ? { status: "available", reason: "The command was available when assessed. Review and approval are still needed before running it." }
+    ? { status: "available", reason: "The command was there when AI looked. You still review and approve it before it runs." }
     : { status: "unavailable", reason: value.availability.reason };
   if (value.reference) return value.reference.reportedAvailability === "unavailable" && value.reference.unavailableReason
     ? { status: "unavailable", reason: value.reference.unavailableReason }
-    : { status: "reinspection-required", reason: "This saved command has not been checked again. Inspect it without making changes before using it." };
+    : { status: "reinspection-required", reason: "This command hasn't been checked since. Check it again before using it." };
   return undefined;
 }
 /** Display guards reject oversized candidates; never truncate review input. */
 function details(choice: DiscoveryRecord["recommendation"]["choice"] | RecommendationObservationV1["choice"]): Pick<DiscoveryCandidate, "details" | "risks" | "nextStep" | "availability"> {
   switch (choice.kind) {
-    case "manual": return { details: choice.steps, risks: [], nextStep: step(false, "Follow the manual steps. There is no automatic run for this suggestion.") };
+    case "manual": return { details: choice.steps, risks: [], nextStep: step(false, "Follow the steps by hand. This one doesn't run automatically.") };
     case "needs-more-evidence": return { details: [...choice.missingEvidence, ...choice.nextInspectionSteps], risks: [],
-      nextStep: step(true, "Inspect the missing evidence without making changes, using your current permissions.") };
+      nextStep: step(true, "Look into what's missing. Nothing will change.") };
     case "missing-capability": return { details: [choice.proposal.desiredOutcome, ...choice.proposal.prerequisites,
       ...choice.proposal.inputs, ...choice.proposal.outputs, ...choice.proposal.verificationExpectations], risks: choice.proposal.risks,
       nextStep: choice.proposal.capabilityKind === "app-backed"
-        ? step(false, "Requires application development. A prompt alone cannot provide this functionality.")
-        : step(true, "Review a proposal without making changes. Creating, checking and running it each need separate review and approval.") };
+        ? step(false, "This needs a change to the GG app itself. A prompt can't do it.")
+        : step(true, "Look over the plan. Nothing changes. Making, testing and running it each need your OK.") };
     case "generate-from-reference": {
       const { generator } = choice;
       const reference = generator.reference.kind === "existing-member"
-        ? `Reference: ${generator.reference.path} (inspected, not verified to work)` : "Build one example by hand first";
+        ? `Example to copy: ${generator.reference.path} (looked at, not tested)` : "Make one example by hand first";
       return { details: [reference, generator.reference.reason, ...generator.sharedShape, ...generator.varyingInputs, ...generator.members],
         risks: generator.risks,
-        nextStep: step(true, "Review generator creation without making changes. Creating, checking and running a generator each need separate review and approval.") };
+        nextStep: step(true, "Look over the plan. Nothing changes. Making, testing and running it each need your OK.") };
     }
     case "reuse-command":
     case "extend-command": {
       const availability = "availability" in choice ? choice.availability : undefined;
       const reference = availability?.status === "available" ? availability.snapshot.command
         : availability?.status === "unavailable" ? availability.command : "reference" in choice ? choice.reference.command : undefined;
-      const command = reference ? `${reference.source}: /${reference.name}` : "Command requires fresh inspection";
+      const command = reference ? `${reference.source}: /${reference.name}` : "Command needs another check";
       const appBacked = availability?.status === "available" && availability.snapshot.capabilityKind === "app-backed";
       return { availability: commandAvailability(choice), details: [command, ...(choice.kind === "extend-command" ? [...choice.requirement.prerequisites, ...choice.proposedChanges] : [])],
         risks: choice.kind === "extend-command" ? choice.requirement.risks : [],
-        nextStep: appBacked ? step(false, "Requires supported application integration. This proposal cannot run it.")
-          : availability?.status !== "available" ? step(true, "Recheck the command and project prerequisites without making changes. Nothing is approved to run.")
-          : step(true, choice.kind === "reuse-command" ? "Review the current command and scope. Running it requires separate approval."
-            : "Review the base command and proposed changes; opening review does not edit or overwrite it.") };
+        nextStep: appBacked ? step(false, "This needs app support GG doesn't have yet. It can't run from here.")
+          : availability?.status !== "available" ? step(true, "Check the command and what it needs. Nothing will run.")
+          : step(true, choice.kind === "reuse-command" ? "Look over the command and what it covers. Running it needs your OK."
+            : "Look over the command and the changes. Opening this doesn't edit it.") };
     }
   }
 }
@@ -86,7 +86,7 @@ export function projectHistoricalDiscovery(observation: RecommendationObservatio
   const candidate: DiscoveryCandidate = {
     assessmentId: observation.assessmentId, candidateId: observation.candidateId, revision, ...sharedDetails(observation),
     evidence: observation.evidence.map((item) => ({ basis: item.basis, message: item.summary,
-      source: item.external?.url ?? item.location?.path ?? "Historical inspection" })),
+      source: item.external?.url ?? item.location?.path ?? "Earlier check" })),
     ...details(observation.choice), nextStep: unavailable,
   };
   return isDiscoveryCandidate(candidate) ? candidate : undefined;

@@ -75,12 +75,12 @@ it.each(["saved", "acknowledgement-unknown"] as const)(
       },
     });
     const view = render(<ProgrammaticChat {...props} state={state} />);
-    fireEvent.click(screen.getByText("Browse recommendation history"));
-    expect(screen.getByText(/This history list may be out of date/)).toBeTruthy();
-    expect(screen.getByText(/This saved recommendation may be out of date/)).toBeTruthy();
+    fireEvent.click(screen.getByText("Past ideas"));
+    expect(screen.getByText(/This list may be out of date/)).toBeTruthy();
+    expect(screen.getByText(/This past idea may be out of date/)).toBeTruthy();
     expect(props.onAction).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole("button", { name: "Reload history (read-only)" }));
-    fireEvent.click(screen.getByRole("button", { name: "Reload selected history (read-only)" }));
+    fireEvent.click(screen.getByRole("button", { name: "Reload past ideas" }));
+    fireEvent.click(screen.getByRole("button", { name: "Reload this idea" }));
     expect(props.onAction.mock.calls.map(([request]) => request)).toEqual([
       { version: 1, action: "history-report", offset: 0 },
       {
@@ -94,13 +94,12 @@ it.each(["saved", "acknowledgement-unknown"] as const)(
     expect(props.onSelectCandidate).not.toHaveBeenCalled();
     view.rerender(<ProgrammaticChat {...props} state={state} busy />);
     expect(
-      (screen.getByRole("button", { name: "Reload history (read-only)" }) as HTMLButtonElement)
-        .disabled,
+      (screen.getByRole("button", { name: "Reload past ideas" }) as HTMLButtonElement).disabled,
     ).toBe(true);
     expect(
       (
         screen.getByRole("button", {
-          name: "Reload selected history (read-only)",
+          name: "Reload this idea",
         }) as HTMLButtonElement
       ).disabled,
     ).toBe(true);
@@ -137,18 +136,14 @@ it.each(["dismissed", "completed"] as const)(
       });
     });
     const view = render(<ProgrammaticChat {...props} state={state} />);
-    fireEvent.click(screen.getByText("Browse recommendation history"));
-    expect(
-      screen.getByText("Linked to an earlier candidate · Not a separate outstanding need"),
-    ).toBeTruthy();
+    fireEvent.click(screen.getByText("Past ideas"));
+    expect(screen.getByText("Same as an earlier idea")).toBeTruthy();
     expect(screen.queryByText("open")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: detail.candidate.outcome }));
     view.rerender(<ProgrammaticChat {...props} state={state} />);
-    expect(
-      screen.getByText("1 saved observation. Historical evidence only; not current approval."),
-    ).toBeTruthy();
+    expect(screen.getByText("Seen 1 time. This is a record, not an approval.")).toBeTruthy();
     expect(document.querySelector("b")).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "View earlier candidate" }));
+    fireEvent.click(screen.getByRole("button", { name: "Open the earlier idea" }));
     expect(props.onAction).toHaveBeenLastCalledWith({
       version: 1,
       action: "history-detail",
@@ -157,9 +152,7 @@ it.each(["dismissed", "completed"] as const)(
     });
     view.rerender(<ProgrammaticChat {...props} state={state} />);
     expect(
-      screen.getByText(
-        `Recorded decision: ${decision === "completed" ? "Marked complete" : "Dismissed"}`,
-      ),
+      screen.getByText(`Status: ${decision === "completed" ? "Done" : "Dismissed"}`),
     ).toBeTruthy();
     expect(state.candidateStale).toBe(true);
     expect(props.onAction.mock.calls.map(([request]) => request.action)).toEqual([
@@ -187,11 +180,9 @@ it("distinguishes unresolved exact-workflow duplicates in both history and legac
     },
   };
   render(<ProgrammaticChat {...props} state={state} />);
-  fireEvent.click(screen.getByText("Browse recommendation history"));
-  expect(
-    screen.getAllByText("Possible duplicate · Same workflow; relationship not confirmed"),
-  ).toHaveLength(2);
-  expect(screen.queryByRole("button", { name: "View earlier candidate" })).toBeNull();
+  fireEvent.click(screen.getByText("Past ideas"));
+  expect(screen.getAllByText("Might be the same as another idea")).toHaveLength(2);
+  expect(screen.queryByRole("button", { name: "Open the earlier idea" })).toBeNull();
   expect(props.onAction).not.toHaveBeenCalled();
   expect(props.onRun).not.toHaveBeenCalled();
 });
@@ -227,7 +218,7 @@ it.each([51, 100, 101])(
     });
     const selected = state;
     const view = render(<ProgrammaticChat {...props} state={state} />);
-    fireEvent.click(screen.getByText("Browse recommendation history"));
+    fireEvent.click(screen.getByText("Past ideas"));
     const showPage = (offset: number) => {
       state = discoveryResponse(state, {
         version: 1,
@@ -247,21 +238,21 @@ it.each([51, 100, 101])(
       expect(state.historyDetail).toBe(detail);
       expect(state.candidateDetail).toBe(candidate);
       expect(state.candidateStale).toBe(true);
+      const pastIdea = screen.getByRole("region", { name: "Selected idea" });
+      expect(within(pastIdea).getByText("New command")).toBeTruthy();
+      expect(within(pastIdea).getByText("Past idea")).toBeTruthy();
       expect(
-        screen.getByText("New automation would need to be built (saved suggestion)"),
-      ).toBeTruthy();
-      expect(
-        (screen.getByRole("button", { name: "Review this task" }) as HTMLButtonElement).disabled,
+        (screen.getByRole("button", { name: "Review this idea" }) as HTMLButtonElement).disabled,
       ).toBe(true);
       expect(
-        (screen.getByRole("button", { name: "Previous history" }) as HTMLButtonElement).disabled,
+        (screen.getByRole("button", { name: "Previous page" }) as HTMLButtonElement).disabled,
       ).toBe(offset === 0);
       expect(
-        (screen.getByRole("button", { name: "Next history" }) as HTMLButtonElement).disabled,
+        (screen.getByRole("button", { name: "Next page" }) as HTMLButtonElement).disabled,
       ).toBe(offset + 50 >= total);
     };
     const navigate = (direction: "Next" | "Previous", offset: number) => {
-      fireEvent.click(screen.getByRole("button", { name: `${direction} history` }));
+      fireEvent.click(screen.getByRole("button", { name: `${direction} page` }));
       expect(props.onAction).toHaveBeenLastCalledWith({
         version: 1,
         action: "history-report",
@@ -323,28 +314,27 @@ it("shows one complete task explanation and visible consequences before review",
   render(<ProgrammaticChat {...props} state={state} />);
   expect(screen.getAllByText(item.rationale)).toHaveLength(1);
   expect(screen.getByText(item.risks[0]).closest("details")).toBeNull();
-  expect(screen.getByText(`Scope: ${item.workflow.scope}`).closest("details")).toBeNull();
-  expect(
-    screen
-      .getByText(`Proposed changes, not permission: ${item.workflow.mutationBoundary}`)
-      .closest("details"),
-  ).toBeNull();
+  // Readout rows: a term, then its value, outside the folded details.
+  const readout = (term: string) => screen.getByText(term, { selector: "dt" }).nextElementSibling!;
+  expect(readout("Where").textContent).toBe(item.workflow.scope);
+  expect(readout("Where").closest("details")).toBeNull();
+  expect(readout("Changes").textContent).toBe(item.workflow.mutationBoundary);
+  expect(readout("Not sure").textContent).toBe(item.uncertainty);
   expect(screen.getByText(item.details[0]).closest("details")).toBeNull();
-  const listSummary = screen.getByText("Browse suggested tasks (1)");
-  const list = listSummary.closest("details")!;
-  expect(list.open).toBe(false);
-  fireEvent.click(listSummary);
-  expect(list.open).toBe(true);
+  // The idea list stays visible; the selected card opens in place.
   expect(screen.getByRole("button", { name: item.outcome }).getAttribute("aria-pressed")).toBe(
     "true",
   );
-  expect(screen.getAllByText("New automation would need to be built")).toHaveLength(1);
-  const selectedRegion = screen.getByRole("region", { name: "Selected opportunity" });
-  const technical = within(selectedRegion).getByText("Details").closest("details")!;
+  expect(screen.getAllByText("New command")).toHaveLength(1);
+  const selectedRegion = screen.getByRole("region", { name: "Selected idea" });
+  expect(within(selectedRegion).getByRole("heading", { name: item.outcome })).toBeTruthy();
+  const technical = within(selectedRegion).getByText("More details").closest("details")!;
   expect(technical.open).toBe(false);
-  expect(within(technical).getByText(`Success check: ${item.workflow.successCheck}`)).toBeTruthy();
+  expect(
+    within(technical).getByText(`How to tell it worked: ${item.workflow.successCheck}`),
+  ).toBeTruthy();
   expect(props.onAction).not.toHaveBeenCalled();
-  fireEvent.click(screen.getByRole("button", { name: "Review this task" }));
+  fireEvent.click(screen.getByRole("button", { name: "Review this idea" }));
   expect(props.onAction).toHaveBeenCalledExactlyOnceWith({
     version: 1,
     action: "review-candidate",
@@ -372,9 +362,9 @@ it("offers explicit fresh discovery for stale suggestions without retrying autom
   );
   expect(props.onAction).not.toHaveBeenCalled();
   expect(
-    (screen.getByRole("button", { name: "Review this task" }) as HTMLButtonElement).disabled,
+    (screen.getByRole("button", { name: "Review this idea" }) as HTMLButtonElement).disabled,
   ).toBe(true);
-  fireEvent.click(screen.getByRole("button", { name: "Check again" }));
+  fireEvent.click(screen.getByRole("button", { name: "Search again" }));
   expect(props.onAction).toHaveBeenCalledExactlyOnceWith({ version: 1, action: "discover" });
 });
 
@@ -446,12 +436,12 @@ it.each(["prepared", "reinspection-required"] as const)(
     expect(settled.selection).toEqual(selected.selection);
     render(<ProgrammaticChat {...props} state={settled} />);
     expect(
-      within(screen.getByRole("region", { name: "Selected opportunity" })).getByText(
+      within(screen.getByRole("region", { name: "Selected idea" })).getByText(
         candidateReview.summary,
       ),
     ).toBeTruthy();
     expect(screen.queryByText("Different host result")).toBeNull();
-    expect(document.querySelector('[aria-label="Selected opportunity"] b')).toBeNull();
+    expect(document.querySelector('[aria-label="Selected idea"] b')).toBeNull();
     expect(props.onAction).not.toHaveBeenCalled();
     expect(props.onRun).not.toHaveBeenCalled();
   },
@@ -460,8 +450,7 @@ it.each(["prepared", "reinspection-required"] as const)(
 it("discovers without scanner setup, selects without submitting, and reviews only with a second explicit action", async () => {
   const props = fixture();
   const view = render(<ProgrammaticChat {...props} />);
-  fireEvent.click(screen.getByText("Find more tasks"));
-  const discover = screen.getByRole("button", { name: "Find tasks to automate" });
+  const discover = screen.getByRole("button", { name: "Find ideas" });
   discover.focus();
   expect(document.activeElement).toBe(discover);
   fireEvent.click(discover);
@@ -478,8 +467,8 @@ it("discovers without scanner setup, selects without submitting, and reviews onl
   });
   view.rerender(<ProgrammaticChat {...props} state={selected} />);
   expect(document.querySelector("img")).toBeNull();
-  expect(screen.getByText("Success check: Known mismatch reported")).toBeTruthy();
-  fireEvent.click(screen.getByRole("button", { name: "Review this task" }));
+  expect(screen.getByText("How to tell it worked: Known mismatch reported")).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "Review this idea" }));
   expect(props.onAction).toHaveBeenLastCalledWith({
     version: 1,
     action: "review-candidate",
@@ -510,13 +499,13 @@ it.each([
     id: candidate.candidateId,
   });
   const { rerender } = render(<ProgrammaticChat {...props} state={selected} />);
-  expect(screen.getByRole("region", { name: "Selected opportunity" })).toBeTruthy();
+  expect(screen.getByRole("region", { name: "Selected idea" })).toBeTruthy();
   const reviewName =
     choice === "generate-from-reference"
-      ? "Review generator creation"
+      ? "Review this idea"
       : choice === "reuse-command" || choice === "extend-command"
-        ? "Reinspect command (read-only)"
-        : "Review this task";
+        ? "Check the command again"
+        : "Review this idea";
   if (choice === "manual") {
     expect(screen.queryByRole("button", { name: reviewName })).toBeNull();
   } else {
@@ -540,9 +529,9 @@ it.each([
   };
   rerender(<ProgrammaticChat {...props} state={stale} />);
   expect(screen.getByRole("heading", { name: candidate.outcome })).toBeTruthy();
-  expect(screen.getByText(/This suggestion is from an earlier check/)).toBeTruthy();
+  expect(screen.getByText(/This idea is from an earlier search/)).toBeTruthy();
   if (choice === "manual")
-    expect(screen.queryByRole("button", { name: "Keep this manual" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Better done by hand" })).toBeNull();
   else
     expect(
       (
@@ -558,18 +547,17 @@ it("shows a generator suggestion in plain words and selecting it starts nothing"
     outcome: "Add new regions from one reference configuration",
     choice: "generate-from-reference",
     details: [
-      "Reference: config/regions/us-east (inspected, not verified to work)",
+      "Example to copy: config/regions/us-east (looked at, not tested)",
       "config/regions/ap-south",
     ],
     nextStep: {
       available: true,
       reason:
-        "Review generator creation without making changes. Creating, checking and running a generator each need separate review and approval.",
+        "Look over the plan. Nothing changes. Making, testing and running it each need your OK.",
     },
   };
   const props = fixture(item);
   const view = render(<ProgrammaticChat {...props} />);
-  fireEvent.click(screen.getByText("Browse suggested tasks (1)"));
   fireEvent.click(screen.getByRole("button", { name: item.outcome }));
   expect(props.onSelectCandidate).toHaveBeenCalledExactlyOnceWith("current", item.candidateId);
   expect(props.onAction).not.toHaveBeenCalled();
@@ -580,10 +568,8 @@ it("shows a generator suggestion in plain words and selecting it starts nothing"
     id: item.candidateId,
   });
   view.rerender(<ProgrammaticChat {...props} state={selected} />);
-  expect(screen.getAllByText(/Build one example, then generate the rest/).length).toBeGreaterThan(
-    0,
-  );
-  expect(screen.getByRole("button", { name: "Review generator creation" })).toBeTruthy();
+  expect(screen.getAllByText("Make one, copy the rest").length).toBeGreaterThan(0);
+  expect(screen.getByRole("button", { name: "Review this idea" })).toBeTruthy();
   expect(props.onAction).not.toHaveBeenCalled();
   expect(props.onRun).not.toHaveBeenCalled();
   expect(document.body.textContent).not.toMatch(/fingerprint|digest|lifecycle/i);
@@ -602,7 +588,9 @@ it("retains user selection and focus through unrelated rerenders without automat
   view.rerender(<ProgrammaticChat {...props} state={selected} />);
   const target = document.querySelector("[data-programmatic-selection]");
   expect(document.activeElement).toBe(target);
-  expect(screen.getByText("Browse suggested tasks (1)").closest("details")!.open).toBe(false);
+  expect(screen.getByRole("button", { name: candidate.outcome }).getAttribute("aria-pressed")).toBe(
+    "true",
+  );
   view.rerender(
     <ProgrammaticChat {...props} state={{ ...selected, notice: "Unrelated update" }} />,
   );
@@ -634,28 +622,28 @@ it("keeps uncertain discovery inert with an explicit retry and original error de
       }}
     />,
   );
-  expect(screen.getByText(/Discovery completion could not be confirmed/)).toBeTruthy();
+  expect(screen.getByText(/We couldn't tell if the search finished/)).toBeTruthy();
   expect(screen.getByRole("alert").textContent).toBe(
-    "This request did not finish. You can retry it when the current work has stopped.",
+    "That didn't finish. Try again when nothing else is running.",
   );
   const summary = screen.getByText("Error details");
   expect(summary.closest("details")!.open).toBe(false);
   fireEvent.click(summary);
   expect(screen.getByText(error)).toBeTruthy();
   expect(document.querySelector("b")).toBeNull();
-  const review = screen.getByRole("button", { name: "Review this task" }) as HTMLButtonElement;
+  const review = screen.getByRole("button", { name: "Review this idea" }) as HTMLButtonElement;
   expect(review.disabled).toBe(true);
   fireEvent.click(review);
   expect(props.onAction).not.toHaveBeenCalled();
   expect(props.onRun).not.toHaveBeenCalled();
-  fireEvent.click(screen.getByRole("button", { name: "Check again" }));
+  fireEvent.click(screen.getByRole("button", { name: "Search again" }));
   expect(props.onAction).toHaveBeenCalledExactlyOnceWith({ version: 1, action: "discover" });
 });
 
 it("does not claim existing coverage for legacy reuse without availability", () => {
   const props = fixture({ ...candidate, choice: "reuse-command" });
   render(<ProgrammaticChat {...props} />);
-  expect(screen.queryByText("The identified needs have existing automation to review.")).toBeNull();
+  expect(screen.queryByText("You already have commands for everything found.")).toBeNull();
 });
 it.each(["reuse-command", "extend-command"] as const)(
   "shows unavailable %s reasons without execution and offers only explicit reinspection",
@@ -664,9 +652,7 @@ it.each(["reuse-command", "extend-command"] as const)(
     const item = { ...candidate, choice, availability: { status: "unavailable" as const, reason } };
     const props = fixture(item);
     const view = render(<ProgrammaticChat {...props} />);
-    expect(
-      screen.queryByText("The identified needs have existing automation to review."),
-    ).toBeNull();
+    expect(screen.queryByText("You already have commands for everything found.")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: item.outcome }));
     expect(props.onAction).not.toHaveBeenCalled();
     expect(props.onRun).not.toHaveBeenCalled();
@@ -677,8 +663,8 @@ it.each(["reuse-command", "extend-command"] as const)(
     });
     view.rerender(<ProgrammaticChat {...props} state={selected} />);
     expect(screen.getByText(reason)).toBeTruthy();
-    expect(screen.getByText("Command unavailable")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Reinspect command (read-only)" }));
+    expect(screen.getByText("Command not found")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Check the command again" }));
     expect(props.onAction).toHaveBeenCalledExactlyOnceWith({
       version: 1,
       action: "review-candidate",
@@ -699,7 +685,7 @@ it("only summarizes current all-available reuse, not mixed or stale results", ()
   };
   const props = fixture(available);
   const { rerender } = render(<ProgrammaticChat {...props} />);
-  const summary = "The identified needs have existing automation to review.";
+  const summary = "You already have commands for everything found.";
   expect(screen.getByText(summary)).toBeTruthy();
   rerender(<ProgrammaticChat {...props} state={{ ...props.state, discoveryStale: true }} />);
   expect(screen.queryByText(summary)).toBeNull();
@@ -746,14 +732,13 @@ it.each([
     candidateStale: true,
   };
   render(<ProgrammaticChat {...props} state={state} />);
-  expect(screen.queryByText("The identified needs have existing automation to review.")).toBeNull();
+  expect(screen.queryByText("You already have commands for everything found.")).toBeNull();
   expect(
     screen.getByText(
-      availability?.reason ??
-        "Command availability was not recorded. Fresh read-only inspection is required.",
+      availability?.reason ?? "We don't know if this command still exists. Check it again.",
     ),
   ).toBeTruthy();
-  const button = screen.getByRole("button", { name: "Reinspect command (read-only)" });
+  const button = screen.getByRole("button", { name: "Check the command again" });
   expect((button as HTMLButtonElement).disabled).toBe(true);
   fireEvent.click(button);
   expect(props.onAction).not.toHaveBeenCalled();
@@ -767,16 +752,16 @@ it.each([false, true])(
     expect(isProgrammaticAssessment(assessment)).toBe(true);
     const state = { ...props.state, ...assessmentDisplay(props.state, assessment) };
     render(<ProgrammaticChat {...props} state={state} />);
-    expect(screen.getByText(/No tasks were suggested from the information checked/)).toBeTruthy();
+    expect(screen.getByText(/No ideas this time/)).toBeTruthy();
     expect(screen.queryByText(/No worthwhile need was identified/)).toBeNull();
-    const assessmentRegion = screen.getByRole("region", { name: "Project assessment" });
+    const assessmentRegion = screen.getByRole("region", { name: "Idea search" });
     const coverage = within(assessmentRegion).getByText("Details").closest("details");
     expect(coverage?.open).toBe(false);
     fireEvent.click(within(assessmentRegion).getByText("Details"));
     expect(coverage?.open).toBe(true);
     expect(
       within(coverage!).getByText(
-        `Project: ${inspected ? "Checked" : "Not checked"} — ${assessment.coverage[1].summary}`,
+        `Your project: ${inspected ? "Checked" : "Not checked"} — ${assessment.coverage[1].summary}`,
       ),
     ).toBeTruthy();
     expect(screen.getByText(assessment.limitations[0])).toBeTruthy();
@@ -808,12 +793,12 @@ it.each(["incomplete", "cancelled", "refreshing"] as const)(
         : { ...current, ...assessmentDisplay(current, { ...interrupted, status }) };
     expect(isProgrammaticAssessment(state.assessment)).toBe(true);
     render(<ProgrammaticChat {...props} state={state} />);
-    expect(screen.queryByText(/No tasks were suggested from the information checked/)).toBeNull();
+    expect(screen.queryByText(/No ideas this time/)).toBeNull();
     expect(screen.queryByText(/No worthwhile need was identified/)).toBeNull();
-    expect(screen.getByText(/These suggestions are from an earlier check/)).toBeTruthy();
+    expect(screen.getByText(/These ideas are from an earlier search/)).toBeTruthy();
     expect(
       screen.getByText(
-        `Project assessment: ${status === "refreshing" ? "Finished" : status === "cancelled" ? "Cancelled" : "Incomplete"}`,
+        `Idea search: ${status === "refreshing" ? "Done" : status === "cancelled" ? "Stopped" : "Not finished"}`,
       ),
     ).toBeTruthy();
   },
@@ -822,12 +807,12 @@ it("does not confuse empty completed discovery with legacy detail or disabled na
   const props = fixture();
   const empty = { ...props.state, discovery: { ...props.state.discovery, candidates: [] } };
   const { rerender } = render(<ProgrammaticChat {...props} state={empty} />);
-  expect(screen.getByText(/No tasks were suggested from the information checked/)).toBeTruthy();
+  expect(screen.getByText(/No ideas this time/)).toBeTruthy();
   rerender(<ProgrammaticChat {...props} state={{ ...props.state, discovery: null }} />);
-  expect(screen.getByText(/Candidate detail is unavailable/)).toBeTruthy();
+  expect(screen.getByText(/Ideas from this search can't be shown/)).toBeTruthy();
   const unsupported = fixture({
     ...candidate,
-    nextStep: { available: false, reason: "Requires application development" },
+    nextStep: { available: false, reason: "This needs a change to the GG app itself" },
   });
   rerender(
     <ProgrammaticChat
@@ -840,7 +825,9 @@ it("does not confuse empty completed discovery with legacy detail or disabled na
     />,
   );
   expect(
-    (screen.getByRole("button", { name: "Review this task" }) as HTMLButtonElement).disabled,
+    (screen.getByRole("button", { name: "Review this idea" }) as HTMLButtonElement).disabled,
   ).toBe(true);
-  expect(screen.getByText("Review limitation: Requires application development")).toBeTruthy();
+  expect(
+    screen.getByText("Why you can't review it: This needs a change to the GG app itself"),
+  ).toBeTruthy();
 });

@@ -247,6 +247,262 @@ export const evaluationFixtures: EvaluationFixture[] = [
   },
 ];
 
+/**
+ * Item-family fixtures for the reference-to-generator journey. Kept apart from
+ * `evaluationFixtures` so the six-case advisory matrix stays unchanged. Folder
+ * names are neutral: detection is path-shape only, never a framework trigger.
+ */
+export interface FamilyTemplateFile {
+  path: string;
+  content: string;
+}
+export interface FamilyExpectedMember {
+  path: string;
+  /** Plan status in the first preview. */
+  preview: "ready" | "conflict" | "unchanged";
+  files: { path: string; action: "create" | "change" | "unchanged" | "skip" | "conflict" }[];
+  /** Status in the apply report. */
+  applied: "created" | "updated" | "unchanged" | "skipped";
+}
+export interface FamilyEvaluationFixture {
+  id: string;
+  variant: "non-javascript" | "javascript";
+  /** Synthetic project files written before discovery. */
+  files: Record<string, string>;
+  parent: string;
+  members: string[];
+  /** Shape files each member lacks at discovery (path-derived). */
+  missingAtDiscovery: Record<string, string[]>;
+  reference:
+    | { kind: "existing-member"; path: string }
+    /** Files the ordinary approved write turn adds to make `path` complete. */
+    | { kind: "build-by-hand-first"; path: string; build: Record<string, string> };
+  placeholders: string[];
+  values: Record<string, Record<string, string>>;
+  template: FamilyTemplateFile[];
+  expected: { members: FamilyExpectedMember[]; report: "completed" | "partial" };
+  grading: string;
+  coverage: string;
+}
+
+/** Mirrors the host's logic-free `{{key}}` rendering for fixture authoring only. */
+function renderFamilyFile(text: string, values: Record<string, string>): string {
+  return Object.entries(values).reduce(
+    (result, [key, value]) => result.replaceAll(`{{${key}}}`, value),
+    text,
+  );
+}
+function renderFamilyMember(
+  template: readonly FamilyTemplateFile[],
+  values: Record<string, string>,
+  only?: readonly string[],
+): Record<string, string> {
+  const files: Record<string, string> = {};
+  for (const file of template) {
+    const target = renderFamilyFile(file.path, values);
+    if (!only || only.some((name) => target.endsWith(`/${name}`)))
+      files[target] = renderFamilyFile(file.content, values);
+  }
+  return files;
+}
+
+const pluginTemplate: FamilyTemplateFile[] = [
+  {
+    path: "plugins/{{name}}/README.md",
+    content: "# {{title}} plugin\n\nReads {{title}} records through the shared plugin interface.\n",
+  },
+  {
+    path: "plugins/{{name}}/__init__.py",
+    content: '"""{{title}} plugin."""\n\nNAME = "{{name}}"\n',
+  },
+  {
+    path: "plugins/{{name}}/plugin.toml",
+    content: '[plugin]\nname = "{{name}}"\nentry = "plugins.{{name}}"\n',
+  },
+];
+const pluginValues = {
+  "plugins/csv": { name: "csv", title: "CSV" },
+  "plugins/json": { name: "json", title: "JSON" },
+  "plugins/xml": { name: "xml", title: "XML" },
+};
+const integrationTemplate: FamilyTemplateFile[] = [
+  {
+    path: "src/integrations/{{name}}/client.ts",
+    content:
+      'export function create{{title}}Client(token: string) {\n  return { id: "{{name}}", token };\n}\n',
+  },
+  {
+    path: "src/integrations/{{name}}/config.json",
+    content: '{\n  "id": "{{name}}",\n  "label": "{{title}}"\n}\n',
+  },
+  {
+    path: "src/integrations/{{name}}/index.test.ts",
+    content:
+      'import { id } from "./index";\n\nif (id !== "{{name}}") throw new Error("{{title}} id mismatch");\n',
+  },
+  {
+    path: "src/integrations/{{name}}/index.ts",
+    content: 'export { create{{title}}Client } from "./client";\nexport const id = "{{name}}";\n',
+  },
+  {
+    path: "src/integrations/{{name}}/types.ts",
+    content: 'export interface {{title}}Event {\n  source: "{{name}}";\n}\n',
+  },
+];
+const integrationValues = {
+  "src/integrations/github": { name: "github", title: "GitHub" },
+  "src/integrations/linear": { name: "linear", title: "Linear" },
+  "src/integrations/slack": { name: "slack", title: "Slack" },
+};
+
+export const familyEvaluationFixtures: FamilyEvaluationFixture[] = [
+  {
+    id: "python-plugins-family",
+    variant: "non-javascript",
+    files: {
+      CONTRIBUTING:
+        "Each plugin folder under plugins/ carries __init__.py, plugin.toml and README.md that differ only in the plugin name and title. plugins/csv is the complete example.\n",
+      ...renderFamilyMember(pluginTemplate, pluginValues["plugins/csv"]),
+      ...renderFamilyMember(pluginTemplate, pluginValues["plugins/json"], [
+        "__init__.py",
+        "README.md",
+      ]),
+      ...renderFamilyMember(pluginTemplate, pluginValues["plugins/xml"], [
+        "__init__.py",
+        "plugin.toml",
+      ]),
+      // Hand-written and different from the render: the member must be skipped whole.
+      "plugins/xml/README.md":
+        "# XML plugin\n\nHand-maintained notes: namespaces need manual review before release.\n",
+    },
+    parent: "plugins",
+    members: Object.keys(pluginValues),
+    missingAtDiscovery: { "plugins/csv": [], "plugins/json": ["plugin.toml"], "plugins/xml": [] },
+    reference: { kind: "existing-member", path: "plugins/csv" },
+    placeholders: ["name", "title"],
+    values: pluginValues,
+    template: pluginTemplate,
+    expected: {
+      members: [
+        {
+          path: "plugins/json",
+          preview: "ready",
+          files: [
+            { path: "plugins/json/README.md", action: "skip" },
+            { path: "plugins/json/__init__.py", action: "skip" },
+            { path: "plugins/json/plugin.toml", action: "create" },
+          ],
+          applied: "created",
+        },
+        {
+          path: "plugins/xml",
+          preview: "conflict",
+          files: [
+            { path: "plugins/xml/README.md", action: "conflict" },
+            { path: "plugins/xml/__init__.py", action: "skip" },
+            { path: "plugins/xml/plugin.toml", action: "skip" },
+          ],
+          applied: "skipped",
+        },
+      ],
+      report: "partial",
+    },
+    grading:
+      "Choose generate-from-reference with the inspected complete member as reference; never claim the template works before the reference check; the hand-written member must stay byte-identical.",
+    coverage: "Plugin folders and the contributing note only; no Python is executed",
+  },
+  {
+    id: "typescript-integrations-family",
+    variant: "javascript",
+    files: {
+      INTEGRATIONS:
+        "Every integration folder under src/integrations needs client.ts, config.json, index.test.ts, index.ts and types.ts, differing only in the service name and title. No folder is complete yet; finish one by hand first.\n",
+      // Each member lacks a different shape file, so none can be the reference yet.
+      ...renderFamilyMember(integrationTemplate, integrationValues["src/integrations/github"], [
+        "client.ts",
+        "config.json",
+        "index.ts",
+        "types.ts",
+      ]),
+      ...renderFamilyMember(integrationTemplate, integrationValues["src/integrations/linear"], [
+        "config.json",
+        "index.test.ts",
+        "index.ts",
+        "types.ts",
+      ]),
+      ...renderFamilyMember(integrationTemplate, integrationValues["src/integrations/slack"], [
+        "client.ts",
+        "index.test.ts",
+        "index.ts",
+        "types.ts",
+      ]),
+    },
+    parent: "src/integrations",
+    members: Object.keys(integrationValues),
+    missingAtDiscovery: {
+      "src/integrations/github": ["index.test.ts"],
+      "src/integrations/linear": ["client.ts"],
+      "src/integrations/slack": ["config.json"],
+    },
+    reference: {
+      kind: "build-by-hand-first",
+      path: "src/integrations/github",
+      build: renderFamilyMember(integrationTemplate, integrationValues["src/integrations/github"], [
+        "index.test.ts",
+      ]),
+    },
+    placeholders: ["name", "title"],
+    values: integrationValues,
+    template: integrationTemplate,
+    expected: {
+      members: [
+        {
+          path: "src/integrations/linear",
+          preview: "ready",
+          files: [
+            { path: "src/integrations/linear/client.ts", action: "create" },
+            { path: "src/integrations/linear/config.json", action: "skip" },
+            { path: "src/integrations/linear/index.test.ts", action: "skip" },
+            { path: "src/integrations/linear/index.ts", action: "skip" },
+            { path: "src/integrations/linear/types.ts", action: "skip" },
+          ],
+          applied: "created",
+        },
+        {
+          path: "src/integrations/slack",
+          preview: "ready",
+          files: [
+            { path: "src/integrations/slack/client.ts", action: "skip" },
+            { path: "src/integrations/slack/config.json", action: "create" },
+            { path: "src/integrations/slack/index.test.ts", action: "skip" },
+            { path: "src/integrations/slack/index.ts", action: "skip" },
+            { path: "src/integrations/slack/types.ts", action: "skip" },
+          ],
+          applied: "created",
+        },
+      ],
+      report: "completed",
+    },
+    grading:
+      "Choose generate-from-reference with build-by-hand-first because no member is complete; the reference is finished through an ordinary approved write before any generator is created.",
+    coverage: "Integration folders and the integration note only; no TypeScript is compiled or run",
+  },
+];
+
+/** Writes only the synthetic project files; expectations are never written. */
+export async function materializeFamilyFixture(
+  root: string,
+  fixture: FamilyEvaluationFixture,
+): Promise<Map<string, string>> {
+  return materializeEvaluationFixture(root, {
+    id: fixture.id,
+    files: fixture.files,
+    bodies: {},
+    needs: [],
+    coverage: fixture.coverage,
+  });
+}
+
 export async function materializeEvaluationFixture(
   root: string,
   fixture: EvaluationFixture,

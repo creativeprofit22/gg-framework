@@ -760,17 +760,24 @@ export type ProgrammaticCommandVerificationState = z.infer<
   typeof programmaticCommandVerificationStateSchema
 >;
 
-const verificationCaseSchema = z.strictObject({
-  category: z.enum(["loads", "behavior", "side-effects"]),
-  scenario: z.enum(["normal", "incomplete", "out-of-scope"]),
-  method: z.enum(["deterministic", "model-judgment"]),
-  input: extensionTextSchema,
-  result: z.enum(["passed", "failed", "unavailable"]),
-  evidence: advisoryEvidenceSchema.refine(
-    (value) => value.items.length > 0,
-    "case evidence is required",
-  ),
-});
+const verificationCaseSchema = z
+  .strictObject({
+    category: z.enum(["loads", "behavior", "side-effects", "reproduces-reference"]),
+    scenario: z.enum(["normal", "incomplete", "out-of-scope"]),
+    method: z.enum(["deterministic", "model-judgment"]),
+    input: extensionTextSchema,
+    result: z.enum(["passed", "failed", "unavailable"]),
+    evidence: advisoryEvidenceSchema.refine(
+      (value) => value.items.length > 0,
+      "case evidence is required",
+    ),
+  })
+  .refine(
+    (value) =>
+      value.category !== "reproduces-reference" ||
+      (value.scenario === "normal" && value.method === "deterministic"),
+    "the reproduces-reference case is a deterministic byte comparison of the normal reference input",
+  );
 export const programmaticVerificationV1Schema = z
   .strictObject({
     version: z.literal(1),

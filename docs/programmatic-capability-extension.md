@@ -69,10 +69,81 @@ Raw content, parsed prompt, canonical owners, declared file contents/identities,
 
 Direct runs share repository claim, one transient session, cancellation, turn/deadline/evidence limits and cleanup. They write no synthetic Opportunity record and receive no parent conversation. Bounded results carry host run ID, execution/file/policy fingerprints and tool argument/result digests, but no child transcript. `completed` means finished with attributed tool evidence; `behavior: "unverified"` does not certify the success condition. Model judgment, opaque stdout and exit zero are not independent behavioral proof. Cleanup survivors retain ownership and cannot report success.
 
+## Generated-file ownership
+
+Generators that write files into a user repository use the shared owner in `packages/ggcoder/src/core/generated-files/` instead of their own write path. Templates are logic-free and values are inserted literally. `renderTemplate` (fixed templates such as `tauri-package`) requires each placeholder exactly once; `renderPlaceholders` (family templates) replaces every declared `{{key}}` in one pass, as described under [logic-free placeholders](#generators-from-a-reference).
+
+- **Ownership record.** Side-record generators keep ownership in `.gg/programmatic/generated/<owner>.json`: canonical JSON with `schema_version: 1`, the owner ID and `{ path, template_sha256, content_sha256 }` entries sorted by path. Nothing is written into the generated file, so JSON, YAML, Python, TOML and comment-less formats work. A file is owned only when the record lists it and its bytes still match.
+- **Refusal.** An existing file the record does not own, a hand-edited owned file, a link, a non-regular file, or a corrupt, extra-field or stale record is a conflict. Commits refuse conflicts and never overwrite them. An owned, unedited side-record file is replaced by a new render; embedded-marker sets refuse owned files that differ from the fixed template.
+- **Rollback.** Commits run under a per-repository, per-owner lock, snapshot every path and the record, check for concurrent changes before each atomic write, and write the record last. Any failure restores the snapshot in reverse order, including the record; files changed concurrently during rollback are left alone and reported.
+- **Legacy markers.** A side-record spec may set `legacyMarker`. Files carrying a valid old in-file marker are recognised as owned and adopted into the record on the next commit.
+- **Verification.** `verifyGeneratedSet` re-renders, compares bytes and lists stale files without writing.
+
+Limits: this is not an OS sandbox. Side records are not in the programmatic inventory exclusions, so they can affect inventory fingerprints. `tauri-package` keeps its in-file markers and writes no side record, because its calibrate script rewrites the config inside the user repository. Templates cannot contain logic.
+
+## Generators from a reference
+
+An approved `generate-from-reference` recommendation becomes a script-backed project command through the reviewed creation flow above. There is no separate creation path. A generator is trusted only after it rebuilds its reference byte for byte.
+
+- **Review scope.** Opportunity review may call `programmatic_command` `inspect` for a generator only after fresh project and catalog inspection. The draft must use the candidate's `familyId` and exact member set, and its reference must be the recommended member when one was named. Create, verify and run stay refused there. Creation is a separate normal-turn `create` with its own question card.
+- **Files.** `inspect` takes `generator` instead of model helpers; the capability kind must be `script-backed`. The host writes `.gg/commands/<name>.md` plus three files in `.gg/commands/.<name>-helpers/`:
+  - `generate.mjs` is a fixed host-owned Node helper, with no dependencies and no network access. It renders one member into a new `--out` directory and refuses to write into an existing one.
+  - `template.json` is the model-drafted template: `{ version, familyId, kind, placeholders, files: [{ path, content }] }`.
+  - `inputs.json` holds one record per family member: `{ version, reference, members: [{ path, values }] }`.
+
+  The tool input lists each member's values as `{ key, value }` pairs so the strict tool schema can express them; the host writes them to `inputs.json` as an object. File text lives inside JSON strings, so Python, Markdown and other non-JavaScript families keep exact bytes, including CRLF and a BOM. The preview shows all three files in full, and creation publishes them without replacing existing files, like any other command.
+
+- **Logic-free placeholders.** A `{{key}}` in a template path or content is replaced by its value. Keys match `^[a-z][a-z0-9_]{0,39}$`. Rendering is one left-to-right pass: values are inserted literally and never expanded again, and any `{{…}}` that is not a declared key stays as written. There are no conditions, loops or filters.
+- **Structural rules at inspection.** These rules are checked without running anything:
+  - The reference is one of 3–12 unique, safe member paths.
+  - Every record has exactly the declared keys.
+  - Every key is used in the template and has at least two different values across members, because placeholders exist only for values that differ.
+  - No reference file contains a declared `{{key}}` literally.
+  - Rendered paths are safe, unique and inside their member (directory family) or equal to it (file family).
+  - The rendered reference paths equal the reference's actual files.
+
+  The reference allows at most 28 regular UTF-8 files and no links. Its files become reviewed prerequisites. Passing these rules does not accept the template.
+
+- **Reference check.** Only `verification` accepts the template, after the usual snapshot checks. It copies the three on-disk helper files into a temporary fixture and runs host Node `generate.mjs --member <reference>`. It then compares the output file set and bytes with the reference on disk. The run uses a minimal environment, a 30 s timeout and bounded output; the fixture is always removed. The deterministic `reproduces-reference` case is recorded as passed or failed.
+
+  On a mismatch the report `result` is `failed`, and the generator is not verified. Each difference is listed as `missing`, `unexpected` or `bytes`, with the first differing byte and a unified diff capped at 8 KB per file and 32 KB in total.
+
+- **Project check.** The host looks for the project's own check with the existing verify-command detection and never runs it itself.
+  - If none is found, the result says "No project check was found; only the exact-match check ran."
+  - If one is found, `generatorVerified` also needs a selected, current, nonpersistent bash receipt for that exact command with exit code 0.
+  - Without such a receipt, `projectCheck` is `not-run` or `failed` and the generator is not verified.
+
+  `behavior` stays `unavailable` and `executionApproved` stays false.
+
+- **Freshness.** No new freshness mechanism is involved. Editing `template.json`, `inputs.json` or `generate.mjs` changes reviewed content. Editing a reference file changes a prerequisite, and adding or removing reference files fails re-enumeration. Before creation, any of these makes the handle stale. After creation, they make verification `unavailable`, and earlier results no longer apply.
+- **Missing Node.** The runtime is host-owned, never a tool parameter. Without it, inspection returns `helper-runtime-unavailable`, and verification is `unavailable` without a generator result.
+
+Verification rebuilds only the reference, and only in a temporary fixture; it writes nothing through the generated-file owner. In practice the 64 KB review preview limits reference size; an oversize reference is refused rather than truncated.
+
+### Apply to the rest of the family
+
+Other members are written only through two later `programmatic_command` actions on the same handle. There is no new tool, runner, background job or approval store.
+
+- **Verified in this session.** `preview_family { handle, members? }` requires the last `verification` for that handle in this session to have `generatorVerified: true`. It re-reads the helper files, reference prerequisites and environment, which must still have the digests that were verified. Otherwise it returns `generator-not-verified` or `stale-generator-verify-again`. Inspect, cancel, dispose and a restart drop the verified record and any pending preview, so the generator must be verified again.
+- **Preview writes nothing.** Each selected member (by default every member except the reference) is rendered by the same fixed `generate.mjs` in a temporary fixture. Its output paths must equal the template's rendered paths. Each file is classified read-only through the shared owner:
+  - `create`: the file is absent.
+  - `change`: the file is listed in this member's record, unedited, and the render differs.
+  - `unchanged`: the file is owned and identical.
+  - `skip`: the file is unowned but byte-identical. It is left alone and not adopted.
+  - `conflict`: the file is unowned and differs, a hand-edited owned file, a link, a non-regular file, or covered by a bad record.
+
+  A member with any conflict or render failure is skipped whole. The preview also lists dirty git paths and the detected project check. It is allowed in plan mode, is capped at 64 KB (refused rather than truncated), and is held in session memory as a single pending preview.
+
+- **Git gate.** The host runs `git status --porcelain` limited to the affected paths, meaning the rendered files and each member's record. Dirty paths are listed. Apply then needs the explicit "despite uncommitted changes" option, which is bound to that exact list. A project that is not a git repository gets a plain warning that git cannot undo the change, and apply is still allowed. If `git status` itself fails, preview fails closed with `git-status-failed`.
+- **Separate approval.** `apply_family { handle, preview_id }` consumes the pending preview before anything else. It is refused in plan mode, on hosts without a question card, and when local filesystem access is off. It plans again, and any difference from the preview returns `stale-preview-review-again`. The question card shows the full preview, and "Do not apply" is the recommended option. Each approving value carries the preview digest, a fresh nonce and the dirty-list digest, so an answer copied from another card does not approve. After the answer, the host plans a third time and requires the same digest. The digest covers the reviewed generator files, reference prerequisites, environment, member list, each file's path, action, prior and rendered digest, the git state and the check command.
+- **Member by member.** The apply claims the project through the same claim as reviewed runs, so it cannot overlap one. It is bounded by the run deadline and the tool's cancellation. Each member is one `commitGeneratedSet` call with its own side record, owner `family-<familyId>-<member digest>`, lock `gg-family-generator`, snapshot and rollback. The record lists the member's files minus any skipped ones. Unowned files are never overwritten. Independent failures do not stop the run. Cancellation, the deadline, an incomplete rollback or a busy lock roll back the current member and mark the rest `not-attempted`. Written and restored paths go through the host's file-mutation notifications.
+- **Project check.** When a project check is detected, the card names the exact command and offers to apply with or without it. If chosen, the host runs it once before any write. If that baseline fails, it is not used to judge members. Otherwise it runs after each member inside that member's lock, and a non-zero exit, timeout or error rolls that member back. Each run gets a reduced environment, a 5-minute timeout, tree kill on timeout or cancel, and a 4,000-character output tail. Running repository code this way is not a sandbox. Without a usable check, the report says only exact rendering was checked.
+- **Report.** The strict report has `status` (`completed`, `partial`, `failed` or `cancelled`), `stopped`, and per-member `created`, `updated`, `unchanged`, `skipped`, `failed` or `not-attempted`. Each member entry has a reason, its file actions and its check result. The report also includes the check statement, git state and override, and limits. A byte-exact render does not prove the member works in the project.
+
 ## Compatibility obligations
 
 The authoritative boundaries are [setup-first slash discovery and code/plan modes](programmatic-user-flow.md#commands-and-ownership), [fixed scanner routing and retained states](programmatic-architecture.md), [history consent/compatibility](programmatic-recommendation-lifecycle.md), and the separate approval/confinement contracts above. Do not generate a duplicate project entry command, broadly rewrite existing profiles, auto-refresh setup from focus/research/ranking/catalog limits, or use a generic prompt fallback for unsupported execution. Advice omissions never mark scanner findings disappeared.
 
 ## Existing test entry points
 
-Use existing owners rather than a new evaluator or detector registry: `packages/ggcoder/src/core/programmatic/assessment-evidence.test.ts` for unfamiliar/extensionless bounded evidence; `core/agent-session-programmatic-assessment.test.ts` and `core/agent-session-programmatic-provider.test.ts` for session entry, delivered receipts and setup/configured policy; `core/programmatic/discovery-projection.test.ts` and `discovery-review.test.ts` for display/review boundaries; tool and creation/run tests alongside their implementations under `core/programmatic` and `src/tools`; `gg-app/src/ProgrammaticDiscovery.test.tsx` and `programmatic-discovery-state.test.ts` for presentation/staleness. The [developer verification material](programmatic-evidence.md#developer-verification-and-exclusions) preserves native/scripted limits. This documentation change runs none of those tests and establishes no live-model or installer result.
+Use existing owners rather than a new evaluator or detector registry: `packages/ggcoder/src/core/programmatic/assessment-evidence.test.ts` for unfamiliar/extensionless bounded evidence; `core/agent-session-programmatic-assessment.test.ts` and `core/agent-session-programmatic-provider.test.ts` for session entry, delivered receipts and setup/configured policy; `core/programmatic/discovery-projection.test.ts` and `discovery-review.test.ts` for display/review boundaries; tool and creation/run tests alongside their implementations under `core/programmatic` and `src/tools`; `gg-app/src/ProgrammaticDiscovery.test.tsx` and `programmatic-discovery-state.test.ts` for presentation/staleness; `src/app-sidecar-programmatic-family.test.ts`, `core/generated-files` and `core/programmatic/family-*.test.ts` for the family generator journey, shared owner and preview/apply. The [developer verification material](programmatic-evidence.md#developer-verification-and-exclusions) preserves native/scripted limits. This documentation change runs none of those tests and establishes no live-model or installer result.

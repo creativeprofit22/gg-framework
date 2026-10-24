@@ -15,6 +15,7 @@ import {
   type CommandCreationReviewer,
   type CommandInspectionOptions,
 } from "./command-creation.js";
+import { FAMILY_GENERATOR_HELPER_SOURCE } from "./family-generator.js";
 
 const roots: string[] = [];
 let restoreHome: (() => void) | undefined;
@@ -824,6 +825,157 @@ describe("command-last no-clobber publication", () => {
     expect((await freshOwner.inspect(request, signal())).status).toBe("review-required");
     freshOwner.dispose();
   });
+});
+
+describe("generator creation from a reference", () => {
+  const reference = {
+    "tools/alpha/__init__.py": "from .main import run\r\n",
+    "tools/alpha/main.py": 'NAME = "alpha"\r\n',
+  };
+  const generatorRequest = {
+    ...request,
+    requirement: { ...request.requirement, capabilityKind: "script-backed" },
+    generator: {
+      familyId: "0123456789abcdef",
+      kind: "directory",
+      reference: "tools/alpha",
+      placeholders: ["name"],
+      members: [
+        { path: "tools/alpha", values: [{ key: "name", value: "alpha" }] },
+        { path: "tools/beta", values: [{ key: "name", value: "beta" }] },
+        { path: "tools/gamma", values: [{ key: "name", value: "gamma" }] },
+      ],
+      files: [
+        { path: "tools/{{name}}/main.py", content: 'NAME = "{{name}}"\r\n' },
+        { path: "tools/{{name}}/__init__.py", content: "from .main import run\r\n" },
+      ],
+    },
+  };
+  async function generatorFixture() {
+    const root = await fixture();
+    for (const [file, content] of Object.entries(reference)) {
+      await fs.mkdir(path.dirname(path.join(root, file)), { recursive: true });
+      await fs.writeFile(path.join(root, file), content);
+    }
+    return root;
+  }
+  const helperDirectory = ".gg/commands/.creation-fixture-helpers";
+
+  it("shows exact host helper, template and inputs and binds reference files as prerequisites", async () => {
+    const root = await generatorFixture();
+    const result = await reviewed(root, generatorRequest);
+    if (result.status !== "proposal") throw new Error(JSON.stringify(result));
+    const { files, preview, prerequisites, generator } = result.value;
+    expect(files.map((file) => file.path)).toEqual([
+      `${helperDirectory}/generate.mjs`,
+      `${helperDirectory}/inputs.json`,
+      `${helperDirectory}/template.json`,
+      ".gg/commands/creation-fixture.md",
+    ]);
+    expect(files[0]?.content).toBe(FAMILY_GENERATOR_HELPER_SOURCE);
+    const template = JSON.parse(files[2]?.content ?? "");
+    expect(template).toMatchObject({ version: 1, familyId: "0123456789abcdef", kind: "directory" });
+    expect(template.files.map((file: { path: string }) => file.path)).toEqual([
+      "tools/{{name}}/__init__.py",
+      "tools/{{name}}/main.py",
+    ]);
+    expect(JSON.parse(files[1]?.content ?? "").members).toHaveLength(3);
+    const shown = JSON.parse(preview);
+    expect(shown.files).toEqual(files);
+    expect(shown.generator.limits.join(" ")).toContain("not accepted yet");
+    expect(generator).toMatchObject({ reference: "tools/alpha" });
+    for (const [file, content] of Object.entries(reference))
+      expect(prerequisites).toContainEqual({ path: file, sha256: sha256(content) });
+    expect(await fs.readdir(path.join(root, ".gg/commands"))).toEqual(["private-fixture"]);
+  });
+
+  it("publishes only the command and helpers and leaves every other member untouched", async () => {
+    const root = await generatorFixture();
+    const result = await reviewed(root, generatorRequest);
+    if (result.status !== "proposal") throw new Error(JSON.stringify(result));
+    expect(await publishReviewedCommand(result.value, options, signal())).toMatchObject({
+      created: true,
+      executionApproved: false,
+    });
+    expect(await fs.readdir(path.join(root, "tools"))).toEqual(["alpha"]);
+    for (const [file, content] of Object.entries(reference))
+      expect(await fs.readFile(path.join(root, file), "utf8")).toBe(content);
+    expect((await fs.readdir(path.join(root, helperDirectory))).sort()).toEqual([
+      "generate.mjs",
+      "inputs.json",
+      "template.json",
+    ]);
+    expect(await publishReviewedCommand(result.value, options, signal())).toMatchObject({
+      created: false,
+    });
+  });
+
+  it("refuses model helpers, prompt-only kinds, invalid drafts and a missing Node runtime", async () => {
+    const root = await generatorFixture();
+    const helper = { name: "extra.mjs", content: "export {};\n", repeatableLogic: "Extra" };
+    expect(
+      await reviewed(root, { ...generatorRequest, helpers: [helper] } as typeof request),
+    ).toMatchObject({
+      status: "unavailable",
+      reason: "generator-owns-helpers",
+    });
+    expect(
+      await reviewed(root, { ...generatorRequest, requirement: request.requirement }),
+    ).toMatchObject({ status: "unavailable", reason: "generator-requires-script-backed" });
+    const { generator } = generatorRequest;
+    expect(
+      await reviewed(root, {
+        ...generatorRequest,
+        generator: { ...generator, reference: "tools/delta" },
+      } as typeof request),
+    ).toMatchObject({ status: "unavailable", reason: "generator-reference-not-a-member" });
+    expect(
+      await reviewed(
+        root,
+        generatorRequest,
+        {},
+        {
+          ...options,
+          runtimeExecutable: path.join(root, "missing-node"),
+        },
+      ),
+    ).toMatchObject({ status: "unavailable", reason: "helper-runtime-unavailable" });
+    expect(await fs.readdir(path.join(root, ".gg/commands"))).toEqual(["private-fixture"]);
+  });
+
+  it.each(["edit", "add"])(
+    "makes creation approval stale when a reference file is changed: %s",
+    async (change) => {
+      const root = await generatorFixture();
+      const owner = new CommandCreationReview(root, { ...options, reviewCreation: accept });
+      try {
+        const first = await owner.inspect(generatorRequest, signal());
+        if (first.status !== "review-required") throw new Error(JSON.stringify(first));
+        const proposal = await owner.inspect(
+          {
+            ...generatorRequest,
+            review: {
+              inventorySha256: first.catalog.sha256,
+              disposition: "create",
+              rationale: "Reviewed missing generator",
+            },
+          },
+          signal(),
+        );
+        if (proposal.status !== "proposal") throw new Error(JSON.stringify(proposal));
+        if (change === "edit")
+          await fs.writeFile(path.join(root, "tools/alpha/main.py"), 'NAME = "alpha!"\r\n');
+        else await fs.writeFile(path.join(root, "tools/alpha/extra.py"), "# extra\n");
+        const publish = vi.fn(async () => ({ status: "fixture-published" }));
+        expect(await owner.consume(proposal.handle, signal(), publish)).toMatchObject({
+          status: "unavailable",
+        });
+        expect(publish).not.toHaveBeenCalled();
+      } finally {
+        owner.dispose();
+      }
+    },
+  );
 });
 
 describe("command creation loader baseline", () => {

@@ -1320,6 +1320,38 @@ describe("programmatic extension contracts", () => {
     );
   });
 
+  it("accepts a deterministic reproduces-reference case only for the normal reference input", () => {
+    const reference = {
+      ...caseRecord,
+      category: "reproduces-reference",
+      scenario: "normal",
+      method: "deterministic",
+      result: "failed",
+    };
+    const failed = { ...verification, result: "failed", cases: [caseRecord, reference] };
+    expect(programmaticVerificationV1Schema.safeParse(failed).success).toBe(true);
+    for (const change of [{ scenario: "incomplete" }, { method: "model-judgment" }])
+      expect(
+        programmaticVerificationV1Schema.safeParse({
+          ...failed,
+          cases: [caseRecord, { ...reference, ...change }],
+        }).success,
+      ).toBe(false);
+    const behaviorCases = ["normal", "incomplete", "out-of-scope"].map((scenario) => ({
+      ...caseRecord,
+      category: "behavior",
+      scenario,
+    }));
+    // A failed exact match can never sit inside a passed report.
+    expect(
+      programmaticVerificationV1Schema.safeParse({
+        ...verification,
+        result: "passed",
+        cases: [caseRecord, ...behaviorCases, reference],
+      }).success,
+    ).toBe(false);
+  });
+
   it("accepts bounded host settings but rejects unsupported grants and limits", () => {
     expect(programmaticExecutionSettingsV1Schema.safeParse(settings).success).toBe(true);
     expect(programmaticExecutionReviewV1Schema.safeParse(review).success).toBe(true);

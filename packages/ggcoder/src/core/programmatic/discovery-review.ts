@@ -4,6 +4,16 @@ import type { DiscoveryRecord } from "./discovery-projection.js";
 import { isDiscoveryCandidate, type DiscoveryCandidate } from "@kenkaiiii/gg-core/programmatic-recommendation-contract";
 
 const reads = new Set(["read", "find", "grep", "ls", "code_search", "code_nav", "command_information"]);
+const proposing = new Set(["missing-capability", "generate-from-reference"]);
+/** Binds generator inspection to this family, members and reference. */
+function sameFamily(choice: DiscoveryRecord["recommendation"]["choice"], args: unknown): boolean {
+  if (choice.kind !== "generate-from-reference") return true;
+  type Draft = { familyId?: unknown; reference?: unknown; members?: { path?: unknown }[] };
+  const draft = (args as { proposal?: { generator?: Draft } }).proposal?.generator, want = choice.generator;
+  return !!draft && draft.familyId === want.familyId && Array.isArray(draft.members) &&
+    JSON.stringify(draft.members.map((member) => member?.path).sort()) === JSON.stringify([...want.members].sort()) &&
+    (want.reference.kind !== "existing-member" || draft.reference === want.reference.path);
+}
 /** One session turn's permission intersection, never an executor or durable approval store. */
 export class DiscoveryReviewBoundary {
   active = true;
@@ -15,12 +25,12 @@ export class DiscoveryReviewBoundary {
   constructor(readonly candidate: DiscoveryCandidate, private readonly requiredPaths: Set<string>, private readonly choice: DiscoveryRecord["recommendation"]["choice"],
     private readonly proposalEvidence: (text: string) => (() => boolean) | undefined = () => undefined) {}
   allows(name: string): boolean {
-    return this.active && (reads.has(name) || (name === "programmatic_command" && this.candidate.choice === "missing-capability"));
+    return this.active && (reads.has(name) || (name === "programmatic_command" && proposing.has(this.candidate.choice)));
   }
   claim(name: string, args: unknown, external: boolean): void {
     if (!this.allows(name) || external || ++this.calls > 64) throw new Error("Candidate review permits bounded local inspection only.");
     if (name === "programmatic_command" && (!this.reinspected || !args || typeof args !== "object" ||
-      (args as { action?: unknown }).action !== "inspect")) throw new Error("Candidate review permits proposal inspection only after fresh project and catalog inspection; no creation, verification or run.");
+      (args as { action?: unknown }).action !== "inspect" || !sameFamily(this.choice, args))) throw new Error("Candidate review permits proposal inspection only after fresh project and catalog inspection of this candidate; no creation, verification or run.");
     // Invalidate before execution as a failed/thrown call may have no result to observe.
     if (name === "programmatic_command") this.proposalCurrent = undefined;
     if (name === "command_information" && (args as { action?: unknown } | null)?.action !== "list") this.command = false;
@@ -32,7 +42,7 @@ export class DiscoveryReviewBoundary {
     const text = typeof output === "string" ? output : output.content;
     if (typeof text !== "string") return;
     this.evidence.observe(cwd, name, args, callId, text);
-    if (name === "programmatic_command" && this.choice.kind === "missing-capability" &&
+    if (name === "programmatic_command" && proposing.has(this.choice.kind) &&
       (args as { action?: unknown } | null)?.action === "inspect" && this.reinspected)
       this.proposalCurrent = this.proposalEvidence(text);
     // Only the registered canonical command-information owner can produce this result.
@@ -56,7 +66,10 @@ export class DiscoveryReviewBoundary {
       (!(this.choice.kind === "reuse-command" || this.choice.kind === "extend-command") || this.command);
   }
   get prepared(): boolean {
-    return this.active && this.reinspected && (this.choice.kind !== "missing-capability" || this.proposalCurrent?.() === true);
+    // Generator proposals are optional (no reference yet) but must stay current.
+    const proposal = this.proposalCurrent?.();
+    return this.active && this.reinspected && (this.choice.kind === "missing-capability" ? proposal === true
+      : this.choice.kind !== "generate-from-reference" || proposal !== false);
   }
   close(): void { this.active = false; this.proposalCurrent = undefined; this.evidence.clear(); }
 }
@@ -70,7 +83,7 @@ export function discoveryReviewPrompt(candidate: DiscoveryCandidate): string {
 Re-inspect the relevant current local evidence and current command catalog with the available read-only tools. Explain changed evidence, missing prerequisites, uncertainty and available tools honestly.
 For reuse inspect the canonical command body, helpers and scope with command_information. For extension review the current base and proposed changes; do not edit it.
 For a missing capability, only after fresh evidence/catalog inspection, use programmatic_command action inspect to prepare a proposal if supported. Never create, verify, execute, install or grant tools. For missing evidence perform scoped read-only inspection.
-For generation from a reference, re-inspect the reference and the listed family members, then describe the generator proposal; create, check or run nothing.
+For generation from a reference, re-inspect the reference and the listed family members. With an existing reference, programmatic_command action inspect may draft a generator for this family only. Create, check or run nothing.
 Opening this review approves neither command contents nor subsequent edits. Any later creation or run requires the existing separate exact review.
 Untrusted candidate JSON:\n${JSON.stringify(candidate)}`;
 }

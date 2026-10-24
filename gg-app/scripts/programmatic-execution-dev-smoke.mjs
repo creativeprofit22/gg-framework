@@ -16,6 +16,7 @@ import { createNativeInputSmoke } from "./programmatic-native-input-smoke.mjs";
 import { smokeLabels, smokeButton, smokeDialHub, smokeDialShows, smokeComposerActionStorageKey, revealSmokeTarget, assessmentWorkflowStep, assessmentRequestCount, readExecutionDisplay, assertTranscriptIsolation, extendedWorkflowStep, extendedRequestCount, extendedCommandName } from "./programmatic-execution-smoke-checks.mjs";
 
 import { discoveryWorkflowStep, discoveryRequestCount, runDiscoverySmoke } from "./programmatic-discovery-smoke.mjs";
+import { familyWorkflowStep, familyRequestCount, familyResponseEvents, runFamilySmoke, seedFamily } from "./programmatic-family-smoke.mjs";
 
 const app = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const workspace = resolve(app, "..");
@@ -49,7 +50,11 @@ function snapshot(directory, prefix = "") {
   return result;
 }
 
-function seed(paths, discoveryOnly = false) {
+function seed(paths, discoveryOnly = false, familyWorkflow = false) {
+  if (familyWorkflow) {
+    seedFamily(paths.project);
+    return {};
+  }
   if (discoveryOnly) {
     writeFileSync(join(paths.project, ".gitignore"), ".gg/\n");
     writeFileSync(join(paths.project, "AGENTS.md"), "Disposable read-only discovery fixture. Never create or execute commands during review.\n");
@@ -132,14 +137,17 @@ async function run() {
   const extendedWorkflow = process.argv.includes("--extended-workflow");
   const discoveryOnly = process.argv.includes("--discovery-only");
   assert.ok(!discoveryOnly || (!extendedWorkflow && !driftOnly && !integratedRecovery), "Discovery is a separate bounded scenario");
+  const familyWorkflow = process.argv.includes("--family-workflow");
+  assert.ok(!familyWorkflow || (!discoveryOnly && !extendedWorkflow && !driftOnly && !integratedRecovery), "Family workflow is a separate bounded scenario");
   assert.ok(!extendedWorkflow || (!driftOnly && !integratedRecovery), "Extended workflow is a separate bounded scenario");
   assert.ok(!integratedRecovery || (!driftOnly && !visual), "Integrated recovery excludes drift-only and visual modes");
   const allowNormalWindow = process.argv.includes("--allow-normal-window");
   assert.ok(!extendedWorkflow || !allowNormalWindow, "Extended minimized verification never allows normal-window fallback");
+  assert.ok(!familyWorkflow || (!allowNormalWindow && !visual), "Family workflow is minimized-only, without normal-window fallback");
   assert.ok(!allowNormalWindow || !visual, "Normal-window fallback does not enable visual/input checks");
   assert.ok(!driftOnly || !visual, "Drift-only smoke does not repeat visual/input checks");
   const reuseBuiltDev = process.argv.includes("--reuse-built-dev");
-  assert.deepEqual(process.argv.slice(2), ["--identity", identity, ...(driftOnly ? ["--drift-only"] : []), ...(integratedRecovery ? ["--integrated-recovery"] : []), ...(extendedWorkflow ? ["--extended-workflow"] : []), ...(discoveryOnly ? ["--discovery-only"] : []), ...(visual ? ["--visual"] : []), ...(allowNormalWindow ? ["--allow-normal-window"] : []), ...(reuseBuiltDev ? ["--reuse-built-dev"] : [])]);
+  assert.deepEqual(process.argv.slice(2), ["--identity", identity, ...(driftOnly ? ["--drift-only"] : []), ...(integratedRecovery ? ["--integrated-recovery"] : []), ...(extendedWorkflow ? ["--extended-workflow"] : []), ...(discoveryOnly ? ["--discovery-only"] : []), ...(familyWorkflow ? ["--family-workflow"] : []), ...(visual ? ["--visual"] : []), ...(allowNormalWindow ? ["--allow-normal-window"] : []), ...(reuseBuiltDev ? ["--reuse-built-dev"] : [])]);
   const builtDev = join(app, "src-tauri/target/debug/gg-app.exe");
   if (reuseBuiltDev) {
     assert.match(process.env.GG_PROGRAMMATIC_BUILT_DEV_SHA256 ?? "", /^[a-f0-9]{64}$/);
@@ -174,7 +182,8 @@ async function run() {
     writeFileSync(join(agentDir, "commands/research.md"), `---\nname: research\ndescription: Harmless fixture\n---\n${fixtureBody}\n`);
     json(join(agentDir, "auth.json"), {});
     json(join(agentDir, "settings.json"), { defaultProvider: "azure", defaultModel: "azure:fixture", autoCompact: false, idealReviewEnabled: false });
-    const fixture = seed(paths, discoveryOnly);
+    const fixture = seed(paths, discoveryOnly, familyWorkflow);
+    const familyState = {};
     assert.equal(existsSync(join(paths.project, ".gg/programmatic/profile.json")), false);
     const baseline = snapshot(paths.project);
     const requests = [];
@@ -200,9 +209,10 @@ async function run() {
             { type: "response.output_item.done", output_index: 0, item: step },
           ];
         } else {
-          assert.ok(requests.length < (discoveryOnly ? discoveryRequestCount : extendedWorkflow ? extendedRequestCount : 3), "No automatic specialist rerun or unexpected continuation");
+          assert.ok(requests.length < (familyWorkflow ? familyRequestCount : discoveryOnly ? discoveryRequestCount : extendedWorkflow ? extendedRequestCount : 3), "No automatic specialist rerun or unexpected continuation");
           requests.push(body);
-          if (discoveryOnly || (extendedWorkflow && requests.length > 3)) {
+          if (familyWorkflow) events = familyResponseEvents(familyWorkflowStep(requests.length, body, familyState));
+          else if (discoveryOnly || (extendedWorkflow && requests.length > 3)) {
             const step = discoveryOnly ? discoveryWorkflowStep(requests.length, body) : extendedWorkflowStep(requests.length, body);
             events = typeof step === "string" ? [{ type: "response.output_text.delta", delta: step }] : [
               { type: "response.output_item.added", output_index: 0, item: step },
@@ -237,7 +247,7 @@ async function run() {
     for (const key of Object.keys(env)) if (/(?:API_KEY|ACCESS_KEY|SECRET|TOKEN|PASSWORD|PRIVATE_KEY|CREDENTIALS|^AZURE_|^HOMEDRIVE$|^HOMEPATH$)/i.test(key)) delete env[key];
     Object.assign(env, { GG_SIDECAR_PATH: fileURLToPath(import.meta.url), GG_PROGRAMMATIC_EXECUTION_FIXTURE_MODE: "sidecar",
       GG_PROGRAMMATIC_EXECUTION_FIXTURE_PROVIDER: providerUrl,
-      ...(discoveryOnly ? { GG_PROGRAMMATIC_DISCOVERY_ONLY: "1", GG_PROGRAMMATIC_DISCOVERY_AUDIT: paths.audit } : { GG_PROGRAMMATIC_EXECUTION_FIXTURE_DETECTOR: fixture.stagedDetector }),
+      ...(discoveryOnly ? { GG_PROGRAMMATIC_DISCOVERY_ONLY: "1", GG_PROGRAMMATIC_DISCOVERY_AUDIT: paths.audit } : familyWorkflow ? { GG_PROGRAMMATIC_FAMILY_WORKFLOW: "1" } : { GG_PROGRAMMATIC_EXECUTION_FIXTURE_DETECTOR: fixture.stagedDetector }),
       GG_PHASE25_DEV_FIXTURE_CDP_PORT: String(cdpPort), GG_PHASE25_DEV_FIXTURE_SKIP_ORPHAN_SWEEP: "1", GG_APP_DEV_SMOKE_WINDOW: visual ? "visible" : "minimized",
       COREPACK_HOME: process.env.COREPACK_HOME ?? join(process.env.LOCALAPPDATA ?? "", "node/corepack"), COREPACK_DEFAULT_TO_LATEST: "0",
       CARGO_HOME: process.env.CARGO_HOME ?? join(process.env.USERPROFILE ?? "", ".cargo"),
@@ -279,7 +289,8 @@ async function run() {
     })()`);
     await client.send("Page.reload");
     await waitFor("fresh fixture document", () => client.evaluate(`!window.fixtureBeforeReload && document.readyState === "complete"`));
-    await waitFor("rendered project pane", () => client.evaluate(`!!document.querySelector('.agent-pane textarea')`));
+    // The pane binds only after the daemon's cold source start; match the native budget (DAEMON_START_TIMEOUT 180 s + session startup 120 s).
+    await waitFor("rendered project pane", () => client.evaluate(`!!document.querySelector('.agent-pane textarea')`), 300_000);
     await waitFor("native session", () => client.evaluate(`window.__TAURI_INTERNALS__.invoke("agent_state", {paneId:"primary"}).then(s => s.ready && s.provider === "azure" && s)`));
     await observeMinimized?.("native-ready");
     const parentState = await client.evaluate(`window.__TAURI_INTERNALS__.invoke("agent_state", {paneId:"primary"})`);
@@ -337,6 +348,24 @@ async function run() {
       pendingAssessment = undefined;
       json(join(paths.audit, "assessment-requests.json"), assessments);
     };
+    if (familyWorkflow) {
+      const protectedSnapshot = () => Object.fromEntries(Object.entries(snapshot(agentDir)).filter(([name]) =>
+        name === "settings.json" || name.startsWith("commands/") || name.startsWith("programmatic/")));
+      const protectedBefore = protectedSnapshot();
+      const result = await runFamilySmoke({ client, click, waitFor, requests, observe: observeMinimized, projectSnapshot: () => snapshot(paths.project), providerFailure: () => providerFailure });
+      assert.equal(providerFailure, undefined);
+      assert.deepEqual(protectedSnapshot(), protectedBefore, "Family workflow changes no global settings, commands or lifecycle files");
+      const after = snapshot(paths.project);
+      const changes = [...new Set([...Object.keys(baseline), ...Object.keys(after)])].filter((key) => baseline[key] !== after[key]).sort();
+      assert.ok(changes.every((file) => file === "plugins/json/plugin.toml" || file.startsWith(".gg/commands/") || file.startsWith(".gg/programmatic/generated/")), `Only the generator, its owner records and the planned create changed: ${changes.join(", ")}`);
+      assert.equal(existsSync(join(paths.project, ".gg/programmatic/profile.json")), false, "No profile written");
+      assert.equal(existsSync(join(paths.project, ".gg/programmatic/state.json")), false, "No lifecycle state written");
+      const finalState = await client.evaluate(`window.__TAURI_INTERNALS__.invoke("agent_state", {paneId:"primary"})`);
+      assert.equal(finalState.sessionId, parentState.sessionId);
+      assert.equal(finalState.provider, parentState.provider);
+      json(join(paths.audit, "family-workflow.json"), { ...result, projectBefore: baseline, projectAfter: after, changes });
+      return { ...result, changedProjectFiles: changes, childTranscript: false };
+    }
     if (discoveryOnly) {
       const protectedSnapshot = () => Object.fromEntries(Object.entries(snapshot(agentDir)).filter(([name]) =>
         name === "settings.json" || name.startsWith("commands/") || name.startsWith("programmatic/")));
@@ -389,17 +418,17 @@ async function run() {
       assert.equal(terminal.lifecycle.state, driftOnly ? "dismissed" : "completed");
       json(join(paths.project, "package.json"), { name: "harmless-isolated-fixture", description: "one exact configuration drift" });
       await click("Refresh results");
-      await waitFor("exact rendered drift", () => client.evaluate(`document.querySelector('.programmatic-chat')?.textContent.includes('modified: package.json')`));
+      await waitFor("exact rendered drift", () => client.evaluate(`document.querySelector('.programmatic-chat')?.textContent.includes('Changed: package.json')`));
       assert.equal(await client.evaluate(`Array.from(document.querySelectorAll('.programmatic-chat button')).find(b=>b.textContent.trim()===${JSON.stringify(smokeLabels.scan)}).disabled`), true);
-      assert.equal(await client.evaluate(`Array.from(document.querySelectorAll('.programmatic-chat button')).some(b=>b.textContent.trim()==='Review task approval' && !b.disabled)`), false);
+      assert.equal(await client.evaluate(`Array.from(document.querySelectorAll('.programmatic-chat button')).some(b=>b.textContent.trim()==='Review and run' && !b.disabled)`), false);
       assert.equal(await client.evaluate(`document.querySelector('.programmatic-detail')?.textContent.includes(${JSON.stringify(terminalLabel)})`), true);
       assert.deepEqual(readFileSync(profilePath), previousProfile);
       assert.deepEqual(readFileSync(fixture.statePath), previousState);
       await observeMinimized?.(driftOnly ? "dismissed-exact-drift" : "completed-exact-drift");
-      await assess("setup", "Review setup refresh");
-      await waitFor("refresh proposal", () => client.evaluate(`Array.from(document.querySelectorAll('button')).some(b=>b.textContent.trim()==='Approve and save refresh' && !b.disabled)`));
+      await assess("setup", "Review updated setup");
+      await waitFor("refresh proposal", () => client.evaluate(`Array.from(document.querySelectorAll('button')).some(b=>b.textContent.trim()==='Approve and save update' && !b.disabled)`));
       assert.deepEqual(readFileSync(profilePath), previousProfile, "Review cannot write setup");
-      await click("Approve and save refresh");
+      await click("Approve and save update");
       await waitFor("new approved fingerprint", () => JSON.parse(readFileSync(profilePath, "utf8")).configurationFingerprint.sha256 !== fixture.fingerprint);
       assert.deepEqual(readFileSync(fixture.statePath), previousState, "Approval must not scan or reset lifecycle");
       await observeMinimized?.("refresh-approved-before-rescan");
@@ -433,7 +462,7 @@ async function run() {
       await input.layout("native-600x640");
       await input.resize(1280, 900);
     }
-    await click("Review task approval");
+    await click("Review and run");
     const question = await waitFor("native approval question", () => client.evaluate(`window.fixtureEvents.find(e=>e.type==="ask_user")?.data`));
     assert.equal(requests.length, 0, "No provider dispatch before approval");
     assert.match(question.questions[0].question, /research/);
@@ -445,9 +474,9 @@ async function run() {
     await waitFor("isolated result through native events", () => client.evaluate(`window.fixtureEvents.some(e=>e.type==="text_delta" && e.data.text.includes(${JSON.stringify(completion)}))`));
     await waitFor("parent settled", () => client.evaluate(`window.__TAURI_INTERNALS__.invoke("agent_state", {paneId:"primary"}).then(s=>!s.running)`));
     const executionDisplay = await waitFor("attributed execution evidence in native transcript", () => client.evaluate(`(${readExecutionDisplay.toString()})(document, ${JSON.stringify(completion)})`));
-    assert.ok(executionDisplay.text.includes("Inferred, not confirmed"));
+    assert.ok(executionDisplay.text.includes("Best guess"));
     assert.ok(executionDisplay.text.includes("GG confirmed the listed tools ran, but did not independently check whether the result is correct."));
-    assert.ok(executionDisplay.items.some((item) => item.includes("Checked directly") && item.includes("Tool read completed (fixture-read).")));
+    assert.ok(executionDisplay.items.some((item) => item.includes("Checked") && item.includes("Tool read completed (fixture-read).")));
     assert.ok(!executionDisplay.text.includes(completion), "Execution evidence must not repeat the streamed summary");
     assert.equal(executionDisplay.summaryCount, 1, "One visible specialist summary");
     assert.equal(executionDisplay.executableElements, 0);
@@ -461,10 +490,10 @@ async function run() {
     const allowed = new Set(["read", "find", "grep", "ls", "code_search", "code_nav", "web_search", "web_fetch", "ask_user", "research_corpus", "programmatic_result"]);
     assert.ok(requests[0].tools.every((tool) => allowed.has(tool.name)));
     assert.equal(JSON.parse(readFileSync(fixture.statePath, "utf8")).records[0].lifecycle.state, "completed");
-    await waitFor("completed selected detail", () => client.evaluate(`document.querySelector('.programmatic-detail')?.textContent.includes('Completed')`));
+    await waitFor("completed selected detail", () => client.evaluate(`document.querySelector('.programmatic-detail')?.textContent.includes('Done')`));
     await observeMinimized?.("read-only-task-completed");
     await assess("configured", smokeLabels.scan);
-    await waitFor("completed selection after rescan", () => client.evaluate(`document.querySelector('.programmatic-row[aria-pressed="true"]')?.textContent.includes('Completed') && document.querySelector('.programmatic-detail')?.textContent.includes('Completed') && !document.querySelector('.programmatic-chat [role="status"]')?.textContent.includes('Working')`));
+    await waitFor("completed selection after rescan", () => client.evaluate(`document.querySelector('.programmatic-row[aria-pressed="true"]')?.textContent.includes('Done') && document.querySelector('.programmatic-detail')?.textContent.includes('Done') && !document.querySelector('.programmatic-chat [role="status"]')?.textContent.includes('Working')`));
     assert.equal(JSON.parse(readFileSync(fixture.statePath, "utf8")).records[0].opportunity.identity.id, fixture.id);
     assert.equal(requests.length, 3, "Rescan must not dispatch another specialist");
     if (input) {
@@ -496,10 +525,10 @@ async function run() {
       writeFileSync(fixture.statePath, "{interrupted fixture primary");
       const corruptHash = hash(readFileSync(fixture.statePath));
       await click("Refresh results");
-      await waitFor("recovered persisted report", () => client.evaluate(`document.querySelector('.programmatic-chat')?.textContent.includes('Showing older saved results.') && document.querySelector('.programmatic-detail')?.textContent.includes('Completed')`));
+      await waitFor("recovered persisted report", () => client.evaluate(`document.querySelector('.programmatic-chat')?.textContent.includes('These results are old.') && document.querySelector('.programmatic-detail')?.textContent.includes('Done')`));
       assert.equal(hash(readFileSync(fixture.statePath)), corruptHash, "Report reads must not repair primary bytes");
       assert.equal(hash(readFileSync(previousPath)), previousHash);
-      assert.equal(await client.evaluate(`document.querySelector('.programmatic-detail')?.textContent.includes('Completed')`), true);
+      assert.equal(await client.evaluate(`document.querySelector('.programmatic-detail')?.textContent.includes('Done')`), true);
       await observeMinimized?.("recovered-inspection");
       await assess("configured", smokeLabels.scan);
       await waitFor("explicit recovery scan", () => {
@@ -554,7 +583,7 @@ async function run() {
       await typePrompt("/programmatic focus on the manifest; retain completed history");
       assert.equal(requests.length, 3, "Optional typing does not dispatch");
       await sendTyped();
-      await settled(7);
+      await settled(6);
       await waitFor("in-thread extended advice", () => client.evaluate(`document.body.innerText.includes('NATIVE EXTENDED ADVICE')`));
       assert.deepEqual(readFileSync(fixture.statePath), stateBytes);
       assert.deepEqual(readFileSync(join(paths.project, ".gg/programmatic/profile.json")), profileBytes);
@@ -563,7 +592,7 @@ async function run() {
       await typePrompt("NATIVE CREATE REQUEST: create only the reviewed manifest prompt, not execution.");
       await sendTyped();
       const creationId = await review("extended-creation-review", 11, questionId);
-      await settled(13);
+      await settled(12);
       assert.equal(existsSync(commandFile), true);
       const catalog = await invoke("agent_commands", {});
       assert.ok(catalog.commands.some((entry) => entry.name === extendedCommandName), "New command is in the native catalog");
@@ -572,7 +601,7 @@ async function run() {
       if (input) await input.resize(1280, 900);
       await typePrompt(`/${extendedCommandName}`);
       await waitFor("renderer catalog refresh", () => client.evaluate(`Array.from(document.querySelectorAll('.slash-item')).some(e=>e.textContent.includes(${JSON.stringify(extendedCommandName)}))`));
-      assert.equal(requests.length, 13, "Discovery does not execute newly created command");
+      assert.equal(requests.length, 12, "Discovery does not execute newly created command");
       await typePrompt("NATIVE RUN REQUEST: request a separate read-only review of the created command.");
       await sendTyped();
       const executionId = await review("extended-execution-review", 14, creationId);
@@ -589,7 +618,7 @@ async function run() {
       await subscribeEvents();
       await click("Opportunities");
       await assess("configured", smokeLabels.scan);
-      await waitFor("retained terminal history after extension", () => client.evaluate(`document.querySelector('.programmatic-chat')?.textContent.includes('Completed')`));
+      await waitFor("retained terminal history after extension", () => client.evaluate(`document.querySelector('.programmatic-chat')?.textContent.includes('Done')`));
       assert.deepEqual(readFileSync(fixture.statePath), stateBytes);
       json(join(paths.audit, "extended-workflow.json"), { passed: true, creationId, executionId, requests: requests.length, history: "native renderer reload, same daemon/session; not daemon restart", verification: "canonical loading only; deterministic helper checks are backend evidence", profilePreserved: true, lifecyclePreserved: true });
       if (input) { input.evidence.passed = true; input.save(); }
@@ -658,15 +687,15 @@ async function run() {
       if (cleanupErrors.length) throw new AggregateError(cleanupErrors, "Fixture cleanup failed");
     },
     validate: (result) => {
-      if (!visual && !discoveryOnly) validateNativeSmokeEvidence(paths.audit, result, { driftOnly, integratedRecovery, extendedWorkflow, allowNormalWindow });
-      if (!visual && discoveryOnly) {
+      if (!visual && !discoveryOnly && !familyWorkflow) validateNativeSmokeEvidence(paths.audit, result, { driftOnly, integratedRecovery, extendedWorkflow, allowNormalWindow });
+      if (!visual && (discoveryOnly || familyWorkflow)) {
         const observations = JSON.parse(readFileSync(join(paths.audit, "native-minimized.json"), "utf8"));
         assert.ok(observations.samples.length >= 3 && observations.samples.every((sample) => sample.verified && sample.minimized));
         result.minimized = true;
       }
     },
   });
-  console.log(`PROGRAMMATIC ${discoveryOnly ? "DISCOVERY" : extendedWorkflow ? "EXTENDED WORKFLOW" : integratedRecovery ? "INTEGRATED RECOVERY" : driftOnly ? "DRIFT" : "EXECUTION"} DEV SMOKE PASS (one ${visual ? "visible" : result.minimized ? "minimized" : "normal-window fallback"} developer launch; no packaging)`);
+  console.log(`PROGRAMMATIC ${familyWorkflow ? "FAMILY WORKFLOW" : discoveryOnly ? "DISCOVERY" : extendedWorkflow ? "EXTENDED WORKFLOW" : integratedRecovery ? "INTEGRATED RECOVERY" : driftOnly ? "DRIFT" : "EXECUTION"} DEV SMOKE PASS (one ${visual ? "visible" : result.minimized ? "minimized" : "normal-window fallback"} developer launch; no packaging)`);
 }
 
 if (mode === "sidecar") {
@@ -677,12 +706,13 @@ if (mode === "sidecar") {
   for (const key of Object.keys(process.env)) if (/^AZURE_/.test(key)) delete process.env[key];
   Object.assign(process.env, providerEnvironment);
   const realFetch = globalThis.fetch;
-  globalThis.fetch = (input, init) => {
+  const fixtureFetch = (input, init) => {
     const target = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
     if (target.href !== providerEnvironment.AZURE_OPENAI_BASE_URL) return Promise.reject(new Error("External network unavailable in fixture"));
     // Mock only the provider transport; preserve the real Azure configuration validator.
     return realFetch(url, init);
   };
+  globalThis.fetch = fixtureFetch;
   if (process.env.GG_PROGRAMMATIC_DISCOVERY_ONLY === "1") {
     const adapterUrl = pathToFileURL(join(workspace, "packages/ggcoder/dist/app-sidecar-programmatic-chat.js")).href;
     registerHooks({ load(target, context, nextLoad) {
@@ -703,7 +733,7 @@ if (mode === "sidecar") {
       return end.call(this, chunk, ...args);
     };
   }
-  if (process.env.GG_PROGRAMMATIC_DISCOVERY_ONLY !== "1") {
+  if (process.env.GG_PROGRAMMATIC_DISCOVERY_ONLY !== "1" && process.env.GG_PROGRAMMATIC_FAMILY_WORKFLOW !== "1") {
   const detectorUrl = pathToFileURL(join(workspace, "packages/ggcoder/dist/core/programmatic/opportunities.js")).href;
   const original = readFileSync(fileURLToPath(detectorUrl), "utf8");
   const staged = readFileSync(process.env.GG_PROGRAMMATIC_EXECUTION_FIXTURE_DETECTOR, "utf8");
@@ -715,6 +745,9 @@ if (mode === "sidecar") {
   } });
   }
   await import(pathToFileURL(join(workspace, "packages/ggcoder/dist/app-sidecar.js")));
+  // gg-ai's providerFetch captures globalThis.fetch at load and defers only to a *replaced* global;
+  // a fresh identity after import keeps provider calls on the fixture instead of undici's network path.
+  globalThis.fetch = (input, init) => fixtureFetch(input, init);
 } else if (process.argv[2] === "--preflight") {
   const { resolveAzureOpenAIConfig } = await import(pathToFileURL(join(workspace, "packages/ggcoder/dist/core/auth-storage.js")));
   assert.ok(resolveAzureOpenAIConfig(providerEnvironment), "Fixture provider must satisfy real daemon startup validation");

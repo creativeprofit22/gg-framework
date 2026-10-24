@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from "vitest";
 import { createElement } from "react";
-import { render, cleanup } from "@testing-library/react";
+import { act, render, cleanup } from "@testing-library/react";
 import { ProgrammaticChat } from "../src/ProgrammaticChat";
 import { initialProgrammaticChatState } from "../src/programmatic-chat-state";
 import {
@@ -33,6 +33,14 @@ import {
 } from "./programmatic-execution-smoke-checks.mjs";
 
 import { discoveryWorkflowStep, discoveryRequestCount } from "./programmatic-discovery-smoke.mjs";
+import {
+  familyCreatedContent,
+  familyRequestCount,
+  familyResponseEvents,
+  familySeedFiles,
+  familyWorkflowStep,
+} from "./programmatic-family-smoke.mjs";
+import { familyEvaluationFixtures } from "../../packages/ggcoder/src/test-support/programmatic-evaluation-fixtures.ts";
 
 it.each(["prepared", "reinspection-required"])(
   "requires native %s handoff and the exact selected-pane summary",
@@ -95,7 +103,7 @@ it.each(["prepared", "reinspection-required"])(
       mutate(altered);
       expect(() => assertDiscoveryHandoff(altered)).toThrow();
     }
-    document.body.innerHTML = '<p></p><section aria-label="Selected opportunity"></section>';
+    document.body.innerHTML = '<p></p><section aria-label="Selected idea"></section>';
     document.querySelector("p").textContent = review.summary;
     expect(readDiscoverySummary(document, review)).toBeNull(); // Transcript text alone is insufficient.
     const paragraph = document.createElement("p");
@@ -179,12 +187,17 @@ it("native selectors match actual setup, current, discovery and stale UI; disclo
     expect(button(smokeLabels.currentSetup).disabled).toBe(false);
     expect(button(smokeLabels.scan).disabled).toBe(false);
     expect(button(smokeLabels.review).disabled).toBe(false);
-    for (const label of [smokeLabels.discover, "Fixture task", "Load history"]) {
-      expect(closedSmokeDisclosure(button(label))).toBeTruthy();
-      await revealSmokeTarget(client, smokeButton(label));
+    // Find ideas (header) and idea cards are always visible; past ideas sit behind their tab.
+    for (const label of [smokeLabels.discover, "Fixture task"])
       expect(closedSmokeDisclosure(button(label))).toBeNull();
-    }
-    const details = document.querySelector('[aria-label="Selected opportunity"] details');
+    const pastTab = closedSmokeDisclosure(button("Show past ideas"));
+    expect(pastTab?.getAttribute("role")).toBe("tab");
+    // Revealing a tab updates React state, so it runs inside act like a user click.
+    await act(() => revealSmokeTarget(client, smokeButton("Show past ideas")));
+    expect(closedSmokeDisclosure(button("Show past ideas"))).toBeNull();
+    expect(pastTab?.getAttribute("aria-selected")).toBe("true");
+    await act(() => revealSmokeTarget(client, smokeButton("Fixture task")));
+    const details = document.querySelector('[aria-label="Selected idea"] details');
     expect(details.open).toBe(false);
     details.querySelector("summary").click();
     expect(details.open).toBe(true);
@@ -253,9 +266,13 @@ it.each(["setup", "configured"])(
       true,
     );
     expect(JSON.parse(step.arguments).recommendations).toEqual([]);
-    expect(
-      assessmentWorkflowStep(mode, assessmentRequestCount, {
+    // An accepted result ends the run: any continuation request is refused.
+    expect(assessmentRequestCount).toBe(1);
+    expect(() =>
+      assessmentWorkflowStep(mode, 2, {
+        ...body,
         input: [
+          ...body.input,
           {
             type: "function_call_output",
             call_id: step.call_id,
@@ -263,31 +280,13 @@ it.each(["setup", "configured"])(
           },
         ],
       }),
-    ).toContain("ASSESSMENT SETTLED");
+    ).toThrow(/No assessment continuation/);
     expect(() =>
       assessmentWorkflowStep(mode, 1, { ...body, tools: [...body.tools, { name: "bash" }] }),
     ).toThrow();
-    expect(() => assessmentWorkflowStep(mode, 2, { input: [] })).toThrow();
-    expect(() => assessmentWorkflowStep(mode, 3, body)).toThrow();
+    expect(() => assessmentWorkflowStep(mode, 1, { ...body, input: [] })).toThrow();
     const next = assessmentWorkflowStep(mode, 1, body, `assessment-${mode}-2`);
     expect(next.call_id).not.toBe(step.call_id);
-    expect(
-      assessmentWorkflowStep(
-        mode,
-        2,
-        {
-          input: [
-            { type: "function_call_output", call_id: step.call_id, output: "Old Recommendations" },
-            {
-              type: "function_call_output",
-              call_id: next.call_id,
-              output: "Current Recommendations",
-            },
-          ],
-        },
-        next.call_id,
-      ),
-    ).toContain("ASSESSMENT SETTLED");
   },
 );
 
@@ -387,7 +386,7 @@ describe("non-Tauri discovery-only provider sequence", () => {
   const input = [];
   const result = (call_id, output) => input.push({ type: "function_call_output", call_id, output });
   it("uses accepted V2 and existing command inspection contracts without creating anything", () => {
-    expect(discoveryRequestCount).toBe(10);
+    expect(discoveryRequestCount).toBe(9);
     expect(discoveryWorkflowStep(1, { tools, input }).name).toBe("read");
     result(
       "discovery-read",
@@ -398,20 +397,20 @@ describe("non-Tauri discovery-only provider sequence", () => {
     expect(programmaticAssessmentResultV2Schema.safeParse(advice).success).toBe(true);
     expect(advice.recommendations[0].choice.kind).toBe("missing-capability");
     result("discovery-submit", "Recommendations");
-    expect(discoveryWorkflowStep(4, { tools, input })).toContain("proposal only");
-    expect(discoveryWorkflowStep(5, { tools, input }).name).toBe("read");
+    // An accepted advisory result ends the run: no settle turn follows the submission.
+    expect(discoveryWorkflowStep(4, { tools, input }).name).toBe("read");
     result("review-read", "harmless-isolated-fixture");
-    expect(discoveryWorkflowStep(6, { tools, input }).name).toBe("command_information");
+    expect(discoveryWorkflowStep(5, { tools, input }).name).toBe("command_information");
     expect(
       commandInspectionInputSchema.safeParse(
-        JSON.parse(discoveryWorkflowStep(7, { tools, input }).arguments).proposal,
+        JSON.parse(discoveryWorkflowStep(6, { tools, input }).arguments).proposal,
       ).success,
     ).toBe(true);
     result(
       "review-inspect",
       JSON.stringify({ status: "review-required", catalog: { sha256: "a".repeat(64) } }),
     );
-    const second = JSON.parse(discoveryWorkflowStep(8, { tools, input }).arguments);
+    const second = JSON.parse(discoveryWorkflowStep(7, { tools, input }).arguments);
     expect(second.action).toBe("inspect");
     expect(commandInspectionInputSchema.safeParse(second.proposal).success).toBe(true);
     expect(second.proposal.review).toMatchObject({
@@ -420,7 +419,7 @@ describe("non-Tauri discovery-only provider sequence", () => {
     });
     for (const heading of ["Inputs", "Outputs", "Required tools", "Limits", "Arguments"])
       expect(second.proposal.markdown).toContain(`## ${heading}\n`);
-    expect(() => discoveryWorkflowStep(9, { tools, input })).toThrow();
+    expect(() => discoveryWorkflowStep(8, { tools, input })).toThrow();
     const handle = "54df729b-2d8c-4a9f-abdc-ae6584a70742";
     const preview = {
       proposal: { proposalId: handle, commandPath: ".gg/commands/native-discovery-proposal.md" },
@@ -436,22 +435,22 @@ describe("non-Tauri discovery-only provider sequence", () => {
       "review-proposal",
       JSON.stringify({ status: "proposal", handle, preview: JSON.stringify(preview) }),
     );
-    expect(JSON.parse(discoveryWorkflowStep(9, { tools, input }).arguments)).toEqual({
+    expect(JSON.parse(discoveryWorkflowStep(8, { tools, input }).arguments)).toEqual({
       action: "create",
       handle,
     });
-    expect(() => discoveryWorkflowStep(10, { tools, input })).toThrow();
+    expect(() => discoveryWorkflowStep(9, { tools, input })).toThrow();
     result("review-refused-create", "no creation, verification or run");
-    expect(discoveryWorkflowStep(10, { tools, input })).toContain("creation rejected");
+    expect(discoveryWorkflowStep(9, { tools, input })).toContain("creation rejected");
   });
   it("rejects extra calls, absent tools and scanner or mutation grants", () => {
-    for (const number of [0, 11, 1.5])
+    for (const number of [0, 10, 1.5])
       expect(() => discoveryWorkflowStep(number, { tools, input: [] })).toThrow();
     expect(() => discoveryWorkflowStep(1, { tools: [], input: [] })).toThrow();
     for (const name of ["bash", "edit", "write", "programmatic_scan"])
       expect(() => discoveryWorkflowStep(1, { tools: [...tools, { name }], input: [] })).toThrow();
     expect(() =>
-      discoveryWorkflowStep(5, { tools: [...tools, { name: "programmatic_profile" }], input: [] }),
+      discoveryWorkflowStep(4, { tools: [...tools, { name: "programmatic_profile" }], input: [] }),
     ).toThrow();
   });
 });
@@ -462,8 +461,8 @@ describe("bounded extended provider sequence", () => {
     input: id ? [{ type: "function_call_output", call_id: id, output }] : [],
   });
   it("rejects extra requests, missing tools and missing completed calls", () => {
-    expect(extendedRequestCount).toBe(18);
-    for (const number of [3, 19, -1, 4.5]) expect(() => extendedWorkflowStep(number, {})).toThrow();
+    expect(extendedRequestCount).toBe(17);
+    for (const number of [3, 18, -1, 4.5]) expect(() => extendedWorkflowStep(number, {})).toThrow();
     expect(() => extendedWorkflowStep(5, body("read"))).toThrow(/Exactly one/);
     expect(() => extendedWorkflowStep(5, body("bash", "extended-scan", "completed"))).toThrow(
       /offered tool/,
@@ -493,14 +492,14 @@ describe("bounded extended provider sequence", () => {
       programmaticAssessmentResultV1Schema.parse(JSON.parse(advice.arguments)).recommendations,
     ).toHaveLength(2);
     const inspect = extendedWorkflowStep(
-      9,
+      8,
       body("programmatic_command", "extended-discover", "programmatic_command"),
     );
     expect(
       commandInspectionInputSchema.safeParse(JSON.parse(inspect.arguments).proposal).success,
     ).toBe(true);
     const reviewed = extendedWorkflowStep(
-      10,
+      9,
       body(
         "programmatic_command",
         "extended-preflight",
@@ -512,7 +511,7 @@ describe("bounded extended provider sequence", () => {
     ).toBe(true);
     expect(
       extendedWorkflowStep(
-        11,
+        10,
         body(
           "programmatic_command",
           "extended-inspect",
@@ -520,7 +519,7 @@ describe("bounded extended provider sequence", () => {
         ),
       ).name,
     ).toBe("programmatic_command");
-    const run = extendedWorkflowStep(14, {
+    const run = extendedWorkflowStep(13, {
       tools: [{ name: "programmatic_command" }],
       input: [{ content: "NATIVE RUN REQUEST" }],
     });
@@ -528,7 +527,7 @@ describe("bounded extended provider sequence", () => {
       "read-only",
     );
     const childResult = extendedWorkflowStep(
-      16,
+      15,
       body("programmatic_result", "extended-child-read", "harmless-isolated-fixture"),
     );
     expect(JSON.parse(childResult.arguments)).toMatchObject({
@@ -539,19 +538,19 @@ describe("bounded extended provider sequence", () => {
   it("requires creation and loading results but never treats loading as execution approval", () => {
     expect(() =>
       extendedWorkflowStep(
-        12,
+        11,
         body("programmatic_command", "extended-create", '{"created":false}'),
       ),
     ).toThrow();
     expect(
       extendedWorkflowStep(
-        13,
+        12,
         body("programmatic_command", "extended-verify", '{"loads":true,"executionApproved":false}'),
       ),
     ).toContain("no behavioral verification or execution grant");
     expect(() =>
       extendedWorkflowStep(
-        13,
+        12,
         body("programmatic_command", "extended-verify", '{"loads":true,"executionApproved":true}'),
       ),
     ).toThrow();
@@ -561,18 +560,18 @@ describe("bounded extended provider sequence", () => {
       input: [{ type: "message", content: "NATIVE EXTENDED CANONICAL PROMPT" }],
       tools: [{ name: "read" }],
     };
-    expect(extendedWorkflowStep(15, child)).toMatchObject({
+    expect(extendedWorkflowStep(14, child)).toMatchObject({
       name: "read",
       arguments: '{"file_path":"package.json"}',
     });
     expect(() =>
-      extendedWorkflowStep(15, {
+      extendedWorkflowStep(14, {
         ...child,
         input: [...child.input, { content: "NATIVE CREATE REQUEST" }],
       }),
     ).toThrow(/parent transcript/);
     expect(() =>
-      extendedWorkflowStep(15, { ...child, tools: [...child.tools, { name: "bash" }] }),
+      extendedWorkflowStep(14, { ...child, tools: [...child.tools, { name: "bash" }] }),
     ).toThrow();
   });
 });
@@ -583,9 +582,9 @@ describe("execution display readiness", () => {
     const doc = document.implementation.createHTMLDocument();
     if (evidence) {
       const section = doc.createElement("section");
-      section.setAttribute("aria-label", "Task execution evidence");
+      section.setAttribute("aria-label", "What the task found");
       section.innerHTML =
-        "<ul><li>Inferred, not confirmed: specialist claim</li><li>Checked directly: Tool read completed.</li></ul>";
+        "<ul><li>Best guess: specialist claim</li><li>Checked: Tool read completed.</li></ul>";
       doc.body.appendChild(section);
     }
     // jsdom has no layout-backed innerText; supply the text the native WebView reveals.
@@ -632,5 +631,218 @@ describe("task transcript isolation", () => {
       assertTranscriptIsolation(before, { "host.jsonl": "after" }, "host.jsonl"),
     ).toThrow();
     expect(() => assertTranscriptIsolation(before, before, "unknown.jsonl")).toThrow();
+  });
+});
+
+describe("bounded family workflow provider sequence", () => {
+  const tools = [
+    "read",
+    "command_information",
+    "programmatic_advisory_result",
+    "programmatic_command",
+    "tool_search",
+  ].map((name) => ({ name }));
+  // Discovery and rescan offer no command tool; only ordinary turns load it.
+  const discoveryTools = tools.filter(
+    (tool) => !["programmatic_command", "tool_search"].includes(tool.name),
+  );
+  const toolsFor = (number) => ([1, 2, 19].includes(number) ? discoveryTools : tools);
+  const members = (missing) =>
+    ["plugins/csv", "plugins/json", "plugins/xml"].map((path, index) => ({
+      path,
+      missing: missing[index],
+      missingCount: missing[index].length,
+    }));
+  const facts = (missing) => ({
+    role: "user",
+    content: [
+      {
+        type: "input_text",
+        text: `Host-owned exact facts (already collected, do not repeat):\n${JSON.stringify({
+          setupFacts: {
+            item_families: {
+              families: [
+                {
+                  id: "0123456789abcdef",
+                  kind: "sibling-directories",
+                  parent: "plugins",
+                  members: members(missing),
+                },
+              ],
+            },
+          },
+        })}\nReusable host evidence receipts: none`,
+      },
+    ],
+  });
+  const result = (input, call_id, output) =>
+    input.push({
+      type: "function_call_output",
+      call_id,
+      output: typeof output === "string" ? output : JSON.stringify(output),
+    });
+
+  it("seeds the same synthetic Python family as the scripted journey fixture", () => {
+    const fixture = familyEvaluationFixtures.find((item) => item.id === "python-plugins-family");
+    const seed = familySeedFiles();
+    for (const [file, content] of Object.entries(fixture.files))
+      expect(seed[file], file).toBe(content);
+    expect(Object.values(seed).every((content) => !content.includes("\r"))).toBe(true);
+    expect(familyCreatedContent).toBe('[plugin]\nname = "json"\nentry = "plugins.json"\n');
+  });
+
+  it("walks detect, recommend, review, create, verify, preview, apply and rescan once", () => {
+    const state = {};
+    const input = [facts([[], ["plugin.toml"], []])];
+    const step = (number) => familyWorkflowStep(number, { tools: toolsFor(number), input }, state);
+    const reads = step(1);
+    expect(reads.map((item) => item.name)).toEqual([
+      "read",
+      "read",
+      "read",
+      "read",
+      "command_information",
+    ]);
+    reads
+      .filter((item) => item.name === "read")
+      .forEach((item, index) =>
+        result(input, item.call_id, `Host receipt IDs: receipt-${index}a. body`),
+      );
+    const advice = JSON.parse(step(2).arguments);
+    expect(programmaticAssessmentResultV2Schema.safeParse(advice).error?.issues).toBeUndefined();
+    expect(advice.recommendations[0].choice).toMatchObject({
+      kind: "generate-from-reference",
+      generator: {
+        familyId: "0123456789abcdef",
+        reference: { kind: "existing-member", path: "plugins/csv" },
+      },
+    });
+    expect(advice.recommendations[0].evidence.items.map((item) => item.source)).toEqual([
+      "receipt-0a",
+      "receipt-1a",
+      "receipt-2a",
+      "receipt-3a",
+    ]);
+    result(input, "family-submit", "Recommendations recorded");
+    // An accepted advisory result ends the run: review starts at request 3.
+    const reviewReads = step(3);
+    expect(reviewReads).toHaveLength(5);
+    // The host records every step-3 result, so later call IDs must not reuse these.
+    reviewReads.forEach((item) => result(input, item.call_id, "inspected"));
+    const inspect = JSON.parse(step(4).arguments);
+    expect(new Set(input.map((item) => item.call_id).filter(Boolean)).has(step(4).call_id)).toBe(
+      false,
+    );
+    expect(commandInspectionInputSchema.safeParse(inspect.proposal).success).toBe(true);
+    result(input, "review-inventory", {
+      status: "review-required",
+      catalog: { sha256: "a".repeat(64) },
+    });
+    expect(JSON.parse(step(5).arguments).proposal.review.inventorySha256).toBe("a".repeat(64));
+    result(input, "review-draft", { status: "proposal", handle: "h-review" });
+    expect(step(6).map((item) => JSON.parse(item.arguments).action)).toEqual([
+      "create",
+      "apply_family",
+    ]);
+    result(input, "review-no-create", "Review-only: no creation, verification or run");
+    result(input, "review-no-apply", "Review-only: no creation, verification or run");
+    expect(step(7)).toContain("creation and apply refused");
+    input.push({ role: "user", content: "NATIVE FAMILY CREATE REQUEST" });
+    expect(step(8).name).toBe("tool_search");
+    step(9);
+    result(input, "create-catalog", {
+      status: "review-required",
+      catalog: { sha256: "b".repeat(64) },
+    });
+    step(10);
+    result(input, "create-draft", { status: "proposal", handle: "h-create" });
+    expect(JSON.parse(step(11).arguments)).toEqual({ action: "create", handle: "h-create" });
+    result(input, "create", { created: true });
+    expect(JSON.parse(step(12).arguments).action).toBe("verification");
+    result(input, "verify", {
+      generator: { generatorVerified: true, referenceCheck: { result: "passed" } },
+      report: { cases: [{ category: "reproduces-reference", result: "passed" }] },
+    });
+    expect(JSON.parse(step(13).arguments).action).toBe("preview_family");
+    result(input, "preview", {
+      status: "previewed",
+      written: false,
+      members: [
+        { path: "plugins/json", status: "ready" },
+        { path: "plugins/xml", status: "conflict" },
+      ],
+    });
+    expect(step(14)).toContain("preview wrote nothing");
+    input.push({ role: "user", content: "NATIVE FAMILY APPLY REQUEST" });
+    expect(step(15).name).toBe("tool_search");
+    step(16);
+    result(input, "apply-preview", { written: false, previewId: "p-1" });
+    expect(JSON.parse(step(17).arguments)).toEqual({
+      action: "apply_family",
+      handle: "h-create",
+      preview_id: "p-1",
+    });
+    result(input, "apply", {
+      status: "applied",
+      report: {
+        status: "partial",
+        members: [
+          { path: "plugins/json", status: "created" },
+          { path: "plugins/xml", status: "skipped" },
+        ],
+      },
+    });
+    expect(step(18)).toContain("partial");
+    input.push(facts([[], [], []]));
+    // The native rescan request carries the whole history: the stale discovery facts come first.
+    const rescan = JSON.parse(
+      familyWorkflowStep(19, { tools: discoveryTools, input }, state).arguments,
+    );
+    expect(programmaticAssessmentResultV2Schema.safeParse(rescan).error?.issues).toBeUndefined();
+    expect(familyRequestCount).toBe(19);
+  });
+
+  it("rejects extra calls, mutation grants, a created review and an incomplete rescan", () => {
+    const input = [facts([[], ["plugin.toml"], []])];
+    for (const number of [0, 20, 1.5])
+      expect(() => familyWorkflowStep(number, { tools, input }, {})).toThrow();
+    for (const name of ["bash", "write", "edit", "programmatic_scan"])
+      expect(() =>
+        familyWorkflowStep(1, { tools: [...discoveryTools, { name }], input }, {}),
+      ).toThrow();
+    expect(() => familyWorkflowStep(1, { tools, input }, {})).toThrow();
+    expect(() =>
+      familyWorkflowStep(1, { tools: discoveryTools, input: [facts([[], [], []])] }, {}),
+    ).toThrow();
+    const created = [];
+    result(created, "review-no-create", { created: true });
+    result(created, "review-no-apply", "refused");
+    expect(() => familyWorkflowStep(7, { tools, input: created }, {})).toThrow();
+    expect(() =>
+      familyWorkflowStep(
+        19,
+        { tools: discoveryTools, input: [facts([[], ["plugin.toml"], []])] },
+        { familyId: "0123456789abcdef" },
+      ),
+    ).toThrow();
+  });
+
+  it("emits one Responses item per parallel call", () => {
+    const items = [1, 2].map((n) => ({
+      type: "function_call",
+      id: `fc_${n}`,
+      call_id: `${n}`,
+      name: "read",
+      arguments: "{}",
+    }));
+    const events = familyResponseEvents(items);
+    expect(
+      events
+        .filter((event) => event.type === "response.output_item.added")
+        .map((event) => event.output_index),
+    ).toEqual([0, 1]);
+    expect(familyResponseEvents("done")).toEqual([
+      { type: "response.output_text.delta", delta: "done" },
+    ]);
   });
 });

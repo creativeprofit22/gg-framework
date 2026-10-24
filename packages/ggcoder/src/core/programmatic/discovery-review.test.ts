@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import type { DiscoveryCandidate } from "@kenkaiiii/gg-core/programmatic-recommendation-contract";
 import { DiscoveryReviewBoundary, discoveryReviewPrompt } from "./discovery-review.js";
 
@@ -71,17 +71,21 @@ function inspect(review: DiscoveryReviewBoundary) {
     "catalog",
   );
 }
-it.each(["create", "inspect-verification", "apply-verification", "run"])(
-  "denies %s before and after fresh inspection",
-  (action) => {
-    const review = boundary();
-    expect(() => review.claim("programmatic_command", { action }, false)).toThrow();
-    inspect(review);
-    expect(review.reinspected).toBe(true);
-    expect(() => review.claim("programmatic_command", { action }, false)).toThrow();
-    expect(() => review.claim("programmatic_command", { action: "inspect" }, false)).not.toThrow();
-  },
-);
+it.each([
+  "create",
+  "inspect-verification",
+  "apply-verification",
+  "run",
+  "preview_family",
+  "apply_family",
+])("denies %s before and after fresh inspection", (action) => {
+  const review = boundary();
+  expect(() => review.claim("programmatic_command", { action }, false)).toThrow();
+  inspect(review);
+  expect(review.reinspected).toBe(true);
+  expect(() => review.claim("programmatic_command", { action }, false)).toThrow();
+  expect(() => review.claim("programmatic_command", { action: "inspect" }, false)).not.toThrow();
+});
 it.each([
   "bash",
   "write",
@@ -98,36 +102,115 @@ it.each([
   expect(review.allows(name)).toBe(false);
   expect(() => review.claim(name, {}, false)).toThrow();
 });
-it("keeps generator review read-only: re-inspection prepares it, nothing is created", () => {
+describe("generator review", () => {
   const generatorCandidate: DiscoveryCandidate = {
     ...candidate,
     choice: "generate-from-reference",
     alternatives: [{ kind: "manual", reasonNotSelected: "New items are frequent" }],
   };
-  const review = new DiscoveryReviewBoundary(generatorCandidate, new Set(["WORKFLOW"]), {
-    kind: "generate-from-reference",
-    generator: {
-      version: 1,
-      familyId: "0123456789abcdef",
-      members: ["records/a", "records/b", "records/c"],
-      sharedShape: ["Same layout"],
-      varyingInputs: ["Name"],
-      reference: { kind: "build-by-hand-first", reason: "No complete record" },
-      risks: ["Overrides may be lost"],
-      verificationExpectations: ["Compare generated records"],
-    },
+  const members = ["records/a", "records/b", "records/c"];
+  function generatorReview(
+    reference:
+      | { kind: "build-by-hand-first"; reason: string }
+      | { kind: "existing-member"; path: string; reason: string },
+    proposalEvidence?: (text: string) => (() => boolean) | undefined,
+  ) {
+    return new DiscoveryReviewBoundary(
+      generatorCandidate,
+      new Set(["WORKFLOW"]),
+      {
+        kind: "generate-from-reference",
+        generator: {
+          version: 1,
+          familyId: "0123456789abcdef",
+          members,
+          sharedShape: ["Same layout"],
+          varyingInputs: ["Name"],
+          reference,
+          risks: ["Overrides may be lost"],
+          verificationExpectations: ["Compare generated records"],
+        },
+      },
+      proposalEvidence,
+    );
+  }
+  function draft(change: Record<string, unknown> = {}) {
+    return {
+      action: "inspect",
+      proposal: {
+        name: "records",
+        generator: {
+          familyId: "0123456789abcdef",
+          reference: "records/a",
+          members: [...members]
+            .reverse()
+            .map((path) => ({ path, values: [{ key: "name", value: path }] })),
+          ...change,
+        },
+      },
+    };
+  }
+  const existing = { kind: "existing-member", path: "records/a", reason: "Complete" } as const;
+
+  it("allows only bound generator inspection after re-inspection; nothing is created", () => {
+    const review = generatorReview(existing);
+    for (const name of ["write", "edit", "bash"]) expect(review.allows(name)).toBe(false);
+    expect(() => review.claim("programmatic_command", draft(), false)).toThrow();
+    expect(review.prepared).toBe(false);
+    inspect(review);
+    expect(review.prepared).toBe(true);
+    expect(review.allows("programmatic_command")).toBe(true);
+    expect(() => review.claim("programmatic_command", draft(), false)).not.toThrow();
+    for (const action of [
+      "create",
+      "inspect-verification",
+      "apply-verification",
+      "run",
+      "preview_family",
+      "apply_family",
+    ])
+      expect(() => review.claim("programmatic_command", { ...draft(), action }, false)).toThrow();
+    expect(() => review.claim("programmatic_command", draft(), true)).toThrow();
+    expect(discoveryReviewPrompt(generatorCandidate)).toContain(
+      "re-inspect the reference and the listed family members",
+    );
   });
-  expect(review.allows("programmatic_command")).toBe(false);
-  for (const action of ["inspect", "create", "run"])
-    expect(() => review.claim("programmatic_command", { action }, false)).toThrow();
-  for (const name of ["write", "edit", "bash"]) expect(review.allows(name)).toBe(false);
-  expect(review.prepared).toBe(false);
-  inspect(review);
-  expect(review.prepared).toBe(true);
-  expect(review.allows("programmatic_command")).toBe(false);
-  expect(discoveryReviewPrompt(generatorCandidate)).toContain(
-    "re-inspect the reference and the listed family members",
-  );
+
+  it.each([
+    ["family", { familyId: "fedcba9876543210" }],
+    ["members", { members: members.slice(0, 2).map((path) => ({ path, values: [] })) }],
+    ["reference", { reference: "records/b" }],
+    ["missing generator", { familyId: undefined, members: undefined }],
+  ])("refuses generator inspection for a mismatched %s", (_, change) => {
+    const review = generatorReview(existing);
+    inspect(review);
+    expect(() => review.claim("programmatic_command", draft(change), false)).toThrow(/no creation/);
+    expect(() =>
+      review.claim("programmatic_command", { action: "inspect", proposal: { name: "x" } }, false),
+    ).toThrow();
+  });
+
+  it("binds family and members without fixing the reference when it is built by hand", () => {
+    const review = generatorReview({ kind: "build-by-hand-first", reason: "No complete record" });
+    inspect(review);
+    expect(() =>
+      review.claim("programmatic_command", draft({ reference: "records/c" }), false),
+    ).not.toThrow();
+    expect(() =>
+      review.claim("programmatic_command", draft({ familyId: "fedcba9876543210" }), false),
+    ).toThrow();
+  });
+
+  it("stops being prepared when the inspected generator proposal goes stale", () => {
+    let current = true;
+    const review = generatorReview(existing, () => () => current);
+    inspect(review);
+    review.claim("programmatic_command", draft(), false);
+    review.observe(process.cwd(), "programmatic_command", draft(), "{}", "proposal");
+    expect(review.prepared).toBe(true);
+    current = false;
+    expect(review.prepared).toBe(false);
+  });
 });
 it("requires relevant local evidence and catalog, refuses failed reads and external replacements", () => {
   const review = boundary();

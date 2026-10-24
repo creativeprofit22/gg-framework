@@ -567,7 +567,7 @@
     },
     {
       "name": "programmatic_command",
-      "description": "Inspect/create a missing project command or request a separately reviewed run of an existing canonical command. Run requires a supported desktop code-mode host, exact content/policy approval and separate mutation approvals. Creation/verification never approves execution or grants tools. Declare sorted project-relative helpers/prerequisites and required tools; no installs, global promotion, recursive runs or OS confinement. Completed tool calls do not prove behavioral correctness.",
+      "description": "Inspect/create a missing project command or request a separately reviewed run of an existing canonical command. Run requires a supported desktop code-mode host, exact content/policy approval and separate mutation approvals. Creation/verification never approves execution or grants tools. Declare sorted project-relative helpers/prerequisites and required tools. For a script-backed generator, pass `generator` (template, reference and one input record per family member) instead of helpers; the host writes its own Node helper, and verification accepts the template only if it rebuilds the reference byte for byte. After that passes, `preview_family` lists what each other member would create, change, skip or conflict on without writing; `apply_family` with its preview_id asks a separate approval, refuses dirty affected paths unless overridden, never overwrites unowned files, and writes each member with its own rollback and report. No installs, global promotion, recursive runs or OS confinement. Completed tool calls do not prove behavioral correctness.",
       "schema": {
         "type": "object",
         "properties": {
@@ -577,7 +577,9 @@
               "inspect",
               "create",
               "prepare_verification",
-              "verification"
+              "verification",
+              "preview_family",
+              "apply_family"
             ]
           },
           "selection": {
@@ -889,6 +891,104 @@
                   "disposition",
                   "rationale"
                 ]
+              },
+              "generator": {
+                "type": "object",
+                "properties": {
+                  "familyId": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{16}$"
+                  },
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "directory",
+                      "file"
+                    ]
+                  },
+                  "reference": {
+                    "type": "string"
+                  },
+                  "placeholders": {
+                    "minItems": 1,
+                    "maxItems": 16,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "pattern": "^[a-z][a-z0-9_]{0,39}$"
+                    }
+                  },
+                  "members": {
+                    "minItems": 3,
+                    "maxItems": 12,
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "path": {
+                          "type": "string"
+                        },
+                        "values": {
+                          "maxItems": 16,
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "key": {
+                                "type": "string",
+                                "pattern": "^[a-z][a-z0-9_]{0,39}$"
+                              },
+                              "value": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 500
+                              }
+                            },
+                            "required": [
+                              "key",
+                              "value"
+                            ]
+                          }
+                        }
+                      },
+                      "required": [
+                        "path",
+                        "values"
+                      ]
+                    }
+                  },
+                  "files": {
+                    "minItems": 1,
+                    "maxItems": 28,
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "path": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 400
+                        },
+                        "content": {
+                          "type": "string",
+                          "maxLength": 128000
+                        }
+                      },
+                      "required": [
+                        "path",
+                        "content"
+                      ]
+                    }
+                  }
+                },
+                "required": [
+                  "familyId",
+                  "kind",
+                  "reference",
+                  "placeholders",
+                  "members",
+                  "files"
+                ]
               }
             },
             "required": [
@@ -992,13 +1092,26 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 4000
+          },
+          "members": {
+            "minItems": 1,
+            "maxItems": 12,
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "preview_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
           }
         },
         "required": [
           "action"
         ]
       },
-      "hash": "8bcead9c58c85bc5541c18387d4920b5be7fd402b787302c91e33cd4d117a5e8"
+      "hash": "a3348bf3a314819dc4bf729890fab66535f055896527cd7c4523430c7ca15b3a"
     },
     {
       "name": "programmatic_profile",

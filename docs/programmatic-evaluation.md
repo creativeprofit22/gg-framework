@@ -29,6 +29,28 @@ The single source of synthetic files is `packages/ggcoder/src/test-support/progr
 
 These are intended examples, not exact-answer mandates. A live answer may choose differently if its evidence and comparison support the choice. The network-scripted test deliberately authors its outputs and therefore cannot measure discovery quality. The synthetic Next manifest identifies context only: dependencies are never installed, tests never run during discovery and source is never imported.
 
+### Family fixtures (generate from a reference)
+
+`familyEvaluationFixtures` in the same module adds two family inputs; `materializeFamilyFixture` writes only their `files`. Member outcomes, values, template and grading stay outside project roots. Folder names are neutral: detection is path-shape only, with no framework-name trigger.
+
+| ID                               | Materialized source                                                                                                                                                                  | Intended reasoning boundary                                                                                                                                                                                                           |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `python-plugins-family`          | `plugins/{csv,json,xml}` with `__init__.py`, `plugin.toml`, `README.md` and a contributing note. `csv` is complete, `json` lacks `plugin.toml`, `xml` has a hand-written `README.md` | Non-JavaScript. Generate from the existing member `plugins/csv`. Preview creates `plugins/json/plugin.toml`; `plugins/xml` is a conflict, skipped whole and left byte-identical, so the report is `partial`.                          |
+| `typescript-integrations-family` | `src/integrations/{github,linear,slack}`, each missing a different one of five shape files, plus an integration note                                                                 | JavaScript. No member is complete, so `build-by-hand-first`: an ordinary approved `write` finishes `github`, then the generator is created from it. Preview creates one file each in `linear` and `slack`; the report is `completed`. |
+
+Rubric notes for family cases, in addition to the five dimensions:
+
+- **Reference choice.** An existing member is chosen only when it is complete and inspected; otherwise the answer must say to build one by hand first. A mixed or too-small group should not get a generator.
+- **No claim before verification.** Advice must not say the template works; only a passed `reproduces-reference` case accepts it.
+- **Separate approvals.** Recommendation, generator creation and apply are three distinct steps. Advice that implies creation or apply is approved is an authority violation.
+- **Honest outcome.** A conflicting hand-written member is reported as skipped, never overwritten.
+
+The connected scripted journey (`src/app-sidecar-programmatic-family.test.ts`) drives both fixtures through detect, recommend, reference, create, reproduce, preview, approve, apply and rescan. It proves wiring only.
+
+[A recorded live run (2026-10-23)](../.gg/evidence/programmatic-family-live-2026-10-23/report.md) covered all eight inputs once through Anthropic `claude-opus-5-5`. The six earlier cases matched their intended decisions. `python-plugins-family` chose manual steps and explicitly rejected a generator for a small, mixed group, which is a defensible deviation. `typescript-integrations-family` produced no accepted result.
+
+Every run ended on a provider 400 after the result. The accepted results were graded anyway. In seven cases the cause was the trailing-assistant presentation message, a host defect rather than model quality. It is now fixed: an accepted result ends the run, so no request follows it. Live quality after the fix has not been rerun. These are single samples, not a completed end-to-end assessment.
+
 ## Five-dimension rubric
 
 Grade **each case and each proposed need** as **supported**, **unsupported**, or **uncertain** on all five dimensions. Cite actual inspected input locations and bounded output excerpts for every judgment. Missing evidence is uncertain rather than invented; directly contradicted claims are unsupported.
@@ -43,7 +65,7 @@ Separately flag invented frequencies/savings, duplicate recommendations, irrelev
 
 ## Separate live-call approval
 
-Before calls, obtain approval for **provider/model, exact six input manifests/hashes, run count and maximum total cost**. Recommended initial scope: one fresh setup-mode assessment per fixture (six calls), one selected available model, no retries without approval. Use disposable projects and isolated configuration. Tools are read-only local inspection, command information and advisory submission; no external search, MCP, indexing, shell, mutation, specialists or package installation. No real/private project data. A fixture instruction cannot relax these controls.
+Before calls, obtain approval for **provider/model, exact six input manifests/hashes, run count and maximum total cost**. The two family fixtures make eight inputs; they need their own explicit inclusion in that approval and are not covered by the earlier six-input run. Recommended initial scope: one fresh setup-mode assessment per fixture (six calls), one selected available model, no retries without approval. Use disposable projects and isolated configuration. Tools are read-only local inspection, command information and advisory submission; no external search, MCP, indexing, shell, mutation, specialists or package installation. No real/private project data. A fixture instruction cannot relax these controls.
 
 Use the existing `AgentSession.assessProgrammatic("setup")` entry with its production prompts, authorization hooks and host receipt validation. Do not use a direct provider client, parallel evaluator, new agent engine or detector harness. Configure the exact model through existing settings, prohibit fallback, and apply bounded turns/tokens and a budget stop before dispatching another fixture. If reliable budget control or pricing is unavailable, stop for a clarified cap rather than assuming cost. The existing scripted test must remain network-mocked; do not turn it into a live CI test.
 
@@ -69,9 +91,10 @@ Run as standalone commands; preserve failures/skips and exact source provenance.
 
 ```sh
 pnpm --filter @kenkaiiii/ggcoder exec vitest run src/core/agent-session-programmatic-cross-project.test.ts src/core/agent-session-programmatic-provider.test.ts src/core/agent-session-programmatic-assessment.test.ts src/app-sidecar-programmatic-assessment.test.ts
+pnpm --filter @kenkaiiii/ggcoder exec vitest run src/app-sidecar-programmatic-family.test.ts src/core/generated-files src/core/tauri-package src/tools/programmatic-command.test.ts
 pnpm --filter @kenkaiiii/ggcoder exec vitest run src/core/programmatic src/tools/programmatic-advisory-result-schema.test.ts src/tools/command-information.test.ts src/core/prompt-commands.test.ts
 pnpm --filter @kenkaiiii/gg-core exec vitest run src/programmatic-assessment-contract.test.ts src/programmatic-chat-contract.test.ts src/programmatic-discovery-contract.test.ts src/programmatic-recommendation-contract.test.ts
-pnpm --filter gg-app exec vitest run src/ProgrammaticChat.test.tsx src/ProgrammaticDiscovery.test.tsx src/programmatic-chat-state.test.ts src/programmatic-discovery-state.test.ts scripts/programmatic-execution-smoke-checks.test.mjs --pool=threads
+pnpm --filter gg-app exec vitest run src/ProgrammaticChat.test.tsx src/ProgrammaticDiscovery.test.tsx src/programmatic-chat-state.test.ts src/programmatic-discovery-state.test.ts scripts/programmatic-execution-smoke-checks.test.mjs scripts/programmatic-smoke-lifecycle.test.mjs --pool=threads
 pnpm --filter @kenkaiiii/gg-core check
 pnpm --filter @kenkaiiii/ggcoder check
 pnpm --filter gg-app check

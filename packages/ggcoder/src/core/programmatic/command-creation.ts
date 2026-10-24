@@ -16,6 +16,12 @@ import {
 } from "../tauri-package/paths.js";
 import { ADVISORY_LIMITS } from "./advisory.js";
 import {
+  familyGeneratorInputSchema,
+  prepareFamilyGenerator,
+  type FamilyFileAccess,
+  type FamilyGeneratorMetadata,
+} from "./family-generator.js";
+import {
   programmaticCreationProposalV1Schema,
   programmaticMissingCapabilityV1Schema,
   repositoryRelativePathSchema,
@@ -93,6 +99,8 @@ export const commandInspectionInputSchema = z.strictObject({
       reuseName: z.string().min(1).max(100).optional(),
     })
     .optional(),
+  /** Generator from a reference: host supplies the Node helper; the model drafts template and inputs. */
+  generator: familyGeneratorInputSchema.optional(),
 });
 type Input = z.infer<typeof commandInspectionInputSchema>;
 export interface CommandInspectionOptions extends CommandDiscoveryOptions {
@@ -100,6 +108,8 @@ export interface CommandInspectionOptions extends CommandDiscoveryOptions {
   /** Host-owned, permission-filtered persistent inventory, independent of temporary turn
    * execution restrictions. Never accepted from model approval input; grants no execution. */
   availableTools: () => readonly string[];
+  /** Host-only Node runtime for helpers (default `process.execPath`); never a tool parameter. */
+  runtimeExecutable?: string;
 }
 type Catalog = {
   sha256: string;
@@ -117,6 +127,8 @@ export interface InspectedCommandProposal {
   rootIdentity: string;
   input: Input;
   preview: string;
+  /** Present for generators: what the reference check must reproduce. */
+  generator?: FamilyGeneratorMetadata;
 }
 export type CommandCreationReviewer = (
   request: AskUserRequest,
@@ -206,13 +218,15 @@ export async function readCommandText(absolute: string, signal: AbortSignal): Pr
     await handle.close();
   }
 }
-export async function commandEnvironmentSha256(): Promise<string> {
-  const executable = await commandLocalStat(process.execPath);
+export async function commandEnvironmentSha256(
+  runtimeExecutable: string = process.execPath,
+): Promise<string> {
+  const executable = await commandLocalStat(runtimeExecutable);
   if (!executable?.isFile()) throw new Error("runtime-unavailable");
   // Retain hashes, never raw environment values (which can contain secrets).
   return sha256(
     stableJson({
-      executable: process.execPath,
+      executable: runtimeExecutable,
       node: process.version,
       platform: process.platform,
       arch: process.arch,
@@ -414,9 +428,38 @@ export async function inspectCommandCreation(
     // closed rather than implying that a shell tool installs their interpreter.
     if (input.helpers.some((helper) => !/\.(?:mjs|cjs|js|json|txt|md)$/.test(helper.name)))
       return { status: "unavailable", reason: "helper-runtime-not-established" };
-    const runtime = input.helpers.length
+    const commandPath = `.gg/commands/${input.name}.md`;
+    const helperDirectory = `.gg/commands/.${input.name}-helpers`;
+    let generator: FamilyGeneratorMetadata | undefined;
+    let helpers: { name: string; content: string; repeatableLogic: string }[] = input.helpers;
+    if (input.generator) {
+      // The host owns the helper; model helpers alongside it would bypass its review.
+      if (input.helpers.length) return { status: "unavailable", reason: "generator-owns-helpers" };
+      if (input.requirement.capabilityKind !== "script-backed")
+        return { status: "unavailable", reason: "generator-requires-script-backed" };
+      const io: FamilyFileAccess = { stat: commandLocalStat, readText: readCommandText };
+      const prepared = await prepareFamilyGenerator(
+        root,
+        input.generator,
+        helperDirectory,
+        io,
+        signal,
+      );
+      if (prepared.status !== "ready")
+        return { status: "unavailable", reason: `generator-${prepared.reason}` };
+      generator = prepared.metadata;
+      helpers = prepared.helpers.map(({ name, content, reason }) => ({
+        name,
+        content,
+        repeatableLogic: reason,
+      }));
+      for (const file of prepared.referencePrerequisites)
+        if (!prerequisites.some((item) => item.path === file.path)) prerequisites.push(file);
+    }
+    const runtimeExecutable = options.runtimeExecutable ?? process.execPath;
+    const runtime = helpers.length
       ? {
-          executable: process.execPath,
+          executable: runtimeExecutable,
           version: process.version,
           platform: process.platform,
           arch: process.arch,
@@ -434,6 +477,7 @@ export async function inspectCommandCreation(
         return { status: "unavailable", reason: "installed-package-unavailable" };
       prerequisites.push({ path: packagePath, sha256: sha256(raw) });
     }
+    if (prerequisites.length > 32 + (generator ? 28 : 0)) throw new Error("prerequisite-limit");
     validateText(input.markdown);
     const command = parseSkillFile(input.markdown, "project");
     if (
@@ -447,12 +491,10 @@ export async function inspectCommandCreation(
       if (!new RegExp(`^#{1,6} ${heading}\\s*\\r?\\n(?!#)\\s*\\S`, "mi").test(command.content))
         throw new Error("missing-command-documentation");
     }
-    if (input.helpers.length > 0 !== (input.requirement.capabilityKind === "script-backed"))
+    if (helpers.length > 0 !== (input.requirement.capabilityKind === "script-backed"))
       throw new Error("helper-capability-mismatch");
-    const commandPath = `.gg/commands/${input.name}.md`;
-    const helperDirectory = `.gg/commands/.${input.name}-helpers`;
     if (
-      input.helpers.length &&
+      helpers.length &&
       (claims.has(path.posix.basename(helperDirectory).toLowerCase()) ||
         (!ownedPaths.has(containedPath(root, helperDirectory)) &&
           (await commandLocalStat(containedPath(root, helperDirectory)))))
@@ -460,7 +502,7 @@ export async function inspectCommandCreation(
       return { status: "conflict", reason: "helper-directory-already-exists" };
     const files = [
       { path: commandPath, content: input.markdown },
-      ...input.helpers.map((helper) => ({
+      ...helpers.map((helper) => ({
         path: `${helperDirectory}/${helper.name}`,
         content: helper.content,
       })),
@@ -505,7 +547,7 @@ export async function inspectCommandCreation(
           .map((file) => ({ path: file.path, sha256: sha256(file.content) })),
       },
     });
-    const environmentSha256 = await commandEnvironmentSha256();
+    const environmentSha256 = await commandEnvironmentSha256(runtimeExecutable);
     const prerequisiteSha256 = sha256(
       stableJson({ tools, prerequisites, runtime, environmentSha256 }),
     );
@@ -518,10 +560,22 @@ export async function inspectCommandCreation(
         runtime,
         environmentSha256,
         requiredTools: input.requiredTools,
-        helperReasons: input.helpers.map(({ name, repeatableLogic }) => ({
+        helperReasons: helpers.map(({ name, repeatableLogic }) => ({
           name,
           repeatableLogic,
         })),
+        ...(generator
+          ? {
+              generator: {
+                ...generator,
+                limits: [
+                  "The template is not accepted yet: only verification, by rebuilding the reference byte for byte in a fixture copy, can accept it.",
+                  "Creation generates no family member and writes nothing outside the command and its helpers.",
+                  "Reference files are prerequisites: editing, adding or removing one invalidates this review and later verification.",
+                ],
+              },
+            }
+          : {}),
         limits: [
           "Creation only: does not execute or grant tools.",
           "Suitability and prose prerequisites are reviewed claims, not proven capabilities.",
@@ -547,6 +601,7 @@ export async function inspectCommandCreation(
         preview,
         prerequisites,
         environmentSha256,
+        ...(generator ? { generator } : {}),
       },
     };
   } catch {
@@ -766,6 +821,7 @@ export function sameCommandProposal(
       left.input,
       left.inventorySha256,
       left.prerequisiteSha256,
+      left.generator ?? null,
     ]) ===
     stableJson([
       right.root,
@@ -775,6 +831,7 @@ export function sameCommandProposal(
       right.input,
       right.inventorySha256,
       right.prerequisiteSha256,
+      right.generator ?? null,
     ])
   );
 }

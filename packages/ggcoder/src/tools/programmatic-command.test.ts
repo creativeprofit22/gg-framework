@@ -1,7 +1,8 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { claimProgrammaticProject, EXECUTION_DEADLINE_MS } from "../core/programmatic/execution.js";
 import { agentLoop, type AgentTool } from "@kenkaiiii/gg-agent";
 import { stream, StreamResult, type ToolCall } from "@kenkaiiii/gg-ai";
 import { ASK_USER_TIMEOUT_MS, createAskUserBridge, type AskUserPrompt } from "../core/ask-user.js";
@@ -388,7 +389,7 @@ it.each(["approve", "reject", "timeout"])(
       const question = await questionReady;
       await vi.advanceTimersByTimeAsync(300_001);
       expect(bridge.pendingCount).toBe(1);
-      expect(deadlines).toEqual([ASK_USER_TIMEOUT_MS + 30_000]);
+      expect(deadlines).toEqual([ASK_USER_TIMEOUT_MS + EXECUTION_DEADLINE_MS + 60_000]);
       if (answer === "timeout") await vi.advanceTimersByTimeAsync(ASK_USER_TIMEOUT_MS - 300_001);
       else
         bridge.settle(question.id, {
@@ -421,4 +422,232 @@ it("rejects model-provided approval, execution operations and cross-session rece
     { action: "create", handle: "f91fefda-c1f9-463f-a821-dff39c438be5", accepted: true },
   ])
     expect(ProgrammaticCommandParams.safeParse(input).success).toBe(false);
+});
+
+describe("family preview and apply through the tool", () => {
+  const family = {
+    name: "family-tool-fixture",
+    requiredTools: ["bash"],
+    markdown:
+      "---\nname: family-tool-fixture\ndescription: generator\n---\n## Inputs\nMember\n## Outputs\nFiles\n## Required tools\nbash\n## Limits\nFamily only\n## Arguments\nAppend member\n",
+    generator: {
+      familyId: "0123456789abcdef",
+      kind: "directory",
+      reference: "tools/alpha",
+      placeholders: ["name"],
+      members: ["alpha", "beta", "gamma"].map((name) => ({
+        path: `tools/${name}`,
+        values: [{ key: "name", value: name }],
+      })),
+      files: [{ path: "tools/{{name}}/main.py", content: 'NAME = "{{name}}"\n' }],
+    },
+    requirement: {
+      version: 1,
+      desiredOutcome: "Generate a family member",
+      capabilityKind: "script-backed",
+      inputs: ["Member"],
+      outputs: ["Files"],
+      prerequisites: ["Node"],
+      risks: ["Template drift"],
+      verificationExpectations: ["Reproduces the reference"],
+    },
+  };
+  type Question = AskUserPrompt["questions"][number];
+  const first = (question: Question) => question.options?.[0]?.value ?? "";
+
+  async function familyTool() {
+    root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "gg-family-tool-")));
+    restore = useFakeHome(path.join(root, "home"));
+    await fs.mkdir(path.join(root, "tools/alpha"), { recursive: true });
+    await fs.writeFile(path.join(root, "tools/alpha/main.py"), 'NAME = "alpha"\n');
+    const questions: Question[] = [];
+    // Creation answers its first option; apply answers come from `answer`.
+    let answer: (question: Question) => Promise<string> | string = first;
+    const planModeRef = { current: false };
+    const mutated: string[] = [];
+    const owner = createProgrammaticCommandTool(root, {
+      availableTools: () => ["bash"],
+      readReadiness: async () => "missing",
+      planModeRef,
+      onFileMutated: (file) => {
+        mutated.push(file);
+      },
+      reviewCreation: async (request) => {
+        const question = request.questions[0];
+        if (!question) throw new Error("no question");
+        questions.push(question);
+        return { action: "answer", answers: { [question.id]: await answer(question) } };
+      },
+    });
+    const run = async (input: unknown) => {
+      const result = await owner.tool.execute(ProgrammaticCommandParams.parse(input), {
+        signal: new AbortController().signal,
+        toolCallId: "family",
+      });
+      return typeof result === "string" && result.startsWith("{") ? JSON.parse(result) : result;
+    };
+    const catalog = await run({ action: "inspect", proposal: family });
+    const inspected = await run({
+      action: "inspect",
+      proposal: {
+        ...family,
+        review: {
+          inventorySha256: catalog.catalog.sha256,
+          disposition: "create",
+          rationale: "No existing generator",
+        },
+      },
+    });
+    const handle = inspected.handle as string;
+    expect(await run({ action: "create", handle })).toMatchObject({ created: true });
+    const setAnswer = (next: typeof answer) => {
+      answer = next;
+    };
+    return { owner, run, handle, questions, mutated, planModeRef, setAnswer };
+  }
+  it("gives apply its full execution budget after the approval wait", () => {
+    // Regression: a question-sized ceiling let the tool deadline cut the member loop short.
+    const { tool } = createProgrammaticCommandTool(".", { availableTools: () => [] });
+    expect(tool.timeoutMs).toBeGreaterThanOrEqual(ASK_USER_TIMEOUT_MS + EXECUTION_DEADLINE_MS);
+  });
+
+  const exists = (file: string) =>
+    fs.stat(path.join(root, file)).then(
+      () => true,
+      () => false,
+    );
+
+  it("previews without writing, then applies only after a separate single-use approval", async () => {
+    const { owner, run, handle, questions, mutated } = await familyTool();
+    try {
+      expect(await run({ action: "preview_family", handle })).toMatchObject({
+        status: "unavailable",
+        reason: "generator-not-verified",
+      });
+      expect(await run({ action: "verification", handle })).toMatchObject({
+        generator: { generatorVerified: true },
+      });
+      const preview = await run({ action: "preview_family", handle });
+      expect(preview).toMatchObject({
+        status: "previewed",
+        written: false,
+        members: [
+          {
+            path: "tools/beta",
+            status: "ready",
+            files: [{ path: "tools/beta/main.py", action: "create" }],
+          },
+          { path: "tools/gamma", status: "ready" },
+        ],
+        projectCheck: null,
+      });
+      expect(await exists("tools/beta")).toBe(false);
+      const applied = await run({ action: "apply_family", handle, preview_id: preview.previewId });
+      expect(applied).toMatchObject({
+        status: "applied",
+        report: {
+          status: "completed",
+          members: [
+            { path: "tools/beta", status: "created" },
+            { path: "tools/gamma", status: "created" },
+          ],
+        },
+      });
+      const question = questions.at(-1);
+      expect(question?.detail).toBe(preview.preview);
+      expect(question?.options?.at(-1)).toMatchObject({ value: "reject", recommended: true });
+      expect(question && first(question)).toContain(preview.previewSha256);
+      expect(await fs.readFile(path.join(root, "tools/beta/main.py"), "utf8")).toBe(
+        'NAME = "beta"\n',
+      );
+      expect(mutated).toContain(path.join(root, "tools", "beta", "main.py"));
+      // Single use: the same preview cannot approve a second apply.
+      expect(await run({ action: "apply_family", handle, preview_id: preview.previewId })).toEqual({
+        status: "unavailable",
+        reason: "unknown-or-consumed-preview",
+      });
+    } finally {
+      owner.dispose();
+    }
+  });
+
+  it("fails closed on a change while asking, a copied answer, a rejection or a busy project", async () => {
+    const { owner, run, handle, setAnswer } = await familyTool();
+    try {
+      await run({ action: "verification", handle });
+      const fresh = async () =>
+        (await run({ action: "preview_family", handle })).previewId as string;
+      setAnswer(async (question) => {
+        await fs.mkdir(path.join(root, "tools/gamma"), { recursive: true });
+        await fs.writeFile(path.join(root, "tools/gamma/main.py"), "appeared while asking\n");
+        return first(question);
+      });
+      expect(await run({ action: "apply_family", handle, preview_id: await fresh() })).toEqual({
+        status: "unavailable",
+        reason: "stale-preview-review-again",
+      });
+      expect(await exists("tools/beta")).toBe(false);
+      await fs.rm(path.join(root, "tools/gamma"), { recursive: true });
+      // A value copied from another card carries a different nonce.
+      let copied = "";
+      setAnswer((question) => {
+        copied = first(question).replace(
+          /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/,
+          "00000000-0000-4000-8000-000000000000",
+        );
+        return copied;
+      });
+      expect(await run({ action: "apply_family", handle, preview_id: await fresh() })).toEqual({
+        status: "unavailable",
+        reason: "apply-not-approved",
+      });
+      expect(copied).toContain(":00000000-0000-4000-8000-000000000000");
+      setAnswer(() => "reject");
+      expect(await run({ action: "apply_family", handle, preview_id: await fresh() })).toEqual({
+        status: "unavailable",
+        reason: "apply-not-approved",
+      });
+      setAnswer(first);
+      const release = claimProgrammaticProject(root);
+      try {
+        expect(await run({ action: "apply_family", handle, preview_id: await fresh() })).toEqual({
+          status: "unavailable",
+          reason: "project-busy",
+        });
+      } finally {
+        release?.();
+      }
+      expect(await exists("tools/beta")).toBe(false);
+      // Inspecting again drops the verified generator and any pending preview.
+      const pending = await fresh();
+      await run({ action: "inspect", proposal: family });
+      expect(await run({ action: "apply_family", handle, preview_id: pending })).toMatchObject({
+        reason: "unknown-or-consumed-preview",
+      });
+    } finally {
+      owner.dispose();
+    }
+  });
+
+  it("allows the no-write preview in plan mode but refuses apply and consumes the preview", async () => {
+    const { owner, run, handle, questions, planModeRef } = await familyTool();
+    try {
+      await run({ action: "verification", handle });
+      planModeRef.current = true;
+      const asked = questions.length;
+      const preview = await run({ action: "preview_family", handle });
+      expect(preview).toMatchObject({ status: "previewed", written: false });
+      expect(
+        await run({ action: "apply_family", handle, preview_id: preview.previewId }),
+      ).toContain("restricted in plan mode");
+      expect(questions.length).toBe(asked);
+      planModeRef.current = false;
+      expect(
+        await run({ action: "apply_family", handle, preview_id: preview.previewId }),
+      ).toMatchObject({ reason: "unknown-or-consumed-preview" });
+      expect(await exists("tools/beta")).toBe(false);
+    } finally {
+      owner.dispose();
+    }
+  });
 });

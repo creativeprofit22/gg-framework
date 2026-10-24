@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { useFakeHome } from "../../test-support/fake-home.js";
 import { inspectCommandCreation, publishReviewedCommand } from "./command-creation.js";
 import { CommandVerification } from "./command-verification.js";
@@ -464,4 +464,274 @@ it("does not issue receipts for retrieval, background calls or unmatched command
   expect(current).toHaveProperty("availableReceiptIds");
   if ("availableReceiptIds" in current) expect(current.availableReceiptIds).toHaveLength(64);
   verifier.clear();
+});
+
+describe("generator reproduces-reference verification", () => {
+  type Family = {
+    reference: Record<string, string>;
+    generator: {
+      reference: string;
+      members: { path: string; values: { key: string; value: string }[] }[];
+    } & Record<string, unknown>;
+  };
+  const python: Family = {
+    reference: {
+      "tools/alpha/__init__.py": "from .main import run\r\n",
+      "tools/alpha/main.py": 'NAME = "alpha"\r\n',
+    },
+    generator: {
+      familyId: "0123456789abcdef",
+      kind: "directory",
+      reference: "tools/alpha",
+      placeholders: ["name"],
+      members: [
+        { path: "tools/alpha", values: [{ key: "name", value: "alpha" }] },
+        { path: "tools/beta", values: [{ key: "name", value: "beta" }] },
+        { path: "tools/gamma", values: [{ key: "name", value: "gamma" }] },
+      ],
+      files: [
+        { path: "tools/{{name}}/__init__.py", content: "from .main import run\r\n" },
+        { path: "tools/{{name}}/main.py", content: 'NAME = "{{name}}"\r\n' },
+      ],
+    },
+  };
+  const markdown: Family = {
+    reference: { "docs/guide-setup.md": "\uFEFF# Setup guide\n\nRead this before setup.\n" },
+    generator: {
+      familyId: "fedcba9876543210",
+      kind: "file",
+      reference: "docs/guide-setup.md",
+      placeholders: ["slug", "title"],
+      members: [
+        {
+          path: "docs/guide-setup.md",
+          values: [
+            { key: "slug", value: "setup" },
+            { key: "title", value: "Setup" },
+          ],
+        },
+        {
+          path: "docs/guide-deploy.md",
+          values: [
+            { key: "slug", value: "deploy" },
+            { key: "title", value: "Deploy" },
+          ],
+        },
+        {
+          path: "docs/guide-debug.md",
+          values: [
+            { key: "slug", value: "debug" },
+            { key: "title", value: "Debug" },
+          ],
+        },
+      ],
+      files: [
+        {
+          path: "docs/guide-{{slug}}.md",
+          content: "\uFEFF# {{title}} guide\n\nRead this before {{slug}}.\n",
+        },
+      ],
+    },
+  };
+  const helperDirectory = ".gg/commands/.family-fixture-helpers";
+
+  async function generatorFixture(
+    family: Family,
+    host: typeof options & { runtimeExecutable?: string } = options,
+  ) {
+    root = await fs.mkdtemp(path.join(os.tmpdir(), "gg-generator-verification-"));
+    restore = useFakeHome(path.join(root, "home"));
+    for (const [file, content] of Object.entries(family.reference)) {
+      await fs.mkdir(path.dirname(path.join(root, file)), { recursive: true });
+      await fs.writeFile(path.join(root, file), content);
+    }
+    const input = {
+      name: "family-fixture",
+      requiredTools: ["bash"],
+      markdown:
+        "---\nname: family-fixture\ndescription: generator\n---\n## Inputs\nMember\n## Outputs\nFiles\n## Required tools\nbash\n## Limits\nReference only\n## Arguments\nAppend member\n",
+      generator: family.generator,
+      requirement: {
+        version: 1,
+        desiredOutcome: "Generate a family member",
+        capabilityKind: "script-backed",
+        inputs: ["Member"],
+        outputs: ["Files"],
+        prerequisites: ["Node"],
+        risks: ["Template drift"],
+        verificationExpectations: ["Reproduces the reference"],
+      },
+    };
+    const first = await inspectCommandCreation(root, input, options, signal());
+    if (first.status !== "review-required") throw new Error(JSON.stringify(first));
+    const inspected = await inspectCommandCreation(
+      root,
+      {
+        ...input,
+        review: {
+          inventorySha256: first.catalog.sha256,
+          disposition: "create",
+          rationale: "No existing generator",
+        },
+      },
+      options,
+      signal(),
+    );
+    if (inspected.status !== "proposal") throw new Error(JSON.stringify(inspected));
+    expect(await publishReviewedCommand(inspected.value, options, signal())).toMatchObject({
+      created: true,
+    });
+    const verifier = new CommandVerification(host, () => ({
+      provider: "deterministic",
+      model: "fixture",
+    }));
+    verifier.created(inspected.value);
+    return { verifier, handle: inspected.value.proposal.proposalId, dir: root };
+  }
+
+  it.each([
+    ["python sibling directories", python],
+    ["markdown file-name pattern", markdown],
+  ])("passes an exact match for %s and says only the exact-match check ran", async (_, family) => {
+    const { verifier, handle, dir } = await generatorFixture(family);
+    const result = await verifier.inspect(handle, [], "", signal());
+    expect(result).toMatchObject({
+      status: "inspected",
+      behavior: "unavailable",
+      executionApproved: false,
+      report: {
+        result: "unavailable",
+        cases: [
+          { category: "loads", result: "passed" },
+          { category: "reproduces-reference", method: "deterministic", result: "passed" },
+        ],
+      },
+      generator: {
+        reference: family.generator.reference,
+        referenceCheck: { result: "passed" },
+        projectCheck: { status: "none-found" },
+        checksRun: ["reproduces-reference"],
+        generatorVerified: true,
+      },
+    });
+    expect(JSON.stringify(result)).toContain(
+      "No project check was found; only the exact-match check ran.",
+    );
+    // No other family member is generated.
+    for (const member of family.generator.members)
+      if (member.path !== family.generator.reference)
+        await expect(fs.stat(path.join(dir, member.path))).rejects.toThrow();
+    verifier.clear();
+  });
+
+  it("fails a one-byte template difference and reports the diff and first differing byte", async () => {
+    const files = [
+      { path: "tools/{{name}}/__init__.py", content: "from .main import run\r\n" },
+      { path: "tools/{{name}}/main.py", content: "NAME = '{{name}}'\r\n" },
+    ];
+    const { verifier, handle } = await generatorFixture({
+      ...python,
+      generator: { ...python.generator, files },
+    });
+    const result = await verifier.inspect(handle, [], "", signal());
+    expect(result).toMatchObject({
+      status: "inspected",
+      report: {
+        result: "failed",
+        cases: [{ category: "loads" }, { category: "reproduces-reference", result: "failed" }],
+      },
+      generator: {
+        generatorVerified: false,
+        referenceCheck: {
+          result: "failed",
+          differences: [{ path: "tools/alpha/main.py", kind: "bytes", firstDifferentByte: 7 }],
+        },
+      },
+    });
+    const text = JSON.stringify(result);
+    expect(text).toContain(JSON.stringify('-NAME = "alpha"').slice(1, -1));
+    expect(text).toContain("+NAME = 'alpha'");
+    expect(text).toContain("not verified");
+    verifier.clear();
+  });
+
+  it.each([
+    ["edited reference file", "tools/alpha/main.py", 'NAME = "alpha!"\r\n'],
+    ["added reference file", "tools/alpha/extra.py", "EXTRA = 1\r\n"],
+    ["edited template", `${helperDirectory}/template.json`, " "],
+    ["edited helper", `${helperDirectory}/generate.mjs`, "\n"],
+  ])("invalidates verification after an %s", async (_, file, extra) => {
+    const { verifier, handle, dir } = await generatorFixture(python);
+    expect(await verifier.inspect(handle, [], "", signal())).toMatchObject({
+      generator: { generatorVerified: true },
+    });
+    await fs.appendFile(path.join(dir, file), extra);
+    const stale = await verifier.inspect(handle, [], "", signal());
+    expect(stale).toMatchObject({ status: "unavailable", executionApproved: false });
+    expect(stale).not.toHaveProperty("generator");
+    verifier.clear();
+  });
+
+  it("requires a passing receipt for a detected project check", async () => {
+    const { verifier, handle, dir } = await generatorFixture(python);
+    await fs.writeFile(
+      path.join(dir, "package.json"),
+      JSON.stringify({ scripts: { test: "node fixture-test.mjs" } }),
+    );
+    await fs.writeFile(path.join(dir, "fixture-test.mjs"), "// project check\n");
+    expect(await verifier.inspect(handle, [], "", signal())).toMatchObject({
+      generator: {
+        referenceCheck: { result: "passed" },
+        projectCheck: { status: "not-run", detectedCommands: ["npm run test"] },
+        generatorVerified: false,
+      },
+    });
+    const projectPlan = { ...plan, command: "npm run test" };
+    expect(await verifier.prepare(handle, projectPlan, signal())).toMatchObject({
+      status: "prepared",
+    });
+    const receipt = async (id: string, exitCode: number) => {
+      const token = await verifier.observeStart(
+        "bash",
+        { command: projectPlan.command },
+        { toolCallId: id, signal: signal() },
+      );
+      const content = `Exit code: ${exitCode}`;
+      const bashDiagnostics = {
+        executionId: id,
+        reason: "completed",
+        exitCode,
+        cwd: dir,
+        outputCapped: false,
+      };
+      await verifier.observeEnd(token, { content, details: { bashDiagnostics } }, signal());
+      verifier.resultPrepared({ type: "tool_result", toolCallId: id, content });
+      if (!token) throw new Error("no receipt");
+      return token;
+    };
+    const passing = await receipt("project-pass", 0);
+    expect(await verifier.inspect(handle, [passing], "", signal())).toMatchObject({
+      generator: {
+        projectCheck: { status: "passed", command: "npm run test", exitCode: 0 },
+        checksRun: ["reproduces-reference", "project-check: npm run test"],
+        generatorVerified: true,
+      },
+    });
+    const failing = await receipt("project-fail", 1);
+    expect(await verifier.inspect(handle, [failing], "", signal())).toMatchObject({
+      generator: { projectCheck: { status: "failed", exitCode: 1 }, generatorVerified: false },
+    });
+    verifier.clear();
+  });
+
+  it("fails closed when the Node runtime is missing", async () => {
+    const { verifier, handle } = await generatorFixture(python, {
+      ...options,
+      runtimeExecutable: path.join(os.tmpdir(), "gg-missing-node", "node.exe"),
+    });
+    const result = await verifier.inspect(handle, [], "", signal());
+    expect(result).toMatchObject({ status: "unavailable", executionApproved: false });
+    expect(result).not.toHaveProperty("generator");
+    verifier.clear();
+  });
 });

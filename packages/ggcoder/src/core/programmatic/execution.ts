@@ -26,6 +26,13 @@ const MUTATION_TOOLS = ["write", "edit", "bash", "task_output", "task_send", "ta
 // No configured MCP server is implicitly approved. The host currently approves none.
 const APPROVED_RESEARCH_MCP_SERVERS: string[] = [];
 const projectClaims = new Set<string>();
+/** Share the per-project claim with other host-owned writers (family apply); null when busy. */
+export function claimProgrammaticProject(root: string): (() => void) | null {
+  if (projectClaims.has(root)) return null;
+  projectClaims.add(root);
+  let released = false;
+  return () => { if (!released) { released = true; projectClaims.delete(root); } };
+}
 
 // Host-owned contracts, never tool permissions inferred from untrusted command prose.
 // Tauri calibrate/package runs a cold build (fresh CARGO_TARGET_DIR, ~23 min), bounded by the

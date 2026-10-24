@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { useState } from "react";
+import { readFileSync } from "node:fs";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import type { AskQuestion, AskUserPrompt } from "./ask-user";
 import { AskBand } from "./AskBand";
@@ -1160,6 +1161,55 @@ describe("AskBand", () => {
     expect(screen.queryByRole("status")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: /Yes/ }));
     expect(onAnswer).toHaveBeenCalledWith({ flag: "Yes" });
+  });
+
+  // A family-apply approval puts the whole write plan in the detail; collapsing
+  // its lines made the CONFLICT rows and the dirty-path override unreadable.
+  const planDetail = [
+    "Apply the verified generator to 2 other family member(s). Nothing has been written.",
+    "Uncommitted changes to affected paths (applying needs an explicit override):",
+    "  src/a/dirty.ts",
+    "",
+    "src/b: conflict, will be skipped",
+    "  CONFLICT src/b/file.ts (unowned)",
+  ].join("\n");
+  const planPrompt = prompt({
+    id: "apply",
+    question: "Apply the family plan?",
+    kind: "choice",
+    detail: planDetail,
+    options: [{ label: "Apply" }, { label: "Cancel" }],
+  });
+
+  it("keeps a detail's line breaks and indentation, with no tab stop while it fits", () => {
+    const { container } = render(
+      <AskBand prompt={planPrompt} onAnswer={vi.fn()} onTypeInstead={onTypeInstead} />,
+    );
+    const detail = container.querySelector(".ask-detail");
+    expect(detail?.textContent).toBe(planDetail);
+    expect(detail?.hasAttribute("tabindex")).toBe(false);
+    expect(screen.queryByRole("region")).toBeNull();
+    const css = readFileSync("src/WorkspaceShell.css", "utf8");
+    const rule = /\.ask-detail \{([^}]*)\}/.exec(css)?.[1] ?? "";
+    expect(rule).toContain("white-space: pre-wrap;");
+    expect(rule).toContain("overflow-wrap: anywhere;");
+    expect(rule).toContain("max-height: min(50vh, 28rem);");
+    expect(rule).toContain("overflow-y: auto;");
+  });
+
+  it("makes an overflowing detail a labelled, focusable scroll region", () => {
+    const scroll = vi.spyOn(Element.prototype, "scrollHeight", "get").mockReturnValue(900);
+    const client = vi.spyOn(Element.prototype, "clientHeight", "get").mockReturnValue(448);
+    try {
+      render(<AskBand prompt={planPrompt} onAnswer={vi.fn()} onTypeInstead={onTypeInstead} />);
+      const region = screen.getByRole("region", { name: "Details: Apply the family plan?" });
+      expect(region.getAttribute("tabindex")).toBe("0");
+      expect(region.textContent).toBe(planDetail);
+      expect(screen.getByRole("button", { name: /Apply/ })).toBeTruthy();
+    } finally {
+      scroll.mockRestore();
+      client.mockRestore();
+    }
   });
 });
 

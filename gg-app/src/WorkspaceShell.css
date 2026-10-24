@@ -111,6 +111,18 @@
 .transcript::-webkit-scrollbar-thumb:active {
   background: var(--text-dim);
 }
+/* ask_user detail: App.css sets it as a plain paragraph, which collapsed the agent's line
+   breaks and let a long detail stretch the card without limit. Details can be the exact plan
+   being approved (per-file create/change/CONFLICT lines, indented dirty paths), so keep the
+   author's breaks and indentation, wrap long paths, and cap the box so the options stay in
+   reach. AskBand makes an overflowing detail a labelled tab stop for keyboard scrolling. */
+.ask-detail {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: min(50vh, 28rem);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
 .pane-drag-active {
   cursor: grabbing;
 }

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Badge } from "./Badge";
 import { theme } from "./theme";
 import type { AskAnswerDelta, AskAnswers, AskOption, AskQuestion, AskUserPrompt } from "./ask-user";
@@ -103,6 +103,38 @@ function keyHint(question: AskQuestion | undefined): string | null {
   if (pick && type) return `${pick}, or ${type}.`;
   if (pick) return `${pick}.`;
   return type ? `${type.charAt(0).toUpperCase()}${type.slice(1)}.` : null;
+}
+
+/**
+ * A question's detail, exactly as the agent wrote it. Some details are the very
+ * thing being approved (a file-by-file write plan, a dirty-path list), so line
+ * breaks and indentation are kept and a long one scrolls inside a capped box
+ * instead of stretching the card past its options. Only an overflowing box
+ * becomes a labelled tab stop, so keyboard users can scroll it while short
+ * details add no extra stop.
+ */
+function AskDetail({ text, label }: { text: string; label: string }): React.ReactElement {
+  const ref = useRef<HTMLParagraphElement>(null);
+  const [scrollable, setScrollable] = useState(false);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const measure = (): void => setScrollable(el.scrollHeight > el.clientHeight + 1);
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [text]);
+  return (
+    <p
+      ref={ref}
+      className="ask-detail"
+      {...(scrollable ? { tabIndex: 0, role: "region", "aria-label": `Details: ${label}` } : {})}
+    >
+      {text}
+    </p>
+  );
 }
 
 /** One question: a heading and its stack of option rows. */
@@ -250,7 +282,7 @@ function Question({
         {numbered && <span className="ask-subq-num">{index}</span>}
         {question.question}
       </p>
-      {question.detail && <p className="ask-detail">{question.detail}</p>}
+      {question.detail && <AskDetail text={question.detail} label={question.question} />}
       {/* `typed` is checked too: a `text` question carries no options at all, so
           guarding on options alone left it showing nothing but its heading once
           answered. */}

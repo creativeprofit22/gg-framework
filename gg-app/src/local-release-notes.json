@@ -12,6 +12,15 @@
       ]
     },
     {
+      "title": "Also in your Local Fork",
+      "items": [
+        "`Opportunities` is easier to find your way around. A fixed header shows a one-line status and `Find ideas`, and three tabs sort the rest: `Ideas` for suggestions, `Checks` for setup and saved check results, and `Past ideas` for history. The panel opens on whichever tab has something for you and stays where you put it. Each idea is a card that opens in place, so the others stay in view, and the wording is plainer throughout.",
+        "When `Opportunities` spots a group of similar items, you can build one example and let GG generate the rest, one approved step at a time. GG creates the generator, checks that it rebuilds your example exactly, then previews every other item: which files would be created, changed, left alone or in conflict. Nothing is written until you approve that exact preview, each item gets its own undo, and files GG didn't create are never overwritten.",
+        "Question cards keep their layout. When your agent adds details such as a file-by-file plan, the line breaks and indentation come through as written, and a long one scrolls inside its own box, keyboard included, instead of pushing the answer options out of reach.",
+        "Idea searches finish cleanly. A search now ends as soon as its result is accepted, rather than sending one more request that current Claude models turn away, which could end a finished search with an error."
+      ]
+    },
+    {
       "title": "Also from upstream 0.96.0 and 0.96.1",
       "items": [
         "Meet `GG Royale`, an online blackjack table played with chips you earn by coding: finished runs, commits, squashed bugs and deploys all pay out, and you can sit at a table and chat with other players. There's no real money anywhere. Nothing is sent until you open it and agree to link, and even then it only hears that something happened, never your code, files or prompts. You can delete all your Royale data any time.",

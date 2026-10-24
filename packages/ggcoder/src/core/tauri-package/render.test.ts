@@ -4,12 +4,16 @@ import { parseGeneratedMarker } from "./ownership.js";
 import { renderTauriSupport } from "./render.js";
 import {
   DISCOVERY_SCHEMA_VERSION,
+  type CalibrationBounds,
+  type HostTarget,
   type TauriCandidate,
   type TauriDiscoveryResult,
 } from "./types.js";
 
-function input(): { discovery: TauriDiscoveryResult; target: TauriCandidate } {
-  const host = detectHostTarget();
+function input(host: HostTarget = detectHostTarget()): {
+  discovery: TauriDiscoveryResult;
+  target: TauriCandidate;
+} {
   const target: TauriCandidate = {
     target_id: "tauri-fixture-target",
     package_root: "apps/desktop",
@@ -95,5 +99,49 @@ describe("renderTauriSupport", () => {
       expect(parseGeneratedMarker(content)).toMatchObject({ contentSha256: file.content_sha256 });
       expect(normalizedContentSha256(content)).toBe(file.content_sha256);
     }
+  });
+
+  it("keeps golden byte digests for a fixed host with and without calibration", () => {
+    const host: HostTarget = {
+      platform: "win32",
+      arch: "x64",
+      id: "win32-x64",
+      rust_triple: "x86_64-pc-windows-msvc",
+    };
+    const { discovery, target } = input(host);
+    const calibration: CalibrationBounds = {
+      evidence_sha256: discovery.evidence_sha256,
+      baseline_total_bytes: 1000,
+      maximum_total_bytes: 2000,
+      maximum_file_bytes: 1500,
+      role_counts: { app: 1, bundle: 0 },
+      role_maximum_bytes: { app: 1500, bundle: 0 },
+      required_paths: ["app/Fixture.exe"],
+      absolute_growth_bytes: 500,
+      percentage_growth: 10,
+    };
+    const digests = (files: ReturnType<typeof renderTauriSupport>) =>
+      Object.fromEntries(files.map((file) => [file.path, sha256(file.bytes)]));
+
+    expect(digests(renderTauriSupport(discovery, target))).toMatchInlineSnapshot(`
+      {
+        ".gg/commands/package-tauri.md": "1454faf5f5cef60957022ca738217871278c41f9b52b55b504c0765c7d94a752",
+        "scripts/package-tauri.config.json": "fa299590a7fe45c7db70dad1ffab74f5e94ecee61214be7915599545e9681d4c",
+        "scripts/package-tauri.mjs": "a893ecb4087e87f0f68dc35e15c90f46fa65677e7b6089d6c6eb445864fc934a",
+        "scripts/package-tauri.test.mjs": "e26d2eb0ed3cb728b147cecc51a3614cda9576c4bec6ef61d2aac4fdfba7cc02",
+        "scripts/smoke-tauri-package.mjs": "8114ea0787786466a17897acb4bbac1f3955bb39f2860f27859ec79dbbdf85fd",
+        "scripts/smoke-tauri-package.test.mjs": "30162244b6b1e65ca73d73844ea3a26be2713af9140bd86bb8bdcddd3b0178e1",
+      }
+    `);
+    expect(digests(renderTauriSupport(discovery, target, calibration))).toMatchInlineSnapshot(`
+      {
+        ".gg/commands/package-tauri.md": "1454faf5f5cef60957022ca738217871278c41f9b52b55b504c0765c7d94a752",
+        "scripts/package-tauri.config.json": "c44f95bb99b02c8113492409ee3045156c568ad4d1eee4cf8bf14c5fff7674b8",
+        "scripts/package-tauri.mjs": "a893ecb4087e87f0f68dc35e15c90f46fa65677e7b6089d6c6eb445864fc934a",
+        "scripts/package-tauri.test.mjs": "e26d2eb0ed3cb728b147cecc51a3614cda9576c4bec6ef61d2aac4fdfba7cc02",
+        "scripts/smoke-tauri-package.mjs": "8114ea0787786466a17897acb4bbac1f3955bb39f2860f27859ec79dbbdf85fd",
+        "scripts/smoke-tauri-package.test.mjs": "30162244b6b1e65ca73d73844ea3a26be2713af9140bd86bb8bdcddd3b0178e1",
+      }
+    `);
   });
 });

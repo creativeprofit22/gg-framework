@@ -1,3 +1,5 @@
+import type { GeneratedFile } from "../generated-files/owner.js";
+
 export const DISCOVERY_SCHEMA_VERSION = 1;
 export const GENERATED_CONFIG_SCHEMA_VERSION = 1;
 export const TEMPLATE_VERSION = 1;
@@ -122,12 +124,7 @@ export interface GeneratedTauriConfig {
   calibration: CalibrationBounds | null;
 }
 
-export interface GeneratedFile {
-  path: string;
-  bytes: Buffer;
-  template_sha256: string;
-  content_sha256: string;
-}
+export type { GeneratedFile } from "../generated-files/owner.js";
 
 export type SupportSetState = "absent" | "owned" | "conflict";
 

@@ -1,3 +1,4 @@
+import { renderTemplate } from "../generated-files/render.js";
 import { canonicalJson, CONTENT_DIGEST_SENTINEL, GENERATED_PATHS, sha256 } from "./paths.js";
 import { finalizeGeneratedContent, generatedMarker } from "./ownership.js";
 import { PACKAGE_COMMAND_TEMPLATE } from "./templates/package-command.js";
@@ -48,9 +49,13 @@ function renderFixed(repositoryPath: string, template: string): GeneratedFile {
   const marker = generatedMarker(templateSha256, CONTENT_DIGEST_SENTINEL);
   const placeholder = repositoryPath.endsWith(".md") ? "<!--__GG_MARKER__-->" : "/*__GG_MARKER__*/";
   const replacement = repositoryPath.endsWith(".md") ? `<!-- ${marker} -->` : `// ${marker}`;
-  if (template.split(placeholder).length !== 2)
-    throw new Error(`Invalid fixed template marker: ${repositoryPath}`);
-  const final = finalizeGeneratedContent(template.replace(placeholder, replacement));
+  let content: string;
+  try {
+    content = renderTemplate(template, [[placeholder, replacement]]);
+  } catch (error) {
+    throw new Error(`Invalid fixed template marker: ${repositoryPath}`, { cause: error });
+  }
+  const final = finalizeGeneratedContent(content);
   return {
     path: repositoryPath,
     bytes: final.bytes,

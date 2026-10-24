@@ -358,6 +358,9 @@ describe("prompt commands", () => {
       "Give a brief user-facing outcome, inspection limits and next permitted action instead",
     );
     expect(setup?.prompt).toContain("Do not repeat rendered accepted advice");
+    expect(setup?.prompt).toContain(
+      "Submitting an accepted result ends this setup turn and no further reply follows, so write this brief transcript, covering steps 4–8, before submitting `programmatic_advisory_result`.",
+    );
     expect(setup?.prompt).not.toContain("Report its inventory, exact configuration fingerprint");
     expect(setup?.prompt).toContain(
       "retain the exact added, removed and modified configuration inputs and policy, schema or exclusion differences in tool data and approval review",
@@ -402,8 +405,9 @@ describe("prompt commands", () => {
         "Do not write a second full report repeating rendered accepted advice",
       );
       expect(prompt).toContain(
-        "Follow with only a brief user-facing outcome, any limits not already visible, and the next permitted action",
+        "Submitting an accepted result ends this assessment; include every limit and the next permitted action in the result's coverage and recommendations, because no further reply follows.",
       );
+      expect(prompt).not.toContain("Follow with only a brief user-facing outcome");
       expect(prompt).toContain("not just three executable specialists");
       expect(prompt).toContain(
         "retain manual work when automation adds unjustified cost or prerequisites",

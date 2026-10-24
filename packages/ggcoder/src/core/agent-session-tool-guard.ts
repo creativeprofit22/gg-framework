@@ -147,6 +147,11 @@ export function guardSessionTool(tool: AgentTool, host: SessionToolGuardHost): A
           text: output,
           signal: context.signal,
         });
+        // An accepted result is the assessment's final deliverable. The checkpoint
+        // publishes the presentation as an assistant message; ending the run there
+        // keeps the next provider request from ending on it (assistant prefill,
+        // which Claude rejects with HTTP 400) and spends no extra model call.
+        return { content: output, endRun: true };
       }
       return output;
     },

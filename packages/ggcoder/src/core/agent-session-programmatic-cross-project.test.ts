@@ -277,8 +277,7 @@ async function assess(
               },
             ];
           } else {
-            expect(result("accepted").isError ?? false, output("accepted")).toBe(false);
-            presentation = output("accepted");
+            // Unreachable when correct: an accepted result ends the run (turn count below).
             return {
               message: { role: "assistant", content: "Scripted assessment ended." },
               stopReason: "end_turn",
@@ -302,8 +301,15 @@ async function assess(
       .readFile(path.join(cwd, ".gg/programmatic/profile.json"))
       .catch(() => null);
     const response = await session.assessProgrammatic(mode);
-    expect(turn).toBe(4);
+    // The accepted result ends the run: no fourth provider request ends on its presentation.
+    expect(turn).toBe(3);
     expect(response.assessment.status).toBe("completed");
+    const accepted = session
+      .getMessages()
+      .flatMap((message) => (message.role === "tool" ? message.content : []))
+      .find((item) => item.toolCallId === "accepted");
+    expect(accepted?.isError ?? false, String(accepted?.content)).toBe(false);
+    presentation = String(accepted?.content);
     expect(response.captured?.assessment.reportedCoverage).toMatchObject({
       status: "limited",
       scope: fixture.coverage,

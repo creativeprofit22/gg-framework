@@ -3078,11 +3078,16 @@ export class AgentSession {
       textRepetitionDetected: detectTextRepetition(this.hookText),
       ...(this.hookCyclicPattern ? { cyclicPattern: this.hookCyclicPattern } : {}),
     });
-    this.maybeStartSemanticLoopCheck(deterministicDecision.shouldBreak);
+    // Advisory assessments and discovery reviews are bounded, read-only turns
+    // with their own validation and rejection feedback. Loop-break steering and
+    // a hidden judge request would escape their request accounting.
+    const boundedReview =
+      this.advisoryTurn?.active === true || this.discoveryReview?.active === true;
+    this.maybeStartSemanticLoopCheck(deterministicDecision.shouldBreak, boundedReview);
     // Two-stage loop-breaker: stage 1 nudges; a FRESH detection after that
     // injects the harsher final stop-and-report prompt. Signals reset after
     // each injection so stage 2 only fires on new evidence.
-    if (this.loopBreakInjected < 2) {
+    if (this.loopBreakInjected < 2 && !boundedReview) {
       const decision = deterministicDecision;
       if (decision.shouldBreak) {
         const stage = this.loopBreakInjected === 0 ? (1 as const) : (2 as const);
@@ -3111,7 +3116,7 @@ export class AgentSession {
     // on a suspicious-but-syntactically-quiet burst) is consumed here, exactly
     // once, with the deterministic breaker getting priority above. Fail-open:
     // no verdict or no-loop verdict injects nothing.
-    if (this.semanticLoop.verdict && !this.semanticLoop.injected) {
+    if (!boundedReview && this.semanticLoop.verdict && !this.semanticLoop.injected) {
       const verdict = this.semanticLoop.verdict;
       this.semanticLoop.injected = true;
       this.semanticLoop.verdict = null;
@@ -3136,9 +3141,10 @@ export class AgentSession {
    *  every retry differs slightly and the run still makes no progress.
    *  Fire-and-forget: the call runs while the next turn streams, and a finished
    *  verdict is consumed by the NEXT steering poll — never blocking a turn. */
-  private maybeStartSemanticLoopCheck(deterministicBreak: boolean): void {
+  private maybeStartSemanticLoopCheck(deterministicBreak: boolean, boundedReview: boolean): void {
     if (
       !shouldRunSemanticLoopCheck({
+        boundedReview,
         consecutiveFailures: this.hookConsecutiveFailures,
         totalFailures: this.hookStats.toolFailures,
         turns: this.hookStats.turns,

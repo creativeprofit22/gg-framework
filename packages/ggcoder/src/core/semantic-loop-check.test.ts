@@ -107,6 +107,11 @@ describe("shouldRunSemanticLoopCheck", () => {
     ).toBe(true);
   });
 
+  it("never runs inside a bounded advisory or discovery review", () => {
+    expect(shouldRunSemanticLoopCheck({ ...base, boundedReview: true })).toBe(false);
+    expect(shouldRunSemanticLoopCheck({ ...base, boundedReview: false })).toBe(true);
+  });
+
   it("never runs concurrently with itself or past the per-run budget", () => {
     expect(shouldRunSemanticLoopCheck({ ...base, checkPending: true })).toBe(false);
     expect(shouldRunSemanticLoopCheck({ ...base, checksUsed: MAX_SEMANTIC_LOOP_CHECKS })).toBe(

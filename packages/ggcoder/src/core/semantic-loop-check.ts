@@ -48,9 +48,13 @@ export interface SemanticLoopTriggerInput {
   checkPending: boolean;
   /** The deterministic verdict for the same evidence — when it fires, it owns the correction. */
   deterministicBreak: boolean;
+  /** A bounded advisory assessment or discovery review is active. Those turns own their
+   *  validation and rejection feedback; a hidden judge request would escape their bounds. */
+  boundedReview?: boolean;
 }
 
 export function shouldRunSemanticLoopCheck(input: SemanticLoopTriggerInput): boolean {
+  if (input.boundedReview) return false;
   if (input.checksUsed >= MAX_SEMANTIC_LOOP_CHECKS) return false;
   if (input.checkPending) return false;
   if (input.deterministicBreak) return false;

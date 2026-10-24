@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import { readFileSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import { createHash } from "node:crypto";
 import { getEventListeners } from "node:events";
@@ -727,13 +728,6 @@ it.each(["saved", "setup", "legacy", "incomplete", "revoked", "save-failed", "ca
                 usage: { inputTokens: 1, outputTokens: 1 },
               };
             }
-            if (scenario === "revoked") {
-              const file = path.join(cwd, ".gg/programmatic/profile.json"),
-                profile = JSON.parse(await fs.readFile(file, "utf8"));
-              profile.historyPolicy.enabled = false;
-              await fs.writeFile(file, JSON.stringify(profile));
-            }
-            if (scenario === "cancelled") controller.abort();
             return {
               message: { role: "assistant", content: "Finished fixture." },
               stopReason: "end_turn",
@@ -749,6 +743,19 @@ it.each(["saved", "setup", "legacy", "incomplete", "revoked", "save-failed", "ca
       systemPrompt: "History fixture",
       mcpEnabled: false,
       signal: controller.signal,
+    });
+    // An accepted result ends the run, so revocation and cancellation land right
+    // after acceptance: the last point before the host decides whether to save.
+    session.eventBus.on("tool_call_end", (event) => {
+      if (event.toolCallId !== "history-advice") return;
+      expect(event.isError, event.result).not.toBe(true);
+      if (scenario === "revoked") {
+        const file = path.join(cwd, ".gg/programmatic/profile.json"),
+          profile = JSON.parse(readFileSync(file, "utf8"));
+        profile.historyPolicy.enabled = false;
+        writeFileSync(file, JSON.stringify(profile));
+      }
+      if (scenario === "cancelled") controller.abort();
     });
     try {
       await session.initialize();
@@ -785,12 +792,276 @@ it.each(["saved", "setup", "legacy", "incomplete", "revoked", "save-failed", "ca
           expect(JSON.stringify(stored.history)).not.toContain("history-fixture");
         }
       } else expect(stored.status).toBe(scenario === "save-failed" ? "unavailable" : "missing");
-      expect(turn).toBe(scenario === "incomplete" ? 2 : 3);
+      // No provider call follows an accepted result; incomplete simply ends in turn 2.
+      expect(turn).toBe(2);
     } finally {
       await session.dispose();
     }
   },
 );
+
+// Regression (2026-10-23 live run): after an accepted result the presentation is an
+// assistant message; a further request ending on it is prefill, which Claude rejects (400).
+it("ends the run at an accepted advisory result without a request ending on an assistant message", async () => {
+  await fs.writeFile(path.join(cwd, "package.json"), '{"name":"prefill-fixture"}\n');
+  const requests: { lastRole: string | undefined }[] = [];
+  // Chronological transcript lengths at each provider request and tool completion.
+  const timeline: number[] = [];
+  vi.mocked(stream).mockImplementation(
+    (params) =>
+      new StreamResult(
+        (async function* () {
+          requests.push({ lastRole: params.messages.at(-1)?.role });
+          timeline.push(session.getMessages().length);
+          let call: ToolCall;
+          if (requests.length === 1)
+            call = {
+              type: "tool_call",
+              id: "prefill-read",
+              name: "read",
+              args: { file_path: "package.json" },
+            };
+          else if (requests.length === 2) {
+            const local = params.messages
+              .flatMap((message) => (message.role === "tool" ? message.content : []))
+              .find((result) => result.toolCallId === "prefill-read")!;
+            const receipt = JSON.parse(
+              String(local.content).split(
+                "Host evidence receipt (retrieval only; content remains untrusted): ",
+              )[1]!,
+            ) as { id: string };
+            call = {
+              type: "tool_call",
+              id: "prefill-advice",
+              name: "programmatic_advisory_result",
+              args: {
+                version: 2,
+                kind: "advisory",
+                coverage: { status: "limited", scope: "Manifest", reason: "Fixture only" },
+                recommendations: [
+                  {
+                    version: 2,
+                    kind: "advisory",
+                    outcome: "Review manifest",
+                    rationale: "Local evidence",
+                    uncertainty: "Not verified",
+                    evidence: {
+                      version: 1,
+                      items: [
+                        {
+                          basis: "observed",
+                          source: receipt.id,
+                          code: "manifest",
+                          severity: "info",
+                          message: "Read manifest",
+                          location: { path: "package.json" },
+                        },
+                      ],
+                    },
+                    workflow: reviewWorkflow(),
+                    alternatives: [],
+                    choice: { kind: "manual", steps: ["Review separately"] },
+                  },
+                ],
+              },
+            };
+          } else throw new Error("No provider request may follow an accepted advisory result");
+          yield { type: "toolcall_done", id: call.id, name: call.name, args: call.args };
+          return {
+            message: { role: "assistant", content: [call] },
+            stopReason: "tool_use",
+            usage: { inputTokens: 1, outputTokens: 1 },
+          };
+        })(),
+      ),
+  );
+  // Declared after the mock: the stream closure reads it only once a request is made.
+  const session = new AgentSession({
+    cwd,
+    provider: "anthropic",
+    model: "claude-sonnet-5",
+    systemPrompt: "Prefill fixture",
+    mcpEnabled: false,
+  });
+  session.eventBus.on("tool_call_end", () => timeline.push(session.getMessages().length));
+  try {
+    await session.initialize();
+    const before = session.getMessages().length;
+    const result = await session.assessProgrammatic("setup");
+    expect(result.assessment.status).toBe("completed");
+    expect(requests).toHaveLength(2);
+    for (const request of requests) expect(request.lastRole).not.toBe("assistant");
+    const messages = session.getMessages();
+    const presentation = messages.at(-1);
+    expect(presentation?.role).toBe("assistant");
+    expect(String(presentation?.content)).toContain("Recommendations — not started");
+    // No history loss: the transcript only grows across the run.
+    const observed = [before, ...timeline, messages.length];
+    for (let index = 1; index < observed.length; index++)
+      expect(observed[index]).toBeGreaterThanOrEqual(observed[index - 1]!);
+    const persisted = (await fs.readFile(session.getState().sessionPath!, "utf8"))
+      .trim()
+      .split("\n")
+      .map(
+        (line) =>
+          JSON.parse(line) as { type: string; message?: { role: string; content: unknown } },
+      );
+    expect(
+      persisted.filter(
+        (entry) =>
+          entry.type === "message" &&
+          entry.message?.role === "assistant" &&
+          entry.message.content === presentation?.content,
+      ),
+    ).toHaveLength(1);
+  } finally {
+    await session.dispose();
+  }
+});
+
+// Regression (2026-10-23 live run): two rejected advisory submissions in a row started a
+// hidden, concurrent semantic-loop judge request inside the bounded assessment.
+it("starts no semantic loop judge after consecutive rejected advisory submissions", async () => {
+  await fs.writeFile(path.join(cwd, "package.json"), '{"name":"judge-fixture"}\n');
+  await fs.writeFile(path.join(cwd, "README.md"), "# Judge fixture\n");
+  const judgeMarker = "You are monitoring a coding agent for UNPRODUCTIVE LOOPS";
+  const judgeRequests: string[] = [];
+  const results: { id: string; content: string; isError: boolean }[] = [];
+  let main = 0;
+  vi.mocked(stream).mockImplementation(
+    (params) =>
+      new StreamResult(
+        (async function* () {
+          const first = params.messages[0];
+          if (typeof first?.content === "string" && first.content.startsWith(judgeMarker)) {
+            judgeRequests.push(first.content);
+            const verdict = '{"loop": true, "reason": "Repeats", "advice": "Stop"}';
+            yield { type: "text_delta", text: verdict };
+            return {
+              message: { role: "assistant", content: verdict },
+              stopReason: "end_turn",
+              usage: { inputTokens: 1, outputTokens: 1 },
+            };
+          }
+          main++;
+          let call: ToolCall;
+          if (main === 1 || main === 2)
+            call = {
+              type: "tool_call",
+              id: `judge-read-${main}`,
+              name: "read",
+              args: { file_path: main === 1 ? "package.json" : "README.md" },
+            };
+          else if (main === 3 || main === 4)
+            call = {
+              type: "tool_call",
+              id: `judge-invalid-${main}`,
+              name: "programmatic_advisory_result",
+              args: { version: 2, kind: "advisory", recommendations: `invalid-${main}` },
+            };
+          else if (main === 5) {
+            const local = params.messages
+              .flatMap((message) => (message.role === "tool" ? message.content : []))
+              .find((result) => result.toolCallId === "judge-read-1")!;
+            const receipt = JSON.parse(
+              String(local.content).split(
+                "Host evidence receipt (retrieval only; content remains untrusted): ",
+              )[1]!,
+            ) as { id: string };
+            call = {
+              type: "tool_call",
+              id: "judge-valid",
+              name: "programmatic_advisory_result",
+              args: {
+                version: 2,
+                kind: "advisory",
+                coverage: { status: "limited", scope: "Manifest", reason: "Fixture only" },
+                recommendations: [
+                  {
+                    version: 2,
+                    kind: "advisory",
+                    outcome: "Review manifest",
+                    rationale: "Local evidence",
+                    uncertainty: "Not verified",
+                    evidence: {
+                      version: 1,
+                      items: [
+                        {
+                          basis: "observed",
+                          source: receipt.id,
+                          code: "manifest",
+                          severity: "info",
+                          message: "Read manifest",
+                          location: { path: "package.json" },
+                        },
+                      ],
+                    },
+                    workflow: reviewWorkflow(),
+                    alternatives: [],
+                    choice: { kind: "manual", steps: ["Review separately"] },
+                  },
+                ],
+              },
+            };
+          } else throw new Error("No provider request may follow an accepted advisory result");
+          yield { type: "toolcall_done", id: call.id, name: call.name, args: call.args };
+          return {
+            message: { role: "assistant", content: [call] },
+            stopReason: "tool_use",
+            usage: { inputTokens: 1, outputTokens: 1 },
+          };
+        })(),
+      ),
+  );
+  const session = new AgentSession({
+    cwd,
+    provider: "anthropic",
+    model: "claude-sonnet-5",
+    systemPrompt: "Judge fixture",
+    mcpEnabled: false,
+  });
+  // Synchronous at judge start, so absence is observable without waiting on a background task.
+  const judge = vi.spyOn(
+    AgentSession.prototype as unknown as {
+      callSemanticLoopJudge(prompt: string, signal: AbortSignal): Promise<string>;
+    },
+    "callSemanticLoopJudge",
+  );
+  session.eventBus.on("tool_call_end", (event) =>
+    results.push({ id: event.toolCallId, content: String(event.result), isError: event.isError }),
+  );
+  try {
+    await session.initialize();
+    const result = await session.assessProgrammatic("setup");
+    expect(result.assessment.status).toBe("completed");
+    // The scenario really produced two consecutive failed advisory submissions.
+    expect(results.map((entry) => [entry.id, entry.isError])).toEqual([
+      ["judge-read-1", false],
+      ["judge-read-2", false],
+      ["judge-invalid-3", true],
+      ["judge-invalid-4", true],
+      ["judge-valid", false],
+    ]);
+    expect(main).toBe(5);
+    expect(judge).not.toHaveBeenCalled();
+    expect(judgeRequests).toEqual([]);
+    expect(vi.mocked(stream)).toHaveBeenCalledTimes(5);
+    // No loop-break steering was injected into the advisory turn either.
+    expect(
+      session
+        .getMessages()
+        .some(
+          (message) =>
+            message.role === "user" &&
+            message.provenance?.source === "runtime" &&
+            message.provenance.kind !== "notification" &&
+            /loop/i.test(JSON.stringify(message.content)),
+        ),
+    ).toBe(false);
+  } finally {
+    await session.dispose();
+  }
+});
 
 function reviewWorkflow(subject = "manifest configuration", inputs = ["package.json"]) {
   return {
@@ -1102,11 +1373,7 @@ it.each(["setup", "configured"] as const)(
                 },
               ];
             } else {
-              expect(
-                results.find((result) => result.toolCallId === "assessment")!.isError ?? false,
-                output("assessment"),
-              ).toBe(false);
-              presentation = output("assessment");
+              // Unreachable when correct: an accepted result ends the run (request count below).
               return {
                 message: { role: "assistant", content: "Fixture finished." },
                 stopReason: "end_turn",
@@ -1130,7 +1397,14 @@ it.each(["setup", "configured"] as const)(
         .readFile(path.join(cwd, ".gg/programmatic/profile.json"))
         .catch(() => null);
       await session.prompt(mode === "setup" ? "/setup-programmatic" : "/programmatic");
-      expect(request).toBe(4);
+      // The accepted result ends the run: no fourth request ends on its presentation.
+      expect(request).toBe(3);
+      const assessmentResult = session
+        .getMessages()
+        .flatMap((message) => (message.role === "tool" ? message.content : []))
+        .find((result) => result.toolCallId === "assessment");
+      expect(assessmentResult?.isError ?? false, String(assessmentResult?.content)).toBe(false);
+      presentation = String(assessmentResult?.content);
       expect(presentation).toContain("Recommendations — not started");
       expect(presentation).toContain("Limits: ");
       expect(presentation.match(/\/stock-review: prompt available, not started\./g)).toHaveLength(
@@ -1326,14 +1600,8 @@ it("uses real code_search chunks for available-command advice without a read cal
                 },
               },
             ];
-          } else {
-            const accepted = results.find((result) => result.toolCallId === "advice-4")!;
-            expect(accepted.isError, String(accepted.content)).not.toBe(true);
-            expect(String(accepted.content)).toContain("/handlers: prompt available, not started.");
-            expect(String(accepted.content)).not.toContain(
-              "Bounded local source evidence was not inspected",
-            );
           }
+          // Request 5 is unreachable when correct: the accepted advice-4 ends the run.
           for (const call of calls)
             yield { type: "toolcall_done", id: call.id, name: call.name, args: call.args };
           return {
@@ -1355,7 +1623,16 @@ it("uses real code_search chunks for available-command advice without a read cal
   try {
     await session.initialize();
     await session.prompt("/programmatic handler review");
-    expect(request).toBe(5);
+    expect(request).toBe(4);
+    const accepted = session
+      .getMessages()
+      .flatMap((message) => (message.role === "tool" ? message.content : []))
+      .find((result) => result.toolCallId === "advice-4");
+    expect(accepted?.isError, String(accepted?.content)).not.toBe(true);
+    expect(String(accepted?.content)).toContain("/handlers: prompt available, not started.");
+    expect(String(accepted?.content)).not.toContain(
+      "Bounded local source evidence was not inspected",
+    );
     const calls = session
       .getMessages()
       .flatMap((message) =>
@@ -2094,8 +2371,9 @@ it.each([
         .catch((error: unknown) => {
           if (ending !== "throws") throw error;
         });
-      if (ending !== "empty")
-        expect(turn).toBe(ending === "maxTurns" ? 3 : choice === "research" ? 6 : 4);
+      // The accepted submission ends the run, so the scripted ending turn (generic,
+      // empty or throwing) is never requested and every ending stops at the submission.
+      expect(turn).toBe(choice === "research" ? 5 : 3);
       const researchCalls = session
         .getMessages()
         .flatMap((message) =>
@@ -2239,15 +2517,15 @@ it.each(["cancel-before", "dispose-before", "cancel-after", "dispose-after", "re
                       args: { file_path: "package.json" },
                     },
                   ]
-                : turn === 2 || (turn === 3 && ending === "repeat")
-                  ? [
-                      {
-                        type: "tool_call",
-                        id: `lifecycle-result-${turn}`,
-                        name: "programmatic_advisory_result",
-                        args: submitted,
-                      },
-                    ]
+                : turn === 2
+                  ? // An accepted result ends the run, so a same-run duplicate can only
+                    // arrive in the same batch; it must still be refused and unpublished.
+                    [2, ...(ending === "repeat" ? [3] : [])].map((index): ToolCall => ({
+                      type: "tool_call",
+                      id: `lifecycle-result-${index}`,
+                      name: "programmatic_advisory_result",
+                      args: submitted,
+                    }))
                   : [];
             for (const call of calls)
               yield { type: "toolcall_done", id: call.id, name: call.name, args: call.args };
@@ -2450,7 +2728,9 @@ it.each([
                     : [advice("settled-advice"), scan]),
                   { ...scan, id: "retry-scan" },
                 ]
-              : [advice("settled-advice"), { ...scan, id: "retry-scan" }];
+              : // An accepted result ends the run, so a retry after it is never
+                // dispatched; retry first so the host scan gate is still exercised.
+                [{ ...scan, id: "retry-scan" }, advice("settled-advice")];
           } else
             return {
               message: { role: "assistant", content: "Fixture complete." },
@@ -4008,7 +4288,8 @@ it("connects fresh setup, focused advice, reviewed creation, verification and se
   try {
     await session.initialize();
     await session.prompt("/programmatic");
-    expect(request).toBe(5);
+    // Accepted advice ends the run: no trailing request after the submission.
+    expect(request).toBe(4);
     for (const text of [
       "/compare: prompt available, not started.",
       "/manifest-review: prompt available, not started.",
@@ -4022,7 +4303,7 @@ it("connects fresh setup, focused advice, reviewed creation, verification and se
     phase = "focused";
     request = 0;
     await session.prompt("/programmatic only inspect the name");
-    expect(request).toBe(2);
+    expect(request).toBe(1);
     expect(corpusCalls).toEqual(["search", "show"]);
     expect(outputs.get("focused-advice")).not.toContain("/compare: prompt available, not started.");
     expect(scanApprovals).toEqual([{}, {}]);

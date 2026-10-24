@@ -106,8 +106,8 @@
   }
   .wn-lounge .whatsnew-tab {
     padding-inline: calc(var(--wn-px) * 3);
-    font-size: 16px;
-    line-height: 12px;
+    font-size: calc(var(--wn-px) * 8);
+    line-height: calc(var(--wn-px) * 6);
     white-space: nowrap;
   }
 }

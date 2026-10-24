@@ -83,10 +83,10 @@ try {
     for (const feed of feeds) {
       await page.getByRole("tab", { name: new RegExp(feed.label) }).click();
       assert.deepEqual(
-        // Each note in either layout (campfire story or history row); the
-        // story number beside it is decorative, so read the copy without it.
+        // Each note in either layout (latest-release row or history item); the
+        // row number beside it is decorative, so read the copy without it.
         await page
-          .locator('[role="tabpanel"]:visible :is(.wn-camp-story, .wn-history-item)')
+          .locator('[role="tabpanel"]:visible :is(.wn-row, .wn-history-item)')
           .evaluateAll((items) =>
             items.map((item) => {
               const copy = item.cloneNode(true);

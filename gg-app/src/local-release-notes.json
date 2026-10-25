@@ -1,35 +1,18 @@
 {
   "schemaVersion": 1,
-  "date": "2026-10-24",
-  "label": "Upstream 0.96.1, with GG Royale and a pixel-art Home",
+  "date": "2026-10-25",
+  "label": "Upstream 0.96.2, with changes made in one move",
   "sections": [
     {
-      "title": "In your workspace",
+      "title": "From upstream 0.96.2",
       "items": [
-        "Home got the new pixel-art look, with your name on it. The hand-lettered gold title spells `Supah Coder` on Home and at the top of `What's new`, and the little coloured dots beside `What's new` still tell you whether the Local Fork or upstream has notes you haven't read.",
-        "`What's new` keeps its `Local Fork`, `Upstream` and `Decisions` tabs, now sitting on the new notes board in the same pixel lettering. In a narrow window the tabs shrink to fit on one line instead of wrapping.",
-        "`GG Royale` opens from any pane. Press `Royale` on Home, or the `Royale` key in a workspace's usage panel, and the game fills the window. `Back` takes you straight back to where you were, and your session keeps running underneath."
+        "Your agent now makes each change in one move. It writes only the lines that are new and runs your tests in the same step, instead of editing, checking and re-running one by one. It also starts every session already knowing your project's files, so its first move can open the right ones instead of looking around. Upstream measured a typical task finishing about `21%` faster while using less of your plan."
       ]
     },
     {
       "title": "Also in your Local Fork",
       "items": [
-        "`Opportunities` is easier to find your way around. A fixed header shows a one-line status and `Find ideas`, and three tabs sort the rest: `Ideas` for suggestions, `Checks` for setup and saved check results, and `Past ideas` for history. The panel opens on whichever tab has something for you and stays where you put it. Each idea is a card that opens in place, so the others stay in view, and the wording is plainer throughout.",
-        "When `Opportunities` spots a group of similar items, you can build one example and let GG generate the rest, one approved step at a time. GG creates the generator, checks that it rebuilds your example exactly, then previews every other item: which files would be created, changed, left alone or in conflict. Nothing is written until you approve that exact preview, each item gets its own undo, and files GG didn't create are never overwritten.",
-        "Question cards keep their layout. When your agent adds details such as a file-by-file plan, the line breaks and indentation come through as written, and a long one scrolls inside its own box, keyboard included, instead of pushing the answer options out of reach.",
-        "Idea searches finish cleanly. A search now ends as soon as its result is accepted, rather than sending one more request that current Claude models turn away, which could end a finished search with an error."
-      ]
-    },
-    {
-      "title": "Also from upstream 0.96.0 and 0.96.1",
-      "items": [
-        "Meet `GG Royale`, an online blackjack table played with chips you earn by coding: finished runs, commits, squashed bugs and deploys all pay out, and you can sit at a table and chat with other players. There's no real money anywhere. Nothing is sent until you open it and agree to link, and even then it only hears that something happened, never your code, files or prompts. You can delete all your Royale data any time.",
-        "Home is now an evening clearing in the pines that follows your local time of day, with fireflies, chunky plate buttons and pixel tooltips. The `What's new` window opens beside a little campfire to match.",
-        "Fewer long stalls when the AI goes quiet. If a reply on a warmed-up conversation hasn't started in about `30 seconds`, GG quietly sends one backup request and keeps whichever answers first, so a stuck request no longer costs you minutes of `Retrying…`. A slow but healthy reply is never cut off.",
-        "Your agent reads routine command output in fewer tokens. Folder listings and long `git log` or `git status` output are trimmed to the facts, while failures and error messages always come through in full.",
-        "`Gemini` is gone from the login list, the model picker and startup, because Google is suspending accounts that use its Gemini subscription through third-party tools. That includes the `Gemini API key` option added earlier. If you were signed in, GG simply moves you to another provider.",
-        "Grok subscription chats now introduce themselves as the latest `Grok CLI` version, after xAI started turning older clients away with an `HTTP 426` error.",
-        "The built-in skills for security, privacy law, databases, UI design, speed and debugging are leaner and more up to date, so they kick in at the right moments with less wasted effort."
+        "On Windows, those one-move edits don't trip over `python3`. On many PCs that name only opens the Microsoft Store, so the edit would fail and your agent would lose a turn retrying. When GG sees that, it tells your agent to use the `python` you actually have installed. If `python3` works on your PC, nothing changes."
       ]
     }
   ]

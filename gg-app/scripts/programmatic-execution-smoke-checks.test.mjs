@@ -6,6 +6,8 @@ import { ProgrammaticChat } from "../src/ProgrammaticChat";
 import { initialProgrammaticChatState } from "../src/programmatic-chat-state";
 import {
   smokeLabels,
+  smokeSteps,
+  smokeStepWords,
   smokeButton,
   smokeDialShows,
   closedSmokeDisclosure,
@@ -134,8 +136,16 @@ it("native selectors match actual setup, current, discovery and stale UI; disclo
     return target;
   };
   try {
+    // Brand-new: step 1 is Next; Find ideas still works from step 2 and Skip writes nothing.
+    expect(evaluate(smokeStepWords)).toEqual(["Next", "Not yet", "Not yet"]);
+    expect(Array.from(document.querySelectorAll('[role="tab"]'), (tab) => tab.textContent)).toEqual(
+      smokeSteps.map((label, index) => expect.stringContaining(`${index + 1} ${label}`)),
+    );
     expect(button(smokeLabels.setup).disabled).toBe(false);
     expect(button(smokeLabels.discover).disabled).toBe(false);
+    expect(closedSmokeDisclosure(button(smokeLabels.discover))?.getAttribute("role")).toBe("tab");
+    expect(button(smokeLabels.skip).disabled).toBe(false);
+    expect(evaluate(smokeButton("Refresh results"))).toBeUndefined();
     const candidate = {
       assessmentId: "assessment",
       candidateId: "candidate",
@@ -183,19 +193,29 @@ it("native selectors match actual setup, current, discovery and stale UI; disclo
       selection: { source: "current", id: "candidate" },
     });
     view.rerender(createElement(ProgrammaticChat, { ...props, state: { ...state } }));
-    expect(evaluate(smokeButton(smokeLabels.setup))).toBeUndefined();
-    expect(button(smokeLabels.currentSetup).disabled).toBe(false);
+    // Checks saved and ideas found: Review is Next and shown; setup sits on step 1.
+    expect(evaluate(smokeStepWords)).toEqual(["Done", "Done", "Next"]);
+    expect(button(smokeLabels.setup).disabled).toBe(false);
+    expect(closedSmokeDisclosure(button(smokeLabels.setup))?.getAttribute("role")).toBe("tab");
+    expect(evaluate(smokeButton(smokeLabels.refresh))).toBeUndefined();
+    expect(evaluate(smokeButton("Refresh results"))).toBeUndefined();
     expect(button(smokeLabels.scan).disabled).toBe(false);
     expect(button(smokeLabels.review).disabled).toBe(false);
-    // Find ideas (header) and idea cards are always visible; past ideas sit behind their tab.
-    for (const label of [smokeLabels.discover, "Fixture task"])
+    // The quiet header key searches again; idea cards are on the shown Review step.
+    expect(button(smokeLabels.rediscover).disabled).toBe(false);
+    for (const label of [smokeLabels.rediscover, "Fixture task", smokeLabels.scan])
       expect(closedSmokeDisclosure(button(label))).toBeNull();
-    const pastTab = closedSmokeDisclosure(button("Show past ideas"));
-    expect(pastTab?.getAttribute("role")).toBe("tab");
-    // Revealing a tab updates React state, so it runs inside act like a user click.
-    await act(() => revealSmokeTarget(client, smokeButton("Show past ideas")));
-    expect(closedSmokeDisclosure(button("Show past ideas"))).toBeNull();
-    expect(pastTab?.getAttribute("aria-selected")).toBe("true");
+    // Past ideas is a header link controlling a hidden region.
+    const pastLink = closedSmokeDisclosure(button(smokeLabels.close));
+    expect(pastLink?.textContent).toBe(smokeLabels.pastIdeas);
+    expect(pastLink?.getAttribute("aria-expanded")).toBe("false");
+    // Revealing updates React state, so it runs inside act like a user click.
+    await act(() => revealSmokeTarget(client, smokeButton(smokeLabels.close)));
+    expect(closedSmokeDisclosure(button(smokeLabels.close))).toBeNull();
+    expect(pastLink?.getAttribute("aria-expanded")).toBe("true");
+    // Opening Past ideas only reads saved history.
+    expect(onAction.mock.calls).toEqual([[{ version: 1, action: "history-report", offset: 0 }]]);
+    onAction.mockClear();
     await act(() => revealSmokeTarget(client, smokeButton("Fixture task")));
     const details = document.querySelector('[aria-label="Selected idea"] details');
     expect(details.open).toBe(false);
@@ -210,6 +230,16 @@ it("native selectors match actual setup, current, discovery and stale UI; disclo
     );
     expect(button(smokeLabels.rediscover).disabled).toBe(false);
     expect(button(smokeLabels.review).disabled).toBe(true);
+    // Relevant project files changed since saving: step 1 is Next again with Update checks.
+    view.rerender(
+      createElement(ProgrammaticChat, {
+        ...props,
+        state: { ...state, configuration: { ...state.configuration, refreshAvailable: true } },
+      }),
+    );
+    expect(button(smokeLabels.refresh).disabled).toBe(false);
+    expect(evaluate(smokeButton(smokeLabels.setup))).toBeUndefined();
+    expect(evaluate(smokeStepWords)[0]).toBe("Next");
   } finally {
     cleanup();
   }
@@ -222,7 +252,7 @@ it("smokeButton finds the composer dial hub by accessible name despite sizer tex
       <button class="action-dial-hub" aria-label="Opportunities"><span aria-hidden="true"><span>Opportunities</span><span>Post-check</span><span>Opportunities</span></span></button>
       <div role="menu"><button role="menuitemradio" aria-label="Opportunities"></button><button role="menuitemradio" aria-label="Post-check"></button></div>
     </div>
-    <button>Review setup</button>`;
+    <button>Show suggested checks</button>`;
   try {
     const hub = document.querySelector(".action-dial-hub");
     expect(hub.textContent.trim()).not.toBe("Opportunities");
@@ -245,10 +275,12 @@ it("all native drivers use the rendered-contract selectors and disclosure helper
     const source = readFileSync(resolve("scripts", file), "utf8");
     expect(source).toContain("smokeLabels");
     expect(source).toContain("revealSmokeTarget");
-    expect(source).not.toMatch(/Run saved checks|Discover opportunities|Review a new capability/);
+    expect(source).not.toMatch(
+      /Run saved checks|Discover opportunities|Review a new capability|Refresh results|Run project checks|Approve and save|Review setup/,
+    );
   }
   const input = readFileSync(resolve("scripts/programmatic-native-input-smoke.mjs"), "utf8");
-  expect(input).toContain("smokeLabels.currentSetup");
+  expect(input).toContain("smokeLabels.setup");
   expect(input).toContain('await key("Enter", "Enter", 13)');
 });
 
@@ -276,7 +308,7 @@ it.each(["setup", "configured"])(
           {
             type: "function_call_output",
             call_id: step.call_id,
-            output: "## Recommendations — not started",
+            output: "## What AI found: 1 idea, nothing you need to do",
           },
         ],
       }),
@@ -396,7 +428,7 @@ describe("non-Tauri discovery-only provider sequence", () => {
     const advice = JSON.parse(discoveryWorkflowStep(3, { tools, input }).arguments);
     expect(programmaticAssessmentResultV2Schema.safeParse(advice).success).toBe(true);
     expect(advice.recommendations[0].choice.kind).toBe("missing-capability");
-    result("discovery-submit", "Recommendations");
+    result("discovery-submit", "## What AI found: 1 idea, 1 needs your call");
     // An accepted advisory result ends the run: no settle turn follows the submission.
     expect(discoveryWorkflowStep(4, { tools, input }).name).toBe("read");
     result("review-read", "harmless-isolated-fixture");
@@ -723,7 +755,7 @@ describe("bounded family workflow provider sequence", () => {
       "receipt-2a",
       "receipt-3a",
     ]);
-    result(input, "family-submit", "Recommendations recorded");
+    result(input, "family-submit", "## What AI found: 1 idea, 1 needs your call");
     // An accepted advisory result ends the run: review starts at request 3.
     const reviewReads = step(3);
     expect(reviewReads).toHaveLength(5);

@@ -3,6 +3,12 @@ import type {
   ProgrammaticChatProposal,
   ProgrammaticChatReport,
 } from "@kenkaiiii/gg-core/programmatic-chat-contract";
+import {
+  CHECKS_ACTIONS,
+  CHECKS_COPY,
+  checksReviewLabel,
+  staleProposalText,
+} from "./programmatic-presentation";
 
 interface ProgrammaticSetupProps {
   id: string;
@@ -44,14 +50,14 @@ export function ProgrammaticSetup({
     <section id={id} className="programmatic-stage inst-module" aria-label="Check setup">
       <h3>{configuration?.status === "current" ? "Check setup" : "Set up checks"}</h3>
       {configuration?.status === "current" && !showProposal ? (
-        <p>Your checks are set up.</p>
+        <p>{CHECKS_COPY.ready}</p>
       ) : (
-        <p>Pick which checks to save. You don't need this to find ideas.</p>
+        <p>{CHECKS_COPY.intro}</p>
       )}
       {(configuration?.status !== "current" || showProposal) && (
         <>
           {reportAssessmentSuperseded ? (
-            <p>These results are older than your latest setup. Refresh results to update them.</p>
+            <p>{CHECKS_COPY.superseded}</p>
           ) : (
             <>
               {report && (!showProposal || report.status !== "setup-required") && (
@@ -63,11 +69,7 @@ export function ProgrammaticSetup({
             </>
           )}
           {setupBlockedReason && <p>{setupBlockedReason}</p>}
-          {report?.status === "stale" && (
-            <p>
-              Older results are still below. After saving, choose Run project checks to update them.
-            </p>
-          )}
+          {report?.status === "stale" && <p>{CHECKS_COPY.staleAfterSave}</p>}
           {configuration?.diagnostic && (
             <details>
               <summary>Setup error details</summary>
@@ -124,16 +126,8 @@ export function ProgrammaticSetup({
         </>
       )}
       <div className="programmatic-actions">
-        <button
-          className={`btn ${!showProposal && configuration?.status !== "current" ? "btn-primary" : "btn-ghost"} btn-sm`}
-          disabled={inspectDisabled}
-          onClick={onInspect}
-        >
-          {configuration?.status === "current"
-            ? "Change settings"
-            : configuration?.refreshAvailable
-              ? "Review updated setup"
-              : "Review setup"}
+        <button className="btn btn-ghost btn-sm" disabled={inspectDisabled} onClick={onInspect}>
+          {checksReviewLabel(configuration)}
         </button>
       </div>
       {proposal && showProposal && (
@@ -141,21 +135,18 @@ export function ProgrammaticSetup({
           <h3>
             {proposal.operation === "current"
               ? currentReview
-                ? "Setup is up to date"
-                : "Older setup review"
-              : "Review your checks"}
+                ? "Checks are up to date"
+                : "Older suggested checks"
+              : "Suggested checks"}
           </h3>
           {proposal.operation === "current" ? (
             currentReview ? (
-              <p>Nothing to save. If you change code, just run the checks again.</p>
+              <p>{CHECKS_COPY.proposalCurrent}</p>
             ) : (
-              <p>A newer review replaced this one. It's shown for reference only.</p>
+              <p>{CHECKS_COPY.proposalReplaced}</p>
             )
           ) : (
-            <p>
-              Saving writes these check settings to your project. It doesn't start any work; each
-              task asks for your approval first.
-            </p>
+            <p>{CHECKS_COPY.proposalIntro}</p>
           )}
 
           {proposal.historyPolicy && (
@@ -164,8 +155,7 @@ export function ProgrammaticSetup({
                 Saving past ideas: {proposal.historyPolicy.enabled ? "on" : "off"}.
                 {proposal.historyPolicy.enabled &&
                   " Ideas from future searches will be saved. This doesn't approve any work."}
-                {proposal.operation === "history-upgrade" &&
-                  " You can leave without approving and keep your checks. Going back later needs another approval."}
+                {proposal.operation === "history-upgrade" && CHECKS_COPY.historyUpgrade}
               </p>
             </>
           )}
@@ -215,7 +205,7 @@ export function ProgrammaticSetup({
             </ul>
           </details>
           {!proposalApprovable && proposal.operation !== "current" && (
-            <p>This review is out of date. Choose Review setup again.</p>
+            <p>{staleProposalText(configuration)}</p>
           )}
           <div className="programmatic-actions">
             {proposal.handle && (
@@ -224,21 +214,14 @@ export function ProgrammaticSetup({
                 disabled={approveDisabled}
                 onClick={onApprove}
               >
-                {proposal.operation === "refresh"
-                  ? "Approve and save update"
-                  : proposal.operation === "history-upgrade"
-                    ? "Turn on saving past ideas"
-                    : "Approve and save setup"}
+                {CHECKS_ACTIONS.save}
               </button>
             )}
             <button className="btn btn-ghost btn-sm" disabled={closeDisabled} onClick={onClose}>
-              Close review without saving
+              {CHECKS_ACTIONS.notNow}
             </button>
           </div>
         </div>
-      )}
-      {report?.status === "setup-required" && !showProposal && (
-        <p>Nothing is saved until you approve. You can still find ideas.</p>
       )}
     </section>
   );

@@ -626,7 +626,10 @@
     auto;
   box-shadow: var(--inst-depth-steel);
 }
-.inst-tabs > [role="tab"][aria-selected="true"]::before {
+/* A step bar's Next step keeps its lamp lit even when another step is shown;
+   the step's status word carries the meaning, the lamp only repeats it. */
+.inst-tabs > [role="tab"][aria-selected="true"]::before,
+.inst-tabs > [role="tab"][aria-current="step"]::before {
   background: var(--primary);
   box-shadow:
     0 0 0 1px rgb(0 0 0 / 0.45),

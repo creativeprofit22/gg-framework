@@ -13,7 +13,7 @@ import { connectToDevWebview, createIsolatedProfile, reserveHeldTcpPort, sanitiz
 import { readProcessTable, processTreeSnapshot } from "./workspace-shell-evidence.mjs";
 import { runSmokeLifecycle, validateNativeSmokeEvidence, trackOwnedProcess, waitForLiveProcess } from "./programmatic-smoke-lifecycle.mjs";
 import { createNativeInputSmoke } from "./programmatic-native-input-smoke.mjs";
-import { smokeLabels, smokeButton, smokeDialHub, smokeDialShows, smokeComposerActionStorageKey, revealSmokeTarget, assessmentWorkflowStep, assessmentRequestCount, readExecutionDisplay, assertTranscriptIsolation, extendedWorkflowStep, extendedRequestCount, extendedCommandName } from "./programmatic-execution-smoke-checks.mjs";
+import { smokeLabels, smokeStepWords, smokeButton, smokeDialHub, smokeDialShows, smokeComposerActionStorageKey, revealSmokeTarget, assessmentWorkflowStep, assessmentRequestCount, readExecutionDisplay, assertTranscriptIsolation, extendedWorkflowStep, extendedRequestCount, extendedCommandName } from "./programmatic-execution-smoke-checks.mjs";
 
 import { discoveryWorkflowStep, discoveryRequestCount, runDiscoverySmoke } from "./programmatic-discovery-smoke.mjs";
 import { familyWorkflowStep, familyRequestCount, familyResponseEvents, runFamilySmoke, seedFamily } from "./programmatic-family-smoke.mjs";
@@ -309,7 +309,7 @@ async function run() {
         await waitFor("rendered composer dial", () => client.evaluate(`!!(${smokeDialHub})`));
         assert.equal(await client.evaluate(smokeDialShows(label)), true, "Composer dial shows Opportunities, never Post-check");
       }
-      if (input) return input.activate(input.button(label), label, label === "Approve and save setup");
+      if (input) return input.activate(input.button(label), label, label === smokeLabels.save);
       const target = smokeButton(label);
       await waitFor(`rendered ${label}`, () => client.evaluate(`!!(${target}) && !(${target}).disabled`));
       await revealSmokeTarget(client, target);
@@ -317,6 +317,16 @@ async function run() {
       await client.evaluate(`(${target}).click()`);
     };
     let assessmentMessageDelta = 0;
+    // Only a configured assessment under an enabled history policy may write idea history.
+    const historyPaths = [".gg/programmatic/recommendations.json", ".gg/programmatic/recommendations.previous.json"];
+    const historyFiles = () => { const files = snapshot(paths.project); return Object.fromEntries(historyPaths.map((path) => [path, files[path] ?? null])); };
+    const historyEnabled = () => {
+      const profilePath = join(paths.project, ".gg/programmatic/profile.json");
+      if (!existsSync(profilePath)) return false;
+      const profile = JSON.parse(readFileSync(profilePath, "utf8"));
+      return profile.version === 3 && profile.historyPolicy?.enabled === true;
+    };
+    const historyWrites = new Set();
     const assess = async (assessmentMode, label) => {
       assert.equal(pendingAssessment, undefined);
       const specialistCount = requests.length;
@@ -324,14 +334,13 @@ async function run() {
       const eventOffset = await client.evaluate(`window.fixtureEvents.length`);
       const entry = { mode: assessmentMode, callId: `assessment-${assessmentMode}-${assessments.length + 1}`, requests: [] };
       pendingAssessment = entry;
+      const historyBefore = historyFiles();
+      const savesHistory = assessmentMode === "configured" && historyEnabled();
       await click(label);
       await waitFor(`${assessmentMode} assessment settled`, async () => {
         if (providerFailure) throw providerFailure;
         const state = await client.evaluate(`window.__TAURI_INTERNALS__.invoke("agent_state", {paneId:"primary"})`);
-        // A successful initial review may replace Review setup with Change settings.
-        const ready = assessmentMode === "setup" ? "Close review without saving" : smokeLabels.scan;
-        return entry.requests.length === assessmentRequestCount && !state.running &&
-          await client.evaluate(`!!(${smokeButton(ready)}) && !(${smokeButton(ready)}).disabled`);
+        return entry.requests.length === assessmentRequestCount && !state.running && await searchEnabled();
       });
       assert.equal(providerFailure, undefined);
       assert.equal(entry.requests.length, assessmentRequestCount);
@@ -343,11 +352,50 @@ async function run() {
       entry.messageDelta = after.messageCount - before.messageCount;
       assessmentMessageDelta += entry.messageDelta;
       entry.events = await client.evaluate(`window.fixtureEvents.splice(${eventOffset})`);
+      const historyAfter = historyFiles();
+      entry.historyChanged = historyPaths.filter((path) => historyBefore[path] !== historyAfter[path]);
+      assert.equal(entry.historyChanged.includes(historyPaths[0]), savesHistory, "Idea history is saved only by a configured assessment with history enabled");
+      for (const path of entry.historyChanged) historyWrites.add(path);
       assert.ok(!entry.events.some((event) => event.type === "ask_user" || event.data?.text?.includes("[research]")), "Assessment cannot request task approval or run a specialist");
       assessments.push(entry);
       pendingAssessment = undefined;
       json(join(paths.audit, "assessment-requests.json"), assessments);
     };
+    // Checks actions are deterministic: no provider request and no transcript turn.
+    const deterministic = [];
+    const act = async (label, settled) => {
+      assert.equal(pendingAssessment, undefined);
+      const before = await client.evaluate(`window.__TAURI_INTERNALS__.invoke("agent_state", {paneId:"primary"})`);
+      const counts = { requests: requests.length, assessments: assessments.length };
+      const historyBefore = historyFiles();
+      // Prove this click ran a panel route (status "Working…"); an unchanged scan rewrites no file.
+      assert.equal(await client.evaluate(`(() => { const status = document.querySelector('.programmatic-chat .opp-status'); if (!status) return false;
+        window.fixtureStatus?.disconnect(); window.fixtureStatusSeen = [];
+        window.fixtureStatus = new MutationObserver(() => window.fixtureStatusSeen.push(status.textContent));
+        window.fixtureStatus.observe(status, { childList: true, characterData: true, subtree: true }); return true; })()`), true);
+      await click(label);
+      await waitFor(`${label} settled`, async () => {
+        if (providerFailure) throw providerFailure;
+        const state = await client.evaluate(`window.__TAURI_INTERNALS__.invoke("agent_state", {paneId:"primary"})`);
+        const ran = await client.evaluate(`window.fixtureStatusSeen.includes("Working…") && !/^(Working|Loading)…$/.test(document.querySelector('.programmatic-chat .opp-status')?.textContent ?? "")`);
+        return !state.running && ran && await settled() && await searchEnabled();
+      });
+      await client.evaluate(`window.fixtureStatus.disconnect()`);
+      assert.equal(providerFailure, undefined);
+      assert.deepEqual({ requests: requests.length, assessments: assessments.length }, counts, `${label} makes no provider request`);
+      const after = await client.evaluate(`window.__TAURI_INTERNALS__.invoke("agent_state", {paneId:"primary"})`);
+      assert.equal(after.sessionId, before.sessionId);
+      assert.equal(after.messageCount, before.messageCount, `${label} adds no transcript turn`);
+      assert.deepEqual(historyFiles(), historyBefore, `${label} writes no idea history`);
+      deterministic.push({ label, providerRequests: 0, transcriptTurns: 0 });
+      json(join(paths.audit, "deterministic-actions.json"), deterministic);
+    };
+    // Results load by themselves when the panel opens; reopening reloads them.
+    const reopen = async () => { await click("Opportunities"); await click("Opportunities"); };
+    const enabled = (label) => client.evaluate(`!!(${smokeButton(label)}) && !(${smokeButton(label)}).disabled`);
+    // Search is Find ideas, or Search again once Review is the shown Next step.
+    async function searchEnabled() { return await enabled(smokeLabels.discover) || await enabled(smokeLabels.rediscover); }
+    const stepWords = () => client.evaluate(smokeStepWords);
     if (familyWorkflow) {
       const protectedSnapshot = () => Object.fromEntries(Object.entries(snapshot(agentDir)).filter(([name]) =>
         name === "settings.json" || name.startsWith("commands/") || name.startsWith("programmatic/")));
@@ -388,16 +436,21 @@ async function run() {
       return { ...result, changedProjectFiles: [], childTranscript: false };
     }
     await click("Opportunities");
-    await waitFor("setup-required section", () => client.evaluate(`document.querySelector(".programmatic-chat")?.textContent.includes("Nothing is saved until you approve.")`));
-    await assess("setup", smokeLabels.setup);
-    await waitFor("exact proposal", () => client.evaluate(`document.querySelector('[aria-label="Exact settings to save"]')?.textContent.includes('"research"')`));
-    assert.equal(requests.length, 0, "No specialist dispatch during setup assessment");
-    assert.equal(assessments.length, 1, "Exactly one explicit setup assessment");
-    assert.equal(existsSync(fixture.statePath), false, "Setup assessment cannot scan implicitly");
+    await waitFor("setup-required section", () => client.evaluate(`document.querySelector(".programmatic-chat")?.textContent.includes(${JSON.stringify("You don't need this to find ideas.")})`));
+    assert.deepEqual(await stepWords(), ["Next", "Not yet", "Not yet"], "First open: Quick checks is Next");
+    await act(smokeLabels.setup, () => client.evaluate(`document.querySelector('[aria-label="Exact settings to save"]')?.textContent.includes('"research"')`));
+    assert.equal(await enabled(smokeLabels.save), true);
+    assert.equal(await enabled(smokeLabels.notNow), true);
+    assert.equal(existsSync(fixture.statePath), false, "Show suggested checks cannot scan implicitly");
     assert.equal(existsSync(join(paths.project, ".gg/programmatic/profile.json")), false, "Inspection must not write approval");
-    await click("Approve and save setup");
-    await waitFor("approved profile", () => existsSync(join(paths.project, ".gg/programmatic/profile.json")));
-    await assess("configured", smokeLabels.scan);
+    await act(smokeLabels.save, async () => existsSync(join(paths.project, ".gg/programmatic/profile.json")) && await enabled(smokeLabels.scan));
+    assert.equal(existsSync(fixture.statePath), false, "Save checks does not scan");
+    await waitFor("Find ideas is Next", async () => JSON.stringify(await stepWords()) === JSON.stringify(["Done", "Next", "Not yet"]));
+    // Find ideas is the only AI action; with saved checks it also updates check results.
+    await assess("configured", smokeLabels.discover);
+    await waitFor("Review is Next", async () => JSON.stringify(await stepWords()) === JSON.stringify(["Done", "Done", "Next"]));
+    if (await enabled(smokeLabels.openReview)) await click(smokeLabels.openReview);
+    assert.equal(await client.evaluate(`document.querySelector('.programmatic-chat [role="tab"][aria-selected="true"]')?.textContent.includes("Review")`), true, "Review is shown");
     await waitFor("persisted scan", () => existsSync(fixture.statePath));
     const scanned = JSON.parse(readFileSync(fixture.statePath, "utf8"));
     assert.equal(scanned.records.length, 1);
@@ -417,7 +470,7 @@ async function run() {
       const terminal = JSON.parse(previousState.toString("utf8")).records[0];
       assert.equal(terminal.lifecycle.state, driftOnly ? "dismissed" : "completed");
       json(join(paths.project, "package.json"), { name: "harmless-isolated-fixture", description: "one exact configuration drift" });
-      await click("Refresh results");
+      await reopen();
       await waitFor("exact rendered drift", () => client.evaluate(`document.querySelector('.programmatic-chat')?.textContent.includes('Changed: package.json')`));
       assert.equal(await client.evaluate(`Array.from(document.querySelectorAll('.programmatic-chat button')).find(b=>b.textContent.trim()===${JSON.stringify(smokeLabels.scan)}).disabled`), true);
       assert.equal(await client.evaluate(`Array.from(document.querySelectorAll('.programmatic-chat button')).some(b=>b.textContent.trim()==='Review and run' && !b.disabled)`), false);
@@ -425,20 +478,17 @@ async function run() {
       assert.deepEqual(readFileSync(profilePath), previousProfile);
       assert.deepEqual(readFileSync(fixture.statePath), previousState);
       await observeMinimized?.(driftOnly ? "dismissed-exact-drift" : "completed-exact-drift");
-      await assess("setup", "Review updated setup");
-      await waitFor("refresh proposal", () => client.evaluate(`Array.from(document.querySelectorAll('button')).some(b=>b.textContent.trim()==='Approve and save update' && !b.disabled)`));
+      await act(smokeLabels.refresh, () => enabled(smokeLabels.save));
       assert.deepEqual(readFileSync(profilePath), previousProfile, "Review cannot write setup");
-      await click("Approve and save update");
-      await waitFor("new approved fingerprint", () => JSON.parse(readFileSync(profilePath, "utf8")).configurationFingerprint.sha256 !== fixture.fingerprint);
+      await act(smokeLabels.save, () => JSON.parse(readFileSync(profilePath, "utf8")).configurationFingerprint.sha256 !== fixture.fingerprint);
       assert.deepEqual(readFileSync(fixture.statePath), previousState, "Approval must not scan or reset lifecycle");
       await observeMinimized?.("refresh-approved-before-rescan");
-      await assess("configured", smokeLabels.scan);
-      await waitFor("reconciled fingerprint", () => JSON.parse(readFileSync(fixture.statePath, "utf8")).configurationFingerprint.sha256 !== fixture.fingerprint);
+      await act(smokeLabels.scan, () => JSON.parse(readFileSync(fixture.statePath, "utf8")).configurationFingerprint.sha256 !== fixture.fingerprint);
       await waitFor("retained terminal selection", () => client.evaluate(`document.querySelector('.programmatic-row[aria-pressed="true"]')?.textContent.includes(${JSON.stringify(terminalLabel)}) && document.querySelector('.programmatic-detail')?.textContent.includes(${JSON.stringify(terminalLabel)})`));
       const refreshed = JSON.parse(readFileSync(fixture.statePath, "utf8")).records[0];
       assert.deepEqual(refreshed.opportunity.identity, terminal.opportunity.identity);
       assert.deepEqual(refreshed.lifecycle, terminal.lifecycle);
-      assert.equal(requests.length, driftOnly ? 0 : 3, "Drift assessments never dispatch a specialist");
+      assert.equal(requests.length, driftOnly ? 0 : 3, "Drift handling never dispatches a specialist");
       assert.equal(providerFailure, undefined);
       json(join(paths.audit, "drift.json"), { changedInput: "package.json", identity: fixture.id,
         previousFingerprint: fixture.fingerprint, fingerprint: JSON.parse(readFileSync(profilePath, "utf8")).configurationFingerprint.sha256,
@@ -447,8 +497,7 @@ async function run() {
         stateBefore: createHash("sha256").update(previousState).digest("hex"), requests: requests.length });
     };
     if (driftOnly) {
-      await click("Dismiss this item");
-      await waitFor("dismissed fixture detail", () => client.evaluate(`document.querySelector('.programmatic-detail')?.textContent.includes('Dismissed')`));
+      await act(smokeLabels.dismiss, () => client.evaluate(`document.querySelector('.programmatic-detail')?.textContent.includes('Dismissed')`));
       await reconcileDrift();
     } else {
     if (input) {
@@ -492,8 +541,7 @@ async function run() {
     assert.equal(JSON.parse(readFileSync(fixture.statePath, "utf8")).records[0].lifecycle.state, "completed");
     await waitFor("completed selected detail", () => client.evaluate(`document.querySelector('.programmatic-detail')?.textContent.includes('Done')`));
     await observeMinimized?.("read-only-task-completed");
-    await assess("configured", smokeLabels.scan);
-    await waitFor("completed selection after rescan", () => client.evaluate(`document.querySelector('.programmatic-row[aria-pressed="true"]')?.textContent.includes('Done') && document.querySelector('.programmatic-detail')?.textContent.includes('Done') && !document.querySelector('.programmatic-chat [role="status"]')?.textContent.includes('Working')`));
+    await act(smokeLabels.scan, () => client.evaluate(`document.querySelector('.programmatic-row[aria-pressed="true"]')?.textContent.includes('Done') && document.querySelector('.programmatic-detail')?.textContent.includes('Done') && !document.querySelector('.programmatic-chat [role="status"]')?.textContent.includes('Working')`));
     assert.equal(JSON.parse(readFileSync(fixture.statePath, "utf8")).records[0].opportunity.identity.id, fixture.id);
     assert.equal(requests.length, 3, "Rescan must not dispatch another specialist");
     if (input) {
@@ -524,14 +572,13 @@ async function run() {
       const previousHash = hash(readFileSync(previousPath));
       writeFileSync(fixture.statePath, "{interrupted fixture primary");
       const corruptHash = hash(readFileSync(fixture.statePath));
-      await click("Refresh results");
+      await reopen();
       await waitFor("recovered persisted report", () => client.evaluate(`document.querySelector('.programmatic-chat')?.textContent.includes('These results are old.') && document.querySelector('.programmatic-detail')?.textContent.includes('Done')`));
       assert.equal(hash(readFileSync(fixture.statePath)), corruptHash, "Report reads must not repair primary bytes");
       assert.equal(hash(readFileSync(previousPath)), previousHash);
       assert.equal(await client.evaluate(`document.querySelector('.programmatic-detail')?.textContent.includes('Done')`), true);
       await observeMinimized?.("recovered-inspection");
-      await assess("configured", smokeLabels.scan);
-      await waitFor("explicit recovery scan", () => {
+      await act(smokeLabels.scan, () => {
         try { return programmaticLifecycleStateV1Schema.safeParse(JSON.parse(readFileSync(fixture.statePath, "utf8"))).success; } catch { return false; }
       });
       const restored = programmaticLifecycleStateV1Schema.parse(JSON.parse(readFileSync(fixture.statePath, "utf8")));
@@ -617,21 +664,17 @@ async function run() {
       assert.equal(requests.length, extendedRequestCount, "Reload cannot replay creation or execution");
       await subscribeEvents();
       await click("Opportunities");
-      await assess("configured", smokeLabels.scan);
-      await waitFor("retained terminal history after extension", () => client.evaluate(`document.querySelector('.programmatic-chat')?.textContent.includes('Done')`));
+      await act(smokeLabels.scan, () => client.evaluate(`document.querySelector('.programmatic-chat')?.textContent.includes('Done')`));
       assert.deepEqual(readFileSync(fixture.statePath), stateBytes);
       json(join(paths.audit, "extended-workflow.json"), { passed: true, creationId, executionId, requests: requests.length, history: "native renderer reload, same daemon/session; not daemon restart", verification: "canonical loading only; deterministic helper checks are backend evidence", profilePreserved: true, lifecyclePreserved: true });
       if (input) { input.evidence.passed = true; input.save(); }
     }
     assert.deepEqual(assessments.map((entry) => ({ mode: entry.mode, requests: entry.requests.length })),
-      ["setup", "configured", ...(driftOnly ? [] : ["configured"]),
-        ...(driftOnly || integratedRecovery ? ["setup", "configured"] : []),
-        ...(integratedRecovery ? ["configured"] : []), ...(extendedWorkflow ? ["configured"] : [])]
-        .map((assessmentMode) => ({ mode: assessmentMode, requests: assessmentRequestCount })),
-      "Only explicitly requested setup/configured assessments reach the provider");
+      [{ mode: "configured", requests: assessmentRequestCount }],
+      "Only the explicit Find ideas assessment reaches the provider");
     const after = snapshot(paths.project);
     const changes = [...new Set([...Object.keys(baseline), ...Object.keys(after)])].filter((key) => baseline[key] !== after[key]);
-    assert.deepEqual(changes.sort(), [...(extendedWorkflow ? [`.gg/commands/${extendedCommandName}.md`] : []), ".gg/programmatic/profile.json", ".gg/programmatic/state.json", ".gg/programmatic/state.previous.json", ...(driftOnly || integratedRecovery ? ["package.json"] : [])].sort());
+    assert.deepEqual(changes.sort(), [...(extendedWorkflow ? [`.gg/commands/${extendedCommandName}.md`] : []), ".gg/programmatic/profile.json", ".gg/programmatic/state.json", ".gg/programmatic/state.previous.json", ...[...historyWrites].filter((path) => after[path] !== baseline[path]), ...(driftOnly || integratedRecovery ? ["package.json"] : [])].sort());
     const finalParent = await client.evaluate(`window.__TAURI_INTERNALS__.invoke("agent_state", {paneId:"primary"})`);
     assert.equal(finalParent.provider, parentState.provider);
     assert.equal(finalParent.model, parentState.model);

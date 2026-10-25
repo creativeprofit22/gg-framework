@@ -134,9 +134,9 @@ window.renderFixture(${JSON.stringify(state)});
   assert.notEqual(focused.ring, "none");
   results.checks.keyboardFocus = focused;
   await capture("keyboard-focus");
-  await page.getByRole("button", { name: "Refresh results" }).click();
+  await page.getByRole("button", { name: "Check again" }).click();
   results.checks.pointerFocus = await page
-    .getByRole("button", { name: "Refresh results" })
+    .getByRole("button", { name: "Check again" })
     .evaluate((button) => button.matches(":focus-visible"));
   assert.equal(results.checks.pointerFocus, false);
   const overflow = () =>
@@ -264,7 +264,7 @@ window.renderFixture(${JSON.stringify(state)});
           reason: "Set up checks first.",
         },
         fingerprint: null,
-        reason: "Choose Review setup to pick your checks. Nothing changes until you save.",
+        reason: "Choose Show suggested checks to pick your checks. Nothing changes until you save.",
       },
     },
     error: {

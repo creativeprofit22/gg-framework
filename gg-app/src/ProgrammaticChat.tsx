@@ -7,10 +7,13 @@ import {
 import { Badge } from "./Badge";
 import { GlassLamp } from "./GlassLamp";
 import { ProgrammaticAssessment } from "./ProgrammaticAssessment";
-import { ProgrammaticIdeas, ProgrammaticPastIdeas } from "./ProgrammaticDiscovery";
+import {
+  ProgrammaticIdeaSearch,
+  ProgrammaticIdeas,
+  ProgrammaticPastIdeas,
+} from "./ProgrammaticDiscovery";
 import { NotesTabList } from "./NotesTabList";
 import { ProgrammaticSetup } from "./ProgrammaticSetup";
-import { evidenceBasisLabel } from "./ProgrammaticExecutionEvidence";
 import {
   canRunProgrammaticSelection,
   canScanProgrammatic,
@@ -19,20 +22,26 @@ import {
   type ProgrammaticChatState,
 } from "./programmatic-chat-state";
 import {
-  opportunityStatusLine,
+  nextOpportunityStep,
+  opportunitySteps,
+  useChecksSkip,
   useOpportunityTab,
-  type OpportunityTab,
+  type OpportunityStep,
 } from "./programmatic-opportunity-tabs";
+import {
+  CHECKS_ACTIONS,
+  CHECKS_COPY,
+  CHECK_RESULT_STATE_LABELS as stateLabels,
+  REVIEW_EMPTY,
+  REVIEW_GROUPS,
+  STEP_ACTIONS,
+  STEP_COPY,
+  STEP_STATE_WORDS,
+  evidenceBasisLabel,
+  opportunityStatusLine,
+} from "./programmatic-presentation";
 
 export { ProgrammaticExecutionEvidenceView } from "./ProgrammaticExecutionEvidence";
-
-const stateLabels: Record<ProgrammaticChatSummary["state"], string> = {
-  discovered: "New",
-  queued: "Waiting to start",
-  running: "Running",
-  completed: "Done",
-  dismissed: "Dismissed",
-};
 
 /** One in-thread review section, sharing the transcript rail and existing controls. */
 export function ProgrammaticChat({
@@ -57,10 +66,18 @@ export function ProgrammaticChat({
   const heading = useRef<HTMLHeadingElement>(null);
   const focused = useRef<HTMLElement | null>(null);
   const focusSelection = useRef(false);
+  const focusReview = useRef(false);
+  const reviewHeading = useRef<HTMLHeadingElement>(null);
+  const pastLink = useRef<HTMLButtonElement>(null);
+  const stepRefs = useRef<Partial<Record<OpportunityStep, HTMLButtonElement | null>>>({});
   // Closing a review changes presentation only, never the retained proposal or its authority.
   const [closedProposal, setClosedProposal] = useState<ProgrammaticChatState["proposal"]>(null);
   const showProposal = !!state.proposal && closedProposal !== state.proposal;
   useLayoutEffect(() => {
+    if (focusReview.current) {
+      focusReview.current = false;
+      reviewHeading.current?.focus();
+    }
     if (focusSelection.current && (state.detail || state.candidateDetail)) {
       const target = root.current?.querySelector<HTMLElement>("[data-programmatic-selection]");
       if (target) {
@@ -87,10 +104,10 @@ export function ProgrammaticChat({
   const setupBlockedReason =
     configuration && configuration.status !== "current"
       ? configuration.status === "unreadable" && configuration.failure === "inventory"
-        ? "This project can't be checked right now. You can still find ideas."
+        ? CHECKS_COPY.blockedInventory
         : configuration.status === "unreadable"
-          ? "Your saved setup can't be read, so checks can't run. You can still find ideas."
-          : "Set up checks before running them. You don't need setup to find ideas."
+          ? CHECKS_COPY.blockedUnreadable
+          : CHECKS_COPY.blockedSetup
       : undefined;
   const groups: { title: string; matches(row: ProgrammaticChatSummary): boolean }[] = [
     {
@@ -108,14 +125,32 @@ export function ProgrammaticChat({
     },
     { title: "No longer found", matches: (row) => row.presence === "disappeared" },
   ];
-  const reloadResults = (
-    <button
-      className="btn btn-ghost btn-sm"
-      disabled={locked}
-      onClick={() => onAction({ version: 1, action: "report", offset: report?.offset ?? 0 })}
-    >
-      {state.error ? "Retry loading results" : "Refresh results"}
-    </button>
+  const [checksSkipped, skipChecks] = useChecksSkip(configuration);
+  const [tab, setTab] = useOpportunityTab(
+    state,
+    showProposal,
+    nextOpportunityStep(state, checksSkipped),
+  );
+  const { steps, keyAction, search } = opportunitySteps({
+    state,
+    showProposal,
+    checksSkipped,
+    planMode,
+    busy,
+    shown: tab,
+  });
+  // When the header key is on another step's action, search stays one quiet click away.
+  const searchButton = keyAction.action !== "discover" && (
+    <div className="programmatic-actions">
+      <button
+        type="button"
+        className="btn btn-ghost btn-sm"
+        disabled={search.disabled}
+        onClick={() => onAction({ version: 1, action: "discover" })}
+      >
+        {search.label}
+      </button>
+    </div>
   );
   const setupStage = (
     <ProgrammaticSetup
@@ -152,7 +187,13 @@ export function ProgrammaticChat({
     onSelectCandidate?.(source, id);
   };
   const ideasStage = (
-    <>
+    <section
+      key="ideas"
+      id={`${headingId}-ideas`}
+      className="programmatic-stage inst-module"
+      aria-label={REVIEW_GROUPS.ideas}
+    >
+      <h3 className="opp-section-title">{REVIEW_GROUPS.ideas}</h3>
       <ProgrammaticIdeas
         state={state}
         locked={locked}
@@ -160,42 +201,40 @@ export function ProgrammaticChat({
         onRequest={onAction}
         onSelect={selectCandidate}
       />
-    </>
+      {searchButton}
+    </section>
   );
   const resultsStage = (
     <section
       key="results"
       id={`${headingId}-results`}
       className="programmatic-stage inst-module"
-      aria-label="Check results"
+      aria-label={REVIEW_GROUPS.ready}
     >
-      <h3 className="opp-section-title">Check results</h3>
-      {reportAssessmentSuperseded && (
-        <p>These results are older than your latest setup. Refresh results to update them.</p>
-      )}
+      <h3 className="opp-section-title" ref={reviewHeading} tabIndex={-1}>
+        {REVIEW_GROUPS.ready}
+      </h3>
+      {!report && <p className="opp-caption">{REVIEW_EMPTY.ready}</p>}
+      {reportAssessmentSuperseded && <p>{CHECKS_COPY.superseded}</p>}
       {report && ["stale", "recovered"].includes(report.status) && <p>{report.reason}</p>}
       {report && !report.scan.available && report.status !== "setup-required" && (
         <p>{setupBlockedReason ?? report.scan.reason}</p>
       )}
-      {report?.status !== "setup-required" && (
-        <p>Runs the checks you set up. Refresh just reloads the last results.</p>
-      )}
-      <div className="programmatic-actions">
-        {report && report.status !== "setup-required" && (
+      {report && report.status !== "setup-required" && (
+        <div className="programmatic-actions">
           <button
             className="btn btn-primary btn-sm"
             disabled={mutationLocked || !canScanProgrammatic(state)}
             title={setupBlockedReason ?? report.scan?.reason}
             onClick={() => onAction({ version: 1, action: "scan" })}
           >
-            Run project checks
+            {CHECKS_ACTIONS.checkAgain}
           </button>
-        )}
-        {!state.error && reloadResults}
-      </div>
-      {report?.status === "setup-required" && <p>Set up checks first.</p>}
+        </div>
+      )}
+      {report?.status === "setup-required" && <p>{CHECKS_COPY.setupFirst}</p>}
       {report && report.status !== "setup-required" && report.total === 0 && (
-        <p>No results yet. Choose Run project checks to run them. This won't start any work.</p>
+        <p>{CHECKS_COPY.noResults}</p>
       )}
       {!!report?.rows.length && (
         <details key={selected?.summary.id ?? "unselected"} open={!selected}>
@@ -337,7 +376,7 @@ export function ProgrammaticChat({
                 })
               }
             >
-              Dismiss this item
+              {CHECKS_ACTIONS.dismiss}
             </button>
           </div>
 
@@ -370,31 +409,84 @@ export function ProgrammaticChat({
       )}
     </section>
   );
-  const setupFirst = showProposal || (!report?.total && configuration?.status !== "current");
-  const [tab, setTab] = useOpportunityTab(state, showProposal);
-  const ideaCount = state.discovery?.candidates.length ?? 0;
-  const tabId = (id: OpportunityTab) => `${headingId}-tab-${id}`;
-  const panelId = (id: OpportunityTab) => `${headingId}-panel-${id}`;
-  const count = (value: number | undefined) =>
-    // The leading space keeps the accessible name "Checks 3", not "Checks3"; flex gap spaces it visually.
-    value ? <span className="inst-tab-count"> {value}</span> : undefined;
-  const tabs = [
-    { id: "ideas" as const, label: "Ideas", adornment: count(ideaCount) },
-    { id: "checks" as const, label: "Checks", adornment: count(report?.total) },
-    { id: "past" as const, label: "Past ideas", adornment: count(state.historyReport?.total) },
-  ];
-  const panel = (id: OpportunityTab, children: React.ReactNode) => (
+  const checksIncomplete = steps[0]?.state !== "done";
+  const tabId = (id: OpportunityStep) => `${headingId}-tab-${id}`;
+  const panelId = (id: OpportunityStep) => `${headingId}-panel-${id}`;
+  const tabs = steps.map(({ id, number, state: stepState }) => {
+    const word = STEP_STATE_WORDS[stepState];
+    return {
+      id,
+      label: STEP_COPY[id].label,
+      labelPrefix: <span className="opp-step-num">{number}</span>,
+      // The leading space keeps the accessible name "1 Quick checks Done"; the icon is decoration.
+      adornment: (
+        <span className="opp-step-state">
+          {" "}
+          <span aria-hidden="true">{word.icon}</span>{" "}
+          <span className="opp-step-word">{word.word}</span>
+        </span>
+      ),
+      current: stepState === "next",
+      state: stepState,
+    };
+  });
+  // Results or detail are being read: the panels are about to change.
+  const loading = state.operation === "report" || state.operation === "detail";
+  const panel = (id: OpportunityStep, children: React.ReactNode) => (
     <div
       key={id}
       id={panelId(id)}
       role="tabpanel"
       aria-labelledby={tabId(id)}
+      aria-busy={loading || undefined}
       className="opp-panel"
       hidden={tab !== id}
     >
+      <p className="opp-step-intro">{STEP_COPY[id].intro}</p>
       {children}
     </div>
   );
+  const runKey = () => {
+    switch (keyAction.action) {
+      case "approve-setup":
+        if (state.proposal?.handle)
+          onAction({ version: 1, action: "approve-setup", proposalHandle: state.proposal.handle });
+        return;
+      case "inspect-setup":
+        setClosedProposal(null);
+        onAction({ version: 1, action: "inspect-setup" });
+        return;
+      case "discover":
+        onAction({ version: 1, action: "discover" });
+        return;
+      case "open-review":
+        focusReview.current = true;
+        setTab("review");
+        return;
+    }
+  };
+  const skip = () => {
+    // Session-only: nothing is saved, and changed project files bring step 1 back.
+    skipChecks();
+    setTab("ideas");
+    stepRefs.current.ideas?.focus();
+  };
+  // Past ideas follows a past-idea selection until the user opens or closes it.
+  const pastKey = state.selection?.source === "history" ? state.selection.id : "";
+  const [pastToggle, setPastToggle] = useState<{ open: boolean; key: string } | null>(null);
+  const pastOpen = pastToggle?.key === pastKey ? pastToggle.open : pastKey !== "";
+  const pastId = `${headingId}-past`;
+  const togglePast = () => {
+    const open = !pastOpen;
+    setPastToggle({ open, key: pastKey });
+    // Read-only load, only when nothing is loaded yet or the list may be out of date.
+    if (open && !locked && (!state.historyReport || state.historyReportStale))
+      onAction({ version: 1, action: "history-report", offset: 0 });
+  };
+  const closePast = () => {
+    setPastToggle({ open: false, key: pastKey });
+    pastLink.current?.focus();
+  };
   return (
     <section
       className="programmatic-chat instrument"
@@ -418,34 +510,77 @@ export function ProgrammaticChat({
         </div>
         <button
           type="button"
-          className="inst-key"
-          data-quiet={tab === "ideas" ? undefined : ""}
-          disabled={locked || planMode || state.reconcile}
-          onClick={() => onAction({ version: 1, action: "discover" })}
+          ref={pastLink}
+          className="btn btn-ghost btn-sm opp-past-link"
+          aria-expanded={pastOpen}
+          aria-controls={pastId}
+          onClick={togglePast}
         >
-          {state.discoveryStale && state.discovery ? "Search again" : "Find ideas"}
+          {STEP_ACTIONS.pastIdeas}
+        </button>
+        <button
+          type="button"
+          className="inst-key"
+          data-quiet={keyAction.quiet ? "" : undefined}
+          disabled={keyAction.disabled}
+          onClick={runKey}
+        >
+          {keyAction.label}
         </button>
       </header>
+      <section
+        id={pastId}
+        className="opp-past inst-module"
+        aria-label={STEP_ACTIONS.pastIdeas}
+        hidden={!pastOpen}
+        onKeyDown={(event) => {
+          if (event.key !== "Escape" || event.defaultPrevented) return;
+          event.preventDefault();
+          event.stopPropagation();
+          closePast();
+        }}
+      >
+        <div className="opp-past-head">
+          <button type="button" className="btn btn-ghost btn-sm" onClick={closePast}>
+            {STEP_ACTIONS.close}
+          </button>
+        </div>
+        <ProgrammaticPastIdeas
+          state={state}
+          locked={locked}
+          planMode={planMode}
+          onRequest={onAction}
+          onSelect={selectCandidate}
+        />
+      </section>
       <p className="opp-status" role="status" aria-live="polite" aria-atomic="true">
         {state.operation
-          ? `${state.operation === "report" || state.operation === "detail" ? "Loading" : "Working"}…`
+          ? `${loading ? "Loading" : "Working"}…`
           : busy
             ? "Work is running. Answer the prompts or stop it in this chat."
             : state.notice}
       </p>
       {planMode && (
         <p className="opp-notice" data-tone="warning">
-          Turn off plan mode to find ideas, save setup or run checks. You can still look at results.
+          {CHECKS_COPY.planMode}
         </p>
       )}
       {state.error && (
         <>
           <p className="opp-notice" data-tone="error" role="alert">
-            {state.reconcile
-              ? "We couldn't tell if that was saved. Refresh results before trying again."
-              : "That didn't finish. Try again when nothing else is running."}
+            {state.reconcile ? CHECKS_COPY.reconcileFailed : CHECKS_COPY.failed}
           </p>
-          <div className="programmatic-actions">{reloadResults}</div>
+          <div className="programmatic-actions">
+            <button
+              className="btn btn-ghost btn-sm"
+              disabled={locked}
+              onClick={() =>
+                onAction({ version: 1, action: "report", offset: report?.offset ?? 0 })
+              }
+            >
+              {CHECKS_ACTIONS.tryAgain}
+            </button>
+          </div>
           <details>
             <summary>Error details</summary>
             <p>{state.error}</p>
@@ -454,11 +589,11 @@ export function ProgrammaticChat({
       )}
       {state.reconcile && !state.error && (
         <p className="opp-notice" data-tone="warning">
-          Refresh results to see what was saved. Nothing will retry on its own.
+          {CHECKS_COPY.reconciling}
         </p>
       )}
-      <NotesTabList<OpportunityTab>
-        label="Opportunities sections"
+      <NotesTabList<OpportunityStep>
+        label="Opportunities steps"
         tabs={tabs}
         activeId={tab}
         onSelect={setTab}
@@ -466,27 +601,37 @@ export function ProgrammaticChat({
         panelId={panelId}
         className="inst-tabs"
         scrollClassName="inst-tabs-scroll"
+        tabRefs={stepRefs}
       />
-      {panel("ideas", ideasStage)}
-      {panel("checks", setupFirst ? [setupStage, resultsStage] : [resultsStage, setupStage])}
+      {panel(
+        "checks",
+        <>
+          {setupStage}
+          {checksIncomplete && !checksSkipped && (
+            <div className="programmatic-actions">
+              <button type="button" className="btn btn-ghost btn-sm" onClick={skip}>
+                {STEP_ACTIONS.skip}
+              </button>
+            </div>
+          )}
+        </>,
+      )}
+      {panel(
+        "ideas",
+        <>
+          <ProgrammaticIdeaSearch state={state} />
+          {searchButton}
+        </>,
+      )}
+      {panel("review", [resultsStage, ideasStage])}
       {state.assessment && (
-        // Search and check outcomes stay visible beside both Ideas and Checks; never behind a tab.
-        <div className="opp-search inst-module" hidden={tab === "past"}>
+        // Search and check outcomes stay visible on every step, beside both Review groups.
+        <div className="opp-search inst-module">
           <ProgrammaticAssessment
             assessment={state.assessment}
             previous={state.assessmentRetained}
           />
         </div>
-      )}
-      {panel(
-        "past",
-        <ProgrammaticPastIdeas
-          state={state}
-          locked={locked}
-          planMode={planMode}
-          onRequest={onAction}
-          onSelect={selectCandidate}
-        />,
       )}
     </section>
   );

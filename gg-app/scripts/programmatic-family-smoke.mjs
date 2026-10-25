@@ -262,7 +262,7 @@ export function familyWorkflowStep(number, body, state = {}) {
     // 3-7 Review: bounded inspection; creation, apply and shell are refused.
     case 3:
       noMutation();
-      assert.ok(output("family-submit").includes("Recommendations"));
+      assert.ok(output("family-submit").includes("What AI found"));
       return reads("review");
     case 4:
       // Step 4's command_information call already owns `review-catalog`; call IDs must stay unique.
@@ -483,7 +483,7 @@ export async function runFamilySmoke({
   assert.equal(requests.length, 2, "Selection does not dispatch review");
   assert.equal(
     await client.evaluate(
-      `document.querySelector('.programmatic-chat')?.textContent.includes('Make one, copy the rest')`,
+      `document.querySelector('.programmatic-chat')?.textContent.includes('Build one then copy it')`,
     ),
     true,
   );

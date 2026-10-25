@@ -763,7 +763,7 @@ describe("pane-local opening (mocked native transport)", () => {
       const pane = client("pane-advisory-section", 1);
       const emit = liveEvents(pane);
       const text =
-        "## Recommendations — not started\n\nInspect configuration manually.\n\nAdvice only: no execution is authorized.";
+        "## What AI found: 1 idea, nothing you need to do\n\nInspect configuration manually.\n\nAdvice only: no execution is authorized.";
       if (mode === "restored")
         vi.mocked(pane.listHistory).mockResolvedValue([{ role: "assistant", text }]);
       render(<AgentPane client={pane} target={target} />);
@@ -785,7 +785,9 @@ describe("pane-local opening (mocked native transport)", () => {
         });
       }
       expect(
-        await screen.findAllByRole("heading", { name: "Recommendations — not started" }),
+        await screen.findAllByRole("heading", {
+          name: "What AI found: 1 idea, nothing you need to do",
+        }),
       ).toHaveLength(1);
       expect(screen.getByText("Inspect configuration manually.")).toBeTruthy();
       expect(screen.getByText("Advice only: no execution is authorized.")).toBeTruthy();
@@ -2289,11 +2291,11 @@ describe("AgentPane question acknowledgement", () => {
     const pane = client("extended-workflow", 1);
     const emit = liveEvents(pane);
     const advice =
-      "## Recommendations — not started\n\nMissing fixture count command. Creation and execution need separate approval.";
+      "## What AI found: 1 idea, nothing you need to do\n\nMissing fixture count command. Creation and execution need separate approval.";
     vi.mocked(pane.listHistory).mockResolvedValue([{ role: "assistant", text: advice }]);
     vi.mocked(pane.getState).mockResolvedValue(agentState("azure:gpt-test"));
     const { container } = render(<AgentPane client={pane} target={target} />);
-    await screen.findByRole("heading", { name: "Recommendations — not started" });
+    await screen.findByRole("heading", { name: "What AI found: 1 idea, nothing you need to do" });
     expect(pane.sendPrompt).not.toHaveBeenCalled();
     expect(pane.answerAskUser).not.toHaveBeenCalled();
     const creation = {
@@ -2376,7 +2378,9 @@ describe("AgentPane question acknowledgement", () => {
     expect(screen.queryByRole("button", { name: /Create reviewed files/ })).toBeNull();
     expect(pane.answerAskUser).toHaveBeenCalledTimes(1);
     expect(screen.getByRole("button", { name: /Run reviewed command/ })).toBeTruthy();
-    expect(screen.getByRole("heading", { name: "Recommendations — not started" })).toBeTruthy();
+    expect(
+      screen.getByRole("heading", { name: "What AI found: 1 idea, nothing you need to do" }),
+    ).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: /Run reviewed command/ }));
     await waitFor(() =>
       expect(pane.answerAskUser).toHaveBeenNthCalledWith(2, "run-command-request", "answer", {
@@ -3209,10 +3213,12 @@ describe("AgentPane swap reading anchors", () => {
   );
 });
 
-/** Setup and saved check results live on the Opportunities panel's Checks tab. */
-async function openChecksTab(): Promise<void> {
-  fireEvent.click(await screen.findByRole("tab", { name: /^Checks/ }));
+/** Shows one Opportunities step: setup is on Quick checks, saved results on Review. */
+async function openStep(label: "Quick checks" | "Find ideas" | "Review"): Promise<void> {
+  fireEvent.click(await screen.findByRole("tab", { name: new RegExp(`^\\d\\s*${label}`) }));
 }
+/** The shown step; the header key may repeat one of its labels. */
+const inStep = () => within(screen.getByRole("tabpanel"));
 
 describe("AgentPane lifecycle", () => {
   it("rehydrates a durable accessible MCP failure transcript row", async () => {
@@ -4616,17 +4622,54 @@ describe("AgentPane lifecycle", () => {
       render(<AgentPane client={pane} target={target} />);
       await waitFor(() => expect(pane.listCommands).toHaveBeenCalled());
       fireEvent.click(screen.getByRole("button", { name: "Opportunities" }));
-      await openChecksTab();
-      fireEvent.click(await screen.findByRole("button", { name: "Review setup" }));
-      await screen.findByRole("button", { name: "Approve and save setup" });
+      await openStep("Quick checks");
+      fireEvent.click(await inStep().findByRole("button", { name: "Show suggested checks" }));
+      await inStep().findByRole("button", { name: "Save checks" });
       const prior = vi.mocked(pane.listCommands).mock.calls.length;
-      fireEvent.click(screen.getByRole("button", { name: "Approve and save setup" }));
+      fireEvent.click(inStep().getByRole("button", { name: "Save checks" }));
       await waitFor(() => expect(pane.listCommands).toHaveBeenCalledTimes(prior + 1));
+      // Setup review is deterministic: no assessment request id.
+      expect(pane.programmatic).toHaveBeenCalledWith({ version: 1, action: "inspect-setup" });
+      // Results reload by themselves after a confirmed save.
+      if (!lostResponse)
+        await waitFor(() =>
+          expect(
+            vi.mocked(pane.programmatic).mock.calls.map(([request]) => request.action),
+          ).toEqual(["report", "inspect-setup", "approve-setup", "report"]),
+        );
       expect(pane.sendPrompt).not.toHaveBeenCalled();
     },
   );
 
-  it("blocks setup assessment in Plan mode but keeps report and detail access (mocked native IPC)", async () => {
+  it("Check again runs only the deterministic scan, then reloads results (mocked native IPC)", async () => {
+    const pane = client("check-again-reload", 8);
+    const report = await pane.programmatic({ version: 1, action: "report", offset: 0 });
+    if (!report.ok || report.action !== "report") throw new Error("Expected report fixture");
+    report.report.scan = { available: true, reason: "Ready" };
+    report.report.status = "current";
+    vi.mocked(pane.programmatic).mockClear();
+    vi.mocked(pane.programmatic).mockImplementation(async (request) =>
+      request.action === "scan" ? { version: 1, action: "scan", ok: true, changed: true } : report,
+    );
+    render(<AgentPane client={pane} target={target} />);
+    await waitFor(() => expect(pane.listCommands).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: "Opportunities" }));
+    await openStep("Review");
+    const check = await screen.findByRole("button", { name: "Check again" });
+    await waitFor(() => expect((check as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(check);
+    await waitFor(() =>
+      expect(vi.mocked(pane.programmatic).mock.calls.map(([request]) => request)).toEqual([
+        { version: 1, action: "report", offset: 0 },
+        { version: 1, action: "scan" },
+        { version: 1, action: "report", offset: 0 },
+      ]),
+    );
+    expect(screen.queryByRole("button", { name: "Refresh results" })).toBeNull();
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it("blocks setup review in Plan mode but keeps report and detail access (mocked native IPC)", async () => {
     nativeMocks.realMentor = true;
     const pane = client("plan-setup-assessment", 8);
     vi.mocked(pane.getState).mockResolvedValue({ ...(await pane.getState()), planMode: true });
@@ -4634,34 +4677,27 @@ describe("AgentPane lifecycle", () => {
     render(<AgentPane client={pane} target={target} />);
     await waitFor(() => expect(pane.listCommands).toHaveBeenCalled());
     fireEvent.click(screen.getByRole("button", { name: "Opportunities" }));
-    await openChecksTab();
-    const review = (await screen.findByRole("button", {
-      name: "Review setup",
+    await openStep("Quick checks");
+    const review = (await inStep().findByRole("button", {
+      name: "Show suggested checks",
     })) as HTMLButtonElement;
+    // Results load by themselves on open, even in Plan mode.
     await waitFor(() =>
-      expect(
-        (screen.getByRole("button", { name: "Refresh results" }) as HTMLButtonElement).disabled,
-      ).toBe(false),
+      expect(pane.programmatic).toHaveBeenCalledWith({ version: 1, action: "report", offset: 0 }),
     );
+    expect(screen.queryByRole("button", { name: "Refresh results" })).toBeNull();
     expect(review.disabled).toBe(true);
     vi.mocked(pane.programmatic).mockClear();
     fireEvent.click(review);
     // Invoke the real pane handler directly as well as the disabled control.
     await act(async () => programmaticView.onAction?.({ version: 1, action: "inspect-setup" }));
     expect(pane.programmatic).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole("button", { name: "Refresh results" }));
-    await waitFor(() =>
-      expect(pane.programmatic).toHaveBeenCalledExactlyOnceWith({
-        version: 1,
-        action: "report",
-        offset: 0,
-      }),
-    );
-    await waitFor(() =>
-      expect(
-        (screen.getByRole("button", { name: "Refresh results" }) as HTMLButtonElement).disabled,
-      ).toBe(false),
-    );
+    await act(async () => programmaticView.onAction?.({ version: 1, action: "report", offset: 0 }));
+    expect(pane.programmatic).toHaveBeenCalledExactlyOnceWith({
+      version: 1,
+      action: "report",
+      offset: 0,
+    });
     const id = "a".repeat(64);
     await act(async () => programmaticView.onSelect?.(id));
     expect(pane.programmatic).toHaveBeenLastCalledWith({ version: 1, action: "detail", id });
@@ -4669,16 +4705,12 @@ describe("AgentPane lifecycle", () => {
     await waitFor(() => expect(review.disabled).toBe(false));
     fireEvent.click(review);
     await waitFor(() =>
-      expect(pane.programmatic).toHaveBeenLastCalledWith({
-        version: 1,
-        action: "inspect-setup",
-        requestId: expect.any(String),
-      }),
+      expect(pane.programmatic).toHaveBeenLastCalledWith({ version: 1, action: "inspect-setup" }),
     );
     expect(pane.sendPrompt).not.toHaveBeenCalled();
   });
 
-  it("assesses unreadable setup from a loaded report without save or scan permission (mocked native IPC)", async () => {
+  it("reviews unreadable setup from a loaded report without AI, save or scan permission (mocked native IPC)", async () => {
     const pane = client("unreadable-setup-assessment", 8);
     const report = await pane.programmatic({ version: 1, action: "report", offset: 0 });
     if (!report.ok || report.action !== "report") throw new Error("Expected report fixture");
@@ -4693,16 +4725,6 @@ describe("AgentPane lifecycle", () => {
           ok: false,
           reconcile: false,
           error,
-          assessment: {
-            version: 1,
-            mode: "setup",
-            status: "incomplete",
-            summary: "Read-only project evidence despite unreadable settings.",
-            limitations: ["Settings cannot be proposed or saved."],
-            coverage: [],
-            observations: [],
-            deterministic: { status: "not-run", reason: "setup" },
-          },
         };
       return {
         ...report,
@@ -4725,37 +4747,36 @@ describe("AgentPane lifecycle", () => {
     await waitFor(() => expect(pane.listCommands).toHaveBeenCalled());
     fireEvent.click(screen.getByRole("button", { name: "Opportunities" }));
     await screen.findByText("Saved settings cannot be read.");
-    await openChecksTab();
-    const review = screen.getByRole("button", { name: "Review setup" }) as HTMLButtonElement;
+    await openStep("Quick checks");
+    const review = inStep().getByRole("button", {
+      name: "Show suggested checks",
+    }) as HTMLButtonElement;
     expect(review.disabled).toBe(false);
     fireEvent.click(review);
-    expect(
-      await screen.findByText("Read-only project evidence despite unreadable settings."),
-    ).toBeTruthy();
-    expect(screen.getByRole("alert").textContent).toBe(
-      "That didn't finish. Try again when nothing else is running.",
+    expect((await screen.findByRole("alert")).textContent).toBe(
+      "That didn't finish. Choose Try again when nothing else is running.",
     );
     const errorDetails = screen.getByText("Error details");
     expect(errorDetails.closest("details")!.open).toBe(false);
     fireEvent.click(errorDetails);
     expect(screen.getByText(error)).toBeTruthy();
-    expect(screen.getByText("Settings cannot be proposed or saved.")).toBeTruthy();
-    expect(screen.queryByRole("button", { name: /Approve and save/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Save checks" })).toBeNull();
     expect(screen.queryByLabelText("Exact settings to save")).toBeNull();
+    await openStep("Review");
     const scan = screen.getByRole("button", {
-      name: "Run project checks",
+      name: "Check again",
     }) as HTMLButtonElement;
     expect(scan.disabled).toBe(true);
     fireEvent.click(scan);
     expect(vi.mocked(pane.programmatic).mock.calls.map(([request]) => request)).toEqual([
       { version: 1, action: "report", offset: 0 },
-      { version: 1, action: "inspect-setup", requestId: expect.any(String) },
+      { version: 1, action: "inspect-setup" },
     ]);
     expect(pane.sendPrompt).not.toHaveBeenCalled();
   });
 
   it.each(["unavailable", "failed", "cancelled"] as const)(
-    "supersedes button success with slash %s status and counts (mocked native IPC)",
+    "supersedes Find ideas success with slash %s status and counts (mocked native IPC)",
     async (status) => {
       nativeMocks.realMentor = true;
       const pane = client(`assessment-${status}`, 8);
@@ -4780,23 +4801,17 @@ describe("AgentPane lifecycle", () => {
       report.report.scan = { available: true, reason: "Ready" };
       report.report.status = "current";
       vi.mocked(pane.programmatic).mockImplementation(async (request) =>
-        request.action === "scan"
-          ? {
-              version: 1,
-              action: "scan",
-              ok: true,
-              changed: false,
-              assessment: success,
-            }
+        request.action === "discover"
+          ? { version: 1, action: "discover", ok: true, assessment: success }
           : report,
       );
       render(<AgentPane client={pane} target={target} />);
       await waitFor(() => expect(pane.listCommands).toHaveBeenCalled());
       fireEvent.click(screen.getByRole("button", { name: "Opportunities" }));
-      await openChecksTab();
-      const check = await screen.findByRole("button", { name: "Run project checks" });
-      await waitFor(() => expect((check as HTMLButtonElement).disabled).toBe(false));
-      fireEvent.click(check);
+      await openStep("Find ideas");
+      const find = await screen.findByRole("button", { name: "Find ideas" });
+      await waitFor(() => expect((find as HTMLButtonElement).disabled).toBe(false));
+      fireEvent.click(find);
       expect(await screen.findByText("3 checks set up, 2 applied.")).toBeTruthy();
       const identity = { conversationId: "conversation-1", sessionId: "session-1", sequence: 2 };
       act(() => emit("run_start", {}));
@@ -4890,6 +4905,7 @@ describe("AgentPane lifecycle", () => {
       render(<AgentPane client={pane} target={target} />);
       await waitFor(() => expect(pane.listCommands).toHaveBeenCalled());
       fireEvent.click(screen.getByRole("button", { name: "Opportunities" }));
+      await openStep("Find ideas");
       const discover = await screen.findByRole("button", { name: "Find ideas" });
       await waitFor(() => expect((discover as HTMLButtonElement).disabled).toBe(false));
       fireEvent.click(discover);
@@ -4955,6 +4971,7 @@ describe("AgentPane lifecycle", () => {
             },
           }),
         );
+        await openStep("Review");
         fireEvent.click(await screen.findByRole("button", { name: candidate.outcome }));
         expect(
           (screen.getByRole("button", { name: "Review this idea" }) as HTMLButtonElement).disabled,
@@ -5003,55 +5020,76 @@ describe("AgentPane lifecycle", () => {
     },
   );
 
-  it.each(["before-run-end", "after-run-end", "after-response"] as const)(
-    "keeps exact setup when assessment completion is %s (mocked native IPC)",
-    async (ordering) => {
+  it.each([true, false])(
+    "typed setup review queues one deterministic inspect-setup after results load (typed: %s, mocked native IPC)",
+    async (typed) => {
       nativeMocks.realMentor = true;
-      const pane = client("assessment-setup-race", 8);
+      const pane = client("typed-setup-review", 8);
       vi.mocked(pane.getState).mockResolvedValue({
         ...(await pane.getState()),
         conversationId: "conversation-1",
         sessionId: "session-1",
       });
       const emit = liveEvents(pane);
-      const receipt = deferred<Awaited<ReturnType<PaneAgentClient["programmatic"]>>>();
       const report = await pane.programmatic({ version: 1, action: "report", offset: 0 });
       vi.mocked(pane.programmatic).mockClear();
+      const hash = "a".repeat(64);
       vi.mocked(pane.programmatic).mockImplementation(async (request) =>
-        request.action === "inspect-setup" ? receipt.promise : report,
+        request.action === "inspect-setup"
+          ? {
+              version: 1,
+              action: "inspect-setup",
+              ok: true,
+              proposal: {
+                handle: hash,
+                operation: "initial",
+                fingerprint: hash,
+                profileJson: "exact reviewed settings",
+                configuration: {
+                  status: "missing",
+                  currentFingerprint: hash,
+                  refreshAvailable: false,
+                  baselineUnavailable: false,
+                  diagnostic: null,
+                  drift: null,
+                },
+                routes: [],
+                exclusions: [],
+                configurationInputs: [],
+              },
+            }
+          : report,
       );
       render(<AgentPane client={pane} target={target} />);
       await waitFor(() => expect(pane.listCommands).toHaveBeenCalled());
       fireEvent.click(screen.getByRole("button", { name: "Opportunities" }));
-      await openChecksTab();
-      const review = await screen.findByRole("button", { name: "Review setup" });
-      await waitFor(() => expect((review as HTMLButtonElement).disabled).toBe(false));
-      fireEvent.click(review);
-      act(() => emit("run_start", {}));
-      const identity = { conversationId: "conversation-1", sessionId: "session-1", sequence: 1 };
-      const eventAssessment = {
-        version: 1,
-        mode: "setup",
-        status: "unavailable",
-        summary: "Event status only",
-        limitations: [],
-        coverage: [],
-        observations: [],
-        deterministic: { status: "not-run", reason: "setup" },
+      await waitFor(() => expect(pane.programmatic).toHaveBeenCalledTimes(1));
+      // A typed /setup-programmatic carries no panel request id; Find ideas always does.
+      const identity = {
+        conversationId: "conversation-1",
+        sessionId: "session-1",
+        sequence: 1,
+        ...(typed ? {} : { requestId: "12345678-1234-4234-8234-123456789abc" }),
       };
+      act(() => emit("run_start", {}));
       act(() => emit("programmatic_assessment", { ...identity, phase: "started" }));
-      const complete = () =>
-        act(() =>
-          emit("programmatic_assessment", {
-            ...identity,
-            phase: "completed",
-            assessment: eventAssessment,
-          }),
-        );
-      if (ordering === "before-run-end") complete();
+      act(() =>
+        emit("programmatic_assessment", {
+          ...identity,
+          phase: "completed",
+          assessment: {
+            version: 1,
+            mode: "setup",
+            status: "completed",
+            summary: "Setup reviewed",
+            limitations: [],
+            coverage: [],
+            observations: [],
+            deterministic: { status: "not-run", reason: "setup" },
+          },
+        }),
+      );
       act(() => emit("run_end", { outcome: "completed", runState: "idle" }));
-      if (ordering === "after-run-end") complete();
-      act(() => emit("agent_done", {}));
       act(() =>
         emit("ready", {
           running: false,
@@ -5060,56 +5098,28 @@ describe("AgentPane lifecycle", () => {
           sessionId: "session-1",
         }),
       );
-      expect(pane.programmatic).toHaveBeenCalledTimes(2);
-      const hash = "a".repeat(64);
-      await act(async () =>
-        receipt.resolve({
-          version: 1,
-          action: "inspect-setup",
-          ok: true,
-          assessment: {
-            version: 1,
-            mode: "setup",
-            status: "unavailable",
-            summary: "Model unavailable; settings can still be reviewed.",
-            limitations: ["No model assessment was completed."],
-            coverage: [],
-            observations: [],
-            deterministic: { status: "not-run", reason: "setup" },
-          },
-          proposal: {
-            handle: hash,
-            operation: "initial",
-            fingerprint: hash,
-            profileJson: "exact reviewed settings",
-            configuration: {
-              status: "missing",
-              currentFingerprint: hash,
-              refreshAvailable: false,
-              baselineUnavailable: false,
-              diagnostic: null,
-              drift: null,
-            },
-            routes: [],
-            exclusions: [],
-            configurationInputs: [],
-          },
-        }),
-      );
-      if (ordering === "after-response") complete();
-      // Duplicate delivery cannot invalidate the exact response or claim approval.
-      complete();
-      expect(await screen.findByText("exact reviewed settings")).toBeTruthy();
-      expect(screen.getByRole("heading", { name: "Idea search: Not available" })).toBeTruthy();
-      expect(
-        (screen.getByRole("button", { name: "Approve and save setup" }) as HTMLButtonElement)
-          .disabled,
-      ).toBe(false);
-      const expectedCalls = ordering === "after-response" ? 3 : 2;
-      await waitFor(() => expect(pane.programmatic).toHaveBeenCalledTimes(expectedCalls));
+      const actions = () => vi.mocked(pane.programmatic).mock.calls.map(([request]) => request);
+      if (typed) {
+        await waitFor(() =>
+          expect(actions()).toEqual([
+            { version: 1, action: "report", offset: 0 },
+            { version: 1, action: "report", offset: 0 },
+            { version: 1, action: "inspect-setup" },
+          ]),
+        );
+        await openStep("Quick checks");
+        expect(await screen.findByText("exact reviewed settings")).toBeTruthy();
+        expect(
+          (inStep().getByRole("button", { name: "Save checks" }) as HTMLButtonElement).disabled,
+        ).toBe(false);
+      } else {
+        await waitFor(() => expect(actions().length).toBeGreaterThanOrEqual(2));
+        await act(async () => {});
+        expect(actions().every((request) => request.action === "report")).toBe(true);
+      }
+      // Inspecting is read-only; saving still needs the click.
+      expect(actions().some((request) => request.action === "approve-setup")).toBe(false);
       expect(pane.sendPrompt).not.toHaveBeenCalled();
-      fireEvent.click(screen.getByRole("button", { name: "Refresh results" }));
-      await waitFor(() => expect(pane.programmatic).toHaveBeenCalledTimes(expectedCalls + 1));
     },
   );
 
@@ -5126,9 +5136,9 @@ describe("AgentPane lifecycle", () => {
     expect(screen.getAllByRole("heading", { name: "Opportunities" })).toHaveLength(1);
     expect((input as HTMLTextAreaElement).value).toBe("Keep this draft");
     expect(pane.sendPrompt).not.toHaveBeenCalled();
-    await openChecksTab();
-    fireEvent.click(screen.getByRole("button", { name: "Refresh results" }));
-    await waitFor(() => expect(pane.programmatic).toHaveBeenCalledTimes(2));
+    await openStep("Review");
+    expect(screen.queryByRole("button", { name: "Refresh results" })).toBeNull();
+    expect(pane.programmatic).toHaveBeenCalledTimes(1);
     expect(screen.getAllByRole("heading", { name: "Opportunities" })).toHaveLength(1);
   });
 
@@ -5333,6 +5343,7 @@ describe("AgentPane lifecycle", () => {
     fireEvent.click(screen.getByRole("button", { name: "Opportunities" }));
     await waitFor(() => expect(pane.programmatic).toHaveBeenCalledTimes(1));
     expect(await screen.findByRole("heading", { name: "Opportunities" })).toBeTruthy();
+    await openStep("Review");
     fireEvent.click(await screen.findByRole("button", { name: /Review packaging/ }));
     const run = await screen.findByRole("button", { name: "Review and run" });
     await waitFor(() => expect((run as HTMLButtonElement).disabled).toBe(false));

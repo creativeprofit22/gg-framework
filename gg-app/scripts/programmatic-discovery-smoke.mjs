@@ -123,7 +123,7 @@ export function discoveryWorkflowStep(number, body) {
     }
     // An accepted advisory result ends the run, so review starts at request 4.
     case 4:
-      assert.ok(output("discovery-submit").includes("Recommendations"));
+      assert.ok(output("discovery-submit").includes("What AI found"));
       return tool("review-read", "read", { file_path: "package.json" });
     case 5:
       assert.ok(output("review-read").includes("harmless-isolated-fixture"));
@@ -256,7 +256,8 @@ export async function runDiscoverySmoke({ client, click, waitFor, requests, inpu
       `document.body.innerText.includes('NATIVE DISCOVERY REVIEW SETTLED') && !!(${smokeButton(smokeLabels.review)}) && !(${smokeButton(smokeLabels.review)}).disabled`,
     ),
   );
-  // Find more ideas is collapsed once suggestions exist. Reveal before keyboard/AX checks.
+  // Without saved checks the header key is on step 1, so Find ideas is the quiet step 2
+  // button. Reveal its step before keyboard/AX checks.
   await revealSmokeTarget(
     client,
     smokeButton(smokeLabels.discover),
@@ -284,14 +285,16 @@ export async function runDiscoverySmoke({ client, click, waitFor, requests, inpu
   );
   assert.equal(
     await client.evaluate(
-      `document.querySelector('.programmatic-chat')?.textContent.includes('Setup only looks, so checks didn't run.')`,
+      `document.querySelector('.programmatic-chat')?.textContent.includes(${JSON.stringify("Setup only looks, so checks didn't run.")})`,
     ),
     true,
   );
-  await click("Refresh results");
-  await waitFor("refresh settled", () =>
+  // Reopening the panel reloads results by itself; there is no separate reload button.
+  await click("Opportunities");
+  await click("Opportunities");
+  await waitFor("reload settled", () =>
     client.evaluate(
-      `Array.from(document.querySelectorAll('.programmatic-chat button')).some(b=>b.textContent.trim()==='Refresh results' && !b.disabled)`,
+      `!!(${smokeButton(smokeLabels.discover)}) && !(${smokeButton(smokeLabels.discover)}).disabled && !document.querySelector('.programmatic-chat [role="status"]')?.textContent.includes('Loading')`,
     ),
   );
   assert.equal(

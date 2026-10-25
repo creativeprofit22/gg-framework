@@ -1,45 +1,12 @@
 import type { ProgrammaticAssessment as Assessment } from "@kenkaiiii/gg-core/programmatic-assessment-contract";
-
-const historyLabels: Record<NonNullable<Assessment["history"]>["status"], string> = {
-  saved: "saved",
-  disabled: "off",
-  "setup-not-saved": "not saved during setup",
-  unsaved: "not saved",
-  "acknowledgement-unknown": "not sure it saved",
-};
-
-const statusLabels: Record<Assessment["status"], string> = {
-  completed: "Done",
-  incomplete: "Not finished",
-  cancelled: "Stopped",
-  unavailable: "Not available",
-};
-const checkLabels: Record<Assessment["deterministic"]["status"], string> = {
-  succeeded: "Done",
-  "not-run": "Not run",
-  unavailable: "Not available",
-  denied: "Not allowed",
-  cancelled: "Stopped",
-  failed: "Failed",
-};
-const checkExplanations: Record<
-  Exclude<Assessment["deterministic"]["status"], "succeeded" | "not-run">,
-  string
-> = {
-  unavailable: "Your checks couldn't run.",
-  denied: "Your checks weren't allowed to run.",
-  cancelled: "Your checks were stopped, so results are incomplete.",
-  failed: "Your checks failed. See Details for why.",
-};
-const coverageLabels: Record<Assessment["coverage"][number]["status"], string> = {
-  inspected: "Checked",
-  uninspected: "Not checked",
-  "budget-limited": "Partly checked",
-  unreadable: "Couldn't read",
-  unsafe: "Skipped for safety",
-  nonmatching: "Didn't match",
-  "not-applicable": "Didn't apply",
-};
+import {
+  CHECK_RUN_EXPLANATIONS as checkExplanations,
+  CHECK_RUN_LABELS as checkLabels,
+  COVERAGE_LABELS as coverageLabels,
+  SEARCH_HISTORY_LABELS as historyLabels,
+  SEARCH_STATUS_LABELS as statusLabels,
+  plainLimitation,
+} from "./programmatic-presentation";
 
 /** Plain-text assessment presentation; actions remain in the parent chat. */
 export function ProgrammaticAssessment({
@@ -62,7 +29,7 @@ export function ProgrammaticAssessment({
       {assessment.limitations.length > 0 && (
         <ul>
           {assessment.limitations.map((limitation, index) => (
-            <li key={index}>{limitation}</li>
+            <li key={index}>{plainLimitation(limitation)}</li>
           ))}
         </ul>
       )}
@@ -90,7 +57,7 @@ export function ProgrammaticAssessment({
               {assessment.coverage.map((item, index) => (
                 <li key={index}>
                   {item.scope === "project" ? "Your project" : "Your commands"}:{" "}
-                  {coverageLabels[item.status]} — {item.summary}
+                  {coverageLabels[item.status]} — {plainLimitation(item.summary)}
                 </li>
               ))}
             </ul>

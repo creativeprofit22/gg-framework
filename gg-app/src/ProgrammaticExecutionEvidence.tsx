@@ -1,9 +1,6 @@
 import type { ProgrammaticExecutionEvidence } from "@kenkaiiii/gg-core/programmatic-chat-contract";
 import { Badge } from "./Badge";
-
-/** One plain word per evidence basis, shared by every Opportunities view. */
-export const evidenceBasisLabel = (basis: ProgrammaticExecutionEvidence["basis"]) =>
-  basis === "observed" ? "Checked" : basis === "inferred" ? "Best guess" : "Assumed";
+import { evidenceBasisLabel } from "./programmatic-presentation";
 
 /** Plain text only: citations are not executable links or rendered Markdown. */
 export function ProgrammaticExecutionEvidenceView({

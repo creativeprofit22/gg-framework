@@ -12,6 +12,12 @@ export interface NotesTabItem<T extends string> {
   label: string;
   /** Decoration shown after the label, such as a count badge. */
   adornment?: ReactNode;
+  /** Shown before the label, such as a step number. */
+  labelPrefix?: ReactNode;
+  /** Marks the step to do next with aria-current="step"; omitted otherwise, never "false". */
+  current?: boolean;
+  /** Exposed as data-state for styling, such as a step's done/next/not-yet. */
+  state?: string;
 }
 
 export interface NotesTabListProps<T extends string> {
@@ -146,10 +152,14 @@ export function NotesTabList<T extends string>({
               role="tab"
               aria-selected={selected}
               aria-controls={panelId(tab.id)}
+              aria-current={tab.current ? "step" : undefined}
+              data-state={tab.state}
               tabIndex={selected ? 0 : -1}
               onClick={() => select(tab.id)}
               onKeyDown={(event) => onKeyDown(event, tab.id)}
             >
+              {/* The space keeps the accessible name "1 Label", not "1Label". */}
+              {tab.labelPrefix ? <>{tab.labelPrefix} </> : null}
               <span>{tab.label}</span>
               {tab.adornment}
             </button>

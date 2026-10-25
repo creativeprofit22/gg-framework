@@ -97,6 +97,37 @@ describe("NotesTabList", () => {
     expect(document.getElementById("panel-two")?.hidden).toBe(false);
     expect(document.getElementById("panel-one")?.hidden).toBe(true);
   });
+
+  it("marks only the current step with aria-current and keeps prefix and state", () => {
+    const steps = [
+      { id: "one", label: "One", labelPrefix: <span>1</span>, state: "done" },
+      { id: "two", label: "Two", labelPrefix: <span>2</span>, state: "next", current: true },
+      { id: "three", label: "Three", labelPrefix: <span>3</span>, state: "not-yet" },
+    ] as const;
+    render(
+      <NotesTabList<TabId>
+        label="Steps"
+        tabs={steps}
+        activeId="one"
+        onSelect={() => undefined}
+        tabId={(id) => `tab-${id}`}
+        panelId={(id) => `panel-${id}`}
+        className="list"
+        scrollClassName="scroller"
+      />,
+    );
+    expect(tabs().map((tab) => tab.getAttribute("aria-current"))).toEqual([null, "step", null]);
+    expect(tabs().map((tab) => tab.dataset.state)).toEqual(["done", "next", "not-yet"]);
+    expect(screen.getByRole("tab", { name: "2 Two" }).getAttribute("aria-selected")).toBe("false");
+  });
+
+  it("omits aria-current and data-state on plain tabs", () => {
+    render(<Harness />);
+    for (const tab of tabs()) {
+      expect(tab.hasAttribute("aria-current")).toBe(false);
+      expect(tab.hasAttribute("data-state")).toBe(false);
+    }
+  });
 });
 
 function rect(left: number, right: number): DOMRect {

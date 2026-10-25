@@ -44,7 +44,8 @@ it.each(["completed", "failed", "aborted"] as const)(
   "keeps host recommendations separate from tool results and drafts after %s (mocked native IPC)",
   (outcome) => {
     const { hook, getItems, getLiveToolFeed } = setup();
-    const text = "## Recommendations — not started\nInspect configuration manually.\nAdvice only.";
+    const text =
+      "## What AI found: 1 idea, nothing you need to do\nInspect configuration manually.\nAdvice only.";
     act(() => {
       const send = (type: string, data: Record<string, unknown>) =>
         hook.result.current.handleEvent(ev(type, data));

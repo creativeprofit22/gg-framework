@@ -17,6 +17,7 @@ import {
   canReviewProgrammaticCandidate,
   type ProgrammaticChatState,
 } from "./programmatic-chat-state";
+import { CHECKS_COPY } from "./programmatic-presentation";
 
 interface ProgrammaticChatStateDeps {
   paneId: string;
@@ -48,6 +49,8 @@ export function useProgrammaticChatState({
   const programmaticEpochRef = useRef(0);
   const programmaticOwnerRef = useRef<number | null>(null);
   const programmaticRefreshPendingRef = useRef(false);
+  /** A typed setup review finished; show its exact deterministic proposal in the panel. */
+  const programmaticSetupReviewPendingRef = useRef(false);
   const [programmaticInvalidation, invalidateProgrammatic] = useReducer(
     (value: number) => value + 1,
     0,
@@ -61,6 +64,10 @@ export function useProgrammaticChatState({
         event,
       });
       setProgrammaticOpen(true);
+      // Find ideas always sends a request id, so a setup assessment without one was a
+      // typed review. Saving happens only in the panel: show its proposal after results load.
+      if (event.phase === "completed" && event.assessment.mode === "setup" && !event.requestId)
+        programmaticSetupReviewPendingRef.current = true;
       // A button request owns its exact response until it settles. Its normal
       // run-end refresh is already deferred; do not schedule a competing report.
       if (programmaticOwnerRef.current === null) invalidateProgrammatic();
@@ -79,6 +86,7 @@ export function useProgrammaticChatState({
     programmaticEpochRef.current++;
     programmaticOwnerRef.current = null;
     programmaticRefreshPendingRef.current = false;
+    programmaticSetupReviewPendingRef.current = false;
     dispatchProgrammatic({ type: "reset", generation: programmaticGeneration });
     setProgrammaticOpen(false);
   }, [programmaticGeneration]);
@@ -94,6 +102,7 @@ export function useProgrammaticChatState({
     programmaticEpochRef,
     programmaticOwnerRef,
     programmaticRefreshPendingRef,
+    programmaticSetupReviewPendingRef,
     programmaticInvalidation,
     invalidateProgrammatic,
     onProgrammaticAssessment,
@@ -110,6 +119,7 @@ interface ProgrammaticChatActionsDeps {
     programmaticEpochRef: RefObject<number>;
     programmaticOwnerRef: RefObject<number | null>;
     programmaticRefreshPendingRef: RefObject<boolean>;
+    programmaticSetupReviewPendingRef: RefObject<boolean>;
     programmaticInvalidation: number;
     invalidateProgrammatic: () => void;
   };
@@ -140,6 +150,7 @@ export function useProgrammaticChatActions({
     programmaticEpochRef,
     programmaticOwnerRef,
     programmaticRefreshPendingRef,
+    programmaticSetupReviewPendingRef,
     programmaticInvalidation,
     invalidateProgrammatic,
   },
@@ -221,12 +232,9 @@ export function useProgrammaticChatActions({
       while (pending && current()) {
         const active: ProgrammaticChatRequest = { ...pending };
         const epoch = ++programmaticEpochRef.current;
+        // Only Find ideas runs AI, so only it carries an assessment request id.
         const requestId =
-          active.action === "discover" ||
-          active.action === "inspect-setup" ||
-          active.action === "scan"
-            ? (active.requestId = crypto.randomUUID())
-            : undefined;
+          active.action === "discover" ? (active.requestId = crypto.randomUUID()) : undefined;
         const { sessionId, conversationId } = stateRef.current ?? {};
         const assessmentRequest =
           requestId && sessionId && conversationId
@@ -243,10 +251,6 @@ export function useProgrammaticChatActions({
         if (!current()) return;
         dispatchProgrammatic({ type: "response", generation, epoch, response });
         if (!response.ok) return;
-        // Provider-backed setup emits run_end before its native response settles.
-        // Its exact proposal is newer than that queued report refresh; retain it
-        // until an explicit refresh or a subsequent independent run invalidates it.
-        if (active.action === "inspect-setup") programmaticRefreshPendingRef.current = false;
         pending = null;
         if (["approve-setup", "scan", "dismiss"].includes(active.action))
           pending = {
@@ -256,6 +260,14 @@ export function useProgrammaticChatActions({
           };
         else if (active.action === "report" && programmaticRef.current.selectedId)
           pending = { version: 1, action: "detail", id: programmaticRef.current.selectedId };
+        if (
+          !pending &&
+          (active.action === "report" || active.action === "detail") &&
+          programmaticSetupReviewPendingRef.current
+        ) {
+          programmaticSetupReviewPendingRef.current = false;
+          if (!stateRef.current?.planMode) pending = { version: 1, action: "inspect-setup" };
+        }
       }
     } catch {
       if (current())
@@ -263,7 +275,7 @@ export function useProgrammaticChatActions({
           type: "error",
           generation,
           epoch: programmaticEpochRef.current,
-          error: "That didn't work. Refresh results to see what happened, then try again.",
+          error: CHECKS_COPY.requestFailed,
           reconcile: [
             "approve-setup",
             "scan",
@@ -339,9 +351,7 @@ export function useProgrammaticChatActions({
           type: "error",
           generation,
           epoch,
-          error: rejected
-            ? `Couldn't start: ${error.message}`
-            : "We couldn't tell if it started. Refresh results before trying again.",
+          error: rejected ? `Couldn't start: ${error.message}` : CHECKS_COPY.runUnknown,
           reconcile: !rejected,
         });
     } finally {

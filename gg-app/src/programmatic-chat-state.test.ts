@@ -141,7 +141,7 @@ it("retains an explicitly reviewed history upgrade through unchanged scanner rep
     }).proposalApprovable,
   ).toBe(false);
 });
-it("retains bounded assessment through reports, rejects stale outcomes and clears on reset", () => {
+it("takes assessments only from Find ideas and keeps them through setup, checks and reports", () => {
   const assessment = {
     version: 1 as const,
     mode: "setup" as const,
@@ -158,16 +158,34 @@ it("retains bounded assessment through reports, rejects stale outcomes and clear
   };
   let state = receive(initialProgrammaticChatState("one"), {
     version: 1,
+    action: "discover",
+    ok: true,
+    assessment,
+  });
+  expect(state.assessment).toEqual(assessment);
+  // A legacy daemon may still attach an AI result to setup or check replies; ignore it.
+  const legacy = { ...assessment, summary: "Legacy setup assessment" };
+  state = receive(state, {
+    version: 1,
     action: "inspect-setup",
     ok: true,
     proposal: exactProposal,
-    assessment,
+    assessment: legacy,
   });
   expect(state.assessment).toEqual(assessment);
   expect(state.proposal).toBe(exactProposal);
   expect(state.proposalApprovable).toBe(true);
   state = receive(state, { version: 1, action: "report", ok: true, report: loadedState().report! });
   expect(state.assessment).toEqual(assessment);
+  const legacyScan = {
+    ...legacy,
+    mode: "configured" as const,
+    deterministic: { status: "succeeded" as const, enabledCount: 1, applicableCount: 1 },
+  };
+  expect(
+    receive(state, { version: 1, action: "scan", ok: true, changed: true, assessment: legacyScan })
+      .assessment,
+  ).toEqual(assessment);
   const response = {
     version: 1 as const,
     action: "scan" as const,
@@ -202,8 +220,18 @@ it("retains bounded assessment through reports, rejects stale outcomes and clear
     reconcile: false,
     assessment: { ...assessment, status: "unavailable" },
   });
-  expect(failed.assessment?.status).toBe("unavailable");
+  expect(failed.assessment).toEqual(assessment);
   expect(failed.proposalApprovable).toBe(false);
+  expect(
+    receive(state, {
+      version: 1,
+      action: "discover",
+      ok: false,
+      error: "AI unavailable",
+      reconcile: false,
+      assessment: { ...assessment, status: "unavailable" },
+    }).assessment?.status,
+  ).toBe("unavailable");
 });
 
 it("replaces assessment without changing in-flight setup ownership and rejects retired updates", () => {
@@ -537,7 +565,7 @@ describe("programmatic state", () => {
       },
     });
     expect(current.proposalApprovable).toBe(false);
-    expect(current.notice).toBe("Setup is up to date. Nothing to save.");
+    expect(current.notice).toBe("Your checks are up to date. Nothing to save.");
     const changed = programmaticChatReducer(reviewed, {
       type: "response",
       generation: "one",
@@ -664,6 +692,59 @@ describe("programmatic state", () => {
       ).toBe(false);
     },
   );
+  it("keeps the save confirmation through the automatic results reload", () => {
+    const report = {
+      status: "current" as const,
+      reason: "Current",
+      scan: { available: true, reason: "Approved" },
+      rows: [],
+      total: 0,
+      offset: 0,
+      snapshot: hash,
+      fingerprint: hash,
+    };
+    let state: ProgrammaticChatState = {
+      ...initialProgrammaticChatState("one"),
+      proposal,
+      proposalApprovable: true,
+    };
+    const step = (
+      operation: "approve-setup" | "scan" | "report",
+      epoch: number,
+      response: ProgrammaticChatResponse,
+    ) => {
+      state = programmaticChatReducer(state, {
+        type: "start",
+        generation: "one",
+        epoch,
+        operation,
+      });
+      state = programmaticChatReducer(state, {
+        type: "response",
+        generation: "one",
+        epoch,
+        response,
+      });
+    };
+    step("approve-setup", 1, { version: 1, action: "approve-setup", ok: true, changed: true });
+    step("report", 2, { version: 1, action: "report", ok: true, report });
+    expect(state.notice).toBe("Checks saved. Choose Check again to run them.");
+    step("scan", 3, { version: 1, action: "scan", ok: true, changed: true });
+    state = programmaticChatReducer(state, {
+      type: "start",
+      generation: "one",
+      epoch: 4,
+      operation: "report",
+    });
+    expect(state.notice).toBe("Checks done. Loading results.");
+    state = programmaticChatReducer(state, {
+      type: "response",
+      generation: "one",
+      epoch: 4,
+      response: { version: 1, action: "report", ok: true, report },
+    });
+    expect(state.notice).toBe("0 saved check results. AI suggestions are shown separately.");
+  });
   it("rejects old generations and epochs, and preserves selected context during scans", () => {
     let state = initialProgrammaticChatState("one");
     state = programmaticChatReducer(state, { type: "select", id: hash });

@@ -157,13 +157,13 @@ $front=[SmokeWindow]::SetForegroundWindow($h)
       result.document.scroll <= result.document.client + 1,
       `${name}: document horizontal overflow`,
     );
-    for (const label of [smokeLabels.currentSetup, "Refresh results", smokeLabels.scan])
+    for (const label of [smokeLabels.setup, smokeLabels.scan])
       await focus(button(label), `${name}: ${label}`);
     await focus("document.querySelector('.programmatic-detail summary')", `${name}: evidence`);
     await capture(name);
   };
   const pointer = async () => {
-    const expression = button("Refresh results");
+    const expression = button(smokeLabels.scan);
     await focus(expression, "pointer baseline");
     const rect = await client.evaluate(
       `(() => {const r=(${expression}).getBoundingClientRect(); return {x:(r.left+r.right)/2,y:(r.top+r.bottom)/2};})()`,
@@ -181,7 +181,7 @@ $front=[SmokeWindow]::SetForegroundWindow($h)
       clickCount: 1,
       ...rect,
     });
-    await waitFor("pointer refresh complete", () =>
+    await waitFor("pointer Check again complete", () =>
       client.evaluate(
         `!document.querySelector('.programmatic-chat [role="status"]')?.textContent.includes('Loading')`,
       ),

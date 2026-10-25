@@ -2,84 +2,42 @@ import { useId } from "react";
 import type { ProgrammaticChatRequest } from "@kenkaiiii/gg-core/programmatic-chat-contract";
 import {
   RECOMMENDATION_HISTORY_PAGE_SIZE,
-  type DiscoveryChoice,
   type DiscoveryCandidate,
   type RecommendationSummary,
-  type RecommendationHistoryReport,
-  type DiscoveryReview,
 } from "@kenkaiiii/gg-core/programmatic-recommendation-contract";
 import {
   canReviewProgrammaticCandidate,
   type ProgrammaticChatState,
 } from "./programmatic-chat-state";
-import { evidenceBasisLabel } from "./ProgrammaticExecutionEvidence";
-import { DataPlate, SpecList, StatusLamp, type LampTone, type SpecRow } from "./InstrumentParts";
-
-/** Sentence form, used where the kind reads inside a sentence (Other options). */
-const labels: Record<DiscoveryChoice, string> = {
-  "reuse-command": "You already have a command for this",
-  "extend-command": "A command you have could do this with changes",
-  "missing-capability": "Needs a new command",
-  "needs-more-evidence": "Needs a closer look first",
-  manual: "Better done by hand",
-  "generate-from-reference": "Make one, then copy it for the rest",
-};
-/** Plate form: the short kind shown on every idea card. */
-const plateLabels: Record<DiscoveryChoice, string> = {
-  "reuse-command": "You have this",
-  "extend-command": "Change a command",
-  "missing-capability": "New command",
-  "needs-more-evidence": "Look closer",
-  manual: "By hand",
-  "generate-from-reference": "Make one, copy the rest",
-};
-const lampTones: Record<DiscoveryChoice, LampTone> = {
-  "reuse-command": "success",
-  "extend-command": "primary",
-  "missing-capability": "primary",
-  "needs-more-evidence": "warning",
-  manual: "neutral",
-  "generate-from-reference": "primary",
-};
-const isCommand = (item: DiscoveryCandidate) =>
-  item.choice === "reuse-command" || item.choice === "extend-command";
-const reviewLabel = (item: DiscoveryCandidate) =>
-  isCommand(item) && item.availability?.status !== "available"
-    ? "Check the command again"
-    : "Review this idea";
-const decisionLabels: Record<RecommendationSummary["decision"], string> = {
-  open: "Still open",
-  dismissed: "Dismissed",
-  completed: "Done",
-};
-const historyLabels: Record<RecommendationHistoryReport["status"], string> = {
-  disabled: "Saving past ideas is off",
-  missing: "No past ideas yet",
-  ready: "Past ideas loaded",
-  recovered: "Past ideas loaded, but some may be missing",
-  unavailable: "Couldn't load past ideas",
-};
-const reviewStatusLabels: Record<DiscoveryReview["status"], string> = {
-  prepared: "Review ready. Nothing was changed.",
-  "reinspection-required": "This command needs another check first.",
-  unsupported: "This idea can't be reviewed here.",
-};
-const availabilityLabel = (
-  status: NonNullable<DiscoveryCandidate["availability"]>["status"] | undefined,
-) =>
-  status === "available"
-    ? "Command found"
-    : status === "unavailable"
-      ? "Command not found"
-      : "Command needs another check";
+import {
+  IDEA_DETAIL_TERMS as terms,
+  NO_RISKS_LISTED,
+  PAST_IDEAS_RECORD_NOTE,
+  PAST_IDEAS_STATUS_LABELS as historyLabels,
+  PAST_IDEA_COPY_NOTE,
+  PAST_IDEA_DECISION_LABELS as decisionLabels,
+  PAST_IDEA_POSSIBLE_REPEAT,
+  REVIEW_EMPTY,
+  REVIEW_STATUS_LABELS as reviewStatusLabels,
+  TECHNICAL_DETAILS,
+  availabilityLabel,
+  evidenceBasisLabel,
+  ideaKindSentence,
+  ideaVerdict,
+  isCommandIdea as isCommand,
+  reviewHint,
+  reviewLabel,
+  seenCount,
+} from "./programmatic-presentation";
+import { DataPlate, SpecList, StatusLamp, type SpecRow } from "./InstrumentParts";
 
 function HistoryStatus({ item }: { item: RecommendationSummary }) {
   return item.canonicalId ? (
-    <span>Same as an earlier idea</span>
+    <span>{PAST_IDEA_COPY_NOTE}</span>
   ) : (
     <>
-      <span>Status: {decisionLabels[item.decision]}</span>
-      {item.ambiguity === "exact-workflow-duplicate" && <p>Might be the same as another idea</p>}
+      <span>{decisionLabels[item.decision]}</span>
+      {item.ambiguity === "exact-workflow-duplicate" && <p>{PAST_IDEA_POSSIBLE_REPEAT}</p>}
     </>
   );
 }
@@ -92,7 +50,7 @@ interface PanelProps {
   onSelect(source: "current" | "history", id: string): void;
 }
 
-/** The selected idea's explanation, shared by the Ideas and Past ideas tabs. */
+/** The selected idea's explanation, shared by Review's Ideas group and the Past ideas region. */
 function CandidateDetail({
   state,
   candidate,
@@ -110,7 +68,7 @@ function CandidateDetail({
         : state.reconcile
           ? "Refresh results to see what was saved, then try again."
           : candidate.nextStep.available
-            ? "Reviewing doesn't change anything."
+            ? reviewHint(candidate)
             : "This idea isn't ready to review.";
   const risks = candidate.risks.length ? (
     <ul className="inst-spec-items">
@@ -122,17 +80,18 @@ function CandidateDetail({
       ))}
     </ul>
   ) : (
-    "None listed. That doesn't mean it's safe."
+    NO_RISKS_LISTED
   );
   const rows: SpecRow[] = [
-    { term: "Changes", value: candidate.workflow.mutationBoundary },
-    { term: "Where", value: candidate.workflow.scope },
-    { term: "Not sure", value: candidate.uncertainty },
-    { term: "Risk", value: risks },
+    { term: terms.yourPart, value: ideaVerdict(candidate).yourPart },
+    { term: terms.change, value: candidate.workflow.mutationBoundary },
+    { term: terms.where, value: candidate.workflow.scope },
+    { term: terms.unsure, value: candidate.uncertainty },
+    { term: terms.risk, value: risks },
     ...(candidate.details.length
       ? [
           {
-            term: "Good to know",
+            term: terms.notes,
             value: (
               <ul className="inst-spec-items">
                 {candidate.details.map((text, index) => (
@@ -171,7 +130,8 @@ function CandidateDetail({
           <p>When it comes up: {candidate.workflow.trigger}</p>
           <p>Example: {candidate.workflow.representativeCase}</p>
           <p>
-            How often ({evidenceBasisLabel(candidate.workflow.repeatability.basis).toLowerCase()}):{" "}
+            How often this comes up (
+            {evidenceBasisLabel(candidate.workflow.repeatability.basis).toLowerCase()}):{" "}
             {candidate.workflow.repeatability.explanation}
           </p>
           <h5>What it uses and how it's done now</h5>
@@ -186,7 +146,7 @@ function CandidateDetail({
           <ul>
             {candidate.evidence.map((item, index) => (
               <li key={index}>
-                {evidenceBasisLabel(item.basis)}: {item.message} ({item.source})
+                {evidenceBasisLabel(item.basis)}: {item.message}
               </li>
             ))}
           </ul>
@@ -194,7 +154,7 @@ function CandidateDetail({
           <ul>
             {candidate.alternatives.map((item) => (
               <li key={item.kind}>
-                {labels[item.kind]}: {item.reasonNotSelected}
+                {ideaKindSentence(item.kind)}: {item.reasonNotSelected}
                 {item.availability && (
                   <>
                     <p>{availabilityLabel(item.availability.status)}</p>
@@ -204,6 +164,19 @@ function CandidateDetail({
               </li>
             ))}
           </ul>
+          {candidate.evidence.length > 0 && (
+            <details>
+              <summary>{TECHNICAL_DETAILS.summary}</summary>
+              <p>{TECHNICAL_DETAILS.intro}</p>
+              <ol>
+                {candidate.evidence.map((item, index) => (
+                  <li key={index}>
+                    <code>{item.source}</code>
+                  </li>
+                ))}
+              </ol>
+            </details>
+          )}
         </details>
         <div className="opp-detail-action">
           {candidate.choice !== "manual" && (
@@ -240,15 +213,14 @@ function CandidateDetail({
   );
 }
 
-/** Ideas tab: search notices, then one card per idea; the selected card opens in place. */
-export function ProgrammaticIdeas({ state, locked, planMode, onRequest, onSelect }: PanelProps) {
-  const candidate = state.selection?.source === "current" ? state.candidateDetail : null;
+/** Step 2, Find ideas: how the search went. The header key starts it; the cards live in Review. */
+export function ProgrammaticIdeaSearch({ state }: Pick<PanelProps, "state">) {
   const current = state.discovery;
   return (
     <>
       {state.assessmentPending && (
         <p className="opp-notice" data-tone="primary">
-          Looking for ideas… Older results below are only for reference.
+          Looking for ideas… Older ideas in Review are only for reference.
         </p>
       )}
       {state.assessmentUncertain && (
@@ -256,19 +228,6 @@ export function ProgrammaticIdeas({ state, locked, planMode, onRequest, onSelect
           We couldn't tell if the search finished. Nothing was retried. When the chat is free, you
           can search again.
         </p>
-      )}
-      {state.discoveryStale && current && (
-        <p className="opp-notice" data-tone="warning">
-          These ideas are from an earlier search. Search again before reviewing one.
-        </p>
-      )}
-      {!current && !state.assessment && (
-        <div className="opp-empty inst-module">
-          <p>
-            AI reads your project and suggests work you could automate. It uses your AI provider and
-            doesn't change anything.
-          </p>
-        </div>
       )}
       {current && !current.candidates.length && !state.discoveryStale && (
         <div className="opp-empty inst-module">
@@ -280,6 +239,22 @@ export function ProgrammaticIdeas({ state, locked, planMode, onRequest, onSelect
           Ideas from this search can't be shown. That doesn't mean there's nothing to improve.
         </p>
       )}
+    </>
+  );
+}
+
+/** Review's Ideas group: one card per idea; the selected card opens in place. */
+export function ProgrammaticIdeas({ state, locked, planMode, onRequest, onSelect }: PanelProps) {
+  const candidate = state.selection?.source === "current" ? state.candidateDetail : null;
+  const current = state.discovery;
+  return (
+    <>
+      {state.discoveryStale && current && (
+        <p className="opp-notice" data-tone="warning">
+          These ideas are from an earlier search. Search again before reviewing one.
+        </p>
+      )}
+      {!current?.candidates.length && <p className="opp-caption">{REVIEW_EMPTY.ideas}</p>}
       {!!current?.candidates.length && (
         <section aria-label="Idea list">
           {!state.discoveryStale &&
@@ -296,8 +271,8 @@ export function ProgrammaticIdeas({ state, locked, planMode, onRequest, onSelect
                 <>
                   <div className="opp-card-head">
                     <div className="opp-card-kind">
-                      <StatusLamp tone={lampTones[item.choice]} />
-                      <DataPlate>{plateLabels[item.choice]}</DataPlate>
+                      <StatusLamp tone={ideaVerdict(item).tone} />
+                      <DataPlate>{ideaVerdict(item).plate}</DataPlate>
                       {isCommand(item) && (
                         <span className="opp-card-meta">
                           {availabilityLabel(item.availability?.status)}
@@ -349,7 +324,7 @@ export function ProgrammaticIdeas({ state, locked, planMode, onRequest, onSelect
   );
 }
 
-/** Past ideas tab: the saved record, read on request, plus the selected past idea. */
+/** Past ideas region: the saved record, loaded when opened, plus the selected past idea. */
 export function ProgrammaticPastIdeas({
   state,
   locked,
@@ -367,16 +342,19 @@ export function ProgrammaticPastIdeas({
   return (
     <>
       <div className="opp-toolbar">
-        <p className="opp-caption">Past ideas are a record only. They don't approve anything.</p>
-        <button
-          className="btn btn-ghost btn-sm"
-          disabled={locked}
-          onClick={() =>
-            onRequest({ version: 1, action: "history-report", offset: history?.offset ?? 0 })
-          }
-        >
-          {state.historyReportStale ? "Reload past ideas" : "Show past ideas"}
-        </button>
+        <p className="opp-caption">{PAST_IDEAS_RECORD_NOTE}</p>
+        {/* Opening Past ideas loads the list; only a list that may be out of date offers a reload. */}
+        {state.historyReportStale && (
+          <button
+            className="btn btn-ghost btn-sm"
+            disabled={locked}
+            onClick={() =>
+              onRequest({ version: 1, action: "history-report", offset: history?.offset ?? 0 })
+            }
+          >
+            Reload past ideas
+          </button>
+        )}
       </div>
       {state.historyReportStale && (
         <p className="opp-notice" role="status">
@@ -461,30 +439,23 @@ export function ProgrammaticPastIdeas({
           )}
           <HistoryStatus item={historical} />
           {historical.canonicalId && (
-            <>
-              <p>This is a copy of an earlier idea. Open the earlier one to see its status.</p>
-              <button
-                className="btn btn-ghost btn-sm"
-                disabled={locked}
-                onClick={() => onSelect("history", historical.canonicalId!)}
-              >
-                Open the earlier idea
-              </button>
-            </>
+            <button
+              className="btn btn-ghost btn-sm"
+              disabled={locked}
+              onClick={() => onSelect("history", historical.canonicalId!)}
+            >
+              Open the earlier idea
+            </button>
           )}
-          <p>
-            Seen {historical.observationCount}{" "}
-            {historical.observationCount === 1 ? "time" : "times"}. This is a record, not an
-            approval.
-          </p>
+          <p>{seenCount(historical.observationCount)}</p>
         </section>
       )}
       {candidate && (
         <section aria-label="Selected idea" className="opp-card inst-module" data-open="">
           <div className="opp-card-head">
             <div className="opp-card-kind">
-              <StatusLamp tone={lampTones[candidate.choice]} />
-              <DataPlate>{plateLabels[candidate.choice]}</DataPlate>
+              <StatusLamp tone={ideaVerdict(candidate).tone} />
+              <DataPlate>{ideaVerdict(candidate).plate}</DataPlate>
               <span className="opp-card-meta">Past idea</span>
             </div>
             <h3 className="opp-card-title" tabIndex={-1} data-programmatic-selection>

@@ -18,6 +18,7 @@ import {
   initialDiscoveryChatState,
   type DiscoveryChatState,
 } from "./programmatic-discovery-state";
+import { CHECKS_NOTICES } from "./programmatic-presentation";
 export type { ProgrammaticSelection } from "./programmatic-discovery-state";
 
 export interface ProgrammaticChatState extends DiscoveryChatState {
@@ -94,10 +95,12 @@ export function programmaticChatReducer(
       epoch: event.epoch,
       operation: event.operation,
       error: null,
-      notice: "",
+      // Auto reloads keep the last notice.
+      notice: event.operation === "report" ? state.notice : "",
       assessmentRequestSequence: state.assessmentSequence,
       assessmentRequest: event.assessmentRequest ?? null,
-      ...(["discover", "inspect-setup", "scan"].includes(event.operation ?? "")
+      // Only Find ideas (AI) replaces ideas.
+      ...(event.operation === "discover"
         ? {
             assessmentRetained: !!state.assessment,
             discoveryStale: true,
@@ -127,7 +130,8 @@ export function programmaticChatReducer(
       notice: "Answer the approval prompt in this chat to start.",
     };
   const response = event.response;
-  const responseDisplay = assessmentResponse(state, response);
+  // Ignore legacy setup/check AI results.
+  const responseDisplay = response.action === "discover" ? assessmentResponse(state, response) : {};
   if (!response.ok)
     return {
       ...state,
@@ -172,7 +176,10 @@ export function programmaticChatReducer(
               response.report.configuration.status === state.proposal?.configuration.status &&
               response.report.configuration.currentFingerprint === state.proposal?.fingerprint)),
         reconcile: false,
-        notice: `${response.report.total} saved check results. AI suggestions are shown separately.`,
+        notice:
+          state.notice === CHECKS_NOTICES.saved
+            ? CHECKS_NOTICES.saved
+            : `${response.report.total} saved check results. AI suggestions are shown separately.`,
       };
     case "detail": {
       if (response.detail && response.detail.summary.id !== state.selectedId) return base;
@@ -186,36 +193,34 @@ export function programmaticChatReducer(
     case "inspect-setup":
       return {
         ...base,
-        ...responseDisplay,
         proposal: response.proposal,
         configuration: response.proposal.configuration,
         proposalApprovable:
           response.proposal.handle !== null && response.proposal.operation !== "current",
         notice:
           response.proposal.operation === "current"
-            ? "Setup is up to date. Nothing to save."
+            ? CHECKS_NOTICES.proposalCurrent
             : response.proposal.operation === "refresh"
-              ? "Updated setup is ready to review. Nothing has changed yet."
-              : "Setup is ready to review. Nothing has changed yet.",
+              ? CHECKS_NOTICES.proposalRefresh
+              : CHECKS_NOTICES.proposalSetup,
       };
     case "approve-setup":
       return {
         ...base,
         proposal: null,
         proposalApprovable: false,
-        notice: "Setup saved. Choose Run project checks when you are ready.",
+        notice: CHECKS_NOTICES.saved,
       };
     case "scan":
       return {
         ...base,
-        ...responseDisplay,
-        notice: "Loading results.",
+        notice: CHECKS_NOTICES.checked,
       };
     case "dismiss":
       return {
         ...base,
         detailSnapshot: null,
-        notice: "Dismissed. Reloading results.",
+        notice: CHECKS_NOTICES.dismissed,
       };
   }
 }

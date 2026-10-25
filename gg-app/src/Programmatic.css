@@ -87,6 +87,11 @@
   flex: 1 1 auto;
   min-width: 0;
 }
+/* The header link keeps its two words together; the heading text gives way first. */
+.opp-head .opp-past-link {
+  flex: none;
+  white-space: nowrap;
+}
 
 .programmatic-chat .opp-head h2 {
   font-size: var(--fs-4xl);
@@ -113,6 +118,31 @@
 }
 .programmatic-chat .inst-tabs-scroll {
   margin-block: var(--space-10) var(--space-8);
+}
+
+/* Step bar: number, label, then the status icon and word, pulled in like a tab count. */
+.opp-step-state {
+  display: inline-flex;
+  gap: var(--space-3);
+  margin-inline-start: calc(var(--space-4) - var(--space-6));
+  color: inherit;
+}
+.programmatic-chat .opp-step-intro {
+  color: var(--text-secondary);
+}
+
+/* Past ideas: a region under the header, opened from its header link. */
+.opp-past {
+  display: grid;
+  gap: var(--space-6);
+  margin-block-start: var(--space-6);
+}
+.opp-past[hidden] {
+  display: none;
+}
+.opp-past-head {
+  display: flex;
+  justify-content: flex-end;
 }
 
 /* Panels: one column of modules with a steady 12px rhythm. */
@@ -295,7 +325,8 @@
   border-inline-start-color: var(--error);
 }
 .opp-empty,
-.opp-search {
+.opp-search,
+.opp-past {
   padding: var(--space-8) var(--space-10);
 }
 .programmatic-chat .opp-empty p {
@@ -305,7 +336,7 @@
   font-size: var(--fs-md);
 }
 
-/* Checks tab: results and setup are modules with the same rhythm as cards. */
+/* Quick checks and Review groups: modules with the same rhythm as cards. */
 .programmatic-stage {
   padding: var(--space-8) var(--space-10);
 }
@@ -344,7 +375,7 @@
   padding: var(--space-8) var(--space-10);
 }
 
-/* Past ideas tab. */
+/* Past ideas list. */
 .opp-toolbar {
   display: flex;
   flex-wrap: wrap;
@@ -386,17 +417,32 @@
   }
   .programmatic-chat .inst-tabs {
     display: grid;
+    grid-auto-columns: auto;
     min-width: 100%;
   }
   .programmatic-chat .inst-tabs > [role="tab"] {
     padding-inline: var(--space-5);
+  }
+  /* Steps that are neither shown nor Next keep their number and icon; the label and
+     word are clipped, not removed, so the accessible name stays whole. */
+  .programmatic-chat
+    .inst-tabs
+    > [role="tab"]:not([aria-selected="true"], [aria-current="step"])
+    :is(.opp-step-num + span, .opp-step-word) {
+    position: absolute;
+    inline-size: 1px;
+    block-size: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
   }
   .opp-card,
   .opp-card[data-open],
   .programmatic-stage,
   .programmatic-detail,
   .opp-empty,
-  .opp-search {
+  .opp-search,
+  .opp-past {
     padding: var(--space-7) var(--space-8);
   }
   .opp-card-toggle::after,

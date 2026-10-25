@@ -1,14 +1,26 @@
 import assert from "node:assert/strict";
 
 // Shared by native drivers and rendered-component contract tests.
+// Only discover/rediscover run AI; every Checks action is deterministic.
 export const smokeLabels = {
-  setup: "Review setup",
-  currentSetup: "Change settings",
-  scan: "Run project checks",
+  setup: "Show suggested checks",
+  refresh: "Update checks",
+  save: "Save checks",
+  notNow: "Not now",
+  scan: "Check again",
+  dismiss: "Dismiss",
+  tryAgain: "Try again",
   discover: "Find ideas",
   rediscover: "Search again",
   review: "Review this idea",
+  skip: "Skip for now",
+  openReview: "Open review",
+  pastIdeas: "Past ideas",
+  close: "Close",
 };
+// Opportunities steps in order; each tab's status word is Done, Next or Not yet.
+export const smokeSteps = ["Quick checks", "Find ideas", "Review"];
+export const smokeStepWords = `Array.from(document.querySelectorAll('.programmatic-chat [role="tab"]'), (tab) => tab.querySelector('.opp-step-word')?.textContent.trim() ?? "")`;
 // Accessible name first: the composer dial's hub also renders every option
 // label as a hidden width sizer, so its textContent never equals its label.
 export const smokeButton = (label) =>
@@ -22,8 +34,9 @@ export const smokeDialShows = (label) =>
   `(${smokeDialHub})?.getAttribute('aria-label')===${JSON.stringify(label)}`;
 
 // Return the control that reveals the outermost hidden ancestor: a closed
-// disclosure's summary (never the target summary's own) or the tab owning a
-// hidden tab panel. Self-contained: it is serialised into the native page.
+// disclosure's summary (never the target summary's own), the tab owning a
+// hidden tab panel, or the button whose aria-controls names a hidden region
+// (Past ideas). Self-contained: it is serialised into the native page.
 export function closedSmokeDisclosure(target) {
   if (!target) throw new Error("Smoke target missing");
   const closed = [];
@@ -37,6 +50,11 @@ export function closedSmokeDisclosure(target) {
     if (node.getAttribute("role") === "tabpanel" && node.hidden) {
       const tab = node.ownerDocument.getElementById(node.getAttribute("aria-labelledby") ?? "");
       if (tab) closed.push(tab);
+    } else if (node.hidden && node.id) {
+      const opener = Array.from(node.ownerDocument.querySelectorAll("button[aria-controls]")).find(
+        (button) => button.getAttribute("aria-controls") === node.id,
+      );
+      if (opener) closed.push(opener);
     }
   }
   return closed.at(-1) ?? null;
@@ -205,7 +223,7 @@ export function extendedWorkflowStep(number, body) {
     }
     // An accepted advisory result ends the run, so the create request is request 7.
     case 7:
-      assert.ok(output("extended-advice").includes("Recommendations"));
+      assert.ok(output("extended-advice").includes("What AI found"));
       assert.ok(JSON.stringify(body.input).includes("NATIVE CREATE REQUEST"));
       return tool("extended-discover", "tool_search", { query: "programmatic_command" });
     case 8:

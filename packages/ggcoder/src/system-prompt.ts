@@ -9,6 +9,7 @@ import {
   usesOneCommandChanges,
 } from "./tools/prompt-hints.js";
 import { listProjectFiles, type ProjectFileList } from "./core/project-files.js";
+import { pythonInsteadOfPython3 } from "./core/python-command.js";
 import { AUTO_LOADED_TOOL_NAMES } from "./tools/tool-tiers.js";
 import type { LanguageId } from "./core/language-detector.js";
 import { cleanInstructionText } from "./utils/text.js";
@@ -387,7 +388,14 @@ function renderEnvironmentSection(cwd: string, environment?: SystemPromptEnviron
     // writes there are allowed.
     lines.push(`- Additional roots: ${roots.join(", ")}`);
   }
-  lines.push(`- Platform: ${process.platform}`, shellLine);
+  // Local Fork: steer scripted edits off the Windows Store `python3` placeholder.
+  const python = pythonInsteadOfPython3({
+    platform: process.platform,
+    pathEnv: process.env.PATH ?? "",
+    pathExt: process.env.PATHEXT,
+  });
+  const pythonNote = python ? ` (run \`${python}\`; \`python3\` won't run here)` : "";
+  lines.push(`- Platform: ${process.platform}${pythonNote}`, shellLine);
   const allow = environment?.networkAllow ?? [];
   if (allow.length > 0) {
     lines.push(`- Network allowlist: ${allow.join(", ")} (other hosts are blocked)`);

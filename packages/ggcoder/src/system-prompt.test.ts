@@ -41,7 +41,10 @@ function toolsSection(prompt: string): string {
   return next === -1 ? rest : rest.slice(0, next);
 }
 
-function promptSize(prompt: string): { characters: number; lines: number; sections: number } {
+function promptSize(raw: string): { characters: number; lines: number; sections: number } {
+  // Local Fork: the Windows `python3` placeholder note depends on the host's PATH,
+  // so sizes are measured without it (covered by core/python-command.test.ts).
+  const prompt = raw.replace(/^(- Platform: \S+) \(run `python`;[^\n]*\)$/m, "$1");
   return {
     characters: prompt.length,
     lines: prompt.split("\n").length,

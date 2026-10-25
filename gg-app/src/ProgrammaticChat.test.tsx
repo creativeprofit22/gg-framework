@@ -678,6 +678,21 @@ describe("opportunities tabs", () => {
     // The shown step was never changed by Past ideas.
     expect(selectedStep()).toMatch(/^3\s*Review/);
   });
+  it("loads Past ideas once the lock clears when opened while busy", () => {
+    const { props, rerender } = fixture();
+    rerender(<ProgrammaticChat {...props} busy />);
+    fireEvent.click(screen.getByRole("button", { name: "Past ideas" }));
+    expect(screen.queryByRole("region", { name: "Past ideas" })).not.toBeNull();
+    expect(props.onAction).not.toHaveBeenCalled();
+    rerender(<ProgrammaticChat {...props} busy={false} />);
+    expect(props.onAction).toHaveBeenCalledExactlyOnceWith({
+      version: 1,
+      action: "history-report",
+      offset: 0,
+    });
+    rerender(<ProgrammaticChat {...props} busy={false} />);
+    expect(props.onAction).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("embedded opportunity review", () => {

@@ -1,4 +1,4 @@
-import { useId, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import {
   PROGRAMMATIC_CHAT_PAGE_LIMIT,
   type ProgrammaticChatRequest,
@@ -476,13 +476,23 @@ export function ProgrammaticChat({
   const [pastToggle, setPastToggle] = useState<{ open: boolean; key: string } | null>(null);
   const pastOpen = pastToggle?.key === pastKey ? pastToggle.open : pastKey !== "";
   const pastId = `${headingId}-past`;
-  const togglePast = () => {
-    const open = !pastOpen;
-    setPastToggle({ open, key: pastKey });
-    // Read-only load, only when nothing is loaded yet or the list may be out of date.
-    if (open && !locked && (!state.historyReport || state.historyReportStale))
-      onAction({ version: 1, action: "history-report", offset: 0 });
-  };
+  const togglePast = () => setPastToggle({ open: !pastOpen, key: pastKey });
+  // Read-only load once per opening from the link, only when nothing is loaded yet or the list
+  // may be out of date. It follows the open state, so opening while busy loads once the lock
+  // clears. An in-flight request sets state.operation, which keeps `locked` true until it
+  // answers. Openings that follow a past-idea selection stay inert (explicit reload only).
+  const pastOpenedByLink = pastToggle?.key === pastKey && pastToggle.open;
+  const pastRequested = useRef(false);
+  const pastNeedsLoad = !state.historyReport || state.historyReportStale;
+  useEffect(() => {
+    if (!pastOpenedByLink) {
+      pastRequested.current = false;
+      return;
+    }
+    if (locked || !pastNeedsLoad || pastRequested.current) return;
+    pastRequested.current = true;
+    onAction({ version: 1, action: "history-report", offset: 0 });
+  }, [pastOpenedByLink, locked, pastNeedsLoad, onAction]);
   const closePast = () => {
     setPastToggle({ open: false, key: pastKey });
     pastLink.current?.focus();

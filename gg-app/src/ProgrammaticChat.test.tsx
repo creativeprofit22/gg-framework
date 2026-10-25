@@ -615,20 +615,22 @@ describe("opportunities tabs", () => {
     expect(document.activeElement).toBe(screen.getByRole("heading", { name: "Ready to run" }));
   });
   it("lights step 1 again with Update checks after project files change, ending a skip", () => {
-    const { props, rerender } = fixture({ selectedId: null, detail: null });
+    // Skip under a known setup, so only the later drift may end it.
+    const { props, rerender } = fixture({
+      selectedId: null,
+      detail: null,
+      configuration: { ...savedConfiguration, status: "missing" },
+    });
     fireEvent.click(shownStep().getByRole("button", { name: "Skip for now" }));
     expect(selectedStep()).toMatch(/^2\s*Find ideas/);
     expect(document.querySelector(".inst-key")!.textContent).toBe("Find ideas");
     const changed = {
       ...props.state,
-      report: {
-        ...props.state.report!,
-        configuration: {
-          ...savedConfiguration,
-          status: "refresh-required" as const,
-          currentFingerprint: "b".repeat(64),
-          refreshAvailable: true,
-        },
+      configuration: {
+        ...savedConfiguration,
+        status: "refresh-required" as const,
+        currentFingerprint: "b".repeat(64),
+        refreshAvailable: true,
       },
     };
     rerender(<ProgrammaticChat {...props} state={changed} />);

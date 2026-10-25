@@ -165,12 +165,21 @@ const skipKey = (configuration: ProgrammaticChatConfiguration | null): string =>
 /**
  * Skip for now on step 1: component state only, never saved or shared. It lapses
  * when the setup status or fingerprint changes, so changed project files light
- * step 1 again.
+ * step 1 again. A skip made before the setup is known (first report still
+ * loading) adopts the first known status and fingerprint, so the report arriving
+ * does not undo it; only a later change lapses it.
  */
 export function useChecksSkip(
   configuration: ProgrammaticChatConfiguration | null,
 ): readonly [boolean, () => void] {
-  const [skipped, setSkipped] = useState<string | null>(null);
-  const key = skipKey(configuration);
-  return [skipped === key, () => setSkipped(key)];
+  // `unknown` = skipped before any setup was known; it binds to the first known key.
+  const [skipped, setSkipped] = useState<{ key: string } | { unknown: true } | null>(null);
+  const key = configuration ? skipKey(configuration) : null;
+  if (skipped && "unknown" in skipped && key !== null) {
+    // Adjust state during render (React's derived-state pattern); runs once per adoption.
+    setSkipped({ key });
+    return [true, () => setSkipped({ key })];
+  }
+  const active = skipped !== null && ("unknown" in skipped ? key === null : skipped.key === key);
+  return [active, () => setSkipped(key === null ? { unknown: true } : { key })];
 }

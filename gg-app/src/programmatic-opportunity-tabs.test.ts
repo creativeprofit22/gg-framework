@@ -207,6 +207,23 @@ describe("useChecksSkip", () => {
     rerender({ configuration: drift });
     expect(result.current[0]).toBe(false);
   });
+
+  it("keeps a skip made before the setup is known until project files change", () => {
+    const { result, rerender } = renderHook(
+      ({ configuration }: { configuration: ProgrammaticChatConfiguration | null }) =>
+        useChecksSkip(configuration),
+      { initialProps: { configuration: null as ProgrammaticChatConfiguration | null } },
+    );
+    expect(result.current[0]).toBe(false);
+    act(() => result.current[1]());
+    expect(result.current[0]).toBe(true);
+    rerender({ configuration: missing });
+    expect(result.current[0]).toBe(true);
+    rerender({ configuration: { ...missing } });
+    expect(result.current[0]).toBe(true);
+    rerender({ configuration: drift });
+    expect(result.current[0]).toBe(false);
+  });
 });
 
 describe("useOpportunityTab", () => {

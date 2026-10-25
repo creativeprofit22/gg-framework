@@ -400,7 +400,7 @@ describe("configuration drift reconciliation", () => {
       const stale = await readProgrammaticChatReport(root);
       expect(stale.scan.available).toBe(false);
       expect(stale.reason).toBe(
-        "Your project settings changed. Choose Review setup before running checks or tasks.",
+        "Your project settings changed. Choose Update checks before checking again or starting tasks.",
       );
       expect(
         (await readProgrammaticChatDetail(root, first.opportunity.identity.id)).detail?.summary
@@ -456,7 +456,7 @@ describe("configuration drift reconciliation", () => {
     await writeFile(profilePath, JSON.stringify({ ...profile, version: 1 }));
     const report = await readProgrammaticChatReport(root);
     expect(report).toMatchObject({ status: "stale", scan: { available: false } });
-    expect(report.reason).toBe("Your setup is from an older version. Choose Review setup.");
+    expect(report.reason).toBe("Your setup is from an older version. Choose Update checks.");
     expect(report.rows).toHaveLength(1);
     expect(await runProgrammaticScan(root)).toMatchObject({
       ok: false,

@@ -564,13 +564,11 @@ it.each(["parallel", "sequential"] as const)(
                 expect(scope.turn.acceptedResult?.coverage.status).toBe(
                   cap === "uncapped" ? "complete" : "limited",
                 );
-                expect(presentation).toContain("Checked: All fixture catalog pages and source");
+                expect(presentation).toContain("Looked at: All fixture catalog pages and source");
                 if (cap !== "uncapped") {
-                  expect(presentation).toContain("source delivery was capped");
-                  expect(presentation).toContain(
-                    "Catalog page at offset 100 was not completely delivered",
-                  );
-                  expect(presentation).toContain("Not all current catalog pages were inspected");
+                  expect(presentation).toContain("was too long to read in full");
+                  expect(presentation).toContain("Part of your command list didn't load");
+                  expect(presentation).toContain("AI didn't read your whole command list.");
                 }
                 return {
                   message: { role: "assistant", content: presentation },
@@ -894,7 +892,7 @@ it("ends the run at an accepted advisory result without a request ending on an a
     const messages = session.getMessages();
     const presentation = messages.at(-1);
     expect(presentation?.role).toBe("assistant");
-    expect(String(presentation?.content)).toContain("Recommendations — not started");
+    expect(String(presentation?.content)).toContain("## What AI found:");
     // No history loss: the transcript only grows across the run.
     const observed = [before, ...timeline, messages.length];
     for (let index = 1; index < observed.length; index++)
@@ -1405,26 +1403,26 @@ it.each(["setup", "configured"] as const)(
         .find((result) => result.toolCallId === "assessment");
       expect(assessmentResult?.isError ?? false, String(assessmentResult?.content)).toBe(false);
       presentation = String(assessmentResult?.content);
-      expect(presentation).toContain("Recommendations — not started");
-      expect(presentation).toContain("Limits: ");
-      expect(presentation.match(/\/stock-review: prompt available, not started\./g)).toHaveLength(
-        1,
-      );
+      expect(presentation).toContain("## What AI found:");
+      expect(presentation).toContain("Didn't fully check: ");
+      expect(presentation.match(/\/stock-review exists\. It hasn't been run/g)).toHaveLength(1);
       expect(
-        presentation.match(/Proposal only: Propose expired consent records for human review/g),
+        presentation.match(
+          /What the new command would do: Propose expired consent records for human review/g,
+        ),
       ).toHaveLength(1);
       for (const text of [
-        "/depot-review: prompt available, not started.",
-        "Proposed changes: Group discrepancies by depot and add regional totals",
-        "Proposal only: Regional depot totals",
-        "Next: follow these manual steps — Review and correct the heading in a separately authorized turn",
-        "Missing evidence: A concrete forecast example and recurrence evidence",
-        "Next: inspect without making changes — Ask the operator for an example before selecting automation",
-        "Scope: operations",
-        "Prerequisites: Local CSV files and separately authorized review",
+        "/depot-review exists. It hasn't been run, and AI hasn't confirmed it does everything needed.",
+        "Suggested changes: Group discrepancies by depot and add regional totals",
+        "What the changed command would do: Regional depot totals",
+        "Steps to do it yourself: Review and correct the heading in a separately authorized turn",
+        "What's missing: A concrete forecast example and recurrence evidence",
+        "What to check next: Ask the operator for an example before selecting automation",
+        "Where: operations",
+        "Needs: Local CSV files and separately authorized review",
         "Risks: Incorrect interpretation of records",
-        "Next: review the base command and proposed changes. Editing requires separate approval.",
-        "Next: review the proposal before creating a command; verify it before running it.",
+        "Your part: Your call. Review the suggested changes to /depot-review.",
+        "Your part: Your call. Review the idea if you want this command made.",
       ])
         expect(presentation).toContain(text);
       const advice = submitted! as {
@@ -1442,12 +1440,12 @@ it.each(["setup", "configured"] as const)(
       expect(accepted.recommendations).toHaveLength(5);
       for (const [index, recommendation] of advice.recommendations.entries()) {
         expect(presentation).toContain(recommendation.outcome);
-        expect(presentation).toContain(`Why: ${recommendation.rationale}`);
+        expect(presentation).toContain(`Why it helps: ${recommendation.rationale}`);
         expect(presentation).toContain(
-          "Uncertainty: Scripted assessment claim; prerequisites were read, no command was executed",
+          "Not sure about: Scripted assessment claim; prerequisites were read, no command was executed",
         );
         expect(presentation).toContain(
-          `Proposed change boundary: ${recommendation.workflow.mutationBoundary}`,
+          `What would change: ${recommendation.workflow.mutationBoundary}`,
         );
         // Detailed workflow, alternatives and receipts remain in the accepted record, not the summary.
         expect(accepted.recommendations[index]).toMatchObject({
@@ -1629,9 +1627,11 @@ it("uses real code_search chunks for available-command advice without a read cal
       .flatMap((message) => (message.role === "tool" ? message.content : []))
       .find((result) => result.toolCallId === "advice-4");
     expect(accepted?.isError, String(accepted?.content)).not.toBe(true);
-    expect(String(accepted?.content)).toContain("/handlers: prompt available, not started.");
+    expect(String(accepted?.content)).toContain(
+      "/handlers exists. It hasn't been run, and AI hasn't confirmed it does everything needed.",
+    );
     expect(String(accepted?.content)).not.toContain(
-      "Bounded local source evidence was not inspected",
+      "AI didn't read any of your project's own files",
     );
     const calls = session
       .getMessages()
@@ -1920,10 +1920,10 @@ it.each([
       expect(results[1]).toMatchObject({ id: "advice-1", error: retiresEvidence });
       if (retiresEvidence) {
         expect(results[2]).toMatchObject({ id: "no-source-advice", error: false });
-        expect(results[2]!.text).toContain("Bounded local source evidence was not inspected");
-        expect(results[2]!.text).toContain("Limits: ");
+        expect(results[2]!.text).toContain("AI didn't read any of your project's own files");
+        expect(results[2]!.text).toContain("Didn't fully check: ");
       } else {
-        expect(results[1]!.text).not.toContain("Bounded local source evidence was not inspected");
+        expect(results[1]!.text).not.toContain("AI didn't read any of your project's own files");
       }
     } finally {
       await session.dispose();
@@ -2390,38 +2390,38 @@ it.each([
       const result = results.find((item) => item.toolCallId === "advice")!;
       expect(result, JSON.stringify(results)).toBeDefined();
       expect(result.isError ?? false, String(result.content)).toBe(false);
-      expect(String(result.content)).toContain("Recommendations — not started");
+      expect(String(result.content)).toContain("## What AI found:");
       expect(String(result.content)).toContain(
         choice === "empty"
-          ? "No supported recommendation was found in the inspected scope."
+          ? "AI found nothing worth automating in the parts it looked at."
           : choice === "missing-app"
-            ? "Proposal only: Show deployment status"
+            ? "What the new command would do: Show deployment status"
             : ["manual", "research"].includes(choice)
-              ? "Next: follow these manual steps — Review one setting in a separate approved turn"
-              : `/${choice}: prompt available, not started.`,
+              ? "Steps to do it yourself: Review one setting in a separate approved turn"
+              : `/${choice} exists. It hasn't been run, and AI hasn't confirmed it does everything needed.`,
       );
       if (choice !== "empty") {
         for (const text of [
           "Inspect a relevant project setting",
-          "Why: Fixture selects a bounded next step",
-          "Uncertainty: This is a model-authored fixture claim, not verification",
-          "Scope: repository-wide",
-          "Proposed change boundary: Inspection only; changes require separate approval",
+          "Why it helps: Fixture selects a bounded next step",
+          "Not sure about: This is a model-authored fixture claim, not verification",
+          "Where: whole project",
+          "What would change: Inspection only; changes require separate approval",
         ])
           expect(String(result.content)).toContain(text);
       }
       if (reuse)
         expect(String(result.content)).toContain(
-          "Next: review the current command, prerequisites and scope before approving a run.",
+          `Your part: Nothing. /${choice} already covers this.`,
         );
       if (choice === "missing-app") {
         for (const text of [
-          "Inputs: Selected project",
-          "Outputs: Status report",
-          "Prerequisites: Separate implementation approval",
+          "Uses: Selected project",
+          "Produces: Status report",
+          "Needs: Separate implementation approval",
           "Risks: Does not exist yet",
-          "Verification needed: Exercise real app integration",
-          "Next: plan application development. A prompt alone cannot provide this functionality.",
+          "How to tell it works: Exercise real app integration",
+          "This needs a change to the GG app itself. A command alone can't do it.",
         ])
           expect(String(result.content)).toContain(text);
       }
@@ -2568,9 +2568,7 @@ it.each(["cancel-before", "dispose-before", "cancel-after", "dispose-after", "re
       await session.initialize();
       await session.prompt("/programmatic");
       await disposing;
-      expect(presentation, JSON.stringify(session.getMessages())).toContain(
-        "Recommendations — not started",
-      );
+      expect(presentation, JSON.stringify(session.getMessages())).toContain("## What AI found:");
       const count = ending.endsWith("before") ? 0 : 1;
       expect(published).toEqual(count ? [presentation] : []);
       const entries = (await fs.readFile(sessionPath, "utf8"))
@@ -2776,7 +2774,7 @@ it.each([
       .flatMap((message) => (message.role === "tool" ? message.content : []));
     if (scenario === "result-first") {
       expect(results.find((item) => item.toolCallId === "early-advice")).toMatchObject({
-        content: expect.stringContaining("Recommendations — not started"),
+        content: expect.stringContaining("## What AI found:"),
       });
       expect(results.find((item) => item.toolCallId === "early-advice")?.isError ?? false).toBe(
         false,
@@ -2804,11 +2802,11 @@ it.each([
         expect(facts).toBeUndefined();
       } else {
         expect(result.isError ?? false, String(result.content)).toBe(false);
-        expect(result.content).toContain("Recommendations — not started");
+        expect(result.content).toContain("## What AI found:");
         expect(result.content).toContain(
-          "Next: follow these manual steps — Review the manifest name in a separate approved turn",
+          "Steps to do it yourself: Review the manifest name in a separate approved turn",
         );
-        expect(result.content).toContain("Why: The manifest was independently inspected");
+        expect(result.content).toContain("Why it helps: The manifest was independently inspected");
         expect(
           (submissions.mock.contexts.at(-1)! as ProgrammaticAdvisoryTurn).acceptedResult
             ?.recommendations[0]?.evidence.items,
@@ -2822,8 +2820,8 @@ it.each([
           }),
         ]);
         if (scenario === "failed" || scenario === "thrown") {
-          expect(result.content).toContain("Limits: ");
-          expect(result.content).toContain("deterministic scan failed");
+          expect(result.content).toContain("Didn't fully check: ");
+          expect(result.content).toContain("Your project checks failed");
           if (scenario === "failed")
             expect(JSON.parse(String(scanOutput))).toMatchObject({
               ok: false,
@@ -2846,7 +2844,7 @@ it.each([
       .some(
         (message) =>
           typeof message.content === "string" &&
-          message.content.includes("Assessment did not submit a validated result"),
+          message.content.includes("The idea search stopped before it finished"),
       );
     expect(incomplete).toBe(scenario === "denied");
     expect(await fs.readFile(profilePath)).toEqual(baselineProfile);
@@ -3021,7 +3019,7 @@ it("claims concurrent scans once, preserves completed scan on cancellation and r
         .some(
           (message) =>
             typeof message.content === "string" &&
-            message.content.includes("Assessment did not submit a validated result"),
+            message.content.includes("The idea search stopped before it finished"),
         ),
     ).toBe(true);
     session.setSignal(new AbortController().signal);
@@ -3691,7 +3689,7 @@ it("cleans up advisory scope at the actual max-turn boundary without losing the 
         .some(
           (message) =>
             typeof message.content === "string" &&
-            message.content.includes("Assessment did not submit a validated result"),
+            message.content.includes("The idea search stopped before it finished"),
         ),
     ).toBe(true);
     expect(session.supportsToolCall("programmatic_advisory_result")).toBe(false);
@@ -3899,7 +3897,7 @@ it.each(["dispose-resolve", "dispose-reject", "reset-resolve", "reset-reject"])(
             .some(
               (message) =>
                 typeof message.content === "string" &&
-                message.content.includes("Assessment did not submit a validated result"),
+                message.content.includes("The idea search stopped before it finished"),
             ),
         ).toBe(false);
       expect(await fs.readFile(path.join(cwd, PROGRAMMATIC_STATE_PATH))).toEqual(baseline);
@@ -4291,13 +4289,13 @@ it("connects fresh setup, focused advice, reviewed creation, verification and se
     // Accepted advice ends the run: no trailing request after the submission.
     expect(request).toBe(4);
     for (const text of [
-      "/compare: prompt available, not started.",
-      "/manifest-review: prompt available, not started.",
-      "Next: follow these manual steps — Inspect the fixture name without creating a command",
-      "Proposal only: Check fixture count",
-      "Prerequisites: Installed Node",
+      "/compare exists. It hasn't been run, and AI hasn't confirmed it does everything needed.",
+      "/manifest-review exists. It hasn't been run, and AI hasn't confirmed it does everything needed.",
+      "Steps to do it yourself: Inspect the fixture name without creating a command",
+      "What the new command would do: Check fixture count",
+      "Needs: Installed Node",
       "Risks: Shell action needs separate permission",
-      "Next: review the proposal before creating a command; verify it before running it.",
+      "Your part: Your call. Review the idea if you want this command made.",
     ])
       expect(outputs.get("general-advice")).toContain(text);
     phase = "focused";
@@ -4305,7 +4303,9 @@ it("connects fresh setup, focused advice, reviewed creation, verification and se
     await session.prompt("/programmatic only inspect the name");
     expect(request).toBe(1);
     expect(corpusCalls).toEqual(["search", "show"]);
-    expect(outputs.get("focused-advice")).not.toContain("/compare: prompt available, not started.");
+    expect(outputs.get("focused-advice")).not.toContain(
+      "/compare exists. It hasn't been run, and AI hasn't confirmed it does everything needed.",
+    );
     expect(scanApprovals).toEqual([{}, {}]);
     expect(await fs.readFile(path.join(cwd, PROGRAMMATIC_STATE_PATH))).toEqual(lifecycle);
     expect(session.supportsToolCall("programmatic_advisory_result")).toBe(false);

@@ -410,8 +410,8 @@ it.each([
         expect(assessment.discovery?.candidates[0]?.outcome).toBe("Review manifest");
         const rendered = onTurnText.mock.calls.map(([text]) => text).join("\n");
         expect(rendered.match(/1\. Review manifest/g)).toHaveLength(1);
-        expect(rendered).toContain("Uncertainty: Not verified");
-        expect(rendered).toContain("Next: follow these manual steps — Review separately");
+        expect(rendered).toContain("Not sure about: Not verified");
+        expect(rendered).toContain("Steps to do it yourself: Review separately");
         if (scenario === "report-rendered")
           expect(presentation).not.toContain("1. Review manifest");
         else expect(presentation).toContain("1. Review manifest");
@@ -958,7 +958,7 @@ it.each(["result", "error", "abort", "reset", "disposal", "max-turn", "plan"])(
       }
       if (ending === "result" || ending === "plan") {
         expect(String(results.find((item) => item.toolCallId === "result")?.content)).toContain(
-          "/compare: prompt available, not started. This does not guarantee the required tools or behavior.",
+          "/compare exists. It hasn't been run, and AI hasn't confirmed it does everything needed.",
         );
         for (const name of blockedNames)
           expect(results.find((item) => item.toolCallId === `denied-${name}`)?.isError).toBe(true);

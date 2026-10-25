@@ -849,7 +849,7 @@ it("retains post-cap lead provenance instead of claiming a capped terminal read 
     const summary = assessmentSummary(messages.current);
     expect(summary.status).toBe("completed");
     expect(summary.limitations).toContain(
-      "Tool call capped-read: source delivery was capped; complete inspection is not established.",
+      "Something AI read was too long to read in full, so it may have missed part of it.",
     );
     expect(summary.coverage).not.toContainEqual(
       expect.objectContaining({ scope: "project", status: "inspected" }),

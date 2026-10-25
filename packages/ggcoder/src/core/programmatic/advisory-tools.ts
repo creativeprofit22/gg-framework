@@ -7,7 +7,7 @@ import { getMcpToolIdentity, withMcpToolIdentity } from "../mcp/tool-identity.js
 import { createProgrammaticAdvisoryResultTool } from "../../tools/programmatic-advisory-result.js";
 import { CommandInformationParams } from "../../tools/command-information.js";
 import type { buildProgrammaticAdvisoryContext } from "./advisory-context.js";
-import { AdvisoryEvidence, ProgrammaticAdvisoryTurn, localLocations, type AdvisoryReceipt, type ProgrammaticAdvisoryPolicy } from "./advisory.js";
+import { ADVISORY_LIMITATIONS, AdvisoryEvidence, ProgrammaticAdvisoryTurn, localLocations, plainToolLimitation, type AdvisoryReceipt, type ProgrammaticAdvisoryPolicy } from "./advisory.js";
 import { repositoryRelativePathSchema } from "./contracts.js";
 
 export type ProgrammaticAdvisoryContext = ReturnType<typeof buildProgrammaticAdvisoryContext>;
@@ -71,7 +71,7 @@ export async function executeAdvisoryTool(
   const recordOutcome = (cancelled: boolean) => {
     if (settled || !turn?.active) return;
     settled = true;
-    turn.limitations.add(`${tool.name}: ${cancelled ? "cancelled" : "tool error"}.`);
+    turn.limitations.add(plainToolLimitation(tool.name, cancelled));
     // Scanner lifecycle and assessment presentation are not research receipts.
     if (tool.name !== "programmatic_scan" && tool.name !== "programmatic_advisory_result")
       turn.evidence.observe(cwd, tool.name, {}, context.toolCallId, "", !cancelled, cancelled);
@@ -98,8 +98,8 @@ export async function executeAdvisoryTool(
       // Cancellation cannot undo a published state file or its recovery copy.
       turn.settleScan(succeeded ? "succeeded" : context.signal.aborted && !committed ? "cancelled" : "failed");
       if (context.signal.aborted && committed) {
-        turn.limitations.delete("programmatic_scan: cancelled.");
-        turn.limitations.add("programmatic_scan: state was persisted before cancellation; read the current report before retrying.");
+        turn.limitations.delete(plainToolLimitation("programmatic_scan", true));
+        turn.limitations.add(ADVISORY_LIMITATIONS.scanSavedBeforeStop);
       }
     }
     if (
@@ -116,13 +116,13 @@ export async function executeAdvisoryTool(
       turn.stageResult(context.toolCallId, (complete) => {
         if (complete) turn.observeCommand(String(output));
         else if (input.success && input.data.action === "list")
-          turn.limitations.add(`Catalog page at offset ${input.data.offset ?? 0} was not completely delivered.`);
+          turn.limitations.add(ADVISORY_LIMITATIONS.catalogPagePartial);
       });
       return output;
     }
     const content = typeof output === "string" ? output : output.content;
     if (typeof content !== "string") {
-      turn.limitations.add(`${tool.name}: non-text evidence was not receipted.`);
+      turn.limitations.add(ADVISORY_LIMITATIONS.nonText(tool.name));
       return output;
     }
     const metadata = retrievalMetadataSchema.safeParse(
@@ -145,12 +145,12 @@ export async function executeAdvisoryTool(
         resource,
       );
       if (receipt.status !== "retrieved" && receipt.status !== "lead")
-        turn.limitations.add(`${tool.name}: ${resource?.outcome ?? receipt.status}.`);
+        turn.limitations.add(ADVISORY_LIMITATIONS.unusable(tool.name));
       if (tool.name === "web_fetch" && !resource)
-        turn.limitations.add("web_fetch: host retrieval metadata unavailable.");
+        turn.limitations.add(ADVISORY_LIMITATIONS.webSourceUnknown);
       if (receipt.status === "retrieved" && tool.name === "web_fetch" && !receipt.external)
         turn.limitations.add(
-          "web_fetch: safe source identity unavailable; external attribution unsupported.",
+          ADVISORY_LIMITATIONS.webSourceUnconfirmed,
         );
       return receipt;
     });
@@ -181,7 +181,7 @@ export async function executeAdvisoryTool(
     if (turn && tool.name === "programmatic_scan")
       turn.settleScan(context.signal.aborted ? "cancelled" : "failed");
     if (turn)
-      turn.limitations.add(`${tool.name}: ${context.signal.aborted ? "cancelled" : "tool error"}.`);
+      turn.limitations.add(plainToolLimitation(tool.name, context.signal.aborted));
     throw error;
   } finally {
     cleanup?.();
@@ -209,9 +209,6 @@ export function guardTerminalTools(
     return identity ? withMcpToolIdentity(guarded, identity) : guarded;
   });
 }
-
-export const INCOMPLETE_ADVISORY_NOTICE =
-  "## Recommendations — not started\n\nAssessment did not submit a validated result (interrupted, unavailable, or incomplete). Any completed deterministic scan remains separate and unchanged.";
 
 /** A terminal invocation intersects the live host tools; it never edits the host registry.
  * Every exposed reference is turn-bound, including freshness reads and the result tool.
@@ -275,12 +272,12 @@ export class ProgrammaticAdvisoryTools {
         ),
       );
     } else {
-      turn.limitations.add("Command catalog tooling is unavailable; command availability cannot be established.");
+      turn.limitations.add(ADVISORY_LIMITATIONS.catalogUnavailable);
       this.tools.push(guard(createProgrammaticAdvisoryResultTool(() => turn.active ? turn : undefined), false));
     }
     if (turn.mode === "configured" && !this.tools.some((tool) => tool.name === "research_corpus"))
       turn.limitations.add(
-        "Read-only corpus tooling is unavailable; no installation or indexing was attempted.",
+        ADVISORY_LIMITATIONS.examplesUnavailable,
       );
   }
   close(): void {

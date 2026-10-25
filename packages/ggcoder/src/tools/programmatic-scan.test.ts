@@ -120,7 +120,9 @@ describe("scan cancellation", () => {
       expect(result).toMatchObject({ ok: when === "committed", changed: when === "committed" });
       expect(notifications).toBe(when === "committed" ? 1 : 0);
       if (when === "committed")
-        expect([...turn.limitations]).not.toContain("programmatic_scan: cancelled.");
+        expect([...turn.limitations]).not.toContain(
+          "Running your project checks was stopped, so this search may have missed something.",
+        );
       expect(await fs.readFile(path.join(root, PROGRAMMATIC_PROFILE_PATH))).toEqual(profile);
       expect((await fs.readdir(path.join(root, ".gg/programmatic"))).sort()).toEqual(
         when === "committed" ? ["profile.json", "state.json"] : ["profile.json"],

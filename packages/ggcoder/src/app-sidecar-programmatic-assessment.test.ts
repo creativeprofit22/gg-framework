@@ -10,7 +10,6 @@ import {
   isProgrammaticAssessmentEvent,
   type ProgrammaticAssessmentEvent,
 } from "@kenkaiiii/gg-core/programmatic-assessment-contract";
-import { canonicalJson } from "./core/tauri-package/paths.js";
 import { useFakeHome } from "./test-support/fake-home.js";
 import {
   AppSidecarProgrammaticChat,
@@ -21,6 +20,7 @@ import {
   buildProgrammaticProfileProposal,
   persistProgrammaticProfile,
 } from "./core/programmatic/profile.js";
+import { readProgrammaticChatReport } from "./core/programmatic/lifecycle.js";
 
 // Real session/tool loop and filesystem owners; only network provider streaming is scripted.
 vi.mock("@kenkaiiii/gg-ai", async (original) => ({
@@ -601,7 +601,7 @@ it.each([
   ["setup", "mixed-monorepo"],
   ["configured", "mixed-monorepo"],
 ] as const)(
-  "desktop %s uses real current-session assessment under one claim in %s",
+  "desktop Find ideas in %s mode uses real current-session assessment under one claim in %s",
   async (mode, project) => {
     if (project === "mixed-monorepo") {
       await fs.mkdir(path.join(cwd, "apps/desktop/src-tauri"), { recursive: true });
@@ -712,7 +712,7 @@ it.each([
       await session.initialize();
       const result = await adapter.handle({
         version: 1,
-        action: mode === "setup" ? "inspect-setup" : "scan",
+        action: "discover",
         requestId: "assessment-request",
       });
       expect(result.status).toBe(200);
@@ -767,12 +767,12 @@ it.each([
       expect(calls).toContain("read");
       expect(release).toHaveBeenCalledOnce();
       expect(settled).toHaveBeenCalledOnce();
-      if (mode === "setup") {
-        expect(result.body).toMatchObject({
-          proposal: { profileJson: canonicalJson(proposal.profile) },
-        });
+      // Find ideas never proposes or saves settings; saving stays in Save checks.
+      expect(result.body).not.toHaveProperty("proposal");
+      if (mode === "setup")
         await expect(fs.access(path.join(cwd, ".gg/programmatic/profile.json"))).rejects.toThrow();
-      }
+      // With saved checks, Find ideas still updates check results through the scanner.
+      else expect((await readProgrammaticChatReport(cwd)).status).toBe("current");
     } finally {
       adapter.dispose();
       await session.dispose();
@@ -781,7 +781,7 @@ it.each([
 );
 
 it.each(["budget", "scan-failure", "unavailable", "cancel"] as const)(
-  "desktop empty-profile Check preserves %s without a false clean zero",
+  "desktop empty-profile Find ideas preserves %s without a false clean zero",
   async (scenario) => {
     const controller = new AbortController();
     const session = new AgentSession({
@@ -837,7 +837,7 @@ it.each(["budget", "scan-failure", "unavailable", "cancel"] as const)(
         vi.mocked(AuthStorage.prototype.resolveCredentials).mockRejectedValue(
           new NotLoggedInError("anthropic"),
         );
-      const result = await adapter.handle({ version: 1, action: "scan" });
+      const result = await adapter.handle({ version: 1, action: "discover" });
       expect(result.body).toMatchObject({
         ok: true,
         assessment: {
@@ -872,7 +872,7 @@ it.each(["budget", "scan-failure", "unavailable", "cancel"] as const)(
 );
 
 it.each(["current", "stale"] as const)(
-  "desktop corrupt settings assess read-only with no approval and preserve bytes: %s",
+  "desktop corrupt settings: deterministic setup review, read-only Find ideas, bytes preserved: %s",
   async (owner) => {
     const session = new AgentSession({
       cwd,
@@ -931,16 +931,28 @@ it.each(["current", "stale"] as const)(
       await fs.mkdir(path.join(cwd, ".gg/programmatic"), { recursive: true });
       const profilePath = path.join(cwd, ".gg/programmatic/profile.json");
       await fs.writeFile(profilePath, "corrupt settings");
-      const result = await adapter.handle({ version: 1, action: "inspect-setup" });
-      expect(result.status).toBe(409);
-      expect(result.body).toMatchObject({ ok: false });
+      // Show suggested checks: deterministic only, fails closed, no AI.
+      const inspected = await adapter.handle({ version: 1, action: "inspect-setup" });
+      expect(inspected.status).toBe(409);
+      expect(inspected.body).toMatchObject({ ok: false });
+      expect(inspected.body).not.toHaveProperty("proposal");
+      expect(inspected.body).not.toHaveProperty("approvableProposalHandle");
+      expect(inspected.body).not.toHaveProperty("assessment");
+      expect(assess).not.toHaveBeenCalled();
+      expect(vi.mocked(stream)).not.toHaveBeenCalled();
+      // Find ideas still assesses read-only with no approval.
+      const result = await adapter.handle({ version: 1, action: "discover" });
       expect(result.body).not.toHaveProperty("proposal");
       expect(result.body).not.toHaveProperty("approvableProposalHandle");
       if (owner === "current")
         expect(result.body).toMatchObject({
+          ok: true,
           assessment: { mode: "setup", status: "incomplete", deterministic: { status: "not-run" } },
         });
-      else expect(result.body).not.toHaveProperty("assessment");
+      else {
+        expect(result.status).toBe(409);
+        expect(result.body).not.toHaveProperty("assessment");
+      }
       expect(assess).toHaveBeenCalledExactlyOnceWith("setup", undefined);
       expect(vi.mocked(stream)).toHaveBeenCalled();
       expect(providerEvidence.length).toBeGreaterThan(0);
@@ -954,9 +966,9 @@ it.each(["current", "stale"] as const)(
       for (const tools of providerTools)
         for (const name of ["write", "edit", "bash", "programmatic_scan"])
           expect(tools).not.toContain(name);
-      expect(acquire).toHaveBeenCalledOnce();
-      expect(release).toHaveBeenCalledOnce();
-      expect(settled).toHaveBeenCalledOnce();
+      expect(acquire).toHaveBeenCalledTimes(2);
+      expect(release).toHaveBeenCalledTimes(2);
+      expect(settled).toHaveBeenCalledTimes(2);
       expect(claim.active).toBe(false);
       expect(await fs.readFile(profilePath, "utf8")).toBe("corrupt settings");
     } finally {
@@ -1014,7 +1026,7 @@ it.each(["cancel", "project", "session", "provider", "unavailable"] as const)(
         vi.mocked(AuthStorage.prototype.resolveCredentials).mockRejectedValue(
           new NotLoggedInError("anthropic"),
         );
-      const result = await adapter.handle({ version: 1, action: "inspect-setup" });
+      const result = await adapter.handle({ version: 1, action: "discover" });
       if (event === "project" || event === "session") expect(result.status).toBe(409);
       else
         expect(result.body).toMatchObject({
@@ -1037,3 +1049,124 @@ it.each(["cancel", "project", "session", "provider", "unavailable"] as const)(
     }
   },
 );
+
+it("typed desktop setup points to Save checks; only the panel saves (scripted provider)", async () => {
+  const reviewer = vi.fn(async () => {
+    throw new Error("Desktop setup must not ask to save in chat.");
+  });
+  const session = new AgentSession({
+    cwd,
+    provider: "anthropic",
+    model: "claude-sonnet-5",
+    transient: true,
+    systemPrompt: "Scripted desktop setup fixture",
+    mcpEnabled: false,
+    allowedTools: ["find", "read", "programmatic_profile"],
+    reviewProgrammaticSetup: reviewer,
+    programmaticSetupApproval: "desktop-panel",
+  });
+  const results = new Map<string, string>();
+  const delivered: string[] = [];
+  let request = 0;
+  let saving = false;
+  vi.mocked(stream).mockImplementation(
+    (params) =>
+      new StreamResult(
+        (async function* () {
+          yield* []; // This fixture completes without streaming deltas.
+          delivered.push(JSON.stringify(params.messages));
+          for (const message of params.messages)
+            if (message.role === "tool")
+              for (const result of message.content)
+                results.set(result.toolCallId, String(result.content));
+          let call: ToolCall | undefined;
+          if (saving && ++request === 1)
+            call = {
+              type: "tool_call",
+              id: "inspect",
+              name: "programmatic_profile",
+              args: { action: "inspect" },
+            };
+          else if (saving && request === 2) {
+            const inspected = JSON.parse(results.get("inspect")!);
+            call = {
+              type: "tool_call",
+              id: "generate",
+              name: "programmatic_profile",
+              args: {
+                action: "generate",
+                configuration_fingerprint: inspected.configuration_fingerprint,
+                profile: inspected.profile,
+                expected_prior_profile_digest: inspected.expected_prior_profile_digest,
+              },
+            };
+          }
+          if (call) {
+            yield { type: "toolcall_done", id: call.id, name: call.name, args: call.args };
+            return {
+              message: { role: "assistant", content: [call] },
+              stopReason: "tool_use",
+              usage: { inputTokens: 1, outputTokens: 1 },
+            };
+          }
+          return {
+            message: {
+              role: "assistant",
+              content: "Open Opportunities → Quick checks and choose Save checks.",
+            },
+            stopReason: "end_turn",
+            usage: { inputTokens: 1, outputTokens: 1 },
+          };
+        })(),
+      ),
+  );
+  const profilePath = path.join(cwd, ".gg/programmatic/profile.json");
+  try {
+    await session.initialize();
+    await session.prompt("/setup-programmatic");
+    // The typed review sees the desktop transport, so its prompt ends by pointing to the panel.
+    expect(delivered.join("\n")).toContain("desktop-panel");
+    saving = true;
+    await session.prompt("Save the proposed setup now.");
+    expect(JSON.parse(results.get("inspect")!)).toMatchObject({
+      approval_available: false,
+      approval_transport: "desktop-panel",
+    });
+    expect(JSON.parse(results.get("generate")!)).toMatchObject({
+      ok: false,
+      changed: false,
+      error: "save-in-panel",
+    });
+    expect(reviewer).not.toHaveBeenCalled();
+    await expect(fs.access(profilePath)).rejects.toThrow();
+    // The one desktop save place: the panel's deterministic review, then Save checks.
+    const claim = new RunClaim();
+    const adapter = new AppSidecarProgrammaticChat(
+      () => ({ cwd, identity: "current", codeMode: true, planMode: false, busy: claim.active }),
+      () => claim.claim(),
+      () => claim.release(),
+    );
+    try {
+      const calls = vi.mocked(stream).mock.calls.length;
+      const inspected = await adapter.handle({ version: 1, action: "inspect-setup" });
+      if (
+        !("ok" in inspected.body) ||
+        !inspected.body.ok ||
+        inspected.body.action !== "inspect-setup"
+      )
+        throw new Error(JSON.stringify(inspected));
+      const saved = await adapter.handle({
+        version: 1,
+        action: "approve-setup",
+        proposalHandle: inspected.body.proposal.handle!,
+      });
+      expect(saved).toMatchObject({ status: 200, body: { ok: true, changed: true } });
+      expect(vi.mocked(stream).mock.calls.length).toBe(calls);
+      await expect(fs.access(profilePath)).resolves.toBeUndefined();
+    } finally {
+      adapter.dispose();
+    }
+  } finally {
+    await session.dispose();
+  }
+});

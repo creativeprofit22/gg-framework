@@ -280,7 +280,7 @@ export class ProgrammaticAdvisoryTurn {
   stageResult(toolCallId: string, accept: (complete: boolean) => void): void {
     if (!this.active) return;
     if (this.pendingResults.size >= ADVISORY_LIMITS.receipts) {
-      this.limitations.add("Pending evidence delivery budget reached.");
+      this.limitations.add(ADVISORY_LIMITATIONS.pendingBudget);
       return;
     }
     this.pendingResults.set(toolCallId, accept);
@@ -290,10 +290,7 @@ export class ProgrammaticAdvisoryTurn {
     if (!this.active || !accept) return;
     this.pendingResults.delete(result.toolCallId);
     const complete = !result.capped && !result.isError;
-    if (!complete)
-      this.limitations.add(
-        `Tool call ${result.toolCallId.slice(0, 128)}: source delivery was ${result.capped ? "capped" : "unsuccessful"}; complete inspection is not established.`,
-      );
+    if (!complete) this.limitations.add(ADVISORY_LIMITATIONS.delivery(!!result.capped));
     accept(complete);
   }
   readonly mode: "setup" | "configured";
@@ -323,9 +320,7 @@ export class ProgrammaticAdvisoryTurn {
   markScanUnavailable(): void {
     if (this.active && this.mode === "configured" && this.scanState === "not-started") {
       this.scanState = "unavailable";
-      this.limitations.add(
-        "The deterministic scan tool is unavailable under host policy; no scan was attempted.",
-      );
+      this.limitations.add(ADVISORY_LIMITATIONS.scanUnavailable);
     }
   }
   get active(): boolean {
@@ -362,11 +357,11 @@ export class ProgrammaticAdvisoryTurn {
         ++this.pageCalls > ADVISORY_LIMITS.pages ||
         this.metadataChars >= ADVISORY_LIMITS.metadataChars
       ) {
-        this.limitations.add("Catalog page/metadata budget reached.");
+        this.limitations.add(ADVISORY_LIMITATIONS.catalogBudget);
         throw new Error("Advisory catalog budget reached; report limited coverage.");
       }
     } else if (input.action === "resolve" && ++this.bodyCalls > ADVISORY_LIMITS.bodies) {
-      this.limitations.add("Candidate body budget reached.");
+      this.limitations.add(ADVISORY_LIMITATIONS.bodyBudget);
       throw new Error("Advisory candidate budget reached; report limited coverage.");
     }
   }
@@ -391,21 +386,18 @@ export class ProgrammaticAdvisoryTurn {
   settleScan(outcome: ScanSettlement): void {
     if (this.closed || this.scanState !== "in-flight") return;
     this.scanState = outcome;
-    if (outcome === "failed")
-      this.limitations.add(
-        "The deterministic scan failed; its separate error remains authoritative. Advice is limited to independently inspected evidence, not scanner results.",
-      );
+    if (outcome === "failed") this.limitations.add(ADVISORY_LIMITATIONS.scanFailed);
   }
   observePage(page: AdvisoryCommandPage): void {
     const serialized = JSON.stringify(page);
     this.metadataChars += serialized.length;
     if (this.metadataChars >= ADVISORY_LIMITS.metadataChars)
-      this.limitations.add("Metadata budget reached.");
+      this.limitations.add(ADVISORY_LIMITATIONS.catalogBudget);
     const hash = fingerprint(page);
     if (this.pages.has(page.offset) && this.pages.get(page.offset)!.hash !== hash)
-      this.limitations.add("Catalog changed during assessment.");
+      this.limitations.add(ADVISORY_LIMITATIONS.catalogChanged);
     if (page.entries.some((entry) => entry.metadataLimited || entry.bodyUnavailableReason))
-      this.limitations.add("Some command metadata or identities are unsupported.");
+      this.limitations.add(ADVISORY_LIMITATIONS.commandsUnsupported);
     this.pages.set(page.offset, { hash, next: page.nextOffset, total: page.total });
   }
   observeCommand(output: string): void {
@@ -419,12 +411,12 @@ export class ProgrammaticAdvisoryTurn {
         else
           this.limitations.add(
             value.status === "non-prompt"
-              ? "Workspace action capabilities remain unassessed."
-              : "A candidate body was unavailable or unreadable.",
+              ? ADVISORY_LIMITATIONS.appCommandsUnjudged
+              : ADVISORY_LIMITATIONS.commandUnreadable,
           );
       }
     } catch {
-      this.limitations.add("Command information could not be inspected.");
+      this.limitations.add(ADVISORY_LIMITATIONS.commandsUnreadable);
     }
   }
   private fullCoverage(): boolean {
@@ -476,18 +468,15 @@ export class ProgrammaticAdvisoryTurn {
       for (const [offset, page] of this.pages) {
         try {
           if (fingerprint(await checks.page(offset)) !== page.hash)
-            this.limitations.add("Catalog changed before submission.");
+            this.limitations.add(ADVISORY_LIMITATIONS.catalogChangedLate);
         } catch {
-          this.limitations.add(
-            "Current catalog could not be rechecked; availability remains uncertain.",
-          );
+          this.limitations.add(ADVISORY_LIMITATIONS.catalogRecheckFailed);
         }
         checks.signal.throwIfAborted();
       }
-      if (!this.fullCoverage())
-        this.limitations.add("Not all current catalog pages were inspected.");
+      if (!this.fullCoverage()) this.limitations.add(ADVISORY_LIMITATIONS.catalogIncomplete);
       if (!this.evidence.list().some((receipt) => hasLocalInspection(receipt)))
-        this.limitations.add("Bounded local source evidence was not inspected.");
+        this.limitations.add(ADVISORY_LIMITATIONS.noProjectFiles);
       for (const recommendation of result.recommendations) {
         for (const item of recommendation.evidence.items) {
           if ("kind" in item) {
@@ -579,7 +568,7 @@ export class ProgrammaticAdvisoryTurn {
               command: snapshot.command,
               reason: "Command identity/body changed or cannot be safely resolved at submission.",
             };
-            this.limitations.add("A recommended or compared command changed before submission.");
+            this.limitations.add(ADVISORY_LIMITATIONS.commandChanged);
           }
         }
       }
@@ -610,92 +599,230 @@ export class ProgrammaticAdvisoryTurn {
   }
 }
 
+// Plain wording for the chat report and stored limitations. This is the single
+// backend owner; the app shows these strings as they are. TOOL_LABELS and the
+// sentence shape must stay in sync with plainLimitation() in
+// gg-app/src/programmatic-presentation.ts, which rewords older saved sessions.
+
+const TOOL_LABELS: Readonly<Record<string, string>> = {
+  programmatic_scan: "Running your project checks",
+  programmatic_advisory_result: "Saving the answer",
+  programmatic_profile: "Reading your check setup",
+  command_information: "Reading your commands",
+  research_corpus: "Searching code examples",
+  web_fetch: "Opening a web page",
+  web_search: "Searching the web",
+  read: "Reading project files",
+  find: "Reading project files",
+  grep: "Reading project files",
+  ls: "Reading project files",
+  code_search: "Reading project files",
+  code_nav: "Reading project files",
+};
+const toolLabel = (name: string) => TOOL_LABELS[name] ?? "One of AI's checks";
+
+/** A tool failure or stop, in words a non-specialist understands. Never names the tool. */
+export function plainToolLimitation(toolName: string, cancelled: boolean): string {
+  return `${toolLabel(toolName)} ${cancelled ? "was stopped" : "failed"}, so this search may have missed something.`;
+}
+
+/** Every other host limitation line, so none leaks a tool name, ID or budget term. */
+export const ADVISORY_LIMITATIONS = {
+  pendingBudget: "AI read more than it could keep track of, so some of what it found wasn't used.",
+  delivery: (capped: boolean) =>
+    capped
+      ? "Something AI read was too long to read in full, so it may have missed part of it."
+      : "Something AI tried to read didn't load, so it may have missed something.",
+  scanUnavailable: "Your project checks couldn't run in this search, so none were run.",
+  scanFailed:
+    "Your project checks failed, so these ideas are based only on what AI read itself. Check results show the error.",
+  scanSavedBeforeStop:
+    "Your project checks saved their results before they were stopped. Reload check results before running them again.",
+  catalogBudget: "Your command list was too long to read in full, so AI may have missed a command.",
+  bodyBudget: "AI could only open some of your commands, so it may have missed one.",
+  catalogChanged:
+    "Your commands changed while AI was reading them, so its list may be out of date.",
+  catalogChangedLate: "Your commands changed before AI finished, so its list may be out of date.",
+  catalogRecheckFailed:
+    "AI couldn't recheck your commands at the end, so it isn't sure they all still exist.",
+  catalogIncomplete: "AI didn't read your whole command list.",
+  catalogPagePartial: "Part of your command list didn't load, so AI may have missed a command.",
+  catalogUnavailable:
+    "AI can't see your command list here, so it can't tell which commands you already have.",
+  commandsUnsupported: "AI couldn't fully read some of your commands.",
+  appCommandsUnjudged: "AI can't look inside app-run commands, so it didn't judge what they do.",
+  commandUnreadable: "AI couldn't open one of your commands.",
+  commandsUnreadable: "AI couldn't read your command list.",
+  commandChanged:
+    "A command AI suggested changed before it finished, so AI couldn't confirm it still fits.",
+  noProjectFiles: "AI didn't read any of your project's own files, so these ideas may miss things.",
+  nonText: (toolName: string) =>
+    `${toolLabel(toolName)} returned something that isn't text, so AI didn't use it.`,
+  unusable: (toolName: string) => `${toolLabel(toolName)} didn't return anything AI could use.`,
+  webSourceUnknown: "AI couldn't tell where a web page came from, so it didn't use it as a source.",
+  webSourceUnconfirmed:
+    "AI couldn't confirm a web page's address, so it didn't credit it as a source.",
+  examplesUnavailable:
+    "The code-example search isn't set up, so AI didn't compare your project with outside examples. Nothing was installed.",
+  hostFacts: (toolName: string) =>
+    `${toolLabel(toolName)} didn't return readable results, so AI worked without them. Nothing was retried.`,
+} as const;
+
+/** Shown in chat when the idea search ends without a saved answer. */
+export const INCOMPLETE_ADVISORY_NOTICE =
+  "## What AI found: no answer this time\n\nThe idea search stopped before it finished, so there are no suggestions yet. Nothing was changed. Any check results you already had are unchanged.";
+
+type Recommendation = Assessment["recommendations"][number];
+
+const BASIS_WORDS = {
+  observed: "checked",
+  inferred: "best guess",
+  assumed: "assumed",
+} as const satisfies Record<Recommendation["workflow"]["repeatability"]["basis"], string>;
+
+/** Ideas where the next step is the user's decision; the rest need nothing from them. */
+const NEEDS_YOUR_CALL: ReadonlySet<Recommendation["choice"]["kind"]> = new Set([
+  "missing-capability",
+  "extend-command",
+  "generate-from-reference",
+]);
+
+type CommandAvailability = Extract<
+  Recommendation["choice"],
+  { kind: "reuse-command" }
+>["availability"];
+const commandName = (availability: CommandAvailability) =>
+  availability.status === "available"
+    ? availability.snapshot.command.name
+    : availability.command.name;
+
+function yourPart(recommendation: Recommendation): string {
+  const { choice } = recommendation;
+  switch (choice.kind) {
+    case "reuse-command":
+      return choice.availability.status === "available"
+        ? `Nothing. /${commandName(choice.availability)} already covers this.`
+        : `Check /${commandName(choice.availability)} again. AI couldn't confirm it still works here.`;
+    case "manual":
+      return "Nothing to set up. Keep doing this yourself; it isn't worth automating.";
+    case "needs-more-evidence":
+      return "Optional. Look into it if it matters to you.";
+    case "missing-capability":
+      return "Your call. Review the idea if you want this command made.";
+    case "extend-command":
+      return `Your call. Review the suggested changes to /${commandName(choice.availability)}.`;
+    case "generate-from-reference":
+      return "Your call. Review the plan for building it.";
+  }
+}
+
+const list = (items: readonly string[]) => items.join("; ");
+const plural = (count: number, one: string, many: string) => `${count} ${count === 1 ? one : many}`;
+
+function headline(result: Assessment): string {
+  const total = result.recommendations.length;
+  if (!total) return "## What AI found: nothing worth automating right now";
+  const calls = result.recommendations.filter((item) =>
+    NEEDS_YOUR_CALL.has(item.choice.kind),
+  ).length;
+  return `## What AI found: ${plural(total, "idea", "ideas")}, ${
+    calls ? `${calls} ${calls === 1 ? "needs" : "need"} your call` : "nothing you need to do"
+  }`;
+}
+
+function choiceLines(recommendation: Recommendation): string[] {
+  const { choice } = recommendation;
+  switch (choice.kind) {
+    case "manual":
+      return [`Steps to do it yourself: ${list(choice.steps)}`];
+    case "needs-more-evidence":
+      return [
+        `What's missing: ${list(choice.missingEvidence)}`,
+        `What to check next: ${list(choice.nextInspectionSteps)}`,
+      ];
+    case "missing-capability":
+    case "extend-command": {
+      const proposal = choice.kind === "missing-capability" ? choice.proposal : choice.requirement;
+      return [
+        `${choice.kind === "extend-command" ? "What the changed command would do" : "What the new command would do"}: ${proposal.desiredOutcome}`,
+        ...(choice.kind === "extend-command"
+          ? [`Suggested changes: ${list(choice.proposedChanges)}`]
+          : []),
+        `Uses: ${list(proposal.inputs)}`,
+        `Produces: ${list(proposal.outputs)}`,
+        `Needs: ${list(proposal.prerequisites)}`,
+        `Risks: ${list(proposal.risks)}`,
+        `How to tell it works: ${list(proposal.verificationExpectations)}`,
+        ...(proposal.capabilityKind === "app-backed"
+          ? ["This needs a change to the GG app itself. A command alone can't do it."]
+          : []),
+      ];
+    }
+    case "generate-from-reference": {
+      const { generator } = choice;
+      return [
+        `Plan: get one example right, then copy it for the other ${plural(generator.members.length - 1, "similar item", "similar items")}.`,
+        generator.reference.kind === "existing-member"
+          ? `Example to copy: ${generator.reference.path}: ${generator.reference.reason} (looked at, not tested)`
+          : `Example to copy: build one yourself first. ${generator.reference.reason}`,
+        `Items: ${list(generator.members)}`,
+        `Same in each: ${list(generator.sharedShape)}`,
+        `Different in each: ${list(generator.varyingInputs)}`,
+        `Risks: ${list(generator.risks)}`,
+        `How to tell it works: ${list(generator.verificationExpectations)}`,
+      ];
+    }
+    case "reuse-command":
+      return [];
+  }
+}
+
+function commandLines(recommendation: Recommendation): string[] {
+  const { choice } = recommendation;
+  if (choice.kind !== "reuse-command" && choice.kind !== "extend-command") return [];
+  const availability = choice.availability;
+  if (availability.status !== "available")
+    return [`/${availability.command.name} couldn't be found: ${availability.reason}`];
+  return [
+    `/${availability.snapshot.command.name} exists. It hasn't been run, and AI hasn't confirmed it does everything needed.`,
+    ...(availability.snapshot.capabilityKind === "app-backed"
+      ? ["It needs a GG app feature to run, so it can't run from this chat."]
+      : []),
+  ];
+}
+
 /** Plain transcript content, never opportunities, run controls or approval objects. */
 export function renderAdvisoryResult(result: Assessment): string {
   const lines = [
-    "## Recommendations — not started",
-    "Advice only. Running or editing anything requires separate approval.",
-    `Checked: ${result.coverage.scope}`,
+    headline(result),
+    "Suggestions only. Nothing runs or changes without your OK.",
+    `Looked at: ${result.coverage.scope}`,
   ];
-  if (result.coverage.status === "limited") lines.push(`Limits: ${result.coverage.reason}`);
+  if (result.coverage.status === "limited")
+    lines.push(`Didn't fully check: ${result.coverage.reason}`);
   if (!result.recommendations.length)
-    lines.push("No supported recommendation was found in the inspected scope.");
+    lines.push("AI found nothing worth automating in the parts it looked at.");
   for (const [index, recommendation] of result.recommendations.entries()) {
-    const { workflow, choice } = recommendation;
+    const { workflow } = recommendation;
     lines.push(
       `\n${index + 1}. ${recommendation.outcome}`,
-      `Why: ${recommendation.rationale}`,
-      `Uncertainty: ${recommendation.uncertainty}`,
-      `Scope: ${workflow.affectedSubproject.scope === "repository-wide" ? "repository-wide" : workflow.affectedSubproject.path}`,
-      `Proposed change boundary: ${workflow.mutationBoundary}`,
+      `Why it helps: ${recommendation.rationale}`,
+      `Your part: ${yourPart(recommendation)}`,
+      `Not sure about: ${recommendation.uncertainty}`,
+      `Where: ${workflow.affectedSubproject.scope === "repository-wide" ? "whole project" : workflow.affectedSubproject.path}`,
+      `What would change: ${workflow.mutationBoundary}`,
+      ...choiceLines(recommendation),
+      ...commandLines(recommendation),
     );
-    if (choice.kind === "manual")
-      lines.push(`Next: follow these manual steps — ${choice.steps.join("; ")}`);
-    else if (choice.kind === "needs-more-evidence")
-      lines.push(
-        `Missing evidence: ${choice.missingEvidence.join("; ")}`,
-        `Next: inspect without making changes — ${choice.nextInspectionSteps.join("; ")}`,
-      );
-    if (choice.kind === "missing-capability" || choice.kind === "extend-command") {
-      const proposal = choice.kind === "missing-capability" ? choice.proposal : choice.requirement;
-      lines.push(`Proposal only: ${proposal.desiredOutcome}`);
-      if (choice.kind === "extend-command")
-        lines.push(`Proposed changes: ${choice.proposedChanges.join("; ")}`);
-      lines.push(
-        `Inputs: ${proposal.inputs.join("; ")}`,
-        `Outputs: ${proposal.outputs.join("; ")}`,
-        `Prerequisites: ${proposal.prerequisites.join("; ")}`,
-        `Risks: ${proposal.risks.join("; ")}`,
-        `Verification needed: ${proposal.verificationExpectations.join("; ")}`,
-        proposal.capabilityKind === "app-backed"
-          ? "Next: plan application development. A prompt alone cannot provide this functionality."
-          : choice.kind === "extend-command"
-            ? "Next: review the base command and proposed changes. Editing requires separate approval."
-            : "Next: review the proposal before creating a command; verify it before running it.",
-      );
-    }
-    if (choice.kind === "generate-from-reference") {
-      const { generator } = choice;
-      lines.push(
-        `Proposal only: use one reference example to generate the other ${generator.members.length - 1} similar items.`,
-        generator.reference.kind === "existing-member"
-          ? `Reference: ${generator.reference.path} — ${generator.reference.reason}. Inspected, not verified to work.`
-          : `Reference: build one example by hand first — ${generator.reference.reason}`,
-        `Items: ${generator.members.join("; ")}`,
-        `Shared: ${generator.sharedShape.join("; ")}`,
-        `Differs: ${generator.varyingInputs.join("; ")}`,
-        `Risks: ${generator.risks.join("; ")}`,
-        `Verification needed: ${generator.verificationExpectations.join("; ")}`,
-        "Next: review generator creation. Creating, checking and running it each need separate approval.",
-      );
-    }
-    if (choice.kind === "reuse-command" || choice.kind === "extend-command") {
-      const availability = choice.availability;
-      lines.push(
-        availability.status === "available"
-          ? `/${availability.snapshot.command.name}: ${availability.snapshot.command.invocationKind === "workspace-action" ? "workspace action" : "prompt"} available, not started. This does not guarantee the required tools or behavior.`
-          : `/${availability.command.name} unavailable: ${availability.reason}`,
-      );
-      if (availability.status === "unavailable")
-        lines.push("Next: recheck the command and project prerequisites before proceeding.");
-      else if (availability.snapshot.capabilityKind === "app-backed")
-        lines.push(
-          "Next: review the required application integration. This proposal cannot run it.",
-        );
-      else if (choice.kind === "reuse-command")
-        lines.push(
-          "Next: review the current command, prerequisites and scope before approving a run.",
-        );
-    }
     for (const item of recommendation.evidence.items) {
       if (!("kind" in item) && item.severity !== "info")
-        lines.push(`Reported limit (${item.basis}): ${item.message}`);
+        lines.push(`Heads-up (${BASIS_WORDS[item.basis]}): ${item.message}`);
     }
     // Keep known restrictions, not a routine report of unselected alternatives.
     for (const alternative of recommendation.alternatives) {
       if (alternative.availability?.status === "unavailable")
         lines.push(
-          `/${alternative.availability.command.name} unavailable: ${alternative.availability.reason}`,
+          `/${alternative.availability.command.name} couldn't be found: ${alternative.availability.reason}`,
         );
     }
   }

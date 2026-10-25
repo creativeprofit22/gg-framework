@@ -90,7 +90,9 @@ function messageText(message: Message): string {
     : "";
 }
 function setupFamilies(params: StreamParams): FamilyFacts {
-  const prompt = params.messages.map(messageText).find((text) => text.includes("Host-owned exact facts"));
+  const prompt = params.messages
+    .map(messageText)
+    .find((text) => text.includes("Host-owned exact facts"));
   const json = prompt
     ?.split("already collected, do not repeat):\n")[1]
     ?.split("\nReusable host evidence receipts:")[0];
@@ -168,7 +170,15 @@ it.each(familyEvaluationFixtures)(
       await run("git", ["add", "-A"], { cwd });
       await run(
         "git",
-        ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "fixture"],
+        [
+          "-c",
+          "user.name=Fixture",
+          "-c",
+          "user.email=fixture@example.invalid",
+          "commit",
+          "-qm",
+          "fixture",
+        ],
         { cwd },
       );
     }
@@ -254,8 +264,9 @@ it.each(familyEvaluationFixtures)(
       fixture.variant === "non-javascript" ? "CONTRIBUTING" : "INTEGRATIONS",
       ...(fixture.reference.kind === "existing-member"
         ? fixture.template.map((file) =>
-            file.path.replace(/\{\{(\w+)\}\}/g, (_, key: string) =>
-              fixture.values[fixture.reference.path]?.[key] ?? "",
+            file.path.replace(
+              /\{\{(\w+)\}\}/g,
+              (_, key: string) => fixture.values[fixture.reference.path]?.[key] ?? "",
             ),
           )
         : [`${fixture.members[2]}/index.ts`]),
@@ -331,7 +342,9 @@ it.each(familyEvaluationFixtures)(
                                 reason: "Every member lacks a different shared file",
                               },
                         risks: ["Hand-edited member files may differ from the template"],
-                        verificationExpectations: ["The generator reproduces the reference exactly"],
+                        verificationExpectations: [
+                          "The generator reproduces the reference exactly",
+                        ],
                       },
                     },
                     alternatives: [
@@ -369,9 +382,11 @@ it.each(familyEvaluationFixtures)(
           : undefined;
       if (!candidate) throw new Error("Missing generate-from-reference candidate");
       expect(candidate.choice).toBe("generate-from-reference");
-      const recommendationText = "Proposal only: use one reference example";
+      const recommendationText = "Plan: get one example right, then copy it";
       expect(JSON.stringify(session.getMessages())).toContain(recommendationText);
-      const transcriptAfterDiscovery = session.getMessages().map((message) => JSON.stringify(message));
+      const transcriptAfterDiscovery = session
+        .getMessages()
+        .map((message) => JSON.stringify(message));
       const reportBefore = await adapter.handle({ version: 1, action: "report", offset: 0 });
 
       // 2. Review: bounded inspection; creation, apply and shell are refused.
@@ -679,7 +694,9 @@ it.each(familyEvaluationFixtures)(
       // No history loss: the transcript only grows and keeps the first recommendation;
       // the lifecycle report and profile are neither created nor rewritten.
       const transcript = session.getMessages().map((message) => JSON.stringify(message));
-      expect(transcript.slice(0, transcriptAfterDiscovery.length)).toEqual(transcriptAfterDiscovery);
+      expect(transcript.slice(0, transcriptAfterDiscovery.length)).toEqual(
+        transcriptAfterDiscovery,
+      );
       expect(transcript.length).toBeGreaterThan(transcriptAfterDiscovery.length);
       expect(JSON.stringify(session.getMessages())).toContain(recommendationText);
       // The configuration fingerprint covers project files and moves with the

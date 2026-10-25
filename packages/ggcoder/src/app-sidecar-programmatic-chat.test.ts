@@ -63,7 +63,7 @@ async function fixture() {
   return { cwd, target, adapter, call, inspect };
 }
 describe("session-scoped programmatic adapter", () => {
-  it("project-agnostic discovery returns an assessment separately from the desktop Check scanner result", async () => {
+  it("Check again and Show suggested checks run only deterministic code, never the AI", async () => {
     const cwd = await mkdtemp(path.join(os.tmpdir(), "gg-check-discovery-"));
     roots.push(cwd);
     await writeFile(
@@ -81,6 +81,9 @@ describe("session-scoped programmatic adapter", () => {
     const claim = new RunClaim();
     let scans = 0;
     let settlements = 0;
+    const assess = vi.fn(async () => {
+      throw new Error("Check again and Show suggested checks must not start the AI.");
+    });
     const adapter = new AppSidecarProgrammaticChat(
       () => ({ cwd, identity: "discovery", codeMode: true, planMode: false, busy: claim.active }),
       () => claim.claim(),
@@ -99,9 +102,9 @@ describe("session-scoped programmatic adapter", () => {
       () => {
         settlements++;
       },
+      assess,
     );
     try {
-      // This is the existing Check for opportunities request, not a direct scanner test.
       const result = await adapter.handle({ version: 1, action: "scan" });
       expect(result.status).toBe(200);
       expect(scans).toBe(1);
@@ -109,19 +112,27 @@ describe("session-scoped programmatic adapter", () => {
       expect(settlements).toBe(1);
       expect(await readFile(profilePath)).toEqual(priorProfile);
       await expect(access(path.join(cwd, ".gg/commands"))).rejects.toThrow();
-      // This adapter fixture has no provider owner: scanner success must not imply
-      // completed needs assessment. A host-only result must explicitly say unavailable.
-      expect(result.body).toMatchObject({
-        ok: true,
+      // No fabricated AI result: the body is only the deterministic scan receipt.
+      expect(result.body).toEqual({
+        version: 1,
         action: "scan",
-        assessment: {
-          mode: "configured",
-          status: "unavailable",
-          deterministic: { status: "succeeded", enabledCount: 0, applicableCount: 0 },
-          coverage: [{ scope: "project", status: "uninspected" }],
-          observations: [],
-        },
+        ok: true,
+        changed: expect.any(Boolean),
       });
+      const inspected = await adapter.handle({
+        version: 1,
+        action: "inspect-setup",
+        requestId: randomUUID(),
+      });
+      expect(inspected.status).toBe(200);
+      expect(inspected.body).toMatchObject({
+        ok: true,
+        action: "inspect-setup",
+        proposal: { operation: "history-upgrade" },
+      });
+      expect(inspected.body).not.toHaveProperty("assessment");
+      expect(assess).not.toHaveBeenCalled();
+      expect(settlements).toBe(2);
     } finally {
       adapter.dispose();
     }
@@ -194,7 +205,13 @@ describe("session-scoped programmatic adapter", () => {
     expect(initial.operation).toBe("initial");
     expect((await f.call("approve-setup", { proposalHandle: initial.handle })).status).toBe(200);
     expect((await f.inspect()).handle).toBeNull();
-    expect((await f.call("approve-setup", { proposalHandle: initial.handle })).status).toBe(409);
+    expect(await f.call("approve-setup", { proposalHandle: initial.handle })).toMatchObject({
+      status: 409,
+      body: {
+        error:
+          "These suggested checks are out of date. Show the suggested checks again before saving.",
+      },
+    });
     await f.call("scan");
     const report = await readProgrammaticChatReport(f.cwd);
     const id = report.rows[0]!.id;
@@ -556,7 +573,14 @@ describe("session-scoped programmatic adapter", () => {
     const proposal = await f.inspect();
     await writeFile(path.join(f.cwd, "package.json"), '{"name":"changed"}');
     const stale = await f.call("approve-setup", { proposalHandle: proposal.handle });
-    expect(stale).toMatchObject({ status: 409, body: { ok: false, reconcile: true } });
+    expect(stale).toMatchObject({
+      status: 409,
+      body: {
+        ok: false,
+        reconcile: true,
+        error: "The project settings changed. Show the suggested checks again before saving.",
+      },
+    });
     expect(stale.body).not.toHaveProperty("approvableProposalHandle");
     await expect(access(path.join(f.cwd, ".gg/programmatic/profile.json"))).rejects.toThrow();
     expect((await f.call("report", { offset: 0 })).status).toBe(200);

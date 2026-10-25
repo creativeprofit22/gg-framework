@@ -363,7 +363,7 @@ describe("slash-command restore", () => {
       expect(agentLoopMock).toHaveBeenCalledTimes(3);
       expect(output.slice(1)).toEqual([
         ...Array<string>(3).fill(
-          "\n\n## Recommendations — not started\n\nAssessment did not submit a validated result (interrupted, unavailable, or incomplete). Any completed deterministic scan remains separate and unchanged.\n",
+          "\n\n## What AI found: no answer this time\n\nThe idea search stopped before it finished, so there are no suggestions yet. Nothing was changed. Any check results you already had are unchanged.\n",
         ),
         "Use an optional focus of at most 4,000 characters without control characters (newlines and tabs are allowed).\n",
         "Use an optional focus of at most 4,000 characters without control characters (newlines and tabs are allowed).\n",

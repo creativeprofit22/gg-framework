@@ -210,6 +210,22 @@ describe("programmatic chat transport", () => {
       expect(isProgrammaticChatResponse(response("scan", { changed: false, ...extra }))).toBe(true);
     }
   });
+  it("accepts deterministic setup/scan requests and replies without any assessment", () => {
+    for (const action of ["inspect-setup", "scan"])
+      expect(isProgrammaticChatRequest({ version: 1, action })).toBe(true);
+    expect(isProgrammaticChatResponse(response("inspect-setup", { proposal }))).toBe(true);
+    expect(isProgrammaticChatResponse(response("scan", { changed: true }))).toBe(true);
+    for (const action of ["inspect-setup", "scan"])
+      expect(
+        isProgrammaticChatResponse({
+          version: 1,
+          action,
+          ok: false,
+          error: "Unavailable",
+          reconcile: false,
+        }),
+      ).toBe(true);
+  });
   it("retains limited assessment on setup/scan failure without authorizing replacement settings", () => {
     for (const [action, projection] of [
       ["inspect-setup", assessment],

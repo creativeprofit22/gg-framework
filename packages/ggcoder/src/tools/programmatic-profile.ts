@@ -26,6 +26,8 @@ export const ProgrammaticProfileParams = z.discriminatedUnion("action", [
 
 export interface ProgrammaticProfileToolOptions {
   reviewer?: CommandCreationReviewer;
+  /** Desktop hosts save setup only from the Opportunities panel, never from this tool. */
+  setupApproval?: "desktop-panel";
   owner?: () => string;
   assertAllowed?: () => void;
   localFilesystem?: boolean;
@@ -45,6 +47,7 @@ export function createProgrammaticProfileTool(
       options.assertAllowed?.();
     },
   });
+  const desktopPanel = options.setupApproval === "desktop-panel";
   return {
     cancel: () => review.cancel(),
     dispose: () => review.dispose(),
@@ -76,8 +79,13 @@ export function createProgrammaticProfileTool(
             action: "inspect",
             changed: false,
             operation: proposal.operation,
-            approval_available: proposal.operation !== "current" && !!options.reviewer,
-            approval_transport: options.reviewer ? "host-review" : "unsupported-host",
+            approval_available:
+              proposal.operation !== "current" && !desktopPanel && !!options.reviewer,
+            approval_transport: desktopPanel
+              ? "desktop-panel"
+              : options.reviewer
+                ? "host-review"
+                : "unsupported-host",
             expected_prior_profile_digest: proposal.expectedPriorProfileDigest,
             configuration: proposal.configuration,
             configuration_fingerprint: proposal.configurationFingerprint,
@@ -96,6 +104,14 @@ export function createProgrammaticProfileTool(
           });
         }
 
+        if (desktopPanel)
+          return stableJson({
+            action: "generate",
+            ok: false,
+            changed: false,
+            error: "save-in-panel",
+            message: "Save checks in Opportunities → Quick checks. Nothing was saved here.",
+          });
         const result = await review.generate(
           input,
           context.signal,

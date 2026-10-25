@@ -397,6 +397,8 @@ export interface AgentSessionOptions {
   unattended?: boolean;
   reviewCommandCreation?: CommandCreationReviewer;
   reviewProgrammaticSetup?: CommandCreationReviewer;
+  /** Desktop: setup is saved only from the Opportunities panel (Save checks). */
+  programmaticSetupApproval?: "desktop-panel";
   executeReviewedCommand?: DirectCommandExecutor;
   provider: Provider;
   model: string;
@@ -1275,6 +1277,7 @@ export class AgentSession {
             },
       reviewCommandCreation: this.opts.reviewCommandCreation,
       reviewProgrammaticSetup: this.opts.reviewProgrammaticSetup,
+      programmaticSetupApproval: this.opts.programmaticSetupApproval,
       setupOwner: () => `${this.sessionId}:${this.cwd}`,
       assertSetupAllowed: () => {
         if (

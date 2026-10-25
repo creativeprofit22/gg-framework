@@ -363,6 +363,12 @@ describe("prompt commands", () => {
       "Submit bounded needs recommendations through `programmatic_advisory_result`",
     );
     expect(setup?.prompt).toContain("no scan is required or permitted in setup");
+    // Desktop has one save place: the Opportunities panel.
+    expect(setup?.prompt).toContain(
+      "When `approval_transport` is `desktop-panel`, approval is never available here: end by telling the user to open Opportunities → Quick checks and choose Save checks, and do not offer another way to save.",
+    );
+    expect(setup?.prompt).toContain("a later explicit Check again reconciles old results");
+    expect(setup?.prompt).not.toContain("Run project checks");
     expect(setup?.prompt).not.toContain("tool_search");
     expect(setup?.prompt).toContain(
       "Keep the exact inventory, configuration fingerprint, profile, routes, exclusions, drift inputs and fixed profile path unchanged in tool data and approval review",
@@ -413,7 +419,7 @@ describe("prompt commands", () => {
     for (const prompt of [deferred, eager]) {
       expect(prompt).toContain("Submit programmatic_advisory_result");
       expect(prompt).toContain(
-        "Use its validated presentation as Recommendations — not started, including coverage limitations",
+        "Use its validated presentation (it opens with 'What AI found') as your answer, including coverage limitations",
       );
       expect(prompt).toContain(
         "Do not write a second full report repeating rendered accepted advice",

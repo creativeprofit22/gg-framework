@@ -198,21 +198,14 @@ export class AppSidecarProgrammaticChat {
           break;
         case "inspect-setup": {
           this.pending = null;
-          // A settings failure blocks approval, not the session's safe read-only assessment.
+          // Deterministic only: Find ideas is the sole AI action in Opportunities.
           const proposal = await this.implementations.inspect(target.cwd, { offerHistory: true }).catch(() => null);
-          if (!current()) return fail(409, "The project or chat changed. Choose Review setup again.");
-          const assessment = this.assess ? (await this.assess("setup", input.requestId)).assessment
-            : unavailableAssessment("setup", { status: "not-run", reason: "setup" });
-          if (!current()) return fail(409, "The project or chat changed. Choose Review setup again.");
-          if (!proposal) {
-            const failure = fail(409, "The setup could not be safely reviewed. No settings were saved; approval is unavailable.");
-            const body: ProgrammaticChatResponse = { ...failure.body, assessment };
-            if (!isProgrammaticChatResponse(body)) return failure;
-            return { status: failure.status, body };
-          }
+          if (!current()) return fail(409, "The project or chat changed. Show the suggested checks again.");
+          if (!proposal)
+            return fail(409, "The suggested checks could not be safely read. Nothing was saved, and Save checks is unavailable.");
           const handle = sha256(randomBytes(32).toString("hex") + canonicalJson(proposal));
           const projection = projectProgrammaticSetup(proposal, handle);
-          body = { version: 1, action: "inspect-setup", ok: true, proposal: projection, assessment };
+          body = { version: 1, action: "inspect-setup", ok: true, proposal: projection };
           if (!isProgrammaticChatResponse(body))
             return fail(422, "The proposed setup is too large to display safely. It cannot be approved here; no settings were saved.");
           this.pending = proposal.operation === "current" ? null : { identity: target.identity, cwd: target.cwd, handle, proposal };
@@ -222,7 +215,7 @@ export class AppSidecarProgrammaticChat {
           const pending = this.pending;
           this.pending = null;
           if (!pending || pending.handle !== input.proposalHandle)
-            return fail(409, "This setup is no longer ready for approval. Choose Review setup again.");
+            return fail(409, "These suggested checks are out of date. Show the suggested checks again before saving.");
           submitted = true;
           const result = await this.implementations.persist(
             target.cwd,
@@ -234,30 +227,23 @@ export class AppSidecarProgrammaticChat {
             },
           );
           if (!result.ok)
-            return fail(409, result.changed ? result.detail : "The project settings changed. Choose Review setup to see the new settings before approving.", true);
+            return fail(409, result.changed ? result.detail : "The project settings changed. Show the suggested checks again before saving.", true);
           body = { version: 1, action: "approve-setup", ok: true, changed: result.changed };
           break;
         }
         case "scan": {
           submitted = true;
-          if (this.assess) {
-            const outcome = await this.assess("configured", input.requestId);
-            const facts = outcome.scanFacts;
-            const changed = typeof facts === "object" && facts !== null && "changed" in facts && facts.changed === true;
-            body = { version: 1, action: "scan", ok: true, changed, assessment: outcome.assessment };
-            break;
-          }
+          // Check again runs only the saved deterministic checks; it never starts the AI.
           const result = await this.implementations.scan(target.cwd);
           if (!result.ok)
             return fail(
               409,
               result.changed
                 ? result.detail
-                : "The checks did not finish. Reload results before trying again.",
+                : "The checks did not finish. Choose Try again.",
               true,
             );
-          body = { version: 1, action: "scan", ok: true, changed: result.changed,
-            assessment: unavailableAssessment("configured", result.scanCounts ? { status: "succeeded", ...result.scanCounts } : { status: "unavailable", reason: "The checks finished but didn't say how many ran." }) };
+          body = { version: 1, action: "scan", ok: true, changed: result.changed };
           break;
         }
         case "dismiss": {
@@ -274,17 +260,17 @@ export class AppSidecarProgrammaticChat {
       if (!current())
         return fail(
           409,
-          "The project or chat changed. Reload results before continuing.",
+          "The project or chat changed. Choose Try again.",
           submitted,
         );
       if (!isProgrammaticChatResponse(body))
-        return fail(500, "The opportunity results could not be displayed. Reload results before continuing.", submitted);
+        return fail(500, "The opportunity results could not be displayed. Choose Try again.", submitted);
       return { status: 200, body };
     } catch {
       return fail(
         409,
         submitted
-          ? "We could not confirm whether your change was saved. Reload results before trying again."
+          ? "We could not confirm whether your change was saved. Choose Try again to reload results."
           : "The project could not be checked. Make sure its folder is available, then try again.",
         submitted,
       );

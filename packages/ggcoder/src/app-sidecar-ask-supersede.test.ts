@@ -260,16 +260,16 @@ describe("reviewed command questions use the existing desktop bridge", () => {
       }
     },
   );
-  it("wires the reviewer only into the normal desktop session, not Ken", async () => {
+  it("wires the command reviewer only into the normal desktop session, not Ken", async () => {
     const source = await fs.readFile(APP_SIDECAR, "utf8");
     // Approval reviews use the undeferrable view: a missed approval is never
     // carried past its deadline or delivered late.
     expect(
       source.match(/reviewCommandCreation: commandCreationReviewer\(withoutDeferral\(asks\)\)/g),
     ).toHaveLength(1);
-    expect(
-      source.match(/reviewProgrammaticSetup: commandCreationReviewer\(withoutDeferral\(asks\)\)/g),
-    ).toHaveLength(1);
+    // Desktop setup is saved only in Opportunities → Quick checks, never through an ask_user review.
+    expect(source.match(/reviewProgrammaticSetup:/g)).toBeNull();
+    expect(source.match(/programmaticSetupApproval: "desktop-panel" as const/g)).toHaveLength(1);
     expect(source.match(/commandCreationReviewer\(asks\)/g)).toBeNull();
   });
 });

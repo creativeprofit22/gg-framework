@@ -16,6 +16,7 @@ import {
   type AssessmentEvidenceAuthorization,
 } from "../../core/programmatic/assessment-evidence.js";
 import { ProgrammaticAssessmentCoordinator } from "../../core/programmatic/assessment.js";
+import { ADVISORY_LIMITATIONS } from "../../core/programmatic/advisory.js";
 import { UI_SLASH_COMMANDS } from "../submit-slash-commands.js";
 
 export interface TerminalProgrammaticAssessment {
@@ -107,10 +108,10 @@ export async function prepareTerminalProgrammaticAssessment(
             if (value?.ok === true) coordinator.recordScanCounts(value.scan_counts);
           }
         } catch {
-          turn.limitations.add(`${name}: host facts unavailable; no retry attempted.`);
+          turn.limitations.add(ADVISORY_LIMITATIONS.hostFacts(name));
         }
       } else {
-        turn.limitations.add(`${name}: host facts unavailable; no retry attempted.`);
+        turn.limitations.add(ADVISORY_LIMITATIONS.hostFacts(name));
         if (input.mode === "configured") turn.markScanUnavailable();
       }
       signal.throwIfAborted();

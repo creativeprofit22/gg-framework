@@ -1684,7 +1684,7 @@ async function createSession(
     sharedMcpPool,
     onMcpElicit: elicitations.onElicit,
     reviewCommandCreation: commandCreationReviewer(withoutDeferral(asks)),
-    reviewProgrammaticSetup: commandCreationReviewer(withoutDeferral(asks)),
+    programmaticSetupApproval: "desktop-panel" as const,
     executeReviewedCommand: (async (request) => {
       if (reviewedExecutionBlocked({ mode, planMode: session.getPlanMode(), active: programmaticExecutionActive }))
         throw new Error(REVIEWED_EXECUTION_UNAVAILABLE);
@@ -4377,7 +4377,7 @@ async function createSession(
       const owner = session;
       let outcome: Awaited<ReturnType<AgentSession["assessProgrammatic"]>> | undefined;
       let failure: unknown;
-      await runAgent(assessmentMode === "setup" ? "Review setup" : "Run project checks", async () => {
+      await runAgent("Find ideas", async () => {
         try {
           outcome = await owner.assessProgrammatic(assessmentMode, undefined, undefined, { assessmentRequestId });
         } catch (error) {

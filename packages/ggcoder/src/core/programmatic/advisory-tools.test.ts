@@ -203,7 +203,7 @@ it.each(provenanceCases)(
               { ...input, recommendations: nonpositive === "empty" ? [] : [conservative] },
               checks,
             ),
-          ).resolves.toContain("Recommendations — not started");
+          ).resolves.toContain("## What AI found:");
           other.close();
         }
       }
@@ -238,7 +238,7 @@ it.each(provenanceCases)(
             },
             checks,
           ),
-        ).resolves.toContain("Recommendations — not started");
+        ).resolves.toContain("## What AI found:");
         uncited.close();
         recommendation.evidence.items[0]!.source = mixed.id;
         // A command citation cannot borrow independent support from another chunk.
@@ -255,7 +255,7 @@ it.each(provenanceCases)(
           location: { path: workflowPath },
         });
       }
-      await expect(turn.submit(input, checks)).resolves.toContain("Recommendations — not started");
+      await expect(turn.submit(input, checks)).resolves.toContain("## What AI found:");
       expect(turn.acceptedResult?.recommendations[0]?.choice.kind).toBe(
         choice === "alternative" ? "manual" : choice,
       );
@@ -413,8 +413,8 @@ it.each(["success", "failure", "cancelled"])(
         );
       else {
         const advice = await result.execute(assessment, freshContext);
-        expect(advice).toContain("Recommendations — not started");
-        if (outcome === "failure") expect(advice).toContain("deterministic scan failed");
+        expect(advice).toContain("## What AI found:");
+        if (outcome === "failure") expect(advice).toContain("Your project checks failed");
       }
       await expect(scan.execute({}, freshContext)).rejects.toThrow("one unchanged");
       expect(execute).toHaveBeenCalledExactlyOnceWith({}, context);

@@ -672,6 +672,35 @@ describe("host setup authorization", () => {
     await expect(fs.access(path.join(root, PROGRAMMATIC_PROFILE_PATH))).rejects.toThrow();
   });
 
+  it("points desktop-panel setup to Save checks and never saves or asks here", async () => {
+    const root = await repository();
+    const reviewer = vi.fn(approveSetup!);
+    const tool = createProgrammaticProfileTool(root, { reviewer, setupApproval: "desktop-panel" });
+    const proposal = (await execute(tool, { action: "inspect" })) as unknown as InspectOutput &
+      Record<string, unknown>;
+    expect(proposal).toMatchObject({
+      operation: "initial",
+      approval_available: false,
+      approval_transport: "desktop-panel",
+    });
+    expect(
+      await execute(tool, {
+        action: "generate",
+        configuration_fingerprint: proposal.configuration_fingerprint,
+        profile: proposal.profile,
+        expected_prior_profile_digest: proposal.expected_prior_profile_digest,
+      }),
+    ).toEqual({
+      action: "generate",
+      ok: false,
+      changed: false,
+      error: "save-in-panel",
+      message: "Save checks in Opportunities → Quick checks. Nothing was saved here.",
+    });
+    expect(reviewer).not.toHaveBeenCalled();
+    await expect(fs.access(path.join(root, PROGRAMMATIC_PROFILE_PATH))).rejects.toThrow();
+  });
+
   it.each([
     "deny",
     "cancel",

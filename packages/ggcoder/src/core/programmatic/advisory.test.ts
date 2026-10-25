@@ -8,7 +8,10 @@ import { executeAdvisoryTool } from "./advisory-tools.js";
 import {
   AdvisoryEvidence,
   ProgrammaticAdvisoryTurn,
+  ADVISORY_LIMITATIONS,
   ADVISORY_LIMITS,
+  INCOMPLETE_ADVISORY_NOTICE,
+  plainToolLimitation,
   renderAdvisoryResult,
 } from "./advisory.js";
 import { inventoryV1Schema, programmaticAssessmentResultV2Schema } from "./contracts.js";
@@ -77,8 +80,18 @@ it("renders a concise decision without changing the accepted record", () => {
   const rendered = renderAdvisoryResult(accepted);
   // Measured on this identical fixture before changing the renderer: 1,247 UTF-16
   // code units / 1,251 UTF-8 bytes. Keep both units explicit (the em dash differs).
-  expect(rendered.length).toBe(518);
-  expect(Buffer.byteLength(rendered, "utf8")).toBe(522);
+  expect(rendered.length).toBe(615);
+  expect(Buffer.byteLength(rendered, "utf8")).toBe(615);
+  expect(rendered.split("\n").slice(0, 2)).toEqual([
+    "## What AI found: 1 idea, nothing you need to do",
+    "Suggestions only. Nothing runs or changes without your OK.",
+  ]);
+  expect(rendered).toContain(
+    "Your part: Nothing to set up. Keep doing this yourself; it isn't worth automating.",
+  );
+  expect(rendered).not.toMatch(
+    /Recommendations — not started|Proposed change boundary|Reported limit/,
+  );
   expect(rendered.length).toBeLessThan(1_247 * 0.5);
   expect(Buffer.byteLength(rendered, "utf8")).toBeLessThan(1_251 * 0.5);
   expect(accepted).toEqual(before);
@@ -96,6 +109,30 @@ it("renders a concise decision without changing the accepted record", () => {
   expect(rendered).not.toMatch(
     /Trigger:|Representative case:|Repeatability|Alternative not selected|receipt-|Sha256/,
   );
+});
+
+it("words host limitations without tool names, IDs or budget terms", () => {
+  expect(plainToolLimitation("programmatic_advisory_result", false)).toBe(
+    "Saving the answer failed, so this search may have missed something.",
+  );
+  expect(plainToolLimitation("grep", true)).toBe(
+    "Reading project files was stopped, so this search may have missed something.",
+  );
+  expect(plainToolLimitation("some_new_tool", false)).toBe(
+    "One of AI's checks failed, so this search may have missed something.",
+  );
+  const sentences = [
+    ...Object.values(ADVISORY_LIMITATIONS).flatMap((value) =>
+      typeof value === "string"
+        ? [value]
+        : [value(true as never), value(false as never), value("web_fetch" as never)],
+    ),
+    INCOMPLETE_ADVISORY_NOTICE,
+  ];
+  for (const sentence of sentences)
+    expect(sentence).not.toMatch(
+      /\b[a-z]+_[a-z_]+\b|tool error|budget|catalog|deterministic|receipt|Tool call/i,
+    );
 });
 
 it("keeps consequential warnings and unavailable alternatives visible without a receipt report", () => {
@@ -126,8 +163,9 @@ it("keeps consequential warnings and unavailable alternatives visible without a 
   });
   const before = structuredClone(accepted);
   const rendered = renderAdvisoryResult(accepted);
-  expect(rendered).toContain("Reported limit (assumed): Back up the configuration before editing.");
-  expect(rendered).toContain("/check-config unavailable: Required helper is missing");
+  expect(rendered).toContain("Heads-up (assumed): Back up the configuration before editing.");
+  expect(rendered).not.toContain("Reported limit");
+  expect(rendered).toContain("/check-config couldn't be found: Required helper is missing");
   expect(rendered).not.toContain("Alternative not selected");
   expect(accepted).toEqual(before);
 });
@@ -500,7 +538,9 @@ describe("host fetch provenance", () => {
     });
     expect(evidence.list()[0]?.status).toBe(mode === "missing" ? "failed" : "retrieved");
     if (mode === "missing") {
-      expect([...turn.limitations]).toContain("web_fetch: unavailable.");
+      expect([...turn.limitations]).toContain(
+        "Opening a web page didn't return anything AI could use.",
+      );
       await expect(
         scannedTurn(evidence).submit(citation("https://example.com/file.pdf"), checks),
       ).rejects.toThrow("External provenance");
@@ -557,7 +597,7 @@ describe("host fetch provenance", () => {
     expect(evidence.list()[0]?.external?.sourceUri).toBe("https://example.com/good");
     expect(evidence.list()[2]?.external).toBeUndefined();
     expect(JSON.stringify(evidence.list())).not.toContain("private-value");
-    expect([...turn.limitations].join(" ")).toContain("safe source identity unavailable");
+    expect([...turn.limitations].join(" ")).toContain("couldn't confirm a web page's address");
     await expect(
       scannedTurn(evidence).submit(citation("https://example.com/page"), checks),
     ).rejects.toThrow("External provenance");
@@ -606,7 +646,9 @@ describe("host fetch provenance", () => {
         retrievedAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T.*Z$/),
       },
     ]);
-    expect([...turn.limitations]).toContain("web_fetch: cancelled.");
+    expect([...turn.limitations]).toContain(
+      "Opening a web page was stopped, so this search may have missed something.",
+    );
   });
   it("does not infer retrieval from legacy text-only fetch output", () => {
     expect(
@@ -681,8 +723,8 @@ describe("bounded advisory validation", () => {
         const output = await turn.submit(manualAssessment, checks);
         expect(turn.submitted).toBe(true);
         if (outcome === "failed") {
-          expect(output).toContain("Limits:");
-          expect(output).toContain("deterministic scan failed");
+          expect(output).toContain("Didn't fully check:");
+          expect(output).toContain("Your project checks failed");
         }
       }
     },
@@ -693,10 +735,10 @@ describe("bounded advisory validation", () => {
       { ...manualAssessment, coverage: { status: "complete", scope: "All commands" } },
       checks,
     );
-    expect(output).toContain("Recommendations — not started");
-    expect(output).toContain("Limits:");
-    expect(output).toContain("Not all current catalog pages");
-    expect(output).toContain("Next: follow these manual steps");
+    expect(output).toContain("## What AI found:");
+    expect(output).toContain("Didn't fully check:");
+    expect(output).toContain("AI didn't read your whole command list");
+    expect(output).toContain("Steps to do it yourself");
   });
   it("rejects invented line ranges and retains only explicitly supplied revisions", async () => {
     const evidence = new AdvisoryEvidence();
@@ -1119,14 +1161,12 @@ describe("advisory evidence presentation", () => {
       checks,
     );
     expect(output.split("\n").filter((line) => line.startsWith("/"))).toEqual([
-      "/project-check unavailable: Body unavailable",
-      "/Global.Check unavailable: Body unavailable",
+      "/project-check couldn't be found: Body unavailable",
+      "/Global.Check couldn't be found: Body unavailable",
     ]);
+    expect(output).toContain("Suggestions only. Nothing runs or changes without your OK.");
     expect(output).toContain(
-      "Advice only. Running or editing anything requires separate approval.",
-    );
-    expect(output).toContain(
-      "Next: recheck the command and project prerequisites before proceeding.",
+      "Your part: Check /project-check again. AI couldn't confirm it still works here.",
     );
   });
 });
@@ -1249,17 +1289,19 @@ describe("needs-first host submission", () => {
       input.recommendations[0]!.workflow.mutationBoundary,
     ])
       expect(output).toContain(value);
-    expect(output).toContain("Scope: repository-wide");
+    expect(output).toContain("Where: whole project");
     expect(output).not.toMatch(
       /Trigger:|Representative case:|Repeatability|Alternative not selected|Evidence \(/,
     );
-    expect(output).toContain("Proposal only");
-    expect(output).toContain("/project-check: prompt available, not started");
-    expect(output).toContain("Editing requires separate approval.");
-    expect(output).toContain("Proposed changes: Accept a selected package list");
+    expect(output).toContain("What the changed command would do");
+    expect(output).toContain("/project-check exists. It hasn't been run");
+    expect(output).toContain(
+      "Your part: Your call. Review the suggested changes to /project-check.",
+    );
+    expect(output).toContain("Suggested changes: Accept a selected package list");
     expect(output).not.toContain("receipt-");
     expect(output).not.toContain(snapshot.bodySha256);
-    expect(output).toContain("Uncertainty: Behavior still needs verification");
+    expect(output).toContain("Not sure about: Behavior still needs verification");
   });
 
   it("keeps app-backed proposals visibly separate from working generated commands", async () => {
@@ -1268,9 +1310,9 @@ describe("needs-first host submission", () => {
       proposal: { ...proposal, capabilityKind: "app-backed" },
     });
     const output = await turn.submit(input, checks);
-    expect(output).toContain("Proposal only");
+    expect(output).toContain("What the new command would do");
     expect(output).toContain(
-      "Next: plan application development. A prompt alone cannot provide this functionality.",
+      "This needs a change to the GG app itself. A command alone can't do it.",
     );
     for (const value of [
       ...proposal.prerequisites,
@@ -1313,12 +1355,12 @@ describe("needs-first host submission", () => {
       const before = structuredClone(accepted);
       const output = renderAdvisoryResult(accepted);
       expect(output).toContain(
-        `/project-check: ${capabilityKind === "app-backed" ? "workspace action" : "prompt"} available, not started. This does not guarantee the required tools or behavior.`,
+        "/project-check exists. It hasn't been run, and AI hasn't confirmed it does everything needed.",
       );
       expect(output).toContain(
         capabilityKind === "app-backed"
-          ? "Next: review the required application integration. This proposal cannot run it."
-          : "Next: review the current command, prerequisites and scope before approving a run.",
+          ? "It needs a GG app feature to run, so it can't run from this chat."
+          : "Your part: Nothing. /project-check already covers this.",
       );
       expect(accepted).toEqual(before);
     },
@@ -1340,10 +1382,8 @@ describe("needs-first host submission", () => {
       explanation: "Recurrence is unknown",
     };
     const output = await turn.submit(input, checks);
-    expect(output).toContain("Missing evidence: Local prerequisite support is unknown");
-    expect(output).toContain(
-      "Next: inspect without making changes — Read the selected package configuration",
-    );
+    expect(output).toContain("What's missing: Local prerequisite support is unknown");
+    expect(output).toContain("What to check next: Read the selected package configuration");
     expect(turn.acceptedResult!.recommendations[0]!.workflow.repeatability).toEqual({
       basis: "assumed",
       explanation: "Recurrence is unknown",
@@ -1487,7 +1527,7 @@ describe("needs-first host submission", () => {
       });
       expect(accepted.coverage).toMatchObject({
         status: "limited",
-        reason: expect.stringContaining("compared command changed"),
+        reason: expect.stringContaining("A command AI suggested changed"),
       });
       expect(accepted.recommendations[0]!.choice.kind).toBe(
         target === "base"
@@ -1657,14 +1697,14 @@ describe("generate-from-reference host submission", () => {
     expect(generator.members).toEqual(REGIONS.map((region) => `config/regions/${region}`));
     const output = await turn.submit(input, checks);
     for (const value of [
-      "Reference: config/regions/us-east",
-      "Inspected, not verified to work.",
+      "Example to copy: config/regions/us-east",
+      "(looked at, not tested)",
       ...generator.members,
       ...generator.sharedShape,
       ...generator.varyingInputs,
       ...generator.risks,
       ...generator.verificationExpectations,
-      "Next: review generator creation. Creating, checking and running it each need separate approval.",
+      "Your part: Your call. Review the plan for building it.",
     ])
       expect(output).toContain(value);
     expect(output).not.toMatch(/fingerprint|digest|lifecycle|receipt-/i);
@@ -1682,7 +1722,7 @@ describe("generate-from-reference host submission", () => {
       reason: "No region is complete yet",
     } as never;
     await expect(turn.submit(input, checks)).resolves.toContain(
-      "Reference: build one example by hand first",
+      "Example to copy: build one yourself first.",
     );
   });
 

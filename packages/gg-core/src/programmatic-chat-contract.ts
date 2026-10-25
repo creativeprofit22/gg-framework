@@ -40,6 +40,7 @@ export type ProgrammaticChatRequest =
   | { version: 1; action: "discover"; requestId?: string }
   | { version: 1; action: "report"; offset: number }
   | { version: 1; action: "detail"; id: string }
+  /** Deterministic since the desktop runs AI only for discover; current daemons ignore a legacy requestId. */
   | { version: 1; action: "inspect-setup" | "scan"; requestId?: string }
   | { version: 1; action: "approve-setup"; proposalHandle: string }
   | { version: 1; action: "dismiss"; id: string; snapshot: string };
@@ -168,9 +169,17 @@ export type ProgrammaticChatResponse =
       action: "inspect-setup";
       ok: true;
       proposal: ProgrammaticChatProposal;
+      /** Legacy only: current daemons inspect deterministically and omit it. */
       assessment?: ProgrammaticAssessment;
     }
-  | { version: 1; action: "scan"; ok: true; changed: boolean; assessment?: ProgrammaticAssessment }
+  | {
+      version: 1;
+      action: "scan";
+      ok: true;
+      changed: boolean;
+      /** Legacy only: current daemons run the saved deterministic checks and omit it. */
+      assessment?: ProgrammaticAssessment;
+    }
   | { version: 1; action: "approve-setup" | "dismiss"; ok: true; changed: boolean }
   | {
       version: 1;
@@ -181,7 +190,7 @@ export type ProgrammaticChatResponse =
       /** Only a pre-consumption setup rejection may preserve this exact handle.
        * Absence on setup failure means reinspection is required, independently of reconcile. */
       approvableProposalHandle?: string;
-      /** Available only on inspect-setup/scan failures; never grants approval. */
+      /** Legacy inspect-setup/scan failures and discover failures only; never grants approval. */
       assessment?: ProgrammaticAssessment;
     };
 

@@ -314,14 +314,12 @@ async function assess(
       status: "limited",
       scope: fixture.coverage,
     });
-    expect(presentation).toContain("Limits:");
-    expect(presentation).toContain(
-      "Advice only. Running or editing anything requires separate approval.",
-    );
+    expect(presentation).toContain("Didn't fully check:");
+    expect(presentation).toContain("Suggestions only. Nothing runs or changes without your OK.");
     expect(presentation).toContain(fixture.coverage);
     for (const need of fixture.needs) {
       for (const text of [need.outcome, need.rationale]) expect(presentation).toContain(text);
-      if (need.scope) expect(presentation).toContain(`Scope: ${need.scope}`);
+      if (need.scope) expect(presentation).toContain(`Where: ${need.scope}`);
     }
     const advice = submitted! as {
       recommendations: {

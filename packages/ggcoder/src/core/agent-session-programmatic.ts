@@ -32,7 +32,9 @@ import {
   type AssessmentEvidenceAuthorization,
 } from "./programmatic/assessment-evidence.js";
 import {
+  ADVISORY_LIMITATIONS,
   AdvisoryEvidence,
+  INCOMPLETE_ADVISORY_NOTICE,
   type ProgrammaticAdvisoryTurn,
   ADVISORY_READ_TOOLS,
 } from "./programmatic/advisory.js";
@@ -352,7 +354,7 @@ export async function assessProgrammatic(
       mode,
       status: signal?.aborted ? "cancelled" : "unavailable",
       summary: "The assessment did not finish. No approval is implied.",
-      limitations: ["The host could not complete this assessment; no retry was attempted."],
+      limitations: ["The idea search couldn't finish. Nothing was retried."],
       coverage: [],
       observations: [],
       history:
@@ -560,7 +562,7 @@ async function runProgrammaticAssessment(
                 }
               }
             } catch {
-              turn.limitations.add(`${name}: host facts unavailable; no retry attempted.`);
+              turn.limitations.add(ADVISORY_LIMITATIONS.hostFacts(name));
             }
           } else if (mode === "configured") turn.markScanUnavailable();
           signal.throwIfAborted();
@@ -609,9 +611,7 @@ ${JSON.stringify(turn.evidence.list())}` +
       sessionHost.boundaries.advisoryTurn() === turn &&
       outcome.assessment.status !== "completed"
     ) {
-      const content = `## Recommendations — not started
-
-Assessment did not submit a validated result (interrupted, unavailable, or incomplete). Any completed deterministic scan remains separate and unchanged.`;
+      const content = INCOMPLETE_ADVISORY_NOTICE;
       sessionHost.session.eventBus().emit("text_delta", {
         text: `
 

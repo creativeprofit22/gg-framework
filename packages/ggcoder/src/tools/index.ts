@@ -77,6 +77,7 @@ export interface CreateToolsOptions {
   commandDiscovery?: CommandDiscoveryOptions | false;
   reviewCommandCreation?: CommandCreationReviewer;
   reviewProgrammaticSetup?: CommandCreationReviewer;
+  programmaticSetupApproval?: "desktop-panel";
   setupOwner?: () => string;
   assertSetupAllowed?: () => void;
   executeReviewedCommand?: DirectCommandExecutor;
@@ -304,6 +305,7 @@ export async function createTools(
     localFilesystem: ops === localOperations,
     planModeRef,
     reviewer: opts?.reviewProgrammaticSetup,
+    setupApproval: opts?.programmaticSetupApproval,
     owner: opts?.setupOwner,
     assertAllowed: opts?.assertSetupAllowed,
     onPreFileMutation: opts?.onPreFileMutation,

@@ -310,7 +310,7 @@ it.each(["setup", "configured"] as const)(
     expect(outcome.assessment.deterministic.status).toBe(
       mode === "setup" ? "not-run" : "unavailable",
     );
-    expect(outcome.advice).toContain("No supported recommendation");
+    expect(outcome.advice).toContain("AI found nothing worth automating");
     expect(outcome.assessment.discovery?.candidates).toEqual([]);
     expect(outcome.discoveryRecords).toEqual([]);
     expect(isProgrammaticAssessment(outcome.assessment)).toBe(true);

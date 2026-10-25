@@ -29,24 +29,34 @@ GG Coder is a desktop AI app for coding, chatting, running whole goals and makin
 
 ## Why GG Coder
 
-**The leanest coding agent I've tested.** I raced GG Coder against 9 other coding agents on the same model. GG had the fastest time, level with Goose and Copilot, and was the cheapest of all 10.
+**The leanest coding agent I've tested.** I raced GG Coder against 19 other coding agents on the same model, all in one race. GG was the fastest and used the least of all 20.
 
 | Agent              | Time for the full suite | Usage per suite | GG Coder compared          |
 | ------------------ | ----------------------- | --------------- | -------------------------- |
-| **GG Coder**       | **125 s**               | **$0.095**      |                            |
-| Goose              | 126 s                   | $0.106          | same speed, 11% less usage |
-| GitHub Copilot CLI | 129 s                   | $0.126          | same speed, 25% less usage |
-| Claude Code        | 154 s                   | $0.212          | 19% faster, 55% less usage |
-| Oh My Pi           | 161 s                   | $0.150          | 23% faster, 37% less usage |
-| Crush              | 164 s                   | $0.196          | 24% faster, 52% less usage |
-| Factory Droid      | 172 s                   | $0.130          | 28% faster, 27% less usage |
-| Deep Agents        | 197 s                   | $0.206          | 37% faster, 54% less usage |
-| Qwen Code          | 229 s                   | $0.319          | 46% faster, 70% less usage |
-| Hermes Agent       | 285 s                   | $0.146          | 56% faster, 35% less usage |
+| **GG Coder**       | **99 s**                | **$0.015**      |                            |
+| Codewhale          | 110 s                   | $0.022          | 10% faster, 32% less usage |
+| Kimi Code          | 120 s                   | $0.029          | 18% faster, 47% less usage |
+| GitHub Copilot CLI | 125 s                   | $0.027          | 21% faster, 44% less usage |
+| Goose              | 126 s                   | $0.021          | 22% faster, 27% less usage |
+| ForgeCode          | 138 s                   | $0.042          | 28% faster, 63% less usage |
+| Claude Code        | 141 s                   | $0.039          | 30% faster, 60% less usage |
+| Factory Droid      | 144 s                   | $0.026          | 32% faster, 40% less usage |
+| Crush              | 153 s                   | $0.038          | 36% faster, 59% less usage |
+| Dirac              | 154 s                   | $0.030          | 36% faster, 48% less usage |
+| Mistral Vibe       | 155 s                   | $0.037          | 36% faster, 58% less usage |
+| DeepSeek-Reasonix  | 157 s                   | $0.026          | 37% faster, 40% less usage |
+| Oh My Pi           | 167 s                   | $0.031          | 41% faster, 50% less usage |
+| Xum                | 172 s                   | $0.047          | 43% faster, 68% less usage |
+| Prime Agent        | 176 s                   | $0.031          | 44% faster, 51% less usage |
+| Docker Agent       | 176 s                   | $0.023          | 44% faster, 33% less usage |
+| Deep Agents        | 189 s                   | $0.041          | 48% faster, 62% less usage |
+| Hermes Agent       | 191 s                   | $0.040          | 48% faster, 61% less usage |
+| Qwen Code          | 212 s                   | $0.063          | 54% faster, 76% less usage |
+| jcode              | 236 s                   | $0.058          | 58% faster, 74% less usage |
 
-On a subscription, less usage means more work out of your plan. The same allowance covers about **2.2x** the coding it would in Claude Code, and about **1.6x** what it would in Oh My Pi.
+On a subscription, less usage means more work out of your plan. The same allowance covers about **2.5x** the coding it would in Claude Code, and about **2.0x** what it would in Oh My Pi.
 
-<sub>Every agent on Claude Haiku 5.5, across more than 3,000 test runs.</sub>
+<sub>Every agent on Claude Haiku 5.5, across more than 3,000 test runs. The table is one race on 25 October 2026: 7 tasks, 5 runs each, every agent on a current version.</sub>
 
 ## What you get
 

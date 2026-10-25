@@ -487,7 +487,8 @@ describe("buildSystemPrompt", () => {
       // Skills rank above this prompt, so they too must not unlock installs,
       // commits or deletes that the Work rules forbid.
       "Project conventions and skills grant no extra authorization",
-      "asserts each target text matches exactly once before replacing",
+      // Scripted edits must still assert the target before replacing it.
+      "replace asserting exactly one match",
       // Hardening detail lives in the `bulletproof` skill, loaded when the work
       // is attacker-reachable; the always-on duty stays here.
       "Preserve input validation, error handling, security and accessibility",
@@ -664,10 +665,11 @@ describe("buildSystemPrompt", () => {
     // removed ~5.4k chars of schemas from the same prefix.
     // Local Fork: deliberate fork rules (status list incl. 'released', fork research
     // one-liner, ADHD reply style; see .gg/local-fixes) add ~730 chars over upstream.
-    // Caps are measured merged sizes (3,830 / 4,284 / 4,810) rounded up to the next 100.
-    expect(measurements.normal.characters).toBeLessThan(3_900);
+    // Caps are measured merged sizes (3,786 / 4,240 / 4,909 after upstream's 0.96.2
+    // one-command change clause) rounded up to the next 100.
+    expect(measurements.normal.characters).toBeLessThan(3_800);
     expect(measurements.planMode.characters).toBeLessThan(4_300);
-    expect(measurements.typescriptProjectContextToolsSkills.characters).toBeLessThan(4_900);
+    expect(measurements.typescriptProjectContextToolsSkills.characters).toBeLessThan(5_000);
     expect(measurements.planMode.characters).toBeGreaterThan(measurements.normal.characters);
     expect(measurements.typescriptProjectContextToolsSkills.characters).toBeGreaterThan(
       measurements.normal.characters,
@@ -703,8 +705,9 @@ describe("buildSystemPrompt", () => {
     console.info(`system prompt audit: ${JSON.stringify(audit)}`);
 
     expect(audit.flags).toEqual([]);
-    // Local Fork: deliberate fork rules (see .gg/local-fixes) add ~760 chars over upstream
-    expect(audit.size.characters).toBeLessThan(4_700);
+    // Local Fork: deliberate fork rules (see .gg/local-fixes) add ~760 chars over upstream;
+    // 4,701 measured after upstream's 0.96.2 one-command change clause.
+    expect(audit.size.characters).toBeLessThan(4_800);
     expect(prompt.match(/^## .+$/gm)).toEqual([
       "## Replies",
       "## Work",

@@ -117,7 +117,7 @@ export const CHECKLIST_ITEMS = [
     description:
       "I use this to check that /commit runs checks and a review before saving a commit.",
     check:
-      "A project /commit command exists that runs the project's checks and a review before committing.",
+      "/commit (the project's own, the user's global one, or the built-in) runs the project's checks, scoped to the changes, and a review before committing.",
     setupCommand: "setup-commit",
   },
   {

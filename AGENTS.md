@@ -46,7 +46,8 @@ pnpm monorepo for GG Coder: a multi-provider coding agent shipped as the `ggcode
 
 ## Check scope
 
-- Per commit / while working: run `pnpm --filter gg-app check`, `lint`, `format:check`, plus only the tests covering the files changed. Run each standalone and unpiped.
+- Per commit / while working: run `pnpm --filter gg-app check`, `lint`, `format:check`, plus only the tests covering the files changed. Run each standalone and unpiped (no `| tail`, `| head`, `| grep`; piped output can look idle and get killed). Don't re-run a check that already passed unless a file changed since.
+- Change only inside one `packages/<name>`: run `pnpm --filter @kenkaiiii/<name> check`, `pnpm exec eslint <changed files>`, `pnpm exec prettier --check <changed files>`, and `pnpm --filter @kenkaiiii/<name> exec vitest run <test files>` for `src/**` tests. `scripts/*.test.mjs` files are node:test, not vitest: run `node --test <file>` or the matching root `pnpm test:<name>` script. Skip root `lint`/`check`.
 - Full `pnpm test` only before a release, a distributable Local Fork rebuild, or an upstream sync, OR when the change touches cross-area code: gg-core contracts, Rust/Tauri, the daemon, auth, build/packaging/sidecar scripts.
 - When skipping the full run, say so in the report and name the scoped tests that were run instead.
 

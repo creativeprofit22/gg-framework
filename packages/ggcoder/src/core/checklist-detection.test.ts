@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -7,11 +7,20 @@ import { detectChecklist } from "./checklist-detection.js";
 import { readChecklistSnapshot } from "./checklist-snapshot.js";
 
 let root: string;
+let agentDir: string;
 beforeEach(async () => {
   root = await fs.mkdtemp(path.join(os.tmpdir(), "gg-checklist-detect-"));
+  // Isolate from the developer's real global commands (~/.gg/commands).
+  agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "gg-checklist-agent-"));
+  vi.stubEnv("GG_AGENT_DIR", agentDir);
+  // An empty home makes os.homedir() throw on Windows; point it at a temp dir.
+  vi.stubEnv("HOME", agentDir);
+  vi.stubEnv("USERPROFILE", agentDir);
 });
 afterEach(async () => {
+  vi.unstubAllEnvs();
   await fs.rm(root, { recursive: true, force: true });
+  await fs.rm(agentDir, { recursive: true, force: true });
 });
 async function put(relative: string, content = ""): Promise<void> {
   const file = path.join(root, relative);
@@ -66,6 +75,15 @@ describe("checklist setup detection", () => {
     expect(result.items["build-release"]?.facts).toContain("Build script found");
     expect(result.items.security).toBeUndefined();
     expect(JSON.stringify(result)).not.toContain("do-not-run");
+  });
+
+  it("counts a global /commit command, which replaces the built-in in every project", async () => {
+    expect((await detectChecklist(root)).items["commit-gate"]).toBeUndefined();
+    await fs.mkdir(path.join(agentDir, "commands"), { recursive: true });
+    await fs.writeFile(path.join(agentDir, "commands", "commit.md"), "");
+    expect((await detectChecklist(root)).items["commit-gate"]?.facts).toEqual([
+      "Global /commit command found",
+    ]);
   });
 
   it("ignores symlinked package directories outside the project", async () => {

@@ -34,6 +34,9 @@ describe("prompt commands", () => {
     expect(setupCommit?.prompt).toContain(
       "push exactly once after all commits if the branch tracks a remote; if it has none, say so instead of pushing",
     );
+    expect(setupCommit?.prompt).toContain(
+      "Never use `--no-verify`; if a hook fails, fix the cause, restage that group, and commit again.",
+    );
     expect(setupCommit?.prompt).not.toContain("current index tree");
   });
 
@@ -109,11 +112,18 @@ describe("prompt commands", () => {
   });
 
   // The commit is where work gets verified; replies leave checks to it.
-  it("builds /commit in for every project: checks with tests, review, commit, push", () => {
+  it("builds /commit in for every project: scoped checks, review, commit, push", () => {
     const cmd = PROMPT_COMMANDS.find((command) => command.name === "commit");
-    expect(cmd?.prompt).toContain("Verification in your instructions, plus the tests");
+    expect(cmd?.prompt).toContain("Run the project's checks, scoped to what changed.");
+    expect(cmd?.prompt).toContain("Run only tests covering the changed files");
+    expect(cmd?.prompt).toContain(
+      "Run the full suite only when asked or when the change touches shared config, lockfiles, build or CI files, or widely used code",
+    );
     expect(cmd?.prompt).toContain("Run each standalone, unpiped");
-    expect(cmd?.prompt).toContain("Fix every failure");
+    expect(cmd?.prompt).toContain("Fix failures the change caused");
+    expect(cmd?.prompt).toContain("do not clean up unrelated failures");
+    expect(cmd?.prompt).not.toContain("plus the tests");
+    expect(cmd?.prompt).not.toContain("Fix every failure");
     expect(cmd?.prompt).toContain("spawn ONE subagent with the full diff");
     expect(cmd?.prompt).toContain("never `git add -A`");
     expect(cmd?.prompt).toContain("never with `--no-verify`");
@@ -127,13 +137,17 @@ describe("prompt commands", () => {
     expect(cmd?.prompt).toContain(
       "If `.gg/commands/commit.md` exists, read it and follow it instead of these steps",
     );
-    expect(cmd?.prompt).toContain("If it runs no tests while the project has some, run them too");
+    // A project's own scoping is respected, not overridden with its full suite.
+    expect(cmd?.prompt).not.toContain("run them too");
   });
 
-  it("makes /setup-commit include the project's tests", () => {
+  it("makes /setup-commit scope the project's checks and tests to the changes", () => {
     const cmd = PROMPT_COMMANDS.find((command) => command.name === "setup-commit");
     expect(cmd?.prompt).toContain("[PROJECT-SPECIFIC QUALITY COMMANDS]");
-    expect(cmd?.prompt).toContain("tests included");
+    expect(cmd?.prompt).toContain("run only tests covering them");
+    expect(cmd?.prompt).toContain("the command that runs only related tests");
+    expect(cmd?.prompt).toContain("Never make the full suite the always-run step.");
+    expect(cmd?.prompt).not.toContain("tests included");
   });
 
   it("defines /steroids as profile, discover, ask, then index only what was chosen", () => {

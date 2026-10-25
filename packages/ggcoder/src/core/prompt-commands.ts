@@ -244,15 +244,15 @@ ${CLAUDE_MD_RESTART_NOTICE}`,
     description: "Run checks, review, commit with AI message, and push if tracking a remote",
     prompt: `# Commit: check, review, commit and push
 
-1. If \`.gg/commands/commit.md\` exists, read it and follow it instead of these steps: it is this project's own commit procedure. If it runs no tests while the project has some, run them too.
-2. Run the project's checks: everything under Verification in your instructions, plus the tests. If none are listed, use the project's own scripts (package.json \`check\`/\`typecheck\`, \`lint\`, \`format:check\`, \`test\`; pyproject, go.mod or Cargo.toml equivalents). Run each standalone, unpiped. Fix every failure (auto-fix formatting/lint where the project has a fix script), then re-run what failed.
+1. If \`.gg/commands/commit.md\` exists, read it and follow it instead of these steps: it is this project's own commit procedure.
+2. Run the project's checks, scoped to what changed. Take the commands from Verification in your instructions, else the project's own scripts (package.json \`check\`/\`typecheck\`, \`lint\`, \`format:check\`, \`test\`; pyproject, go.mod or Cargo.toml equivalents); never invent commands. Lint, format-check and typecheck the changed files where the tool accepts paths, else the narrowest package holding them. Run only tests covering the changed files (e.g. \`vitest related\`, \`jest --findRelatedTests\`, the changed package's tests); docs and other non-code changes need none. Run the full suite only when asked or when the change touches shared config, lockfiles, build or CI files, or widely used code, and say why. Skip install steps unless a check cannot start without them. Run each standalone, unpiped. Fix failures the change caused (auto-fix formatting/lint on the changed files where the project has a fix script), then re-run only what failed; do not clean up unrelated failures.
 3. Review changes: run \`git status\`, \`git diff --staged\` and \`git diff\`.
 4. Fast review gate: spawn ONE subagent with the full diff. Instructions: review ONLY the diff for real bugs, regressions, leftover debug code and unintended changes. Score each issue 0-100 confidence (pre-existing issues and stylistic nitpicks are false positives, score low). Report ONLY issues with confidence >= 80, with file:line and a one-line fix. If none, reply "CLEAR". This is a last check, not a deep audit - be fast.
 5. If CLEAR: continue to step 6 without asking anything.
    If issues >= 80 were reported: show them and ask with \`ask_user\` (one \`choice\` question, \`id: "land"\`) offering exactly:
    - "Fix it first, then commit & push" (recommended, hint: keeps the branch green)
    - "Commit & push anyway" (hint: issue stays open in the log)
-   On fix-first: fix, re-run step 2, then continue (no re-review).
+   On fix-first: fix, re-run the affected checks from step 2, then continue (no re-review).
 6. Stage the relevant files with \`git add <specific files>\`; never \`git add -A\`. Never stage secrets or files the user did not change on purpose.
 7. Commit message: one line, starting with Add/Update/Fix/Remove/Refactor, specific and concise.
 8. \`git commit -m "<message>"\`, never with \`--no-verify\`; if a hook fails, fix the cause and commit again. Then \`git push\` if the branch has an upstream; if it has none, say so instead of pushing.
@@ -288,16 +288,16 @@ Scope comes from git, not this conversation: handle every uncommitted change in 
 1. Inspect status, staged/unstaged diffs, untracked files, and recent commit subjects. Review the full diff for bugs, regressions, debug leftovers, and unintended changes. If nothing is uncommitted, say so and stop.
 2. Leave out and report anything that must not be committed: secrets or credentials, build output, logs, scratch files, or clearly unfinished edits. Never delete, revert, or discard them.
 3. Group obvious changes by purpose, splitting exact hunks only when a file spans independent purposes. Keep uncertain or coupled changes together and order foundations before dependents.
-4. Run [PROJECT-SPECIFIC QUALITY COMMANDS] once. If a required check fails, stop and report it; do not clean up unrelated failures or rerun passing checks without file changes.
+4. Run [PROJECT-SPECIFIC QUALITY COMMANDS] once, scoped to what changed: lint, format-check and typecheck the changed files (or the narrowest package holding them), run only tests covering them, and run the full suite only when asked or when shared config, lockfiles, build/CI files, or widely used code change. Skip install steps unless a check cannot start without them. If a required check fails, stop and report it; do not clean up unrelated failures or rerun passing checks without file changes.
 5. Spawn ONE subagent with the full diff for a fast review of real bugs, regressions, debug leftovers, and unintended changes. Require confidence scores and report only findings at least 80; pre-existing issues and style nitpicks score low.
 6. If review is CLEAR, continue. Otherwise show the findings and use one \`ask_user\` choice with a \`detail\` of one plain sentence naming which review findings are blocking: fix first (recommended) or commit anyway. On fix-first, fix and rerun affected checks without another review. If \`ask_user\` is unavailable, ask the same choice in prose.
 7. For each group, stage exact paths or hunks, never \`git add -A\` or interactive \`git add -p\` (stage a hunk with \`git apply --cached\`). The index must hold only that group, including anything staged before the run; inspect its staged diff before committing.
-8. Create ordered commits with concise Add/Update/Fix/Remove/Refactor messages, then push exactly once after all commits if the branch tracks a remote; if it has none, say so instead of pushing. Never force-push.
+8. Create ordered commits with concise Add/Update/Fix/Remove/Refactor messages. Never use \`--no-verify\`; if a hook fails, fix the cause, restage that group, and commit again. Then push exactly once after all commits if the branch tracks a remote; if it has none, say so instead of pushing. Never force-push.
 
 Finish with the created commits, anything left uncommitted and why, passed checks, review result, and push result.
 \`\`\`
 
-Replace [PROJECT-SPECIFIC QUALITY COMMANDS] with the actual lint/typecheck/format-check/test commands, tests included: /commit is where this project's work gets verified.
+Replace [PROJECT-SPECIFIC QUALITY COMMANDS] with the project's actual lint/typecheck/format-check/test commands in their scoped forms: how each takes changed paths or a package filter, the command that runs only related tests, which folders map to which package's checks, and the full-suite command kept for the cases above. Never make the full suite the always-run step.
 
 If the project has no quality commands, write step 4 as: \`No project quality checks are configured; say so and continue.\` Never leave the placeholder or describe missing files inside the recipe.
 
@@ -309,7 +309,7 @@ ${checklistSetupStep(["commit-gate"])}
 
 ## Step 4: Confirm
 
-Report that /commit now commits all uncommitted work in the repository (from this or any earlier session) as grouped, ordered commits, verifies them, and pushes once when the branch tracks a remote; mention which local scripts/docs verified the commands.`,
+Report that /commit now commits all uncommitted work in the repository (from this or any earlier session) as grouped, ordered commits, verifies them with checks scoped to the changes, and pushes once when the branch tracks a remote; mention which local scripts/docs verified the commands.`,
   },
   {
     name: "setup-programmatic",

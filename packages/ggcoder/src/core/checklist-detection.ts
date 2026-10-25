@@ -3,6 +3,7 @@ import fs, { type FileHandle } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 import { runBackgroundGit } from "../utils/git.js";
+import { getGlobalCommandDirs } from "./custom-commands.js";
 import { log } from "./logger.js";
 
 /** Observations of setup, never audit verdicts. No project code is executed. */
@@ -158,6 +159,19 @@ export async function detectChecklist(
     const file = await contained(relative);
     if (file && (await fs.stat(file)).isFile())
       add("commit-gate", "Project commit check configuration found");
+  }
+  // A user's global commit.md replaces the built-in /commit in every project
+  // (CUSTOM_OVERRIDABLE_PROMPT_COMMANDS), so it counts as commit checks too.
+  for (const directory of getGlobalCommandDirs()) {
+    if (signal?.aborted) break;
+    try {
+      if ((await fs.stat(path.join(directory, "commit.md"))).isFile()) {
+        add("commit-gate", "Global /commit command found");
+        break;
+      }
+    } catch {
+      // A missing global command folder is normal.
+    }
   }
   if ((await names("docs/adr")).files.length > 0)
     add("naming", "Decision records found in docs/adr");

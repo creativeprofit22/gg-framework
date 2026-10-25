@@ -56,14 +56,19 @@ Outside `/ship`, when a confirmed finding belongs to another command, do not cre
 
 **Scope.** Accept an empty argument, `recent`, a natural-language scope, or an exact path or symbol.
 
-- **Empty (default): the whole chat.** Audit every piece of implementation work in this conversation, from its first message — not only the latest turn. Build the scope as the union of every feature, fix, and file created or edited during the chat, including work that survives only in a compaction summary. Then add uncommitted files from `git status --short` that belong to that work. When the chat touched several unrelated areas, audit each one as its own capability; do not ask which one to pick. Arguments like `all of this chat` mean this default.
+- **Empty (default): the whole chat.** Audit every piece of implementation work in this conversation, from its first message — not only the latest turn. Build the scope as the union of every feature, fix, and file created or edited during the chat, including work that survives only in a compaction summary. Then add a file from `git status --short` only if this chat created or edited it. When the chat touched several unrelated areas, audit each one as its own capability; do not ask which one to pick. Arguments like `all of this chat` mean this default.
 - **`recent`: the latest unit of work only** — the most recent implementation in this chat.
 - **Fallback.** If the chat contains no implementation work, infer scope from `git status --short` and `git diff --name-only HEAD~1 HEAD`, then the most recently modified `.gg/plans/*.md`.
-- **Coverage.** List the chat work items covered in the report so the user can see nothing was dropped. Leave uncommitted changes unrelated to the chat out of scope and mention them in one line. Ask with `ask_user` only when a chat work item cannot be resolved to files, or a natural-language scope has low confidence or matches unrelated areas.
+- **Expansion limit.** Expand at most one hop from in-scope files (direct imports and importers, the matching test, the paired client or handler). List anything further as a lead under `Out of scope` instead of reading it.
+- **Coverage.** When tasks are created, list the chat work items covered on the summary's `Chat work covered:` line so the user can see nothing was dropped; an `N/A` reply omits it. Leave uncommitted changes unrelated to the chat out of scope and do not list them. Ask with `ask_user` only when a chat work item cannot be resolved to files, or a natural-language scope has low confidence or matches unrelated areas.
 
 **Read-only.** Do not edit project files. Installs, code generation, migrations, starting servers, or any other project-changing command need explicit approval through `ask_user` first. The `allowed-tools` frontmatter is advisory: the command runtime does not enforce it, so this no-edit rule is enforced by instruction only.
 
-**Report footer.** After the command's summary block, add `Routed: <N>` and `Already tracked: <N>`, with one line per entry when non-zero. If tasks were created, end with: `Tasks created. Open the task list (Ctrl+T in the terminal, or the Tasks button in the desktop app) and run them.`
+**Report.** Keep the reply as short as possible: print only the command's summary block and one line per task or entry. No headings, intro or closing prose, bold lead sentence, notes on what passed, or repeated scope detail. Leave out summary lines whose value is zero or n/a, and sections with no entries.
+
+**Report footer.** After the task lines, add `Routed: <N>` and `Already tracked: <N>` only when non-zero, with one line per entry. If tasks were created, end with: `Tasks created. Open the task list (Ctrl+T in the terminal, or the Tasks button in the desktop app) and run them.`
+
+**Nothing to create.** If this run created no tasks, the first line of the reply is exactly `N/A`. Add lines after it only for `Routed`, `Needs decision` or `Skipped` entries, and in `/ship` the `Ship status:` line; otherwise `N/A` is the whole reply.
 
 ## Step 1: Determine what to audit
 
@@ -72,7 +77,7 @@ If `$ARGUMENTS` is provided and is not `recent`, treat it as an exact interface,
 If `$ARGUMENTS` is empty, audit every contract touched by implementation work in this chat, following the Scope rule above:
 
 - **Session context** — every feature, fix, and file created or edited across the whole conversation, from the first message (including compaction summaries), not just the latest turn
-- **Git diff** — `git status --short` to attach uncommitted type/interface/CLI/API files that belong to that work
+- **Git diff** — `git status --short` to attach uncommitted type/interface/CLI/API files this chat created or edited
 - **Active plan** — any `.gg/plans/` file the chat followed
 
 If `$ARGUMENTS` equals `recent`, audit only the latest unit of work in this chat. If the chat has no implementation work, fall back to `git diff --name-only HEAD~1 HEAD`, `git status --short`, then the most recently modified `.gg/plans/*.md`.
@@ -86,7 +91,7 @@ If nothing can be inferred, ask the user what to audit with `ask_user`. Do not p
 
 ## Step 2: Identify contract boundaries
 
-Find every place a **contract** is defined — a promise of what something accepts, returns, implements, or does:
+Find every place a **contract** is defined — a promise of what something accepts, returns, implements, or does — limited to in-scope files and the one hop from the Expansion limit:
 
 | Contract                           | Where it lives                                     | What it promises                    | Where to verify                            |
 | ---------------------------------- | -------------------------------------------------- | ----------------------------------- | ------------------------------------------ |
@@ -112,6 +117,8 @@ For each contract in scope, list every field / method / event / flag it promises
 - Used conditionally: only read when another flag is set
 - Passed to a base class constructor: `super(options)` propagates it
 
+Do not run typecheck, lint or test suites during the audit. You may run one filtered test file that covers an in-scope file, and only when its result decides a finding.
+
 Confirm it's truly never consumed before flagging. Local declarations, consumers, tests, and runtime evidence are authoritative for whether this project keeps its contract.
 
 **Ground unfamiliar APIs with Steroids before classifying.** If a contract involves a third-party library, framework hook, decorator, or external API you're not certain about, use Steroids to look up canonical usage in real public repos _before_ deciding the implementation is broken. Two reasons:
@@ -135,6 +142,17 @@ For every promise that isn't fully kept:
 | **DOCUMENTED-ONLY** | Mentioned in docs / `--help` / README but no code implements it                              |
 | **PHANTOM**         | Implementation reads or returns a field the contract doesn't define (undocumented behaviour) |
 | **FACADE**          | Whole module/subclass implements the shape but every method is a stub or throws              |
+
+Canonical type mapping. Use the mapped type; never pick another:
+
+| Contract gap    | Canonical type   |
+| --------------- | ---------------- |
+| IGNORED         | `DROPPED-INPUT`  |
+| PARTIAL         | `PARTIAL-WIRING` |
+| STUB            | `UNIMPLEMENTED`  |
+| DOCUMENTED-ONLY | `UNIMPLEMENTED`  |
+| FACADE          | `UNIMPLEMENTED`  |
+| PHANTOM         | `SHAPE-DRIFT`    |
 
 For each gap, record:
 
@@ -187,6 +205,7 @@ Each task must be self-contained — a fix agent in a separate chat must execute
 - A plain-english description of the gap
 - A concrete fix at the code level — actual field names, function names, import paths, where the new wiring goes (not pseudocode). If you grounded the contract against Steroids in Step 3, bake the canonical pattern you saw directly into the task (call signature, import path, surrounding usage). The fix agent should be able to execute, not re-investigate.
 - Any related files the fix agent should read first
+- Verification: the exact test file(s) covering the fix and the filtered command to run each (e.g. `pnpm --filter <pkg> exec vitest run <file>`), plus that package's `check`. Never root `pnpm test`, `lint` or `check`.
 - **Fallback grounding clause**: if your Step 3 recipe is ambiguous or you couldn't verify the pattern (rare API, no public examples), tell the fix agent to search Steroids for the specific literal symbol and inspect matches with `show` _before_ writing code. Otherwise omit — don't pad every task with redundant lookup instructions.
 
 Order: Critical → High → Medium → Low.
@@ -200,7 +219,6 @@ Reply inline with:
 ```
 Audited: <contracts in scope>
 Chat work covered: <one short item per area, or n/a>
-Contracts checked: <N>
 Gaps found: <N> (<N> Critical, <N> High, <N> Medium, <N> Low)
 Tasks created: <N> (<N> wire, <N> trim, <N> document, <N> needs-decision)
 Skipped: <N>

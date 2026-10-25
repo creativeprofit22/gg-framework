@@ -104,3 +104,129 @@ test("ship covers contract and journey lanes and defers to existing audit tasks"
   assert.match(ship, /verification status handoff/);
   assert.match(ship, /already covers the finding, do not duplicate it/);
 });
+
+const mappedGaps = {
+  parity: [
+    "UI-MISSING",
+    "BACKEND-MISSING",
+    "SHAPE-MISMATCH",
+    "VALIDATION-DRIFT",
+    "PERMISSION-DRIFT",
+    "ERROR-DRIFT",
+    "CACHE-DRIFT",
+    "EVENT-DRIFT",
+    "DOC-TEST-DRIFT",
+    "VERIFY-FIRST",
+  ],
+  trace: [
+    "Dropped config",
+    "Silent default",
+    "Missing env wiring",
+    "Stale wrapper",
+    "Partial wiring",
+    "Missing gate",
+    "Dead export",
+    "Shape mismatch",
+    "Schema drift",
+    "Event drift",
+    "Verification gap",
+  ],
+  contract: ["IGNORED", "PARTIAL", "STUB", "DOCUMENTED-ONLY", "FACADE", "PHANTOM"],
+};
+
+function mappingTable(text) {
+  const start = text.indexOf("Canonical type mapping. Use the mapped type; never pick another:");
+  assert.notEqual(start, -1, "missing canonical type mapping");
+  const lines = text.slice(start).split("\n");
+  const first = lines.findIndex((line) => line.startsWith("|"));
+  assert.notEqual(first, -1, "canonical type mapping has no table");
+  assert.match(lines[first + 1] ?? "", /^\| -+ \| -+ \|$/, "mapping table separator");
+  const rows = new Map();
+  for (const line of lines.slice(first + 2)) {
+    if (!line.startsWith("|")) break;
+    const [gap, type] = line
+      .split("|")
+      .slice(1, 3)
+      .map((cell) => cell.trim());
+    assert.ok(gap && type, `malformed mapping row: ${line}`);
+    assert.ok(!rows.has(gap), `duplicate mapping row: ${gap}`);
+    rows.set(gap, type);
+  }
+  return rows;
+}
+
+test("each gap-type command maps every own gap to one shared canonical type", async () => {
+  const block = familyBlock(await readCommand("trace"));
+  for (const [name, gaps] of Object.entries(mappedGaps)) {
+    const rows = mappingTable(await readCommand(name));
+    assert.deepEqual([...rows.keys()].sort(), [...gaps].sort(), `${name}.md mapping rows`);
+    for (const [gap, type] of rows) {
+      assert.match(type, /^`[A-Z-]+`$/, `${name}.md ${gap} must map to exactly one type`);
+      assert.ok(block.includes(type), `${name}.md maps ${gap} to unknown type ${type}`);
+    }
+    // Prose next to the table must not override it; that splits dedupe keys.
+    const text = await readCommand(name);
+    assert.doesNotMatch(text, /maps to `[A-Z-]+` instead/, `${name}.md overrides its mapping`);
+  }
+});
+
+test("audit commands ask only through ask_user", async () => {
+  for (const name of family) {
+    assert.doesNotMatch(await readCommand(name), /ask a clarifying question/i, name);
+  }
+});
+
+test("family rules cap expansion at one hop", async () => {
+  assert.match(
+    familyBlock(await readCommand("trace")),
+    /\*\*Expansion limit\.\*\* Expand at most one hop from in-scope files[^\n]*under `Out of scope`/,
+  );
+});
+
+test("task prompts name exact test files and filtered commands", async () => {
+  for (const name of Object.keys(mappedGaps)) {
+    const text = await readCommand(name);
+    assert.match(
+      text,
+      /- Verification: the exact test file\(s\) covering the fix and the filtered command[^\n]*`pnpm --filter <pkg> exec vitest run <file>`[^\n]*Never root `pnpm test`, `lint` or `check`\./,
+      name,
+    );
+    assert.doesNotMatch(text, /Targeted verification command|targeted verification command/, name);
+  }
+});
+
+test("audits do not run repo-wide checks", async () => {
+  for (const name of ["parity", "contract"]) {
+    const text = await readCommand(name);
+    assert.match(text, /Do not run typecheck, lint or test suites during the audit\./, name);
+    assert.doesNotMatch(text, /Examples: `typecheck`, `lint`/, name);
+  }
+  assert.match(
+    await readCommand("trace"),
+    /verification commands from project config: list them for task prompts; do not run them/,
+  );
+});
+
+test("reports stay concise and say N/A when nothing is created", async () => {
+  const block = familyBlock(await readCommand("trace"));
+  assert.match(block, /\*\*Report\.\*\* Keep the reply as short as possible/);
+  assert.match(block, /Leave out summary lines whose value is zero or n\/a/);
+  assert.match(block, /`Routed: <N>` and `Already tracked: <N>` only when non-zero/);
+  assert.match(
+    block,
+    /If this run created no tasks, the first line of the reply is exactly `N\/A`[^\n]*otherwise `N\/A` is the whole reply\./,
+  );
+  assert.match(block, /only for `Routed`, `Needs decision` or `Skipped` entries/);
+  assert.ok(block.includes("an `N/A` reply omits it"), "coverage rule must exempt N/A replies");
+  for (const name of family) {
+    const text = await readCommand(name);
+    assert.match(
+      text,
+      /^Chat work covered: <one short item per area, or n\/a>$/m,
+      `${name}.md summary lacks the Chat work covered: line the Coverage rule points to`,
+    );
+    for (const line of ["Files scanned:", "Scope confidence: <", "Mode: <", "Paths traced:"]) {
+      assert.ok(!text.includes(line), `${name}.md report still prints ${line}`);
+    }
+  }
+});

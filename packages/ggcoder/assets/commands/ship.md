@@ -58,14 +58,19 @@ Outside `/ship`, when a confirmed finding belongs to another command, do not cre
 
 **Scope.** Accept an empty argument, `recent`, a natural-language scope, or an exact path or symbol.
 
-- **Empty (default): the whole chat.** Audit every piece of implementation work in this conversation, from its first message — not only the latest turn. Build the scope as the union of every feature, fix, and file created or edited during the chat, including work that survives only in a compaction summary. Then add uncommitted files from `git status --short` that belong to that work. When the chat touched several unrelated areas, audit each one as its own capability; do not ask which one to pick. Arguments like `all of this chat` mean this default.
+- **Empty (default): the whole chat.** Audit every piece of implementation work in this conversation, from its first message — not only the latest turn. Build the scope as the union of every feature, fix, and file created or edited during the chat, including work that survives only in a compaction summary. Then add a file from `git status --short` only if this chat created or edited it. When the chat touched several unrelated areas, audit each one as its own capability; do not ask which one to pick. Arguments like `all of this chat` mean this default.
 - **`recent`: the latest unit of work only** — the most recent implementation in this chat.
 - **Fallback.** If the chat contains no implementation work, infer scope from `git status --short` and `git diff --name-only HEAD~1 HEAD`, then the most recently modified `.gg/plans/*.md`.
-- **Coverage.** List the chat work items covered in the report so the user can see nothing was dropped. Leave uncommitted changes unrelated to the chat out of scope and mention them in one line. Ask with `ask_user` only when a chat work item cannot be resolved to files, or a natural-language scope has low confidence or matches unrelated areas.
+- **Expansion limit.** Expand at most one hop from in-scope files (direct imports and importers, the matching test, the paired client or handler). List anything further as a lead under `Out of scope` instead of reading it.
+- **Coverage.** When tasks are created, list the chat work items covered on the summary's `Chat work covered:` line so the user can see nothing was dropped; an `N/A` reply omits it. Leave uncommitted changes unrelated to the chat out of scope and do not list them. Ask with `ask_user` only when a chat work item cannot be resolved to files, or a natural-language scope has low confidence or matches unrelated areas.
 
 **Read-only.** Do not edit project files. Installs, code generation, migrations, starting servers, or any other project-changing command need explicit approval through `ask_user` first. The `allowed-tools` frontmatter is advisory: the command runtime does not enforce it, so this no-edit rule is enforced by instruction only.
 
-**Report footer.** After the command's summary block, add `Routed: <N>` and `Already tracked: <N>`, with one line per entry when non-zero. If tasks were created, end with: `Tasks created. Open the task list (Ctrl+T in the terminal, or the Tasks button in the desktop app) and run them.`
+**Report.** Keep the reply as short as possible: print only the command's summary block and one line per task or entry. No headings, intro or closing prose, bold lead sentence, notes on what passed, or repeated scope detail. Leave out summary lines whose value is zero or n/a, and sections with no entries.
+
+**Report footer.** After the task lines, add `Routed: <N>` and `Already tracked: <N>` only when non-zero, with one line per entry. If tasks were created, end with: `Tasks created. Open the task list (Ctrl+T in the terminal, or the Tasks button in the desktop app) and run them.`
+
+**Nothing to create.** If this run created no tasks, the first line of the reply is exactly `N/A`. Add lines after it only for `Routed`, `Needs decision` or `Skipped` entries, and in `/ship` the `Ship status:` line; otherwise `N/A` is the whole reply.
 
 ## Step 0: Safety model
 
@@ -95,7 +100,7 @@ If a command fails, read the failure and classify it. Do not claim it passed.
 If `$ARGUMENTS` is empty, gate everything implemented in this chat, following the Scope rule above:
 
 1. every feature, fix, and file created or edited across the whole conversation, from the first message (including compaction summaries)
-2. `git status --short` to attach uncommitted files that belong to that work
+2. `git status --short` to attach uncommitted files this chat created or edited
 3. any `.gg/plans/*.md` file the chat followed
 
 If `$ARGUMENTS` equals `recent`, gate only the latest unit of work in this chat. If the chat has no implementation work, fall back to `git status --short`, `git diff --name-only HEAD~1 HEAD`, then the most recently modified `.gg/plans/*.md`.
@@ -117,7 +122,7 @@ Build a release scope map:
 - **Verification assets** — tests, scripts, CI workflows, build configs, e2e specs.
 - **Adjacent risk files** — callers/callees and consumers likely affected.
 
-If scope confidence is low or multiple unrelated release areas match, ask a clarifying question.
+If an argument scope is low-confidence or matches unrelated areas, ask with `ask_user` per the Scope rule.
 
 ## Step 2: Detect project gates and production surfaces
 
@@ -354,9 +359,6 @@ Reply with:
 ```text
 Ship scope: <resolved scope>
 Chat work covered: <one short item per area, or n/a>
-Scope confidence: <high|medium|low>
-Mode: <recent|argument|all>
-Files scanned: <N primary, N adjacent>
 Gates run: <N> passed, <N> failed, <N> skipped
 Release findings: <N> (<N Critical, N High, N Medium, N Low>)
 Tasks created: <N>

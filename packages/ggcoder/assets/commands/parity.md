@@ -60,21 +60,26 @@ Outside `/ship`, when a confirmed finding belongs to another command, do not cre
 
 **Scope.** Accept an empty argument, `recent`, a natural-language scope, or an exact path or symbol.
 
-- **Empty (default): the whole chat.** Audit every piece of implementation work in this conversation, from its first message — not only the latest turn. Build the scope as the union of every feature, fix, and file created or edited during the chat, including work that survives only in a compaction summary. Then add uncommitted files from `git status --short` that belong to that work. When the chat touched several unrelated areas, audit each one as its own capability; do not ask which one to pick. Arguments like `all of this chat` mean this default.
+- **Empty (default): the whole chat.** Audit every piece of implementation work in this conversation, from its first message — not only the latest turn. Build the scope as the union of every feature, fix, and file created or edited during the chat, including work that survives only in a compaction summary. Then add a file from `git status --short` only if this chat created or edited it. When the chat touched several unrelated areas, audit each one as its own capability; do not ask which one to pick. Arguments like `all of this chat` mean this default.
 - **`recent`: the latest unit of work only** — the most recent implementation in this chat.
 - **Fallback.** If the chat contains no implementation work, infer scope from `git status --short` and `git diff --name-only HEAD~1 HEAD`, then the most recently modified `.gg/plans/*.md`.
-- **Coverage.** List the chat work items covered in the report so the user can see nothing was dropped. Leave uncommitted changes unrelated to the chat out of scope and mention them in one line. Ask with `ask_user` only when a chat work item cannot be resolved to files, or a natural-language scope has low confidence or matches unrelated areas.
+- **Expansion limit.** Expand at most one hop from in-scope files (direct imports and importers, the matching test, the paired client or handler). List anything further as a lead under `Out of scope` instead of reading it.
+- **Coverage.** When tasks are created, list the chat work items covered on the summary's `Chat work covered:` line so the user can see nothing was dropped; an `N/A` reply omits it. Leave uncommitted changes unrelated to the chat out of scope and do not list them. Ask with `ask_user` only when a chat work item cannot be resolved to files, or a natural-language scope has low confidence or matches unrelated areas.
 
 **Read-only.** Do not edit project files. Installs, code generation, migrations, starting servers, or any other project-changing command need explicit approval through `ask_user` first. The `allowed-tools` frontmatter is advisory: the command runtime does not enforce it, so this no-edit rule is enforced by instruction only.
 
-**Report footer.** After the command's summary block, add `Routed: <N>` and `Already tracked: <N>`, with one line per entry when non-zero. If tasks were created, end with: `Tasks created. Open the task list (Ctrl+T in the terminal, or the Tasks button in the desktop app) and run them.`
+**Report.** Keep the reply as short as possible: print only the command's summary block and one line per task or entry. No headings, intro or closing prose, bold lead sentence, notes on what passed, or repeated scope detail. Leave out summary lines whose value is zero or n/a, and sections with no entries.
+
+**Report footer.** After the task lines, add `Routed: <N>` and `Already tracked: <N>` only when non-zero, with one line per entry. If tasks were created, end with: `Tasks created. Open the task list (Ctrl+T in the terminal, or the Tasks button in the desktop app) and run them.`
+
+**Nothing to create.** If this run created no tasks, the first line of the reply is exactly `N/A`. Add lines after it only for `Routed`, `Needs decision` or `Skipped` entries, and in `/ship` the `Ship status:` line; otherwise `N/A` is the whole reply.
 
 ## Step 1: Resolve scope
 
 If `$ARGUMENTS` is empty, audit everything implemented in this chat, following the Scope rule above:
 
 1. every feature, fix, and file created or edited across the whole conversation, from the first message (including compaction summaries); check each frontend ↔ backend boundary they touch
-2. `git status --short` to attach uncommitted files that belong to that work
+2. `git status --short` to attach uncommitted files this chat created or edited
 3. any `.gg/plans/*.md` file the chat followed
 
 If `$ARGUMENTS` equals `recent`, audit only the latest unit of work in this chat. If the chat has no implementation work, fall back to `git status --short`, `git diff --name-only HEAD~1 HEAD`, then the most recently modified `.gg/plans/*.md`.
@@ -86,7 +91,7 @@ Resolve natural-language scopes by:
 1. extracting domain terms, entity names, route words, form names, API names, event names, and synonyms
 2. searching filenames/paths for those terms
 3. grepping route handlers, API clients, fetch calls, server actions, schemas, validators, form fields, hooks, query keys, stores, event names, permissions, tests, and docs
-4. expanding to adjacent UI, API, schema, validation, auth, cache, event, and test files
+4. expanding to adjacent UI, API, schema, validation, auth, cache, event, and test files, one hop only per the Expansion limit above
 
 Build a scope map:
 
@@ -97,7 +102,7 @@ Build a scope map:
 
 If no frontend/backend boundary exists in the project, stop and say `/parity` is not applicable; use `/trace` for non-UI wiring or `/contract` for interface-vs-implementation gaps.
 
-If confidence is low or multiple unrelated features match, ask a clarifying question before proceeding.
+If an argument scope is low-confidence or matches unrelated areas, ask with `ask_user` per the Scope rule.
 
 ## Step 2: Collect safe programmatic evidence
 
@@ -105,14 +110,14 @@ Use safe local evidence first:
 
 - changed files and changed exported symbols from git diff/status
 - package scripts/config that identify build, lint, typecheck, test, codegen, API client generation, schema validation, and e2e commands
-- route/API inventory from project files
+- route/API inventory, limited to in-scope files and the one hop from the Expansion limit
 - frontend API calls: `fetch`, generated clients, RPC hooks, server actions, query/mutation hooks, SDK calls
 - backend handlers: routes/controllers/resolvers/server actions/IPC channels/webhooks
 - schemas/types: validators, DTOs, OpenAPI/tRPC/GraphQL schemas, DB models, shared types
 - cache/state: query keys, invalidations, stores, event subscriptions, realtime channels
 - permission/error/loading paths: guards, status codes, error mappers, UI error/loading/empty states
 
-Run existing safe verification commands only if clearly relevant and non-mutating. Examples: `typecheck`, `lint`, schema/codegen check, API client check, relevant tests. Do not install, download, migrate, generate, or mutate lockfiles without explicit user confirmation.
+Do not run typecheck, lint or test suites during the audit. You may run one filtered test file that covers an in-scope file, and only when its result decides a finding. Do not install, download, migrate, generate, or mutate lockfiles without explicit user confirmation.
 
 Programmatic output is a lead, not a finding. Every mismatch must be confirmed by reading the actual files.
 
@@ -159,6 +164,23 @@ Gap types:
 - **EVENT-DRIFT** — emitter/listener/payload/channel disagree.
 - **DOC-TEST-DRIFT** — docs, fixtures, tests, or generated clients describe old behavior.
 - **VERIFY-FIRST** — plausible mismatch with exact verification path, but not proven enough to fix directly.
+
+Canonical type mapping. Use the mapped type; never pick another:
+
+| Parity gap       | Canonical type  |
+| ---------------- | --------------- |
+| UI-MISSING       | `UNREACHABLE`   |
+| BACKEND-MISSING  | `UNIMPLEMENTED` |
+| SHAPE-MISMATCH   | `SHAPE-DRIFT`   |
+| VALIDATION-DRIFT | `GATE-DRIFT`    |
+| PERMISSION-DRIFT | `GATE-DRIFT`    |
+| ERROR-DRIFT      | `SHAPE-DRIFT`   |
+| CACHE-DRIFT      | `STALE-STATE`   |
+| EVENT-DRIFT      | `EVENT-DRIFT`   |
+| DOC-TEST-DRIFT   | `DOC-DRIFT`     |
+| VERIFY-FIRST     | `VERIFY-FIRST`  |
+
+ERROR-DRIFT maps to `SHAPE-DRIFT` because error codes and messages are part of the response.
 
 Do NOT track:
 
@@ -220,7 +242,7 @@ Every task prompt must be standalone and include:
 - Concrete fix direction with actual route names, field names, types, hooks, handlers, query keys, events, validators, or permission gates
 - Files the fix agent should read before editing
 - Whether Steroids grounding was used and which actions and external pattern supplied evidence
-- Targeted verification command(s) or manual steps
+- Verification: the exact test file(s) covering the fix and the filtered command to run each (e.g. `pnpm --filter <pkg> exec vitest run <file>`), plus that package's `check`. Never root `pnpm test`, `lint` or `check`.
 
 Order tasks by severity, then dependency: shared contract/schema → backend handler/service → frontend client/hook → UI rendering/state → tests/docs.
 
@@ -233,9 +255,6 @@ Reply with:
 ```text
 Parity scope: <resolved scope>
 Chat work covered: <one short item per area, or n/a>
-Scope confidence: <high|medium|low>
-Boundaries checked: <N>
-Files scanned: <N frontend, N backend, N shared>
 Parity gaps: <N> (<N Critical, N High, N Medium, N Low>)
 Tasks created: <N>
 Skipped: <N>

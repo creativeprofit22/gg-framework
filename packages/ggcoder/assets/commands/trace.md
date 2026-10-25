@@ -1,12 +1,12 @@
 ---
 argument-hint: [capability, natural-language scope, path, or recent — optional]
-description: Trace all work from this chat (or only the latest with `recent`, or a scoped capability) through every project layer. Finds dropped config, missing wiring, drifted duplicates, and shape mismatches — then creates task-pane tasks for concrete gaps.
+description: Trace all work from this chat (or only the latest with `recent`, or a scoped capability) through every layer the scoped code touches. Finds dropped config, missing wiring, drifted duplicates, and shape mismatches — then creates task-pane tasks for concrete gaps.
 allowed-tools: tasks, Bash, Read, Grep, Glob, steroids, ask_user
 ---
 
 # Trace
 
-Trace a capability end-to-end through every layer of the project. Default to all implementation work in this chat, not just the latest turn; `recent` narrows to the latest unit of work. If the user provides a natural-language scope like `the onboarding stuff`, `calendar posting`, `auth sessions`, or an exact path, resolve that scope first. If concrete gaps are found, create one actionable task-pane task per gap. Do not edit project files.
+Trace a capability end-to-end through every layer the scoped code touches. Default to all implementation work in this chat, not just the latest turn; `recent` narrows to the latest unit of work. If the user provides a natural-language scope like `the onboarding stuff`, `calendar posting`, `auth sessions`, or an exact path, resolve that scope first. If concrete gaps are found, create one actionable task-pane task per gap. Do not edit project files.
 
 ## Audit family rules
 
@@ -56,21 +56,26 @@ Outside `/ship`, when a confirmed finding belongs to another command, do not cre
 
 **Scope.** Accept an empty argument, `recent`, a natural-language scope, or an exact path or symbol.
 
-- **Empty (default): the whole chat.** Audit every piece of implementation work in this conversation, from its first message — not only the latest turn. Build the scope as the union of every feature, fix, and file created or edited during the chat, including work that survives only in a compaction summary. Then add uncommitted files from `git status --short` that belong to that work. When the chat touched several unrelated areas, audit each one as its own capability; do not ask which one to pick. Arguments like `all of this chat` mean this default.
+- **Empty (default): the whole chat.** Audit every piece of implementation work in this conversation, from its first message — not only the latest turn. Build the scope as the union of every feature, fix, and file created or edited during the chat, including work that survives only in a compaction summary. Then add a file from `git status --short` only if this chat created or edited it. When the chat touched several unrelated areas, audit each one as its own capability; do not ask which one to pick. Arguments like `all of this chat` mean this default.
 - **`recent`: the latest unit of work only** — the most recent implementation in this chat.
 - **Fallback.** If the chat contains no implementation work, infer scope from `git status --short` and `git diff --name-only HEAD~1 HEAD`, then the most recently modified `.gg/plans/*.md`.
-- **Coverage.** List the chat work items covered in the report so the user can see nothing was dropped. Leave uncommitted changes unrelated to the chat out of scope and mention them in one line. Ask with `ask_user` only when a chat work item cannot be resolved to files, or a natural-language scope has low confidence or matches unrelated areas.
+- **Expansion limit.** Expand at most one hop from in-scope files (direct imports and importers, the matching test, the paired client or handler). List anything further as a lead under `Out of scope` instead of reading it.
+- **Coverage.** When tasks are created, list the chat work items covered on the summary's `Chat work covered:` line so the user can see nothing was dropped; an `N/A` reply omits it. Leave uncommitted changes unrelated to the chat out of scope and do not list them. Ask with `ask_user` only when a chat work item cannot be resolved to files, or a natural-language scope has low confidence or matches unrelated areas.
 
 **Read-only.** Do not edit project files. Installs, code generation, migrations, starting servers, or any other project-changing command need explicit approval through `ask_user` first. The `allowed-tools` frontmatter is advisory: the command runtime does not enforce it, so this no-edit rule is enforced by instruction only.
 
-**Report footer.** After the command's summary block, add `Routed: <N>` and `Already tracked: <N>`, with one line per entry when non-zero. If tasks were created, end with: `Tasks created. Open the task list (Ctrl+T in the terminal, or the Tasks button in the desktop app) and run them.`
+**Report.** Keep the reply as short as possible: print only the command's summary block and one line per task or entry. No headings, intro or closing prose, bold lead sentence, notes on what passed, or repeated scope detail. Leave out summary lines whose value is zero or n/a, and sections with no entries.
+
+**Report footer.** After the task lines, add `Routed: <N>` and `Already tracked: <N>` only when non-zero, with one line per entry. If tasks were created, end with: `Tasks created. Open the task list (Ctrl+T in the terminal, or the Tasks button in the desktop app) and run them.`
+
+**Nothing to create.** If this run created no tasks, the first line of the reply is exactly `N/A`. Add lines after it only for `Routed`, `Needs decision` or `Skipped` entries, and in `/ship` the `Ship status:` line; otherwise `N/A` is the whole reply.
 
 ## Step 1: Resolve what to trace
 
 If `$ARGUMENTS` is empty, trace everything implemented in this chat, following the Scope rule above:
 
 1. **Session context** — list every feature, fix, and file created or edited across the whole conversation, from the first message (including compaction summaries). Each distinct area becomes its own traced capability.
-2. **Git diff** — run `git status --short` to attach uncommitted files that belong to that work.
+2. **Git diff** — run `git status --short` to attach uncommitted files this chat created or edited.
 3. **Active plan** — read any `.gg/plans/` file the chat followed.
 
 If `$ARGUMENTS` equals `recent`, trace only the latest unit of work in this chat. If the chat has no implementation work, fall back to `git status --short`, `git diff --name-only HEAD~1 HEAD`, then the most recently modified `.gg/plans/*.md`.
@@ -82,7 +87,7 @@ Resolve natural-language scopes by:
 1. extracting likely domain terms, feature names, entity names, route words, config keys, and synonyms from the phrase
 2. searching filenames and paths for those terms
 3. grepping imports, route names, handlers, component names, schema/entity names, env/config keys, tests, docs headings, and command names
-4. expanding to direct callers/callees, entry points, schemas, validators, serializers, tests, docs, and config around primary matches
+4. expanding to direct callers/callees, entry points, schemas, validators, serializers, tests, docs, and config around primary matches, one hop only per the Expansion limit above
 
 Build a scope map:
 
@@ -96,7 +101,7 @@ From that, extract:
 - the starting file set and terms/symbols that define the scope
 - scope confidence: **high**, **medium**, or **low**
 
-If nothing can be inferred, multiple unrelated domains match, or confidence is low enough that tracing would be guesswork, ask a clarifying question. Do not proceed blind.
+If an argument scope is low-confidence or matches unrelated areas, ask with `ask_user` per the Scope rule. Do not proceed blind.
 
 ## Step 2: Collect safe trace evidence
 
@@ -104,9 +109,9 @@ Before deep tracing, collect mechanical evidence that helps avoid missed paths:
 
 - changed files and touched symbols from git diff/status
 - import/reference hits for the capability terms and primary symbols
-- entry-point discovery: API routes, UI handlers, CLI commands, server actions, cron jobs, IPC channels, webhooks, event listeners
+- entry-point discovery (API routes, UI handlers, CLI commands, server actions, cron jobs, IPC channels, webhooks, event listeners), limited to in-scope files and the one hop from the Expansion limit
 - config/env/schema references related to the capability
-- existing relevant scripts or verification commands from project config, without running installs or mutating commands
+- existing relevant scripts or verification commands from project config: list them for task prompts; do not run them
 
 Do not install tools, download ephemeral analyzers, run migrations, generate code, mutate lockfiles, or change git state.
 
@@ -114,7 +119,7 @@ Analyzer/search output is a lead, not a finding. Every reported gap must be conf
 
 ## Step 3: Map the architecture
 
-Identify every layer this capability touches:
+Identify every layer the scoped code touches:
 
 `Entry Points → Orchestration → Capability Modules → External (APIs, DB, browser, network, filesystem)`
 
@@ -128,9 +133,9 @@ Build a map of:
 
 Use Glob/Grep and real imports/function calls. Do not guess at the architecture.
 
-## Step 4: Trace every path
+## Step 4: Trace every path that passes through an in-scope file
 
-Starting from each entry point, follow the capability through to where it is consumed. Read each file in the chain.
+Start from each entry point that reaches in-scope code and follow the capability through to where it is consumed. Read each file in the chain.
 
 Track every layer boundary in a trace matrix:
 
@@ -180,6 +185,24 @@ At every layer boundary, check for:
 - **Event drift** — emitter, listener, payload type, and UI/subscriber disagree or one side is missing
 - **Verification gaps** — no relevant test/check/manual path can prove the traced behavior, and the gap blocks safe fixing
 
+Canonical type mapping. Use the mapped type; never pick another:
+
+| Trace gap          | Canonical type   |
+| ------------------ | ---------------- |
+| Dropped config     | `DROPPED-INPUT`  |
+| Silent default     | `DROPPED-INPUT`  |
+| Missing env wiring | `DROPPED-INPUT`  |
+| Stale wrapper      | `DROPPED-INPUT`  |
+| Partial wiring     | `PARTIAL-WIRING` |
+| Missing gate       | `GATE-DRIFT`     |
+| Dead export        | `UNREACHABLE`    |
+| Shape mismatch     | `SHAPE-DRIFT`    |
+| Schema drift       | `SHAPE-DRIFT`    |
+| Event drift        | `EVENT-DRIFT`    |
+| Verification gap   | `VERIFY-FIRST`   |
+
+Stale wrapper maps to `DROPPED-INPUT` because callers' values never reach the code underneath.
+
 For each gap, record:
 
 - **WHERE**: `file:line` at both the source end and destination end of the boundary
@@ -227,7 +250,7 @@ Each task must have:
 Include in every task prompt:
 
 - Severity label: Critical / High / Medium / Low
-- Gap type: Dropped config / Silent default / Partial wiring / Stale wrapper / Missing gate / Dead export / Shape mismatch / Missing env wiring / Schema drift / Event drift / Verification gap
+- Gap type (singular form of the Step 6 headings): Dropped config / Silent default / Partial wiring / Stale wrapper / Missing gate / Dead export / Shape mismatch / Missing env wiring / Schema drift / Event drift / Verification gap
 - Canonical type from the Audit family rules
 - Confidence: confirmed / likely / verify-first
 - The capability being fixed
@@ -237,7 +260,7 @@ Include in every task prompt:
 - A concrete description of what the fix looks like: actual field names, function names, import paths, route names, schema names, event names, or config keys from this project
 - Any related files the fix agent should read before editing
 - Whether Steroids grounding affected classification and the exact external/framework pattern it confirmed, if applicable
-- The targeted verification command or manual verification steps for this gap
+- Verification: the exact test file(s) covering the fix and the filtered command to run each (e.g. `pnpm --filter <pkg> exec vitest run <file>`), plus that package's `check`. Never root `pnpm test`, `lint` or `check`.
 
 Order tasks: Critical first, then High, Medium, Low. Within each severity, order by dependency: types/schemas/config → core logic → integrations/routes/events → UI/docs/tests.
 
@@ -249,11 +272,7 @@ Reply inline with:
 
 ```text
 Traced: <capability inferred or provided>
-Scope source: <chat|recent|argument|git|plan>
 Chat work covered: <one short item per area, or n/a>
-Scope confidence: <high|medium|low>
-Files scanned: <N primary, N adjacent>
-Paths traced: <N>
 Gaps found: <N> (<N Critical, N High, N Medium, N Low>)
 Tasks created: <N>
 Skipped: <N>

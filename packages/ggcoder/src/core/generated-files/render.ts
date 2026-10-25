@@ -43,10 +43,7 @@ const PLACEHOLDER_TOKEN = /\{\{([a-z][a-z0-9_]{0,39})\}\}/g;
  * re-expanded, and unknown `{{...}}` text stays literal. The fixed Node helper
  * in `programmatic/family-generator.ts` mirrors this exactly.
  */
-export function renderPlaceholders(
-  text: string,
-  values: Readonly<Record<string, string>>,
-): string {
+export function renderPlaceholders(text: string, values: Readonly<Record<string, string>>): string {
   for (const key of Object.keys(values)) {
     if (!PLACEHOLDER_KEY_PATTERN.test(key)) {
       throw new Error(`Invalid placeholder key: ${JSON.stringify(key)}`);

@@ -20,10 +20,12 @@ describe("generated-file rendering", () => {
   });
 
   it("does not expand placeholders that appear inside inserted values", () => {
-    expect(renderTemplate("{{A}}|{{B}}", [
-      ["{{A}}", "{{B}}"],
-      ["{{B}}", "x"],
-    ])).toBe("{{B}}|x");
+    expect(
+      renderTemplate("{{A}}|{{B}}", [
+        ["{{A}}", "{{B}}"],
+        ["{{B}}", "x"],
+      ]),
+    ).toBe("{{B}}|x");
   });
 
   it("rejects missing, repeated, empty and overlapping placeholders", () => {

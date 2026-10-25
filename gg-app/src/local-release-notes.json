@@ -1,18 +1,13 @@
 {
   "schemaVersion": 1,
   "date": "2026-10-25",
-  "label": "Upstream 0.96.2, with changes made in one move",
+  "label": "Upstream 0.96.3, with a pixel-art greeting",
   "sections": [
     {
-      "title": "From upstream 0.96.2",
+      "title": "From upstream 0.96.3",
       "items": [
-        "Your agent now makes each change in one move. It writes only the lines that are new and runs your tests in the same step, instead of editing, checking and re-running one by one. It also starts every session already knowing your project's files, so its first move can open the right ones instead of looking around. Upstream measured a typical task finishing about `21%` faster while using less of your plan."
-      ]
-    },
-    {
-      "title": "Also in your Local Fork",
-      "items": [
-        "On Windows, those one-move edits don't trip over `python3`. On many PCs that name only opens the Microsoft Store, so the edit would fail and your agent would lose a turn retrying. When GG sees that, it tells your agent to use the `python` you actually have installed. If `python3` works on your PC, nothing changes."
+        "The critter that greets you in a fresh session now talks in chunky pixel art. Its speech bubble uses the same `m5x7` lettering and stepped tail as the `GG Royale` critters, and the critter stands at its true size with a shadow underneath instead of looking squished. Your Local Fork's starting tip and starter buttons still sit just below it.",
+        "Your built-in malware guard stays current on `Windows`. A quick refresh of the daily threat feed could leave GG holding the previous day's list, so a newly flagged package might slip through. GG now notices every refresh, so fresh warnings apply right away."
       ]
     }
   ]

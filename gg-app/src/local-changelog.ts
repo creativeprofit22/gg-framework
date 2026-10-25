@@ -53,10 +53,19 @@ export const CURRENT_LOCAL_RELEASE_NOTES = requireCurrentReleaseNotes(releaseNot
 /** Newest first. Maintained only by the Local Fork release flow. */
 export const LOCAL_CHANGELOG: LocalChangelogEntry[] = [
   {
-    id: "local-2026-10-25-upstream-0962-one-move-edits",
+    id: "local-2026-10-25-upstream-0963-pixel-wake-bubble",
     label: CURRENT_LOCAL_RELEASE_NOTES.label,
     date: CURRENT_LOCAL_RELEASE_NOTES.date,
     items: CURRENT_LOCAL_RELEASE_NOTES.sections.flatMap(({ items }) => items),
+  },
+  {
+    id: "local-2026-10-25-upstream-0962-one-move-edits",
+    label: "Upstream 0.96.2, with changes made in one move",
+    date: "2026-10-25",
+    items: [
+      "Your agent now makes each change in one move. It writes only the lines that are new and runs your tests in the same step, instead of editing, checking and re-running one by one. It also starts every session already knowing your project's files, so its first move can open the right ones instead of looking around. Upstream measured a typical task finishing about `21%` faster while using less of your plan.",
+      "On Windows, those one-move edits don't trip over `python3`. On many PCs that name only opens the Microsoft Store, so the edit would fail and your agent would lose a turn retrying. When GG sees that, it tells your agent to use the `python` you actually have installed. If `python3` works on your PC, nothing changes.",
+    ],
   },
   {
     id: "local-2026-10-24-upstream-0961-royale-and-pixel-home",

@@ -1,3 +1,4 @@
+import path from "node:path";
 import { projectAdvisoryCommands, type CommandDiscovery } from "../command-discovery.js";
 import { programmaticAssessmentInputV1Schema } from "./contracts.js";
 import {
@@ -34,7 +35,18 @@ export async function buildProgrammaticAssessmentContext(
   options: AssessmentEvidenceOptions = {},
 ) {
   const assessment = programmaticAssessmentInputV1Schema.parse(input);
-  const evidence = await collectProgrammaticAssessmentEvidence(repositoryRoot, options);
+  // Discovered command bodies stay listed but are opened on demand, never excerpted.
+  const commandFiles = new Set(
+    discovery.entries.flatMap((entry) =>
+      entry.custom?.scope === "project"
+        ? [path.relative(repositoryRoot, entry.custom.filePath).split(path.sep).join("/")]
+        : [],
+    ),
+  );
+  const evidence = await collectProgrammaticAssessmentEvidence(repositoryRoot, {
+    ...options,
+    skipExcerpt: (file) => commandFiles.has(file) || options.skipExcerpt?.(file) === true,
+  });
   options.signal?.throwIfAborted();
   return { ...buildProgrammaticAdvisoryContext(assessment, discovery, evidence), evidence };
 }

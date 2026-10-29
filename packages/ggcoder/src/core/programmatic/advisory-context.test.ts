@@ -104,4 +104,39 @@ describe("advisory context", () => {
       expect(parseProgrammaticAssessmentInput(args).success).toBe(false);
     },
   );
+
+  it("never excerpts discovered project command bodies in the initial sample", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "gg-advisory-commands-"));
+    try {
+      await fs.mkdir(path.join(root, ".gg/commands"), { recursive: true });
+      await fs.writeFile(path.join(root, ".gg/commands/ship.md"), "SHIP-BODY steps\n");
+      await fs.writeFile(path.join(root, "package.json"), "{}");
+      const discovered = {
+        entries: [
+          {
+            listing: {
+              name: "ship",
+              aliases: [],
+              description: "Ship",
+              input: { kind: "none" },
+              source: "custom",
+              origin: "project-custom",
+              invocationKind: "prompt",
+            },
+            custom: {
+              name: "ship",
+              scope: "project",
+              filePath: path.join(root, ".gg/commands/ship.md"),
+            },
+          },
+        ],
+        resolve: () => undefined,
+      } as unknown as Parameters<typeof buildProgrammaticAssessmentContext>[1];
+      const context = await buildProgrammaticAssessmentContext({ version: 1 }, discovered, root);
+      expect(context.evidence.paths.map((item) => item.path)).toContain(".gg/commands/ship.md");
+      expect(context.evidence.excerpts.map((item) => item.path)).toEqual(["package.json"]);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
 });

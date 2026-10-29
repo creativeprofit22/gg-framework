@@ -5,6 +5,8 @@ import { validateProgrammaticFile, walkProgrammaticPaths } from "./inventory.js"
 
 export const ASSESSMENT_EVIDENCE_LIMITS = Object.freeze({
   maxPaths: 200,
+  /** Walk cap for ranking; the sample keeps only the best maxPaths of these. */
+  maxWalkedPaths: 20_000,
   maxExcerpts: 12,
   maxExcerptBytes: 16 * 1024,
   maxDeliveredBytes: 64 * 1024,
@@ -43,6 +45,89 @@ export interface AssessmentEvidenceAuthorization {
 export interface AssessmentEvidenceOptions {
   signal?: AbortSignal;
   authorization?: AssessmentEvidenceAuthorization;
+  /** Listed but never excerpted, e.g. command files the model can open on demand. */
+  skipExcerpt?: (repositoryPath: string) => boolean;
+}
+
+const MANIFESTS = new Set([
+  "package.json",
+  "pnpm-workspace.yaml",
+  "deno.json",
+  "deno.jsonc",
+  "pyproject.toml",
+  "setup.py",
+  "setup.cfg",
+  "requirements.txt",
+  "pipfile",
+  "cargo.toml",
+  "go.mod",
+  "gemfile",
+  "composer.json",
+  "pom.xml",
+  "build.gradle",
+  "build.gradle.kts",
+  "settings.gradle",
+  "settings.gradle.kts",
+  "mix.exs",
+  "pubspec.yaml",
+  "package.swift",
+  "cmakelists.txt",
+]);
+const TASK_RUNNERS = new Set([
+  "makefile",
+  "gnumakefile",
+  "justfile",
+  "taskfile.yml",
+  "taskfile.yaml",
+  "rakefile",
+  "noxfile.py",
+  "tox.ini",
+  "turbo.json",
+  "nx.json",
+  "lerna.json",
+  "docker-compose.yml",
+  "docker-compose.yaml",
+  "compose.yml",
+  "compose.yaml",
+  "dockerfile",
+  "jenkinsfile",
+]);
+const LOCKFILES = new Set([
+  "pnpm-lock.yaml",
+  "package-lock.json",
+  "yarn.lock",
+  "bun.lockb",
+  "bun.lock",
+  "cargo.lock",
+  "poetry.lock",
+  "uv.lock",
+  "pipfile.lock",
+  "gemfile.lock",
+  "composer.lock",
+  "go.sum",
+  "mix.lock",
+  "pubspec.lock",
+  "package.resolved",
+]);
+const CI =
+  /^(\.github\/workflows\/[^/]+\.ya?ml|\.gitlab-ci\.ya?ml|\.circleci\/config\.ya?ml|azure-pipelines\.ya?ml|\.travis\.ya?ml|bitbucket-pipelines\.ya?ml|\.buildkite\/[^/]+\.ya?ml)$/i;
+const COMMAND_FILE = /^\.(gg|claude)\/commands\/.+\.md$/i;
+const DOC = /^(readme|contributing|agents|claude)(\.[a-z]+)?$/i;
+const CONFIG = /\.(json|jsonc|ya?ml|toml|ini|cfg)$/i;
+
+/** Workflow signal first: root manifests/CI, nested manifests, commands, docs, config, rest, lockfiles. */
+function workflowTier(repositoryPath: string, skip: boolean): number {
+  const segments = repositoryPath.split("/");
+  const name = segments.at(-1)!.toLowerCase();
+  const depth = segments.length - 1;
+  if (LOCKFILES.has(name)) return 6;
+  const build = MANIFESTS.has(name) || TASK_RUNNERS.has(name) || /\.(csproj|sln|mk)$/.test(name);
+  if ((build && depth === 0) || CI.test(repositoryPath)) return 0;
+  if (build) return 1;
+  if (skip || COMMAND_FILE.test(repositoryPath)) return 2;
+  if (depth <= 1 && (DOC.test(name) || (depth === 0 && name.endsWith(".md")))) return 3;
+  if (depth <= 1 && (CONFIG.test(name) || segments[0] === "scripts")) return 4;
+  return 5;
 }
 const traversal: AssessmentEvidenceRequest = { name: "find", args: { pattern: "**/*" } };
 const readRequest = (file_path: string): AssessmentEvidenceRequest => ({
@@ -152,6 +237,7 @@ export async function collectProgrammaticAssessmentEvidence(
   options: AssessmentEvidenceOptions = {},
 ): Promise<ProgrammaticAssessmentEvidence> {
   const { signal, authorization } = options;
+  const skipExcerpt = options.skipExcerpt ?? (() => false);
   signal?.throwIfAborted();
   const result: ProgrammaticAssessmentEvidence = {
     version: 1,
@@ -195,37 +281,54 @@ export async function collectProgrammaticAssessmentEvidence(
     if (!(error instanceof EvidenceDenied)) diagnose("walk-failed");
     return result;
   }
+  const walked: { path: string; unsafe: boolean; tier: number; depth: number }[] = [];
   try {
     checkAuthorization(authorization, traversal);
     for await (const entry of walkProgrammaticPaths(root, { signal, gitignoreLines })) {
       signal?.throwIfAborted();
       checkAuthorization(authorization, traversal);
-      if (result.paths.length === ASSESSMENT_EVIDENCE_LIMITS.maxPaths) {
+      if (walked.length === ASSESSMENT_EVIDENCE_LIMITS.maxWalkedPaths) {
         diagnose("path-limit");
         break;
       }
-      const item: ProgrammaticAssessmentEvidence["paths"][number] = {
+      walked.push({
         path: entry.path,
-        coverage: entry.kind === "unsafe" ? "unreadable-or-unsafe" : "uninspected",
-      };
-      result.paths.push(item);
-      if (!fits()) {
-        result.paths.pop();
-        diagnose("delivery-limit");
-        break;
-      }
-      if (entry.kind === "unsafe") diagnose("unreadable-or-unsafe");
+        unsafe: entry.kind === "unsafe",
+        tier: workflowTier(entry.path, skipExcerpt(entry.path)),
+        depth: entry.path.split("/").length - 1,
+      });
     }
   } catch (error) {
     signal?.throwIfAborted();
     diagnose(error instanceof EvidenceDenied ? "permission-denied" : "walk-failed");
   }
-  result.paths.sort((a, b) => a.path.localeCompare(b.path, "en"));
+  // Deterministic rank, independent of walk order: tier, then shallower, then ordinal path.
+  walked.sort(
+    (a, b) =>
+      a.tier - b.tier || a.depth - b.depth || (a.path < b.path ? -1 : a.path > b.path ? 1 : 0),
+  );
+  if (
+    walked.length > ASSESSMENT_EVIDENCE_LIMITS.maxPaths &&
+    !result.diagnostics.some((item) => item.code === "path-limit")
+  )
+    diagnose("path-limit");
+  for (const entry of walked.slice(0, ASSESSMENT_EVIDENCE_LIMITS.maxPaths)) {
+    result.paths.push({
+      path: entry.path,
+      coverage: entry.unsafe ? "unreadable-or-unsafe" : "uninspected",
+    });
+    if (!fits()) {
+      result.paths.pop();
+      diagnose("delivery-limit");
+      break;
+    }
+    if (entry.unsafe) diagnose("unreadable-or-unsafe");
+  }
   // Name-independent selection: extensionless and unknown source participate equally.
   let attempts = 0;
   for (const item of result.paths) {
     signal?.throwIfAborted();
-    if (item.coverage !== "uninspected") continue;
+    if (item.coverage !== "uninspected" || skipExcerpt(item.path)) continue;
     if (attempts++ >= ASSESSMENT_EVIDENCE_LIMITS.maxExcerpts) {
       item.coverage = "budget-limited";
       diagnose("excerpt-limit");

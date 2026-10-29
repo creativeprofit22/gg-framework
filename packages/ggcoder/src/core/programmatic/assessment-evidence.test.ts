@@ -307,4 +307,45 @@ describe("bounded assessment evidence", () => {
     await expect(collect(root, { signal: afterRead.signal })).rejects.toThrow("stop after read");
     expect(checks).toBe(2);
   });
+
+  it("ranks manifests and workflows ahead of alphabetical-first dotfiles", async () => {
+    const files: Record<string, string> = {
+      "package.json": '{"scripts":{"test":"vitest"}}',
+      ".github/workflows/ci.yml": "on: push\n",
+      "pnpm-lock.yaml": "lockfileVersion: 9\n",
+      "packages/app/package.json": "{}",
+      "README.md": "# Project\n",
+    };
+    for (let i = 0; i < 230; i++) files[`.aaa-dot-${String(i).padStart(3, "0")}/note.txt`] = "x";
+    const result = await collect(await fixture(files));
+    expect(result.paths).toHaveLength(limits.maxPaths);
+    expect(result.paths.slice(0, 4).map((item) => item.path)).toEqual([
+      "package.json",
+      ".github/workflows/ci.yml",
+      "packages/app/package.json",
+      "README.md",
+    ]);
+    expect(result.excerpts.map((item) => item.path)).toEqual(
+      expect.arrayContaining([".github/workflows/ci.yml", "package.json"]),
+    );
+    expect(result.paths.some((item) => item.path === "pnpm-lock.yaml")).toBe(false);
+    expect(result.diagnostics).toEqual(expect.arrayContaining([{ code: "path-limit", count: 1 }]));
+    expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThanOrEqual(limits.maxDeliveredBytes);
+  });
+
+  it("lists skipped command files without excerpting them and spends excerpts elsewhere", async () => {
+    const files: Record<string, string> = {
+      ".gg/commands/release.md": "SECRET-BODY ".repeat(1000),
+    };
+    for (let i = 0; i < 20; i++) files[`src/file-${i}.txt`] = "text";
+    const result = await collect(await fixture(files), {
+      skipExcerpt: (file) => file === ".gg/commands/release.md",
+    });
+    expect(result.paths.find((item) => item.path === ".gg/commands/release.md")).toEqual({
+      path: ".gg/commands/release.md",
+      coverage: "uninspected",
+    });
+    expect(JSON.stringify(result)).not.toContain("SECRET-BODY");
+    expect(result.excerpts).toHaveLength(limits.maxExcerpts);
+  });
 });

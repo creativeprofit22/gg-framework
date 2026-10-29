@@ -125,6 +125,10 @@ export default defineConfig(async ({ command }) => ({
       : []),
   ],
   define: { ...buildEnvDefines(), ...whatsNewHeadDefines },
+  // Scan only the app's own entry for dependencies. Without this Vite also scans every .html under gg-app, including
+  // the bundled Motion previews in src-tauri/sidecar (they import three from a CDN map), the scan fails, deps are found
+  // late, and the dev page reloads mid-load with "504 Outdated Optimize Dep".
+  optimizeDeps: { entries: ["index.html"] },
   build: {
     manifest: true, // Lets CI budget initial JS separately from lazy chunks.
     rolldownOptions: {

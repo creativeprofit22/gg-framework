@@ -102,7 +102,6 @@ describe("specialist chat agents", () => {
       "read",
       "find",
       "grep",
-      "code_search",
       "ls",
       "source_path",
       "web_fetch",

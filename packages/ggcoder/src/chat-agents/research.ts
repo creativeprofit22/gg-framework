@@ -8,7 +8,6 @@ export const RESEARCH_CHAT_ALLOWED_TOOL_NAMES = [
   "read",
   "find",
   "grep",
-  "code_search",
   "ls",
   "source_path",
   "web_fetch",

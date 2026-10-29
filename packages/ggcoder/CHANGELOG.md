@@ -1,5 +1,35 @@
 # @kenkaiiii/ggcoder
 
+## 5.87.2
+
+### Patch Changes
+
+- Fix the stall watchdog killing long silent Anthropic thinking: SSE pings now count as stream activity, and the streaming thinking cap is raised to 30 minutes
+  - @kenkaiiii/gg-ai@5.87.2
+  - @kenkaiiii/gg-agent@5.87.2
+  - @kenkaiiii/gg-core@5.87.2
+
+## 5.87.1
+
+### Patch Changes
+
+- Retire the seeded find-skills skill and the /setup-skills command (untouched seeded copies are cleaned from ~/.gg/skills), add a light-comments rule to the system prompt, and sharpen the bulletproof, compliance-guard, durable and lean skill descriptions so they load only for the work they cover.
+  - @kenkaiiii/gg-ai@5.87.1
+  - @kenkaiiii/gg-agent@5.87.1
+  - @kenkaiiii/gg-core@5.87.1
+
+## 5.87.0
+
+### Minor Changes
+
+- World mode replaces GG Royale (live multiplayer hangout, online save). Skills trimmed to the two that change results (compliance-guard, durable); bulletproof and lean stay for Checklist audits only; the rest are removed. OpenAI models get a skill-loading rule; the skill tool now requires a skill name. Removed the unused code_search and code_nav tools.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.87.0
+- @kenkaiiii/gg-agent@5.87.0
+- @kenkaiiii/gg-core@5.87.0
+
 ## 5.86.3
 
 ### Patch Changes

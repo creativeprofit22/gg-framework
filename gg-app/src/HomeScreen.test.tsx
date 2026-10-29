@@ -4,7 +4,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import type { UpdateInfo } from "./update";
 import { useAppUpdate } from "./update";
 import { error as logError } from "@tauri-apps/plugin-log";
-import { authStatus, getSettings, royaleStatus, royaleSummary } from "./agent";
+import { authStatus, getSettings } from "./agent";
 import { HomeScreen } from "./HomeScreen";
 import { CHANGELOG } from "./changelog";
 import { LOCAL_CHANGELOG } from "./local-changelog";
@@ -23,9 +23,6 @@ const agentMocks = vi.hoisted(() => ({
   getSteroidsStatus: vi.fn().mockResolvedValue({ installed: false, connected: false }),
   onSteroidsChange: vi.fn(() => vi.fn()),
   setRemoteActive: vi.fn().mockResolvedValue(undefined),
-  royaleStatus: vi.fn(async () => ({ linked: true, serverUrl: "https://royale.test" })),
-  openRoyale: vi.fn(async () => ({ url: "https://royale.test/#code=x" })),
-  royaleSummary: vi.fn(async () => null),
 }));
 
 vi.mock("@tauri-apps/api/app", () => ({ getVersion: vi.fn().mockResolvedValue("1.2.3") }));
@@ -67,7 +64,7 @@ async function renderHome(): Promise<void> {
         onGoals={onGoals}
         onChat={vi.fn()}
         onMotion={onMotion}
-        onRoyale={vi.fn()}
+        onWorld={vi.fn()}
         onSettings={onSettings}
         waitForAgentReady={agentMocks.waitForReady}
       />,
@@ -355,81 +352,48 @@ describe("HomeScreen setup check", () => {
     expect(screen.getByRole("button", { name: "Code" }).getAttribute("aria-disabled")).toBe("true");
   });
 
-  it("offers GG Royale after Motion, never dimmed, and enters it", async () => {
-    localStorage.setItem("gg-royale-consent", "999");
-    // No folder and no provider: the workspace modes are dimmed, Royale isn't.
+  it("offers World after Motion, never dimmed, and enters it", async () => {
+    // No folder and no provider: the workspace modes are dimmed, World isn't.
     vi.mocked(getSettings).mockResolvedValue({ projectsRoot: "", configured: false });
     vi.mocked(authStatus).mockResolvedValue([]);
-    const onRoyale = vi.fn();
+    const onWorld = vi.fn();
     render(
       <HomeScreen
         onProjects={vi.fn()}
         onGoals={vi.fn()}
         onChat={vi.fn()}
         onMotion={vi.fn()}
-        onRoyale={onRoyale}
+        onWorld={onWorld}
         onSettings={vi.fn()}
       />,
     );
     const motion = screen.getByRole("button", { name: "Motion" });
-    const royale = screen.getByRole("button", { name: "Royale" });
-    expect(motion.compareDocumentPosition(royale) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    const world = screen.getByRole("button", { name: "World" });
+    expect(motion.compareDocumentPosition(world) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     await waitFor(() => expect(motion.getAttribute("aria-disabled")).toBe("true"));
-    expect(royale.getAttribute("aria-disabled")).toBeNull();
-    fireEvent.click(royale);
-    await waitFor(() => expect(onRoyale).toHaveBeenCalledOnce());
-    expect(royaleStatus).toHaveBeenCalled();
+    expect(world.getAttribute("aria-disabled")).toBeNull();
+    fireEvent.click(world);
+    await waitFor(() => expect(onWorld).toHaveBeenCalledOnce());
   });
 
-  it("holds the Royale plate down from the click until Royale is on screen", async () => {
+  it("holds the World plate down from the click until World is on screen", async () => {
     vi.mocked(getSettings).mockResolvedValue({ projectsRoot: "", configured: false });
     vi.mocked(authStatus).mockResolvedValue([]);
-    localStorage.setItem("gg-royale-consent", "999");
     const props = {
       onProjects: vi.fn(),
       onGoals: vi.fn(),
       onChat: vi.fn(),
       onMotion: vi.fn(),
-      onRoyale: vi.fn(),
+      onWorld: vi.fn(),
       onSettings: vi.fn(),
     };
     const { rerender } = render(<HomeScreen {...props} />);
-    const royale = screen.getByRole("button", { name: "Royale" });
-    expect(royale.getAttribute("aria-busy")).toBeNull();
-    fireEvent.click(royale);
-    await waitFor(() => expect(props.onRoyale).toHaveBeenCalledOnce());
-    expect(royale.getAttribute("aria-busy")).toBe("true");
-    rerender(<HomeScreen {...props} royaleShown />);
-    await waitFor(() => expect(royale.getAttribute("aria-busy")).toBeNull());
-  });
-
-  it("badges GG Royale with rewards waiting, people playing, or nothing", async () => {
-    vi.mocked(getSettings).mockResolvedValue({ projectsRoot: "", configured: false });
-    vi.mocked(authStatus).mockResolvedValue([]);
-    const home = () =>
-      render(
-        <HomeScreen
-          onProjects={vi.fn()}
-          onGoals={vi.fn()}
-          onChat={vi.fn()}
-          onMotion={vi.fn()}
-          onRoyale={vi.fn()}
-          onSettings={vi.fn()}
-        />,
-      );
-    vi.mocked(royaleSummary).mockResolvedValueOnce({ claimable: 2, streak: 0, playing: 5 });
-    home();
-    expect((await screen.findByLabelText("2 rewards waiting")).textContent).toBe("2");
-    cleanup();
-
-    vi.mocked(royaleSummary).mockResolvedValueOnce({ claimable: 0, streak: 0, playing: 3 });
-    home();
-    expect(await screen.findByText("3 playing")).toBeTruthy();
-    cleanup();
-
-    vi.mocked(royaleSummary).mockResolvedValueOnce(null);
-    home();
-    await waitFor(() => expect(royaleSummary).toHaveBeenCalledTimes(3));
-    expect(screen.queryByRole("status")).toBeNull();
+    const world = screen.getByRole("button", { name: "World" });
+    expect(world.getAttribute("aria-busy")).toBeNull();
+    fireEvent.click(world);
+    await waitFor(() => expect(props.onWorld).toHaveBeenCalledOnce());
+    expect(world.getAttribute("aria-busy")).toBe("true");
+    rerender(<HomeScreen {...props} worldShown />);
+    await waitFor(() => expect(world.getAttribute("aria-busy")).toBeNull());
   });
 });

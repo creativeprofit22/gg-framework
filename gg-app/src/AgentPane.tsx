@@ -181,7 +181,7 @@ import { ChatPicker } from "./ChatPicker";
 import { BackButton } from "./BackButton";
 import { Badge } from "./Badge";
 import { HomeScreen } from "./HomeScreen";
-import { RoyaleScreen } from "./RoyaleScreen";
+import { WorldScreen } from "./WorldScreen";
 // Lazy: Goals is an opt-in surface; keep its picker out of the startup bundle.
 const GoalPicker = lazy(() =>
   import("./GoalPicker").then((module) => ({ default: module.GoalPicker })),
@@ -1057,13 +1057,40 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   const [restoreChecked, setRestoreChecked] = useState(false);
   // Every window starts from the mode-neutral home screen before choosing Code or Chat.
   const [entryView, setEntryView] = useState<EntryView>(initialEntryView(kind === "auxiliary"));
-  // GG Royale has faded in over Home (Home holds its Royale plate down until then).
-  const [royaleShown, setRoyaleShown] = useState(false);
+  // World has faded in over Home (Home holds its World plate down until then).
+  const [worldShown, setWorldShown] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTabId>("general");
   // Re-open the matching session picker over an already-open workspace.
   const [showPicker, setShowPicker] = useState(false);
-  // GG Royale over a workspace (from the Deck's Royale key); Back returns here.
-  const [showRoyale, setShowRoyale] = useState(false);
+  // World over whatever this pane shows (Home, a picker or a workspace); Back returns to it. ONE World layer for
+  // every screen (see worldLayer below), so switching screens under it (the in-game computer opening a project)
+  // never reloads the game.
+  const [showWorld, setShowWorld] = useState(false);
+  // The in-game computer: this pane's own GG Coder over World (WorldScreen.tsx).
+  const [worldComputer, setWorldComputer] = useState(false);
+  // In the computer the pane keeps its full-window layout and is scaled into the space between World's top bar and
+  // Stand up (.app-in-monitor reads --mon-tf).
+  const monitorOpen = showWorld && worldComputer;
+  useEffect(() => {
+    if (!monitorOpen) return;
+    const root = document.documentElement;
+    const fit = (): void => {
+      const w = window.innerWidth;
+      const h = window.innerHeight;
+      const top = 52;
+      const bottom = 64;
+      const k = Math.max(0.5, Math.min((w - 40) / w, (h - top - bottom) / h));
+      // scaled about the window's centre (.app-in-monitor's transform-origin), then shifted into the free band
+      const dy = top + (h - top - bottom - k * h) / 2 - (h - k * h) / 2;
+      root.style.setProperty("--mon-tf", `translateY(${dy.toFixed(1)}px) scale(${k.toFixed(4)})`);
+    };
+    fit();
+    window.addEventListener("resize", fit);
+    return () => {
+      window.removeEventListener("resize", fit);
+      root.style.removeProperty("--mon-tf");
+    };
+  }, [monitorOpen]);
   // Bumped on each workspace/session choice to force re-hydration.
   const [hydrateNonce, setHydrateNonce] = useState(0);
   const { activity, handleActivityEvent } = useTaskActivity(hydrateNonce);
@@ -4606,6 +4633,41 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     return () => registerInput?.(paneId, null);
   }, [insertDroppedFolderPaths, paneId, registerInput, stageAttachments]);
 
+  // World (one layer for every screen, so changing screen under it never reloads the game) and the in-game
+  // computer: while it's open this pane's GG Coder sits inside a monitor over World (.app-in-monitor).
+  // World's Back always lands on GG Coder's Home screen, never on whatever the in-game computer was last
+  // showing. A session opened there keeps running and is one click away from Home.
+  const closeWorld = (): void => {
+    setShowWorld(false);
+    setWorldShown(false);
+    setWorldComputer(false);
+    setShowPicker(false);
+    setNeedsProject(true);
+    setEntryView("home");
+  };
+  const onWorldComputer = (open: boolean): void => {
+    setWorldComputer(open);
+    // The computer always boots to GG Coder's Home screen, whatever this pane was showing: the same way
+    // the app's own Back gets there (a running session carries on underneath and is one click away again).
+    if (open) {
+      setShowPicker(false);
+      setNeedsProject(true);
+      setEntryView("home");
+    }
+  };
+  const inMonitor = monitorOpen ? " app-in-monitor" : "";
+  const worldLayer = showWorld ? (
+    <div className="world-overlay">
+      <WorldScreen
+        player={progress}
+        onShown={() => setWorldShown(true)}
+        onClose={closeWorld}
+        computer={worldComputer}
+        onComputer={onWorldComputer}
+      />
+    </div>
+  ) : null;
+
   // Show explicit recovery feedback while Rust resolves this window's durable
   // target. This branch used to paint only the dark background, which looked
   // indistinguishable from a dead/black webview during a slow recovery.
@@ -4622,103 +4684,96 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
 
   if (needsProject) {
     return (
-      <div className="app" style={{ background: theme.background }}>
-        {/* GG Royale opens OVER Home (as it does over a workspace), so Home
+      <>
+        <div className={`app${inMonitor}`} style={{ background: theme.background }}>
+          {/* World opens OVER Home (as it does over a workspace), so Home
             stays put underneath while the game fades in, and Back fades
             straight back to it. */}
-        {entryView === "home" || entryView === "royale" ? (
-          <HomeScreen
-            onProjects={() => {
-              setWorkspaceMode("code");
-              setEntryView("projects");
-            }}
-            onChat={() => {
-              setWorkspaceMode("chat");
-              setEntryView("chats");
-            }}
-            onMotion={() => {
-              setWorkspaceMode("motion");
-              setEntryView("motion");
-            }}
-            onGoals={() => {
-              setWorkspaceMode("code");
-              setEntryView("goals");
-            }}
-            onRoyale={() => setEntryView("royale")}
-            royaleShown={royaleShown}
-            onSettings={(tab) => {
-              setSettingsTab(tab ?? "general");
-              setEntryView("settings");
-            }}
-            refreshSignal={homeRefreshSignal}
-            waitForAgentReady={catalogClient.waitForReady}
-          />
-        ) : entryView === "settings" ? (
-          <SettingsScreen
-            initialTab={settingsTab}
-            // Home panes have no session yet; the catalog client's daemon session
-            // is running, so MCP management never waits on an unstarted pane.
-            mcpClient={catalogClient}
-            onClose={() => {
-              setEntryView("home");
-              // Settings may have changed the folder or providers.
-              setHomeRefreshSignal((n) => n + 1);
-            }}
-          />
-        ) : entryView === "chats" ? (
-          <ChatPicker
-            onChosen={handlePickerChosen}
-            onClose={() => setEntryView("home")}
-            waitForCatalogReady={catalogClient.waitForReady}
-            discoverSessions={catalogClient.listSessions}
-            bindChat={bindPickerChat}
-            showWindowControls={kind === "primary"}
-          />
-        ) : entryView === "goals" ? (
-          <Suspense fallback={null}>
-            <GoalPicker
-              openGoal={bindPickerProject}
-              onChosen={handleGoalChosen}
-              onClose={() => setEntryView("home")}
+          {entryView === "home" || entryView === "world" ? (
+            <HomeScreen
+              onProjects={() => {
+                setWorkspaceMode("code");
+                setEntryView("projects");
+              }}
+              onChat={() => {
+                setWorkspaceMode("chat");
+                setEntryView("chats");
+              }}
+              onMotion={() => {
+                setWorkspaceMode("motion");
+                setEntryView("motion");
+              }}
+              onGoals={() => {
+                setWorkspaceMode("code");
+                setEntryView("goals");
+              }}
+              // On the in-game computer World is already open behind it: World just stands the player up.
+              onWorld={() => (worldComputer ? setWorldComputer(false) : setShowWorld(true))}
+              worldShown={worldShown}
+              onSettings={(tab) => {
+                setSettingsTab(tab ?? "general");
+                setEntryView("settings");
+              }}
+              refreshSignal={homeRefreshSignal}
+              waitForAgentReady={catalogClient.waitForReady}
             />
-          </Suspense>
-        ) : entryView === "motion" ? (
-          <ChatPicker
-            mode="motion"
-            onChosen={handlePickerChosen}
-            onClose={() => setEntryView("home")}
-            waitForCatalogReady={catalogClient.waitForReady}
-            discoverSessions={catalogClient.listSessions}
-            bindChat={bindPickerMotion}
-            showWindowControls={kind === "primary"}
-          />
-        ) : (
-          <ProjectPicker
-            onChosen={handlePickerChosen}
-            waitForCatalogReady={catalogClient.waitForReady}
-            discoverProjects={catalogClient.listProjects}
-            discoverSessions={catalogClient.listSessions}
-            renameSession={catalogClient.renameSession}
-            bindProject={bindPickerProject}
-            refreshSignal={homeRefreshSignal}
-            showWindowControls={kind === "primary"}
-            onClose={() => setEntryView("home")}
-          />
-        )}
-        {entryView === "royale" && (
-          <div className="royale-overlay">
-            <RoyaleScreen
-              onShown={() => setRoyaleShown(true)}
+          ) : entryView === "settings" ? (
+            <SettingsScreen
+              initialTab={settingsTab}
+              // Home panes have no session yet; the catalog client's daemon session
+              // is running, so MCP management never waits on an unstarted pane.
+              mcpClient={catalogClient}
               onClose={() => {
-                setRoyaleShown(false);
                 setEntryView("home");
+                // Settings may have changed the folder or providers.
+                setHomeRefreshSignal((n) => n + 1);
               }}
             />
-          </div>
-        )}
-        {showTraySettings && <SettingsModal onClose={closeTraySettings} />}
-        <Toaster />
-      </div>
+          ) : entryView === "chats" ? (
+            <ChatPicker
+              onChosen={handlePickerChosen}
+              onClose={() => setEntryView("home")}
+              waitForCatalogReady={catalogClient.waitForReady}
+              discoverSessions={catalogClient.listSessions}
+              bindChat={bindPickerChat}
+              showWindowControls={kind === "primary"}
+            />
+          ) : entryView === "goals" ? (
+            <Suspense fallback={null}>
+              <GoalPicker
+                openGoal={bindPickerProject}
+                onChosen={handleGoalChosen}
+                onClose={() => setEntryView("home")}
+              />
+            </Suspense>
+          ) : entryView === "motion" ? (
+            <ChatPicker
+              mode="motion"
+              onChosen={handlePickerChosen}
+              onClose={() => setEntryView("home")}
+              waitForCatalogReady={catalogClient.waitForReady}
+              discoverSessions={catalogClient.listSessions}
+              bindChat={bindPickerMotion}
+              showWindowControls={kind === "primary"}
+            />
+          ) : (
+            <ProjectPicker
+              onChosen={handlePickerChosen}
+              waitForCatalogReady={catalogClient.waitForReady}
+              discoverProjects={catalogClient.listProjects}
+              discoverSessions={catalogClient.listSessions}
+              renameSession={catalogClient.renameSession}
+              bindProject={bindPickerProject}
+              refreshSignal={homeRefreshSignal}
+              showWindowControls={kind === "primary"}
+              onClose={() => setEntryView("home")}
+            />
+          )}
+          {showTraySettings && <SettingsModal onClose={closeTraySettings} />}
+          <Toaster />
+        </div>
+        {worldLayer}
+      </>
     );
   }
 
@@ -4741,37 +4796,40 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       showWindowControls: kind === "primary",
     };
     return (
-      <div className="app" style={{ background: theme.background }}>
-        {workspaceMode === "chat" ? (
-          <ChatPicker
-            initialAgent={state?.chatAgent ?? "general"}
-            bindChat={bindPickerChat}
-            {...pickerProps}
-          />
-        ) : workspaceMode === "motion" ? (
-          <ChatPicker mode="motion" bindChat={bindPickerMotion} {...pickerProps} />
-        ) : state?.goal ? (
-          <Suspense fallback={null}>
-            <GoalPicker
-              openGoal={bindPickerProject}
-              onChosen={() => {
-                setShowPicker(false);
-                handleGoalChosen();
-              }}
-              onClose={pickerProps.onClose}
+      <>
+        <div className={`app${inMonitor}`} style={{ background: theme.background }}>
+          {workspaceMode === "chat" ? (
+            <ChatPicker
+              initialAgent={state?.chatAgent ?? "general"}
+              bindChat={bindPickerChat}
+              {...pickerProps}
             />
-          </Suspense>
-        ) : (
-          <ProjectPicker
-            initialProjectPath={state?.cwd ?? null}
-            discoverProjects={catalogClient.listProjects}
-            renameSession={catalogClient.renameSession}
-            bindProject={bindPickerProject}
-            {...pickerProps}
-          />
-        )}
-        {showTraySettings && <SettingsModal onClose={closeTraySettings} />}
-      </div>
+          ) : workspaceMode === "motion" ? (
+            <ChatPicker mode="motion" bindChat={bindPickerMotion} {...pickerProps} />
+          ) : state?.goal ? (
+            <Suspense fallback={null}>
+              <GoalPicker
+                openGoal={bindPickerProject}
+                onChosen={() => {
+                  setShowPicker(false);
+                  handleGoalChosen();
+                }}
+                onClose={pickerProps.onClose}
+              />
+            </Suspense>
+          ) : (
+            <ProjectPicker
+              initialProjectPath={state?.cwd ?? null}
+              discoverProjects={catalogClient.listProjects}
+              renameSession={catalogClient.renameSession}
+              bindProject={bindPickerProject}
+              {...pickerProps}
+            />
+          )}
+          {showTraySettings && <SettingsModal onClose={closeTraySettings} />}
+        </div>
+        {worldLayer}
+      </>
     );
   }
 
@@ -4887,7 +4945,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
 
   const content = (
     <div
-      className={`app agent-pane${props.focused !== false ? " pane-focused" : ""}${isFileDragOver ? " app-file-dragover" : ""}${windowFocused && props.windowFocused !== false ? " window-focused" : ""}${workspaceMode === "code" && showChecklist ? " checklist-open" : ""}${goalWorldOpen && !showChecklist ? " goal-world-open" : ""}`}
+      className={`app agent-pane${props.focused !== false ? " pane-focused" : ""}${isFileDragOver ? " app-file-dragover" : ""}${windowFocused && props.windowFocused !== false ? " window-focused" : ""}${workspaceMode === "code" && showChecklist ? " checklist-open" : ""}${goalWorldOpen && !showChecklist ? " goal-world-open" : ""}${inMonitor}`}
       data-glow={glowState}
       style={{ background: "var(--workspace-pane-bg, var(--bg))", ...glowStyle }}
       onPointerDown={() => props.onFocus?.(paneId)}
@@ -5364,7 +5422,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
             }}
             progress={progress}
             trophies={trophies.snapshot}
-            onOpenRoyale={() => setShowRoyale(true)}
+            onOpenWorld={() => setShowWorld(true)}
             usageExtras={
               windowTotal > 1 &&
               windowIndex !== null && (
@@ -5956,21 +6014,18 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
           workspace mode, and its tool call stays blocked until we answer. */}
       <McpElicitModal />
 
-      {/* GG Royale over this workspace, full window. The session keeps running
-          underneath; Back comes straight back to it. */}
-      {showRoyale && (
-        <div className="royale-overlay">
-          <RoyaleScreen onClose={() => setShowRoyale(false)} />
-        </div>
-      )}
-
       {/* Settings reached from the menu-bar tray. Rendered in every view branch
           (Home, picker, workspace) because the tray targets a WINDOW and can't
           know which of the three it is showing. */}
       {showTraySettings && <SettingsModal onClose={closeTraySettings} />}
     </div>
   );
-  return <PaneIdProvider value={paneId}>{content}</PaneIdProvider>;
+  return (
+    <PaneIdProvider value={paneId}>
+      {content}
+      {worldLayer}
+    </PaneIdProvider>
+  );
 }
 
 /**

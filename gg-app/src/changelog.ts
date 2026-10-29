@@ -22,6 +22,50 @@ export interface ChangelogEntry {
 /** Newest first. Prepended by the `/release` flow. */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.97.5",
+    date: "2026-10-28",
+    items: [
+      "Big, ambitious tasks no longer get stuck on `retrying`. When Claude needs a long, deep think before building something huge, I now let it finish instead of cutting it off and starting over, so your agent keeps working for up to `30 minutes` on a single answer and you get the result instead of a spinner.",
+    ],
+  },
+  {
+    version: "0.97.4",
+    date: "2026-10-28",
+    items: [
+      "Your agent now writes cleaner code. It keeps comments to a single short line, only where the why is not obvious, so files stay readable and every answer comes back leaner: about `60%` fewer comment lines and `5.5%` less output, which means a little less waiting and a little less spend.",
+      "Built-in skills now show up only for the job they are made for. I sharpened how `Compliance Guard`, `Durable` and friends describe themselves, so a hunt for a data leak stays a security hunt instead of turning into a legal review. I also retired the old `/setup-skills` workflow to keep your command list tight.",
+    ],
+  },
+  {
+    version: "0.97.3",
+    date: "2026-10-28",
+    items: [
+      "Roaming `GG World` is smooth from your very first step. That little stutter as you explored new rooms is gone: I now get every floor ready while the loading screen is up, so walking from the bar to the roof to the basement just flows.",
+    ],
+  },
+  {
+    version: "0.97.2",
+    date: "2026-10-28",
+    items: [
+      "`GG World` really opens now. I tracked the black screen down to a security rule that quietly stopped the game from starting inside the app, and fixed it at the root. Your character, the rooms and your saved progress all load straight up, and I watched it happen in a real build before shipping.",
+    ],
+  },
+  {
+    version: "0.97.1",
+    date: "2026-10-28",
+    items: [
+      "`GG World` now opens straight into the action. I fixed the black screen some of you hit on launch, so the whole 3D world, your character and every room load up right away. Grab a drink, it's all there.",
+    ],
+  },
+  {
+    version: "0.97.0",
+    date: "2026-10-28",
+    items: [
+      "Say hello to `GG World`, the brand-new hangout that replaces GG Royale. Walk around a living 3D world with up to `50` real players, chat, emote, grab a drink and code at an in-game PC that opens your own GG Coder. Every mini-game was rebuilt from scratch, it runs a buttery `60 fps`, and an optional online save keeps your progress, wardrobe and level wherever you play.",
+      "Your agent got leaner and smarter about when to slow down. I benchmarked every built-in skill on and off and kept only the ones that actually change results: `durable` for anything that could lose data and `compliance-guard` for privacy, consent and tracking. The rest just made runs slower, so they're gone. GPT models also stopped loading skills they don't need, cutting wasted steps on everyday tasks.",
+    ],
+  },
+  {
     version: "0.96.3",
     date: "2026-10-25",
     items: [

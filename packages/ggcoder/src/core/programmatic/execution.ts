@@ -21,7 +21,7 @@ import type { CommandDiscoveryOptions } from "../command-discovery.js";
 
 export const EXECUTION_DEADLINE_MS = 10 * 60_000;
 const CLEANUP_DEADLINE_MS = 5_000;
-export const RESEARCH_TOOLS = ["read", "find", "grep", "ls", "code_search", "code_nav", "web_search", "web_fetch", "ask_user", "research_corpus", "programmatic_result"];
+export const RESEARCH_TOOLS = ["read", "find", "grep", "ls", "web_search", "web_fetch", "ask_user", "research_corpus", "programmatic_result"];
 const MUTATION_TOOLS = ["write", "edit", "bash", "task_output", "task_send", "task_stop", "enter_plan", "exit_plan"];
 // No configured MCP server is implicitly approved. The host currently approves none.
 const APPROVED_RESEARCH_MCP_SERVERS: string[] = [];

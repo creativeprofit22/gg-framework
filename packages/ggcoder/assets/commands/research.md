@@ -1,7 +1,7 @@
 ---
 description: Read-only, evidence-led research using the local workspace, Steroids, and primary sources
 argument-hint: [question or topic]
-allowed-tools: read, find, grep, code_search, code_nav, ls, source_path, web_fetch, web_search, tool_search, steroids, ask_user
+allowed-tools: read, find, grep, ls, source_path, web_fetch, web_search, tool_search, steroids, ask_user
 ---
 
 # /research

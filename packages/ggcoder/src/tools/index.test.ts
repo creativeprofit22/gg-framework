@@ -30,12 +30,11 @@ afterEach(async () => {
 });
 
 describe("createTools LSP policy", () => {
-  it("keeps local navigation available when edit diagnostics are disabled", async () => {
+  it("keeps the language-server manager when edit diagnostics are disabled", async () => {
     const result = await createTools(process.cwd(), { lspDiagnostics: false });
     results.push(result);
 
     expect(result.lspManager).toBeDefined();
-    expect(result.tools.map((tool) => tool.name)).toContain("code_nav");
   });
 });
 

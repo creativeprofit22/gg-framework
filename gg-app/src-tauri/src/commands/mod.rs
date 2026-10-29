@@ -5,4 +5,4 @@ pub(crate) mod agent_admin;
 pub(crate) mod files;
 pub(crate) mod local_update;
 pub(crate) mod notes;
-pub(crate) mod royale;
+pub(crate) mod world;

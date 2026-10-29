@@ -33,7 +33,6 @@ import { compactResetLabel, fullResetLabel } from "./usage-display";
 import { formatBackgroundTaskStatus, isBackgroundTaskRunning } from "./background-task-status";
 import { toast } from "./toast";
 import { TrophiesPanel } from "./TrophiesPanel";
-import { RoyaleKey } from "./RoyaleKey";
 import { useRadio, type Radio } from "./useRadio";
 import { pluralize } from "./workspace-title";
 
@@ -98,8 +97,8 @@ export interface DeckProps {
   onReviewHealth?: (prompt: string, label: string) => boolean;
   /** The window number, shown in the usage panel. */
   usageExtras: ReactNode;
-  /** Shows GG Royale full-window over this workspace. */
-  onOpenRoyale: () => void;
+  /** Shows World full-window over this workspace. */
+  onOpenWorld: () => void;
   /** Level and rank, for the usage panel's level row (it opens Scorecard). */
   progress: ProgressSnapshot | null;
   /** Every trophy, for the trophies key and its panel; null until loaded. */
@@ -392,9 +391,9 @@ function PanelBody(
           onOpenScorecard={() => props.onPanelChange("scorecard")}
           trophies={props.trophies}
           onOpenTrophies={() => props.onPanelChange("trophies")}
-          onOpenRoyale={() => {
+          onOpenWorld={() => {
             props.onPanelChange(null);
-            props.onOpenRoyale();
+            props.onOpenWorld();
           }}
           extras={props.usageExtras}
           onClose={close}
@@ -702,7 +701,7 @@ function UsagePanel({
   onOpenScorecard,
   trophies,
   onOpenTrophies,
-  onOpenRoyale,
+  onOpenWorld,
   extras,
   onClose,
 }: {
@@ -714,7 +713,7 @@ function UsagePanel({
   onOpenScorecard: () => void;
   trophies: TrophySnapshot | null;
   onOpenTrophies: () => void;
-  onOpenRoyale: () => void;
+  onOpenWorld: () => void;
   extras: ReactNode;
   onClose: () => void;
 }): React.ReactElement {
@@ -790,7 +789,16 @@ function UsagePanel({
               <span className="well">{trophies.earned}</span>
             </button>
           )}
-          <RoyaleKey onOpen={onOpenRoyale} />
+          <button
+            type="button"
+            className="key key-sm trophy-key"
+            aria-label="World"
+            title="World: play the 3D game"
+            onClick={onOpenWorld}
+          >
+            <Icon name="play" size={13} />
+            <span className="well">World</span>
+          </button>
           <button
             type="button"
             className="key key-sm level-key"

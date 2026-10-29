@@ -820,7 +820,7 @@ function assertPrunedLayout(
 
   const requiredFiles = [
     "app-sidecar.mjs",
-    "skills/evidence-led-ui/SKILL.md",
+    "skills/compliance-guard/SKILL.md",
     "node_modules/sharp/package.json",
     ...(process.platform === "win32" && process.arch === "x64"
       ? ["node_modules/@img/colour/package.json", "node_modules/@img/sharp-win32-x64/package.json"]

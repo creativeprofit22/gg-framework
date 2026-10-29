@@ -15,6 +15,10 @@ packages/ggcoder/src/__fixtures__/
 # keeps them diffable against their source.
 packages/ggcoder/assets/motion/
 
+# GG World: upstream's game package, kept byte-identical to upstream (it is not
+# Prettier-formatted there). Reformatting it here would conflict on every sync.
+packages/gg-world/
+
 # Prompt-bench experiments: comparison-bench records a SHA-256 of these sources
 # with every result. Reformatting would change the hashes and detach recorded
 # runs from the code that produced them.

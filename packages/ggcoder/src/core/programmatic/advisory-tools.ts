@@ -7,7 +7,15 @@ import { getMcpToolIdentity, withMcpToolIdentity } from "../mcp/tool-identity.js
 import { createProgrammaticAdvisoryResultTool } from "../../tools/programmatic-advisory-result.js";
 import { CommandInformationParams } from "../../tools/command-information.js";
 import type { buildProgrammaticAdvisoryContext } from "./advisory-context.js";
-import { ADVISORY_LIMITATIONS, AdvisoryEvidence, ProgrammaticAdvisoryTurn, localLocations, plainToolLimitation, type AdvisoryReceipt, type ProgrammaticAdvisoryPolicy } from "./advisory.js";
+import {
+  ADVISORY_LIMITATIONS,
+  AdvisoryEvidence,
+  ProgrammaticAdvisoryTurn,
+  localLocations,
+  plainToolLimitation,
+  type AdvisoryReceipt,
+  type ProgrammaticAdvisoryPolicy,
+} from "./advisory.js";
 import { repositoryRelativePathSchema } from "./contracts.js";
 
 export type ProgrammaticAdvisoryContext = ReturnType<typeof buildProgrammaticAdvisoryContext>;
@@ -27,34 +35,63 @@ export function claimAdvisoryTool(
  * Canonical identities catch aliases; unresolved identities cannot establish independence.
  * This is source-purpose provenance, not proof of workflow relevance or prerequisites. */
 async function classifyLocalSources(cwd: string, receipts: AdvisoryReceipt[]): Promise<void> {
-  const paths = [...new Set(receipts.flatMap((receipt) => localLocations(receipt).map((location) => location.path)))];
+  const paths = [
+    ...new Set(
+      receipts.flatMap((receipt) => localLocations(receipt).map((location) => location.path)),
+    ),
+  ];
   if (!paths.length) return;
   const purposes = new Map<string, "command-definition" | "independent" | "unknown">();
   try {
     // Readiness affects advertised actions, not custom file ownership. Do not run inventory.
     const discovery = await discoverCommands(cwd, { readReadiness: async () => "missing" });
-    const canonical = (file: string) => process.platform === "win32" ? file.toLowerCase() : file;
+    const canonical = (file: string) => (process.platform === "win32" ? file.toLowerCase() : file);
     const root = await fs.realpath(cwd);
-    const owners = discovery.entries.flatMap((entry) => entry.custom ? [entry.custom.filePath] : []);
+    const owners = discovery.entries.flatMap((entry) =>
+      entry.custom ? [entry.custom.filePath] : [],
+    );
     const ownerPaths = new Set(owners.map((owner) => canonical(path.resolve(owner))));
-    const realOwners = await Promise.all(owners.map((owner) => fs.realpath(owner).then(canonical).catch(() => undefined)));
+    const realOwners = await Promise.all(
+      owners.map((owner) =>
+        fs
+          .realpath(owner)
+          .then(canonical)
+          .catch(() => undefined),
+      ),
+    );
     const canonicalOwners = new Set(realOwners.filter((owner) => owner !== undefined));
-    await Promise.all(paths.map(async (file) => {
-      if (ownerPaths.has(canonical(path.resolve(cwd, file)))) {
-        purposes.set(file, "command-definition");
-        return;
-      }
-      const real = await fs.realpath(path.resolve(cwd, file)).catch(() => undefined);
-      const local = real && repositoryRelativePathSchema.safeParse(path.relative(root, real).split(path.sep).join("/")).success;
-      purposes.set(file, real && canonicalOwners.has(canonical(real)) ? "command-definition"
-        : local && realOwners.every((owner) => owner !== undefined) ? "independent" : "unknown");
-    }));
+    await Promise.all(
+      paths.map(async (file) => {
+        if (ownerPaths.has(canonical(path.resolve(cwd, file)))) {
+          purposes.set(file, "command-definition");
+          return;
+        }
+        const real = await fs.realpath(path.resolve(cwd, file)).catch(() => undefined);
+        const local =
+          real &&
+          repositoryRelativePathSchema.safeParse(
+            path.relative(root, real).split(path.sep).join("/"),
+          ).success;
+        purposes.set(
+          file,
+          real && canonicalOwners.has(canonical(real))
+            ? "command-definition"
+            : local && realOwners.every((owner) => owner !== undefined)
+              ? "independent"
+              : "unknown",
+        );
+      }),
+    );
   } catch {
     // Keep retrieval evidence, but fail closed for independent workflow support.
   }
   for (const receipt of receipts) {
     const inspected = [...new Set(localLocations(receipt).map((location) => location.path))];
-    if (inspected.length) receipt.localSources = inspected.map((file) => ({ path: file, purpose: purposes.get(file) ?? "unknown" }));
+    if (inspected.length)
+      receipt.localSources = inspected.map((file) => ({
+        path: file,
+        purpose: purposes.get(file) ?? "unknown",
+      }));
   }
 }
 
@@ -76,7 +113,10 @@ export async function executeAdvisoryTool(
     if (tool.name !== "programmatic_scan" && tool.name !== "programmatic_advisory_result")
       turn.evidence.observe(cwd, tool.name, {}, context.toolCallId, "", !cancelled, cancelled);
   };
-  const onAbort = () => { recordOutcome(true); cleanup?.(); };
+  const onAbort = () => {
+    recordOutcome(true);
+    cleanup?.();
+  };
   const cleanup = turn?.trackExecution(() => context.signal.removeEventListener("abort", onAbort));
   try {
     if (turn) context.signal.addEventListener("abort", onAbort, { once: true });
@@ -96,7 +136,9 @@ export async function executeAdvisoryTool(
         // An unreadable scanner response is not success; preserve it verbatim below.
       }
       // Cancellation cannot undo a published state file or its recovery copy.
-      turn.settleScan(succeeded ? "succeeded" : context.signal.aborted && !committed ? "cancelled" : "failed");
+      turn.settleScan(
+        succeeded ? "succeeded" : context.signal.aborted && !committed ? "cancelled" : "failed",
+      );
       if (context.signal.aborted && committed) {
         turn.limitations.delete(plainToolLimitation("programmatic_scan", true));
         turn.limitations.add(ADVISORY_LIMITATIONS.scanSavedBeforeStop);
@@ -129,7 +171,9 @@ export async function executeAdvisoryTool(
       typeof output === "string" ? undefined : output.details,
     );
     const resources =
-      (tool.name === "web_fetch" || tool.name === "code_search") && metadata.success && metadata.data.resources.length
+      (tool.name === "web_fetch" || tool.name === "code_search") &&
+      metadata.success &&
+      metadata.data.resources.length
         ? metadata.data.resources
         : [undefined];
     const pendingEvidence = new AdvisoryEvidence();
@@ -149,9 +193,7 @@ export async function executeAdvisoryTool(
       if (tool.name === "web_fetch" && !resource)
         turn.limitations.add(ADVISORY_LIMITATIONS.webSourceUnknown);
       if (receipt.status === "retrieved" && tool.name === "web_fetch" && !receipt.external)
-        turn.limitations.add(
-          ADVISORY_LIMITATIONS.webSourceUnconfirmed,
-        );
+        turn.limitations.add(ADVISORY_LIMITATIONS.webSourceUnconfirmed);
       return receipt;
     });
     await classifyLocalSources(cwd, receipts);
@@ -160,10 +202,16 @@ export async function executeAdvisoryTool(
     turn.stageResult(context.toolCallId, (complete) => {
       for (const receipt of receipts) {
         // A truncated source is at most a lead, never observed local/external evidence.
-        turn.evidence.retain(complete ? receipt : {
-          id: receipt.id, toolCallId: receipt.toolCallId, tool: receipt.tool,
-          status: receipt.status === "retrieved" ? "lead" : receipt.status,
-        });
+        turn.evidence.retain(
+          complete
+            ? receipt
+            : {
+                id: receipt.id,
+                toolCallId: receipt.toolCallId,
+                tool: receipt.tool,
+                status: receipt.status === "retrieved" ? "lead" : receipt.status,
+              },
+        );
       }
     });
     const annotated =
@@ -180,8 +228,7 @@ export async function executeAdvisoryTool(
     recordOutcome(context.signal.aborted);
     if (turn && tool.name === "programmatic_scan")
       turn.settleScan(context.signal.aborted ? "cancelled" : "failed");
-    if (turn)
-      turn.limitations.add(plainToolLimitation(tool.name, context.signal.aborted));
+    if (turn) turn.limitations.add(plainToolLimitation(tool.name, context.signal.aborted));
     throw error;
   } finally {
     cleanup?.();
@@ -216,11 +263,21 @@ export function guardTerminalTools(
 export class ProgrammaticAdvisoryTools {
   readonly turn: ProgrammaticAdvisoryTurn;
   readonly tools: AgentTool[];
-  constructor(cwd: string, advisory: ProgrammaticAdvisoryContext, getTools: () => AgentTool[], policy: ProgrammaticAdvisoryPolicy = { mode: "configured" }) {
+  constructor(
+    cwd: string,
+    advisory: ProgrammaticAdvisoryContext,
+    getTools: () => AgentTool[],
+    policy: ProgrammaticAdvisoryPolicy = { mode: "configured" },
+  ) {
     this.turn = new ProgrammaticAdvisoryTurn(new AdvisoryEvidence(), policy);
     const turn = this.turn;
     turn.claim("command_information", { action: "list" });
     turn.observePage(advisory.commands);
+    if (advisory.evidence)
+      turn.recordSample({
+        listed: advisory.evidence.paths.length,
+        excerpted: advisory.evidence.excerpts.length,
+      });
     const allowed = (tool: AgentTool) =>
       turn.active &&
       getTools().includes(tool) &&
@@ -228,7 +285,8 @@ export class ProgrammaticAdvisoryTools {
       (tool.name !== "programmatic_scan" || policy.scanAvailable !== false) &&
       !getMcpToolIdentity(tool);
     const refreshScanPolicy = () => {
-      if (!getTools().some((tool) => tool.name === "programmatic_scan" && allowed(tool))) turn.markScanUnavailable();
+      if (!getTools().some((tool) => tool.name === "programmatic_scan" && allowed(tool)))
+        turn.markScanUnavailable();
     };
     refreshScanPolicy();
     const guard = (tool: AgentTool, registered = true): AgentTool => ({
@@ -273,12 +331,15 @@ export class ProgrammaticAdvisoryTools {
       );
     } else {
       turn.limitations.add(ADVISORY_LIMITATIONS.catalogUnavailable);
-      this.tools.push(guard(createProgrammaticAdvisoryResultTool(() => turn.active ? turn : undefined), false));
+      this.tools.push(
+        guard(
+          createProgrammaticAdvisoryResultTool(() => (turn.active ? turn : undefined)),
+          false,
+        ),
+      );
     }
     if (turn.mode === "configured" && !this.tools.some((tool) => tool.name === "research_corpus"))
-      turn.limitations.add(
-        ADVISORY_LIMITATIONS.examplesUnavailable,
-      );
+      turn.limitations.add(ADVISORY_LIMITATIONS.examplesUnavailable);
   }
   close(): void {
     this.turn.close();

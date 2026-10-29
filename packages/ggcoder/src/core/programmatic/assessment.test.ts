@@ -2,7 +2,7 @@ import { expect, it, vi } from "vitest";
 import { z } from "zod";
 import type { AgentTool } from "@kenkaiiii/gg-agent";
 import { isProgrammaticAssessment } from "@kenkaiiii/gg-core/programmatic-assessment-contract";
-import type { AdvisoryReceipt } from "./advisory.js";
+import { ADVISORY_LIMITATIONS, type AdvisoryReceipt } from "./advisory.js";
 import { ProgrammaticAssessmentCoordinator } from "./assessment.js";
 import { programmaticAssessmentResultV2Schema } from "./contracts.js";
 import {
@@ -363,6 +363,7 @@ it("projects control-free bounded text accepted by the browser contract without 
     .filter((code) => (code < 32 && ![9, 10, 13].includes(code)) || code >= 127)
     .map((code) => String.fromCharCode(code))
     .join("");
+  let hostScope: string | undefined;
   const outcome = await owner.run(new AbortController().signal, async (scope) => {
     scope.turn.limitations.add(`Before${controls}After\tline\nnext\rend`);
     scope.turn.limitations.add(controls);
@@ -384,13 +385,22 @@ it("projects control-free bounded text accepted by the browser contract without 
       },
       toolContext(),
     );
+    hostScope = scope.turn.acceptedResult?.coverage.scope;
   });
   expect(outcome.assessment.status).toBe("completed");
   expect(outcome.assessment.limitations).toContain("BeforeAfter\tline\nnext\rend");
   expect(outcome.assessment.limitations).toContain("Unspecified limitation.");
   expect(outcome.assessment.limitations).toContain("x".repeat(4_000));
-  expect(outcome.assessment.coverage.find((item) => item.scope === "catalog")?.summary).toContain(
-    "Bounded evidence",
+  const catalog = outcome.assessment.coverage.find((item) => item.scope === "catalog")?.summary;
+  expect(hostScope).toMatch(/in your list\./);
+  expect(catalog).toBe(hostScope);
+  expect(catalog).not.toContain("Fixture");
+  expect(catalog).not.toContain("Bounded evidence");
+  for (const item of outcome.assessment.coverage)
+    for (const limitation of outcome.assessment.limitations)
+      expect(item.summary).not.toContain(limitation);
+  expect(outcome.assessment.coverage.some((item) => /more limits?\./.test(item.summary))).toBe(
+    false,
   );
   expect(isProgrammaticAssessment(outcome.assessment)).toBe(true);
 });
@@ -438,4 +448,41 @@ it("cancellation stops the operation and closes scope without a callback or retr
   expect(outcome.discoveryRecords).toBeUndefined();
   expect(JSON.stringify(outcome)).not.toContain("secret");
   expect(failed.scope.turn.active).toBe(false);
+});
+
+it("marks the command row checked when the only limit is about project files", async () => {
+  const context = buildProgrammaticAdvisoryContext(
+    { version: 1 },
+    { entries: [], resolve: () => undefined },
+  );
+  const information = tool("command_information", JSON.stringify(context.commands));
+  const owner = new ProgrammaticAssessmentCoordinator(process.cwd(), context, () => [information], {
+    mode: "setup",
+  });
+  let hostScope: string | undefined;
+  const outcome = await owner.run(new AbortController().signal, async (scope) => {
+    const submit = scope.tools.find((item) => item.name === "programmatic_advisory_result")!;
+    await submit.execute(result, toolContext());
+    hostScope = scope.turn.acceptedResult?.coverage.scope;
+  });
+  expect(outcome.assessment.limitations).toEqual([ADVISORY_LIMITATIONS.noProjectFiles]);
+  expect(hostScope).toContain("no commands in your list");
+  expect(outcome.assessment.coverage.find((item) => item.scope === "catalog")).toEqual({
+    scope: "catalog",
+    status: "inspected",
+    summary: hostScope,
+  });
+  expect(isProgrammaticAssessment(outcome.assessment)).toBe(true);
+});
+
+it("marks the command row partly checked when part of the command list didn't load", async () => {
+  const owner = await coordinator("setup");
+  const outcome = await owner.run(new AbortController().signal, async (scope) => {
+    scope.turn.limitations.add(ADVISORY_LIMITATIONS.catalogPagePartial);
+    const submit = scope.tools.find((item) => item.name === "programmatic_advisory_result")!;
+    await submit.execute(result, toolContext());
+  });
+  expect(outcome.assessment.coverage.find((item) => item.scope === "catalog")?.status).toBe(
+    "budget-limited",
+  );
 });

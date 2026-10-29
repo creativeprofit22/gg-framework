@@ -8,7 +8,7 @@ import {
   sameMcpToolIdentity,
   withMcpToolIdentity,
 } from "./mcp/tool-identity.js";
-import type { ProgrammaticAdvisoryTurn } from "./programmatic/advisory.js";
+import { renderAdvisorySummary, type ProgrammaticAdvisoryTurn } from "./programmatic/advisory.js";
 import { claimAdvisoryTool, executeAdvisoryTool } from "./programmatic/advisory-tools.js";
 import type { DiscoveryReviewBoundary } from "./programmatic/discovery-review.js";
 import type { ProgrammaticSetupInspection } from "./programmatic/setup-inspection.js";
@@ -24,7 +24,10 @@ export interface SessionToolGuardHost {
   advisoryTurn(): ProgrammaticAdvisoryTurn | undefined;
   commandCreation(): CreateToolsResult["commandCreation"] | undefined;
   cwd(): string;
-  options(): Pick<AgentSessionOptions, "approveToolExecution" | "validateToolExecution">;
+  options(): Pick<
+    AgentSessionOptions,
+    "approveToolExecution" | "validateToolExecution" | "advisoryDetailsInOpportunities"
+  >;
   setPendingAdvisoryPresentation(presentation: {
     turn: ProgrammaticAdvisoryTurn;
     text: string;
@@ -142,9 +145,17 @@ export function guardSessionTool(tool: AgentTool, host: SessionToolGuardHost): A
         !context.signal.aborted &&
         typeof output === "string"
       ) {
+        const accepted = advisory.acceptedResult;
+        // The chat gets a short summary; the tool result keeps the full report for follow-ups.
         host.setPendingAdvisoryPresentation({
           turn: advisory,
-          text: output,
+          text: accepted
+            ? renderAdvisorySummary(
+                accepted,
+                [...advisory.limitations],
+                host.options().advisoryDetailsInOpportunities === true,
+              )
+            : output,
           signal: context.signal,
         });
         // An accepted result is the assessment's final deliverable. The checkpoint

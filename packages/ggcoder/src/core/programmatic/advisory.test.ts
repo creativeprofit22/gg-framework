@@ -4,6 +4,8 @@ import { randomUUID } from "node:crypto";
 import { projectDiscovery } from "./discovery-projection.js";
 import { createWebFetchTool } from "../../tools/web-fetch.js";
 import { executeAdvisoryTool } from "./advisory-tools.js";
+import { renderTerminalProgrammaticAssessment } from "../../ui/hooks/terminal-programmatic-presentation.js";
+import type { ProgrammaticAssessmentOutcome } from "./assessment.js";
 
 import {
   AdvisoryEvidence,
@@ -13,6 +15,7 @@ import {
   INCOMPLETE_ADVISORY_NOTICE,
   plainToolLimitation,
   renderAdvisoryResult,
+  renderAdvisorySummary,
 } from "./advisory.js";
 import { inventoryV1Schema, programmaticAssessmentResultV2Schema } from "./contracts.js";
 import { detectProgrammaticItemFamilies } from "./item-families.js";
@@ -929,6 +932,88 @@ describe("bounded advisory validation", () => {
       input(local.id).recommendations[0]!.evidence,
     );
     expect(output).not.toContain(local.id);
+  });
+  it("reports every rule failure at once so one corrected resubmission is accepted", async () => {
+    const evidence = new AdvisoryEvidence();
+    const turn = scannedTurn(evidence);
+    turn.observePage(page);
+    const lead = evidence.observe(
+      process.cwd(),
+      "research_corpus",
+      { action: "search" },
+      "search",
+      "lead",
+    );
+    const local = evidence.observe(
+      process.cwd(),
+      "read",
+      { file_path: "package.json" },
+      "read",
+      "contents",
+    );
+    const base = manualAssessment.recommendations[0];
+    const withItems = (items: unknown[][]) => ({
+      ...manualAssessment,
+      recommendations: items.map((list) => ({ ...base, evidence: { version: 1, items: list } })),
+    });
+    const claim = { code: "inspection", severity: "info", message: "A model claim" };
+    const bad = withItems([
+      [{ ...claim, basis: "observed", source: lead.id }],
+      [
+        { ...claim, basis: "observed", source: "forged-call-id" },
+        { ...claim, basis: "observed", source: local.id, location: { path: "src/missing.ts" } },
+      ],
+    ]);
+    const error = await turn.submit(bad, checks).then(
+      () => undefined,
+      (failure: unknown) => (failure instanceof Error ? failure.message : String(failure)),
+    );
+    expect(error).toContain("Fix all 3 problems");
+    expect(error).toContain("1. Idea 1: Search leads and failed calls");
+    expect(error).toContain("2. Idea 2: Evidence source must reference a retained host receipt ID");
+    expect(error).toContain("3. Idea 2: Evidence location was not inspected");
+    expect(turn.submitted).toBe(false);
+    const fixed = withItems([
+      [{ ...claim, basis: "observed", source: local.id }],
+      [{ ...claim, basis: "observed", source: local.id }],
+    ]);
+    await turn.submit(fixed, checks);
+    expect(turn.submitted).toBe(true);
+    expect(turn.acceptedResult!.recommendations).toHaveLength(2);
+  });
+  it("keeps freshness findings from a rejected or aborted attempt out of the accepted one", async () => {
+    const evidence = new AdvisoryEvidence();
+    const turn = scannedTurn(evidence);
+    turn.observePage(page);
+    evidence.observe(process.cwd(), "read", { file_path: "package.json" }, "read", "contents");
+    let rechecks = 0;
+    const controller = new AbortController();
+    await expect(
+      turn.submit(manualAssessment, {
+        snapshot: async () => true,
+        page: async () => {
+          rechecks++;
+          controller.abort();
+          return { ...page, total: 99 };
+        },
+        signal: controller.signal,
+      }),
+    ).rejects.toThrow();
+    expect(rechecks).toBe(1);
+    expect(turn.limitations.has(ADVISORY_LIMITATIONS.catalogChangedLate)).toBe(false);
+    await turn.submit(manualAssessment, checks);
+    expect(turn.limitations.has(ADVISORY_LIMITATIONS.catalogChangedLate)).toBe(false);
+    expect(
+      turn.acceptedResult!.coverage.status === "limited" && turn.acceptedResult!.coverage.reason,
+    ).not.toContain(ADVISORY_LIMITATIONS.catalogChangedLate);
+  });
+  it("still reports a real catalog change at acceptance", async () => {
+    const evidence = new AdvisoryEvidence();
+    const turn = scannedTurn(evidence);
+    turn.observePage(page);
+    evidence.observe(process.cwd(), "read", { file_path: "package.json" }, "read", "contents");
+    await turn.submit(manualAssessment, { ...checks, page: async () => ({ ...page, total: 1 }) });
+    expect(turn.limitations.has(ADVISORY_LIMITATIONS.catalogChangedLate)).toBe(true);
   });
   it("claims the one scan synchronously and enforces turn budgets and closure", () => {
     const turn = new ProgrammaticAdvisoryTurn(new AdvisoryEvidence());
@@ -1872,5 +1957,128 @@ describe("advisory extension regression fixtures", () => {
       [...first.entries, ...second.entries, ...third.entries].map((entry) => entry.name),
     ).toEqual(entries.map((entry) => entry.listing.name));
     expect(third.nextOffset).toBeNull();
+  });
+});
+
+describe("host-written coverage", () => {
+  const signal = new AbortController().signal;
+  const page = { entries: [], offset: 0, nextOffset: null, total: 0, limitedCoverage: false };
+  const checks = { snapshot: async () => true, page: async () => page, signal };
+  const internal = /receipt|deterministic scan|budget-limited|programmatic_|command_information/i;
+  function sampledTurn(): ProgrammaticAdvisoryTurn {
+    const evidence = new AdvisoryEvidence();
+    const receipt = evidence.observe(
+      process.cwd(),
+      "read",
+      { file_path: "package.json" },
+      "config",
+      "1\tCheck configuration",
+    );
+    receipt.localSources = [{ path: "package.json", purpose: "independent" }];
+    const turn = scannedTurn(evidence);
+    turn.observePage({
+      entries: [],
+      offset: 0,
+      nextOffset: null,
+      total: 0,
+      limitedCoverage: false,
+    });
+    turn.recordSample({ listed: 30, excerpted: 12 });
+    return turn;
+  }
+  it("replaces model coverage text with plain host facts", async () => {
+    const turn = sampledTurn();
+    const output = await turn.submit(
+      {
+        ...manualAssessment,
+        coverage: {
+          status: "limited",
+          scope: "Deterministic scan plus receipts from command_information",
+          reason: "budget-limited by programmatic_scan receipts",
+        },
+      },
+      checks,
+    );
+    expect(output).toContain(
+      "Looked at: 12 sampled project files, 1 more project file AI opened itself and no commands in your list. 18 listed files weren't read.",
+    );
+    expect(output).toContain(`Didn't fully check: ${ADVISORY_LIMITATIONS.modelLimited}`);
+    expect(output).not.toMatch(internal);
+    expect(turn.acceptedResult?.coverage).not.toMatchObject({
+      scope: expect.stringMatching(internal),
+    });
+    expect(turn.reportedCoverage).toMatchObject({
+      scope: expect.stringContaining("Deterministic"),
+    });
+  });
+  it("keeps host limitations first and whole within 4,000 characters", async () => {
+    const turn = sampledTurn();
+    const lines = Array.from(
+      { length: 60 },
+      (_, index) => `Host limit ${index} ${"y".repeat(90)}.`,
+    );
+    for (const line of lines) turn.limitations.add(line);
+    await turn.submit(
+      { ...manualAssessment, coverage: { status: "limited", scope: "x", reason: "Model words." } },
+      checks,
+    );
+    const coverage = turn.acceptedResult?.coverage;
+    expect(coverage?.status).toBe("limited");
+    const reason = coverage?.status === "limited" ? coverage.reason : "";
+    expect(reason.length).toBeLessThanOrEqual(4_000);
+    expect(reason.startsWith(lines[0]!)).toBe(true);
+    expect(reason).not.toContain("Model words.");
+    const kept = lines.filter((line) => reason.includes(line));
+    expect(kept).toEqual(lines.slice(0, kept.length));
+    expect(reason).toContain(`And ${lines.length - kept.length} more limits.`);
+  });
+});
+
+describe("short chat summary", () => {
+  const signal = new AbortController().signal;
+  const page = { entries: [], offset: 0, nextOffset: null, total: 0, limitedCoverage: false };
+  const checks = { snapshot: async () => true, page: async () => page, signal };
+  it("keeps the answer, idea count, coverage and first limit, and points to Opportunities", async () => {
+    const turn = scannedTurn(new AdvisoryEvidence());
+    turn.observePage(page);
+    turn.limitations.add("First limit.");
+    turn.limitations.add("Second limit.");
+    const full = await turn.submit(manualAssessment, checks);
+    const result = turn.acceptedResult!;
+    const summary = renderAdvisorySummary(result, [...turn.limitations], true);
+    expect(summary.split("\n")[0]).toBe(full.split("\n")[0]);
+    expect(summary).toMatch(/^## What AI found: 1 idea, /);
+    expect(summary).toContain(`Looked at: ${result.coverage.scope}`);
+    expect([...turn.limitations][0]).toBe("First limit.");
+    const more = turn.limitations.size - 1;
+    expect(summary).toContain(`Didn't fully check: First limit. And ${more} more limits.`);
+    expect(summary).not.toContain("Second limit.");
+    expect(summary).not.toContain("Why it helps");
+    expect(summary.endsWith("Full details are in Opportunities.")).toBe(true);
+    expect(renderAdvisorySummary(result, [...turn.limitations])).not.toContain("Opportunities");
+    expect(summary.length).toBeLessThan(full.length);
+  });
+  it("leaves the full report to the terminal when the chat only got the summary", async () => {
+    const turn = scannedTurn(new AdvisoryEvidence());
+    turn.observePage(page);
+    const advice = await turn.submit(manualAssessment, checks);
+    const summary = renderAdvisorySummary(turn.acceptedResult!, [...turn.limitations]);
+    const outcome = {
+      advice,
+      assessment: {
+        status: "completed",
+        summary: "Assessment finished.",
+        deterministic: { status: "not-run" },
+        limitations: [],
+        coverage: [],
+      },
+    } as unknown as ProgrammaticAssessmentOutcome;
+    const terminal = renderTerminalProgrammaticAssessment(outcome, [
+      { role: "assistant", content: summary },
+    ]);
+    expect(terminal).toContain(advice);
+    expect(
+      renderTerminalProgrammaticAssessment(outcome, [{ role: "assistant", content: advice }]),
+    ).not.toContain(advice);
   });
 });

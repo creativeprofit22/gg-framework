@@ -419,7 +419,7 @@ describe("prompt commands", () => {
     for (const prompt of [deferred, eager]) {
       expect(prompt).toContain("Submit programmatic_advisory_result");
       expect(prompt).toContain(
-        "Use its validated presentation (it opens with 'What AI found') as your answer, including coverage limitations",
+        "Use its validated presentation (it opens with 'What AI found') as your answer; the app replaces your coverage text with what it observed",
       );
       expect(prompt).toContain(
         "Do not write a second full report repeating rendered accepted advice",

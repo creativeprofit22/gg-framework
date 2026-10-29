@@ -564,7 +564,8 @@ it.each(["parallel", "sequential"] as const)(
                 expect(scope.turn.acceptedResult?.coverage.status).toBe(
                   cap === "uncapped" ? "complete" : "limited",
                 );
-                expect(presentation).toContain("Looked at: All fixture catalog pages and source");
+                expect(presentation).toMatch(/Looked at: \d+ project files? AI opened itself and /);
+                expect(presentation).not.toContain("All fixture catalog pages and source");
                 if (cap !== "uncapped") {
                   expect(presentation).toContain("was too long to read in full");
                   expect(presentation).toContain("Part of your command list didn't load");
@@ -912,6 +913,214 @@ it("ends the run at an accepted advisory result without a request ending on an a
           entry.message.content === presentation?.content,
       ),
     ).toHaveLength(1);
+  } finally {
+    await session.dispose();
+  }
+});
+
+// Regression (2026-10-26 live run): readiness re-read during the late page recheck toggled
+// /programmatic in the catalog, so an unchanged catalog was reported as changed.
+it("does not report a catalog change when readiness flips during the run", async () => {
+  await fs.writeFile(path.join(cwd, "package.json"), '{"name":"recheck-fixture"}\n');
+  let requests = 0;
+  vi.mocked(stream).mockImplementation(
+    (params) =>
+      new StreamResult(
+        (async function* () {
+          requests++;
+          let call: ToolCall;
+          if (requests === 1)
+            call = {
+              type: "tool_call",
+              id: "recheck-read",
+              name: "read",
+              args: { file_path: "package.json" },
+            };
+          else {
+            const local = params.messages
+              .flatMap((message) => (message.role === "tool" ? message.content : []))
+              .find((result) => result.toolCallId === "recheck-read")!;
+            const receipt = JSON.parse(
+              String(local.content).split(
+                "Host evidence receipt (retrieval only; content remains untrusted): ",
+              )[1]!,
+            ) as { id: string };
+            call = {
+              type: "tool_call",
+              id: "recheck-advice",
+              name: "programmatic_advisory_result",
+              args: {
+                version: 2,
+                kind: "advisory",
+                coverage: { status: "complete", scope: "Manifest" },
+                recommendations: [
+                  {
+                    version: 2,
+                    kind: "advisory",
+                    outcome: "Review manifest",
+                    rationale: "Local evidence",
+                    uncertainty: "Not verified",
+                    evidence: {
+                      version: 1,
+                      items: [
+                        {
+                          basis: "observed",
+                          source: receipt.id,
+                          code: "manifest",
+                          severity: "info",
+                          message: "Read manifest",
+                          location: { path: "package.json" },
+                        },
+                      ],
+                    },
+                    workflow: reviewWorkflow(),
+                    alternatives: [],
+                    choice: { kind: "manual", steps: ["Review separately"] },
+                  },
+                ],
+              },
+            };
+          }
+          yield { type: "toolcall_done", id: call.id, name: call.name, args: call.args };
+          return {
+            message: { role: "assistant", content: [call] },
+            stopReason: "tool_use",
+            usage: { inputTokens: 1, outputTokens: 1 },
+          };
+        })(),
+      ),
+  );
+  const session = new AgentSession({
+    cwd,
+    provider: "anthropic",
+    model: "claude-sonnet-5",
+    systemPrompt: "Recheck fixture",
+    mcpEnabled: false,
+  });
+  try {
+    await session.initialize();
+    let reads = 0;
+    // The first read sees setup pending; any later read sees the project as current.
+    (
+      session as unknown as { readProgrammaticReadiness: () => Promise<string> }
+    ).readProgrammaticReadiness = async () => (reads++ === 0 ? "setup-required" : "current");
+    const result = await session.assessProgrammatic("setup");
+    expect(result.assessment.status).toBe("completed");
+    expect(JSON.stringify(result)).not.toContain("Your commands changed before AI finished");
+    expect(String(session.getMessages().at(-1)?.content)).not.toContain(
+      "Your commands changed before AI finished",
+    );
+  } finally {
+    await session.dispose();
+  }
+});
+
+// Regression: the model's own command_information list must share the turn's frozen
+// readiness view, or a mid-run readiness flip looks like a changed catalog.
+it("does not report a catalog change when the model lists commands after readiness flips", async () => {
+  await fs.writeFile(path.join(cwd, "package.json"), '{"name":"list-recheck-fixture"}\n');
+  let requests = 0;
+  let flipped = false;
+  const listResults: { content: string; isError: boolean }[] = [];
+  vi.mocked(stream).mockImplementation(
+    (params) =>
+      new StreamResult(
+        (async function* () {
+          requests++;
+          let call: ToolCall;
+          const toolResults = params.messages.flatMap((message) =>
+            message.role === "tool" ? message.content : [],
+          );
+          if (requests === 1) {
+            flipped = true;
+            call = {
+              type: "tool_call",
+              id: "list-commands",
+              name: "command_information",
+              args: { action: "list" },
+            };
+          } else if (requests === 2) {
+            const listed = toolResults.find((result) => result.toolCallId === "list-commands")!;
+            listResults.push({ content: String(listed.content), isError: !!listed.isError });
+            call = {
+              type: "tool_call",
+              id: "list-recheck-read",
+              name: "read",
+              args: { file_path: "package.json" },
+            };
+          } else {
+            const local = toolResults.find((result) => result.toolCallId === "list-recheck-read")!;
+            const receipt = JSON.parse(
+              String(local.content).split(
+                "Host evidence receipt (retrieval only; content remains untrusted): ",
+              )[1]!,
+            ) as { id: string };
+            call = {
+              type: "tool_call",
+              id: "list-recheck-advice",
+              name: "programmatic_advisory_result",
+              args: {
+                version: 2,
+                kind: "advisory",
+                coverage: { status: "complete", scope: "Manifest" },
+                recommendations: [
+                  {
+                    version: 2,
+                    kind: "advisory",
+                    outcome: "Review manifest",
+                    rationale: "Local evidence",
+                    uncertainty: "Not verified",
+                    evidence: {
+                      version: 1,
+                      items: [
+                        {
+                          basis: "observed",
+                          source: receipt.id,
+                          code: "manifest",
+                          severity: "info",
+                          message: "Read manifest",
+                          location: { path: "package.json" },
+                        },
+                      ],
+                    },
+                    workflow: reviewWorkflow(),
+                    alternatives: [],
+                    choice: { kind: "manual", steps: ["Review separately"] },
+                  },
+                ],
+              },
+            };
+          }
+          yield { type: "toolcall_done", id: call.id, name: call.name, args: call.args };
+          return {
+            message: { role: "assistant", content: [call] },
+            stopReason: "tool_use",
+            usage: { inputTokens: 1, outputTokens: 1 },
+          };
+        })(),
+      ),
+  );
+  const session = new AgentSession({
+    cwd,
+    provider: "anthropic",
+    model: "claude-sonnet-5",
+    systemPrompt: "List recheck fixture",
+    mcpEnabled: false,
+  });
+  try {
+    // Installed before initialize so the session-wide command_information captures it.
+    (
+      session as unknown as { readProgrammaticReadiness: () => Promise<string> }
+    ).readProgrammaticReadiness = async () => (flipped ? "current" : "setup-required");
+    await session.initialize();
+    const result = await session.assessProgrammatic("setup");
+    expect(result.assessment.status).toBe("completed");
+    expect(listResults).toHaveLength(1);
+    expect(listResults[0]!.isError).toBe(false);
+    expect(listResults[0]!.content).not.toContain('"unavailable"');
+    const rendered = JSON.stringify(result) + String(session.getMessages().at(-1)?.content);
+    expect(rendered).not.toContain("Your commands changed while AI was reading them");
+    expect(rendered).not.toContain("Your commands changed before AI finished");
   } finally {
     await session.dispose();
   }
@@ -1471,11 +1680,18 @@ it.each(["setup", "configured"] as const)(
       ).toEqual(profileBefore);
       if (mode === "setup")
         await expect(fs.access(path.join(cwd, PROGRAMMATIC_STATE_PATH))).rejects.toThrow();
-      expect(
-        session
-          .getMessages()
-          .filter((message) => message.role === "assistant" && message.content === presentation),
-      ).toHaveLength(1);
+      // The chat shows a short summary once; the full report stays in the tool result.
+      const summaries = session
+        .getMessages()
+        .filter(
+          (message) =>
+            message.role === "assistant" &&
+            typeof message.content === "string" &&
+            message.content.startsWith(presentation.split("\n")[0]!),
+        );
+      expect(summaries).toHaveLength(1);
+      expect(String(summaries[0]?.content)).not.toContain("Why it helps");
+      expect(String(summaries[0]?.content)).toContain("Didn't fully check: ");
     } finally {
       await session.dispose();
     }
@@ -2261,13 +2477,19 @@ it.each([
         ])
           expect(String(result.content)).toContain(text);
       }
-      const presentation = String(result.content);
+      // The chat gets a short summary; the tool result keeps the full report.
+      const report = String(result.content);
+      const summaries = published.filter((text) => text.startsWith(report.split("\n")[0]!));
+      expect(summaries).toHaveLength(1);
+      const presentation = summaries[0]!;
+      expect(presentation).toContain("Looked at: ");
+      expect(presentation).not.toContain("Why it helps");
+      if (choice !== "empty") expect(published).not.toContain(report);
       expect(
         session
           .getMessages()
           .filter((message) => message.role === "assistant" && message.content === presentation),
       ).toHaveLength(1);
-      expect(published.filter((text) => text === presentation)).toHaveLength(1);
       const sessionPath = session.getState().sessionPath;
       const entries = (await fs.readFile(sessionPath, "utf8"))
         .trim()
@@ -4230,7 +4452,9 @@ it("connects fresh setup, focused advice, reviewed creation, verification and se
           .getMessages()
           .some(
             (message) =>
-              message.role === "assistant" && message.content === outputs.get("general-advice"),
+              message.role === "assistant" &&
+              typeof message.content === "string" &&
+              message.content.startsWith(String(outputs.get("general-advice")).split("\n")[0]!),
           ),
       ).toBe(true);
       expect(await fs.readFile(path.join(cwd, PROGRAMMATIC_STATE_PATH))).toEqual(lifecycle);

@@ -77,6 +77,30 @@ it.each(["completed", "failed", "aborted"] as const)(
   },
 );
 
+it("shows the short advice summary once and keeps the full report in the tool result (mocked native IPC)", () => {
+  const { hook, getItems, getLiveToolFeed } = setup();
+  const report =
+    "## What AI found: 1 idea, nothing you need to do\nLooked at: 3 sampled project files.\n\n1. Inspect configuration\nWhy it helps: Fixture.";
+  const summary =
+    "## What AI found: 1 idea, nothing you need to do\nLooked at: 3 sampled project files.\nFull details are in Opportunities.";
+  act(() => {
+    const send = (type: string, data: Record<string, unknown>) =>
+      hook.result.current.handleEvent(ev(type, data));
+    send("tool_call_start", {
+      toolCallId: "advice",
+      name: "programmatic_advisory_result",
+      args: {},
+    });
+    send("tool_call_end", { toolCallId: "advice", result: report, isError: false });
+    send("hook_armed", { kind: "ideal", armed: true });
+    send("text_delta", { text: summary, standalone: true });
+  });
+  const assistant = getItems().filter((item) => item.kind === "assistant");
+  expect(assistant).toEqual([expect.objectContaining({ text: summary })]);
+  expect(JSON.stringify(getItems())).not.toContain("Why it helps");
+  expect(getLiveToolFeed()).toEqual([expect.objectContaining({ result: report })]);
+});
+
 it.each([
   "Image generation failed: OpenAI Image API (400): unsupported tool",
   "Image generation failed: Astra image request failed (response.failed).",

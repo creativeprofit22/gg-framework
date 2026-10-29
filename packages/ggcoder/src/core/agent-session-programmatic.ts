@@ -394,20 +394,23 @@ async function runProgrammaticAssessment(
 ): Promise<ProgrammaticAssessmentOutcome & { setupFacts?: unknown; scanFacts?: unknown }> {
   const input = parseProgrammaticAssessmentInput(focus ?? "");
   if (!input.success) throw new Error("Invalid assessment focus.");
+  // One readiness and registry view per turn: the late page recheck must list what the first page listed.
+  const turnReadiness = await sessionHost.session.readReadiness();
   if (mode === "configured") {
-    const guidance = programmaticReadinessGuidance(await sessionHost.session.readReadiness());
+    const guidance = programmaticReadinessGuidance(turnReadiness);
     if (guidance) throw new Error(guidance);
   }
   const signal = sessionHost.session.options().signal ?? new AbortController().signal;
-  const discovery = await discoverCommands(sessionHost.session.cwd(), {
+  const discoveryOptions = {
     workspaceActions: sessionHost.session.options().workspaceCommands,
     workspaceCaseInsensitive: sessionHost.session.options().workspaceCommandCaseInsensitive,
     registryActions:
       sessionHost.session.options().advertiseRegistryCommands === false
         ? []
         : registryCommandListings(sessionHost.session.slashCommands().getAll()),
-    readReadiness: () => sessionHost.session.readReadiness(),
-  });
+    readReadiness: async () => turnReadiness,
+  };
+  const discovery = await discoverCommands(sessionHost.session.cwd(), discoveryOptions);
   const evidenceAuthorization: AssessmentEvidenceAuthorization = {
     isAllowed: ({ name }) =>
       !options.disableTools &&
@@ -449,6 +452,9 @@ async function runProgrammaticAssessment(
   let setupFacts: unknown;
   let scanFacts: unknown;
   let coordinator: ProgrammaticAssessmentCoordinator | undefined;
+  const information = createCommandInformationTool(sessionHost.session.cwd(), discoveryOptions);
+  let previousInformation: AgentTool | undefined;
+  let turnInformation: AgentTool | undefined;
   try {
     for (const name of [...ADVISORY_READ_TOOLS, "programmatic_profile"]) {
       const deferred = sessionHost.tools.deferred().get(name);
@@ -460,6 +466,12 @@ async function runProgrammaticAssessment(
         sessionHost.tools.registered().set(name, sessionHost.tools.guard(deferred));
         promoted.add(name);
       }
+    }
+    // The model's own list calls must see this turn's discovery view, not live readiness.
+    previousInformation = sessionHost.tools.registered().get("command_information");
+    if (previousInformation) {
+      turnInformation = sessionHost.tools.guard(information);
+      sessionHost.tools.registered().set("command_information", turnInformation);
     }
     sessionHost.tools.reconcile();
     coordinator = new ProgrammaticAssessmentCoordinator(
@@ -481,15 +493,6 @@ async function runProgrammaticAssessment(
       sessionHost.boundaries.programmaticProfile()?.cancel();
       sessionHost.boundaries.setSetupInspection(new ProgrammaticSetupInspection(true));
     }
-    const information = createCommandInformationTool(sessionHost.session.cwd(), {
-      workspaceActions: sessionHost.session.options().workspaceCommands,
-      workspaceCaseInsensitive: sessionHost.session.options().workspaceCommandCaseInsensitive,
-      registryActions:
-        sessionHost.session.options().advertiseRegistryCommands === false
-          ? []
-          : registryCommandListings(sessionHost.session.slashCommands().getAll()),
-      readReadiness: () => sessionHost.session.readReadiness(),
-    });
     const freshInformation: typeof information = {
       ...information,
       execute: async (args, toolContext) => {
@@ -639,6 +642,11 @@ ${content}
     if (previousResult)
       sessionHost.tools.registered().set("programmatic_advisory_result", previousResult);
     else sessionHost.tools.registered().delete("programmatic_advisory_result");
+    if (
+      previousInformation &&
+      sessionHost.tools.registered().get("command_information") === turnInformation
+    )
+      sessionHost.tools.registered().set("command_information", previousInformation);
     for (const name of promoted)
       if (
         !sessionHost.tools.searchedPromoted().has(name) &&

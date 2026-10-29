@@ -316,7 +316,9 @@ async function assess(
     });
     expect(presentation).toContain("Didn't fully check:");
     expect(presentation).toContain("Suggestions only. Nothing runs or changes without your OK.");
-    expect(presentation).toContain(fixture.coverage);
+    // Model coverage stays in history only; the shown line is written from host facts.
+    expect(presentation).not.toContain(fixture.coverage);
+    expect(presentation).toMatch(/Looked at: \d+ sampled project files?, /);
     for (const need of fixture.needs) {
       for (const text of [need.outcome, need.rationale]) expect(presentation).toContain(text);
       if (need.scope) expect(presentation).toContain(`Where: ${need.scope}`);

@@ -122,6 +122,7 @@ const record = (value: unknown): Record<string, unknown> =>
     : {};
 const fingerprint = (value: unknown) =>
   createHash("sha256").update(JSON.stringify(value)).digest("hex");
+const count = (value: number, noun: string) => `${value} ${noun}${value === 1 ? "" : "s"}`;
 const safeText = (value: string) =>
   Array.from(value)
     .filter((character) => {
@@ -251,9 +252,21 @@ export interface ProgrammaticAdvisoryPolicy {
 }
 
 /** Turn-local bookkeeping only. Semantic assessment remains in the existing model loop. */
+function commandOptions(recommendation: Recommendation) {
+  const choice = recommendation.choice;
+  return [
+    ...(choice.kind === "reuse-command" || choice.kind === "extend-command" ? [choice] : []),
+    ...recommendation.alternatives.filter((option) => option.availability !== undefined),
+  ];
+}
+
 export class ProgrammaticAdvisoryTurn {
   readonly limitations = new Set<string>();
-  private readonly pages = new Map<number, { hash: string; next: number | null; total: number }>();
+  private readonly pages = new Map<
+    number,
+    { hash: string; next: number | null; total: number; entries: number }
+  >();
+  private sample = { listed: 0, excerpted: 0 };
   private readonly snapshots = new Map<string, ProgrammaticCommandSnapshotV1>();
   /** Host-delivered item families for this turn: family id → member paths. */
   private readonly families = new Map<string, ReadonlySet<string>>();
@@ -296,6 +309,8 @@ export class ProgrammaticAdvisoryTurn {
   readonly mode: "setup" | "configured";
   private readonly setup?: ProgrammaticSetupInspection;
   private accepted?: Assessment;
+  /** The model's own coverage claim, kept for history only and never rendered. */
+  reportedCoverage?: Assessment["coverage"];
   get acceptedResult(): Assessment | undefined {
     return this.accepted && structuredClone(this.accepted);
   }
@@ -398,7 +413,12 @@ export class ProgrammaticAdvisoryTurn {
       this.limitations.add(ADVISORY_LIMITATIONS.catalogChanged);
     if (page.entries.some((entry) => entry.metadataLimited || entry.bodyUnavailableReason))
       this.limitations.add(ADVISORY_LIMITATIONS.commandsUnsupported);
-    this.pages.set(page.offset, { hash, next: page.nextOffset, total: page.total });
+    this.pages.set(page.offset, {
+      hash,
+      next: page.nextOffset,
+      total: page.total,
+      entries: page.entries.length,
+    });
   }
   observeCommand(output: string): void {
     try {
@@ -418,6 +438,46 @@ export class ProgrammaticAdvisoryTurn {
     } catch {
       this.limitations.add(ADVISORY_LIMITATIONS.commandsUnreadable);
     }
+  }
+  /** Host facts about the initial sample, used only for the plain coverage line. */
+  recordSample(sample: { listed: number; excerpted: number }): void {
+    this.sample = { listed: sample.listed, excerpted: sample.excerpted };
+  }
+  /** Plain coverage from host facts only; model coverage text is never shown. */
+  hostCoverage(limitations: ReadonlySet<string>): Assessment["coverage"] {
+    const read = new Set<string>();
+    for (const receipt of this.evidence.list())
+      for (const location of localLocations(receipt))
+        if (hasLocalInspection(receipt, location)) read.add(location.path);
+    const seen = [...this.pages.values()].reduce((sum, page) => sum + page.entries, 0);
+    const total = this.pages.get(0)?.total ?? 0;
+    const unread = Math.max(0, this.sample.listed - this.sample.excerpted);
+    const parts = [
+      ...(this.sample.excerpted ? [count(this.sample.excerpted, "sampled project file")] : []),
+      `${count(read.size, `${this.sample.excerpted ? "more " : ""}project file`)} AI opened itself`,
+      total ? `${seen} of ${count(total, "command")} in your list` : "no commands in your list",
+      ...(this.snapshots.size ? [`the full text of ${count(this.snapshots.size, "command")}`] : []),
+    ];
+    const scope = `${parts.slice(0, -1).join(", ")} and ${parts.at(-1)}.${
+      unread ? ` ${count(unread, "listed file")} ${unread === 1 ? "wasn't" : "weren't"} read.` : ""
+    }`;
+    if (!limitations.size) return { status: "complete", scope };
+    const lines = [...limitations];
+    const kept: string[] = [];
+    let length = 0;
+    for (const [index, line] of lines.entries()) {
+      const rest = lines.length - index - 1;
+      const tail = rest ? ` And ${count(rest, "more limit")}.`.length : 0;
+      if (length + line.length + 1 + tail > 4_000) break;
+      kept.push(line);
+      length += line.length + 1;
+    }
+    const more = lines.length - kept.length;
+    return {
+      status: "limited",
+      scope,
+      reason: [...kept, ...(more ? [`And ${count(more, "more limit")}.`] : [])].join(" "),
+    };
   }
   private fullCoverage(): boolean {
     let offset = 0;
@@ -465,35 +525,31 @@ export class ProgrammaticAdvisoryTurn {
       const result = programmaticAssessmentResultV2Schema.parse(input);
       if (result.recommendations.length > ADVISORY_LIMITS.recommendations)
         throw new Error("At most 10 advisory recommendations are permitted.");
-      for (const [offset, page] of this.pages) {
-        try {
-          if (fingerprint(await checks.page(offset)) !== page.hash)
-            this.limitations.add(ADVISORY_LIMITATIONS.catalogChangedLate);
-        } catch {
-          this.limitations.add(ADVISORY_LIMITATIONS.catalogRecheckFailed);
-        }
-        checks.signal.throwIfAborted();
-      }
-      if (!this.fullCoverage()) this.limitations.add(ADVISORY_LIMITATIONS.catalogIncomplete);
-      if (!this.evidence.list().some((receipt) => hasLocalInspection(receipt)))
-        this.limitations.add(ADVISORY_LIMITATIONS.noProjectFiles);
-      for (const recommendation of result.recommendations) {
+      // Validate every rule first so one corrected resubmission is enough.
+      const failures: string[] = [];
+      for (const [index, recommendation] of result.recommendations.entries()) {
+        const fail = (message: string) => {
+          const line = `Idea ${index + 1}: ${message}`;
+          if (!failures.includes(line)) failures.push(line);
+        };
         for (const item of recommendation.evidence.items) {
           if ("kind" in item) {
             if (!deliveredExternalReceipt(this.evidence.list(), item))
-              throw new Error(
+              fail(
                 "External provenance must match an inspected host receipt; search leads and unsupplied revisions are not evidence.",
               );
             continue;
           }
           if (item.basis === "assumed" && item.source === "assumption") continue;
           const receipt = this.evidence.get(item.source);
-          if (!receipt)
-            throw new Error(
+          if (!receipt) {
+            fail(
               "Evidence source must reference a retained host receipt ID (or an explicit assumption).",
             );
+            continue;
+          }
           if (item.basis === "observed" && receipt.status !== "retrieved")
-            throw new Error("Search leads and failed calls cannot substantiate observed evidence.");
+            fail("Search leads and failed calls cannot substantiate observed evidence.");
           const cited = item.location;
           if (
             cited &&
@@ -507,7 +563,7 @@ export class ProgrammaticAdvisoryTurn {
                     (cited.endLine ?? cited.startLine) <= location.endLine)),
             )
           )
-            throw new Error("Evidence location was not inspected by the referenced tool call.");
+            fail("Evidence location was not inspected by the referenced tool call.");
         }
         const choice = recommendation.choice;
         const localSupport = recommendation.evidence.items.some(
@@ -516,50 +572,74 @@ export class ProgrammaticAdvisoryTurn {
             item.basis !== "assumed" &&
             hasLocalInspection(this.evidence.get(item.source), item.location),
         );
-        const commands = [
-          ...(choice.kind === "reuse-command" || choice.kind === "extend-command" ? [choice] : []),
-          ...recommendation.alternatives.filter((option) => option.availability !== undefined),
-        ];
+        const commands = commandOptions(recommendation);
         if (commands.some((option) => option.availability?.status === "available") && !localSupport)
-          throw new Error(
+          fail(
             "Command suitability requires inspected local prerequisite evidence, not its prompt body alone.",
           );
         if (POSITIVE_ADVISORY_CHOICES.includes(choice.kind) && !localSupport)
-          throw new Error(
+          fail(
             "Positive automation recommendations require inspected local workflow evidence, not assumptions, metadata or external examples alone.",
           );
         if (choice.kind === "generate-from-reference") {
           const { generator } = choice;
           const family = this.families.get(generator.familyId);
           if (!family)
-            throw new Error(
+            fail(
               "Generation needs a family detected by the host setup inspection in this turn; for a too-small or undetected group, use needs-more-evidence or another choice.",
             );
-          if (generator.members.some((member) => !family.has(member)))
-            throw new Error(
+          else if (generator.members.some((member) => !family.has(member)))
+            fail(
               "Every generator member must belong to the cited detected family; do not mix items from different groups.",
             );
           if (
             generator.reference.kind === "existing-member" &&
             !inspectedWithin(this.evidence.list(), generator.reference.path)
           )
-            throw new Error(
+            fail(
               "An existing reference member must be inspected in this turn; otherwise propose building one by hand first.",
             );
         }
         if (choice.kind === "extend-command" && choice.availability.status !== "available")
-          throw new Error(
+          fail(
             "Extension requires an inspected base; use needs-more-evidence for an unresolved or unreadable command.",
           );
-        // One delivery/freshness boundary for selected targets and concrete alternatives.
-        // Receipt provenance does not prove the model's explanation of prerequisite relevance.
         for (const option of commands) {
           if (option.availability?.status !== "available") continue;
-          const snapshot = option.availability.snapshot;
-          if (!this.snapshots.has(fingerprint(snapshot)))
-            throw new Error(
+          if (!this.snapshots.has(fingerprint(option.availability.snapshot)))
+            fail(
               "Resolve the exact candidate body before asserting availability; host hashes cannot be supplied by the model.",
             );
+        }
+      }
+      if (failures.length === 1) throw new Error(failures[0]);
+      if (failures.length)
+        throw new Error(
+          `Fix all ${failures.length} problems below, then resubmit once:\n${failures
+            .map((line, index) => `${index + 1}. ${line}`)
+            .join("\n")}`,
+        );
+      // Freshness findings stay local until acceptance so a rejected or aborted
+      // attempt cannot leave limitations behind for the next one.
+      const limitations = new Set(this.limitations);
+      for (const [offset, page] of this.pages) {
+        try {
+          if (fingerprint(await checks.page(offset)) !== page.hash)
+            limitations.add(ADVISORY_LIMITATIONS.catalogChangedLate);
+        } catch {
+          limitations.add(ADVISORY_LIMITATIONS.catalogRecheckFailed);
+        }
+        checks.signal.throwIfAborted();
+      }
+      if (!this.fullCoverage()) limitations.add(ADVISORY_LIMITATIONS.catalogIncomplete);
+      if (!this.evidence.list().some((receipt) => hasLocalInspection(receipt)))
+        limitations.add(ADVISORY_LIMITATIONS.noProjectFiles);
+      // One delivery/freshness boundary for selected targets and concrete alternatives.
+      // Receipt provenance does not prove the model's explanation of prerequisite relevance.
+      for (const recommendation of result.recommendations) {
+        for (const option of commandOptions(recommendation)) {
+          if (option.availability?.status !== "available") continue;
+          const snapshot = option.availability.snapshot;
           const current = await checks.snapshot(snapshot).catch(() => false);
           checks.signal.throwIfAborted();
           if (!current) {
@@ -568,29 +648,23 @@ export class ProgrammaticAdvisoryTurn {
               command: snapshot.command,
               reason: "Command identity/body changed or cannot be safely resolved at submission.",
             };
-            this.limitations.add(ADVISORY_LIMITATIONS.commandChanged);
+            limitations.add(ADVISORY_LIMITATIONS.commandChanged);
           }
         }
       }
       checks.signal.throwIfAborted();
       if (this.closed) throw new Error("Advisory scope has ended.");
-      if (this.limitations.size)
-        result.coverage = {
-          status: "limited",
-          scope: result.coverage.scope,
-          reason: [
-            result.coverage.status === "limited" ? result.coverage.reason : "",
-            ...this.limitations,
-          ]
-            .filter(Boolean)
-            .join(" ")
-            .slice(0, 4_000),
-        };
+      const reported = structuredClone(result.coverage);
+      if (result.coverage.status === "limited" && !limitations.size)
+        limitations.add(ADVISORY_LIMITATIONS.modelLimited);
+      result.coverage = this.hostCoverage(limitations);
       if (JSON.stringify(result).length > ADVISORY_LIMITS.resultChars)
         throw new Error(
           "Validated advisory result exceeds 64,000 characters including host limitations.",
         );
+      for (const line of limitations) this.limitations.add(line);
       this.accepted = structuredClone(result);
+      this.reportedCoverage = reported;
       this.submitted = true;
       return renderAdvisoryResult(result);
     } finally {
@@ -664,6 +738,8 @@ export const ADVISORY_LIMITATIONS = {
     "AI couldn't confirm a web page's address, so it didn't credit it as a source.",
   examplesUnavailable:
     "The code-example search isn't set up, so AI didn't compare your project with outside examples. Nothing was installed.",
+  modelLimited:
+    "AI said it couldn't check everything it wanted to, so it may have missed something.",
   hostFacts: (toolName: string) =>
     `${toolLabel(toolName)} didn't return readable results, so AI worked without them. Nothing was retried.`,
 } as const;
@@ -789,6 +865,30 @@ function commandLines(recommendation: Recommendation): string[] {
       ? ["It needs a GG app feature to run, so it can't run from this chat."]
       : []),
   ];
+}
+
+/** Short chat summary; the full report stays in the tool result and Opportunities. */
+export function renderAdvisorySummary(
+  result: Assessment,
+  limitations: readonly string[],
+  detailsInOpportunities = false,
+): string {
+  const lines = [
+    headline(result),
+    "Suggestions only. Nothing runs or changes without your OK.",
+    `Looked at: ${result.coverage.scope}`,
+  ];
+  const [first] = limitations;
+  if (result.coverage.status === "limited" && first)
+    lines.push(
+      `Didn't fully check: ${first}${
+        limitations.length > 1 ? ` And ${count(limitations.length - 1, "more limit")}.` : ""
+      }`,
+    );
+  if (!result.recommendations.length)
+    lines.push("AI found nothing worth automating in the parts it looked at.");
+  else if (detailsInOpportunities) lines.push("Full details are in Opportunities.");
+  return safeText(lines.join("\n"));
 }
 
 /** Plain transcript content, never opportunities, run controls or approval objects. */

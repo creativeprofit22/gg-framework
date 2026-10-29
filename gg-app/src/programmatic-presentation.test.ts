@@ -138,6 +138,12 @@ describe("programmatic presentation", () => {
     );
   });
 
+  it("shows the host's 'what was looked at' line unchanged in the commands row", () => {
+    const scope =
+      "12 sampled project files, 3 more project files AI opened itself and 40 of 40 commands in your list. 2 listed files weren't read.";
+    expect(plainLimitation(scope)).toBe(scope);
+  });
+
   it("words every tool exactly like the backend plainToolLimitation()", () => {
     // Copied from packages/ggcoder/src/core/programmatic/advisory.ts TOOL_LABELS
     // and advisory.test.ts ("words host limitations…"); keep both in sync.

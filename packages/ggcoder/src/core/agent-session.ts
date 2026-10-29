@@ -640,6 +640,8 @@ export interface AgentSessionOptions {
   approveToolExecution?: (name: string, args: unknown, signal?: AbortSignal) => Promise<boolean>;
   /** Host freshness check after approval/receipt waits, immediately before guarded dispatch. */
   validateToolExecution?: () => Promise<void>;
+  /** The app shows full advice in Opportunities, so the chat summary points there. */
+  advisoryDetailsInOpportunities?: boolean;
   /** Host-provided broadcast hook fired after the `tasks` tool adds, completes, or removes a task. */
   onTasksChanged?: () => void;
   /** Mode-owned completion policy; absent in Coder/chat/worker sessions. */

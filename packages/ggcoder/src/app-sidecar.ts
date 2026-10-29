@@ -1757,6 +1757,7 @@ async function createSession(
       workspaceCommands: DESKTOP_COMMAND_DISCOVERY_OPTIONS.workspaceActions,
       reservedCommandIdentities: DESKTOP_COMMAND_DISCOVERY_OPTIONS.reservedCommandIdentities,
       advertiseRegistryCommands: false,
+      advisoryDetailsInOpportunities: true,
       ...(active ?? {}),
       sessionId: sessionPath,
       signal: abort.signal,

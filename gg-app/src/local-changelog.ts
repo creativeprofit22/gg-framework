@@ -53,10 +53,19 @@ export const CURRENT_LOCAL_RELEASE_NOTES = requireCurrentReleaseNotes(releaseNot
 /** Newest first. Maintained only by the Local Fork release flow. */
 export const LOCAL_CHANGELOG: LocalChangelogEntry[] = [
   {
-    id: "local-2026-10-25-upstream-0963-pixel-wake-bubble",
+    id: "local-2026-10-29-upstream-0975-gg-world",
     label: CURRENT_LOCAL_RELEASE_NOTES.label,
     date: CURRENT_LOCAL_RELEASE_NOTES.date,
     items: CURRENT_LOCAL_RELEASE_NOTES.sections.flatMap(({ items }) => items),
+  },
+  {
+    id: "local-2026-10-25-upstream-0963-pixel-wake-bubble",
+    label: "Upstream 0.96.3, with a pixel-art greeting",
+    date: "2026-10-25",
+    items: [
+      "The critter that greets you in a fresh session now talks in chunky pixel art. Its speech bubble uses the same `m5x7` lettering and stepped tail as the `GG Royale` critters, and the critter stands at its true size with a shadow underneath instead of looking squished. Your Local Fork's starting tip and starter buttons still sit just below it.",
+      "Your built-in malware guard stays current on `Windows`. A quick refresh of the daily threat feed could leave GG holding the previous day's list, so a newly flagged package might slip through. GG now notices every refresh, so fresh warnings apply right away.",
+    ],
   },
   {
     id: "local-2026-10-25-upstream-0962-one-move-edits",

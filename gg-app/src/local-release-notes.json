@@ -1,13 +1,14 @@
 {
   "schemaVersion": 1,
-  "date": "2026-10-25",
-  "label": "Upstream 0.96.3, with a pixel-art greeting",
+  "date": "2026-10-29",
+  "label": "Upstream 0.97.5, with GG World",
   "sections": [
     {
-      "title": "From upstream 0.96.3",
+      "title": "From upstream 0.97.5",
       "items": [
-        "The critter that greets you in a fresh session now talks in chunky pixel art. Its speech bubble uses the same `m5x7` lettering and stepped tail as the `GG Royale` critters, and the critter stands at its true size with a shadow underneath instead of looking squished. Your Local Fork's starting tip and starter buttons still sit just below it.",
-        "Your built-in malware guard stays current on `Windows`. A quick refresh of the daily threat feed could leave GG holding the previous day's list, so a newly flagged package might slip through. GG now notices every refresh, so fresh warnings apply right away."
+        "Say hello to `GG World`, the 3D hangout that replaces GG Royale. Open it with the `World` button on Home or the `World` key on the deck: walk around with other players, chat, grab a drink, and sit at an in-game PC that opens your own Supah Coder. `Back` always brings you home. An optional online save keeps your progress, wardrobe and level, and it only switches on after you say yes.",
+        "Big, ambitious tasks no longer get stuck on `retrying`. When Claude takes a long, silent think before a big answer, GG now lets it finish, for up to `30 minutes`, instead of cutting it off and starting over, so you get the result instead of a spinner.",
+        "Your agent travels lighter. It keeps code comments to one short line, only where the why isn't obvious, and everyday work now loads just the skills that measurably changed results: `durable` for anything that could lose data and `compliance-guard` for privacy and tracking. The rest, two code-search tools that went unused, and the old `/setup-skills` workflow are gone, so runs spend fewer steps on detours."
       ]
     }
   ]

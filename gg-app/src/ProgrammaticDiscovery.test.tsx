@@ -16,6 +16,14 @@ import { ProgrammaticChat } from "./ProgrammaticChat";
 import { assessmentDisplay, discoveryResponse } from "./programmatic-discovery-state";
 import { isProgrammaticAssessment } from "@kenkaiiii/gg-core/programmatic-assessment-contract";
 import { emptyDiscoveryAssessment } from "./programmatic-empty-discovery.fixture";
+import {
+  areaAssessment,
+  docsFind,
+  finishSearch,
+  liveAreas,
+  progress,
+  startSearch,
+} from "./programmatic-area.fixture";
 import { recommendationHistoryFixture } from "../scripts/recommendation-history-fixture.mjs";
 
 afterEach(cleanup);
@@ -870,4 +878,48 @@ it("does not confuse empty completed discovery with legacy detail or disabled na
   expect(
     screen.getByText("Why you can't review it: This needs a change to the GG app itself"),
   ).toBeTruthy();
+});
+
+it("shows early finds as plain Still checking cards until the final ideas replace them", () => {
+  const props = fixture();
+  let state = progress(startSearch(props.state), "areas", liveAreas("reading", "waiting"));
+  const { rerender } = render(<ProgrammaticChat {...props} state={state} />);
+  openStep("Review");
+  const early = () => screen.queryByRole("region", { name: "Early finds" });
+  const section = early()!;
+  expect(within(section).getByText(docsFind.need)).toBeTruthy();
+  expect(within(section).getByText("Still checking")).toBeTruthy();
+  expect(within(section).getByText(docsFind.where)).toBeTruthy();
+  expect(within(section).getByText(docsFind.unsure)).toBeTruthy();
+  expect(within(section).getByText(/These become ideas you can review/)).toBeTruthy();
+  // Never reviewable: nothing inside can be pressed or selected.
+  expect(within(section).queryByRole("button")).toBeNull();
+  expect(section.querySelector("a, input, [tabindex]")).toBeNull();
+  // The coverage line waits for the finished search.
+  expect(screen.queryByText(/areas fully/)).toBeNull();
+  state = finishSearch(state, areaAssessment("completed", [candidate]));
+  rerender(<ProgrammaticChat {...props} state={state} />);
+  expect(early()).toBeNull();
+  expect(screen.getByText(candidate.outcome)).toBeTruthy();
+  expect(screen.getByText("Read 1 of 3 areas fully. 1 read partly. 1 not read.")).toBeTruthy();
+  expect(props.onAction).not.toHaveBeenCalled();
+});
+
+it("keeps early finds labelled Stopped before checking after Stop, and hides them after an empty finish", () => {
+  const props = fixture();
+  const running = progress(startSearch(props.state), "areas", liveAreas("reading", "waiting"));
+  const stopped = finishSearch(
+    progress(running, "areas", liveAreas("stopped", "stopped")),
+    areaAssessment("cancelled", null),
+  );
+  const { rerender } = render(<ProgrammaticChat {...props} state={stopped} />);
+  openStep("Review");
+  const section = screen.getByRole("region", { name: "Early finds" });
+  expect(within(section).getByText(/Stopped before checking/)).toBeTruthy();
+  expect(within(section).getByText(docsFind.need)).toBeTruthy();
+  expect(within(section).queryByRole("button")).toBeNull();
+  const empty = finishSearch(running, areaAssessment("completed", []));
+  rerender(<ProgrammaticChat {...props} state={empty} />);
+  expect(screen.queryByRole("region", { name: "Early finds" })).toBeNull();
+  expect(props.onAction).not.toHaveBeenCalled();
 });

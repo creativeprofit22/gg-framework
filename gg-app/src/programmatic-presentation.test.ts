@@ -1,12 +1,18 @@
 import { describe, expect, it } from "vitest";
 import type { DiscoveryChoice } from "@kenkaiiii/gg-core/programmatic-recommendation-contract";
+import type { ProgrammaticAreaProgressStatus } from "@kenkaiiii/gg-core/programmatic-assessment-contract";
 import {
+  AREA_PROGRESS,
+  AREA_STATUS_ICONS,
   IDEA_VERDICTS,
   PAST_IDEA_DECISION_LABELS,
   REVIEW_GROUPS,
   STEP_ACTIONS,
   STEP_COPY,
   STEP_STATE_WORDS,
+  areaAnnouncement,
+  areaCoverageLine,
+  areaStatusWord,
   ideaVerdict,
   opportunityStatusLine,
   plainLimitation,
@@ -153,6 +159,7 @@ describe("programmatic presentation", () => {
       ["programmatic_profile", "Reading your check setup"],
       ["command_information", "Reading your commands"],
       ["research_corpus", "Searching code examples"],
+      ["git_history", "Reading project history"],
       ["web_fetch", "Opening a web page"],
       ["web_search", "Searching the web"],
       ["read", "Reading project files"],
@@ -179,5 +186,49 @@ describe("programmatic presentation", () => {
     expect(plainLimitation("some_new_tool: tool error.")).toBe(
       "One of AI's checks failed, so this search may have missed something.",
     );
+  });
+
+  it("words every area state, with an icon for each and plain-text announcements", () => {
+    const statuses = Object.keys({
+      waiting: true,
+      reading: true,
+      found: true,
+      partly: true,
+      failed: true,
+      stopped: true,
+    } satisfies Record<ProgrammaticAreaProgressStatus, true>) as ProgrammaticAreaProgressStatus[];
+    expect(Object.keys(AREA_STATUS_ICONS).sort()).toEqual([...statuses].sort());
+    const find = { need: "n", where: "w", unsure: "u" };
+    expect(statuses.map((status) => areaStatusWord({ status }))).toEqual([
+      "Waiting",
+      "Reading",
+      "No ideas",
+      "No ideas · read partly",
+      "Couldn't finish",
+      "Stopped",
+    ]);
+    expect(areaStatusWord({ status: "found", finds: [find] })).toBe("1 idea");
+    expect(areaStatusWord({ status: "partly", finds: [find, find] })).toBe("2 ideas · read partly");
+    const area = { id: "a", label: "packages/core" };
+    expect(areaAnnouncement({ ...area, status: "found", finds: [find, find] })).toBe(
+      "packages/core: 2 ideas",
+    );
+    expect(areaAnnouncement({ ...area, status: "failed" })).toBe("packages/core: couldn't finish");
+    expect(areaAnnouncement({ ...area, status: "reading" })).toBeNull();
+    expect(AREA_PROGRESS.retryName("packages/core")).toBe("Try packages/core again");
+    expect(AREA_PROGRESS.retryRefused).toBe(
+      "Project files changed since this search. Search again instead.",
+    );
+    for (const value of Object.values(AREA_PROGRESS))
+      if (typeof value === "string") expect(value.trim()).toBe(value);
+  });
+
+  it("states area coverage with only the parts that apply", () => {
+    expect(areaCoverageLine([{ status: "searched" }, { status: "searched" }])).toBe(
+      "Read 2 of 2 areas fully.",
+    );
+    expect(
+      areaCoverageLine([{ status: "searched" }, { status: "partly" }, { status: "not-searched" }]),
+    ).toBe("Read 1 of 3 areas fully. 1 read partly. 1 not read.");
   });
 });

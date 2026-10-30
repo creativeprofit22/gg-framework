@@ -153,6 +153,8 @@ import {
 import { ADVISORY_ONLY_TOOL_NAMES, partitionToolsByTier } from "../tools/tool-tiers.js";
 import type { CommandCreationReviewer } from "./programmatic/command-creation.js";
 import type { ProgrammaticAssessmentOutcome } from "./programmatic/assessment.js";
+import type { AreaSearchCache } from "./programmatic/area-progress.js";
+import type { ProgrammaticChatRetryArea } from "@kenkaiiii/gg-core/programmatic-chat-contract";
 import type { ProgrammaticSetupInspection } from "./programmatic/setup-inspection.js";
 import type { DirectCommandExecutor } from "./programmatic/execution.js";
 import type { BackgroundProcess } from "./process-manager.js";
@@ -1006,6 +1008,7 @@ export class AgentSession {
     this.programmaticProfile?.cancel();
     this.discoveryReview?.close();
     this.discoveryCandidates = null;
+    this.areaSearchCache = null;
     this.setupInspection?.close();
     this.lspManager?.clearPendingDiagnostics();
     void this.subAgentManager?.interruptAll();
@@ -2357,6 +2360,8 @@ export class AgentSession {
     sequence: number;
     records: NonNullable<ProgrammaticAssessmentOutcome["discoveryRecords"]>;
   } | null = null;
+  // Local Fork: session-memory inputs for a one-area idea-search retry.
+  private areaSearchCache: AreaSearchCache | null = null;
 
   reviewDiscoveryCandidate(request: DiscoveryReviewRequest): Promise<DiscoveryReview> {
     return reviewDiscoveryCandidate(this.programmaticHost(), request);
@@ -2373,6 +2378,7 @@ export class AgentSession {
       onAccepted?: () => void | Promise<void>;
       meta?: PromptMeta;
       assessmentRequestId?: string;
+      retryArea?: ProgrammaticChatRetryArea;
     } = {},
   ): Promise<ProgrammaticAssessmentOutcome & { setupFacts?: unknown; scanFacts?: unknown }> {
     return assessProgrammatic(this.programmaticHost(), mode, focus, provenance, options);
@@ -2426,6 +2432,10 @@ export class AgentSession {
         candidates: () => this.discoveryCandidates,
         setCandidates: (candidates) => {
           this.discoveryCandidates = candidates;
+        },
+        areaSearch: () => this.areaSearchCache,
+        setAreaSearch: (cache) => {
+          this.areaSearchCache = cache;
         },
       },
       session: {
@@ -4853,6 +4863,7 @@ export class AgentSession {
     this.programmaticProfile?.cancel();
     this.discoveryReview?.close();
     this.discoveryCandidates = null;
+    this.areaSearchCache = null;
     this.setupInspection?.close();
     const finish = this.beforeConversationTransition?.(
       preserveConversation ? "checkpoint" : "reset",
@@ -5024,6 +5035,7 @@ export class AgentSession {
     this.programmaticProfile?.cancel();
     this.discoveryReview?.close();
     this.discoveryCandidates = null;
+    this.areaSearchCache = null;
     this.setupInspection?.close();
     const finish = this.beforeConversationTransition?.("restore");
     try {
@@ -5048,6 +5060,7 @@ export class AgentSession {
     this.programmaticProfile?.cancel();
     this.discoveryReview?.close();
     this.discoveryCandidates = null;
+    this.areaSearchCache = null;
     this.setupInspection?.close();
     const finish = this.beforeConversationTransition?.(retain ? "checkpoint" : "restore");
     try {
@@ -5075,6 +5088,7 @@ export class AgentSession {
     this.programmaticProfile?.cancel();
     this.discoveryReview?.close();
     this.discoveryCandidates = null;
+    this.areaSearchCache = null;
     this.setupInspection?.close();
     const finish = this.beforeConversationTransition?.("history");
     try {
@@ -6975,6 +6989,7 @@ export class AgentSession {
     this.programmaticProfile?.dispose();
     this.discoveryReview?.close();
     this.discoveryCandidates = null;
+    this.areaSearchCache = null;
     this.setupInspection?.close();
     this.advisoryTurn?.close();
     this.advisoryTurn = undefined;

@@ -76,6 +76,8 @@ export const AUTO_LOADED_TOOL_NAMES: ReadonlySet<string> = new Set([
   // beside `steroids` made ordinary turns refuse corpus add/refresh as
   // "read-only tools only", so ordinary turns only see `steroids`.
   "research_corpus",
+  // Promoted only by the programmatic assessment, like research_corpus.
+  "git_history",
 ]);
 
 /**
@@ -85,7 +87,10 @@ export const AUTO_LOADED_TOOL_NAMES: ReadonlySet<string> = new Set([
  * `research_corpus` is a read-only facade; offering it in ordinary turns made
  * corpus add/refresh requests pick it over `steroids` and fail.
  */
-export const ADVISORY_ONLY_TOOL_NAMES: ReadonlySet<string> = new Set(["research_corpus"]);
+export const ADVISORY_ONLY_TOOL_NAMES: ReadonlySet<string> = new Set([
+  "research_corpus",
+  "git_history",
+]);
 
 export const DEFERRED_TOOL_NAMES: readonly string[] = [
   "task_output",
@@ -109,6 +114,7 @@ export const DEFERRED_TOOL_NAMES: readonly string[] = [
   "programmatic_command",
   "command_information",
   "research_corpus",
+  "git_history",
   "screenshot",
   "debug",
   "generate_image",

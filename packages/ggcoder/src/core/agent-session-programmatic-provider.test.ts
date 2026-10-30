@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import { readFileSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import os from "node:os";
 import { createHash } from "node:crypto";
 import { getEventListeners } from "node:events";
@@ -40,6 +41,8 @@ vi.mock("@kenkaiiii/gg-ai", async (importOriginal) => ({
 function hostFacts(messages: Parameters<typeof stream>[0]["messages"]): {
   setupFacts: Record<string, unknown>;
   scanFacts: Record<string, unknown>;
+  areaMap: Record<string, unknown>;
+  areaMapOmitted?: Record<string, number>;
 } {
   const prompt = [...messages]
     .reverse()
@@ -259,6 +262,7 @@ it.each([
     const delivered: string[] = [];
     let requests = 0;
     const factsCalls: string[] = [];
+    const areaMaps: Record<string, unknown>[] = [];
     const session = new AgentSession({
       cwd,
       provider: "anthropic",
@@ -284,6 +288,7 @@ it.each([
                   results.set(result.toolCallId, String(result.content));
             requests++;
             const facts = hostFacts(params.messages);
+            areaMaps.push(facts.areaMap);
             results.set(
               "discovery-facts",
               JSON.stringify(mode === "setup" ? facts.setupFacts : facts.scanFacts),
@@ -307,6 +312,21 @@ it.each([
       expect(factsCalls).toContain("find");
       expect(factsCalls).toContain("read");
       expect(results.size).toBe(1);
+      // Both callers get the advisory area map; git_history is not allowed here, so no change counts.
+      const areaMap = areaMaps[0] as {
+        basis: string;
+        history: unknown;
+        areas: { kind: string; label: string; signals: { recentChanges: unknown } }[];
+      };
+      expect(areaMap).toMatchObject({
+        basis: "observed-paths",
+        history: { status: "unavailable", reason: "not-authorized" },
+      });
+      expect(areaMap.areas[0]?.kind).toBe("cross-area");
+      expect(areaMap.areas.every((area) => area.signals.recentChanges === null)).toBe(true);
+      if (project === "mixed-monorepo")
+        expect(areaMap.areas.some((area) => area.label.startsWith("apps"))).toBe(true);
+      expect(String(await fs.readFile(profilePath).catch(() => ""))).not.toContain("areaMap");
       if (mode === "setup") {
         expect(JSON.parse(results.get("discovery-facts")!)).toMatchObject({
           configuration_fingerprint: proposal.configurationFingerprint,
@@ -4562,4 +4582,116 @@ it("keeps real scanner inputs and lifecycle bytes identical with and without foc
     }
   }
   expect(states[1]).toEqual(states[0]);
+});
+
+it("delivers folder change counts in the area map when git_history is approved", async () => {
+  const git = (...args: string[]) =>
+    execFileSync(
+      "git",
+      ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", ...args],
+      { cwd, stdio: "ignore" },
+    );
+  await fs.mkdir(path.join(cwd, "src"));
+  await fs.writeFile(path.join(cwd, "package.json"), '{"name":"fixture"}');
+  git("init", "-q");
+  for (let index = 0; index < 6; index++) {
+    await fs.writeFile(
+      path.join(cwd, "src", `f${index}.ts`),
+      `export const v = ${index};
+`,
+    );
+    git("add", "-A");
+    git("commit", "-q", "-m", `change ${index}`);
+  }
+  const approvals: string[] = [];
+  let areaMap: Record<string, unknown> | undefined;
+  const session = new AgentSession({
+    cwd,
+    provider: "anthropic",
+    model: "claude-sonnet-5",
+    transient: true,
+    approveToolExecution: async (name) => {
+      approvals.push(name);
+      return true;
+    },
+    systemPrompt: "Assess the local project read-only.",
+    mcpEnabled: false,
+    allowedTools: ["find", "read", "programmatic_profile", "git_history"],
+  });
+  vi.mocked(stream).mockImplementation(
+    (params) =>
+      new StreamResult(
+        (async function* () {
+          yield* [];
+          areaMap ??= hostFacts(params.messages).areaMap;
+          return {
+            message: { role: "assistant", content: "Assessment fixture ended." },
+            stopReason: "end_turn",
+            usage: { inputTokens: 1, outputTokens: 1 },
+          };
+        })(),
+      ),
+  );
+  try {
+    await session.initialize();
+    await session.prompt("/setup-programmatic");
+  } finally {
+    await session.dispose();
+  }
+  expect(approvals).toContain("git_history");
+  expect(areaMap?.history).toMatchObject({ status: "ok", sinceDays: 90 });
+  const areas = areaMap?.areas as { label: string; signals: { recentChanges: unknown } }[];
+  expect(areas.find((area) => area.label === "src")?.signals.recentChanges).toEqual({
+    folderCommits: 6,
+    partial: true,
+  });
+  await expect(fs.access(path.join(cwd, ".gg/programmatic/profile.json"))).rejects.toThrow();
+});
+
+it("reports skipped manifests next to the area map when a member package.json does not parse", async () => {
+  await fs.mkdir(path.join(cwd, "packages", "a"), { recursive: true });
+  await fs.mkdir(path.join(cwd, "packages", "b"), { recursive: true });
+  await fs.writeFile(
+    path.join(cwd, "package.json"),
+    '{"name":"fixture","workspaces":["packages/*"]}',
+  );
+  await fs.writeFile(path.join(cwd, "packages", "a", "package.json"), "{ not json");
+  await fs.writeFile(path.join(cwd, "packages", "b", "package.json"), '{"name":"b"}');
+  let facts: ReturnType<typeof hostFacts> | undefined;
+  const session = new AgentSession({
+    cwd,
+    provider: "anthropic",
+    model: "claude-sonnet-5",
+    transient: true,
+    systemPrompt: "Assess the local project read-only.",
+    mcpEnabled: false,
+    allowedTools: ["find", "read", "programmatic_profile"],
+  });
+  vi.mocked(stream).mockImplementation(
+    (params) =>
+      new StreamResult(
+        (async function* () {
+          yield* [];
+          facts ??= hostFacts(params.messages);
+          return {
+            message: { role: "assistant", content: "Assessment fixture ended." },
+            stopReason: "end_turn",
+            usage: { inputTokens: 1, outputTokens: 1 },
+          };
+        })(),
+      ),
+  );
+  try {
+    await session.initialize();
+    await session.prompt("/setup-programmatic");
+  } finally {
+    await session.dispose();
+  }
+  expect(facts?.areaMap).toHaveProperty("areas");
+  expect(facts?.areaMapOmitted).toEqual({
+    changedManifests: 0,
+    unparsedManifests: 1,
+    overLimit: 0,
+  });
+  await expect(fs.access(path.join(cwd, ".gg/programmatic/profile.json"))).rejects.toThrow();
 });

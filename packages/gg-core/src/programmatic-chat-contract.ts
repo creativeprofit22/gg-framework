@@ -1,4 +1,6 @@
+import { isValidProgrammaticFocus } from "./slash-command-contract.js";
 import {
+  PROGRAMMATIC_AREA_PROGRESS_LIMITS,
   isProgrammaticAssessment,
   isProgrammaticAssessmentRequestId,
   type ProgrammaticAssessment,
@@ -23,6 +25,9 @@ export const PROGRAMMATIC_CHAT_VERSION = 1 as const;
 export const PROGRAMMATIC_CHAT_PAGE_LIMIT = 50;
 export const PROGRAMMATIC_CHAT_EVIDENCE_LIMIT = 50;
 export const PROGRAMMATIC_CHAT_ERROR_LIMIT = 1_000;
+// The app matches this exact error to show the refusal instead of a generic failure.
+export const PROGRAMMATIC_AREA_RETRY_REFUSED =
+  "Project files changed since this search. Search again instead.";
 
 export type ProgrammaticChatAction =
   | RecommendationHistoryRequest["action"]
@@ -37,13 +42,24 @@ export type ProgrammaticChatAction =
 export type ProgrammaticChatRequest =
   | ({ version: 1 } & RecommendationHistoryRequest)
   | ({ version: 1 } & DiscoveryReviewRequest)
-  | { version: 1; action: "discover"; requestId?: string }
+  | {
+      version: 1;
+      action: "discover";
+      requestId?: string;
+      /** Reruns one area of the latest search in this chat; host refuses if stale. */
+      retryArea?: ProgrammaticChatRetryArea;
+    }
   | { version: 1; action: "report"; offset: number }
   | { version: 1; action: "detail"; id: string }
   /** Deterministic since the desktop runs AI only for discover; current daemons ignore a legacy requestId. */
   | { version: 1; action: "inspect-setup" | "scan"; requestId?: string }
   | { version: 1; action: "approve-setup"; proposalHandle: string }
   | { version: 1; action: "dismiss"; id: string; snapshot: string };
+
+export interface ProgrammaticChatRetryArea {
+  sequence: number;
+  areaId: string;
+}
 
 export interface ProgrammaticChatRoute {
   available: boolean;
@@ -528,6 +544,18 @@ export function isProgrammaticChatRequest(value: unknown): value is Programmatic
     case "detail":
       return object(value, { ...base, id: hash });
     case "discover":
+      return object(value, base, {
+        requestId: isProgrammaticAssessmentRequestId,
+        retryArea: (retry) =>
+          object(retry, {
+            sequence: (seq) => Number.isSafeInteger(seq) && (seq as number) > 0,
+            areaId: (id) =>
+              typeof id === "string" &&
+              id.length > 0 &&
+              id.length <= PROGRAMMATIC_AREA_PROGRESS_LIMITS.id &&
+              isValidProgrammaticFocus(id),
+          }),
+      });
     case "inspect-setup":
     case "scan":
       return object(value, base, { requestId: isProgrammaticAssessmentRequestId });

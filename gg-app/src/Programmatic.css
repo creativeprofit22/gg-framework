@@ -375,6 +375,81 @@
   padding: var(--space-8) var(--space-10);
 }
 
+/* Step 2 area list: one engraved row per area; the word carries the state, the icon decorates. */
+.opp-areas {
+  display: grid;
+  gap: var(--space-5);
+  margin-block-start: var(--space-6);
+}
+.programmatic-chat .opp-areas-intro:focus-visible {
+  border-radius: var(--radius-control);
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+.programmatic-chat .opp-area-list {
+  display: grid;
+  gap: var(--space-3);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.opp-area {
+  display: grid;
+  grid-template-columns: 1.5em minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: var(--space-3) var(--space-6);
+  min-height: 36px;
+  padding: var(--space-4) var(--space-7);
+}
+.programmatic-chat .opp-area:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+.opp-area-icon {
+  color: var(--text-dim);
+  font: var(--fs-md) / 1 var(--mono);
+  text-align: center;
+}
+.opp-area-label {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-size: var(--fs-base);
+}
+.opp-area-word {
+  color: var(--text-secondary);
+  font: var(--fs-sm) / 1.4 var(--mono);
+  letter-spacing: var(--inst-tracking);
+  text-align: end;
+  text-transform: uppercase;
+}
+.programmatic-chat .opp-area-retry {
+  grid-column: 4;
+}
+.programmatic-chat .opp-areas .programmatic-actions {
+  margin: 0;
+}
+
+/* Early finds: plain cards with no action; they never read as reviewable ideas. */
+.opp-early {
+  display: grid;
+  gap: var(--space-5);
+}
+.programmatic-chat .opp-early-heading {
+  margin: 0;
+  font-size: var(--fs-md);
+}
+.opp-early-card {
+  display: grid;
+  gap: var(--space-5);
+}
+.programmatic-chat .opp-early-need {
+  margin: 0;
+  color: var(--text);
+  font-size: var(--fs-lg);
+  line-height: 1.4;
+}
+
 /* Past ideas list. */
 .opp-toolbar {
   display: flex;
@@ -465,6 +540,22 @@
     width: 100%;
     margin-inline-start: 0;
     text-align: start;
+  }
+  /* Area rows: icon and label on top, word below the label, retry on its own row. */
+  .opp-area {
+    grid-template-columns: 1.5em minmax(0, 1fr);
+    padding: var(--space-4) var(--space-6);
+  }
+  .opp-area-word {
+    grid-column: 2;
+    text-align: start;
+  }
+  .programmatic-chat .opp-area-retry {
+    grid-column: 1 / -1;
+    justify-self: stretch;
+  }
+  .opp-early-card {
+    padding: var(--space-7) var(--space-8);
   }
 }
 

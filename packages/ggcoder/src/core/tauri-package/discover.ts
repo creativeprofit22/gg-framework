@@ -130,7 +130,7 @@ async function discoverPackageRoots(context: DiscoveryContext): Promise<string[]
   return packageRoots;
 }
 
-function packageWorkspacePatterns(rootPackage: JsonObject): string[] {
+export function packageWorkspacePatterns(rootPackage: Record<string, unknown>): string[] {
   const workspaces = rootPackage.workspaces;
   if (Array.isArray(workspaces))
     return workspaces.filter((item): item is string => typeof item === "string");
@@ -140,7 +140,7 @@ function packageWorkspacePatterns(rootPackage: JsonObject): string[] {
   return [];
 }
 
-function parsePnpmWorkspace(source: string): string[] {
+export function parsePnpmWorkspace(source: string): string[] {
   const lines = source.replace(/\r\n?/g, "\n").split("\n");
   const result: string[] = [];
   let inPackages = false;

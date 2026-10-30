@@ -64,6 +64,24 @@ describe("createTools advisory-only corpus facade", () => {
   });
 });
 
+describe("createTools advisory-only git history", () => {
+  async function hasGitHistory(includeAdvisoryOnlyTools?: boolean): Promise<boolean> {
+    const result = await createTools(process.cwd(), {
+      steroidsBin: null,
+      lspDiagnostics: false,
+      ...(includeAdvisoryOnlyTools === undefined ? {} : { includeAdvisoryOnlyTools }),
+    });
+    results.push(result);
+    return result.tools.some((tool) => tool.name === "git_history");
+  }
+
+  it("adds git_history only when advisory-only tools are requested", async () => {
+    expect(await hasGitHistory()).toBe(false);
+    expect(await hasGitHistory(false)).toBe(false);
+    expect(await hasGitHistory(true)).toBe(true);
+  });
+});
+
 describe("createTools research citation gate (terminal TUI wiring)", () => {
   const PLAN_STEPS = "\n\n## Steps\n1. Do the thing.\n";
 

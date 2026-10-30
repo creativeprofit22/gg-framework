@@ -170,6 +170,36 @@ export interface BackgroundGitOptions {
    * inspects the same repository.
    */
   globalArgs?: readonly string[];
+  /**
+   * Drop inherited env that points git at another repository or injects
+   * config (`GIT_DIR`, `GIT_CONFIG_PARAMETERS`, …), so git only sees `cwd`.
+   */
+  isolateRepository?: boolean;
+}
+
+const REPOSITORY_REDIRECT_ENV = new Set([
+  "GIT_DIR",
+  "GIT_WORK_TREE",
+  "GIT_COMMON_DIR",
+  "GIT_INDEX_FILE",
+  "GIT_OBJECT_DIRECTORY",
+  "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+  "GIT_NAMESPACE",
+  "GIT_CONFIG_PARAMETERS",
+  "GIT_CONFIG_COUNT",
+]);
+
+/** Copy of `env` without variables that redirect git's repository or config. */
+export function withoutRepositoryRedirectEnv(
+  env: Readonly<Record<string, string | undefined>>,
+): Record<string, string | undefined> {
+  const result: Record<string, string | undefined> = {};
+  for (const [key, value] of Object.entries(env)) {
+    const upper = key.toUpperCase();
+    if (REPOSITORY_REDIRECT_ENV.has(upper) || /^GIT_CONFIG_(?:KEY|VALUE)_/.test(upper)) continue;
+    result[key] = value;
+  }
+  return result;
 }
 
 export interface BackgroundGitResult {
@@ -204,6 +234,14 @@ function spawnGit(
   args: readonly string[],
   options: BackgroundGitOptions,
 ): Promise<BackgroundGitResult> {
+  const env = {
+    ...process.env,
+    GIT_TERMINAL_PROMPT: "0",
+    GIT_OPTIONAL_LOCKS: "0",
+    GIT_PAGER: "cat",
+    GIT_NO_LAZY_FETCH: "1",
+    ...options.env,
+  };
   return new Promise((resolve, reject) => {
     const child = execFile(
       resolveGitBinary(),
@@ -217,14 +255,9 @@ function spawnGit(
         encoding: "utf8",
         // Local Fork: never pass native Token Plan auth to git (or any
         // helper it could launch), including through caller-supplied env.
-        env: withoutQwenRuntimeSecret({
-          ...process.env,
-          GIT_TERMINAL_PROMPT: "0",
-          GIT_OPTIONAL_LOCKS: "0",
-          GIT_PAGER: "cat",
-          GIT_NO_LAZY_FETCH: "1",
-          ...options.env,
-        }),
+        env: withoutQwenRuntimeSecret(
+          options.isolateRepository === true ? withoutRepositoryRedirectEnv(env) : env,
+        ),
       },
       (error, stdout, stderr) => {
         if (!error) {
@@ -273,6 +306,7 @@ async function probeDriverOverrides(options: BackgroundGitOptions): Promise<stri
             timeoutMs: PROBE_TIMEOUT_MS,
             signal: options.signal,
             env: options.env,
+            isolateRepository: options.isolateRepository,
           },
         );
         return stdout;

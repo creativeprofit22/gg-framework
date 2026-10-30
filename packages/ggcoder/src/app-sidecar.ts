@@ -4356,7 +4356,7 @@ async function createSession(
         broadcastError("error", "queued prompt failed after opportunity request", error);
       });
     },
-    async (assessmentMode, assessmentRequestId) => {
+    async (assessmentMode, assessmentRequestId, retryArea) => {
       // The adapter already owns runClaim. Use the current session and its current
       // stop signal inside the ordinary run lifecycle, never a claiming wrapper.
       const owner = session;
@@ -4364,7 +4364,10 @@ async function createSession(
       let failure: unknown;
       await runAgent("Find ideas", async () => {
         try {
-          outcome = await owner.assessProgrammatic(assessmentMode, undefined, undefined, { assessmentRequestId });
+          outcome = await owner.assessProgrammatic(assessmentMode, undefined, undefined, {
+            assessmentRequestId,
+            ...(retryArea ? { retryArea } : {}),
+          });
         } catch (error) {
           failure = error;
           throw error;

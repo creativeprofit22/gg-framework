@@ -252,6 +252,7 @@ it("setup intersects local read/catalog/result and exact inspect-only profile; n
     "ls",
     "code_search",
     "code_nav",
+    "git_history",
     "command_information",
     "programmatic_profile",
     "programmatic_scan",
@@ -268,7 +269,7 @@ it("setup intersects local read/catalog/result and exact inspect-only profile; n
     names.map((name) => tool(name)),
   );
   expect(owner.scope.tools.map((item) => item.name).sort()).toEqual(
-    [...names.slice(0, 8), "programmatic_advisory_result"].sort(),
+    [...names.slice(0, 9), "programmatic_advisory_result"].sort(),
   );
   const profile = owner.scope.tools.find((item) => item.name === "programmatic_profile")!;
   await expect(profile.execute({ action: "generate" }, toolContext())).rejects.toThrow(
@@ -485,4 +486,38 @@ it("marks the command row partly checked when part of the command list didn't lo
   expect(outcome.assessment.coverage.find((item) => item.scope === "catalog")?.status).toBe(
     "budget-limited",
   );
+});
+
+it("lists each area's search coverage as its own project row", async () => {
+  const owner = await coordinator("configured");
+  owner.recordAreaCoverage([
+    { scope: "project", status: "inspected", summary: "Area app was searched." },
+    { scope: "project", status: "budget-limited", summary: "Area core was partly searched." },
+    { scope: "project", status: "uninspected", summary: "Area docs was not searched." },
+  ]);
+  const outcome = await owner.run(new AbortController().signal, async (scope) => {
+    const submit = scope.tools.find((item) => item.name === "programmatic_advisory_result")!;
+    await submit.execute(result, toolContext());
+  });
+  const rows = outcome.assessment.coverage.filter((item) => item.summary.startsWith("Area "));
+  expect(rows.map((row) => row.status)).toEqual(["inspected", "budget-limited", "uninspected"]);
+  expect(outcome.assessment.coverage[0]).toEqual({
+    scope: "project",
+    status: "uninspected",
+    summary: "The project was searched one part at a time; see each part below.",
+  });
+  expect(isProgrammaticAssessment(outcome.assessment)).toBe(true);
+});
+
+it("keeps the initial-sample project row when no areas were searched", async () => {
+  const owner = await coordinator("configured");
+  const outcome = await owner.run(new AbortController().signal, async (scope) => {
+    const submit = scope.tools.find((item) => item.name === "programmatic_advisory_result")!;
+    await submit.execute(result, toolContext());
+  });
+  expect(outcome.assessment.coverage[0]).toEqual({
+    scope: "project",
+    status: "uninspected",
+    summary: "The initial sample does not show that the whole project was checked.",
+  });
 });

@@ -953,7 +953,7 @@ it.each(["current", "stale"] as const)(
         expect(result.status).toBe(409);
         expect(result.body).not.toHaveProperty("assessment");
       }
-      expect(assess).toHaveBeenCalledExactlyOnceWith("setup", undefined);
+      expect(assess).toHaveBeenCalledExactlyOnceWith("setup", undefined, undefined);
       expect(vi.mocked(stream)).toHaveBeenCalled();
       expect(providerEvidence.length).toBeGreaterThan(0);
       expect(providerClaims).toEqual(providerEvidence.map(() => true));

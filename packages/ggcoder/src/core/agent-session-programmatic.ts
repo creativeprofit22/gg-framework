@@ -3,6 +3,8 @@
 // stay small.
 import {
   isProgrammaticAssessment,
+  isProgrammaticAssessmentEvent,
+  type ProgrammaticAreaProgress,
   type ProgrammaticAssessment,
 } from "@kenkaiiii/gg-core/programmatic-assessment-contract";
 import type { AgentTool } from "@kenkaiiii/gg-agent";
@@ -30,6 +32,7 @@ import {
 import {
   recheckAssessmentEvidence,
   type AssessmentEvidenceAuthorization,
+  type AssessmentEvidenceRequest,
 } from "./programmatic/assessment-evidence.js";
 import {
   ADVISORY_LIMITATIONS,
@@ -58,6 +61,36 @@ import {
   saveAssessmentHistory,
 } from "./programmatic/assessment-history.js";
 import { ProgrammaticSetupInspection } from "./programmatic/setup-inspection.js";
+import {
+  collectProgrammaticAreaMap,
+  type AreaMapCollectResult,
+} from "./programmatic/area-map-collect.js";
+import {
+  mergeAreaCandidates,
+  runAreaPasses,
+  selectAreaSearch,
+  type AreaSearchDecision,
+  type AreaStatusFact,
+  type MergedAreaCandidate,
+} from "./programmatic/area-search.js";
+import { runAreaPass } from "./programmatic/area-pass.js";
+import type { ProgrammaticAreaV1 } from "./programmatic/area-map.js";
+import {
+  assessmentAreas,
+  createAreaProgress,
+  settledAreaProgress,
+  withoutFinds,
+  type AreaSearchCache,
+} from "./programmatic/area-progress.js";
+import {
+  AreaRetryUnavailableError,
+  assertAreaRetryFresh,
+  citedFileDigests,
+  retryTarget,
+  structuralAreaMapDigest,
+} from "./programmatic/area-retry.js";
+import type { ProgrammaticChatRetryArea } from "@kenkaiiii/gg-core/programmatic-chat-contract";
+import { createGitHistoryTool } from "../tools/git-history.js";
 import type { AgentSessionOptions } from "./agent-session.js";
 
 type DiscoveryCandidates = {
@@ -108,6 +141,8 @@ export interface SessionProgrammaticHost {
     nextSequence(): number;
     candidates(): DiscoveryCandidates;
     setCandidates(candidates: DiscoveryCandidates): void;
+    areaSearch(): AreaSearchCache | null;
+    setAreaSearch(cache: AreaSearchCache | null): void;
   };
   session: {
     sessionId(): string;
@@ -261,6 +296,7 @@ export async function assessProgrammatic(
     onAccepted?: () => void | Promise<void>;
     meta?: PromptMeta;
     assessmentRequestId?: string;
+    retryArea?: ProgrammaticChatRetryArea;
   },
 ): Promise<ProgrammaticAssessmentOutcome & { setupFacts?: unknown; scanFacts?: unknown }> {
   if (
@@ -271,6 +307,16 @@ export async function assessProgrammatic(
   )
     throw new Error("An assessment or review is already active.");
   sessionHost.assessment.setActive(true);
+  let retry: AreaRetry | undefined;
+  if (options.retryArea) {
+    try {
+      retry = await checkAreaRetry(sessionHost, mode, focus, options, options.retryArea);
+    } catch (error) {
+      // Refused before the sequence moves, so the previous results stay reviewable.
+      sessionHost.assessment.setActive(false);
+      throw error;
+    }
+  }
   const { conversationId, sessionId } = sessionHost.session.conversationIdentity();
   const identity = {
     conversationId,
@@ -286,6 +332,16 @@ export async function assessProgrammatic(
   };
   const host = { id: crypto.randomUUID(), startedAt: new Date().toISOString() };
   const owner = sessionHost.session.sessionId();
+  const current = () =>
+    sessionHost.session.sessionId() === owner &&
+    sessionHost.assessment.sequence() === identity.sequence;
+  // Model-derived finds that fail the display contract are dropped; rows still show.
+  const publishProgress = (stage: "areas" | "merging", areas: ProgrammaticAreaProgress[]) => {
+    for (const rows of [areas, withoutFinds(areas)]) {
+      const event: unknown = { ...identity, phase: "progress", stage, areas: rows };
+      if (isProgrammaticAssessmentEvent(event)) return publish(event);
+    }
+  };
   const allowed = () =>
     !options.disableTools &&
     !sessionHost.session.planMode() &&
@@ -300,6 +356,25 @@ export async function assessProgrammatic(
     sessionHost.tools.isCapabilityAllowed("programmatic_scan") &&
     !sessionHost.tools.unavailable().has("programmatic_scan");
   publish({ ...identity, phase: "started" });
+  sessionHost.assessment.setAreaSearch(null);
+  const areaRun: AreaRunHooks = {
+    ...(retry ? { retry } : {}),
+    progress: (stage, areas) => {
+      if (allowed()) publishProgress(stage, areas);
+    },
+    stopped: (areas) => {
+      // Stop aborts the signal, so `allowed()` would drop the final rows and leave them "reading".
+      if (signal?.aborted && current() && areas.some((area) => area.status === "stopped"))
+        publishProgress("areas", areas);
+    },
+    remember: (cache) => {
+      if (
+        sessionHost.session.sessionId() === owner &&
+        sessionHost.assessment.sequence() === identity.sequence
+      )
+        sessionHost.assessment.setAreaSearch({ ...cache, owner, sequence: identity.sequence });
+    },
+  };
   const historyPolicy = await captureAssessmentHistoryPolicy(sessionHost.session.cwd(), mode);
   try {
     const outcome = await runProgrammaticAssessment(
@@ -309,6 +384,7 @@ export async function assessProgrammatic(
       provenance,
       options,
       host,
+      areaRun,
     );
     // Retain transient accepted candidates independently of history consent or save outcome.
     if (
@@ -384,6 +460,102 @@ export async function assessProgrammatic(
   }
 }
 
+// Fixed, bounded folder-level history for the advisory area map (partial by design).
+const AREA_HISTORY_REQUEST = {
+  name: "git_history",
+  args: { action: "change_frequency", group_by: "folder", depth: 4, limit: 50, since_days: 90 },
+} as const satisfies AssessmentEvidenceRequest;
+
+async function collectAssessmentAreaMap(
+  cwd: string,
+  signal: AbortSignal,
+  authorization: AssessmentEvidenceAuthorization,
+  historyEnabled: boolean,
+): Promise<{
+  result: AreaMapCollectResult;
+  facts: { areaMap: unknown; areaMapOmitted?: Record<string, number> };
+}> {
+  const result: AreaMapCollectResult = await collectProgrammaticAreaMap(cwd, {
+    signal,
+    ...(historyEnabled
+      ? {
+          history: async () => {
+            if (!(await authorization.authorize(AREA_HISTORY_REQUEST)))
+              return JSON.stringify({ status: "unavailable", reason: "not-authorized" });
+            // Run directly: the host consumes the facts, so no model receipt is minted.
+            const output = await createGitHistoryTool(cwd).execute(
+              { ...AREA_HISTORY_REQUEST.args },
+              { signal, toolCallId: "assessment-area-history" },
+            );
+            const raw = typeof output === "string" ? output : output.content;
+            return typeof raw === "string" ? raw : "";
+          },
+        }
+      : {}),
+  }).catch((error: unknown) => {
+    if (signal.aborted) throw error;
+    return { status: "unavailable" as const, reason: "unreadable" as const };
+  });
+  if (result.status !== "ok") return { result, facts: { areaMap: result } };
+  // Skipped manifests make the map partial; surface the bounded counts so it isn't read as complete.
+  const skipped = Object.values(result.omitted).some((count) => count > 0);
+  return {
+    result,
+    facts: {
+      areaMap: result.areaMap,
+      ...(skipped ? { areaMapOmitted: result.omitted } : {}),
+    },
+  };
+}
+
+const AREA_MERGE_INSTRUCTION = `
+
+Host area search: the project was searched one part at a time. "areaSearch.candidates" lists the candidate needs those searches found, already de-duplicated by the host, each with the parts it came from and evidence citing the reusable receipts above. "areaSearch.areas" says which parts were searched fully, partly or not at all. Merge any candidates that still describe the same need, compare each against the full command list, and pick one outcome per need under the policy above. Parts that were not searched may hide needs; do not invent needs for them.`;
+
+interface AreaRetry {
+  cache: AreaSearchCache;
+  area: ProgrammaticAreaV1;
+}
+
+interface AreaRunHooks {
+  progress(stage: "areas" | "merging", areas: ProgrammaticAreaProgress[]): void;
+  /** One final "areas" snapshot after Stop; never a merge stage. */
+  stopped(areas: ProgrammaticAreaProgress[]): void;
+  remember(cache: Omit<AreaSearchCache, "owner" | "sequence">): void;
+  retry?: AreaRetry;
+}
+
+/** Validates a one-area retry without events, sequence changes or provider calls. */
+async function checkAreaRetry(
+  sessionHost: SessionProgrammaticHost,
+  mode: "setup" | "configured",
+  focus: string | undefined,
+  options: { disableTools?: boolean },
+  request: ProgrammaticChatRetryArea,
+): Promise<AreaRetry> {
+  const cache = sessionHost.assessment.areaSearch();
+  if (
+    !cache ||
+    cache.owner !== sessionHost.session.sessionId() ||
+    cache.sequence !== request.sequence ||
+    sessionHost.assessment.sequence() !== request.sequence
+  )
+    throw new AreaRetryUnavailableError("no-search");
+  const area = retryTarget(cache, request.areaId);
+  if (mode !== "configured" || focus?.trim() || options.disableTools || !area)
+    throw new AreaRetryUnavailableError("not-retryable");
+  const signal = sessionHost.session.options().signal ?? new AbortController().signal;
+  const collected = await collectProgrammaticAreaMap(sessionHost.session.cwd(), { signal }).catch(
+    (error: unknown) => {
+      signal.throwIfAborted();
+      throw error;
+    },
+  );
+  if (collected.status !== "ok") throw new AreaRetryUnavailableError("changed");
+  await assertAreaRetryFresh(sessionHost.session.cwd(), cache, collected.areaMap, signal);
+  return { cache, area };
+}
+
 async function runProgrammaticAssessment(
   sessionHost: SessionProgrammaticHost,
   mode: "setup" | "configured",
@@ -391,6 +563,7 @@ async function runProgrammaticAssessment(
   provenance: MessageProvenance,
   options: { disableTools?: boolean; onAccepted?: () => void | Promise<void>; meta?: PromptMeta },
   host: { id: string; startedAt: string },
+  areaRun: AreaRunHooks,
 ): Promise<ProgrammaticAssessmentOutcome & { setupFacts?: unknown; scanFacts?: unknown }> {
   const input = parseProgrammaticAssessmentInput(focus ?? "");
   if (!input.success) throw new Error("Invalid assessment focus.");
@@ -435,22 +608,59 @@ async function runProgrammaticAssessment(
       }
     },
   };
-  const context = await buildProgrammaticAssessmentContext(
-    input.data,
-    discovery,
+  const areaMapFacts = await collectAssessmentAreaMap(
     sessionHost.session.cwd(),
-    {
-      signal,
-      authorization: evidenceAuthorization,
-    },
+    signal,
+    evidenceAuthorization,
+    !options.disableTools,
   ).catch((error: unknown) => {
     if (!signal.aborted) throw error;
-    return buildProgrammaticAdvisoryContext(input.data, discovery);
+    // The coordinator reports the cancellation; this placeholder is never shown.
+    const result = { status: "unavailable" as const, reason: "unreadable" as const };
+    return { result, facts: { areaMap: result } };
   });
+  const retry = areaRun.retry;
+  const areaSearch: AreaSearchDecision = retry
+    ? {
+        mode: "areas",
+        selected: retry.cache.passes.map(({ area }) => area),
+        skipped: retry.cache.skipped,
+      }
+    : selectAreaSearch({
+        mode,
+        focus: input.data.focus,
+        areaMap: areaMapFacts.result,
+        readAllowed:
+          !sessionHost.tools.unavailable().has("read") &&
+          sessionHost.tools.isCapabilityAllowed("read"),
+        toolsDisabled: options.disableTools === true,
+      });
+  if (retry) {
+    // Recheck after the full map collection; the files may have changed since the request.
+    if (areaMapFacts.result.status !== "ok") throw new AreaRetryUnavailableError("changed");
+    await assertAreaRetryFresh(
+      sessionHost.session.cwd(),
+      retry.cache,
+      areaMapFacts.result.areaMap,
+      signal,
+    );
+  }
+  // Per-area passes carry their own samples, so the merge turn skips the whole-repo sample.
+  const context =
+    areaSearch.mode === "areas"
+      ? buildProgrammaticAdvisoryContext(input.data, discovery)
+      : await buildProgrammaticAssessmentContext(input.data, discovery, sessionHost.session.cwd(), {
+          signal,
+          authorization: evidenceAuthorization,
+        }).catch((error: unknown) => {
+          if (!signal.aborted) throw error;
+          return buildProgrammaticAdvisoryContext(input.data, discovery);
+        });
   const promoted = new Set<string>();
   const previousResult = sessionHost.tools.registered().get("programmatic_advisory_result");
   let setupFacts: unknown;
   let scanFacts: unknown;
+  let areaStatuses: AreaStatusFact[] | undefined;
   let coordinator: ProgrammaticAssessmentCoordinator | undefined;
   const information = createCommandInformationTool(sessionHost.session.cwd(), discoveryOptions);
   let previousInformation: AgentTool | undefined;
@@ -572,7 +782,90 @@ async function runProgrammaticAssessment(
           const prompt = getPromptCommand(
             mode === "setup" ? "setup-programmatic" : "programmatic",
           )!.prompt;
-          const facts = { setupFacts, scanFacts };
+          let areaSearchFacts:
+            { areas: AreaStatusFact[]; candidates: MergedAreaCandidate[] } | undefined;
+          if (areaSearch.mode === "areas" && areaMapFacts.result.status === "ok") {
+            const areaMap = areaMapFacts.result.areaMap;
+            const sessionOptions = sessionHost.session.options();
+            // A retry starts from the kept areas' settled rows; only the target reads again.
+            const kept = new Map(
+              (retry?.cache.passes ?? [])
+                .filter(({ area }) => area.id !== retry?.area.id)
+                .map(({ area, outcome }) => [area.id, settledAreaProgress(area, outcome)]),
+            );
+            const progress = createAreaProgress(areaSearch.selected, kept);
+            areaRun.progress("areas", progress.snapshot());
+            const searched = await runAreaPasses(
+              retry ? [retry.area] : areaSearch.selected,
+              (area, areaSignal) =>
+                runAreaPass({
+                  root: sessionHost.session.cwd(),
+                  areaMap,
+                  area,
+                  provider: sessionOptions.provider,
+                  model: sessionOptions.model,
+                  ...(sessionOptions.baseUrl ? { baseUrl: sessionOptions.baseUrl } : {}),
+                  signal: areaSignal,
+                  discovery,
+                  authorization: evidenceAuthorization,
+                  approveTool: async (name, args, toolSignal) => {
+                    if (
+                      options.disableTools ||
+                      sessionHost.tools.unavailable().has(name) ||
+                      !sessionHost.tools.isCapabilityAllowed(name)
+                    )
+                      return false;
+                    const current = sessionHost.session.options();
+                    return (
+                      !current.approveToolExecution ||
+                      (await current.approveToolExecution(name, args, toolSignal))
+                    );
+                  },
+                  validate: async () => {
+                    await sessionHost.session.options().validateToolExecution?.();
+                  },
+                  historyEnabled: !options.disableTools,
+                }),
+              {
+                signal,
+                onProgress: (area, state) => {
+                  if (progress.update(area, state)) areaRun.progress("areas", progress.snapshot());
+                },
+              },
+            ).catch((error: unknown) => {
+              // runAreaPasses reports every unfinished area as stopped before it rejects.
+              if (signal.aborted) areaRun.stopped(progress.snapshot());
+              throw error;
+            });
+            const passes = retry
+              ? retry.cache.passes.map((pass) =>
+                  pass.area.id === retry.area.id
+                    ? (searched.find(({ area }) => area.id === retry.area.id) ?? pass)
+                    : pass,
+                )
+              : searched;
+            areaRun.remember({
+              areaMapDigest: structuralAreaMapDigest(areaMap),
+              passes,
+              skipped: areaSearch.skipped,
+              citedFiles: await citedFileDigests(sessionHost.session.cwd(), passes, signal),
+            });
+            areaRun.progress("merging", progress.snapshot());
+            const merged = mergeAreaCandidates(passes, areaSearch.skipped);
+            for (const receipt of merged.receipts) turn.evidence.retain(receipt);
+            turn.recordSample(merged.sample);
+            coordinator!.recordAreaCoverage(merged.coverage);
+            for (const limitation of merged.limitations) turn.limitations.add(limitation);
+            areaSearchFacts = { areas: merged.statuses, candidates: merged.candidates };
+            areaStatuses = merged.statuses;
+          }
+          signal.throwIfAborted();
+          const facts = {
+            setupFacts,
+            scanFacts,
+            ...areaMapFacts.facts,
+            ...(areaSearchFacts ? { areaSearch: areaSearchFacts } : {}),
+          };
           if (context.evidence) recheckAssessmentEvidence(context.evidence, evidenceAuthorization);
           try {
             await sessionHost.transcript.acceptPromptTemplate(
@@ -583,6 +876,7 @@ Host-owned exact facts (not model authority; already collected, do not repeat):
 ${JSON.stringify(facts)}
 Reusable host evidence receipts:
 ${JSON.stringify(turn.evidence.list())}` +
+                (areaSearchFacts ? AREA_MERGE_INSTRUCTION : "") +
                 renderProgrammaticAdvisoryContext(context),
               provenance,
               options,
@@ -610,6 +904,7 @@ ${JSON.stringify(turn.evidence.list())}` +
       },
       host,
     );
+    if (areaStatuses) outcome.assessment.areas = assessmentAreas(areaStatuses);
     if (
       sessionHost.boundaries.advisoryTurn() === turn &&
       outcome.assessment.status !== "completed"

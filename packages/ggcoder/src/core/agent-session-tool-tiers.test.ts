@@ -584,10 +584,13 @@ describe("AgentSession built-in tool tiering", () => {
       expect(liveToolNames(session)).toContain("steroids");
       expect(liveToolNames(session)).not.toContain("research_corpus");
       expect(prompt).not.toContain("research_corpus");
+      expect(liveToolNames(session)).not.toContain("git_history");
+      expect(prompt).not.toContain("git_history");
       const resolve = (
         session as unknown as { promoteDeferredBuiltin(name: string): AgentTool | undefined }
       ).promoteDeferredBuiltin.bind(session);
       expect(resolve("research_corpus")).toBeUndefined();
+      expect(resolve("git_history")).toBeUndefined();
 
       // The programmatic advisory turn still promotes it, then removes it.
       const proposal = await buildProgrammaticProfileProposal(tempProject);
@@ -611,6 +614,8 @@ describe("AgentSession built-in tool tiering", () => {
       await session.prompt("/programmatic");
       expect(advisoryTools).toContain("research_corpus");
       expect(liveToolNames(session)).not.toContain("research_corpus");
+      expect(advisoryTools).toContain("git_history");
+      expect(liveToolNames(session)).not.toContain("git_history");
     } finally {
       await session.dispose();
     }
@@ -630,6 +635,9 @@ describe("AgentSession built-in tool tiering", () => {
       expect(missed).toContain("Still in the catalog");
       expect(missed).not.toContain("research_corpus");
       expect(liveToolNames(session)).not.toContain("research_corpus");
+      const history = String(await toolSearch?.execute({ query: "git history" }, TOOL_CONTEXT));
+      expect(history).not.toContain("git_history");
+      expect(missed).not.toContain("git_history");
     } finally {
       await session.dispose();
     }

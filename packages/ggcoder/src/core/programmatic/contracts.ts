@@ -612,6 +612,22 @@ export const programmaticWorkflowV2Schema = z.strictObject({
     explanation: extensionTextSchema,
   }),
 });
+const AREA_CANDIDATE_NEEDS_MAX = 3;
+/** One area pass returns candidate needs only; the merge turn picks outcomes. */
+export const areaCandidatesV1Schema = z.strictObject({
+  version: z.literal(1),
+  needs: z
+    .array(
+      z.strictObject({
+        need: extensionTextSchema,
+        workflow: programmaticWorkflowV2Schema,
+        evidence: advisoryEvidenceSchema,
+        uncertainty: extensionTextSchema,
+      }),
+    )
+    .max(AREA_CANDIDATE_NEEDS_MAX),
+});
+export type AreaCandidatesV1 = z.infer<typeof areaCandidatesV1Schema>;
 export const programmaticRecommendationV2Schema = z
   .strictObject({
     version: z.literal(2),

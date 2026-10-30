@@ -4885,6 +4885,145 @@ describe("AgentPane lifecycle", () => {
     expect(await screen.findByRole("heading", { name: "Opportunities" })).toBeTruthy();
   });
 
+  it("shows area progress, stops through the pane cancel and refuses a stale retry (mocked native IPC)", async () => {
+    nativeMocks.realMentor = true;
+    const pane = client("area-progress", 8);
+    vi.mocked(pane.getState).mockResolvedValue({
+      ...(await pane.getState()),
+      conversationId: "conversation-1",
+      sessionId: "session-1",
+    });
+    pane.cancel = vi.fn(async () => ({
+      cancelled: true,
+      runState: "cancelling" as const,
+      drained: "",
+      roadmapStatusSaved: false,
+      roadmapStatusOutcome: "not-pending" as const,
+      roadmapStatusRetryable: false,
+    }));
+    const emit = liveEvents(pane);
+    const receipt = deferred<Awaited<ReturnType<PaneAgentClient["programmatic"]>>>();
+    const report = await pane.programmatic({ version: 1, action: "report", offset: 0 });
+    if (!report.ok || report.action !== "report") throw new Error("Expected report fixture");
+    report.report.scan = { available: true, reason: "Ready" };
+    report.report.status = "current";
+    vi.mocked(pane.programmatic).mockClear();
+    vi.mocked(pane.programmatic).mockImplementation(async (request) =>
+      request.action !== "discover"
+        ? report
+        : request.retryArea
+          ? {
+              version: 1,
+              action: "discover",
+              ok: false,
+              error: "Project files changed since this search. Search again instead.",
+              reconcile: false,
+            }
+          : receipt.promise,
+    );
+    render(<AgentPane client={pane} target={target} />);
+    await waitFor(() => expect(pane.listCommands).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: "Opportunities" }));
+    await openStep("Find ideas");
+    const find = await screen.findByRole("button", { name: "Find ideas" });
+    await waitFor(() => expect((find as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(find);
+    const request = vi
+      .mocked(pane.programmatic)
+      .mock.calls.find(([request]) => request.action === "discover")![0];
+    if (request.action !== "discover") throw new Error("Expected discovery request");
+    const lifecycle = {
+      conversationId: "conversation-1",
+      sessionId: "session-1",
+      sequence: 1,
+      requestId: request.requestId,
+    };
+    const find1 = { need: "Release notes are hand-written", where: "docs", unsure: "Two files" };
+    act(() => emit("run_start", {}));
+    act(() => emit("programmatic_assessment", { ...lifecycle, phase: "started" }));
+    act(() =>
+      emit("programmatic_assessment", {
+        ...lifecycle,
+        phase: "progress",
+        stage: "areas",
+        areas: [
+          { id: "docs", label: "docs", status: "found", finds: [find1] },
+          { id: "api", label: "src/api", status: "reading" },
+        ],
+      }),
+    );
+    const areas = await screen.findByRole("list", { name: "Areas" });
+    expect(within(areas).getByText("1 idea")).toBeTruthy();
+    expect(within(areas).getByText("Reading")).toBeTruthy();
+    // Progress keeps the search running; Stop calls the pane's own cancel and nothing else.
+    fireEvent.click(screen.getByRole("button", { name: "Stop search" }));
+    expect(pane.cancel).toHaveBeenCalledTimes(1);
+    act(() =>
+      emit("programmatic_assessment", {
+        ...lifecycle,
+        phase: "progress",
+        stage: "areas",
+        areas: [
+          { id: "docs", label: "docs", status: "found", finds: [find1] },
+          { id: "api", label: "src/api", status: "stopped" },
+        ],
+      }),
+    );
+    const stopped = {
+      version: 1 as const,
+      lifecycle,
+      mode: "configured" as const,
+      status: "cancelled" as const,
+      summary: "Search stopped.",
+      limitations: [],
+      coverage: [],
+      observations: [],
+      deterministic: { status: "succeeded" as const, enabledCount: 1, applicableCount: 1 },
+      areas: [
+        { id: "docs", label: "docs", status: "searched" as const, retryable: false },
+        {
+          id: "api",
+          label: "src/api",
+          status: "not-searched" as const,
+          reason: "cancelled" as const,
+          retryable: true,
+        },
+      ],
+    };
+    act(() =>
+      emit("programmatic_assessment", { ...lifecycle, phase: "completed", assessment: stopped }),
+    );
+    await act(async () =>
+      receipt.resolve({ version: 1, action: "discover", ok: true, assessment: stopped }),
+    );
+    act(() => emit("run_end", { outcome: "cancelled", runState: "idle" }));
+    const early = screen.getByRole("region", { name: "Early finds", hidden: true });
+    expect(within(early).getByText(/Stopped before checking/)).toBeTruthy();
+    expect(within(early).queryByRole("button", { hidden: true })).toBeNull();
+    await openStep("Find ideas");
+    const retry = await screen.findByRole("button", { name: "Try src/api again" });
+    await waitFor(() => expect((retry as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(retry);
+    expect(
+      await screen.findByText("Project files changed since this search. Search again instead."),
+    ).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Try src/api again" })).toBeNull();
+    const discovers = vi
+      .mocked(pane.programmatic)
+      .mock.calls.map(([request]) => request)
+      .filter((request) => request.action === "discover");
+    expect(discovers).toEqual([
+      { version: 1, action: "discover", requestId: request.requestId },
+      {
+        version: 1,
+        action: "discover",
+        retryArea: { sequence: 1, areaId: "api" },
+        requestId: expect.any(String),
+      },
+    ]);
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+  });
+
   it.each(["success", "transport-lost"] as const)(
     "programmatic discovery settles dropped completion as %s without replay and maps explicit review (mocked native IPC)",
     async (outcome) => {

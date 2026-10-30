@@ -31,6 +31,7 @@ import {
 import {
   CHECKS_ACTIONS,
   CHECKS_COPY,
+  AREA_PROGRESS,
   CHECK_RESULT_STATE_LABELS as stateLabels,
   REVIEW_EMPTY,
   REVIEW_GROUPS,
@@ -52,6 +53,7 @@ export function ProgrammaticChat({
   onSelect,
   onSelectCandidate,
   onRun,
+  onStop,
 }: {
   state: ProgrammaticChatState;
   busy: boolean;
@@ -60,6 +62,8 @@ export function ProgrammaticChat({
   onSelect(id: string): void;
   onSelectCandidate?(source: "current" | "history", id: string): void;
   onRun(): void;
+  /** Stops the running search through the pane's existing cancel. */
+  onStop?(): void;
 }): React.ReactElement {
   const headingId = useId();
   const root = useRef<HTMLElement>(null);
@@ -575,7 +579,8 @@ export function ProgrammaticChat({
           {CHECKS_COPY.planMode}
         </p>
       )}
-      {state.error && (
+      {/* A refused area retry is explained in step 2, not as a checks failure. */}
+      {state.error && state.error !== AREA_PROGRESS.retryRefused && (
         <>
           <p className="opp-notice" data-tone="error" role="alert">
             {state.reconcile ? CHECKS_COPY.reconcileFailed : CHECKS_COPY.failed}
@@ -629,7 +634,13 @@ export function ProgrammaticChat({
       {panel(
         "ideas",
         <>
-          <ProgrammaticIdeaSearch state={state} />
+          <ProgrammaticIdeaSearch
+            state={state}
+            locked={locked}
+            planMode={planMode}
+            onRequest={onAction}
+            onStop={onStop}
+          />
           {searchButton}
         </>,
       )}

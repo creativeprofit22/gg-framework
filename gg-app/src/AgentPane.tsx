@@ -5204,6 +5204,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
                             });
                         }}
                         onRun={() => void runSelectedProgrammatic()}
+                        onStop={requestCancel}
                       />
                     )}
                 </>

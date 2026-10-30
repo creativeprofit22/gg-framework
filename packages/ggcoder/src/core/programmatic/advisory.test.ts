@@ -933,6 +933,56 @@ describe("bounded advisory validation", () => {
     );
     expect(output).not.toContain(local.id);
   });
+  it("records git history as retrieved observed evidence without a location", async () => {
+    const evidence = new AdvisoryEvidence();
+    const turn = scannedTurn(evidence);
+    turn.observePage(page);
+    const history = evidence.observe(
+      process.cwd(),
+      "git_history",
+      { action: "change_frequency" },
+      "history",
+      '{"status":"ok","action":"change_frequency","entries":[{"path":"src/a.ts","commits":4}]}',
+    );
+    expect(history).toMatchObject({ tool: "git_history", status: "retrieved" });
+    expect(history.location).toBeUndefined();
+    expect(history.locations).toBeUndefined();
+    expect(
+      evidence.observe(
+        process.cwd(),
+        "git_history",
+        { action: "change_frequency" },
+        "history-missing",
+        '{"status":"unavailable","reason":"not-a-git-repository","message":"x"}',
+      ).status,
+    ).toBe("failed");
+    const input = {
+      ...manualAssessment,
+      recommendations: [
+        {
+          ...manualAssessment.recommendations[0],
+          evidence: {
+            version: 1,
+            items: [
+              {
+                basis: "observed",
+                source: history.id,
+                code: "recurrence",
+                severity: "info",
+                message: "src/a.ts changed in 4 commits this year",
+              },
+            ],
+          },
+        },
+      ],
+    };
+    await turn.submit(input, checks);
+    expect(turn.submitted).toBe(true);
+    for (const mode of ["setup", "configured"] as const)
+      expect(
+        new ProgrammaticAdvisoryTurn(new AdvisoryEvidence(), { mode }).allows("git_history"),
+      ).toBe(true);
+  });
   it("reports every rule failure at once so one corrected resubmission is accepted", async () => {
     const evidence = new AdvisoryEvidence();
     const turn = scannedTurn(evidence);
@@ -1487,7 +1537,7 @@ describe("needs-first host submission", () => {
     },
   );
 
-  it.each(["empty", "assumption", "metadata", "body", "external"])(
+  it.each(["empty", "assumption", "metadata", "body", "external", "history"])(
     "refuses new automation supported only by %s evidence",
     async (support) => {
       const { evidence, turn, input, recommendation, checks } = fixture("missing-capability");
@@ -1530,6 +1580,22 @@ describe("needs-first host submission", () => {
           code: "need",
           severity: "info",
           message: "An external example does not establish this project's need",
+        });
+      }
+      if (support === "history") {
+        const receipt = evidence.observe(
+          process.cwd(),
+          "git_history",
+          { action: "change_frequency" },
+          "history",
+          '{"status":"ok","action":"change_frequency","entries":[{"path":"src/a.ts","commits":4}]}',
+        );
+        recommendation.evidence.items.push({
+          basis: "observed",
+          source: receipt.id,
+          code: "recurrence",
+          severity: "info",
+          message: "Change frequency alone does not establish that automation would help",
         });
       }
       await expect(turn.submit(input, checks)).rejects.toThrow("inspected local workflow evidence");

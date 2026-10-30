@@ -8,6 +8,16 @@ import {
   programmaticChatReducer,
   type ProgrammaticChatState,
 } from "./programmatic-chat-state";
+import { AREA_PROGRESS } from "./programmatic-presentation";
+import {
+  areaAssessment,
+  areaIdentity,
+  docsFind,
+  finishSearch,
+  liveAreas,
+  progress,
+  startSearch,
+} from "./programmatic-area.fixture";
 const hash = "a".repeat(64);
 const savedConfiguration = {
   status: "current" as const,
@@ -1857,5 +1867,168 @@ describe("embedded opportunity review", () => {
       />,
     );
     expect(screen.getByText(/Pick another one/)).toBeTruthy();
+  });
+});
+
+describe("area-by-area search", () => {
+  const areaList = () => shownStep().getByRole("list", { name: "Areas" });
+  const rowTexts = () =>
+    within(areaList())
+      .getAllByRole("listitem")
+      .map((row) => row.textContent);
+  const announced = () =>
+    document.querySelector('.opp-areas [role="status"][aria-live="polite"]')?.textContent;
+  const tabNames = () => screen.getAllByRole("tab").map((tab) => tab.textContent);
+
+  it("lists each area with a word, decorative icons, the merge line and Stop search", () => {
+    const { props, rerender } = fixture();
+    const onStop = vi.fn();
+    const tabs = tabNames();
+    let state = startSearch(props.state);
+    const show = () => rerender(<ProgrammaticChat {...props} state={state} onStop={onStop} />);
+    show();
+    openStep("Find ideas");
+    state = progress(state, "areas", liveAreas("reading", "waiting"));
+    show();
+    expect(rowTexts()).toEqual(["✓docs1 idea", "→src/apiReading", "○scriptsWaiting"]);
+    expect(areaList().getAttribute("aria-busy")).toBe("true");
+    // Icons are decoration; each row's word carries the state.
+    const icons = areaList().querySelectorAll(".opp-area-icon");
+    expect([...icons].every((icon) => icon.getAttribute("aria-hidden") === "true")).toBe(true);
+    expect(within(areaList()).getByText("Reading")).toBeTruthy();
+    expect(screen.queryByText("Checking ideas from every area…")).toBeNull();
+    state = progress(state, "merging", liveAreas("failed", "partly"));
+    show();
+    expect(rowTexts()).toEqual([
+      "✓docs1 idea",
+      "!src/apiCouldn't finish",
+      "✓scriptsNo ideas · read partly",
+    ]);
+    expect(shownStep().getByText("Checking ideas from every area…")).toBeTruthy();
+    // The step bar and its steps stay as they were.
+    expect(tabNames()).toEqual(tabs);
+    expect(props.onAction).not.toHaveBeenCalled();
+    const stop = shownStep().getByRole("button", { name: "Stop search" });
+    expect(stop.getAttribute("type")).toBe("button");
+    fireEvent.click(stop);
+    expect(onStop).toHaveBeenCalledTimes(1);
+    expect(props.onAction).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(shownStep().getByText("Areas"));
+  });
+
+  it("announces each finished area once, then the merge start and the stop", () => {
+    const { props, rerender } = fixture();
+    let state = startSearch(props.state);
+    const show = () => rerender(<ProgrammaticChat {...props} state={state} onStop={vi.fn()} />);
+    state = progress(state, "areas", [
+      { id: "docs", label: "docs", status: "reading" },
+      { id: "api", label: "src/api", status: "waiting" },
+    ]);
+    show();
+    // Starting to read is not news.
+    expect(announced()).toBe("");
+    state = progress(state, "areas", [
+      { id: "docs", label: "docs", status: "found", finds: [docsFind] },
+      { id: "api", label: "src/api", status: "reading" },
+    ]);
+    show();
+    expect(announced()).toBe("docs: 1 idea");
+    state = progress(state, "areas", [
+      { id: "docs", label: "docs", status: "found", finds: [docsFind] },
+      { id: "api", label: "src/api", status: "failed" },
+    ]);
+    show();
+    expect(announced()).toBe("src/api: couldn't finish");
+    state = progress(state, "merging", [
+      { id: "docs", label: "docs", status: "found", finds: [docsFind] },
+      { id: "api", label: "src/api", status: "failed" },
+    ]);
+    show();
+    expect(announced()).toBe("Checking ideas from every area…");
+    let stopping = progress(startSearch(props.state), "areas", [
+      { id: "docs", label: "docs", status: "found", finds: [docsFind] },
+      { id: "api", label: "src/api", status: "reading" },
+    ]);
+    rerender(<ProgrammaticChat {...props} state={stopping} onStop={vi.fn()} />);
+    stopping = progress(stopping, "areas", [
+      { id: "docs", label: "docs", status: "found", finds: [docsFind] },
+      { id: "api", label: "src/api", status: "stopped" },
+    ]);
+    rerender(<ProgrammaticChat {...props} state={stopping} onStop={vi.fn()} />);
+    // Only the stop is news; docs was already announced.
+    expect(announced()).toBe("Search stopped.");
+  });
+
+  it("offers Try this area again only for a failed area and sends that area alone", () => {
+    const { props, rerender } = fixture();
+    const finished = finishSearch(
+      progress(startSearch(props.state), "areas", liveAreas("failed", "partly")),
+      areaAssessment("incomplete", []),
+    );
+    rerender(<ProgrammaticChat {...props} state={finished} />);
+    openStep("Find ideas");
+    expect(rowTexts()).toEqual([
+      "✓docs1 idea",
+      "!src/apiCouldn't finishTry this area again",
+      "✓scriptsNo ideas · read partly",
+    ]);
+    expect(shownStep().queryByRole("button", { name: "Stop search" })).toBeNull();
+    expect(areaList().hasAttribute("aria-busy")).toBe(false);
+    const retries = within(areaList()).getAllByRole("button");
+    expect(retries.map((button) => button.getAttribute("aria-label"))).toEqual([
+      "Try src/api again",
+    ]);
+    const retry = retries[0] as HTMLButtonElement;
+    // Rows are focus targets only; the native button is the one tab stop.
+    expect(
+      within(areaList())
+        .getAllByRole("listitem")
+        .every((row) => row.tabIndex === -1),
+    ).toBe(true);
+    expect(retry.tabIndex).toBe(0);
+    fireEvent.click(retry);
+    expect(props.onAction).toHaveBeenCalledExactlyOnceWith({
+      version: 1,
+      action: "discover",
+      retryArea: { sequence: 1, areaId: "api" },
+    });
+    expect(document.activeElement).toBe(retry.closest("li"));
+    rerender(<ProgrammaticChat {...props} state={finished} planMode />);
+    expect((within(areaList()).getByRole("button") as HTMLButtonElement).disabled).toBe(true);
+    rerender(<ProgrammaticChat {...props} state={finished} busy />);
+    expect((within(areaList()).getByRole("button") as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("refuses a retry after project files change and points to Search again", () => {
+    const { props, rerender } = fixture();
+    const finished = finishSearch(startSearch(props.state), areaAssessment("incomplete", []));
+    const retrying = programmaticChatReducer(finished, {
+      type: "start",
+      generation: finished.generation,
+      epoch: finished.epoch + 1,
+      operation: "discover",
+      assessmentRequest: { ...areaIdentity, requestId: "retry-1" },
+    });
+    const refused = programmaticChatReducer(retrying, {
+      type: "response",
+      generation: retrying.generation,
+      epoch: retrying.epoch,
+      response: {
+        version: 1,
+        action: "discover",
+        ok: false,
+        error: AREA_PROGRESS.retryRefused,
+        reconcile: false,
+      },
+    });
+    rerender(<ProgrammaticChat {...props} state={refused} />);
+    openStep("Find ideas");
+    expect(screen.getByRole("alert").textContent).toBe(AREA_PROGRESS.retryRefused);
+    // Not dressed up as a failed checks load with its report-reload Try again.
+    expect(screen.queryByText("Error details")).toBeNull();
+    expect(within(areaList()).queryByRole("button")).toBeNull();
+    // Rows fall back to the last finished search's words.
+    expect(rowTexts()).toEqual(["✓docsRead", "!src/apiNot read", "✓scriptsRead partly"]);
+    expect(props.onAction).not.toHaveBeenCalled();
   });
 });

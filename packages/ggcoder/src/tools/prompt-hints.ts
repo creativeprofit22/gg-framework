@@ -47,6 +47,7 @@ export const TOOL_PROMPT_HINTS: Record<string, string> = {
   programmatic_scan: "Scan approved profiles.",
   command_information: "Read command metadata; no execution permission.",
   research_corpus: "Read-only corpus search/show.",
+  git_history: "Bounded read-only git change history.",
 };
 
 /**

@@ -8,6 +8,7 @@ export const SETUP_ASSESSMENT_TOOLS = new Set([
   "ls",
   "code_search",
   "code_nav",
+  "git_history",
   "command_information",
   "programmatic_advisory_result",
   "programmatic_profile",

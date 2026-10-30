@@ -16,6 +16,7 @@ import { createNativeInputSmoke } from "./programmatic-native-input-smoke.mjs";
 import { smokeLabels, smokeStepWords, smokeButton, smokeDialHub, smokeDialShows, smokeComposerActionStorageKey, revealSmokeTarget, assessmentWorkflowStep, assessmentRequestCount, readExecutionDisplay, assertTranscriptIsolation, extendedWorkflowStep, extendedRequestCount, extendedCommandName } from "./programmatic-execution-smoke-checks.mjs";
 
 import { discoveryWorkflowStep, discoveryRequestCount, runDiscoverySmoke } from "./programmatic-discovery-smoke.mjs";
+import { createAreaProvider, runAreaSmoke, seedAreas } from "./programmatic-area-smoke.mjs";
 import { familyWorkflowStep, familyRequestCount, familyResponseEvents, runFamilySmoke, seedFamily } from "./programmatic-family-smoke.mjs";
 
 const app = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -50,7 +51,11 @@ function snapshot(directory, prefix = "") {
   return result;
 }
 
-function seed(paths, discoveryOnly = false, familyWorkflow = false) {
+function seed(paths, discoveryOnly = false, familyWorkflow = false, areaSearch = false) {
+  if (areaSearch) {
+    seedAreas(paths.project);
+    return {};
+  }
   if (familyWorkflow) {
     seedFamily(paths.project);
     return {};
@@ -140,14 +145,17 @@ async function run() {
   const familyWorkflow = process.argv.includes("--family-workflow");
   assert.ok(!familyWorkflow || (!discoveryOnly && !extendedWorkflow && !driftOnly && !integratedRecovery), "Family workflow is a separate bounded scenario");
   assert.ok(!extendedWorkflow || (!driftOnly && !integratedRecovery), "Extended workflow is a separate bounded scenario");
+  const areaSearch = process.argv.includes("--area-search");
+  assert.ok(!areaSearch || (!familyWorkflow && !discoveryOnly && !extendedWorkflow && !driftOnly && !integratedRecovery), "Area search is a separate bounded scenario");
   assert.ok(!integratedRecovery || (!driftOnly && !visual), "Integrated recovery excludes drift-only and visual modes");
   const allowNormalWindow = process.argv.includes("--allow-normal-window");
   assert.ok(!extendedWorkflow || !allowNormalWindow, "Extended minimized verification never allows normal-window fallback");
   assert.ok(!familyWorkflow || (!allowNormalWindow && !visual), "Family workflow is minimized-only, without normal-window fallback");
+  assert.ok(!areaSearch || (!allowNormalWindow && !visual), "Area search is minimized-only, without normal-window fallback");
   assert.ok(!allowNormalWindow || !visual, "Normal-window fallback does not enable visual/input checks");
   assert.ok(!driftOnly || !visual, "Drift-only smoke does not repeat visual/input checks");
   const reuseBuiltDev = process.argv.includes("--reuse-built-dev");
-  assert.deepEqual(process.argv.slice(2), ["--identity", identity, ...(driftOnly ? ["--drift-only"] : []), ...(integratedRecovery ? ["--integrated-recovery"] : []), ...(extendedWorkflow ? ["--extended-workflow"] : []), ...(discoveryOnly ? ["--discovery-only"] : []), ...(familyWorkflow ? ["--family-workflow"] : []), ...(visual ? ["--visual"] : []), ...(allowNormalWindow ? ["--allow-normal-window"] : []), ...(reuseBuiltDev ? ["--reuse-built-dev"] : [])]);
+  assert.deepEqual(process.argv.slice(2), ["--identity", identity, ...(driftOnly ? ["--drift-only"] : []), ...(integratedRecovery ? ["--integrated-recovery"] : []), ...(extendedWorkflow ? ["--extended-workflow"] : []), ...(discoveryOnly ? ["--discovery-only"] : []), ...(familyWorkflow ? ["--family-workflow"] : []), ...(areaSearch ? ["--area-search"] : []), ...(visual ? ["--visual"] : []), ...(allowNormalWindow ? ["--allow-normal-window"] : []), ...(reuseBuiltDev ? ["--reuse-built-dev"] : [])]);
   const builtDev = join(app, "src-tauri/target/debug/gg-app.exe");
   if (reuseBuiltDev) {
     assert.match(process.env.GG_PROGRAMMATIC_BUILT_DEV_SHA256 ?? "", /^[a-f0-9]{64}$/);
@@ -182,7 +190,8 @@ async function run() {
     writeFileSync(join(agentDir, "commands/research.md"), `---\nname: research\ndescription: Harmless fixture\n---\n${fixtureBody}\n`);
     json(join(agentDir, "auth.json"), {});
     json(join(agentDir, "settings.json"), { defaultProvider: "azure", defaultModel: "azure:fixture", autoCompact: false, idealReviewEnabled: false });
-    const fixture = seed(paths, discoveryOnly, familyWorkflow);
+    const fixture = seed(paths, discoveryOnly, familyWorkflow, areaSearch);
+    const areaProvider = areaSearch ? createAreaProvider() : undefined;
     const familyState = {};
     assert.equal(existsSync(join(paths.project, ".gg/programmatic/profile.json")), false);
     const baseline = snapshot(paths.project);
@@ -200,7 +209,20 @@ async function run() {
         for await (const chunk of request) { size += chunk.length; assert.ok(size < 1_000_000); chunks.push(chunk); }
         const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
         let events;
-        if (pendingAssessment) {
+        if (areaProvider) {
+          const answer = await areaProvider.respond(body);
+          if (answer.hold) {
+            // Parked until Stop cancels the pass; ended afterwards so no socket outlives the run.
+            areaProvider.state.held.push(response);
+            return;
+          }
+          if (answer.status) {
+            response.writeHead(answer.status, { "content-type": "application/json" });
+            response.end(JSON.stringify({ error: { code: "fixture_area_failure", message: "Scripted area failure" } }));
+            return;
+          }
+          events = answer.events;
+        } else if (pendingAssessment) {
           pendingAssessment.requests.push(body);
           const step = assessmentWorkflowStep(pendingAssessment.mode, pendingAssessment.requests.length, body, pendingAssessment.callId);
           events = typeof step === "string" ? [{ type: "response.output_text.delta", delta: step }] : [
@@ -247,7 +269,7 @@ async function run() {
     for (const key of Object.keys(env)) if (/(?:API_KEY|ACCESS_KEY|SECRET|TOKEN|PASSWORD|PRIVATE_KEY|CREDENTIALS|^AZURE_|^HOMEDRIVE$|^HOMEPATH$)/i.test(key)) delete env[key];
     Object.assign(env, { GG_SIDECAR_PATH: fileURLToPath(import.meta.url), GG_PROGRAMMATIC_EXECUTION_FIXTURE_MODE: "sidecar",
       GG_PROGRAMMATIC_EXECUTION_FIXTURE_PROVIDER: providerUrl,
-      ...(discoveryOnly ? { GG_PROGRAMMATIC_DISCOVERY_ONLY: "1", GG_PROGRAMMATIC_DISCOVERY_AUDIT: paths.audit } : familyWorkflow ? { GG_PROGRAMMATIC_FAMILY_WORKFLOW: "1" } : { GG_PROGRAMMATIC_EXECUTION_FIXTURE_DETECTOR: fixture.stagedDetector }),
+      ...(discoveryOnly ? { GG_PROGRAMMATIC_DISCOVERY_ONLY: "1", GG_PROGRAMMATIC_DISCOVERY_AUDIT: paths.audit } : familyWorkflow ? { GG_PROGRAMMATIC_FAMILY_WORKFLOW: "1" } : areaSearch ? { GG_PROGRAMMATIC_AREA_SEARCH: "1" } : { GG_PROGRAMMATIC_EXECUTION_FIXTURE_DETECTOR: fixture.stagedDetector }),
       GG_PHASE25_DEV_FIXTURE_CDP_PORT: String(cdpPort), GG_PHASE25_DEV_FIXTURE_SKIP_ORPHAN_SWEEP: "1", GG_APP_DEV_SMOKE_WINDOW: visual ? "visible" : "minimized",
       COREPACK_HOME: process.env.COREPACK_HOME ?? join(process.env.LOCALAPPDATA ?? "", "node/corepack"), COREPACK_DEFAULT_TO_LATEST: "0",
       CARGO_HOME: process.env.CARGO_HOME ?? join(process.env.USERPROFILE ?? "", ".cargo"),
@@ -412,6 +434,24 @@ async function run() {
       assert.equal(finalState.sessionId, parentState.sessionId);
       assert.equal(finalState.provider, parentState.provider);
       json(join(paths.audit, "family-workflow.json"), { ...result, projectBefore: baseline, projectAfter: after, changes });
+      return { ...result, changedProjectFiles: changes, childTranscript: false };
+    }
+    if (areaSearch) {
+      const running = async () => (await client.evaluate(`window.__TAURI_INTERNALS__.invoke("agent_state", {paneId:"primary"})`)).running;
+      let result;
+      try {
+        result = await runAreaSmoke({ client, click, act, waitFor, provider: areaProvider, observe: observeMinimized, enabled, running, providerFailure: () => providerFailure });
+      } finally {
+        for (const parked of areaProvider.state.held.splice(0)) { try { parked.destroy(); } catch { /* already closed by cancel */ } }
+      }
+      assert.equal(providerFailure, undefined);
+      const after = snapshot(paths.project);
+      const changes = [...new Set([...Object.keys(baseline), ...Object.keys(after)])].filter((key) => baseline[key] !== after[key]).sort();
+      assert.ok(changes.every((file) => file.startsWith(".gg/programmatic/")), `Find ideas changes only Opportunities records: ${changes.join(", ")}`);
+      const finalState = await client.evaluate(`window.__TAURI_INTERNALS__.invoke("agent_state", {paneId:"primary"})`);
+      assert.equal(finalState.sessionId, parentState.sessionId);
+      assert.equal(finalState.provider, parentState.provider);
+      json(join(paths.audit, "area-search.json"), { ...result, changes });
       return { ...result, changedProjectFiles: changes, childTranscript: false };
     }
     if (discoveryOnly) {
@@ -730,15 +770,15 @@ async function run() {
       if (cleanupErrors.length) throw new AggregateError(cleanupErrors, "Fixture cleanup failed");
     },
     validate: (result) => {
-      if (!visual && !discoveryOnly && !familyWorkflow) validateNativeSmokeEvidence(paths.audit, result, { driftOnly, integratedRecovery, extendedWorkflow, allowNormalWindow });
-      if (!visual && (discoveryOnly || familyWorkflow)) {
+      if (!visual && !discoveryOnly && !familyWorkflow && !areaSearch) validateNativeSmokeEvidence(paths.audit, result, { driftOnly, integratedRecovery, extendedWorkflow, allowNormalWindow });
+      if (!visual && (discoveryOnly || familyWorkflow || areaSearch)) {
         const observations = JSON.parse(readFileSync(join(paths.audit, "native-minimized.json"), "utf8"));
         assert.ok(observations.samples.length >= 3 && observations.samples.every((sample) => sample.verified && sample.minimized));
         result.minimized = true;
       }
     },
   });
-  console.log(`PROGRAMMATIC ${familyWorkflow ? "FAMILY WORKFLOW" : discoveryOnly ? "DISCOVERY" : extendedWorkflow ? "EXTENDED WORKFLOW" : integratedRecovery ? "INTEGRATED RECOVERY" : driftOnly ? "DRIFT" : "EXECUTION"} DEV SMOKE PASS (one ${visual ? "visible" : result.minimized ? "minimized" : "normal-window fallback"} developer launch; no packaging)`);
+  console.log(`PROGRAMMATIC ${areaSearch ? "AREA SEARCH" : familyWorkflow ? "FAMILY WORKFLOW" : discoveryOnly ? "DISCOVERY" : extendedWorkflow ? "EXTENDED WORKFLOW" : integratedRecovery ? "INTEGRATED RECOVERY" : driftOnly ? "DRIFT" : "EXECUTION"} DEV SMOKE PASS (one ${visual ? "visible" : result.minimized ? "minimized" : "normal-window fallback"} developer launch; no packaging)`);
 }
 
 if (mode === "sidecar") {
@@ -776,7 +816,7 @@ if (mode === "sidecar") {
       return end.call(this, chunk, ...args);
     };
   }
-  if (process.env.GG_PROGRAMMATIC_DISCOVERY_ONLY !== "1" && process.env.GG_PROGRAMMATIC_FAMILY_WORKFLOW !== "1") {
+  if (process.env.GG_PROGRAMMATIC_DISCOVERY_ONLY !== "1" && process.env.GG_PROGRAMMATIC_FAMILY_WORKFLOW !== "1" && process.env.GG_PROGRAMMATIC_AREA_SEARCH !== "1") {
   const detectorUrl = pathToFileURL(join(workspace, "packages/ggcoder/dist/core/programmatic/opportunities.js")).href;
   const original = readFileSync(fileURLToPath(detectorUrl), "utf8");
   const staged = readFileSync(process.env.GG_PROGRAMMATIC_EXECUTION_FIXTURE_DETECTOR, "utf8");

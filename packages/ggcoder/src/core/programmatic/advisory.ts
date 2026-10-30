@@ -35,6 +35,7 @@ export const ADVISORY_READ_TOOLS = new Set([
   "web_fetch",
   "command_information",
   "research_corpus",
+  "git_history",
   "programmatic_advisory_result",
   "programmatic_scan",
 ]);
@@ -177,7 +178,9 @@ export class AdvisoryEvidence {
       tool === "read" ||
       locations.length > 0 ||
       tool === "web_fetch" ||
-      (tool === "research_corpus" && input.action === "show");
+      (tool === "research_corpus" && input.action === "show") ||
+      // Observed change frequency; no location, so it is never local workflow inspection.
+      tool === "git_history";
     const receipt: AdvisoryReceipt = {
       id: `receipt-${randomUUID()}`,
       retrievedAt: new Date().toISOString(),
@@ -297,6 +300,9 @@ export class ProgrammaticAdvisoryTurn {
       return;
     }
     this.pendingResults.set(toolCallId, accept);
+  }
+  get hasPendingResults(): boolean {
+    return this.pendingResults.size > 0;
   }
   resultPrepared(result: Readonly<ToolResult>): void {
     const accept = this.pendingResults.get(result.toolCallId);
@@ -532,45 +538,11 @@ export class ProgrammaticAdvisoryTurn {
           const line = `Idea ${index + 1}: ${message}`;
           if (!failures.includes(line)) failures.push(line);
         };
-        for (const item of recommendation.evidence.items) {
-          if ("kind" in item) {
-            if (!deliveredExternalReceipt(this.evidence.list(), item))
-              fail(
-                "External provenance must match an inspected host receipt; search leads and unsupplied revisions are not evidence.",
-              );
-            continue;
-          }
-          if (item.basis === "assumed" && item.source === "assumption") continue;
-          const receipt = this.evidence.get(item.source);
-          if (!receipt) {
-            fail(
-              "Evidence source must reference a retained host receipt ID (or an explicit assumption).",
-            );
-            continue;
-          }
-          if (item.basis === "observed" && receipt.status !== "retrieved")
-            fail("Search leads and failed calls cannot substantiate observed evidence.");
-          const cited = item.location;
-          if (
-            cited &&
-            !localLocations(receipt).some(
-              (location) =>
-                cited.path === location.path &&
-                (cited.startLine === undefined ||
-                  (location.startLine !== undefined &&
-                    location.endLine !== undefined &&
-                    cited.startLine >= location.startLine &&
-                    (cited.endLine ?? cited.startLine) <= location.endLine)),
-            )
-          )
-            fail("Evidence location was not inspected by the referenced tool call.");
-        }
+        validateAdvisoryEvidenceItems(this.evidence, recommendation.evidence.items, fail);
         const choice = recommendation.choice;
-        const localSupport = recommendation.evidence.items.some(
-          (item) =>
-            !("kind" in item) &&
-            item.basis !== "assumed" &&
-            hasLocalInspection(this.evidence.get(item.source), item.location),
+        const localSupport = hasIndependentLocalSupport(
+          this.evidence,
+          recommendation.evidence.items,
         );
         const commands = commandOptions(recommendation);
         if (commands.some((option) => option.availability?.status === "available") && !localSupport)
@@ -612,13 +584,8 @@ export class ProgrammaticAdvisoryTurn {
             );
         }
       }
-      if (failures.length === 1) throw new Error(failures[0]);
-      if (failures.length)
-        throw new Error(
-          `Fix all ${failures.length} problems below, then resubmit once:\n${failures
-            .map((line, index) => `${index + 1}. ${line}`)
-            .join("\n")}`,
-        );
+      const failure = advisoryFailureMessage(failures);
+      if (failure) throw new Error(failure);
       // Freshness findings stay local until acceptance so a rejected or aborted
       // attempt cannot leave limitations behind for the next one.
       const limitations = new Set(this.limitations);
@@ -684,6 +651,7 @@ const TOOL_LABELS: Readonly<Record<string, string>> = {
   programmatic_profile: "Reading your check setup",
   command_information: "Reading your commands",
   research_corpus: "Searching code examples",
+  git_history: "Reading project history",
   web_fetch: "Opening a web page",
   web_search: "Searching the web",
   read: "Reading project files",
@@ -740,6 +708,12 @@ export const ADVISORY_LIMITATIONS = {
     "The code-example search isn't set up, so AI didn't compare your project with outside examples. Nothing was installed.",
   modelLimited:
     "AI said it couldn't check everything it wanted to, so it may have missed something.",
+  areasIncomplete:
+    "AI couldn't finish searching some parts of your project, so ideas from those parts may be missing.",
+  areasNotSearched:
+    "AI didn't search every part of your project, so ideas from the skipped parts may be missing.",
+  areasPermissionDenied:
+    "Permission to read some parts of your project was denied, so ideas from what AI couldn't read may be missing.",
   hostFacts: (toolName: string) =>
     `${toolLabel(toolName)} didn't return readable results, so AI worked without them. Nothing was retried.`,
 } as const;
@@ -749,6 +723,69 @@ export const INCOMPLETE_ADVISORY_NOTICE =
   "## What AI found: no answer this time\n\nThe idea search stopped before it finished, so there are no suggestions yet. Nothing was changed. Any check results you already had are unchanged.";
 
 type Recommendation = Assessment["recommendations"][number];
+
+type AdvisoryEvidenceItem = Recommendation["evidence"]["items"][number];
+
+/** Shared receipt checks for final ideas and per-area candidate needs. */
+export function validateAdvisoryEvidenceItems(
+  evidence: AdvisoryEvidence,
+  items: readonly AdvisoryEvidenceItem[],
+  fail: (message: string) => void,
+): void {
+  for (const item of items) {
+    if ("kind" in item) {
+      if (!deliveredExternalReceipt(evidence.list(), item))
+        fail(
+          "External provenance must match an inspected host receipt; search leads and unsupplied revisions are not evidence.",
+        );
+      continue;
+    }
+    if (item.basis === "assumed" && item.source === "assumption") continue;
+    const receipt = evidence.get(item.source);
+    if (!receipt) {
+      fail(
+        "Evidence source must reference a retained host receipt ID (or an explicit assumption).",
+      );
+      continue;
+    }
+    if (item.basis === "observed" && receipt.status !== "retrieved")
+      fail("Search leads and failed calls cannot substantiate observed evidence.");
+    const cited = item.location;
+    if (
+      cited &&
+      !localLocations(receipt).some(
+        (location) =>
+          cited.path === location.path &&
+          (cited.startLine === undefined ||
+            (location.startLine !== undefined &&
+              location.endLine !== undefined &&
+              cited.startLine >= location.startLine &&
+              (cited.endLine ?? cited.startLine) <= location.endLine)),
+      )
+    )
+      fail("Evidence location was not inspected by the referenced tool call.");
+  }
+}
+
+export function hasIndependentLocalSupport(
+  evidence: AdvisoryEvidence,
+  items: readonly AdvisoryEvidenceItem[],
+): boolean {
+  return items.some(
+    (item) =>
+      !("kind" in item) &&
+      item.basis !== "assumed" &&
+      hasLocalInspection(evidence.get(item.source), item.location),
+  );
+}
+
+/** One message listing every problem so one corrected resubmission is enough. */
+export function advisoryFailureMessage(failures: readonly string[]): string | undefined {
+  if (failures.length <= 1) return failures[0];
+  return `Fix all ${failures.length} problems below, then resubmit once:\n${failures
+    .map((line, index) => `${index + 1}. ${line}`)
+    .join("\n")}`;
+}
 
 const BASIS_WORDS = {
   observed: "checked",

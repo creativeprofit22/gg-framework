@@ -505,6 +505,12 @@ describe("prompt commands", () => {
         "Prefer reuse-command when an existing generator or command already fits",
       );
       expect(prompt).toContain("Never invent usage counts, frequency or time savings");
+      expect(prompt).toContain(
+        "When git_history is available, check recurrence with it before calling repeatability observed",
+      );
+      expect(prompt).toContain(
+        "history does not show effort, who did the work or that automation would help",
+      );
       expect(prompt).toContain("Consolidate duplicate proposals");
       expect(prompt).toContain("allow honest empty recommendations");
       expect(prompt).toContain("never a global early exit");

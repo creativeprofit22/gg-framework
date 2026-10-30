@@ -4,7 +4,14 @@ import {
   isProgrammaticExecutionResult,
   isProgrammaticChatRequest,
   isProgrammaticChatResponse,
+  PROGRAMMATIC_AREA_RETRY_REFUSED,
 } from "./programmatic-chat-contract.js";
+
+it("keeps the shared area-retry refusal wording the app matches on", () => {
+  expect(PROGRAMMATIC_AREA_RETRY_REFUSED).toBe(
+    "Project files changed since this search. Search again instead.",
+  );
+});
 
 it("allows bounded request correlation only on assessment requests and validates completion receipts", () => {
   for (const action of ["discover", "inspect-setup", "scan"]) {
@@ -607,4 +614,35 @@ describe("programmatic chat transport", () => {
     expect(isProgrammaticChatResponse({ ...error, error: "x".repeat(1_001) })).toBe(false);
     expect(isProgrammaticChatResponse({ ...error, reconcile: undefined })).toBe(false);
   });
+});
+
+it("accepts a bounded one-area retry only on discover requests", () => {
+  const retryArea = { sequence: 3, areaId: "packages/gg-core" };
+  expect(isProgrammaticChatRequest({ version: 1, action: "discover" })).toBe(true);
+  expect(
+    isProgrammaticChatRequest({ version: 1, action: "discover", requestId: "r-1", retryArea }),
+  ).toBe(true);
+  expect(
+    isProgrammaticChatRequest({
+      version: 1,
+      action: "discover",
+      retryArea: { ...retryArea, areaId: "x".repeat(128) },
+    }),
+  ).toBe(true);
+  for (const invalid of [
+    { ...retryArea, sequence: 0 },
+    { ...retryArea, sequence: 1.5 },
+    { ...retryArea, sequence: "3" },
+    { ...retryArea, areaId: "" },
+    { ...retryArea, areaId: "x".repeat(129) },
+    { ...retryArea, areaId: 7 },
+    { ...retryArea, force: true },
+    { sequence: 3 },
+    null,
+  ])
+    expect(isProgrammaticChatRequest({ version: 1, action: "discover", retryArea: invalid })).toBe(
+      false,
+    );
+  for (const action of ["inspect-setup", "scan"])
+    expect(isProgrammaticChatRequest({ version: 1, action, retryArea })).toBe(false);
 });

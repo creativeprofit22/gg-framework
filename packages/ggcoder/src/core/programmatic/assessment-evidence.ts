@@ -12,7 +12,7 @@ export const ASSESSMENT_EVIDENCE_LIMITS = Object.freeze({
   maxDeliveredBytes: 64 * 1024,
 });
 
-type DiagnosticCode =
+export type DiagnosticCode =
   | "path-limit"
   | "excerpt-limit"
   | "excerpt-truncated"
@@ -36,7 +36,21 @@ export interface ProgrammaticAssessmentEvidence {
 
 export type AssessmentEvidenceRequest =
   | { name: "find"; args: { pattern: string } }
-  | { name: "read"; args: { file_path: string; limit: number } };
+  | { name: "read"; args: { file_path: string; limit: number } }
+  | {
+      name: "git_history";
+      args: {
+        action: "change_frequency";
+        group_by: "folder";
+        depth: number;
+        limit: number;
+        since_days: number;
+      };
+    }
+  | {
+      name: "git_history";
+      args: { action: "recent_subjects"; path: string; limit: number; since_days: number };
+    };
 export interface AssessmentEvidenceAuthorization {
   authorize(request: AssessmentEvidenceRequest): Promise<boolean>;
   /** Synchronous live-policy check after awaits and before delivery. */
@@ -47,9 +61,14 @@ export interface AssessmentEvidenceOptions {
   authorization?: AssessmentEvidenceAuthorization;
   /** Listed but never excerpted, e.g. command files the model can open on demand. */
   skipExcerpt?: (repositoryPath: string) => boolean;
+  /** Restricts the sample to matching paths, e.g. one area of the project. */
+  includePath?: (repositoryPath: string) => boolean;
+  /** Smaller caps for a narrower sample; never above the defaults. */
+  limits?: Partial<Record<"maxPaths" | "maxExcerpts" | "maxDeliveredBytes", number>>;
 }
 
-const MANIFESTS = new Set([
+// Lower-case basenames.
+export const MANIFESTS: ReadonlySet<string> = new Set([
   "package.json",
   "pnpm-workspace.yaml",
   "deno.json",
@@ -73,7 +92,8 @@ const MANIFESTS = new Set([
   "package.swift",
   "cmakelists.txt",
 ]);
-const TASK_RUNNERS = new Set([
+// Lower-case basenames.
+export const TASK_RUNNERS: ReadonlySet<string> = new Set([
   "makefile",
   "gnumakefile",
   "justfile",
@@ -238,6 +258,14 @@ export async function collectProgrammaticAssessmentEvidence(
 ): Promise<ProgrammaticAssessmentEvidence> {
   const { signal, authorization } = options;
   const skipExcerpt = options.skipExcerpt ?? (() => false);
+  const includePath = options.includePath ?? (() => true);
+  const cap = (key: "maxPaths" | "maxExcerpts" | "maxDeliveredBytes") =>
+    Math.min(ASSESSMENT_EVIDENCE_LIMITS[key], options.limits?.[key] ?? Infinity);
+  const limits = {
+    maxPaths: cap("maxPaths"),
+    maxExcerpts: cap("maxExcerpts"),
+    maxDeliveredBytes: cap("maxDeliveredBytes"),
+  };
   signal?.throwIfAborted();
   const result: ProgrammaticAssessmentEvidence = {
     version: 1,
@@ -252,9 +280,7 @@ export async function collectProgrammaticAssessmentEvidence(
     else result.diagnostics.push({ code, count });
   };
   // Reserve space for all fixed diagnostic codes and coverage state changes.
-  const fits = () =>
-    Buffer.byteLength(JSON.stringify(result)) <=
-    ASSESSMENT_EVIDENCE_LIMITS.maxDeliveredBytes - 1024;
+  const fits = () => Buffer.byteLength(JSON.stringify(result)) <= limits.maxDeliveredBytes - 1024;
   let root: string;
   let gitignoreLines: string[] = [];
   try {
@@ -291,6 +317,7 @@ export async function collectProgrammaticAssessmentEvidence(
         diagnose("path-limit");
         break;
       }
+      if (!includePath(entry.path)) continue;
       walked.push({
         path: entry.path,
         unsafe: entry.kind === "unsafe",
@@ -308,11 +335,11 @@ export async function collectProgrammaticAssessmentEvidence(
       a.tier - b.tier || a.depth - b.depth || (a.path < b.path ? -1 : a.path > b.path ? 1 : 0),
   );
   if (
-    walked.length > ASSESSMENT_EVIDENCE_LIMITS.maxPaths &&
+    walked.length > limits.maxPaths &&
     !result.diagnostics.some((item) => item.code === "path-limit")
   )
     diagnose("path-limit");
-  for (const entry of walked.slice(0, ASSESSMENT_EVIDENCE_LIMITS.maxPaths)) {
+  for (const entry of walked.slice(0, limits.maxPaths)) {
     result.paths.push({
       path: entry.path,
       coverage: entry.unsafe ? "unreadable-or-unsafe" : "uninspected",
@@ -329,7 +356,7 @@ export async function collectProgrammaticAssessmentEvidence(
   for (const item of result.paths) {
     signal?.throwIfAborted();
     if (item.coverage !== "uninspected" || skipExcerpt(item.path)) continue;
-    if (attempts++ >= ASSESSMENT_EVIDENCE_LIMITS.maxExcerpts) {
+    if (attempts++ >= limits.maxExcerpts) {
       item.coverage = "budget-limited";
       diagnose("excerpt-limit");
       continue;

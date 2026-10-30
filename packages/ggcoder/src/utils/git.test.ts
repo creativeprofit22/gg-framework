@@ -1,11 +1,16 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { slowRevParseGit } from "../test-support/slow-git.js";
-import { getGitDirtyFileCount, isGitRepo } from "./git.js";
+import {
+  getGitDirtyFileCount,
+  isGitRepo,
+  runBackgroundGit,
+  withoutRepositoryRedirectEnv,
+} from "./git.js";
 
 const execFileAsync = promisify(execFile);
 const tempDirs: string[] = [];
@@ -66,4 +71,43 @@ describe("isGitRepo", () => {
       expect(await isGitRepo(cwd, { timeoutMs: 5_000 })).toBe(true);
     },
   );
+});
+
+describe("isolateRepository", () => {
+  it("drops repository-redirect and config-injection variables case-insensitively", () => {
+    const env = withoutRepositoryRedirectEnv({
+      GIT_DIR: "/elsewhere",
+      git_work_tree: "/elsewhere",
+      GIT_COMMON_DIR: "x",
+      GIT_INDEX_FILE: "x",
+      GIT_OBJECT_DIRECTORY: "x",
+      GIT_ALTERNATE_OBJECT_DIRECTORIES: "x",
+      GIT_NAMESPACE: "x",
+      GIT_CONFIG_PARAMETERS: "'core.pager'='evil'",
+      GIT_CONFIG_COUNT: "1",
+      GIT_CONFIG_KEY_0: "core.pager",
+      Git_Config_Value_0: "evil",
+      GIT_TERMINAL_PROMPT: "0",
+      GIT_AUTHOR_DATE: "2026-01-01",
+      PATH: "/bin",
+    });
+    expect(Object.keys(env).sort()).toEqual(["GIT_AUTHOR_DATE", "GIT_TERMINAL_PROMPT", "PATH"]);
+  });
+
+  it("ignores an inherited GIT_DIR pointing at another repository", async () => {
+    const cwd = await realpath(await mkdtemp(path.join(tmpdir(), "gg-git-isolate-")));
+    const other = await realpath(await mkdtemp(path.join(tmpdir(), "gg-git-other-")));
+    tempDirs.push(cwd, other);
+    await execFileAsync("git", ["init"], { cwd });
+    await execFileAsync("git", ["init"], { cwd: other });
+    vi.stubEnv("GIT_DIR", path.join(other, ".git"));
+
+    const leaked = await runBackgroundGit(["rev-parse", "--absolute-git-dir"], { cwd });
+    expect(await realpath(leaked.stdout.trim())).toBe(await realpath(path.join(other, ".git")));
+    const isolated = await runBackgroundGit(["rev-parse", "--absolute-git-dir"], {
+      cwd,
+      isolateRepository: true,
+    });
+    expect(await realpath(isolated.stdout.trim())).toBe(await realpath(path.join(cwd, ".git")));
+  });
 });

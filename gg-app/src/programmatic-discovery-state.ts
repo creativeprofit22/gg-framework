@@ -1,4 +1,5 @@
 import type {
+  ProgrammaticAreaProgress,
   ProgrammaticAssessment,
   ProgrammaticAssessmentEvent,
   ProgrammaticAssessmentIdentity,
@@ -15,7 +16,14 @@ import type { ProgrammaticChatState } from "./programmatic-chat-state";
 
 export type ProgrammaticSelection =
   { source: "deterministic"; id: string } | { source: "current" | "history"; id: string };
+export interface AreaProgressState {
+  sequence: number;
+  stage: "areas" | "merging";
+  areas: ProgrammaticAreaProgress[];
+}
 export interface DiscoveryChatState {
+  /** Live area rows for the pending search; kept after completion for the final rows. */
+  areaProgress: AreaProgressState | null;
   assessment: ProgrammaticAssessment | null;
   assessmentSequence: number;
   assessmentRequestSequence: number;
@@ -42,6 +50,7 @@ export interface DiscoveryChatState {
   historyInvalidatedEpoch: number;
 }
 export const initialDiscoveryChatState = (): DiscoveryChatState => ({
+  areaProgress: null,
   assessment: null,
   assessmentSequence: 0,
   assessmentRequestSequence: 0,
@@ -69,6 +78,22 @@ export function assessmentEvent(
 ): ProgrammaticChatState {
   const owner = state.assessmentRequest ?? state.assessmentIdentity;
   if (owner && !sameOwner(owner, update)) return state;
+  // Before the generic branch, which would settle the pending search.
+  if (update.phase === "progress") {
+    const identity = state.assessmentIdentity;
+    if (
+      !state.assessmentPending ||
+      update.sequence !== state.assessmentSequence ||
+      !identity ||
+      !sameOwner(identity, update) ||
+      identity.requestId !== update.requestId
+    )
+      return state;
+    return {
+      ...state,
+      areaProgress: { sequence: update.sequence, stage: update.stage, areas: update.areas },
+    };
+  }
   if (
     update.sequence < state.assessmentSequence ||
     (update.sequence === state.assessmentSequence &&
@@ -82,6 +107,7 @@ export function assessmentEvent(
     assessmentIdentity: update,
     assessmentUncertain: false,
     assessmentPending: update.phase === "started",
+    ...(update.phase === "started" ? { areaProgress: null } : {}),
     ...(update.phase === "completed"
       ? assessmentDisplay(state, update.assessment)
       : {

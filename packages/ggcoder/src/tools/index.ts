@@ -51,6 +51,7 @@ import { createEnterPlanTool } from "./enter-plan.js";
 import { createExitPlanTool } from "./exit-plan.js";
 import { createSteroidsTool } from "./steroids.js";
 import { createResearchCorpusTool } from "./research-corpus.js";
+import { createGitHistoryTool } from "./git-history.js";
 import { findSteroidsBinary } from "../core/steroids.js";
 import {
   withCorpusSourceRecording,
@@ -181,8 +182,8 @@ export interface CreateToolsOptions {
    */
   steroidsBin?: string | null;
   /**
-   * Include advisory-only tools (`ADVISORY_ONLY_TOOL_NAMES`, currently the
-   * read-only `research_corpus` facade). Off by default: ordinary hosts such as
+   * Include advisory-only tools (`ADVISORY_ONLY_TOOL_NAMES`: the read-only
+   * `research_corpus` facade and, with local operations, `git_history`). Off by default: ordinary hosts such as
    * the terminal TUI have no programmatic advisory turn, and advertising the
    * read-only facade next to `steroids` makes the model refuse corpus
    * add/refresh requests. AgentSession opts in because it defers and gates
@@ -466,6 +467,10 @@ export async function createTools(
 
   if (opts?.onEnterPlan) {
     tools.push(createEnterPlanTool(opts.onEnterPlan));
+  }
+
+  if (opts?.includeAdvisoryOnlyTools && ops === localOperations) {
+    tools.push(createGitHistoryTool(cwd));
   }
 
   if (opts?.onExitPlan) {

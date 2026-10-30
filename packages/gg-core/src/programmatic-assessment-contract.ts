@@ -11,6 +11,48 @@ import {
 export const PROGRAMMATIC_ASSESSMENT_VERSION = 1 as const;
 export const PROGRAMMATIC_ASSESSMENT_TEXT_LIMIT = 4_000;
 export const PROGRAMMATIC_ASSESSMENT_ITEM_LIMIT = 50;
+export const PROGRAMMATIC_AREA_PROGRESS_LIMITS = Object.freeze({
+  areas: 6,
+  finds: 3,
+  findText: 280,
+  id: 128,
+  label: 120,
+  assessmentAreas: 24,
+});
+
+export type ProgrammaticAreaProgressStatus =
+  "waiting" | "reading" | "found" | "partly" | "failed" | "stopped";
+/** Display-only candidate need from one finished area; never a reviewable recommendation. */
+export interface ProgrammaticAreaEarlyFind {
+  need: string;
+  where: string;
+  unsure: string;
+}
+export interface ProgrammaticAreaProgress {
+  /** Host-built from paths; never model text. */
+  id: string;
+  label: string;
+  status: ProgrammaticAreaProgressStatus;
+  finds?: ProgrammaticAreaEarlyFind[];
+}
+export type ProgrammaticAssessmentAreaReason =
+  | "timed-out"
+  | "failed"
+  | "cancelled"
+  | "no-result"
+  | "low-signal"
+  | "limit"
+  | "receipt-limit"
+  | "sample-limit"
+  | "permission-denied";
+export interface ProgrammaticAssessmentArea {
+  id: string;
+  label: string;
+  status: "searched" | "partly" | "not-searched";
+  reason?: ProgrammaticAssessmentAreaReason;
+  /** Host may rerun only this area against the cached search; not an approval capability. */
+  retryable: boolean;
+}
 
 export interface ProgrammaticAssessmentCoverage {
   /** Catalog inspection never implies project inspection. */
@@ -68,18 +110,37 @@ export interface ProgrammaticAssessment {
   history?: RecommendationSaveStatus;
   /** Absence means legacy/unavailable candidate detail, not an empty scoped result. */
   discovery?: DiscoveryProjection;
+  /** Per-area search status; absent when no area search ran. */
+  areas?: ProgrammaticAssessmentArea[];
 }
 
 /** Host-owned display lifecycle. Sequence increases within a session; neither
  * event phase conveys proposal ownership or approval authority. */
 export type ProgrammaticAssessmentEvent = ProgrammaticAssessmentIdentity &
-  ({ phase: "started" } | { phase: "completed"; assessment: ProgrammaticAssessment });
+  (
+    | { phase: "started" }
+    | { phase: "progress"; stage: "areas" | "merging"; areas: ProgrammaticAreaProgress[] }
+    | { phase: "completed"; assessment: ProgrammaticAssessment }
+  );
 
 export function isProgrammaticAssessmentEvent(
   value: unknown,
 ): value is ProgrammaticAssessmentEvent {
   const optional = { requestId: isProgrammaticAssessmentRequestId };
   if (object(value, { ...identityFields, phase: oneOf("started") }, optional)) return true;
+  if (
+    object(
+      value,
+      {
+        ...identityFields,
+        phase: oneOf("progress"),
+        stage: oneOf("areas", "merging"),
+        areas: uniqueAreas(list(areaProgress, PROGRAMMATIC_AREA_PROGRESS_LIMITS.areas)),
+      },
+      optional,
+    )
+  )
+    return true;
   if (
     !object(
       value,
@@ -133,6 +194,54 @@ function object(
     )
   );
 }
+const L = PROGRAMMATIC_AREA_PROGRESS_LIMITS;
+const areaId: Guard = (value) =>
+  typeof value === "string" && value.length > 0 && value.length <= L.id && text(L.id)(value);
+const earlyFind: Guard = (value) =>
+  object(value, { need: text(L.findText), where: text(L.findText), unsure: text(L.findText) });
+const areaProgress: Guard = (value) =>
+  object(
+    value,
+    {
+      id: areaId,
+      label: text(L.label),
+      status: oneOf("waiting", "reading", "found", "partly", "failed", "stopped"),
+    },
+    { finds: list(earlyFind, L.finds) },
+  ) &&
+  // Only finished areas carry finds.
+  (!Object.hasOwn(value as object, "finds") ||
+    ["found", "partly", "stopped"].includes((value as ProgrammaticAreaProgress).status));
+const assessmentArea: Guard = (value) =>
+  object(
+    value,
+    {
+      id: areaId,
+      label: text(L.label),
+      status: oneOf("searched", "partly", "not-searched"),
+      retryable: (flag) => typeof flag === "boolean",
+    },
+    {
+      reason: oneOf(
+        "timed-out",
+        "failed",
+        "cancelled",
+        "no-result",
+        "low-signal",
+        "limit",
+        "receipt-limit",
+        "sample-limit",
+        "permission-denied",
+      ),
+    },
+  ) &&
+  (!(value as ProgrammaticAssessmentArea).retryable ||
+    (value as ProgrammaticAssessmentArea).status === "not-searched");
+const uniqueAreas =
+  (guard: Guard): Guard =>
+  (value) =>
+    guard(value) &&
+    new Set((value as { id: string }[]).map(({ id }) => id)).size === (value as unknown[]).length;
 const deterministic: Guard = (value) => {
   if (!value || typeof value !== "object") return false;
   switch ((value as { status?: unknown }).status) {
@@ -197,6 +306,7 @@ export function isProgrammaticAssessment(value: unknown): value is ProgrammaticA
         focus: (focus) => typeof focus === "string" && isValidProgrammaticFocus(focus),
         history: isRecommendationSaveStatus,
         discovery: isDiscoveryProjection,
+        areas: uniqueAreas(list(assessmentArea, L.assessmentAreas)),
       },
     )
   )

@@ -23,6 +23,7 @@ import {
   AppSidecarProgrammaticChat,
   type ProgrammaticChatTarget,
 } from "./app-sidecar-programmatic-chat.js";
+import { AreaRetryUnavailableError } from "./core/programmatic/area-retry.js";
 const roots: string[] = [];
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
@@ -603,5 +604,40 @@ describe("session-scoped programmatic adapter", () => {
     const failed = await f.call("dismiss", { id: "a".repeat(64), snapshot: "b".repeat(64) });
     expect(failed.body).toMatchObject({ ok: false, reconcile: true });
     expect((await f.call("report", { offset: 0 })).status).toBe(200);
+  });
+});
+
+describe("one-area retry", () => {
+  it("passes retryArea through and maps a refusal to 409 with plain copy", async () => {
+    const cwd = await mkdtemp(path.join(os.tmpdir(), "gg-chat-retry-"));
+    roots.push(cwd);
+    await writeFile(path.join(cwd, "package.json"), '{"name":"fixture"}\n');
+    const seen: unknown[][] = [];
+    let refuse = true;
+    const adapter = new AppSidecarProgrammaticChat(
+      () => ({ cwd, identity: "retry", codeMode: true, planMode: false, busy: false }),
+      () => true,
+      () => {},
+      undefined,
+      undefined,
+      async (...args) => {
+        seen.push(args);
+        throw refuse ? new AreaRetryUnavailableError("changed") : new Error("other failure");
+      },
+    );
+    const retryArea = { sequence: 3, areaId: "packages/cli" };
+    const refused = await adapter.handle({ version: 1, action: "discover", retryArea });
+    expect(refused.status).toBe(409);
+    expect(refused.body).toMatchObject({
+      ok: false,
+      error: "Project files changed since this search. Search again instead.",
+    });
+    expect(seen.at(-1)?.[2]).toEqual(retryArea);
+
+    refuse = false;
+    const failed = await adapter.handle({ version: 1, action: "discover" });
+    expect(failed.status).toBe(409);
+    expect(failed.body).not.toMatchObject({ error: expect.stringContaining("Search again") });
+    expect(seen.at(-1)?.[2]).toBeUndefined();
   });
 });

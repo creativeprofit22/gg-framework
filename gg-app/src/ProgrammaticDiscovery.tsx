@@ -28,8 +28,11 @@ import {
   reviewHint,
   reviewLabel,
   seenCount,
+  AREA_PROGRESS,
+  areaCoverageLine,
 } from "./programmatic-presentation";
 import { DataPlate, SpecList, StatusLamp, type SpecRow } from "./InstrumentParts";
+import { ProgrammaticAreaProgress } from "./ProgrammaticAreaProgress";
 
 function HistoryStatus({ item }: { item: RecommendationSummary }) {
   return item.canonicalId ? (
@@ -214,7 +217,13 @@ function CandidateDetail({
 }
 
 /** Step 2, Find ideas: how the search went. The header key starts it; the cards live in Review. */
-export function ProgrammaticIdeaSearch({ state }: Pick<PanelProps, "state">) {
+export function ProgrammaticIdeaSearch({
+  state,
+  locked,
+  planMode,
+  onRequest,
+  onStop,
+}: Omit<PanelProps, "onSelect"> & { onStop?(): void }) {
   const current = state.discovery;
   return (
     <>
@@ -239,6 +248,13 @@ export function ProgrammaticIdeaSearch({ state }: Pick<PanelProps, "state">) {
           Ideas from this search can't be shown. That doesn't mean there's nothing to improve.
         </p>
       )}
+      <ProgrammaticAreaProgress
+        state={state}
+        locked={locked}
+        planMode={planMode}
+        onRequest={onRequest}
+        onStop={onStop}
+      />
     </>
   );
 }
@@ -247,13 +263,16 @@ export function ProgrammaticIdeaSearch({ state }: Pick<PanelProps, "state">) {
 export function ProgrammaticIdeas({ state, locked, planMode, onRequest, onSelect }: PanelProps) {
   const candidate = state.selection?.source === "current" ? state.candidateDetail : null;
   const current = state.discovery;
+  const areas = state.assessmentPending ? undefined : state.assessment?.areas;
   return (
     <>
+      {!!areas?.length && <p className="opp-caption opp-coverage">{areaCoverageLine(areas)}</p>}
       {state.discoveryStale && current && (
         <p className="opp-notice" data-tone="warning">
           These ideas are from an earlier search. Search again before reviewing one.
         </p>
       )}
+      <EarlyFinds state={state} />
       {!current?.candidates.length && <p className="opp-caption">{REVIEW_EMPTY.ideas}</p>}
       {!!current?.candidates.length && (
         <section aria-label="Idea list">
@@ -321,6 +340,50 @@ export function ProgrammaticIdeas({ state, locked, planMode, onRequest, onSelect
         </section>
       )}
     </>
+  );
+}
+
+/** Display-only needs from finished areas; never reviewable, replaced by the final ideas. */
+function EarlyFinds({ state }: Pick<PanelProps, "state">) {
+  const progress = state.areaProgress;
+  const current = state.discovery;
+  if (!progress || progress.sequence !== state.assessmentSequence) return null;
+  const ended = !state.assessmentPending;
+  // A completed search shows its merged ideas; early finds stay only after a stop or a cut-short end.
+  const completed =
+    state.assessment?.lifecycle?.sequence === progress.sequence &&
+    state.assessment.status === "completed";
+  // Older, stale ideas don't count as this search's final ideas.
+  if (ended && ((current?.candidates.length && !state.discoveryStale) || completed)) return null;
+  const finds = progress.areas.flatMap((area) =>
+    (area.finds ?? []).map((find, index) => ({ ...find, key: `${area.id}:${index}` })),
+  );
+  if (!finds.length) return null;
+  return (
+    <section className="opp-early" aria-label={AREA_PROGRESS.earlyHeading}>
+      <h3 className="opp-early-heading">{AREA_PROGRESS.earlyHeading}</h3>
+      <p className="opp-caption">
+        {ended ? AREA_PROGRESS.earlyStopped : AREA_PROGRESS.earlyRunning}
+      </p>
+      <ul className="opp-cards">
+        {finds.map((find) => (
+          <li key={find.key} className="opp-card opp-early-card inst-module">
+            <div className="opp-card-kind">
+              <StatusLamp tone="neutral" />
+              <DataPlate>{AREA_PROGRESS.earlyPlate}</DataPlate>
+            </div>
+            <p className="opp-early-need">{find.need}</p>
+            <SpecList
+              label={AREA_PROGRESS.earlyPlate}
+              rows={[
+                { term: terms.where, value: find.where },
+                { term: terms.unsure, value: find.unsure },
+              ]}
+            />
+          </li>
+        ))}
+      </ul>
+    </section>
   );
 }
 

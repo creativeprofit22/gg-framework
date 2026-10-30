@@ -127,7 +127,7 @@ async function directPolicy(options: DirectCommandExecutionOptions) {
   });
 }
 
-function bounded<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
+export function bounded<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
   if (signal.aborted) {
     void operation.catch(() => {});
     return Promise.reject(new Error("Execution aborted."));

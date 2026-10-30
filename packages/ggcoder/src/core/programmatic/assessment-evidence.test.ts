@@ -348,4 +348,32 @@ describe("bounded assessment evidence", () => {
     expect(JSON.stringify(result)).not.toContain("SECRET-BODY");
     expect(result.excerpts).toHaveLength(limits.maxExcerpts);
   });
+
+  it("restricts one area sample to its paths and to tighter caps", async () => {
+    const files: Record<string, string> = { "package.json": "{}" };
+    for (let index = 0; index < 6; index++) files[`packages/api/f${index}.txt`] = `api ${index}`;
+    files["packages/web/w.txt"] = "web";
+    const root = await fixture(files);
+    const result = await collect(root, {
+      includePath: (item) => item.startsWith("packages/api/"),
+      limits: { maxPaths: 4, maxExcerpts: 2, maxDeliveredBytes: 1_000_000 },
+    });
+    expect(result.paths.map((item) => item.path)).toEqual([
+      "packages/api/f0.txt",
+      "packages/api/f1.txt",
+      "packages/api/f2.txt",
+      "packages/api/f3.txt",
+    ]);
+    expect(result.excerpts.map((item) => item.path)).toEqual([
+      "packages/api/f0.txt",
+      "packages/api/f1.txt",
+    ]);
+    expect(result.diagnostics).toEqual(
+      expect.arrayContaining([
+        { code: "path-limit", count: 1 },
+        { code: "excerpt-limit", count: 2 },
+      ]),
+    );
+    expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThanOrEqual(limits.maxDeliveredBytes);
+  });
 });

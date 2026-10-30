@@ -218,3 +218,75 @@ describe("bounded assessment display contract", () => {
     ).toBe(false);
   });
 });
+
+describe("area progress contract", () => {
+  const identity = { conversationId: "chat", sessionId: "session", sequence: 1 };
+  const find = { need: "Release notes drift", where: "docs/", unsure: "Owner unclear" };
+  const area = { id: "src/core", label: "src/core", status: "found", finds: [find] };
+  const progress = { ...identity, phase: "progress", stage: "areas", areas: [area] };
+
+  it("accepts bounded progress snapshots and the merging stage", () => {
+    expect(isProgrammaticAssessmentEvent(progress)).toBe(true);
+    expect(isProgrammaticAssessmentEvent({ ...progress, stage: "merging" })).toBe(true);
+    for (const status of ["waiting", "reading", "found", "partly", "failed", "stopped"])
+      expect(
+        isProgrammaticAssessmentEvent({ ...progress, areas: [{ id: "a", label: "a", status }] }),
+      ).toBe(true);
+    const six = Array.from({ length: 6 }, (_, i) => ({
+      id: `a${i}`,
+      label: "x".repeat(120),
+      status: "partly",
+      finds: [find, find, find].map(() => ({
+        need: "x".repeat(280),
+        where: "x".repeat(280),
+        unsure: "x".repeat(280),
+      })),
+    }));
+    expect(isProgrammaticAssessmentEvent({ ...progress, areas: six })).toBe(true);
+  });
+
+  it("rejects oversize, unknown keys, duplicate ids and finds on unfinished areas", () => {
+    for (const invalid of [
+      { ...progress, stage: "done" },
+      { ...progress, assessment },
+      { ...progress, areas: Array.from({ length: 7 }, (_, i) => ({ ...area, id: `a${i}` })) },
+      { ...progress, areas: [area, area] },
+      { ...progress, areas: [{ ...area, id: "" }] },
+      { ...progress, areas: [{ ...area, id: "x".repeat(129) }] },
+      { ...progress, areas: [{ ...area, label: "x".repeat(121) }] },
+      { ...progress, areas: [{ ...area, status: "approved" }] },
+      { ...progress, areas: [{ ...area, approved: true }] },
+      { ...progress, areas: [{ ...area, finds: [find, find, find, find] }] },
+      { ...progress, areas: [{ ...area, finds: [{ ...find, need: "x".repeat(281) }] }] },
+      { ...progress, areas: [{ ...area, finds: [{ ...find, review: true }] }] },
+      { ...progress, areas: [{ ...area, status: "reading" }] },
+      { ...progress, areas: [{ ...area, status: "waiting" }] },
+      { ...progress, sequence: 0 },
+    ])
+      expect(isProgrammaticAssessmentEvent(invalid)).toBe(false);
+  });
+
+  it("adds optional per-area status to assessments without breaking legacy payloads", () => {
+    const areas = [
+      { id: "src", label: "src", status: "searched", retryable: false },
+      { id: "docs", label: "docs", status: "partly", reason: "sample-limit", retryable: false },
+      { id: "app", label: "app", status: "not-searched", reason: "timed-out", retryable: true },
+    ];
+    expect(isProgrammaticAssessment(assessment)).toBe(true);
+    expect(isProgrammaticAssessment({ ...assessment, areas })).toBe(true);
+    expect(isProgrammaticAssessment({ ...assessment, areas: [] })).toBe(true);
+    const many = Array.from({ length: 24 }, (_, i) => ({ ...areas[0], id: `a${i}` }));
+    expect(isProgrammaticAssessment({ ...assessment, areas: many })).toBe(true);
+    for (const invalid of [
+      [...many, { ...areas[0], id: "a24" }],
+      [areas[0], areas[0]],
+      [{ ...areas[0], retryable: true }],
+      [{ ...areas[1], retryable: true }],
+      [{ ...areas[2], reason: "model-said-so" }],
+      [{ ...areas[0], retryable: "yes" }],
+      [{ id: "src", label: "src", status: "searched" }],
+      [{ ...areas[0], finds: [] }],
+    ])
+      expect(isProgrammaticAssessment({ ...assessment, areas: invalid })).toBe(false);
+  });
+});

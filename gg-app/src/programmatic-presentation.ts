@@ -1,9 +1,15 @@
-import type { ProgrammaticAssessment } from "@kenkaiiii/gg-core/programmatic-assessment-contract";
+import type {
+  ProgrammaticAreaProgress,
+  ProgrammaticAreaProgressStatus,
+  ProgrammaticAssessment,
+  ProgrammaticAssessmentArea,
+} from "@kenkaiiii/gg-core/programmatic-assessment-contract";
 import type {
   ProgrammaticChatConfiguration,
   ProgrammaticChatSummary,
   ProgrammaticExecutionEvidence,
 } from "@kenkaiiii/gg-core/programmatic-chat-contract";
+import { PROGRAMMATIC_AREA_RETRY_REFUSED } from "@kenkaiiii/gg-core/programmatic-chat-contract";
 import type {
   DiscoveryCandidate,
   DiscoveryChoice,
@@ -231,6 +237,7 @@ const TOOL_LABELS: Readonly<Record<string, string>> = {
   programmatic_profile: "Reading your check setup",
   command_information: "Reading your commands",
   research_corpus: "Searching code examples",
+  git_history: "Reading project history",
   web_fetch: "Opening a web page",
   web_search: "Searching the web",
   read: "Reading project files",
@@ -391,4 +398,81 @@ export function opportunityStatusLine(state: ProgrammaticChatState): string {
         : "Checks set up"
       : CHECKS_STATUS_WORDS[status],
   ].join(" · ");
+}
+
+// Area-by-area search progress (step 2) and the early finds shown in Review.
+
+const ideaCount = (count: number) =>
+  count === 0 ? "No ideas" : `${count} ${count === 1 ? "idea" : "ideas"}`;
+
+/** The word carries the meaning; the icon is decoration. */
+export const AREA_STATUS_ICONS = {
+  waiting: "○",
+  reading: "→",
+  found: "✓",
+  partly: "✓",
+  failed: "!",
+  stopped: "■",
+} as const satisfies Record<ProgrammaticAreaProgressStatus, string>;
+
+export function areaStatusWord(area: Pick<ProgrammaticAreaProgress, "status" | "finds">): string {
+  const count = area.finds?.length ?? 0;
+  switch (area.status) {
+    case "waiting":
+      return "Waiting";
+    case "reading":
+      return "Reading";
+    case "found":
+      return ideaCount(count);
+    case "partly":
+      return `${ideaCount(count)} · read partly`;
+    case "failed":
+      return "Couldn't finish";
+    case "stopped":
+      return "Stopped";
+  }
+}
+
+export const AREA_PROGRESS = {
+  listLabel: "Areas",
+  merging: "Checking ideas from every area…",
+  stop: "Stop search",
+  stopped: "Search stopped.",
+  retry: "Try this area again",
+  retryName: (area: string) => `Try ${area} again`,
+  retryRefused: PROGRAMMATIC_AREA_RETRY_REFUSED,
+  earlyHeading: "Early finds",
+  earlyRunning: "Still checking. These become ideas you can review when the search finishes.",
+  earlyStopped: "Stopped before checking. Search again to get ideas you can review.",
+  earlyPlate: "Still checking",
+} as const;
+
+/** Final per-area words when only the finished assessment is known (no live rows). */
+export const AREA_RESULT_WORDS = {
+  searched: "Read",
+  partly: "Read partly",
+  "not-searched": "Not read",
+} as const satisfies Record<ProgrammaticAssessmentArea["status"], string>;
+
+/** Polite announcement for one area that just finished; null while it is still running. */
+export function areaAnnouncement(area: ProgrammaticAreaProgress): string | null {
+  if (area.status === "found" || area.status === "partly")
+    return `${area.label}: ${ideaCount(area.finds?.length ?? 0).toLowerCase()}`;
+  if (area.status === "failed") return `${area.label}: couldn't finish`;
+  return null;
+}
+
+export function areaCoverageLine(
+  areas: readonly Pick<ProgrammaticAssessmentArea, "status">[],
+): string {
+  const full = areas.filter(({ status }) => status === "searched").length;
+  const partly = areas.filter(({ status }) => status === "partly").length;
+  const missed = areas.length - full - partly;
+  return [
+    `Read ${full} of ${areas.length} areas fully.`,
+    partly ? `${partly} read partly.` : "",
+    missed ? `${missed} not read.` : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
 }

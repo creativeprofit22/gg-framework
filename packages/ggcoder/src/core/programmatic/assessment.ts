@@ -50,6 +50,11 @@ export class ProgrammaticAssessmentCoordinator {
   readonly scope: ProgrammaticAdvisoryTools;
   private started = false;
   private scanCounts: ProgrammaticAssessmentTurnCompletion["scanCounts"];
+  private areaCoverage: ProgrammaticAssessment["coverage"] = [];
+  /** One project row per searched or skipped area; recorded by the per-area search. */
+  recordAreaCoverage(rows: readonly ProgrammaticAssessment["coverage"][number][]): void {
+    this.areaCoverage = rows.map((row) => ({ ...row, summary: text(row.summary) }));
+  }
   /** Deterministic owner records success independently of later turn cancellation. */
   recordScanCounts(counts: ProgrammaticAssessmentTurnCompletion["scanCounts"]): void {
     this.scanCounts = counts && { ...counts };
@@ -115,7 +120,11 @@ export class ProgrammaticAssessmentCoordinator {
       {
         scope: "project",
         status: "uninspected",
-        summary: "The initial sample does not show that the whole project was checked.",
+        // Area mode takes no whole-project sample; each area adds its own row below.
+        summary:
+          this.areaCoverage.length > 0
+            ? "The project was searched one part at a time; see each part below."
+            : "The initial sample does not show that the whole project was checked.",
       },
     ];
     if (
@@ -131,6 +140,7 @@ export class ProgrammaticAssessmentCoordinator {
         status: "inspected",
         summary: "Some local source files were inspected, not the whole project.",
       });
+    coverage.push(...this.areaCoverage);
     for (const diagnostic of this.context.evidence?.diagnostics ?? [])
       coverage.push({
         scope: "project",

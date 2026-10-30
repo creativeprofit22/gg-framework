@@ -58,6 +58,19 @@ const receiptOf = (content: string) =>
       .split("\n")[0]!,
   ) as { id: string; status: string };
 
+type AreaData = { area: { id: string; label: string }; evidence: { paths: { path: string }[] } };
+const AREA_DATA = /<programmatic-area-data>\n([\s\S]*?)\n<\/programmatic-area-data>/;
+const FACTS_MARK =
+  "Host-owned exact facts (not model authority; already collected, do not repeat):\n";
+type AreaFacts = {
+  areaSearch?: {
+    areas: { id: string; status: string }[];
+    candidates: { need: string; workflow: unknown; evidence: unknown; uncertainty: string }[];
+  };
+};
+const factsOf = (prompt: string): AreaFacts =>
+  JSON.parse(prompt.split(FACTS_MARK)[1]!.split("\nReusable host evidence receipts:")[0]!);
+
 function contextOf(prompt: string): {
   evidence?: { paths: { path: string; coverage: string }[]; excerpts: { path: string }[] };
 } {
@@ -84,6 +97,10 @@ async function measure(
 ) {
   const submissions = vi.spyOn(ProgrammaticAdvisoryTurn.prototype, "submit");
   let turns = 0;
+  let coordinatorTurns = 0;
+  let areaTurns = 0;
+  const areaPromptBytes = new Map<string, number>();
+  let areaStatuses: { id: string; status: string }[] = [];
   let toolCalls = 0;
   let rejected = 0;
   let promptBytes = 0;
@@ -116,7 +133,113 @@ async function measure(
               message.content.includes("Host-owned exact facts"),
           );
           let calls: ToolCall[] = [];
-          if (turns === 1 && prompt) {
+          const areaPrompt = params.messages.find(
+            (message) =>
+              message.role === "user" &&
+              typeof message.content === "string" &&
+              AREA_DATA.test(message.content),
+          );
+          if (areaPrompt) {
+            // Per-area pass: one read inside the area, then one candidate need backed by it.
+            areaTurns++;
+            const data = JSON.parse(AREA_DATA.exec(String(areaPrompt.content))![1]!) as AreaData;
+            const key = data.area.id.replace(/[^A-Za-z0-9]+/g, "-");
+            areaPromptBytes.set(key, Buffer.byteLength(String(areaPrompt.content)));
+            const read = results.find((result) => result.toolCallId === `area-read-${key}`);
+            const file = data.evidence.paths[0]?.path;
+            if (file && !read)
+              calls = [
+                {
+                  type: "tool_call",
+                  id: `area-read-${key}`,
+                  name: "read",
+                  args: { file_path: file },
+                },
+              ];
+            else if (file && read && !results.some((r) => r.toolCallId === `area-result-${key}`))
+              calls = [
+                {
+                  type: "tool_call",
+                  id: `area-result-${key}`,
+                  name: "programmatic_area_result",
+                  args: {
+                    version: 1,
+                    needs: [
+                      {
+                        need: `Review ${data.area.label} changes by hand`,
+                        workflow: {
+                          trigger: "A file in the area changes",
+                          representativeCase: `Review one ${data.area.label} file`,
+                          inputs: [file],
+                          currentProcess: ["Read the file"],
+                          output: "A short review",
+                          successCheck: "Each note traces to a read file",
+                          affectedSubproject: { scope: "repository-wide" },
+                          mutationBoundary: "Inspection only",
+                          repeatability: {
+                            basis: "inferred",
+                            explanation: "Files change over time",
+                          },
+                        },
+                        evidence: {
+                          version: 1,
+                          items: [
+                            {
+                              basis: "observed",
+                              source: receiptOf(String(read.content)).id,
+                              code: "workflow-source",
+                              severity: "info",
+                              message: `Read ${file}`,
+                              location: { path: file },
+                            },
+                          ],
+                        },
+                        uncertainty: "Scripted measurement, not a real assessment",
+                      },
+                    ],
+                  },
+                },
+              ];
+          } else if (prompt) coordinatorTurns++;
+          const areaFacts =
+            !areaPrompt && prompt && String(prompt.content).includes(FACTS_MARK)
+              ? factsOf(String(prompt.content)).areaSearch
+              : undefined;
+          if (areaFacts && coordinatorTurns === 1) {
+            promptBytes = Buffer.byteLength(String(prompt!.content));
+            areaStatuses = areaFacts.areas.map(({ id, status }) => ({ id, status }));
+          }
+          if (areaPrompt) {
+            // Handled above.
+          } else if (areaFacts) {
+            // Per-area merge: submit the host-merged candidates once.
+            const last = results.find((result) => result.toolCallId === "submit-merge");
+            if (!last)
+              calls = [
+                {
+                  type: "tool_call",
+                  id: "submit-merge",
+                  name: "programmatic_advisory_result",
+                  args: {
+                    version: 2,
+                    kind: "advisory",
+                    coverage: { status: "limited", scope: "Areas", reason: "Scripted" },
+                    recommendations: areaFacts.candidates.map((candidate) => ({
+                      version: 2,
+                      kind: "advisory",
+                      outcome: candidate.need,
+                      rationale: "A scripted measurement idea; no recurrence is claimed.",
+                      alternatives: [],
+                      choice: { kind: "manual", steps: ["Review the files when they change"] },
+                      evidence: candidate.evidence,
+                      uncertainty: candidate.uncertainty,
+                      workflow: candidate.workflow,
+                    })),
+                  },
+                },
+              ];
+            else if (last.isError) rejected++;
+          } else if (coordinatorTurns === 1 && prompt) {
             promptBytes = Buffer.byteLength(String(prompt.content));
             const evidence = contextOf(String(prompt.content)).evidence;
             sample = (evidence?.paths ?? []).map((item) => item.path);
@@ -263,6 +386,7 @@ async function measure(
     const accepted = messages
       .flatMap((message) => (message.role === "tool" ? message.content : []))
       .find((result) => result.toolCallId.startsWith("submit-") && !result.isError);
+    const areaBytes = [...areaPromptBytes.values()].reduce((sum, bytes) => sum + bytes, 0);
     const turn = submissions.mock.contexts.at(-1) as ProgrammaticAdvisoryTurn | undefined;
     const assistantTexts = messages.flatMap((message) =>
       message.role === "assistant" && typeof message.content === "string" ? [message.content] : [],
@@ -273,10 +397,15 @@ async function measure(
       status: accepted ? "accepted" : "not-accepted",
       wallMs,
       modelTurns: turns,
+      coordinatorTurns,
+      areaTurns,
+      areaPasses: areaPromptBytes.size,
+      areaStatuses,
+      areaPromptBytes: areaBytes,
       toolCalls,
       rejectedSubmissions: rejected,
       deliveredContextBytes:
-        promptBytes + [...resultBytes.values()].reduce((sum, bytes) => sum + bytes, 0),
+        promptBytes + areaBytes + [...resultBytes.values()].reduce((sum, bytes) => sum + bytes, 0),
       promptBytes,
       toolResults: lastResult,
       sampledPaths: sample.length,

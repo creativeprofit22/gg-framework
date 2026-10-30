@@ -7,8 +7,11 @@ import { isProgrammaticAssessmentEvent, type ProgrammaticAssessment, type Progra
 import {
   isProgrammaticChatRequest,
   isProgrammaticChatResponse,
+  PROGRAMMATIC_AREA_RETRY_REFUSED,
   type ProgrammaticChatResponse,
+  type ProgrammaticChatRetryArea,
 } from "@kenkaiiii/gg-core/programmatic-chat-contract";
+import { AreaRetryUnavailableError } from "./core/programmatic/area-retry.js";
 import {
   buildProgrammaticProfileProposal,
   persistProgrammaticProfile,
@@ -39,7 +42,7 @@ export function bindProgrammaticAssessmentEvents(
   });
 }
 
-export type ProgrammaticChatAssessment = (mode: "setup" | "configured", requestId?: string) => ReturnType<AgentSession["assessProgrammatic"]>;
+export type ProgrammaticChatAssessment = (mode: "setup" | "configured", requestId?: string, retryArea?: ProgrammaticChatRetryArea) => ReturnType<AgentSession["assessProgrammatic"]>;
 
 function unavailableAssessment(mode: "setup" | "configured", deterministic: ProgrammaticAssessment["deterministic"]): ProgrammaticAssessment {
   return { version: 1, mode, status: "unavailable", summary: "AI couldn't look for ideas. Your checks still work.",
@@ -158,7 +161,15 @@ export class AppSidecarProgrammaticChat {
           const proposal = await this.implementations.inspect(target.cwd, { offerHistory: true }).catch(() => null);
           if (!current()) return fail(409, "The project or chat changed. Discover opportunities again.");
           const mode = proposal?.configuration.status === "current" ? "configured" : "setup";
-          const assessment = this.assess ? (await this.assess(mode, input.requestId)).assessment
+          if (input.retryArea && !this.assess) return fail(409, PROGRAMMATIC_AREA_RETRY_REFUSED);
+          const assessed = this.assess
+            ? await this.assess(mode, input.requestId, input.retryArea).catch((error: unknown) => {
+              if (error instanceof AreaRetryUnavailableError) return null;
+              throw error;
+            })
+            : undefined;
+          if (assessed === null) return fail(409, PROGRAMMATIC_AREA_RETRY_REFUSED);
+          const assessment = assessed ? assessed.assessment
             : unavailableAssessment(mode, mode === "setup" ? { status: "not-run", reason: "setup" } : { status: "unavailable", reason: "No AI provider is available." });
           if (!current()) return fail(409, "The project or chat changed. Discover opportunities again.");
           body = { version: 1, action: "discover", ok: true, assessment };

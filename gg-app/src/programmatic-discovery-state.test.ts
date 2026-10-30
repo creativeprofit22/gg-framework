@@ -715,3 +715,72 @@ it("keeps selected context and disables handoff on unknown acknowledgement witho
   expect(failed.operation).toBeNull();
   expect(canReviewProgrammaticCandidate(failed)).toBe(false);
 });
+
+const areaEvent = (
+  sequence: number,
+  phase: "started" | "progress",
+  extra: { stage?: "areas" | "merging"; requestId?: string; sessionId?: string } = {},
+) => ({
+  type: "assessment" as const,
+  generation: "one",
+  event:
+    phase === "started"
+      ? {
+          conversationId: "chat",
+          sessionId: extra.sessionId ?? "session",
+          sequence,
+          phase,
+          ...(extra.requestId ? { requestId: extra.requestId } : {}),
+        }
+      : {
+          conversationId: "chat",
+          sessionId: extra.sessionId ?? "session",
+          sequence,
+          phase,
+          stage: extra.stage ?? ("areas" as const),
+          areas: [
+            {
+              id: "a",
+              label: "src",
+              status: "found" as const,
+              finds: [{ need: "n", where: "w", unsure: "u" }],
+            },
+            { id: "b", label: "docs", status: "reading" as const },
+          ],
+          ...(extra.requestId ? { requestId: extra.requestId } : {}),
+        },
+});
+
+it("tracks area progress only for the pending search and keeps it through completion", () => {
+  const started = programmaticChatReducer(
+    initialProgrammaticChatState("one"),
+    areaEvent(1, "started"),
+  );
+  expect(started.areaProgress).toBeNull();
+  expect(isProgrammaticAssessmentEvent(areaEvent(1, "progress").event)).toBe(true);
+  const progressed = programmaticChatReducer(started, areaEvent(1, "progress"));
+  expect(progressed.assessmentPending).toBe(true);
+  expect(progressed.areaProgress?.stage).toBe("areas");
+  expect(progressed.areaProgress?.areas.map((area) => area.status)).toEqual(["found", "reading"]);
+  const merging = programmaticChatReducer(
+    progressed,
+    areaEvent(1, "progress", { stage: "merging" }),
+  );
+  expect(merging.areaProgress?.stage).toBe("merging");
+  expect(merging.assessmentPending).toBe(true);
+  // Wrong sequence, request or owner is ignored.
+  expect(programmaticChatReducer(progressed, areaEvent(2, "progress"))).toBe(progressed);
+  expect(
+    programmaticChatReducer(progressed, areaEvent(1, "progress", { requestId: "other" })),
+  ).toBe(progressed);
+  expect(
+    programmaticChatReducer(progressed, areaEvent(1, "progress", { sessionId: "elsewhere" })),
+  ).toBe(progressed);
+  const done = programmaticChatReducer(merging, completion(assessment, 1));
+  expect(done.assessmentPending).toBe(false);
+  expect(done.areaProgress).toBe(merging.areaProgress);
+  // Late progress after completion cannot reopen the search.
+  expect(programmaticChatReducer(done, areaEvent(1, "progress"))).toBe(done);
+  const restarted = programmaticChatReducer(done, areaEvent(2, "started"));
+  expect(restarted.areaProgress).toBeNull();
+});

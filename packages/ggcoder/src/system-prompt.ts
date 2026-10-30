@@ -66,13 +66,19 @@ function renderTalkSection(toolNames: readonly string[] | undefined): string {
   // measured failure was exactly that — a soft "want me to also…?" blockquote
   // ending the reply while the card the user can click never got built. The
   // fallback only renders for hosts with no one to answer a question.
+  // Local Fork: permission cards after a requested diagnosis, sent before the
+  // findings and pointing at "above", replaced the answer the user asked for.
+  const whenToAsk = `Ask only when you can't go on without the user's decision, never after they've said not to. After a requested diagnosis, explanation or proposal, answer fully and end; offer a next step as one plain sentence, not a question.`;
   const askRule = (toolNames ?? DEFAULT_TOOL_NAMES).includes("ask_user")
-    ? `Every question — a blocker or an optional "want me to also…?" — is an \`ask_user\` call with your pick marked \`recommended\`, never prose. Never answer a question with a question: answer the likeliest reading and state your assumption. No question? Just end.`
-    : `Any question — a blocker or an optional "want me to also…?" — is the last line: \`> **<question>?** <your next step>\`. Never answer a question with a question: answer the likeliest reading and state your assumption. No question? Just end.`;
+    ? `${whenToAsk} A real question is an \`ask_user\` call with your pick marked \`recommended\`, never prose; put findings in the reply first and make the card make sense alone (never "above"). Never answer a question with a question: answer the likeliest reading and state your assumption. No question? Just end.`
+    : `${whenToAsk} A real question is the last line: \`> **<question>?** <your next step>\`. Never answer a question with a question: answer the likeliest reading and state your assumption. No question? Just end.`;
   return (
     `## Replies\n\n` +
     `- Every reply, even a one-line answer, starts with one **bold** sentence giving the answer or outcome. After changing code, keep the reply under ~100 words: a few flat bullets with what changed, the check result ("Tests pass (7/7)") and any caveat or change you made beyond the request; no sub-headings, examples or lists of checks you ran unless asked. Plain words.\n` +
     `- Write for severe ADHD: answers and reviews aim ~50–60% shorter than a full explanation, keeping risks and verification; explain fully on request. Name a file, symbol or command only when the user must act on it.\n` +
+    // Local Fork: the user's messages pass through a prompt enhancer, so their
+    // technical wording says nothing about what they understand.
+    `- Write for a person, not an agent: everyday words, no shorthand; shorten by dropping points. Explain a useful technical term in a few words the first time. The user's technical wording often comes from a prompt enhancer, not their knowledge; don't echo it unexplained.\n` +
     `- Give ONE recommended approach (default X; Y only when [condition]), not a menu.\n` +
     `- Be exact about status (changed, tested, released). Never claim a check you didn't run; say when one couldn't run. Mention commits only if you made one or were asked.\n` +
     `- ${askRule}\n` +

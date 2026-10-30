@@ -99,6 +99,11 @@ describe("buildSystemPrompt", () => {
       // "Mention commits only if you made one or were asked".
       "(changed, tested, released)",
       "Never answer a question with a question: answer the likeliest reading and state your assumption.",
+      "Write for a person, not an agent: everyday words, no shorthand; shorten by dropping points.",
+      "Explain a useful technical term in a few words the first time.",
+      "The user's technical wording often comes from a prompt enhancer, not their knowledge; don't echo it unexplained.",
+      "Ask only when you can't go on without the user's decision, never after they've said not to.",
+      "After a requested diagnosis, explanation or proposal, answer fully and end; offer a next step as one plain sentence, not a question.",
       "ask before touching unrecognized user changes",
       "Ask before indexing repositories",
       // Upstream 0.94: style packs yield to the project's own conventions.
@@ -178,8 +183,9 @@ describe("buildSystemPrompt", () => {
     // a `>` in a reply always means "the agent is waiting on you". The rule must
     // not manufacture questions either, so "no question" stays a valid ending.
     expect(prompt).toContain("No question? Just end.");
-    expect(prompt).toContain('Any question — a blocker or an optional "want me to also…?"');
-    expect(prompt).toContain("is the last line: `> **<question>?** <your next step>`");
+    expect(prompt).toContain(
+      "A real question is the last line: `> **<question>?** <your next step>`",
+    );
     expect(prompt).not.toContain(
       "Do not default to generic tests, scripts, screenshots, benchmarks, or simulations",
     );
@@ -266,8 +272,8 @@ describe("buildSystemPrompt", () => {
   it.each([
     // Local Fork: hashes pin the merged Replies section, which keeps the fork's
     // status list, ADHD reply style and interjection lines on top of upstream's.
-    [[], "07c803b99e5f454c2679e2cb703a084972711dc30ed3fed34fcc6a4e2e6fc87f"],
-    [["ask_user"], "86951e0c753101b7838c4594b5a0e0598e2d5598961a8abe4d9b50639985032b"],
+    [[], "59de80cdafd0191d88eaa4a881b26c7f2671df86ad5ca9cba4d0834e0e96cffa"],
+    [["ask_user"], "4269b032fb002e8bf406302ac7c3fd6b05aed194e19d20dae29bd601c6d67e93"],
   ] as const)(
     "preserves the paragraph-first response policy with tools %j",
     async (toolNames, hash) => {
@@ -344,8 +350,10 @@ describe("buildSystemPrompt", () => {
     expect(prompt).toContain(
       "is an `ask_user` call with your pick marked `recommended`, never prose",
     );
-    // Optional follow-up offers are questions too, so they also go on the card.
-    expect(prompt).toContain('a blocker or an optional "want me to also…?"');
+    // Local Fork: optional offers are a plain statement, so they need neither a
+    // prose question nor a card; a real card carries its own context.
+    expect(prompt).toContain("offer a next step as one plain sentence, not a question");
+    expect(prompt).toContain('make the card make sense alone (never "above")');
     expect(prompt).toContain("No question? Just end.");
     expect(prompt).not.toContain("is the last line");
     expect(prompt.match(/`> \*\*/g) ?? []).toHaveLength(0);
@@ -380,9 +388,9 @@ describe("buildSystemPrompt", () => {
 
     // Keep the instructions themselves compact. Upstream's Replies section is
     // ~125 words with the budget; the Local Fork's deliberate reply rules (ADHD
-    // style, one approach, status list, interjection, no question-for-question)
-    // bring it to ~238; the cap leaves ~7% headroom.
-    expect(talk.split(/\s+/).filter(Boolean).length).toBeLessThan(255);
+    // style, one approach, status list, interjection, no question-for-question,
+    // plain-language and when-to-ask rules) bring it to ~312; the cap leaves ~7% headroom.
+    expect(talk.split(/\s+/).filter(Boolean).length).toBeLessThan(335);
 
     // Mid-turn speech and the cut rule must agree: a bare "finding" cannot both
     // trigger a message and be cut for not changing the next move.
@@ -673,10 +681,11 @@ describe("buildSystemPrompt", () => {
     // one-liner, ADHD reply style; see .gg/local-fixes) add ~730 chars over upstream.
     // Caps are measured merged sizes (3,905 / 4,359 / 5,028 after upstream's 0.97.4
     // light-comments rule, +119 each; upstream raised its own caps +100 for it)
-    // rounded up to the next 100.
-    expect(measurements.normal.characters).toBeLessThan(4_000);
-    expect(measurements.planMode.characters).toBeLessThan(4_400);
-    expect(measurements.typescriptProjectContextToolsSkills.characters).toBeLessThan(5_100);
+    // rounded up to the next 100. The fork's plain-language and when-to-ask reply
+    // rules then added ~450 each (4,354 / 4,808 / 5,477).
+    expect(measurements.normal.characters).toBeLessThan(4_400);
+    expect(measurements.planMode.characters).toBeLessThan(4_900);
+    expect(measurements.typescriptProjectContextToolsSkills.characters).toBeLessThan(5_500);
     expect(measurements.planMode.characters).toBeGreaterThan(measurements.normal.characters);
     expect(measurements.typescriptProjectContextToolsSkills.characters).toBeGreaterThan(
       measurements.normal.characters,
@@ -713,8 +722,9 @@ describe("buildSystemPrompt", () => {
 
     expect(audit.flags).toEqual([]);
     // Local Fork: deliberate fork rules (see .gg/local-fixes) add ~760 chars over upstream;
-    // 4,820 measured after upstream's 0.97.4 light-comments rule (+119).
-    expect(audit.size.characters).toBeLessThan(4_900);
+    // 4,820 measured after upstream's 0.97.4 light-comments rule (+119); 5,269 after
+    // the fork's plain-language and when-to-ask reply rules (+449).
+    expect(audit.size.characters).toBeLessThan(5_300);
     expect(prompt.match(/^## .+$/gm)).toEqual([
       "## Replies",
       "## Work",

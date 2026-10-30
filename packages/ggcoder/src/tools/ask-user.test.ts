@@ -36,6 +36,7 @@ describe("ask_user", () => {
     expect(description).toContain("NEVER answer the user's question with a question.");
     expect(description).toContain("answer the likeliest reading and state your assumption");
     expect(description).toContain("still write your answer and findings in the reply");
+    expect(description).toContain("never permission to do more after a requested answer");
   });
 
   it("rejects a question without context before showing the card", async () => {
@@ -69,14 +70,16 @@ describe("ask_user", () => {
   // model back into prose and the user lost the clickable card. The opposite
   // failure matters just as much: the description must not read as an
   // obligation to ask something every turn.
-  it("routes soft follow-up offers through the card, not just blocking decisions", async () => {
+  // Local Fork: soft offers then became permission cards that replaced the
+  // requested answer, so an offer is now a plain statement, never a question.
+  it("states optional offers plainly and keeps every real question on the card", async () => {
     const { description } = createAskUserTool(vi.fn());
     expect(description).toContain("instead of a prose question");
     // The routing rule now lives in the system prompt (rendered whenever this
     // tool is registered) rather than repeated in the schema.
     const prompt = await buildSystemPrompt(os.tmpdir(), undefined, false, undefined, ["ask_user"]);
-    expect(prompt).toContain('Every question — a blocker or an optional "want me to also…?"');
-    expect(prompt).toContain("is an `ask_user` call");
+    expect(prompt).toContain("offer a next step as one plain sentence, not a question");
+    expect(prompt).toContain("A real question is an `ask_user` call");
     // …and never manufactures a question when none exists.
     expect(prompt).toContain("No question? Just end.");
     // The old blocked-only scoping must be gone, not merely softened.

@@ -26,7 +26,13 @@ const Question = z.object({
   id: z.string().min(1),
   question: z.string().min(1),
   kind: z.enum(["confirm", "choice", "multi", "text"]),
-  detail: z.string().trim().min(1).describe("Required: what you found and why you need their call"),
+  detail: z
+    .string()
+    .trim()
+    .min(1)
+    .describe(
+      'Required, in plain words: what you found, what each choice does and why you need their call; must make sense alone (never "above" or unseen text)',
+    ),
   options: z.array(Option).max(MAX_OPTIONS).optional(),
   allowOther: z.boolean().optional(),
 });
@@ -90,7 +96,8 @@ export function createAskUserTool(ask: AskUserHandler): AgentTool<typeof AskUser
       // Local Fork rule (restored after upstream prompt trim).
       "NEVER answer the user's question with a question. When they ask something, answer it; " +
       "if it is ambiguous, answer the likeliest reading and state your assumption. This tool " +
-      "REPLACES only the asking line — still write your answer and findings in the reply.",
+      "REPLACES only the asking line — still write your answer and findings in the reply. Only for " +
+      "decisions you can't continue without, never permission to do more after a requested answer.",
     parameters: AskUserParams,
     // The turn is blocked on a human; nothing else in the batch may run first.
     executionMode: "sequential",

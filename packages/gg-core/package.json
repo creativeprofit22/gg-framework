@@ -102,6 +102,11 @@
       "types": "./dist/slash-command-contract.d.ts",
       "import": "./dist/slash-command-contract.js",
       "require": "./dist/slash-command-contract.cjs"
+    },
+    "./verify-plan": {
+      "types": "./dist/verify-plan.d.ts",
+      "import": "./dist/verify-plan.js",
+      "require": "./dist/verify-plan.cjs"
     }
   },
   "main": "./dist/index.cjs",

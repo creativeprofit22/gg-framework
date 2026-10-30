@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "mode": "changed",
+  "run": [
+    {
+      "gate": "typecheck",
+      "argv": ["pnpm", "exec", "tsc", "--noEmit"],
+      "cwd": ".",
+      "files": ["src/**/*.ts", "tsconfig.json"],
+      "fingerprint": "3f2a9c1e5b7d4a6f8e0c2b4d6f8a0c2e4b6d8f0a2c4e6b8d0f2a4c6e8b0d2f4a"
+    },
+    {
+      "gate": "unit",
+      "argv": ["pnpm", "exec", "vitest", "run"],
+      "cwd": "packages/api",
+      "files": ["packages/api/src/**/*.{ts,tsx}"],
+      "fingerprint": null
+    }
+  ],
+  "skip": [
+    {
+      "gate": "lint",
+      "reason": "inputs unchanged since last pass",
+      "lastRun": "2026-10-29T18:04:11Z"
+    },
+    {
+      "gate": "e2e",
+      "reason": "no covered files changed"
+    }
+  ]
+}

@@ -20,6 +20,7 @@ export default defineConfig({
     "src/roadmap-workflow.ts",
     "src/slash-command-contract.ts",
     "src/progress-contract.ts",
+    "src/verify-plan.ts",
   ],
   format: ["esm", "cjs"],
   // tsup's declaration build sets `baseUrl`, which TypeScript 6 deprecates.

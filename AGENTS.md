@@ -9,6 +9,7 @@ pnpm monorepo for GG Coder: a multi-provider coding agent shipped as the `ggcode
 - `packages/gg-ai`: provider adapters and one streaming API across LLM providers.
 - `packages/gg-agent`: agent loop, tool execution, compaction, subagents.
 - `packages/gg-core`: auth/config/path storage and the cross-process contracts (Project Notes, Roadmap, slash commands, programmatic execution) exported as subpaths.
+  - Project check plans (`verify-plan` subpath) and the harness check module map: [docs/harness-checks.md](docs/harness-checks.md).
 - `packages/ggcoder`: `ggcoder` CLI plus the desktop daemon (`app-sidecar.ts` + `app-sidecar-*.ts` routes) and bundled slash-command installers under `scripts/`.
 - `packages/gg-world`: in-app "game mode" world, built into `gg-app/public/world` (gg-app `build` rebuilds it if stale). Other empty `packages/*` dirs hold no code.
 - `gg-app`: React UI; Rust (`src-tauri`) owns native access and proxies the daemon.

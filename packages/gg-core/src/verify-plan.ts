@@ -8,8 +8,10 @@ export const VERIFY_PLAN_DESCRIPTOR_PATH = ".gg/verify-plan.json";
 export const VERIFY_PLAN_LIMITS = {
   gates: 64,
   advice: 64,
-  argv: 64,
+  argv: 2048,
   argLength: 1024,
+  // Joined with spaces; stays under Windows' 32,767-char command line.
+  argvBytes: 32_000,
   pathLength: 512,
   covers: 2000,
   protectedPaths: 200,
@@ -125,6 +127,8 @@ function checkArgv(value: unknown, at: string): Check<string[]> {
     if (/[\0\r\n]/.test(arg)) return fail(`${at}[${index}]: contains NUL or a newline`);
   }
   const argv = value as string[];
+  if (utf8Bytes(argv.join(" ")) > VERIFY_PLAN_LIMITS.argvBytes)
+    return fail(`${at}: argv is longer than ${VERIFY_PLAN_LIMITS.argvBytes} bytes in total`);
   const program = (argv[0] ?? "")
     .split(/[/\\]/)
     .pop()

@@ -72,18 +72,43 @@ describe("verify-plan fixtures", () => {
     expect(result.plan.mode).toBe("changed");
     expect(result.plan.gates.map((entry) => [entry.id, entry.cwd, entry.covers])).toEqual([
       ["typecheck", ".", ["src/**/*.ts", "tsconfig.json"]],
+      ["lint", ".", ["src/app.ts", "src/util/strings.ts", "packages/api/src/routes.ts"]],
       ["unit", "packages/api", ["packages/api/src/**/*.{ts,tsx}"]],
     ]);
     expect(result.plan.gates[0]?.fingerprint).toMatch(/^[a-f0-9]{64}$/);
+    expect(result.plan.gates[1]?.argv).toEqual([
+      "pnpm",
+      "exec",
+      "eslint",
+      "--no-warn-ignored",
+      "packages/api/src/routes.ts",
+      "src/app.ts",
+      "src/util/strings.ts",
+    ]);
     expect(result.plan.advice).toEqual([
       {
-        gateId: "lint",
+        gateId: "format",
         kind: "reused-pass",
         reason: "inputs unchanged since last pass",
         lastRun: "2026-10-29T18:04:11Z",
       },
     ]);
-    expect(result.plan.gates.some((entry) => entry.id === "lint")).toBe(false);
+    expect(result.plan.gates.some((entry) => entry.id === "format")).toBe(false);
+  });
+
+  it("accepts a supa plan whose eslint gate has 100 file args", () => {
+    const supa = JSON.parse(fixture("supa-plan-v1.json")) as { run: Record<string, unknown>[] };
+    const files = Array.from({ length: 100 }, (_, index) => `src/features/module-${index}.ts`);
+    const run = supa.run.map((entry) =>
+      entry.gate === "lint"
+        ? { ...entry, argv: ["pnpm", "exec", "eslint", "--no-warn-ignored", ...files], files }
+        : entry,
+    );
+    const result = adaptSupaPlanV1({ ...supa, run });
+    if (!result.ok) throw new Error(result.reason);
+    const lint = result.plan.gates.find((entry) => entry.id === "lint");
+    expect(lint?.argv).toHaveLength(104);
+    expect(lint?.covers).toEqual(files);
   });
 
   it("rejects a supa plan of another version", () => {
@@ -137,6 +162,17 @@ describe("parseVerifyPlan rejections", () => {
     );
     expect(reasonOf(plan({ gates: [gate({ argv: ["node", "a\nb"] })] }))).toBe(
       "gates[0].argv[1]: contains NUL or a newline",
+    );
+  });
+
+  it("caps argv entries and total size", () => {
+    const tooMany = Array.from({ length: VERIFY_PLAN_LIMITS.argv + 1 }, () => "a");
+    expect(reasonOf(plan({ gates: [gate({ argv: tooMany })] }))).toBe(
+      `gates[0].argv: argv has more than ${VERIFY_PLAN_LIMITS.argv} entries`,
+    );
+    const tooLong = Array.from({ length: 40 }, () => "x".repeat(VERIFY_PLAN_LIMITS.argLength));
+    expect(reasonOf(plan({ gates: [gate({ argv: ["pnpm", ...tooLong] })] }))).toBe(
+      `gates[0].argv: argv is longer than ${VERIFY_PLAN_LIMITS.argvBytes} bytes in total`,
     );
   });
 
@@ -248,7 +284,7 @@ describe("plan source rules", () => {
     });
     expect(interpretVerifyPlanOutput("gg-verify-plan-v1", supa, 0, false)).toEqual({
       kind: "heuristics",
-      reason: `${VERIFY_PLAN_HEURISTICS_REASONS.badPlan}: unknown key "run"`,
+      reason: `${VERIFY_PLAN_HEURISTICS_REASONS.badPlan}: unknown key "since"`,
     });
   });
 });

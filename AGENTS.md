@@ -10,6 +10,7 @@ pnpm monorepo for GG Coder: a multi-provider coding agent shipped as the `ggcode
 - `packages/gg-agent`: agent loop, tool execution, compaction, subagents.
 - `packages/gg-core`: auth/config/path storage and the cross-process contracts (Project Notes, Roadmap, slash commands, programmatic execution) exported as subpaths.
 - `packages/ggcoder`: `ggcoder` CLI plus the desktop daemon (`app-sidecar.ts` + `app-sidecar-*.ts` routes) and bundled slash-command installers under `scripts/`.
+- `packages/gg-world`: in-app "game mode" world, built into `gg-app/public/world` (gg-app `build` rebuilds it if stale). Other empty `packages/*` dirs hold no code.
 - `gg-app`: React UI; Rust (`src-tauri`) owns native access and proxies the daemon.
 - `Matey`: unrelated Electron app sharing the workspace; it imports no framework packages.
 
@@ -22,22 +23,24 @@ pnpm monorepo for GG Coder: a multi-provider coding agent shipped as the `ggcode
 
 ## Gotchas / Invariants
 
-- `auth.json` is shared by CLI, daemon, pollers and windows. Mutations lock, re-read inside the lock, then atomically replace (`gg-core/src/auth-storage.ts`); writing a cached snapshot erases another process's login.
+- `auth.json` is shared by CLI, daemon, pollers and windows. Mutations lock, re-read inside the lock, then atomically replace (`gg-core/src/auth-storage.ts`); writing a cached snapshot erases another process's login. The lock can be broken by a waiter during a slow refresh, so never write back a snapshot taken before a network call.
 - Forced OAuth refresh must pass the rejected token: if disk already holds a different token, a sibling rotated it, so reuse it. Refreshing again revokes it and causes cross-process logout loops.
-- `.gitattributes` forces LF (CRLF only for `.bat/.cmd/.ps1`). Agent fixtures are SHA-256 content-hashed, so CRLF breaks Windows tests.
+- Provider HTTP goes through `gg-ai/src/utils/provider-fetch.ts`: Node's default fetch 300s cap killed long requests. The stall watchdog counts SSE pings as activity (thinking can be silent for many minutes).
+- `.gitattributes` forces LF (CRLF only for `.bat/.cmd/.ps1`). ggcoder's seeded agent fixtures are SHA-256 content-hashed, so CRLF breaks Windows tests.
+- Release builds use a strict CSP that dev runs don't exercise; `script-src` needs both `tauri://localhost` and `http://tauri.localhost` (World frame broke twice).
 - Local Fork identity (`GG Coder Local Fork`, `com.ggcoder.local-fork`, `gg-coder-local-fork`) lives in `tauri.local.conf.json` and the `build-local-hotfix.mjs` overlay, with updater artifacts/endpoints disabled. Keep base `tauri.conf.json` on upstream identity (`com.ggcoder.app`, updater on): `assertIsolatedIdentities` fails the build otherwise, and it keeps local builds from overwriting the official install.
 - Rust `reqwest` is forced onto rustls by the updater plugin's feature unification; `install_rustls_provider` (ring) must run before any client is built or it panics.
 - `// Local Fork:` comments in `daemon.rs`, `commands/agent.rs`, `auth.rs` mark fork replacements of upstream tests; keep them through upstream syncs.
 - Multi-line workflow steps need `shell: bash`; Windows PowerShell only reports the last command's status.
-- `.github/ci/size-gate.mjs` honors only `--only <artifact>` (`dist:ggcoder`, `sidecar`); positional args are ignored and every artifact gets checked.
+- `.github/ci/size-gate.mjs` honors only `--only <artifact>` (`dist:ggcoder`, `sidecar`); positional args are ignored and every artifact gets checked. `--update` rewrites the baseline instead of failing — don't use it casually.
 - Flaky-test fixes here consistently replace fixed sleeps with fake clocks/polling; on Windows a released lock dir may still be pending delete.
 
 ## Workflows
 
-- Build order: `gg-ai` → `gg-agent` → `gg-core` → `ggcoder`, then `pnpm --filter gg-app stage:node` → `bundle:sidecar` → `node gg-app/scripts/smoke-sidecar.mjs` → Tauri build. Sidecar bundles include a staged Node + native addons, so they are per-OS.
+- Build order: `gg-ai` → `gg-agent` → `gg-core` → `ggcoder`, then `pnpm --filter gg-app stage:node` → `bundle:sidecar` → `node gg-app/scripts/smoke-sidecar.mjs` → Tauri build. Root `build` (`pnpm -r`) doesn't enforce this; CI does. Sidecar bundles include a staged Node + native addons, so they are per-OS.
 - Generated-output audit (outside manifests): `node --test scripts/audit-generated.test.mjs`, then `node scripts/audit-generated.mjs --inspect` (`--inspect` must be the only arg).
 - Upstream sync: `pnpm app:update:local-fixes` (`gg-app/scripts/update-with-local-fixes.mjs`); default is `--check`, never pushes without `--push`, which forbids `--no-build`/`--no-check`. Local installer: `app:build:local-patched`.
-- Dev smoke windows: `GG_APP_DEV_SMOKE_WINDOW` = `minimized|visible`. Fixture launchers start minimized; pass `--visual` only when visible UI/focus matters (`programmatic-execution-dev-smoke.mjs` asserts minimization unless `--allow-normal-window`).
+- Dev smoke windows: `GG_APP_DEV_SMOKE_WINDOW` = `minimized|visible`. Fixture launchers start minimized; pass `--visual` only when visible UI/focus matters (`programmatic-execution-dev-smoke.mjs` asserts minimization unless `--allow-normal-window`). Roadmap-reliability, cross-pane-isolation and Qwen smokes require `--identity com.ggcoder.local-fork`.
 - Vite dev server is fixed at port 1420 (`strictPort`).
 - Comparing candidates (engines, libraries, CLIs, agents): use the bench kit (`/setup-bench`, then `/bench`); see `docs/bench/README.md`. Kit tests: `pnpm test:bench-kit`, `pnpm test:setup-bench-command`.
 - Release: push tag `vX.Y.Z[-pre]` whose commit is in `origin/main` and has green CI (`scripts/verify-release-ci.mjs`). Ships Windows + Apple Silicon macOS only; needs Tauri updater signing and Apple signing/notarization secrets; nested macOS Node/native binaries are signed before Tauri bundles. Windows CI also builds and launches the MSI.

@@ -90,6 +90,8 @@ import { cleanupToolOutputs } from "./tools/overflow.js";
 import { spawnedTasks, type SpawnedTaskArgs } from "./tools/subagent-shared.js";
 import { CheckpointStore } from "./core/checkpoint-store.js";
 import { ResearchSourceLedger } from "./core/research-sources.js";
+import { VerifyPlanLoader } from "./core/verify-plan-loader.js";
+import { isVerifyPlanApprovedIn } from "./core/verify-plan-approval.js";
 import { shouldCompact, compact } from "./core/compaction/compactor.js";
 import {
   createCompactedSessionCheckpoint,
@@ -737,6 +739,14 @@ async function runInkTUI(opts: {
   let activeModel = model;
   let activeThinkingLevel = opts.thinkingLevel;
 
+  // Runs only a descriptor approved by hash (the TUI has no approval prompt, so
+  // approvals come from settings); no getSandboxPolicy because TUI bash runs unsandboxed too.
+  const verifyPlanLoader = new VerifyPlanLoader({
+    cwd,
+    isApproved: (text) => isVerifyPlanApprovedIn(savedSettings.verifyPlanApprovals, cwd, text),
+  });
+  void verifyPlanLoader.refresh();
+
   const {
     tools,
     processManager,
@@ -755,6 +765,8 @@ async function runInkTUI(opts: {
     planModeRef,
     researchSources,
     onPreFileMutation,
+    onFileMutated: (filePath) => verifyPlanLoader.noteFileMutated(filePath),
+    getVerifyPlan: () => verifyPlanLoader.get(),
     lspDiagnostics: opts.lspDiagnostics,
     getWriteGuardSettings: () => ({
       allowOutsideWorkspaceWrites: opts.allowOutsideWorkspaceWrites ?? false,
@@ -817,6 +829,7 @@ async function runInkTUI(opts: {
     lspManager?.shutdownAll();
     debugManager?.shutdown();
     mcpManager.dispose().catch(() => {});
+    verifyPlanLoader.dispose();
   });
 
   // Seed messages with system prompt
@@ -1116,6 +1129,7 @@ async function runInkTUI(opts: {
     },
   });
 
+  verifyPlanLoader.dispose();
   await subAgentManager?.shutdownAll();
   closeLogger();
 }

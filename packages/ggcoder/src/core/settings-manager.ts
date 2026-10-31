@@ -1,7 +1,15 @@
 import path from "node:path";
 import fs from "node:fs/promises";
 import { z } from "zod";
+import { withFileLock } from "@kenkaiiii/gg-core";
 import { getAppPaths } from "../config.js";
+import { atomicWrite } from "./session-storage.js";
+import {
+  isVerifyPlanApprovedIn,
+  mergeVerifyPlanApprovals,
+  parseVerifyPlanApprovals,
+  verifyPlanApproval,
+} from "./verify-plan-approval.js";
 
 // ── Settings Schema ────────────────────────────────────────
 
@@ -120,6 +128,12 @@ const SettingsSchema = z.object({
    *  resolved absolute paths so symlink/relative mismatches can't flip the
    *  decision. */
   trustedProjects: z.array(z.string()).default([]),
+  /** Approvals to run a project's `.gg/verify-plan.json` command, each bound to
+   *  the sha256 of the descriptor text the user saw, so a changed command needs
+   *  consent again. Separate from MCP trust on purpose. */
+  verifyPlanApprovals: z
+    .array(z.object({ project: z.string(), descriptorSha256: z.string() }))
+    .default([]),
   /** Max concurrent subagents per resolved child model. Unset = only the
    *  global limit applies. Can only REDUCE concurrency, never raise it. */
   subagentMaxPerModel: z.number().int().min(1).max(4).optional(),
@@ -192,6 +206,7 @@ export const DEFAULT_SETTINGS: Settings = {
   mcpModernProtocol: false,
   trustProjectMcpServers: false,
   trustedProjects: [],
+  verifyPlanApprovals: [],
   sessionRetentionDays: 30,
   speedProfile: "optimized",
   keepAwake: true,
@@ -260,5 +275,55 @@ export class SettingsManager {
       this.settings.trustedProjects = [...this.settings.trustedProjects, resolved];
       await this.save();
     }
+  }
+
+  /** Whether the user approved running this exact descriptor text for `cwd`.
+   *  Ignores MCP trust (`trustProjectMcpServers`, `trustedProjects`). */
+  isVerifyPlanApproved(cwd: string, descriptorText: string): boolean {
+    return isVerifyPlanApprovedIn(this.settings.verifyPlanApprovals, cwd, descriptorText);
+  }
+
+  /** Persist approval of this descriptor text. Re-reads the file under the
+   *  shared lock and replaces it atomically, so another process's settings
+   *  survive; refuses to overwrite a settings file it cannot parse. */
+  async approveVerifyPlan(cwd: string, descriptorText: string): Promise<void> {
+    const approval = verifyPlanApproval(cwd, descriptorText);
+    await fs.mkdir(path.dirname(this.filePath), { recursive: true });
+    await withFileLock(this.filePath, async () => {
+      const raw = await this.readRawFile();
+      const approvals = mergeVerifyPlanApprovals(
+        parseVerifyPlanApprovals(raw.verifyPlanApprovals),
+        approval,
+      );
+      await atomicWrite(
+        this.filePath,
+        JSON.stringify({ ...raw, verifyPlanApprovals: approvals }, null, 2),
+      );
+      this.settings.verifyPlanApprovals = approvals;
+    });
+  }
+
+  /** Pick up approvals another session or process saved since load(). */
+  async reloadVerifyPlanApprovals(): Promise<void> {
+    try {
+      const raw = await this.readRawFile();
+      this.settings.verifyPlanApprovals = parseVerifyPlanApprovals(raw.verifyPlanApprovals);
+    } catch {
+      // Keep the in-memory approvals; an unreadable file grants nothing new.
+    }
+  }
+
+  private async readRawFile(): Promise<Record<string, unknown>> {
+    let content: string;
+    try {
+      content = await fs.readFile(this.filePath, "utf-8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
+      throw error;
+    }
+    const raw: unknown = JSON.parse(content);
+    if (raw === null || typeof raw !== "object" || Array.isArray(raw))
+      throw new Error(`${this.filePath} is not a JSON object`);
+    return raw as Record<string, unknown>;
   }
 }

@@ -5,6 +5,7 @@ import { createHash } from "node:crypto";
 import type { Provider, ThinkingLevel } from "@kenkaiiii/gg-ai";
 import { getAppPaths, withoutPaidTier, type AppPaths } from "@kenkaiiii/gg-core";
 import type { ThemeName } from "./ui/theme/theme.js";
+import { parseVerifyPlanApprovals, type VerifyPlanApproval } from "./core/verify-plan-approval.js";
 import {
   DEFAULT_FOREGROUND_LIMIT_SETTINGS,
   type ForegroundLimitSettings,
@@ -46,11 +47,15 @@ export interface SavedSettings {
   allowOutsideWorkspaceWrites: boolean;
   /** Connect MCP servers declared in the opened repo's .gg/mcp.json. That file
    *  is repo-controlled, so a malicious repo could run a command the moment
-   *  the project opens. Default false — enable only for repos you trust. */
+   *  the project opens. Default false — enable only for repos you trust.
+   *  MCP only: it does not approve the repo's .gg/verify-plan.json command. */
   trustProjectMcpServers: boolean;
   /** Repo paths individually trusted for project-scope MCP (the per-repo
-   *  complement to the global `trustProjectMcpServers`). */
+   *  complement to the global `trustProjectMcpServers`). MCP only. */
   trustedProjects: string[];
+  /** Per-descriptor approvals to run a repo's .gg/verify-plan.json command,
+   *  bound to the descriptor's sha256 (see core/verify-plan-approval.ts). */
+  verifyPlanApprovals: VerifyPlanApproval[];
   /** Max concurrent subagents per resolved child model (1–4). Unset = global limit only. */
   subagentMaxPerModel?: number;
   /** Days to keep session transcripts before startup pruning. 0 disables. */
@@ -120,6 +125,7 @@ export function loadSavedSettings(settingsFilePath?: string): SavedSettings {
     sessionRetentionDays: 30,
     trustProjectMcpServers: false,
     trustedProjects: [],
+    verifyPlanApprovals: [],
   };
   try {
     const raw = JSON.parse(fsSync.readFileSync(filePath, "utf-8"));
@@ -177,6 +183,7 @@ export function loadSavedSettings(settingsFilePath?: string): SavedSettings {
       result.trustedProjects = raw.trustedProjects.filter(
         (x: unknown): x is string => typeof x === "string",
       );
+    result.verifyPlanApprovals = parseVerifyPlanApprovals(raw.verifyPlanApprovals);
   } catch {
     // No settings file or invalid JSON — use defaults
   }

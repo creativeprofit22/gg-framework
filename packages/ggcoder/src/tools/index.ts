@@ -20,6 +20,7 @@ import { createUiRegistryTool } from "./ui-registry.js";
 import { createUiAdoptTool } from "./ui-adopt.js";
 import { createEditTool, createFlatEditTool } from "./edit.js";
 import { createBashTool } from "./bash.js";
+import type { CheckCoverageMemory, CheckCoverageRecord } from "../core/check-coverage.js";
 import type { ForegroundLimitSettings } from "./foreground-limits.js";
 import { createTauriPackageTool } from "./tauri-package.js";
 import { createProgrammaticProfileTool } from "./programmatic-profile.js";
@@ -63,6 +64,7 @@ import type { ReadTracker } from "./read-tracker.js";
 import type { WriteGuardSettings } from "../core/workspace-guard.js";
 import type { GetNetworkPolicy } from "../core/network-guard.js";
 import type { SandboxPolicy } from "../core/sandbox.js";
+import type { VerifyPlan } from "@kenkaiiii/gg-core/verify-plan";
 import type { AgentDefinition } from "../core/agents.js";
 import type { BlockedSkill, Skill } from "../core/skills.js";
 import type { AgentNotificationQueue } from "../core/agent-notifications.js";
@@ -170,6 +172,12 @@ export interface CreateToolsOptions {
   getForegroundLimitSettings?: () => ForegroundLimitSettings;
   /** Package release-age cooldown in days (settings `packageCooldownDays`). */
   getPackageCooldownDays?: () => number;
+  /** Session memory of check outcomes by input fingerprint, shared with the evidence ledger. */
+  checkCoverage?: CheckCoverageMemory;
+  /** The project's verify plan (core/verify-plan-loader.ts), shared with the evidence ledger. */
+  getVerifyPlan?: () => VerifyPlan | null;
+  /** The latest identical pass and whether the ledger still holds it current. */
+  findPriorPass?: (fingerprint: string) => { record: CheckCoverageRecord; current: boolean } | null;
   /**
    * Lazily read whether `grep` may use the external `rg` scanner when present
    * (grepUseRipgrep). Defaults to enabled when omitted.
@@ -343,6 +351,9 @@ export async function createTools(
       ops === localOperations ? opts?.getSandboxPolicy : undefined,
       opts?.getForegroundLimitSettings,
       opts?.getPackageCooldownDays,
+      ops === localOperations ? opts?.getVerifyPlan : undefined,
+      ops === localOperations ? opts?.checkCoverage : undefined,
+      ops === localOperations ? opts?.findPriorPass : undefined,
     ),
     createTauriPackageTool(cwd, processManager, {
       operations: ops,

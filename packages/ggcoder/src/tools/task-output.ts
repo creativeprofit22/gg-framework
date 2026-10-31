@@ -8,6 +8,7 @@ import {
 } from "../core/process-manager.js";
 import { truncateTail, describeCompressed } from "./truncate.js";
 import { compressToolOutput } from "./compress.js";
+import { overloadHint } from "./check-hints.js";
 
 const TaskOutputParams = z.object({
   id: z.string(),
@@ -100,6 +101,8 @@ export function createTaskOutputTool(
           : null,
       ].filter((notice): notice is string => notice !== null);
 
+      const finishedWithFailure = !result.isRunning && result.exitCode !== 0;
+      const advice = finishedWithFailure && result.output ? overloadHint(result.output) : "";
       let output = result.output;
       let presentationCapped = false;
       if (output) {
@@ -117,7 +120,7 @@ export function createTaskOutputTool(
         output = "(no new output)";
       }
 
-      const notices = rangeNotices.length > 0 ? `${rangeNotices.join("\n")}\n` : "";
+      const notices = advice + (rangeNotices.length > 0 ? `${rangeNotices.join("\n")}\n` : "");
       const content = `Process ${id}: ${status}\n${notices}${output}`;
       const taskOutput: TaskOutputDetails = {
         id,

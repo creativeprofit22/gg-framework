@@ -263,7 +263,7 @@ describe("ProcessManager failure wake", () => {
       pid: child.pid ?? 0,
       command: "slow foreground test run",
       startedAt: Date.now(),
-      limits: { inactivityMs: null, hardMs: null, exitSettleMs: 500 },
+      limits: { quietMs: null, hardMs: null, exitSettleMs: 500 },
       takeOver: () => ({ seedOutput: "", lastOutputAt: Date.now() }),
     });
     expect(await pm.waitForExitOrWake(adopted.id, 30_000)).toBe("failure");

@@ -171,6 +171,7 @@ import { LocalUpdateConfirmModal } from "./LocalUpdateConfirmModal";
 import { InitGitModal } from "./InitGitModal";
 import { PlanModeLogo } from "./PlanModeLogo";
 import { KenPowerBanner } from "./KenPowerBanner";
+import { VerifyPlanNotice } from "./VerifyPlanNotice";
 import { KenFace } from "./KenFace";
 import { PlanReviewModal } from "./PlanReviewModal";
 import { ReviewDock, type ReviewDockItem } from "./ReviewDock";
@@ -2586,6 +2587,15 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
         if (showChecklist || completed) void refreshChecklist(completed ?? undefined);
       }),
     [subscribe, showChecklist, refreshChecklist],
+  );
+  // Re-read the verify-plan status after each run: the descriptor may have changed.
+  const [verifyPlanRefresh, setVerifyPlanRefresh] = useState(0);
+  useEffect(
+    () =>
+      subscribe((event) => {
+        if (event.type === "run_end") setVerifyPlanRefresh((n) => n + 1);
+      }),
+    [subscribe],
   );
   useEffect(
     () => () => {
@@ -5180,6 +5190,9 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
                       )}
                     </LiveTextContext.Provider>
                   </KenPromptActionProvider>
+                  {workspaceMode === "code" && (
+                    <VerifyPlanNotice client={client} refreshKey={verifyPlanRefresh} />
+                  )}
                   {workspaceMode === "code" &&
                     programmaticOpen &&
                     programmatic.generation === programmaticGeneration && (

@@ -37,6 +37,12 @@ import type {
   PromptSegment,
 } from "@kenkaiiii/gg-core/desktop-session-ux";
 import type { OpenAICodexContextProfile } from "@kenkaiiii/gg-core/models";
+import {
+  isVerifyPlanApproveResult,
+  isVerifyPlanStatus,
+  type VerifyPlanApproveResult,
+  type VerifyPlanStatus,
+} from "@kenkaiiii/gg-core/verify-plan";
 import type {
   DesktopContextSnapshot,
   PendingPlanReview,
@@ -3085,6 +3091,10 @@ export interface PaneAgentClient extends NotesClient {
   setRadioVolume(volume: number): Promise<number>;
   listTasks(): Promise<ProjectTask[]>;
   getChecklist(): Promise<ChecklistSnapshot | null>;
+  /** `null` when the status can't be read yet; optional so older clients keep working. */
+  getVerifyPlanStatus?(): Promise<VerifyPlanStatus | null>;
+  /** Approve the verify-plan command whose descriptor hash the user was shown. */
+  approveVerifyPlan?(descriptorSha256: string): Promise<VerifyPlanApproveResult>;
   runTask(id: string): Promise<void>;
   runAllTasks(): Promise<void>;
   deleteTask(id: string): Promise<ProjectTask[]>;
@@ -3609,6 +3619,19 @@ export function createPaneAgentClient(paneId: string): PaneAgentClient {
     },
     listTasks: async () => (await call<{ tasks: ProjectTask[] }>("agent_tasks")).tasks ?? [],
     getChecklist: () => getChecklist(paneId),
+    async getVerifyPlanStatus() {
+      try {
+        const response = await call<unknown>("agent_verify_plan_status");
+        return isVerifyPlanStatus(response) ? response : null;
+      } catch {
+        return null;
+      }
+    },
+    async approveVerifyPlan(descriptorSha256) {
+      const response = await call<unknown>("agent_approve_verify_plan", { descriptorSha256 });
+      if (!isVerifyPlanApproveResult(response)) throw new Error("invalid approval response");
+      return response;
+    },
     runTask: (id) => call("agent_run_tasks", { id, all: false }),
     runAllTasks: () => call("agent_run_tasks", { id: null, all: true }),
     deleteTask: async (id) =>

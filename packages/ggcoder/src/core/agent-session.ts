@@ -261,9 +261,16 @@ import {
 import { AgentNotificationQueue } from "./agent-notifications.js";
 import {
   SessionVerificationEvidenceLedger,
-  classifyVerificationCommand,
   type SessionVerificationEvidenceLedgerSnapshot,
 } from "./verification-evidence.js";
+import { CheckCoverageMemory, type SettledCheckCoverage } from "./check-coverage.js";
+import { VerifyPlanLoader } from "./verify-plan-loader.js";
+import type {
+  VerifyPlan,
+  VerifyPlanApproveResult,
+  VerifyPlanStatus,
+} from "@kenkaiiii/gg-core/verify-plan";
+import type { SandboxPolicy } from "./sandbox.js";
 
 import { findUserSessionPrompt, getUserSessionPrompt } from "./session-preview.js";
 import { sameSessionFile } from "./session-storage.js";
@@ -709,6 +716,9 @@ import {
   type OpenAICodexContextProfileEligibility,
 } from "@kenkaiiii/gg-core/desktop-session-ux";
 
+// Longest a turn waits for the verify plan before falling back to heuristics.
+const VERIFY_PLAN_TURN_WAIT_MS = 2_000;
+
 interface QueuedPrompt {
   /** Display identity: what the user typed, shown in the queue and restored on cancel. */
   id: string;
@@ -898,7 +908,15 @@ export class AgentSession {
       evidenceRun: number;
     }
   >();
-  private readonly verificationEvidenceLedger = new SessionVerificationEvidenceLedger();
+  // One memory per session, shared by the ledger and the bash tool.
+  private readonly checkCoverage = new CheckCoverageMemory();
+  /** Created in initialize(); the bash tool and the ledger read the same plan. */
+  private verifyPlanLoader: VerifyPlanLoader | undefined;
+  private readonly getVerifyPlan = (): VerifyPlan | null => this.verifyPlanLoader?.get() ?? null;
+  private readonly verificationEvidenceLedger = new SessionVerificationEvidenceLedger({
+    checkCoverage: this.checkCoverage,
+    getVerifyPlan: this.getVerifyPlan,
+  });
   /** 0 = none; 1 = first nudge sent; 2 = final stop-and-report injected. */
   private loopBreakInjected: 0 | 1 | 2 = 0;
   private regroundingInjected = false;
@@ -1258,6 +1276,14 @@ export class AgentSession {
         : this.opts.globalSubagents
           ? await discoverAgents({ globalAgentsDir: paths.agentsDir })
           : [];
+    this.verifyPlanLoader?.dispose();
+    this.verifyPlanLoader = new VerifyPlanLoader({
+      cwd: this.cwd,
+      isApproved: (text) => this.settingsManager.isVerifyPlanApproved(this.cwd, text),
+      getSandboxPolicy: () => this.sandboxPolicy(),
+    });
+    // Overlaps setup; runLoop awaits the (cached) result before the first turn.
+    void this.verifyPlanLoader.refresh();
     const {
       tools: createdBuiltInTools,
       processManager,
@@ -1335,6 +1361,9 @@ export class AgentSession {
         additionalRoots: this.additionalRoots,
       }),
       getPackageCooldownDays: () => this.settingsManager.get("packageCooldownDays"),
+      checkCoverage: this.checkCoverage,
+      getVerifyPlan: this.getVerifyPlan,
+      findPriorPass: (fingerprint) => this.verificationEvidenceLedger.findPriorPass(fingerprint),
       getNetworkPolicy: () => ({
         mode: this.settingsManager.get("networkMode"),
         allow: this.settingsManager.get("networkAllow"),
@@ -1344,23 +1373,12 @@ export class AgentSession {
         inactivitySeconds: this.settingsManager.get("bashInactivitySeconds"),
         hardLimitMinutes: this.settingsManager.get("bashHardLimitMinutes"),
       }),
-      getSandboxPolicy: () => ({
-        mode: this.settingsManager.get("sandboxMode"),
-        // networkAllow always applies. Choosing "allowlist" is the user taking
-        // over network policy, so the built-in developer defaults drop out and
-        // only their hosts remain reachable.
-        allowedDomains: this.settingsManager.get("networkAllow"),
-        strictDomains: this.settingsManager.get("networkMode") === "allowlist",
-        // Same source of truth as getWriteGuardSettings, so bash and the write
-        // tool agree on which roots are writable.
-        additionalRoots: this.additionalRoots,
-        allowOutsideWorkspaceWrites: this.settingsManager.get("allowOutsideWorkspaceWrites"),
-        allowUnixSockets: this.settingsManager.get("sandboxAllowUnixSockets"),
-      }),
+      getSandboxPolicy: () => this.sandboxPolicy(),
       getUseExternalGrep: () => this.settingsManager.get("grepUseRipgrep"),
       researchSources: this.researchSources,
       authStorage: this.authStorage,
       onFileMutated: (filePath) => {
+        this.verifyPlanLoader?.noteFileMutated(filePath);
         const relative = path.relative(this.cwd, filePath) || path.basename(filePath);
         this.hookFileEditCounts.set(relative, (this.hookFileEditCounts.get(relative) ?? 0) + 1);
       },
@@ -1909,6 +1927,50 @@ export class AgentSession {
 
   private isCurrentMcpConnection(generation: number, manager: MCPClientManager): boolean {
     return generation === this.mcpConnectionGeneration && manager === this.mcpManager;
+  }
+
+  /** OS sandbox policy for bash, debug, packaging and the verify-plan command. */
+  private sandboxPolicy(): SandboxPolicy {
+    return {
+      mode: this.settingsManager.get("sandboxMode"),
+      // networkAllow always applies. Choosing "allowlist" is the user taking
+      // over network policy, so the built-in developer defaults drop out and
+      // only their hosts remain reachable.
+      allowedDomains: this.settingsManager.get("networkAllow"),
+      strictDomains: this.settingsManager.get("networkMode") === "allowlist",
+      // Same source of truth as getWriteGuardSettings, so bash and the write
+      // tool agree on which roots are writable.
+      additionalRoots: this.additionalRoots,
+      allowOutsideWorkspaceWrites: this.settingsManager.get("allowOutsideWorkspaceWrites"),
+      allowUnixSockets: this.settingsManager.get("sandboxAllowUnixSockets"),
+    };
+  }
+
+  /** What this session does with the project's verify plan, after a refresh.
+   *  Picks up approvals saved by other panes first. */
+  async getVerifyPlanStatus(): Promise<VerifyPlanStatus | null> {
+    const loader = this.verifyPlanLoader;
+    if (!loader) return null;
+    await this.settingsManager.reloadVerifyPlanApprovals();
+    await loader.refresh();
+    return loader.status();
+  }
+
+  /** Approve the descriptor only if it still hashes to what the user saw. */
+  async approveVerifyPlan(descriptorSha256: string): Promise<VerifyPlanApproveResult> {
+    const loader = this.verifyPlanLoader;
+    if (!loader) return { ok: false, reason: "missing", status: null };
+    const current = await loader.readCurrentDescriptor();
+    if (current === null)
+      return { ok: false, reason: "missing", status: await this.getVerifyPlanStatus() };
+    if (current.sha256 !== descriptorSha256)
+      return { ok: false, reason: "changed", status: await this.getVerifyPlanStatus() };
+    await this.settingsManager.approveVerifyPlan(this.cwd, current.text);
+    await loader.refresh();
+    const status = loader.status();
+    return status === null
+      ? { ok: false, reason: "changed", status: await this.getVerifyPlanStatus() }
+      : { ok: true, status };
   }
 
   /** Persist explicit per-project trust for project-scope MCP servers. */
@@ -2810,11 +2872,13 @@ export class AgentSession {
           const verificationCandidate =
             call.name === "bash" &&
             !rejectedBeforeStart &&
-            classifyVerificationCommand(command).candidate;
+            this.verificationEvidenceLedger.classify(command).candidate;
           const workspace =
             verificationCandidate && this.opts.captureVerificationWorkspace
               ? await this.opts.captureVerificationWorkspace().catch(() => undefined)
               : undefined;
+          const settledCoverage =
+            call.name === "task_output" ? await this.settleCheckHandoff(event.details) : null;
           if (this.hookToolCalls.get(event.toolCallId) !== call) break;
           if (!rejectedBeforeStart)
             this.verificationEvidenceLedger.recordToolResult({
@@ -2823,6 +2887,8 @@ export class AgentSession {
               details: event.details,
               workspace,
               planMode: this.getPlanMode(),
+              sessionCwd: this.cwd,
+              settledCoverage,
             });
           // Upstream saves completion-review state whenever verification state
           // changes; the evidence ledger replaced that save point here.
@@ -3519,8 +3585,18 @@ export class AgentSession {
       evidenceRevision: check.generation,
       evidenceRun: check.run,
       planMode: this.getPlanMode(),
+      sessionCwd: this.cwd,
     });
     await this.persistCompletionReviewState();
+  }
+
+  /** A finished hand-off's fingerprint, only when its inputs did not move during the run. */
+  private async settleCheckHandoff(details: unknown): Promise<SettledCheckCoverage | null> {
+    const task = (details as { taskOutput?: { id?: unknown; isRunning?: unknown } } | undefined)
+      ?.taskOutput;
+    if (!task || typeof task.id !== "string" || task.isRunning !== false) return null;
+    if (!this.checkCoverage.hasHandoff(task.id)) return null;
+    return this.checkCoverage.settleHandoff(task.id).catch(() => null);
   }
 
   /** Wraps the real run: cancels an in-flight cache prewarm and tracks run
@@ -3559,6 +3635,9 @@ export class AgentSession {
   private async runLoopInternal(options: PromptRunOptions): Promise<void> {
     assertProviderExecutionAllowed(this.provider, this.opts.unattended);
     await this.prepareSystemPromptForRequest();
+    // Cached until the descriptor changes; a slow plan command never holds the turn
+    // longer than this, and checks use heuristics until it lands.
+    await this.verifyPlanLoader?.settle(VERIFY_PLAN_TURN_WAIT_MS);
     // One-shot cache-key marker per session so turn_end cacheRead numbers
     // in the log can be traced back to a specific routing namespace —
     // particularly useful when sub-agents inherit `parentKey:subagent`.
@@ -6996,6 +7075,7 @@ export class AgentSession {
     this.advisoryEvidence.clear();
     this.semanticLoop.controller?.abort();
     this.semanticLoop.verdict = null;
+    this.verifyPlanLoader?.dispose();
     await this.settlePostTurnCompaction();
     this.cacheDiagnostics.reset();
     this.diagnosticsRecorder?.finalize();

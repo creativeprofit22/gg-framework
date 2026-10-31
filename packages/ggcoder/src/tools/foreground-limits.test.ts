@@ -22,9 +22,9 @@ describe("resolveForegroundLimits", () => {
       { yieldMs: 120_000, inactivityMs: 600_000, hardMs: 3_600_000 },
     ],
     [
-      "explicit timeout becomes the hard limit and disables yield",
+      "explicit timeout becomes the hard limit and replaces yield and the silence limit",
       { explicitTimeoutMs: 30_000 },
-      { yieldMs: null, inactivityMs: 600_000, hardMs: 30_000 },
+      { yieldMs: null, inactivityMs: null, hardMs: 30_000 },
     ],
     [
       "zero settings disable every layer",
@@ -42,7 +42,22 @@ describe("resolveForegroundLimits", () => {
     [
       "explicit zero timeout disables yield and hard limit",
       { explicitTimeoutMs: 0 },
-      { yieldMs: null, hardMs: null, inactivityMs: 600_000 },
+      { yieldMs: null, hardMs: null, inactivityMs: null },
+    ],
+    [
+      "a gate quiet budget overrides the silence setting",
+      { quietBudgetSeconds: 1800 },
+      { yieldMs: 120_000, inactivityMs: 1_800_000, hardMs: 3_600_000 },
+    ],
+    [
+      "persist keeps the gate quiet budget as its silence limit",
+      { mode: "persistent", quietBudgetSeconds: 900 },
+      { yieldMs: null, inactivityMs: 900_000 },
+    ],
+    [
+      "an explicit timeout still wins over a gate quiet budget",
+      { explicitTimeoutMs: 30_000, quietBudgetSeconds: 1800 },
+      { inactivityMs: null, hardMs: 30_000 },
     ],
   ];
 

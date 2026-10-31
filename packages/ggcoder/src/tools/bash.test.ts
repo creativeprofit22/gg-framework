@@ -10,13 +10,15 @@ import { createTaskOutputTool } from "./task-output.js";
 import { clearPackageThreatCache } from "../core/package-threats.js";
 import { getToolOutputRoot } from "./overflow.js";
 import { ProcessManager } from "../core/process-manager.js";
-import { AgentNotificationQueue } from "../core/agent-notifications.js";
+import { AgentNotificationQueue, type AgentNotification } from "../core/agent-notifications.js";
+import type { VerifyPlan } from "@kenkaiiii/gg-core/verify-plan";
 import { resolveShell } from "../core/shell.js";
 import { localOperations } from "./operations.js";
 import { existsSync } from "node:fs";
 import { useFakeHome } from "../test-support/fake-home.js";
 import { keepAliveWhileOwnerLives } from "../test-support/keep-alive.js";
 import { collectVerificationReview } from "./verification-review.js";
+import { CheckCoverageMemory } from "../core/check-coverage.js";
 
 let restoreHome: (() => void) | undefined;
 let tmpHome: string;
@@ -185,6 +187,45 @@ describe("foreground verification review", () => {
     } finally {
       spawnSpy.mockRestore();
     }
+  });
+
+  it("accepts a project verify-plan gate for review", async () => {
+    await fixture();
+    await fs.writeFile(path.join(tmpHome, "gate.mjs"), "console.log('gate ok');\n");
+    const plan: VerifyPlan = {
+      version: 1,
+      mode: "changed",
+      advice: [],
+      gates: [
+        {
+          id: "gate",
+          argv: ["node", "gate.mjs"],
+          cwd: ".",
+          covers: [],
+          fingerprint: null,
+          quietBudgetSeconds: null,
+          protectedPaths: [],
+        },
+      ],
+    };
+    const args = { command: "node gate.mjs", review: true };
+    const withoutPlan = createBashTool(tmpHome, new ProcessManager());
+    expect(await withoutPlan.execute(args, context())).toContain("Nothing was run");
+    const tool = createBashTool(
+      tmpHome,
+      new ProcessManager(),
+      localOperations,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      () => plan,
+    );
+    const result = outputText(await tool.execute(args, context()));
+    expect(result).toMatch(/^Exit code: 0\b/);
+    expect(result).toContain("Independent read-only review");
   });
 
   it("does not review a cancelled check", async () => {
@@ -596,6 +637,34 @@ describe.skipIf(resolveShell("").isCmdFallback)("createBashTool on a real Bash s
     expect(await diagnostics("echo plain")).not.toHaveProperty("sourceUnchanged");
   }, 30_000);
 
+  it("names the standalone check when a check's output went to a file", async () => {
+    const tool = createBashTool(tmpHome, new ProcessManager());
+    const out = outputText(
+      await tool.execute(
+        { command: "node --test missing-fixture.test.mjs > check-out.txt" },
+        ctx("posix-redirect-hint"),
+      ),
+    );
+    expect(out).toMatch(/^Exit code: [1-9]\d*\n/);
+    expect(out).toContain(
+      "[Not counted as a check: output went to a file. Run `node --test missing-fixture.test.mjs` on its own;",
+    );
+    expect(out).toMatch(/this run's full output is kept at [^\n]+\.log\.\]\n/);
+  });
+
+  it("adds overload advice for timeout-only failures without changing the exit code", async () => {
+    const tool = createBashTool(tmpHome, new ProcessManager());
+    const out = outputText(
+      await tool.execute(
+        { command: "printf 'Error: Test timed out in 5000ms.\\n%.0s' 1 2 3; exit 1" },
+        ctx("posix-overload-hint"),
+      ),
+    );
+    expect(out).toMatch(/^Exit code: 1\n/);
+    expect(out).toContain("the machine may have been overloaded");
+    expect(out).toContain("Error: Test timed out in 5000ms.");
+  });
+
   it("still exits 0 for a passing command piped through a limiter", async () => {
     const tool = createBashTool(tmpHome, new ProcessManager());
     const out = outputText(
@@ -739,6 +808,28 @@ describe.skipIf(process.platform !== "win32")("createBashTool on real Windows", 
     const out = outputText(await tool.execute({ command: "exit /b 4" }, ctx("win-cmd-exit")));
     expect(out).toContain("Exit code: 4");
   });
+
+  it("teaches the real options when a cmd.exe command goes silent", async () => {
+    const processManager = new ProcessManager();
+    const tool = createBashTool(
+      tmpHome,
+      processManager,
+      undefined,
+      undefined,
+      { exists: () => false },
+      undefined,
+      undefined,
+      () => ({ yieldSeconds: 0, inactivitySeconds: 1, hardLimitMinutes: 0 }),
+    );
+    const out = outputText(
+      await tool.execute({ command: "ping -n 30 127.0.0.1 >nul" }, ctx("win-cmd-quiet")),
+    );
+    expect(out).toMatch(/^Exit code: INACTIVE/);
+    expect(out).toContain("Ran under Windows cmd.exe");
+    expect(out).toContain("run_in_background=true and wake.silence_seconds");
+    expect(out).toContain("explicit timeout");
+    processManager.shutdownAll();
+  }, 30_000);
 
   it.each([false, true])(
     "refuses pipelines without pipefail under cmd.exe (persist=%s)",
@@ -984,11 +1075,81 @@ describe("foreground limits: hand-off, inactivity and held pipes", () => {
     );
   }
 
-  it("hands a silent command to the background, where the inactivity guard stops it", async () => {
-    const processManager = new ProcessManager();
+  /** Drains the queue until a silence notice for the task arrives; returns all seen. */
+  async function silenceNotice(
+    notifications: AgentNotificationQueue,
+    id: string,
+  ): Promise<AgentNotification[]> {
+    const seen: AgentNotification[] = [];
+    await expect
+      .poll(
+        () => {
+          seen.push(...notifications.drain());
+          return seen.some((n) => n.id === id && /has produced no output for/.test(n.text));
+        },
+        { timeout: 20_000 },
+      )
+      .toBe(true);
+    return seen;
+  }
+
+  /** Shuts down, then waits for the node process that printed `pid:<n>`. */
+  async function shutdownAndReap(processManager: ProcessManager, id: string): Promise<void> {
+    const { output } = await processManager.readOutput(id, true);
+    const nodePid = Number(/pid:(\d+)/.exec(output)?.[1]);
+    await shutdownAndWait(processManager);
+    if (nodePid > 0) {
+      await expect.poll(() => isProcessAlive(nodePid), { timeout: 15_000 }).toBe(false);
+    }
+  }
+
+  function gatePlan(argv: string[], quietBudgetSeconds: number): VerifyPlan {
+    return {
+      version: 1,
+      mode: "changed",
+      gates: [
+        {
+          id: "quiet-gate",
+          argv,
+          cwd: ".",
+          covers: [],
+          fingerprint: null,
+          quietBudgetSeconds,
+          protectedPaths: [],
+        },
+      ],
+      advice: [],
+    };
+  }
+
+  function limitedTool(
+    processManager: ProcessManager,
+    settings: { yieldSeconds: number; inactivitySeconds: number; hardLimitMinutes: number },
+    plan: VerifyPlan | null = null,
+  ): ReturnType<typeof createBashTool> {
+    return createBashTool(
+      tmpHome,
+      processManager,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      () => settings,
+      undefined,
+      () => plan,
+    );
+  }
+
+  const run = (tool: ReturnType<typeof createBashTool>, args: Parameters<typeof tool.execute>[0]) =>
+    tool.execute(args, { signal: new AbortController().signal, toolCallId: "limits" });
+
+  it("hands a silent command to the background, where silence only notifies", async () => {
+    const notifications = new AgentNotificationQueue();
+    const processManager = new ProcessManager({ notifications, wakeIntervalMs: 50 });
     const command = await nodeScript(
       "silent",
-      "console.log('ready'); setTimeout(() => {}, 60000);",
+      "console.log('ready pid:' + process.pid); setTimeout(() => {}, 60000);",
     );
 
     const { outcome, rawOutput } = await foreground(processManager, command, {
@@ -999,17 +1160,14 @@ describe("foreground limits: hand-off, inactivity and held pipes", () => {
     });
 
     expect(outcome.reason).toBe("backgrounded");
-    expect(outcome.backgroundTaskId).toEqual(expect.any(String));
     expect(rawOutput).toContain("ready");
     const id = outcome.backgroundTaskId ?? "";
-    const waitStarted = Date.now();
-    const result = outputText(await waitFor(createTaskOutputTool(processManager), id));
-    expect(Date.now() - waitStarted).toBeLessThan(10_000);
-    expect(result).toMatch(
-      /exited \(.*\) — stopped: no output for the inactivity limit \(inactive\)/,
-    );
-    expect(result).toContain("ready");
-    await shutdownAndWait(processManager);
+    const seen = await silenceNotice(notifications, id);
+    const read = await processManager.readOutput(id);
+    expect(read.isRunning).toBe(true);
+    expect(read.stopReason).toBeNull();
+    expect(seen.filter((n) => n.id === id && n.terminal)).toEqual([]);
+    await shutdownAndReap(processManager, id);
   }, 30_000);
 
   it("a chatty command past the yield is backgrounded and the wait returns right after exit", async () => {
@@ -1119,7 +1277,7 @@ describe("foreground limits: hand-off, inactivity and held pipes", () => {
   }, 20_000);
 
   it("renders the hand-off through the bash tool with the task ID", async () => {
-    const processManager = new ProcessManager();
+    const processManager = new ProcessManager({ notifications: new AgentNotificationQueue() });
     const command = await nodeScript(
       "slow",
       "console.log('start'); setTimeout(() => console.log('end'), 12500);",
@@ -1144,10 +1302,254 @@ describe("foreground limits: hand-off, inactivity and held pipes", () => {
     const id = /moved to background task (\S+)/.exec(text)?.[1] ?? "";
     expect(id).not.toBe("");
     expect(text).toContain(`task_output with id="${id}"`);
+    expect(text).toContain("Silence only sends you a notice; it never stops the command.");
+    expect(text).toContain("It is stopped at the hard limit");
+    expect(text).not.toContain("long stretch with no output");
     expect(text).toContain("start");
     const waited = outputText(await waitFor(createTaskOutputTool(processManager), id));
     expect(waited).toMatch(/exited \(code 0/);
     expect(waited).toContain("end");
     await shutdownAndWait(processManager);
   }, 40_000);
+
+  it("does not promise a silence notice after a hand-off when no notification path exists", async () => {
+    // Terminal-CLI-style manager: no notifications queue wired.
+    const processManager = new ProcessManager();
+    const command = await nodeScript(
+      "quiet-noqueue",
+      "console.log('start pid:' + process.pid); setTimeout(() => {}, 60000);",
+    );
+    const tool = limitedTool(processManager, {
+      yieldSeconds: 1,
+      inactivitySeconds: 60,
+      hardLimitMinutes: 5,
+    });
+
+    const text = outputText(await run(tool, { command }));
+    const id = /moved to background task (\S+)/.exec(text)?.[1] ?? "";
+    expect(id).not.toBe("");
+    expect(text).not.toContain("sends you a notice");
+    expect(text).toContain("Silence never stops the command, but no notice will arrive");
+    expect(text).toContain("task_output wait_ms");
+    expect(text).toContain("It is stopped at the hard limit");
+    await shutdownAndReap(processManager, id);
+  }, 40_000);
+
+  it("uses a matching gate's quiet budget once a command moves to the background", async () => {
+    const notifications = new AgentNotificationQueue();
+    const processManager = new ProcessManager({ notifications, wakeIntervalMs: 50 });
+    // Chatty through the yield (the gate budget is also the foreground silence
+    // limit), then silent: only the 1 s gate budget can raise a notice this soon.
+    const yieldMs = process.platform === "win32" ? 10_000 : 1_000;
+    await fs.writeFile(
+      path.join(tmpHome, "gate.cjs"),
+      `console.log('pid:' + process.pid); const t = setInterval(() => console.log('tick'), 200); setTimeout(() => clearInterval(t), ${yieldMs + 1_500}); setTimeout(() => {}, 60000);`,
+    );
+    const tool = limitedTool(
+      processManager,
+      { yieldSeconds: 1, inactivitySeconds: 600, hardLimitMinutes: 5 },
+      gatePlan(["node", "gate.cjs"], 1),
+    );
+
+    const text = outputText(await run(tool, { command: "node gate.cjs" }));
+    const id = /moved to background task (\S+)/.exec(text)?.[1] ?? "";
+    expect(id).not.toBe("");
+    const seen = await silenceNotice(notifications, id);
+    expect(seen.find((n) => n.id === id && !n.terminal)?.text).toContain("no output for 1s");
+    expect((await processManager.readOutput(id)).isRunning).toBe(true);
+    await shutdownAndReap(processManager, id);
+  }, 60_000);
+
+  it("gives a started command the gate's quiet budget when no wake silence was set", async () => {
+    const notifications = new AgentNotificationQueue();
+    const processManager = new ProcessManager({ notifications, wakeIntervalMs: 50 });
+    await fs.writeFile(
+      path.join(tmpHome, "gate.cjs"),
+      "console.log('ready pid:' + process.pid); setTimeout(() => {}, 60000);",
+    );
+    const tool = limitedTool(
+      processManager,
+      { yieldSeconds: 120, inactivitySeconds: 600, hardLimitMinutes: 60 },
+      gatePlan(["node", "gate.cjs"], 1),
+    );
+
+    const text = outputText(await run(tool, { command: "node gate.cjs", run_in_background: true }));
+    expect(text).toContain("silence 1s (the project's quiet budget for this gate)");
+    const id = /ID: (\S+)/.exec(text)?.[1] ?? "";
+    await silenceNotice(notifications, id);
+    expect((await processManager.readOutput(id)).isRunning).toBe(true);
+
+    const other = outputText(
+      await run(tool, { command: "node gate.cjs --other", run_in_background: true }),
+    );
+    expect(other).not.toContain("Wake rules armed");
+    const otherId = /ID: (\S+)/.exec(other)?.[1] ?? "";
+    const { output: otherOutput } = await processManager.readOutput(otherId, true);
+    const otherPid = Number(/pid:(\d+)/.exec(otherOutput)?.[1]);
+    await shutdownAndReap(processManager, id);
+    if (otherPid > 0) {
+      await expect.poll(() => isProcessAlive(otherPid), { timeout: 15_000 }).toBe(false);
+    }
+  }, 30_000);
+
+  it("an explicit timeout replaces the silence limit", async () => {
+    const processManager = new ProcessManager();
+    const command = await nodeScript(
+      "quiet-then-done",
+      "setTimeout(() => console.log('done'), 2500);",
+    );
+    const tool = limitedTool(processManager, {
+      yieldSeconds: 120,
+      inactivitySeconds: 1,
+      hardLimitMinutes: 60,
+    });
+
+    const text = outputText(await run(tool, { command, timeout: 30_000 }));
+    expect(text).toMatch(/^Exit code: 0\b/);
+    expect(text).toContain("done");
+    await shutdownAndWait(processManager);
+  }, 30_000);
+
+  it.each([false, true])(
+    "teaches the real options when a command that never moves goes silent (persist=%s)",
+    async (persist) => {
+      const processManager = new ProcessManager();
+      const command = await nodeScript("never-moves", "setTimeout(() => {}, 60000);");
+      const tool = limitedTool(processManager, {
+        yieldSeconds: 0,
+        inactivitySeconds: 1,
+        hardLimitMinutes: 0,
+      });
+
+      const text = outputText(await run(tool, { command, persist }));
+      expect(text).toMatch(/^Exit code: INACTIVE/);
+      expect(text).toContain("run_in_background=true and wake.silence_seconds");
+      expect(text).toContain("explicit timeout");
+      expect(text).not.toContain("bashInactivitySeconds");
+      if (persist) expect(text).toContain("persist:true keeps the silence limit");
+      else expect(text).not.toContain("persist:true");
+      processManager.shutdownAll();
+    },
+    30_000,
+  );
+});
+
+describe("check coverage fingerprints", () => {
+  const gatePlan = (advice: VerifyPlan["advice"] = []): VerifyPlan => ({
+    version: 1,
+    mode: "changed",
+    gates: [
+      {
+        id: "gate",
+        argv: ["node", "gate.mjs"],
+        cwd: ".",
+        covers: ["gate.mjs", "crates"],
+        fingerprint: null,
+        quietBudgetSeconds: null,
+        protectedPaths: [],
+      },
+    ],
+    advice,
+  });
+  const context = (): { signal: AbortSignal; toolCallId: string } => ({
+    signal: new AbortController().signal,
+    toolCallId: "coverage-test",
+  });
+
+  async function fixture(gateSource = "console.log('ok');\n"): Promise<void> {
+    await fs.mkdir(path.join(tmpHome, "crates"), { recursive: true });
+    await fs.mkdir(path.join(tmpHome, "src"), { recursive: true });
+    await fs.writeFile(path.join(tmpHome, "gate.mjs"), gateSource);
+    await fs.writeFile(path.join(tmpHome, "crates/a.rs"), "fn a() {}\n");
+    await fs.writeFile(path.join(tmpHome, "src/app.ts"), "export const a = 1;\n");
+    execFileSync("git", ["init", "-q"], { cwd: tmpHome });
+  }
+
+  function tool(plan: VerifyPlan, memory?: CheckCoverageMemory) {
+    return createBashTool(
+      tmpHome,
+      new ProcessManager(),
+      localOperations,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      () => plan,
+      memory,
+      memory
+        ? (fingerprint) => {
+            const record = memory.lookup(fingerprint);
+            return record ? { record, current: true } : null;
+          }
+        : undefined,
+    );
+  }
+
+  it("tells the agent about an identical earlier pass, across an unrelated edit", async () => {
+    await fixture();
+    const memory = new CheckCoverageMemory();
+    const bash = tool(gatePlan(), memory);
+    const first = structuredBashResult(await bash.execute({ command: "node gate.mjs" }, context()));
+    const coverage = first.details.bashDiagnostics.checkCoverage;
+    expect(coverage?.scope).toMatchObject({ kind: "plan", gateId: "gate" });
+    expect(first.content).not.toContain("Same check passed");
+    memory.remember({
+      fingerprint: coverage?.fingerprint ?? "",
+      status: "passed",
+      command: "node gate.mjs",
+      executionId: first.details.bashDiagnostics.executionId,
+      run: 1,
+      observedAt: "2026-10-30T01:12:04.000Z",
+    });
+    await fs.writeFile(path.join(tmpHome, "src/app.ts"), "export const a = 2;\n");
+    const second = structuredBashResult(
+      await bash.execute({ command: "node gate.mjs" }, context()),
+    );
+    expect(second.details.bashDiagnostics.checkCoverage?.fingerprint).toBe(coverage?.fingerprint);
+    const notices = second.content.split("\n").filter((line) => line.includes("Same check passed"));
+    expect(notices).toEqual([
+      `[Same check passed with identical inputs in run 1 at 2026-10-30T01:12:04Z (exec ${first.details.bashDiagnostics.executionId}); it is still current evidence, so this re-run is optional.]`,
+    ]);
+    expect(second.details.bashDiagnostics.reason).toBe("completed");
+  });
+
+  it("stores no fingerprint when the run changes a covered file", async () => {
+    await fixture("import fs from 'node:fs'; fs.appendFileSync('crates/a.rs', '// x');\n");
+    const result = structuredBashResult(
+      await tool(gatePlan(), new CheckCoverageMemory()).execute(
+        { command: "node gate.mjs" },
+        context(),
+      ),
+    );
+    expect(result.details.bashDiagnostics.exitCode).toBe(0);
+    expect(result.details.bashDiagnostics.checkCoverage).toBeUndefined();
+  });
+
+  it("labels passes the project reports as not harness evidence", async () => {
+    await fixture();
+    const plan = gatePlan([
+      { gateId: "rust", kind: "reused-pass", reason: "unchanged", lastRun: "2026-10-29T08:00:00Z" },
+    ]);
+    const content = structuredBashResult(
+      await tool(plan, new CheckCoverageMemory()).execute({ command: "node gate.mjs" }, context()),
+    ).content;
+    expect(content).toContain(
+      "[Passes reused by the project: rust (last run 2026-10-29T08:00:00Z); reported by the project, not harness evidence.]",
+    );
+  });
+
+  it("changes nothing without the coverage parameters", async () => {
+    await fixture();
+    const plan = gatePlan([
+      { gateId: "rust", kind: "reused-pass", reason: "unchanged", lastRun: null },
+    ]);
+    const result = structuredBashResult(
+      await tool(plan).execute({ command: "node gate.mjs" }, context()),
+    );
+    expect(result.details.bashDiagnostics.checkCoverage).toBeUndefined();
+    expect(result.content).not.toContain("reported by the project");
+    expect(result.content).not.toContain("Same check passed");
+  });
 });

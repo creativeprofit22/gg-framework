@@ -310,3 +310,18 @@ describe("re-running a check whose exit status could not count", { timeout: 60_0
     expect(evidenceFor(check)).toEqual([]);
   });
 });
+
+describe("read-only commands after a passing check", () => {
+  it("keeps the pass current across git status", async () => {
+    const { internal, events } = await makeSession();
+    await tool(internal, "edit", { file_path: "src/a.ts" });
+    await tool(internal, "bash", { command: "cargo test" }, 0);
+    await tool(internal, "bash", { command: "git status --short" }, 0);
+    expect(session!.getVerificationEvidenceLedgerSnapshot().currentEvidence).toEqual([
+      expect.objectContaining({ command: "cargo test", status: "passed" }),
+    ]);
+    expect(session!.getVerificationProblem()).toBeNull();
+    expect(await internal.getHookFollowUpMessages()).toBeNull();
+    expect(events).not.toContain("verification");
+  });
+});

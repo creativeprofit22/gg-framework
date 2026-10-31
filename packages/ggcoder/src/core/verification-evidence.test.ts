@@ -1,11 +1,14 @@
 import { describe, expect, it } from "vitest";
 import type { Message } from "@kenkaiiii/gg-ai";
+import type { VerifyPlan } from "@kenkaiiii/gg-core/verify-plan";
 import {
   SessionVerificationEvidenceLedger,
   classifyVerificationCommand,
   collectVerificationEvidence,
   formatVerificationCommandDisplay,
   extractStandaloneCheck,
+  VERIFICATION_PROBLEM_FAILED,
+  VERIFICATION_PROBLEM_MISSING,
 } from "./verification-evidence.js";
 
 const TEST_WORKSPACE = {
@@ -954,5 +957,438 @@ describe("SessionVerificationEvidenceLedger", () => {
       currentEvidence: [expect.objectContaining({ executionId: "accepted" })],
       staleEvidence: [],
     });
+  });
+});
+
+describe("project checks and harmless commands", () => {
+  const plan: VerifyPlan = {
+    version: 1,
+    mode: "changed",
+    advice: [],
+    gates: [
+      {
+        id: "ts",
+        argv: ["node", "scripts/test-ts.mjs"],
+        cwd: ".",
+        covers: [],
+        fingerprint: null,
+        quietBudgetSeconds: null,
+        protectedPaths: [],
+      },
+      {
+        id: "native",
+        argv: ["node", "scripts/native.mjs"],
+        cwd: "apps/desktop",
+        covers: [],
+        fingerprint: null,
+        quietBudgetSeconds: null,
+        protectedPaths: [],
+      },
+      {
+        id: "watcher",
+        argv: ["node", "scripts/test-ts.mjs", "--watch"],
+        cwd: "web",
+        covers: [],
+        fingerprint: null,
+        quietBudgetSeconds: null,
+        protectedPaths: [],
+      },
+    ],
+  };
+
+  function run(ledger: SessionVerificationEvidenceLedger, executionId: string, command: string) {
+    ledger.recordToolResult({
+      name: "bash",
+      args: { command },
+      isError: false,
+      details: {
+        bashDiagnostics: {
+          executionId,
+          command,
+          cwd: "C:/project",
+          startedAt: Date.parse("2026-10-30T10:00:00.000Z"),
+          reason: "completed",
+          exitCode: 0,
+        },
+      },
+    });
+  }
+
+  it.each([
+    "pnpm verify --changed",
+    "pnpm verify:full",
+    "pnpm --dir apps/desktop test:native",
+    "pnpm -C apps/desktop test:native",
+    "pnpm test:unit",
+    "npm run verify",
+  ])("accepts the project script %j", (command) => {
+    expect(classifyVerificationCommand(command)).toMatchObject({ accepted: true });
+  });
+
+  it.each([
+    "pnpm test:watch",
+    "pnpm verify:fix",
+    "pnpm test:native --watch",
+    "pnpm test:update",
+    "pnpm dev",
+    "node scripts/test-ts.mjs",
+  ])("rejects %j", (command) => {
+    expect(classifyVerificationCommand(command).accepted).toBe(false);
+  });
+
+  it.each([
+    ["node scripts/test-ts.mjs", "project verify-plan gate ts"],
+    ["cd apps/desktop && node scripts/native.mjs", "project verify-plan gate native"],
+  ])("accepts the verify-plan gate %j", (command, reason) => {
+    expect(classifyVerificationCommand(command, { verifyPlan: plan })).toMatchObject({
+      accepted: true,
+      reason,
+    });
+  });
+
+  it.each([
+    "node scripts/test-ts.mjs --extra",
+    "node 'scripts/test-ts.mjs'",
+    "cd other && node scripts/native.mjs",
+    "node scripts/native.mjs",
+    "cd web && node scripts/test-ts.mjs --watch",
+  ])("does not accept the lookalike %j", (command) => {
+    expect(classifyVerificationCommand(command, { verifyPlan: plan }).accepted).toBe(false);
+  });
+
+  it("counts a verify-plan gate through the ledger's plan getter", () => {
+    const ledger = new SessionVerificationEvidenceLedger({ getVerifyPlan: () => plan });
+    run(ledger, "gate", "node scripts/test-ts.mjs");
+    expect(ledger.snapshot().currentEvidence).toEqual([
+      expect.objectContaining({ executionId: "gate", status: "passed" }),
+    ]);
+  });
+
+  it.each(["pnpm test > /tmp/fmt.log 2>&1", "pnpm test >/dev/null", "pnpm test >> /tmp/a/b.txt"])(
+    "lets the host snapshot count %j on a POSIX shell",
+    (command) => {
+      expect(classifyVerificationCommand(command, { posixShell: true })).toMatchObject({
+        accepted: false,
+        snapshotEligible: true,
+      });
+      expect(classifyVerificationCommand(command).snapshotEligible).toBeFalsy();
+    },
+  );
+
+  it.each([
+    "pnpm test > out.txt",
+    'pnpm test > "$LOG"',
+    "pnpm test > $LOG",
+    "pnpm test > /tmp/../repo/out.txt",
+    "pnpm test:update > /tmp/u.log",
+  ])("keeps refusing the redirect %j", (command) => {
+    const verdict = classifyVerificationCommand(command, { posixShell: true });
+    expect(verdict.accepted).toBe(false);
+    expect(verdict.snapshotEligible).toBeFalsy();
+  });
+
+  describe("redirected check through the ledger", () => {
+    const redirected = "pnpm test > /tmp/fmt.log 2>&1";
+    function runRedirected(
+      ledger: SessionVerificationEvidenceLedger,
+      { exitCode = 0, sourceUnchanged }: { exitCode?: number; sourceUnchanged: boolean },
+    ) {
+      ledger.recordToolResult({
+        name: "bash",
+        args: { command: redirected },
+        evidenceRevision: ledger.revision,
+        isError: exitCode !== 0,
+        details: {
+          bashDiagnostics: {
+            executionId: "redirected",
+            command: redirected,
+            cwd: "C:/project",
+            startedAt: Date.parse("2026-10-30T10:00:00.000Z"),
+            reason: exitCode === 0 ? "completed" : "nonZeroExit",
+            exitCode,
+            sourceUnchanged,
+          },
+        },
+      });
+    }
+    function editedLedger() {
+      const ledger = new SessionVerificationEvidenceLedger({ posixShell: true });
+      ledger.recordToolResult({ name: "edit", args: { file_path: "src/a.ts" }, isError: false });
+      return ledger;
+    }
+
+    it("counts a pass with unchanged inputs as current evidence", () => {
+      const ledger = editedLedger();
+      const revision = ledger.revision;
+      runRedirected(ledger, { sourceUnchanged: true });
+      expect(ledger.verificationProblem()).toBeNull();
+      expect(ledger.revision).toBe(revision);
+      expect(ledger.snapshot()).toMatchObject({
+        currentEvidence: [{ executionId: "redirected", status: "passed" }],
+        staleEvidence: [],
+      });
+    });
+
+    it("does not count a pass that changed inputs", () => {
+      const ledger = editedLedger();
+      const revision = ledger.revision;
+      runRedirected(ledger, { sourceUnchanged: false });
+      expect(ledger.verificationProblem()).toBe(VERIFICATION_PROBLEM_MISSING);
+      expect(ledger.revision).toBe(revision + 1);
+    });
+
+    it("does not record a redirected failure as the check's", () => {
+      const ledger = editedLedger();
+      const revision = ledger.revision;
+      runRedirected(ledger, { exitCode: 1, sourceUnchanged: true });
+      expect(ledger.verificationProblem()).toBe(VERIFICATION_PROBLEM_MISSING);
+      expect(ledger.revision).toBe(revision);
+      expect(ledger.snapshot().currentEvidence).toEqual([]);
+    });
+  });
+
+  it.each([
+    ["pnpm test > /tmp/fmt.log 2>&1; true", "pnpm test"],
+    ["pnpm test > out.txt; true", "pnpm test"],
+  ])("drops the redirect when recovering %j", (command, expected) => {
+    expect(extractStandaloneCheck(command)).toBe(expected);
+  });
+
+  // 2026-10-30 probe: one `git status` used to move a passing cargo test to stale.
+  it.each([
+    "git status --short",
+    "git diff",
+    "git log --oneline -5",
+    "git show HEAD",
+    "ls",
+    "cat src/a.ts",
+    "rg -n foo src",
+  ])("keeps a passing check current across %j", (command) => {
+    const ledger = new SessionVerificationEvidenceLedger();
+    ledger.recordToolResult({ name: "edit", args: { file_path: "src/a.ts" }, isError: false });
+    run(ledger, "cargo", "cargo test");
+    const before = ledger.snapshot();
+    run(ledger, "probe", command);
+    // The read-only command is not evidence itself, so it is listed as not current.
+    expect(ledger.snapshot().currentEvidence).toEqual(before.currentEvidence);
+    expect(before.currentEvidence).toEqual([
+      expect.objectContaining({ executionId: "cargo", status: "passed" }),
+    ]);
+  });
+
+  it.each(["rm x", "node script.mjs"])("still stales a pass after %j", (command) => {
+    const ledger = new SessionVerificationEvidenceLedger();
+    run(ledger, "cargo", "cargo test");
+    run(ledger, "other", command);
+    expect(ledger.snapshot().staleEvidence).toEqual([
+      expect.objectContaining({ executionId: "cargo", status: "passed" }),
+    ]);
+  });
+});
+
+describe("check coverage scoped by covered files", () => {
+  const FP_RUST = "a".repeat(64);
+  const FP_TREE = "b".repeat(64);
+  const rustScope = { kind: "plan" as const, root: "/repo", gateId: "rust", covers: ["crates/**"] };
+  const plan: VerifyPlan = {
+    version: 1,
+    mode: "changed",
+    gates: [
+      {
+        id: "rust",
+        argv: ["cargo", "test"],
+        cwd: ".",
+        covers: ["crates/**"],
+        fingerprint: null,
+        quietBudgetSeconds: null,
+        protectedPaths: [],
+      },
+    ],
+    advice: [{ gateId: "rust", kind: "reused-pass", reason: "unchanged", lastRun: "2026-10-29" }],
+  };
+
+  function newLedger() {
+    return new SessionVerificationEvidenceLedger({ getVerifyPlan: () => plan });
+  }
+
+  function check(
+    ledger: SessionVerificationEvidenceLedger,
+    executionId: string,
+    command: string,
+    options: { exitCode?: number; reason?: string; checkCoverage?: unknown } = {},
+  ) {
+    const exitCode = options.exitCode ?? 0;
+    ledger.recordToolResult({
+      evidenceRevision: ledger.revision,
+      name: "bash",
+      args: { command },
+      isError: exitCode !== 0,
+      sessionCwd: "/repo",
+      details: {
+        bashDiagnostics: {
+          executionId,
+          command,
+          cwd: "/repo",
+          startedAt: Date.parse("2026-10-30T10:00:00.000Z"),
+          reason: options.reason ?? (exitCode === 0 ? "completed" : "nonZeroExit"),
+          exitCode,
+          checkCoverage: options.checkCoverage,
+        },
+      },
+    });
+  }
+
+  function edit(ledger: SessionVerificationEvidenceLedger, filePath: string) {
+    ledger.recordToolResult({
+      name: "edit",
+      args: { file_path: filePath },
+      isError: false,
+      sessionCwd: "/repo",
+    });
+  }
+
+  const currentIds = (ledger: SessionVerificationEvidenceLedger) =>
+    ledger.snapshot().currentEvidence.map((evidence) => evidence.executionId);
+  const staleIds = (ledger: SessionVerificationEvidenceLedger) =>
+    ledger.snapshot().staleEvidence.map((evidence) => evidence.executionId);
+
+  it("keeps a plan-scoped Rust pass current across a TS edit, but owes a check for the TS change", () => {
+    const ledger = newLedger();
+    edit(ledger, "crates/core/src/lib.rs");
+    check(ledger, "rust-1", "cargo test", {
+      checkCoverage: { fingerprint: FP_RUST, scope: rustScope },
+    });
+    expect(ledger.verificationProblem()).toBeNull();
+    edit(ledger, "/repo/src/app.ts");
+    expect(currentIds(ledger)).toEqual(["rust-1"]);
+    expect(ledger.findPriorPass(FP_RUST)).toMatchObject({ current: true });
+    expect(ledger.verificationProblem()).toBe(VERIFICATION_PROBLEM_MISSING);
+    check(ledger, "ts-1", "tsc --noEmit");
+    expect(ledger.verificationProblem()).toBeNull();
+    expect(currentIds(ledger)).toEqual(["rust-1", "ts-1"]);
+    edit(ledger, "crates/core/src/lib.rs");
+    expect(currentIds(ledger)).toEqual([]);
+    expect(staleIds(ledger)).toEqual(["rust-1", "ts-1"]);
+    expect(ledger.findPriorPass(FP_RUST)).toMatchObject({
+      current: false,
+      record: { executionId: "rust-1", run: 0, status: "passed" },
+    });
+  });
+
+  it("stales a whole-tree pass on any edit", () => {
+    const ledger = newLedger();
+    check(ledger, "tree-1", "tsc --noEmit", {
+      checkCoverage: { fingerprint: FP_TREE, scope: { kind: "tree", root: "/repo" } },
+    });
+    expect(currentIds(ledger)).toEqual(["tree-1"]);
+    edit(ledger, "docs/readme.md");
+    expect(currentIds(ledger)).toEqual([]);
+    expect(staleIds(ledger)).toEqual(["tree-1"]);
+    expect(ledger.findPriorPass(FP_TREE)?.current).toBe(false);
+  });
+
+  it("stales a plan-scoped pass on edits it cannot place", () => {
+    const ledger = newLedger();
+    check(ledger, "rust-1", "cargo test", {
+      checkCoverage: { fingerprint: FP_RUST, scope: rustScope },
+    });
+    ledger.recordToolResult({ name: "edit", args: { file_path: "src/a.ts" }, isError: false });
+    expect(currentIds(ledger)).toEqual([]);
+    check(ledger, "rust-2", "cargo test", {
+      checkCoverage: { fingerprint: FP_RUST, scope: rustScope },
+    });
+    edit(ledger, "/elsewhere/a.ts");
+    expect(currentIds(ledger)).toEqual([]);
+  });
+
+  it("keeps a scoped failure across an unrelated edit until the same check passes", () => {
+    const ledger = newLedger();
+    edit(ledger, "crates/core/src/lib.rs");
+    check(ledger, "rust-fail", "cargo test", {
+      exitCode: 1,
+      checkCoverage: { fingerprint: FP_RUST, scope: rustScope },
+    });
+    expect(ledger.verificationProblem()).toBe(VERIFICATION_PROBLEM_FAILED);
+    edit(ledger, "src/app.ts");
+    check(ledger, "ts-1", "tsc --noEmit");
+    expect(ledger.verificationProblem()).toBe(VERIFICATION_PROBLEM_FAILED);
+    expect(ledger.findPriorPass(FP_RUST)).toBeNull();
+    check(ledger, "rust-pass", "cargo test", {
+      checkCoverage: { fingerprint: FP_RUST, scope: rustScope },
+    });
+    expect(ledger.verificationProblem()).toBeNull();
+  });
+
+  it("remembers only conclusive outcomes with a stable fingerprint", () => {
+    const ledger = newLedger();
+    check(ledger, "unknown", "cargo test", {
+      exitCode: 0,
+      reason: "weird",
+      checkCoverage: { fingerprint: FP_RUST, scope: rustScope },
+    });
+    expect(ledger.findPriorPass(FP_RUST)).toBeNull();
+    check(ledger, "unstable", "cargo test");
+    expect(ledger.findPriorPass(FP_RUST)).toBeNull();
+    check(ledger, "malformed", "cargo test", {
+      checkCoverage: { fingerprint: "not-a-hash", scope: rustScope },
+    });
+    expect(ledger.findPriorPass("not-a-hash")).toBeNull();
+    check(ledger, "stable", "cargo test", {
+      checkCoverage: { fingerprint: FP_RUST, scope: rustScope },
+    });
+    expect(ledger.findPriorPass(FP_RUST)).toMatchObject({
+      current: true,
+      record: { executionId: "stable" },
+    });
+    ledger.clear();
+    expect(ledger.findPriorPass(FP_RUST)).toBeNull();
+  });
+
+  it("never turns project-reported reuse into evidence or coverage", () => {
+    const ledger = newLedger();
+    edit(ledger, "crates/core/src/lib.rs");
+    expect(ledger.verificationProblem()).toBe(VERIFICATION_PROBLEM_MISSING);
+    expect(ledger.snapshot()).toEqual({ currentEvidence: [], staleEvidence: [] });
+    expect(ledger.workspaceEvidence()).toEqual([]);
+  });
+
+  it("settles a handed-off check's fingerprint and scope from the host", () => {
+    const ledger = newLedger();
+    ledger.recordToolResult({
+      evidenceRevision: ledger.revision,
+      name: "bash",
+      args: { command: "cargo test" },
+      isError: false,
+      sessionCwd: "/repo",
+      details: {
+        bashDiagnostics: {
+          executionId: "bg-1",
+          command: "cargo test",
+          cwd: "/repo",
+          startedAt: 1000,
+          reason: "backgrounded",
+          exitCode: null,
+          backgroundTaskId: "task-1",
+          checkCoverage: { fingerprint: FP_RUST, scope: rustScope },
+        },
+      },
+    });
+    expect(ledger.findPriorPass(FP_RUST)).toBeNull();
+    ledger.recordToolResult({
+      name: "task_output",
+      args: { id: "task-1" },
+      isError: false,
+      sessionCwd: "/repo",
+      settledCoverage: { fingerprint: FP_RUST, scope: rustScope },
+      details: {
+        taskOutput: { id: "task-1", isRunning: false, exitCode: 0, signal: null, stopReason: null },
+      },
+    });
+    expect(ledger.findPriorPass(FP_RUST)).toMatchObject({
+      current: true,
+      record: { executionId: "bg-1" },
+    });
+    edit(ledger, "src/app.ts");
+    expect(currentIds(ledger)).toEqual(["bg-1"]);
   });
 });

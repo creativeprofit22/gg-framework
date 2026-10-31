@@ -55,7 +55,8 @@ export interface StartResult {
 
 /** Limits that keep guarding a foreground command after it is handed off. */
 export interface AdoptedCommandLimits {
-  inactivityMs: number | null;
+  /** Silence before one wake notice; silence never stops a moved command. */
+  quietMs: number | null;
   hardMs: number | null;
   exitSettleMs: number;
 }
@@ -264,6 +265,8 @@ interface WakeState {
   lastSize: number;
   lastGrowthAt: number;
   silenceFired: boolean;
+  /** When the hard limit stops this task, named in the silence notice. */
+  hardDeadlineAt?: number | undefined;
   /** The built-in failure detector is one-shot per task: the first failure is
    *  the news; a run with fifty failing tests must not wake fifty times. */
   failureFired: boolean;
@@ -316,6 +319,22 @@ export interface ProcessManagerOptions {
   spawnSync?: typeof spawnSync;
   /** Base delay before the first progress report. */
   watchIntervalMs?: number;
+  /** Timers for the adopted-command hard limit; tests inject a manual clock. */
+  commandTimers?: {
+    set: (callback: () => void, ms: number) => ReturnType<typeof setTimeout>;
+    clear: (handle: ReturnType<typeof setTimeout>) => void;
+  };
+  /** Wake-rule tick interval; tests shorten it. */
+  wakeIntervalMs?: number;
+  /** Test hook, called after each wake-rule evaluation of a task. */
+  onWakeEvaluated?: (id: string) => void;
+}
+
+/** Carries silence already spent before a hand-off into the wake watcher. */
+interface WakeSeed {
+  lastGrowthAt: number;
+  lastSize: number;
+  hardDeadlineAt?: number | undefined;
 }
 
 interface NativeCloseDeferred {
@@ -567,16 +586,17 @@ export class ProcessManager {
    * are not (nothing could deliver them), but failure detection still releases
    * a blocking `task_output` wait directly.
    */
-  private armWakeWatcher(proc: BackgroundProcess, requested?: WakeRules): boolean {
+  private armWakeWatcher(proc: BackgroundProcess, requested?: WakeRules, seed?: WakeSeed): boolean {
     const wantsRules = Boolean(requested && (requested.pattern || requested.silenceMs));
     const rulesArmed = wantsRules && this.options.notifications !== undefined;
     const state: WakeState = {
       rules: rulesArmed && requested ? requested : {},
       scanOffset: 0,
       failureOffset: 0,
-      lastSize: 0,
-      lastGrowthAt: proc.startedAt,
+      lastSize: seed?.lastSize ?? 0,
+      lastGrowthAt: seed?.lastGrowthAt ?? proc.startedAt,
       silenceFired: false,
+      hardDeadlineAt: seed?.hardDeadlineAt,
       failureFired: false,
     };
     this.wakeStates.set(proc.id, state);
@@ -587,6 +607,7 @@ export class ProcessManager {
     const tick = (): void => {
       const timer = setTimeout(() => {
         void this.evaluateWakeRules(proc, state, overlap).then(() => {
+          this.options.onWakeEvaluated?.(proc.id);
           if (proc.exitCode !== null || !this.wakeStates.has(proc.id)) {
             this.disposeWakeWatcher(proc.id);
             return;
@@ -602,7 +623,7 @@ export class ProcessManager {
           }
           tick();
         });
-      }, WAKE_INTERVAL_MS);
+      }, this.options.wakeIntervalMs ?? WAKE_INTERVAL_MS);
       timer.unref?.();
       this.wakeWatchers.set(proc.id, timer);
     };
@@ -716,12 +737,19 @@ export class ProcessManager {
       this.disposeProgressWatcher(proc.id);
       const tail = await this.readTail(proc.logFile, size);
       if (gone()) return;
+      const now = this.now();
+      const hardLeft =
+        state.hardDeadlineAt === undefined
+          ? ""
+          : `It is stopped at the hard limit in ${formatElapsed(Math.max(0, state.hardDeadlineAt - now))}. `;
       queue.enqueue(
         "process",
         proc.id,
         `Background process ${proc.id} (${proc.command}) has produced no output for ` +
-          `${Math.round((this.now() - state.lastGrowthAt) / 1000)}s — it may be stalled` +
+          `${Math.round((now - state.lastGrowthAt) / 1000)}s ` +
+          `(running ${formatElapsed(now - proc.startedAt)} in total) — it may be stalled` +
           `${tail ? `. Last output: ${tail}` : " (no output so far)"}. ` +
+          `Still running; silence never stops it. Log: ${proc.logFile}. ${hardLeft}` +
           `Check task_output id="${proc.id}" and decide whether to wait, send input, or stop it.`,
       );
       this.fireWake(proc, "silence", size);
@@ -1092,8 +1120,9 @@ export class ProcessManager {
 
   /**
    * Take ownership of a still-running foreground command so the agent can
-   * wait on it as a background task instead of killing it. The stuck-command
-   * guard (inactivity + remaining hard limit) keeps running after hand-off.
+   * wait on it as a background task instead of killing it. After hand-off
+   * silence only sends one wake notice; the remaining hard limit is the only
+   * automatic stop (docs/harness-checks.md, "Quiet commands after a move").
    * Throws `AdoptExitedError` when the command already exited.
    */
   async adopt(options: AdoptOptions): Promise<StartResult> {
@@ -1135,8 +1164,15 @@ export class ProcessManager {
     child.stdout?.resume();
     child.stderr?.resume();
     const proc = tracking.register(pid, startedAt);
-    // Handed-off commands get the same built-in failure detector as started ones.
-    if (!this.closing) this.armWakeWatcher(proc);
+    const hardDeadlineAt = limits.hardMs === null ? undefined : startedAt + limits.hardMs;
+    // Same wake path as started tasks; silence spent before the move counts.
+    const wakeArmed = this.closing
+      ? false
+      : this.armWakeWatcher(proc, limits.quietMs ? { silenceMs: limits.quietMs } : undefined, {
+          lastGrowthAt: lastOutputAt,
+          lastSize: Buffer.byteLength(seedOutput),
+          hardDeadlineAt,
+        });
 
     // A leftover helper holding the pipes must not keep the task "running"
     // forever after the command itself exited.
@@ -1152,27 +1188,24 @@ export class ProcessManager {
       },
     });
 
-    const now = this.now();
-    const hardMs = limits.hardMs === null ? null : Math.max(0, limits.hardMs - (now - startedAt));
-    const initialInactivityMs =
-      limits.inactivityMs === null
-        ? undefined
-        : Math.max(0, limits.inactivityMs - Math.max(0, now - lastOutputAt));
-    if (!this.closing && (limits.inactivityMs !== null || hardMs !== null)) {
+    const hardMs = hardDeadlineAt === undefined ? null : Math.max(0, hardDeadlineAt - this.now());
+    if (!this.closing && hardMs !== null) {
+      const timers = this.options.commandTimers;
       const watchdog = createCommandWatchdog({
         yieldMs: null,
-        inactivityMs: limits.inactivityMs,
+        inactivityMs: null,
         hardMs,
-        initialInactivityMs,
         setTimer: (callback, ms) => {
+          if (timers) return timers.set(callback, ms);
           const timer = setTimeout(callback, ms);
           timer.unref?.();
           return timer;
         },
-        onFire: (fire) => {
+        clearTimer: timers?.clear,
+        onFire: () => {
           this.commandWatchdogs.delete(id);
           if (!this.children.has(id)) return;
-          proc.stopReason = fire === "inactive" ? "inactive" : "timedOut";
+          proc.stopReason = "timedOut";
           log("INFO", "process", "Stopping adopted command automatically", {
             id,
             reason: proc.stopReason,
@@ -1180,13 +1213,10 @@ export class ProcessManager {
           void this.stop(id, { automatic: true });
         },
       });
-      const onActivity = (): void => watchdog.noteActivity();
-      child.stdout?.on("data", onActivity);
-      child.stderr?.on("data", onActivity);
       this.commandWatchdogs.set(id, watchdog);
     }
 
-    return { id, pid, logFile, wakeArmed: false };
+    return { id, pid, logFile, wakeArmed };
   }
 
   /** Terminal-only observation remains available to evidence owners. */

@@ -41,7 +41,17 @@ import {
   packageCooldownEnv,
   scopeCooldown,
 } from "../core/package-cooldown.js";
-import { classifyVerificationCommand } from "../core/verification-evidence.js";
+import { classifyVerificationCommand, matchVerifyPlanGate } from "../core/verification-evidence.js";
+import {
+  captureCheckInputs,
+  formatPriorPassNotice,
+  formatProjectReportedPasses,
+  type CaptureCheckInputsArgs,
+  type CheckCoverageMemory,
+  type CheckCoverageRecord,
+  type CheckInputs,
+} from "../core/check-coverage.js";
+import { overloadHint, redirectHint, sharedLogWarning } from "./check-hints.js";
 import { checkCommandPolicy, type GetNetworkPolicy } from "../core/network-guard.js";
 import {
   BOUNDED_OUTPUT_MAX_BYTES,
@@ -57,6 +67,13 @@ import {
   type SandboxLaunch,
 } from "../core/sandbox.js";
 import type { WakeRules } from "../core/process-manager.js";
+import type { VerifyPlan } from "@kenkaiiii/gg-core/verify-plan";
+import {
+  findGateQuietBudgetSeconds,
+  handOffNotice,
+  inactiveHint,
+  resolveQuietBudgetMs,
+} from "./quiet-budget.js";
 import { annotateSandboxDenial } from "../core/sandbox-feedback.js";
 import { collectVerificationReview } from "./verification-review.js";
 import { captureVerificationSnapshot } from "../core/verification-snapshot.js";
@@ -368,6 +385,8 @@ export async function executeForegroundCommand({
       error: Error | null = null,
       extra: {
         backgroundTaskId?: string;
+        /** Settles with `adopt()`'s `wakeArmed`; the result waits for it. */
+        quietNoticeArmed?: Promise<boolean>;
         pipesHeldAfterExit?: boolean;
         leftoverStopped?: boolean;
       } = {},
@@ -401,7 +420,8 @@ export async function executeForegroundCommand({
         outputSnapshot,
         isCmdFallback: effectiveLaunch.isCmdFallback,
       };
-      void foregroundLog.close().then(() => {
+      void Promise.all([foregroundLog.close(), extra.quietNoticeArmed]).then(([, armed]) => {
+        if (armed !== undefined) result.outcome.quietNoticeArmed = armed;
         if (foregroundLog.error) {
           log("WARN", "bash", "Foreground log stream failed", {
             executionId: foregroundLog.executionId,
@@ -451,14 +471,20 @@ export async function executeForegroundCommand({
       }
       handingOff = true;
       const handedOffPid = pid;
+      // takeOver runs before adopt() knows whether a silence notice can be sent.
+      let settleArmed: (armed: boolean) => void = () => {};
+      const quietNoticeArmed = new Promise<boolean>((resolve) => {
+        settleArmed = resolve;
+      });
       try {
-        await processManager.adopt({
+        const adopted = await processManager.adopt({
           child: running,
           pid: handedOffPid,
           command,
           startedAt,
           limits: {
-            inactivityMs: effectiveLimits.inactivityMs,
+            // Silence after the move only notifies; the hard limit is the kill.
+            quietMs: effectiveLimits.inactivityMs,
             hardMs: effectiveLimits.hardMs,
             exitSettleMs: effectiveLimits.exitSettleMs,
           },
@@ -471,7 +497,10 @@ export async function executeForegroundCommand({
             // Seed with the full bounded buffer, not the 100-line tail, so the
             // background log keeps everything printed before the hand-off.
             const seedOutput = fullOutput.content();
-            finalize("backgrounded", null, null, null, { backgroundTaskId: taskId });
+            finalize("backgrounded", null, null, null, {
+              backgroundTaskId: taskId,
+              quietNoticeArmed,
+            });
             log("INFO", "bash", "Foreground command handed off to background task", {
               taskId,
               pid: String(handedOffPid),
@@ -480,7 +509,9 @@ export async function executeForegroundCommand({
             return { seedOutput, lastOutputAt };
           },
         });
+        settleArmed(adopted.wakeArmed);
       } catch (error) {
+        settleArmed(false);
         handingOff = false;
         if (settled || terminalIntent !== null) return;
         if (!(error instanceof AdoptExitedError)) {
@@ -774,10 +805,13 @@ async function renderStructuredForegroundResult(
     const id = outcome.backgroundTaskId;
     return {
       content:
-        `Still running after ${formatDuration(outcome.elapsedMs)} — moved to background task ${id} ` +
-        `(not killed). It is still stopped automatically after a long stretch with no output ` +
-        `or at the hard time limit. Call task_output with id="${id}" and wait_ms; it returns ` +
-        `the moment the command exits or prints a failure. Output so far:\n${output}\n\n${diagnostics}`,
+        handOffNotice({
+          id,
+          elapsed: formatDuration(outcome.elapsedMs),
+          quietNotice: outcome.quietNoticeArmed === true,
+          hardLimit:
+            outcome.metadata.timeoutMs > 0 ? formatDuration(outcome.metadata.timeoutMs) : null,
+        }) + ` Output so far:\n${output}\n\n${diagnostics}`,
       details,
     };
   }
@@ -809,14 +843,16 @@ async function renderStructuredForegroundResult(
         : "so its later output was not captured; it may still be running. ") +
       "Use run_in_background=true for anything that should keep running.]\n"
     : "";
-  const inactiveHint =
-    outcome.reason === "inactive"
-      ? "[Stopped because it printed nothing for too long. If this step is legitimately " +
-        "silent, raise the bashInactivitySeconds setting instead of retrying as-is.]\n"
-      : "";
+  const silenceHint = outcome.reason === "inactive" ? inactiveHint({ persistent }) : "";
+  const { command, logPath } = outcome.metadata;
+  const posixShell = !execution.isCmdFallback;
+  const checkHints =
+    redirectHint(command, logPath, posixShell) +
+    sharedLogWarning(command, logPath, posixShell) +
+    (exitCode === "0" ? "" : overloadHint(execution.rawOutput));
 
   return {
-    content: `Exit code: ${exitCode}\n${leftoverNote}${inactiveHint}${output}\n\n${diagnostics}`,
+    content: `Exit code: ${exitCode}\n${leftoverNote}${silenceHint}${checkHints}${output}\n\n${diagnostics}`,
     details,
   };
 }
@@ -881,6 +917,12 @@ export function createBashTool(
   getForegroundLimitSettings?: () => ForegroundLimitSettings,
   /** Package release-age cooldown in days; 0 disables. Default 2. */
   getPackageCooldownDays: () => number = () => 2,
+  /** The project's verify plan (core/verify-plan-loader.ts): gate classification, quiet budgets, plan-scoped coverage. */
+  getVerifyPlan?: () => VerifyPlan | null,
+  /** Session memory of check outcomes by input fingerprint; absent = no fingerprinting. */
+  checkCoverage?: CheckCoverageMemory,
+  /** The latest identical pass and whether it is still current evidence. */
+  findPriorPass?: (fingerprint: string) => { record: CheckCoverageRecord; current: boolean } | null,
 ): AgentTool<typeof BashParams> {
   // Lazily created on the first persist:true call; one session per tool
   // instance (i.e. per agent session), owned by the shared process manager.
@@ -922,7 +964,10 @@ export function createBashTool(
         (persist ||
           run_in_background ||
           ops !== localOperations ||
-          !classifyVerificationCommand(command).accepted)
+          !classifyVerificationCommand(command, {
+            posixShell: !isCmdFallback,
+            verifyPlan: getVerifyPlan?.() ?? null,
+          }).accepted)
       ) {
         return REVIEW_REJECTED_BEFORE_START;
       }
@@ -941,6 +986,14 @@ export function createBashTool(
       if (wake?.silence_seconds) {
         wakeRules = { ...wakeRules, silenceMs: wake.silence_seconds * 1000 };
       }
+      const gateQuietSeconds = findGateQuietBudgetSeconds(getVerifyPlan?.(), command);
+      // A started command takes the gate's quiet budget as its silence notice
+      // unless the model chose one; it still gets no default notice.
+      const gateSilenceMs =
+        run_in_background && wakeRules?.silenceMs === undefined
+          ? resolveQuietBudgetMs({ settingsSeconds: 0, gateSeconds: gateQuietSeconds })
+          : null;
+      if (gateSilenceMs !== null) wakeRules = { ...wakeRules, silenceMs: gateSilenceMs };
       // A long sleep-only foreground call while something runs in the
       // background is a guessed wait: too short wastes a turn, too long wastes
       // wall-clock. Redirect rather than run it — descriptions alone do not
@@ -1087,6 +1140,7 @@ export function createBashTool(
           platform: process.platform,
           mode: "persistent",
           canHandOff: false,
+          quietBudgetSeconds: gateQuietSeconds,
         });
         if (context.signal.aborted) return CANCELLED_BEFORE_START;
         const execution = await executePersistentCommand({
@@ -1133,7 +1187,11 @@ export function createBashTool(
             ? result.wakeArmed
               ? `Wake rules armed: ${[
                   wakeRules.pattern ? `pattern /${wakeRules.pattern.source}/` : null,
-                  wakeRules.silenceMs ? `silence ${wakeRules.silenceMs / 1000}s` : null,
+                  wakeRules.silenceMs
+                    ? `silence ${wakeRules.silenceMs / 1000}s${
+                        gateSilenceMs !== null ? " (the project's quiet budget for this gate)" : ""
+                      }`
+                    : null,
                 ]
                   .filter(Boolean)
                   .join(
@@ -1153,6 +1211,7 @@ export function createBashTool(
         platform: process.platform,
         mode: "spawn",
         canHandOff: true,
+        quietBudgetSeconds: gateQuietSeconds,
       });
       // Cross-platform shell: bash on macOS/Linux, Git Bash on Windows (or
       // cmd.exe fallback), wrapped by the OS sandbox before any child starts.
@@ -1167,12 +1226,43 @@ export function createBashTool(
       // when workspace inputs are unchanged across the run (upstream's snapshot
       // rule). Both snapshots are taken inside this call, so nothing the
       // command writes can land before the "before" snapshot.
+      const verifyPlan = getVerifyPlan?.() ?? null;
+      const classification = classifyVerificationCommand(command, {
+        posixShell: !shell.isCmdFallback,
+        verifyPlan,
+      });
+      const isLocal = ops === localOperations;
+      // Fingerprint check inputs (argv, cwd, env, HEAD, covered files) once
+      // before the run; the whole-tree hash doubles as the snapshot below.
+      const coverageArgs: CaptureCheckInputsArgs | null =
+        checkCoverage && isLocal && (classification.accepted || classification.snapshotEligible)
+          ? {
+              cwd,
+              command,
+              shellPath: shell.file,
+              env: sandboxAwareEnv(launch.sandboxed, cooldownEnv),
+              gate: matchVerifyPlanGate(verifyPlan, command),
+              signal: context.signal,
+            }
+          : null;
+      const checkBefore = coverageArgs ? await captureCheckInputs(coverageArgs) : null;
+      const treeHash = (inputs: CheckInputs | null): Promise<string | null> =>
+        inputs?.scope.kind === "tree"
+          ? Promise.resolve(inputs.contentHash)
+          : captureVerificationSnapshot(cwd);
       const inputsBefore =
-        ops === localOperations &&
-        classifyVerificationCommand(command, { posixShell: !shell.isCmdFallback })
-          .snapshotEligible === true
-          ? await captureVerificationSnapshot(cwd)
+        isLocal && classification.snapshotEligible === true
+          ? await treeHash(checkBefore)
           : undefined;
+      const notices: string[] = [];
+      if (checkBefore) {
+        const prior = findPriorPass?.(checkBefore.fingerprint);
+        if (prior) notices.push(formatPriorPassNotice(prior.record, prior.current));
+      }
+      if (coverageArgs) {
+        const reported = formatProjectReportedPasses(verifyPlan);
+        if (reported) notices.push(reported);
+      }
       // Stop may have landed while the launch was being prepared. The abort
       // listener below would never fire for an already-aborted signal.
       if (context.signal.aborted) return CANCELLED_BEFORE_START;
@@ -1199,17 +1289,31 @@ export function createBashTool(
         cooldownDays,
       );
       // A hand-off is still running: its "after" state does not exist yet.
-      if (
-        inputsBefore !== undefined &&
-        rendered.details.bashDiagnostics.reason !== "backgrounded"
-      ) {
-        const inputsAfter = inputsBefore === null ? null : await captureVerificationSnapshot(cwd);
+      const handedOff = rendered.details.bashDiagnostics.reason === "backgrounded";
+      let checkAfter: CheckInputs | null = null;
+      if (coverageArgs && checkBefore && !handedOff) {
+        checkAfter = await captureCheckInputs(coverageArgs);
+        // Stored only when the inputs did not move during the run.
+        if (checkAfter?.fingerprint === checkBefore.fingerprint) {
+          rendered.details.bashDiagnostics.checkCoverage = {
+            fingerprint: checkAfter.fingerprint,
+            scope: checkAfter.scope,
+          };
+        }
+      }
+      const backgroundTaskId = rendered.details.bashDiagnostics.backgroundTaskId;
+      if (coverageArgs && checkBefore && handedOff && backgroundTaskId) {
+        checkCoverage?.trackHandoff(backgroundTaskId, checkBefore, coverageArgs);
+      }
+      if (inputsBefore !== undefined && !handedOff) {
+        const inputsAfter = inputsBefore === null ? null : await treeHash(checkAfter);
         rendered.details.bashDiagnostics.sourceUnchanged =
           inputsBefore !== null && inputsAfter === inputsBefore;
       }
+      const sandboxed = annotateSandboxDenial(rendered.content, launch.sandboxed);
       const result = {
         ...rendered,
-        content: annotateSandboxDenial(rendered.content, launch.sandboxed),
+        content: notices.length > 0 ? `${sandboxed}\n\n${notices.join("\n")}` : sandboxed,
       };
       const diagnostics = rendered.details.bashDiagnostics;
       if (

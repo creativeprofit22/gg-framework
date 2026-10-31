@@ -4,11 +4,13 @@
  * A foreground command is never killed because the agent guessed too short.
  * Instead, three independent layers apply:
  * - yield: after a soft limit the command is handed off to a background task;
- * - inactivity: a command with no output for a long time is stopped;
+ * - inactivity: a foreground command that has not moved and prints nothing
+ *   for a long time is stopped (after a move, silence only notifies);
  * - hard: a high backstop that stops the command regardless of output.
  *
  * `null` disables a layer. An explicit `timeout` becomes the hard limit and
- * disables yield, for callers that genuinely want a bounded foreground run.
+ * replaces both yield and the silence limit: the caller's bound is the limit.
+ * A matching verify-plan gate's quiet budget overrides the silence setting.
  */
 
 export interface ForegroundLimitSettings {
@@ -34,6 +36,8 @@ export interface ResolveForegroundLimitsInput {
   platform: NodeJS.Platform;
   mode: "spawn" | "persistent";
   canHandOff: boolean;
+  /** A matching verify-plan gate's `quietBudgetSeconds`; overrides `inactivitySeconds`. */
+  quietBudgetSeconds?: number | null | undefined;
 }
 
 export const DEFAULT_FOREGROUND_LIMIT_SETTINGS = {
@@ -65,7 +69,10 @@ export function resolveForegroundLimits(input: ResolveForegroundLimitsInput): Fo
 
   return {
     yieldMs,
-    inactivityMs: positiveOrNull(settings.inactivitySeconds * 1000),
+    inactivityMs:
+      explicit !== undefined
+        ? null
+        : positiveOrNull((input.quietBudgetSeconds ?? settings.inactivitySeconds) * 1000),
     hardMs: explicit !== undefined ? explicit : positiveOrNull(settings.hardLimitMinutes * 60_000),
     exitSettleMs: DEFAULT_EXIT_SETTLE_MS,
   };

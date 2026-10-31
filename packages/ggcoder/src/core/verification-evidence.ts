@@ -10,9 +10,18 @@ import {
   splitShellCommandSegments,
 } from "../tools/read-only-bash.js";
 import { editTargetPaths } from "../tools/edit-targets.js";
+import type { VerifyGate, VerifyPlan } from "@kenkaiiii/gg-core/verify-plan";
 import { getSafeToolEnv } from "../tools/safe-env.js";
 import { resolveShell } from "./shell.js";
 import { isCheckOwnFile, isCodeFilePath } from "./verification-paths.js";
+import {
+  CheckCoverageMemory,
+  parseSettledCheckCoverage,
+  scopeAffectedBy,
+  type CheckCoverageRecord,
+  type CheckScope,
+  type SettledCheckCoverage,
+} from "./check-coverage.js";
 
 export interface VerificationCommandClassification {
   accepted: boolean;
@@ -34,7 +43,7 @@ export interface VerificationCommandClassification {
   ambiguousFailure?: boolean;
 }
 
-export const ROADMAP_VERIFICATION_CLASSIFIER_VERSION = "roadmap-verification-v2";
+export const ROADMAP_VERIFICATION_CLASSIFIER_VERSION = "roadmap-verification-v3";
 
 export interface VerificationEvidence {
   command: string;
@@ -90,8 +99,24 @@ const AMBIGUOUS_FLAGS = new Set([
   "--collect-only",
   "--listtests",
 ]);
+// Documented in docs/harness-checks.md ("What counts as a check"): a check-named
+// base with up to two plain `:segment` suffixes (`verify:full`, `test:native`).
 const SAFE_PACKAGE_SCRIPTS =
-  /^(?:test(?::(?:unit|integration|e2e))?|check|typecheck|type-check|lint(?::check)?|format(?::check|-check)|prettier:check)$/i;
+  /^(?:(?:test|verify|check|typecheck|type-check|lint)(?::[a-z0-9][a-z0-9_-]*){0,2}|format(?::check|-check)|prettier:check)$/i;
+const DENIED_SCRIPT_WORDS = new Set([
+  "watch",
+  "dev",
+  "serve",
+  "start",
+  "ui",
+  "debug",
+  "fix",
+  "write",
+  "update",
+  "snapshot",
+  "coverage",
+]);
+const MUTATING_SCRIPT_WORDS = new Set(["fix", "write", "update", "snapshot", "coverage"]);
 const UNSAFE_PACKAGE_SCRIPTS =
   /^(?:build|clean|dev|serve|start|watch|preview|prepare|install|format(?!:check$)|lint:fix|test:watch)(?::|$)/i;
 const VERIFIER_EXECUTABLES = new Set([
@@ -306,6 +331,18 @@ function classifyPackageRunner(tokens: readonly string[]): VerificationCommandCl
       result.snapshotEligible = true;
     return result;
   }
+  const deniedWord = script
+    .split(":")
+    .slice(1)
+    .flatMap((segment) => segment.split(/[-_]/))
+    .find((word) => DENIED_SCRIPT_WORDS.has(word));
+  if (deniedWord !== undefined && SAFE_PACKAGE_SCRIPTS.test(script)) {
+    return rejected(
+      true,
+      "watch, interactive or rewriting package-script variant",
+      MUTATING_SCRIPT_WORDS.has(deniedWord),
+    );
+  }
   if (!SAFE_PACKAGE_SCRIPTS.test(script)) {
     // pnpm permits omitting exec for installed binaries, e.g. pnpm vitest run.
     if (runner === "pnpm" && action !== "run") return classifyDirect(tokens.slice(index));
@@ -353,10 +390,29 @@ const PIPE_LIMITER = /^(?:tail|head)(?:\s+(?:-[1-9]\d*|-n\s*\d+|--lines(?:=|\s+)
  * caller that does not know the shell fails closed. */
 export function classifyVerificationCommand(
   command: string,
-  { posixShell = false }: { posixShell?: boolean } = {},
+  {
+    posixShell = false,
+    verifyPlan = null,
+  }: { posixShell?: boolean; verifyPlan?: VerifyPlan | null } = {},
 ): VerificationCommandClassification {
+  const gate = matchVerifyPlanGate(verifyPlan, command);
+  if (gate) return classifyVerifyPlanGate(gate);
   const strict = classifyStrict(command);
-  if (strict.accepted || !posixShell || !checkWithReadOnlyContext(command)) return strict;
+  if (strict.accepted || !posixShell) return strict;
+  const redirected = stripOutsideRedirect(command);
+  if (redirected !== null) {
+    const inner = classifyStrict(redirected);
+    if (inner.accepted && !inner.mayMutate) {
+      // The file is outside the workspace, so the host's unchanged-inputs
+      // snapshot still proves what was checked; a failed redirect is not the check's.
+      return {
+        ...rejected(true, "check with output redirected outside the workspace"),
+        snapshotEligible: true,
+        ambiguousFailure: true,
+      };
+    }
+  }
+  if (!checkWithReadOnlyContext(command)) return strict;
   // Never certified from the transcript: the live host must also see the
   // workspace unchanged across the run (snapshotEligible), exactly as for an
   // ordinary build. Non-preserve-only, so a clean pass is fresh evidence.
@@ -366,6 +422,54 @@ export function classifyVerificationCommand(
     ambiguousFailure: true,
   };
 }
+
+/** Argv tokens the shell passes through unchanged: no quotes, globs, `$` or operators. */
+const SHELL_INERT_TOKEN = /^[A-Za-z0-9_@%+=:,./-]+$/;
+
+/** The project gate this exact command runs: the gate's argv joined by single
+ * spaces, behind `cd <cwd> &&` unless the gate runs at the root. Lookalikes
+ * (extra args, quoting, another directory) never match. */
+export function matchVerifyPlanGate(plan: VerifyPlan | null, command: string): VerifyGate | null {
+  if (!plan) return null;
+  const wanted = command.trim();
+  if (!wanted) return null;
+  for (const gate of plan.gates) {
+    if (gate.argv.length === 0 || !gate.argv.every((token) => SHELL_INERT_TOKEN.test(token))) {
+      continue;
+    }
+    const joined = gate.argv.join(" ");
+    if (gate.cwd === ".") {
+      if (wanted === joined) return gate;
+    } else if (SHELL_INERT_TOKEN.test(gate.cwd) && wanted === `cd ${gate.cwd} && ${joined}`) {
+      return gate;
+    }
+  }
+  return null;
+}
+
+function classifyVerifyPlanGate(gate: VerifyGate): VerificationCommandClassification {
+  const flags = lowerFlags(gate.argv);
+  if (hasFlag(flags, LONG_RUNNING_FLAGS)) return rejected(true, "long-running verify-plan gate");
+  if (hasFlag(flags, MUTATING_FLAGS)) return rejected(true, "mutating verify-plan gate", true);
+  if (hasFlag(flags, AMBIGUOUS_FLAGS))
+    return rejected(true, "verify-plan gate does not prove correctness");
+  return accepted(`project verify-plan gate ${gate.id}`);
+}
+
+/** One trailing stdout redirect to `/dev/null` or a literal `/tmp/…` path,
+ * optionally followed by `2>&1`. */
+const OUTSIDE_REDIRECT_SUFFIX = /\s+>>?\s*(\/dev\/null|\/tmp\/[A-Za-z0-9._/-]+)(?:\s+2>&1)?\s*$/;
+
+/** The command without its trailing outside-the-workspace redirect, or null. */
+function stripOutsideRedirect(command: string): string | null {
+  const match = OUTSIDE_REDIRECT_SUFFIX.exec(command);
+  if (!match || match[1]!.split("/").includes("..")) return null;
+  const rest = command.slice(0, match.index).trim();
+  return rest || null;
+}
+
+/** Any trailing literal stdout redirect, dropped when re-running the check on its own. */
+const LITERAL_STDOUT_REDIRECT_SUFFIX = /\s+>>?\s*[^\s;&|<>()$`'"]+(?:\s+2>&1)?\s*$/;
 
 type Separator = "&&" | "||" | ";" | null;
 
@@ -825,7 +929,7 @@ export function extractStandaloneCheck(command: string): string | null {
   for (const [index, segment] of segments.entries()) {
     // A pipeline's later stages are filters, never the check itself.
     if (segment.before === "|") continue;
-    const text = segment.text.replace(/\s+2>&1$/, "");
+    const text = segment.text.replace(LITERAL_STDOUT_REDIRECT_SUFFIX, "").replace(/\s+2>&1$/, "");
     const verdict = classifyStrict(text);
     if (verdict.accepted && !verdict.mayMutate) {
       checkIndex = index;
@@ -1098,10 +1202,15 @@ const READ_ONLY_OR_METADATA_TOOLS = new Set([
   "web_search",
 ]);
 
-function isWorkspaceMutation(call: { name: string; args: Record<string, unknown> }): boolean {
+function isWorkspaceMutation(
+  call: { name: string; args: Record<string, unknown> },
+  classification?: VerificationCommandClassification,
+): boolean {
   if (call.name === "bash") {
     const command = typeof call.args.command === "string" ? call.args.command.trim() : "";
-    return !classifyVerificationCommand(command).accepted;
+    // Upstream's gate never advances on shell commands; read-only ones cannot stale a pass.
+    if (isReadOnlyCommand(command)) return false;
+    return !(classification ?? classifyVerificationCommand(command)).accepted;
   }
   return !READ_ONLY_OR_METADATA_TOOLS.has(call.name);
 }
@@ -1156,6 +1265,26 @@ interface BashExecutionDiagnostics {
   logPath?: unknown;
   backgroundTaskId?: unknown;
   sourceUnchanged?: unknown;
+  /** `{ fingerprint, scope }` when the check's inputs did not move during the run. */
+  checkCoverage?: unknown;
+}
+
+/** One check's latest outcome since the code changes it covers. */
+interface CoverageEntry {
+  status: "passed" | "failed";
+  /** Generation the check started at. */
+  generation: number;
+  /** Files the check depends on; null = unknown, treated as the whole tree. */
+  scope: CheckScope | null;
+}
+
+function changedPathsOf(
+  call: { name: string; args: Record<string, unknown> },
+  sessionCwd: string | undefined,
+): string[] | null {
+  if (!sessionCwd || (call.name !== "edit" && call.name !== "write")) return null;
+  const paths = editTargetPaths(call.args);
+  return paths.length > 0 ? paths : null;
 }
 
 interface BackgroundTaskOutputDetails {
@@ -1208,45 +1337,98 @@ export class SessionVerificationEvidenceLedger {
   private runChecked = false;
   /** Generation of the last code/check-file change; null = nothing owed. */
   private codeChangeGeneration: number | null = null;
+  /** `counts`: an accepted check, a pass proven harmless by the host snapshot,
+   *  or a command that advanced the generation.
+   *  Non-checks that leave it alone (read-only commands) no longer stale
+   *  themselves, so they stay out of currentEvidence explicitly. */
   private readonly entries = new Map<
     string,
-    { generation: number; run: number; evidence: RoadmapShellEvidence }
+    {
+      generation: number;
+      /** Last generation this entry is current for; plan-scoped passes survive unrelated edits. */
+      currentThrough: number;
+      run: number;
+      counts: boolean;
+      scope: CheckScope | null;
+      evidence: RoadmapShellEvidence;
+    }
   >();
   /** Background task ID → the check handed off by the soft yield. */
   private readonly pendingBackground = new Map<
     string,
     { executionId: string; command: string; generation: number }
   >();
-  /** Latest outcome of each check since the last code change. Kept apart from
-   *  `entries`, so ordinary commands evicting old executions cannot drop the
-   *  check that covers the current changes. */
-  private readonly coverage = new Map<string, "passed" | "failed">();
+  /** Latest outcome of each check since the code changes it covers. Kept apart
+   *  from `entries`, so ordinary commands evicting old executions cannot drop
+   *  the check that covers the current changes. */
+  private readonly coverage = new Map<string, CoverageEntry>();
+  /** Conclusive outcomes by input fingerprint, shared with the bash tool. */
+  private readonly checkCoverage: CheckCoverageMemory;
   /** bash runs with pipefail (not the cmd.exe fallback): see classifyVerificationCommand. */
   private readonly posixShell: boolean;
   /** See {@link takeRefusedCheck}. */
   private refusedCheck: RefusedCheck | null = null;
 
-  constructor({ posixShell = !resolveShell("").isCmdFallback }: { posixShell?: boolean } = {}) {
+  /** The project's verify plan; its gates count as checks. */
+  private readonly getVerifyPlan: (() => VerifyPlan | null) | undefined;
+
+  constructor({
+    posixShell = !resolveShell("").isCmdFallback,
+    getVerifyPlan,
+    checkCoverage = new CheckCoverageMemory(),
+  }: {
+    posixShell?: boolean;
+    getVerifyPlan?: () => VerifyPlan | null;
+    checkCoverage?: CheckCoverageMemory;
+  } = {}) {
     this.posixShell = posixShell;
+    this.getVerifyPlan = getVerifyPlan;
+    this.checkCoverage = checkCoverage;
+  }
+
+  /**
+   * The latest conclusive pass with these exact inputs, and whether it is
+   * still current evidence. A match never makes stale evidence current.
+   */
+  findPriorPass(fingerprint: string): { record: CheckCoverageRecord; current: boolean } | null {
+    const record = this.checkCoverage.lookup(fingerprint);
+    if (!record || record.status !== "passed") return null;
+    const entry = this.entries.get(record.executionId);
+    const current =
+      entry !== undefined &&
+      entry.counts &&
+      entry.currentThrough === this.generation &&
+      entry.evidence.status === "passed";
+    return { record, current };
   }
 
   /** Classification as the live shell runs the command. */
   classify(command: string): VerificationCommandClassification {
-    return classifyVerificationCommand(command, { posixShell: this.posixShell });
+    return classifyVerificationCommand(command, {
+      posixShell: this.posixShell,
+      verifyPlan: this.getVerifyPlan?.() ?? null,
+    });
   }
 
   private covers(generation: number): boolean {
     return this.codeChangeGeneration === null || generation >= this.codeChangeGeneration;
   }
 
-  private setCoverage(command: string, status: string): void {
+  private setCoverage(
+    command: string,
+    status: string,
+    generation: number,
+    scope: CheckScope | null,
+    remember: { fingerprint: string; executionId: string; run: number; observedAt: string } | null,
+  ): void {
     if (status !== "passed" && status !== "failed") return;
     this.coverage.delete(command);
-    this.coverage.set(command, status);
+    this.coverage.set(command, { status, generation, scope });
+    if (remember) this.checkCoverage.remember({ ...remember, status, command });
     while (this.coverage.size > SESSION_VERIFICATION_LEDGER_MAX_ENTRIES) {
       // Drop the oldest pass first: dropping a failure would hide it.
       const oldest =
-        [...this.coverage].find(([, outcome]) => outcome === "passed")?.[0] ??
+        [...this.coverage].find(([, outcome]) => outcome.status === "passed")?.[0] ??
         this.coverage.keys().next().value;
       if (oldest === undefined) break;
       this.coverage.delete(oldest);
@@ -1297,12 +1479,21 @@ export class SessionVerificationEvidenceLedger {
    * Upstream 0.86.0's verification rule, computed from this ledger: code was
    * changed and no passing check covers it, or a covering check failed and the
    * same check has not passed since. Docs and plan files never count.
+   * Coverage retained across unrelated edits keeps its failures, but only a
+   * pass started after the latest code change covers that change.
    */
   verificationProblem(): string | null {
-    if (this.codeChangeGeneration !== null) {
-      const statuses = [...this.coverage.values()];
-      if (statuses.includes("failed")) return VERIFICATION_PROBLEM_FAILED;
-      if (!statuses.includes("passed")) return VERIFICATION_PROBLEM_MISSING;
+    const codeChange = this.codeChangeGeneration;
+    if (codeChange !== null) {
+      const outcomes = [...this.coverage.values()];
+      if (outcomes.some((outcome) => outcome.status === "failed")) {
+        return VERIFICATION_PROBLEM_FAILED;
+      }
+      if (
+        !outcomes.some((outcome) => outcome.status === "passed" && outcome.generation >= codeChange)
+      ) {
+        return VERIFICATION_PROBLEM_MISSING;
+      }
     }
     return this.pendingBackground.size > 0 ? VERIFICATION_PROBLEM_BACKGROUND : null;
   }
@@ -1311,9 +1502,9 @@ export class SessionVerificationEvidenceLedger {
     const evidence = new Map<string, VerificationEvidence>();
     for (const entry of this.entries.values()) {
       if (run !== undefined && entry.run !== run) continue;
-      const classification = classifyVerificationCommand(entry.evidence.command);
+      const classification = this.classify(entry.evidence.command);
       if (!classification.candidate) continue;
-      const current = entry.generation === this.generation;
+      const current = entry.currentThrough === this.generation;
       evidence.set(entry.evidence.command, {
         command: entry.evidence.command,
         status:
@@ -1350,6 +1541,10 @@ export class SessionVerificationEvidenceLedger {
     workspace?: NotesWorkspaceSnapshotV1;
     /** Plan mode refuses code edits with text, not an error (upstream 0.86.0). */
     planMode?: boolean;
+    /** Host-owned session directory that relative edit paths resolve against. */
+    sessionCwd?: string;
+    /** Host-settled inputs of a finished hand-off, from check-coverage. */
+    settledCoverage?: SettledCheckCoverage | null;
   }): void {
     const run = input.evidenceRun ?? this.run;
     const diagnostics =
@@ -1365,8 +1560,24 @@ export class SessionVerificationEvidenceLedger {
       gateClassification?.snapshotEligible === true &&
       typeof diagnostics?.sourceUnchanged === "boolean";
     const inputsUnchanged = inputsCompared && diagnostics?.sourceUnchanged === true;
-    if (isWorkspaceMutation(input)) {
+    // A check proven not to touch workspace inputs (read-only context, output
+    // outside the workspace) is not a mutation either.
+    const provenHarmless = inputsUnchanged && gateClassification?.mayMutate === false;
+    const advanced = !provenHarmless && isWorkspaceMutation(input, gateClassification);
+    if (advanced) {
+      const changedPaths = changedPathsOf(input, input.sessionCwd);
+      const sessionCwd = input.sessionCwd ?? "";
+      const previous = this.generation;
       this.generation += 1;
+      for (const entry of this.entries.values()) {
+        if (
+          entry.currentThrough === previous &&
+          entry.scope?.kind === "plan" &&
+          !scopeAffectedBy(entry.scope, changedPaths, sessionCwd)
+        ) {
+          entry.currentThrough = this.generation;
+        }
+      }
       if (run === this.run) this.runChanged = true;
       const refusedPlanEdit = input.planMode === true && input.name !== "bash";
       const codeChanged = inputsCompared
@@ -1374,11 +1585,15 @@ export class SessionVerificationEvidenceLedger {
         : !input.isError && isCodeMutation(input);
       if (!refusedPlanEdit && codeChanged) {
         this.codeChangeGeneration = this.generation;
-        this.coverage.clear();
+        for (const [command, outcome] of [...this.coverage]) {
+          if (!outcome.scope || scopeAffectedBy(outcome.scope, changedPaths, sessionCwd)) {
+            this.coverage.delete(command);
+          }
+        }
       }
     }
     if (input.name === "task_output") {
-      this.recordBackgroundCompletion(input.details);
+      this.recordBackgroundCompletion(input.details, input.settledCoverage ?? null);
       return;
     }
     if (input.name !== "bash") return;
@@ -1402,7 +1617,7 @@ export class SessionVerificationEvidenceLedger {
     if (
       run === this.run &&
       diagnostics?.reason !== "backgrounded" &&
-      classifyVerificationCommand(String(input.args.command ?? "")).candidate
+      gateClassification?.candidate === true
     ) {
       this.runChecked = true;
     }
@@ -1511,17 +1726,42 @@ export class SessionVerificationEvidenceLedger {
     const existing = this.entries.get(executionId);
     if (existing) return;
     const generation = input.evidenceRevision ?? this.generation;
-    this.entries.set(executionId, { generation, run, evidence });
+    const stable =
+      diagnostics?.reason === "backgrounded" || background
+        ? null
+        : parseSettledCheckCoverage(diagnostics?.checkCoverage);
+    const remember = stable
+      ? {
+          fingerprint: stable.fingerprint,
+          executionId,
+          run,
+          observedAt: evidence.observedAt ?? new Date(startedAt).toISOString(),
+        }
+      : null;
+    this.entries.set(executionId, {
+      generation,
+      currentThrough: generation,
+      scope: stable?.scope ?? null,
+      run,
+      // A pass the snapshot proves harmless counts for the gate, so it is current evidence too.
+      counts:
+        gateClassification?.accepted === true ||
+        advanced ||
+        (provenHarmless &&
+          gateClassification?.snapshotPreserveOnly !== true &&
+          evidence.status === "passed"),
+      evidence,
+    });
     if (gateClassification && this.covers(generation)) {
       if (gateClassification.accepted) {
-        this.setCoverage(command, evidence.status);
+        this.setCoverage(command, evidence.status, generation, stable?.scope ?? null, remember);
       } else if (
         inputsUnchanged &&
         !gateClassification.snapshotPreserveOnly &&
         // A read-only command around the check may own the non-zero exit.
         !(evidence.status === "failed" && gateClassification.ambiguousFailure)
       ) {
-        this.setCoverage(command, evidence.status);
+        this.setCoverage(command, evidence.status, generation, stable?.scope ?? null, remember);
       }
     }
     const backgroundTaskId =
@@ -1542,21 +1782,39 @@ export class SessionVerificationEvidenceLedger {
   }
 
   /** Upgrade a handed-off check once task_output reports its terminal state. */
-  private recordBackgroundCompletion(details: unknown): void {
+  private recordBackgroundCompletion(
+    details: unknown,
+    settledCoverage: SettledCheckCoverage | null,
+  ): void {
     const task = (details as { taskOutput?: BackgroundTaskOutputDetails } | undefined)?.taskOutput;
     if (!task || typeof task.id !== "string" || task.isRunning !== false) return;
     const pending = this.pendingBackground.get(task.id);
     if (pending === undefined) return;
     this.pendingBackground.delete(task.id);
     const outcome = backgroundTerminalOutcome(task);
+    const entry = this.entries.get(pending.executionId);
+    const settled = parseSettledCheckCoverage(settledCoverage);
     // The gate needs only that no code changed since the check started; the
     // ordinary commands that stale Roadmap evidence below do not stale it.
     if (this.classify(pending.command).accepted && this.covers(pending.generation)) {
-      this.setCoverage(pending.command, outcome.status);
+      this.setCoverage(
+        pending.command,
+        outcome.status,
+        pending.generation,
+        settled?.scope ?? null,
+        settled
+          ? {
+              fingerprint: settled.fingerprint,
+              executionId: pending.executionId,
+              run: entry?.run ?? this.run,
+              observedAt: entry?.evidence.observedAt ?? new Date().toISOString(),
+            }
+          : null,
+      );
     }
-    const entry = this.entries.get(pending.executionId);
     // Evicted, or the workspace changed after the command started: leave it stale.
-    if (!entry || entry.generation !== this.generation) return;
+    if (!entry || entry.currentThrough !== this.generation) return;
+    if (settled) entry.scope = settled.scope;
 
     const evidence: RoadmapShellEvidence = {
       ...entry.evidence,
@@ -1585,7 +1843,7 @@ export class SessionVerificationEvidenceLedger {
       evidence.elapsedMs = task.completedAt - startedAt;
     }
     entry.evidence = evidence;
-    if (entry.run === this.run && classifyVerificationCommand(entry.evidence.command).candidate) {
+    if (entry.run === this.run && this.classify(entry.evidence.command).candidate) {
       this.runChecked = true;
     }
   }
@@ -1594,7 +1852,10 @@ export class SessionVerificationEvidenceLedger {
     const currentEvidence: RoadmapShellEvidence[] = [];
     const staleEvidence: RoadmapShellEvidence[] = [];
     for (const entry of this.entries.values()) {
-      (entry.generation === this.generation ? currentEvidence : staleEvidence).push({
+      (entry.counts && entry.currentThrough === this.generation
+        ? currentEvidence
+        : staleEvidence
+      ).push({
         ...entry.evidence,
       });
     }
@@ -1608,6 +1869,7 @@ export class SessionVerificationEvidenceLedger {
     this.entries.clear();
     this.pendingBackground.clear();
     this.coverage.clear();
+    this.checkCoverage.clear();
   }
 }
 

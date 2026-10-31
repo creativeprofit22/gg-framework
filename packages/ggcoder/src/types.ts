@@ -1,4 +1,5 @@
 import type { Message, Provider, ThinkingLevel } from "@kenkaiiii/gg-ai";
+import type { CheckScope } from "./core/check-coverage.js";
 
 // ── CLI Config ─────────────────────────────────────────────
 
@@ -47,6 +48,8 @@ export interface ForegroundExecutionOutcome {
   error: Error | null;
   /** Background task ID when the command was handed off (`backgrounded`). */
   backgroundTaskId: string | null;
+  /** After a hand-off: true only when a silence notice can actually be delivered. */
+  quietNoticeArmed?: boolean;
   /** True when a leftover process still held the output pipes after exit. */
   pipesHeldAfterExit: boolean;
   /** True when that leftover's process group was stopped (POSIX only). */
@@ -78,6 +81,8 @@ export interface BashDiagnostics {
   /** Host comparison of workspace inputs before and after a build or a check
    *  wrapped in read-only commands; absent when not compared. */
   sourceUnchanged?: boolean;
+  /** Check inputs that did not move during the run; absent when unknown or unstable. */
+  checkCoverage?: { fingerprint: string; scope: CheckScope };
 }
 
 export interface BashToolResultDetails {

@@ -16,6 +16,8 @@ export interface SpawnProcessOptions {
   env?: NodeJS.ProcessEnv;
   detached?: boolean;
   stdio?: Array<"pipe" | "ignore">;
+  /** Windows only: pass args to CreateProcess unquoted (needed for `cmd /s /c "..."`). */
+  windowsVerbatimArguments?: boolean;
 }
 
 /** Complete lifecycle for processes on one execution target. */
@@ -176,6 +178,7 @@ export const localProcessLifecycle: ProcessLifecycleAdapter = {
       cwd: options.cwd,
       env: withoutQwenRuntimeSecret(options.env),
       detached: options.detached,
+      windowsVerbatimArguments: options.windowsVerbatimArguments,
       stdio: options.stdio as Parameters<typeof spawn>[2] extends { stdio: infer S } ? S : never,
     });
     if (

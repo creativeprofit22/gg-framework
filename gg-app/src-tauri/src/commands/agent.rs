@@ -1197,6 +1197,44 @@ pub(crate) async fn agent_checklist(
     parse_sidecar_json_response(status, &body)
 }
 
+/// Proxy: what this pane's session does with the project's verify plan
+/// (`.gg/verify-plan.json`): applied, heuristics with a reason, or waiting for approval.
+#[tauri::command]
+pub(crate) async fn agent_verify_plan_status(
+    webview: WebviewWindow,
+    pane_id: String,
+    client: State<'_, reqwest::Client>,
+) -> Result<serde_json::Value, String> {
+    sidecar_get_json(&webview, &pane_id, &client, "/verify-plan").await
+}
+
+/// Proxy: approve the verify-plan descriptor the user was shown. The daemon
+/// re-reads the file and approves only if it still has this sha256.
+#[tauri::command]
+pub(crate) async fn agent_approve_verify_plan(
+    webview: WebviewWindow,
+    pane_id: String,
+    client: State<'_, reqwest::Client>,
+    descriptor_sha256: String,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
+    post_session_json(
+        &client,
+        &sidecar_base(port),
+        &gg_sid,
+        VERIFY_PLAN_APPROVE_ROUTE,
+        &verify_plan_approve_body(&descriptor_sha256),
+    )
+    .await
+}
+
+pub(crate) const VERIFY_PLAN_APPROVE_ROUTE: &str = "/verify-plan/approve";
+
+pub(crate) fn verify_plan_approve_body(descriptor_sha256: &str) -> serde_json::Value {
+    serde_json::json!({ "descriptorSha256": descriptor_sha256 })
+}
+
 /// Proxy: run one task (`id`) or run-all (`all = true`, starting from the next
 /// pending task). Progress streams back via `agent-event` (session_reset,
 /// task_start, run_start/run_end, tasks_list, tasks_run_done).
@@ -2374,6 +2412,31 @@ mod tests {
                 Ok(result)
             );
         }
+    }
+
+    #[test]
+    fn agent_approve_verify_plan_posts_the_shown_hash() {
+        let sha = "a".repeat(64);
+        let result =
+            serde_json::json!({ "ok": true, "status": { "state": "plan", "reason": null } });
+        assert_eq!(
+            session_json_proxy_result(
+                reqwest::StatusCode::OK,
+                &result.to_string(),
+                VERIFY_PLAN_APPROVE_ROUTE,
+                verify_plan_approve_body(&sha),
+            ),
+            Ok(result)
+        );
+        assert_eq!(
+            session_json_proxy_result(
+                reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+                r#"{"error":"Could not save the approval: disk full"}"#,
+                VERIFY_PLAN_APPROVE_ROUTE,
+                verify_plan_approve_body(&sha),
+            ),
+            Err("Could not save the approval: disk full".to_string())
+        );
     }
 
     #[test]

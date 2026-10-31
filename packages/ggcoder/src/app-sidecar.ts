@@ -259,6 +259,10 @@ import {
   type TaskRunSettlement,
 } from "./core/tasks-store.js";
 import { readChecklistSnapshot } from "./core/checklist-snapshot.js";
+import {
+  runVerifyPlanApproveRequest,
+  runVerifyPlanStatusRequest,
+} from "./app-sidecar-verify-plan.js";
 import { initLogger, log } from "./core/logger.js";
 import { installTerminationHandlers } from "./core/shutdown.js";
 import { handleGoalRoutes } from "./app-sidecar/goal-routes.js";
@@ -5878,6 +5882,31 @@ async function createSession(
       // Settle runs a closed app/daemon/CLI left behind; live runs are skipped.
       recoverAbandonedTaskRunsSync(cwd);
       json(res, 200, { tasks: pruneDoneTasksSync(cwd) });
+      return;
+    }
+
+    // The project's verify-plan command runs only after the user approves this
+    // exact descriptor (hash-bound); MCP trust never counts as approval.
+    if (method === "GET" && url === "/verify-plan") {
+      void runVerifyPlanStatusRequest(session).then((result) => {
+        if (!res.destroyed) json(res, result.status, result.body);
+      });
+      return;
+    }
+
+    if (method === "POST" && url === "/verify-plan/approve") {
+      void readBody(req, res).then(async (raw) => {
+        if (raw === null) return;
+        let body: unknown;
+        try {
+          body = JSON.parse(raw);
+        } catch {
+          json(res, 400, { error: "invalid JSON body" });
+          return;
+        }
+        const result = await runVerifyPlanApproveRequest(session, body);
+        if (!res.destroyed) json(res, result.status, result.body);
+      });
       return;
     }
 

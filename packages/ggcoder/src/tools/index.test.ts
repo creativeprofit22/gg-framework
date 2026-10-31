@@ -6,6 +6,8 @@ import type { AgentDefinition } from "../core/agents.js";
 import { ResearchSourceLedger } from "../core/research-sources.js";
 import type { CreateToolsResult } from "./index.js";
 import { createTools } from "./index.js";
+import type { VerifyPlan } from "@kenkaiiii/gg-core/verify-plan";
+import { useFakeHome } from "../test-support/fake-home.js";
 
 const agent: AgentDefinition = {
   name: "researcher",
@@ -189,5 +191,72 @@ describe("createTools subagent depth policy", () => {
     ];
     expect(names.filter((name) => delegationTools.includes(name))).toEqual([]);
     expect(result.subAgentManager).toBeUndefined();
+  });
+});
+
+describe("createTools verify-plan wiring", () => {
+  const plan: VerifyPlan = {
+    version: 1,
+    mode: "changed",
+    advice: [],
+    gates: [
+      {
+        id: "gate",
+        argv: ["node", "gate.mjs"],
+        cwd: ".",
+        covers: [],
+        fingerprint: null,
+        quietBudgetSeconds: null,
+        protectedPaths: [],
+      },
+    ],
+  };
+
+  async function runReviewedGate(getVerifyPlan?: () => VerifyPlan | null): Promise<string> {
+    const cwd = mkdtempSync(path.join(tmpdir(), "gg-verify-plan-wiring-"));
+    dirs.push(cwd);
+    writeFileSync(path.join(cwd, "gate.mjs"), "console.log('gate ok');\n");
+    const restoreHome = useFakeHome(cwd);
+    try {
+      const result = await createTools(cwd, {
+        steroidsBin: null,
+        lspDiagnostics: false,
+        ...(getVerifyPlan ? { getVerifyPlan } : {}),
+      });
+      results.push(result);
+      const bash = result.tools.find((tool) => tool.name === "bash");
+      if (!bash) throw new Error("bash tool missing");
+      const output = await bash.execute({ command: "node gate.mjs", review: true }, {
+        signal: new AbortController().signal,
+        toolCallId: "gate",
+      } as Parameters<typeof bash.execute>[1]);
+      return typeof output === "string" ? output : String((output as { content: unknown }).content);
+    } finally {
+      restoreHome();
+    }
+  }
+
+  it("forwards getVerifyPlan to bash so review accepts an exact plan gate", async () => {
+    expect(await runReviewedGate()).toContain("Nothing was run");
+    const accepted = await runReviewedGate(() => plan);
+    expect(accepted).not.toContain("Nothing was run");
+    expect(accepted).toMatch(/^Exit code: 0\b/);
+  });
+
+  it("passes a verify-plan loader from runInkTUI into createTools", () => {
+    const source = readFileSync(new URL("../cli.ts", import.meta.url), "utf8");
+    const tui = source.slice(
+      source.indexOf("async function runInkTUI("),
+      source.indexOf("// ── Sessions"),
+    );
+    expect(tui).toContain("const verifyPlanLoader = new VerifyPlanLoader({");
+    expect(tui).toContain("void verifyPlanLoader.refresh();");
+    const createCall = tui.slice(
+      tui.indexOf("await createTools("),
+      tui.indexOf("const mcpManager"),
+    );
+    expect(createCall).toContain("getVerifyPlan: () => verifyPlanLoader.get(),");
+    expect(createCall).toContain("verifyPlanLoader.noteFileMutated(filePath)");
+    expect(tui.match(/verifyPlanLoader\.dispose\(\);/g)).toHaveLength(2);
   });
 });

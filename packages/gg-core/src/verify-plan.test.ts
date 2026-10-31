@@ -7,6 +7,8 @@ import {
   VERIFY_PLAN_MAX_BYTES,
   adaptSupaPlanV1,
   decideVerifyPlanSource,
+  isVerifyPlanApproveResult,
+  isVerifyPlanStatus,
   interpretVerifyPlanOutput,
   parseVerifyPlan,
   parseVerifyPlanDescriptor,
@@ -249,8 +251,18 @@ describe("plan source rules", () => {
 
   it("falls back to heuristics with fixed reasons", () => {
     expect(decideVerifyPlanSource({ trusted: false, descriptor: descriptor() })).toEqual({
+      kind: "needs-approval",
+      descriptor: {
+        version: 1,
+        command: { argv: ["node", "scripts/verify-plan.mjs"], cwd: "." },
+        format: "gg-verify-plan-v1",
+      },
+      reason: VERIFY_PLAN_HEURISTICS_REASONS.notApproved,
+    });
+    expect(decideVerifyPlanSource({ trusted: false, descriptor: "[]" }).kind).toBe("heuristics");
+    expect(decideVerifyPlanSource({ trusted: false, descriptor: null })).toEqual({
       kind: "heuristics",
-      reason: VERIFY_PLAN_HEURISTICS_REASONS.untrusted,
+      reason: VERIFY_PLAN_HEURISTICS_REASONS.noDescriptor,
     });
     expect(decideVerifyPlanSource({ trusted: true, descriptor: null })).toEqual({
       kind: "heuristics",
@@ -261,6 +273,32 @@ describe("plan source rules", () => {
       reason: `${VERIFY_PLAN_HEURISTICS_REASONS.badDescriptor}: descriptor must be a JSON object`,
     });
     expect(decideVerifyPlanSource({ trusted: true, descriptor: descriptor() }).kind).toBe("run");
+  });
+
+  it("validates status and approval results read back from the daemon", () => {
+    const sha = "a".repeat(64);
+    const pending = {
+      state: "needs-approval",
+      reason: VERIFY_PLAN_HEURISTICS_REASONS.notApproved,
+      argv: ["node", "plan.mjs"],
+      cwd: "/repo",
+      descriptorSha256: sha,
+    };
+    expect(isVerifyPlanStatus({ state: "plan", reason: null })).toBe(true);
+    expect(isVerifyPlanStatus({ state: "heuristics", reason: "x", descriptorPresent: true })).toBe(
+      true,
+    );
+    expect(isVerifyPlanStatus(pending)).toBe(true);
+    expect(isVerifyPlanStatus({ ...pending, descriptorSha256: "A".repeat(64) })).toBe(false);
+    expect(isVerifyPlanStatus({ ...pending, argv: "node plan.mjs" })).toBe(false);
+    expect(isVerifyPlanStatus({ state: "heuristics", reason: "", descriptorPresent: true })).toBe(
+      false,
+    );
+    expect(isVerifyPlanApproveResult({ ok: true, status: { state: "plan", reason: null } })).toBe(
+      true,
+    );
+    expect(isVerifyPlanApproveResult({ ok: false, reason: "changed", status: pending })).toBe(true);
+    expect(isVerifyPlanApproveResult({ ok: false, reason: "other", status: null })).toBe(false);
   });
 
   it("interprets plan command output as untrusted data", () => {

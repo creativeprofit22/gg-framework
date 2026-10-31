@@ -66,13 +66,33 @@ export type VerifyPlanDescriptorParseResult =
   { ok: true; descriptor: VerifyPlanDescriptor } | { ok: false; reason: string };
 
 export type VerifyPlanSourceDecision =
-  { kind: "run"; descriptor: VerifyPlanDescriptor } | { kind: "heuristics"; reason: string };
+  | { kind: "run"; descriptor: VerifyPlanDescriptor }
+  | { kind: "needs-approval"; descriptor: VerifyPlanDescriptor; reason: string }
+  | { kind: "heuristics"; reason: string };
+
+/** What the session does with the project's plan; served to the desktop app. */
+export type VerifyPlanStatus =
+  | { state: "plan"; reason: null }
+  | { state: "heuristics"; reason: string; descriptorPresent: boolean }
+  | {
+      state: "needs-approval";
+      reason: string;
+      argv: string[];
+      /** Absolute directory the command would run in. */
+      cwd: string;
+      /** sha256 hex of the descriptor text; approval is bound to it. */
+      descriptorSha256: string;
+    };
+
+export type VerifyPlanApproveResult =
+  | { ok: true; status: VerifyPlanStatus }
+  | { ok: false; reason: "changed" | "missing"; status: VerifyPlanStatus | null };
 
 export type VerifyPlanOutcome =
   { kind: "plan"; plan: VerifyPlan } | { kind: "heuristics"; reason: string };
 
 export const VERIFY_PLAN_HEURISTICS_REASONS = {
-  untrusted: "project is not trusted, so its plan command is not run",
+  notApproved: "plan command is not approved yet, so it is not run",
   noDescriptor: `no ${VERIFY_PLAN_DESCRIPTOR_PATH} descriptor`,
   badDescriptor: "bad verify-plan descriptor",
   timedOut: "plan command timed out",
@@ -413,22 +433,64 @@ export function parseVerifyPlanDescriptor(text: string): VerifyPlanDescriptorPar
   };
 }
 
-/** Decide whether to run the project's plan command. Untrusted projects never get parsed. */
+/**
+ * Decide whether to run the project's plan command. `trusted` is the user's
+ * approval of this exact descriptor; without it a valid descriptor is only
+ * parsed (so its argv can be shown for approval), never run.
+ */
 export function decideVerifyPlanSource(input: {
   trusted: boolean;
   descriptor: string | null;
 }): VerifyPlanSourceDecision {
-  if (!input.trusted)
-    return { kind: "heuristics", reason: VERIFY_PLAN_HEURISTICS_REASONS.untrusted };
   if (input.descriptor === null)
     return { kind: "heuristics", reason: VERIFY_PLAN_HEURISTICS_REASONS.noDescriptor };
   const descriptor = parseVerifyPlanDescriptor(input.descriptor);
-  return descriptor.ok
+  if (!descriptor.ok)
+    return {
+      kind: "heuristics",
+      reason: `${VERIFY_PLAN_HEURISTICS_REASONS.badDescriptor}: ${descriptor.reason}`,
+    };
+  return input.trusted
     ? { kind: "run", descriptor: descriptor.descriptor }
     : {
-        kind: "heuristics",
-        reason: `${VERIFY_PLAN_HEURISTICS_REASONS.badDescriptor}: ${descriptor.reason}`,
+        kind: "needs-approval",
+        descriptor: descriptor.descriptor,
+        reason: VERIFY_PLAN_HEURISTICS_REASONS.notApproved,
       };
+}
+
+const SHA256 = FINGERPRINT;
+const STATUS_TEXT_MAX = 4096;
+
+function isStatusText(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= STATUS_TEXT_MAX;
+}
+
+/** Validate a status read back from the daemon before rendering it. */
+export function isVerifyPlanStatus(value: unknown): value is VerifyPlanStatus {
+  if (!isRecord(value)) return false;
+  if (value.state === "plan") return value.reason === null;
+  if (value.state === "heuristics")
+    return isStatusText(value.reason) && typeof value.descriptorPresent === "boolean";
+  if (value.state !== "needs-approval") return false;
+  return (
+    isStatusText(value.reason) &&
+    checkArgv(value.argv, "argv").ok &&
+    isStatusText(value.cwd) &&
+    typeof value.descriptorSha256 === "string" &&
+    SHA256.test(value.descriptorSha256)
+  );
+}
+
+/** Validate the daemon's answer to an approval request. */
+export function isVerifyPlanApproveResult(value: unknown): value is VerifyPlanApproveResult {
+  if (!isRecord(value)) return false;
+  if (value.ok === true) return isVerifyPlanStatus(value.status);
+  return (
+    value.ok === false &&
+    (value.reason === "changed" || value.reason === "missing") &&
+    (value.status === null || isVerifyPlanStatus(value.status))
+  );
 }
 
 /** Turn the plan command's (untrusted) output into a plan, or a stated fallback. */

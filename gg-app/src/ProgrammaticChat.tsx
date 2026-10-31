@@ -1,12 +1,12 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import {
-  PROGRAMMATIC_CHAT_PAGE_LIMIT,
   type ProgrammaticChatRequest,
   type ProgrammaticChatSummary,
 } from "@kenkaiiii/gg-core/programmatic-chat-contract";
 import { Badge } from "./Badge";
 import { GlassLamp } from "./GlassLamp";
 import { ProgrammaticAssessment } from "./ProgrammaticAssessment";
+import { ProgrammaticCheckDetail, ProgrammaticResultPages } from "./ProgrammaticCheckResults";
 import {
   ProgrammaticIdeaSearch,
   ProgrammaticIdeas,
@@ -38,7 +38,6 @@ import {
   STEP_ACTIONS,
   STEP_COPY,
   STEP_STATE_WORDS,
-  evidenceBasisLabel,
   opportunityStatusLine,
 } from "./programmatic-presentation";
 
@@ -277,139 +276,37 @@ export function ProgrammaticChat({
           })}
         </details>
       )}
-      {report && (report.offset > 0 || report.total > PROGRAMMATIC_CHAT_PAGE_LIMIT) && (
-        <nav className="programmatic-actions" aria-label="Result pages">
-          <button
-            className="btn btn-ghost btn-sm"
-            disabled={locked || report.offset === 0}
-            onClick={() =>
-              onAction({
-                version: 1,
-                action: "report",
-                offset: Math.max(0, report.offset - PROGRAMMATIC_CHAT_PAGE_LIMIT),
-              })
-            }
-          >
-            Previous page
-          </button>
-          <span>
-            {report.rows.length > 0
-              ? `${report.offset + 1}–${report.offset + report.rows.length} of ${report.total}`
-              : `No results on this page (${report.total} total).`}
-          </span>
-          <button
-            className="btn btn-ghost btn-sm"
-            disabled={locked || report.offset + report.rows.length >= report.total}
-            onClick={() =>
-              onAction({
-                version: 1,
-                action: "report",
-                offset: report.offset + PROGRAMMATIC_CHAT_PAGE_LIMIT,
-              })
-            }
-          >
-            Next page
-          </button>
-        </nav>
+      {report && (
+        <ProgrammaticResultPages
+          report={report}
+          locked={locked}
+          onPage={(offset) => onAction({ version: 1, action: "report", offset })}
+        />
       )}
       {state.missingSelection && (
         <p>The item you picked isn't in these results anymore. Pick another one.</p>
       )}
       {selected && (
-        <div className="programmatic-detail inst-module">
-          <h3 tabIndex={-1} data-programmatic-selection>
-            {selected.summary.expectedOutput}
-          </h3>
-          <p>
-            <Badge>{stateLabels[selected.summary.state]}</Badge>{" "}
-            {selected.summary.presence === "disappeared" && "No longer found, so it can't start."}
-          </p>
-          <p>{selected.summary.route.reason}</p>
-          {selected.summary.actions?.run.available === false && (
-            <p>{selected.summary.actions.run.reason}</p>
-          )}
-          {selected.summary.route.machineLocal && (
-            <p>This tool is only installed on this computer.</p>
-          )}
-          <h4>Files it may change</h4>
-          {selected.summary.mutationPaths.length ? (
-            <ul>
-              {selected.summary.mutationPaths.map((item) => (
-                <li key={item}>
-                  <code>{item}</code>
-                </li>
-              ))}
-            </ul>
-          ) : (
-            <p>No files are listed. Check what it does before you approve it.</p>
-          )}
-          {!!selected.risks.length && (
-            <>
-              <h4>Risks</h4>
-              <ul>
-                {selected.risks.map((risk, index) => (
-                  <li key={index}>{risk}</li>
-                ))}
-              </ul>
-            </>
-          )}
-          <div className="programmatic-actions">
-            <button
-              className="btn btn-primary btn-sm"
-              disabled={mutationLocked || !canRunProgrammaticSelection(state)}
-              title={setupBlockedReason ?? selected.summary.actions?.run.reason}
-              onClick={onRun}
-            >
-              Review and run
-            </button>
-            <button
-              className="btn btn-ghost btn-sm"
-              disabled={
-                mutationLocked ||
-                !["discovered", "queued"].includes(selected.summary.state) ||
-                selected.summary.actions?.dismiss.available !== true ||
-                state.detailSnapshot !== report?.snapshot
-              }
-              title={selected.summary.actions?.dismiss.reason}
-              onClick={() =>
-                onAction({
-                  version: 1,
-                  action: "dismiss",
-                  id: selected.summary.id,
-                  snapshot: state.detailSnapshot!,
-                })
-              }
-            >
-              {CHECKS_ACTIONS.dismiss}
-            </button>
-          </div>
-
-          <details>
-            <summary>Why this came up</summary>
-            <h4>What was found</h4>
-            <p>{selected.trigger}</p>
-            <h4>How to tell it worked</h4>
-            <p>{selected.verification}</p>
-            <h4>Where it was found</h4>
-            <ul>
-              {selected.evidence.map((item, index) => (
-                <li key={index}>
-                  <Badge>{evidenceBasisLabel(item.basis)}</Badge> {item.message}
-                  {item.location && (
-                    <>
-                      {" "}
-                      <code>
-                        {item.location.path}
-                        {item.location.startLine ? `:${item.location.startLine}` : ""}
-                      </code>
-                    </>
-                  )}
-                </li>
-              ))}
-            </ul>
-            {selected.evidenceTruncated && <p>Showing the first 50.</p>}
-          </details>
-        </div>
+        <ProgrammaticCheckDetail
+          selected={selected}
+          runDisabled={mutationLocked || !canRunProgrammaticSelection(state)}
+          runTitle={setupBlockedReason ?? selected.summary.actions?.run.reason}
+          dismissDisabled={
+            mutationLocked ||
+            !["discovered", "queued"].includes(selected.summary.state) ||
+            selected.summary.actions?.dismiss.available !== true ||
+            state.detailSnapshot !== report?.snapshot
+          }
+          onRun={onRun}
+          onDismiss={() =>
+            onAction({
+              version: 1,
+              action: "dismiss",
+              id: selected.summary.id,
+              snapshot: state.detailSnapshot!,
+            })
+          }
+        />
       )}
     </section>
   );

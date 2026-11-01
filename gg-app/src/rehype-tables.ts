@@ -11,6 +11,8 @@
  * - A GitHub repo link reading `owner/name` becomes a two-line identity
  *   (owner line, bold name); other `owner/name` or path text splits into
  *   muted folder segments and a bold name, breaking only after a slash.
+ * - A ` (CN)` country tag right after such a repo link becomes a small
+ *   superscript beside the name (Local Fork; see table-country.ts).
  * - A rank column's numbers become badges, the top three lit.
  * - Tables of four or more columns get `md-table-cards` (cards in narrow panes).
  *
@@ -22,9 +24,11 @@ import {
   classifyColumn,
   hastText,
   parseNumber,
+  REPO_COUNTRY_CLASS,
   type TableHastNode,
   tableRows,
 } from "./markdown-table-data";
+import { leadingRepoCountry } from "./table-country";
 
 /** Columns at which a table switches to cards in narrow panes. */
 const CARD_COLUMNS = 4;
@@ -105,10 +109,38 @@ function repoIdentity(link: TableHastNode): boolean {
   return true;
 }
 
+/**
+ * A country tag right after a repo identity link (`[o/n](url) (CN)`) moves
+ * beside the bold name as a superscript. The tag's text, space and
+ * parentheses included, stays for copying (copy as Markdown puts it back
+ * after the link); only the parentheses are hidden. Returns the text left
+ * after the tag, or null when there is no tag.
+ */
+function tagRepoCountry(link: TableHastNode, text: string): string | null {
+  const tag = leadingRepoCountry(text);
+  const repo = link.children?.[0];
+  const name = repo?.children?.[1];
+  if (!tag || !repo?.children || !name) return null;
+  const country = element("sup", REPO_COUNTRY_CLASS);
+  country.properties = { ...country.properties, title: tag.name };
+  country.children = [
+    element("span", "md-repo-paren", `${tag.leading}(`),
+    { type: "text", value: tag.code },
+    element("span", "md-repo-paren", ")"),
+  ];
+  const row = element("span", "md-repo-name-row");
+  row.children = [name, country];
+  repo.children[1] = row;
+  return tag.rest;
+}
+
 function splitPathsIn(node: TableHastNode, inLink: boolean): void {
   if (!node.children) return;
   const next: TableHastNode[] = [];
-  for (const child of node.children) {
+  const children = [...node.children];
+  for (let index = 0; index < children.length; index++) {
+    const child = children[index];
+    if (!child) continue;
     if (child.type === "text" && child.value) {
       const parts = splitPath(child.value, inLink);
       if (parts) next.push(...parts);
@@ -117,6 +149,12 @@ function splitPathsIn(node: TableHastNode, inLink: boolean): void {
     }
     if (child.type === "element" && child.tagName === "a" && repoIdentity(child)) {
       next.push(child);
+      const following = children[index + 1];
+      const rest = following?.type === "text" ? tagRepoCountry(child, following.value ?? "") : null;
+      if (rest !== null) {
+        if (rest) next.push({ type: "text", value: rest });
+        index++;
+      }
       continue;
     }
     if (child.type === "element" && !LITERAL.has(child.tagName ?? "")) {

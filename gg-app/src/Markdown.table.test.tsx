@@ -245,6 +245,83 @@ describe("/steroids table extras", () => {
     const { container } = render(<Markdown>{REPOS}</Markdown>);
     expect(container.querySelector(".md-meter, time")).toBeNull();
   });
+
+  // Regression: one "—" row turned every typed column back into plain text.
+  it("keeps star bars and relative dates when a row holds placeholders", () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-10-20T09:00:00Z"));
+    const { container } = render(
+      <Markdown>{`${STEROIDS_COLLAPSIBLE_TABLE_MARKER}\n\n${REPOS}\n| — | — | — | — | — |`}</Markdown>,
+    );
+    expect(container.querySelectorAll(".md-meter-fill")).toHaveLength(3);
+    expect([...container.querySelectorAll("time")].map((date) => date.textContent)).toEqual([
+      "2 days ago",
+      "7 months ago",
+      "last week",
+    ]);
+  });
+
+  it("colours licences by how freely the code can be reused, only in the /steroids table", () => {
+    const licences = [
+      "| # | Repo | Licence |",
+      "|---|---|---|",
+      "| 1 | [a/b](https://github.com/a/b) | MIT |",
+      "| 2 | [c/d](https://github.com/c/d) | MPL-2.0 |",
+      "| 3 | [e/f](https://github.com/e/f) | AGPL-3.0 ⚠ ideas only |",
+      "| 4 | [g/h](https://github.com/g/h) | NOASSERTION |",
+      "| 5 | [i/j](https://github.com/i/j) | Something odd |",
+    ].join("\n");
+    const { container, unmount } = render(
+      <Markdown>{`${STEROIDS_COLLAPSIBLE_TABLE_MARKER}\n\n${licences}`}</Markdown>,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Show all 5 repos/ }));
+    const marked = [...container.querySelectorAll(".md-licence")];
+    expect(marked.map((licence) => [licence.className, licence.textContent])).toEqual([
+      ["md-licence md-licence-permissive", "MIT"],
+      ["md-licence md-licence-weak-copyleft", "MPL-2.0"],
+      ["md-licence md-licence-strong-copyleft", "AGPL-3.0 ⚠ ideas only"],
+      ["md-licence md-licence-unclear", "NOASSERTION"],
+    ]);
+    unmount();
+    const plain = render(<Markdown>{licences}</Markdown>);
+    expect(plain.container.querySelector(".md-licence")).toBeNull();
+  });
+});
+
+describe("repo country tags", () => {
+  const TAGGED = [
+    "| # | Repo | Stars |",
+    "|---|---|---|",
+    "| 1 | [ayuayue/PiDeck](https://github.com/ayuayue/PiDeck) (CN) | 1,170 |",
+    "| 2 | [vitejs/vite](https://github.com/vitejs/vite) (UI) | 71.2k |",
+  ].join("\n");
+
+  it("shows a known country code as a superscript beside the repo name", () => {
+    render(<Markdown>{TAGGED}</Markdown>);
+    const country = document.querySelector(".md-repo-name-row .md-repo-country");
+    expect(country?.textContent).toBe(" (CN)");
+    expect(country?.getAttribute("title")).toBe("China");
+    const link = screen.getByRole("link", { name: /^ayuayue\/PiDeck/ });
+    expect(link.querySelector(".md-repo-name-row")?.textContent).toBe("PiDeck (CN)");
+    // Not a country code: left as plain text after the link.
+    expect(document.querySelectorAll(".md-repo-country")).toHaveLength(1);
+    expect(screen.getByRole("link", { name: "vitejs/vite" }).parentElement?.textContent).toContain(
+      "(UI)",
+    );
+  });
+
+  it("keeps the tag in copied Markdown", async () => {
+    const writeText = vi.fn(() => Promise.resolve());
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+    render(<Markdown>{TAGGED}</Markdown>);
+    fireEvent.click(screen.getByRole("button", { name: "Copy table as Markdown" }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledTimes(1));
+    expect(writeText).toHaveBeenLastCalledWith(
+      expect.stringContaining(
+        "| 1 | [ayuayue/PiDeck](https://github.com/ayuayue/PiDeck) (CN) | 1,170 |",
+      ),
+    );
+  });
 });
 
 describe("table data helpers", () => {

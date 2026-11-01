@@ -81,6 +81,8 @@ import {
 } from "./markdown-table-data";
 import { useAnimatedHeight } from "./animated-height";
 import "highlight.js/styles/github-dark.css";
+import "./MarkdownTableExtras.css";
+import { isLicenceHeader, licenceTier } from "./table-licence";
 
 interface Props {
   children: string;
@@ -519,8 +521,9 @@ function withPathBreaks(children: React.ReactNode): React.ReactNode {
  * the narrow-pane cards show beside the value).
  *
  * In the /steroids table, a number gets a thin bar scaled to the column's
- * largest value, and a date reads relative ("3 days ago") with a freshness dot
- * and the full date on hover.
+ * largest value, a date reads relative ("3 days ago") with a freshness dot
+ * and the full date on hover, and a licence is coloured by how freely the
+ * code can be reused (table-licence.ts).
  */
 function TableCell({
   children,
@@ -552,6 +555,9 @@ function TableCell({
       );
     }
   }
+  const tier =
+    steroids && typeof label === "string" && isLicenceHeader(label) ? licenceTier(text) : null;
+  if (tier) content = <span className={`md-licence md-licence-${tier}`}>{content}</span>;
   const ratio = Number(node?.properties?.dataRatio);
   const meter =
     steroids && kind === "num" && Number.isFinite(ratio) && ratio > 0 ? (

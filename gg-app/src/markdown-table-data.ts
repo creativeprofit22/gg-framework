@@ -89,13 +89,20 @@ const ID = /^(?:v?\d+(?:\.\d+){1,3}(?:[-+][\w.]+)?|[0-9a-f]{7,40}|#\d+|[A-Z][A-Z
 const RANK_VALUE = /^#?\d{1,3}\.?$/;
 const RANK_HEADERS = new Set(["", "#", "no", "no.", "nr", "rank", "pos"]);
 
+/** A stand-in for a missing value ("—", "n/a", "?"); it never decides a column's kind. */
+export function isPlaceholderCell(text: string): boolean {
+  return /^(?:[-–—]+|n\/a|\?|unknown)$/i.test(text.trim());
+}
+
 /** Classify one column from its header and body cell texts (empty cells are skipped). */
 export function classifyColumn(
   header: string,
   values: readonly string[],
   column: number,
 ): ColumnKind {
-  const cells = values.map((value) => value.trim()).filter((value) => value !== "");
+  const cells = values
+    .map((value) => value.trim())
+    .filter((value) => value !== "" && !isPlaceholderCell(value));
   if (cells.length === 0) return "text";
   if (column === 0 && cells.every((value) => RANK_VALUE.test(value))) {
     const ranks = cells.map((value) => Number(value.replace(/[#.]/g, "")));
@@ -160,7 +167,7 @@ export function headerIcon(label: string, kind: ColumnKind): HeaderIcon | null {
 /** How a cell sorts: numbers and dates by value, everything else as text; empty is null. */
 export function sortKey(text: string, kind: ColumnKind): number | string | null {
   const value = text.trim();
-  if (value === "") return null;
+  if (value === "" || (kind !== "text" && isPlaceholderCell(value))) return null;
   if (kind === "num") return parseNumber(value) ?? value;
   if (kind === "rank") return Number(value.replace(/[#.]/g, ""));
   if (kind === "date") return parseIsoDate(value) ?? value;
@@ -202,6 +209,30 @@ export function firstSortDirection(kind: ColumnKind): SortDirection {
   return kind === "num" || kind === "date" ? "desc" : "asc";
 }
 
+/** Class of the country superscript rehype-tables puts beside a repo name. */
+export const REPO_COUNTRY_CLASS = "md-repo-country";
+
+function isRepoCountry(node: TableHastNode): boolean {
+  const names = node.properties?.className;
+  return node.type === "element" && Array.isArray(names) && names.includes(REPO_COUNTRY_CLASS);
+}
+
+/** A copy of a link without its country superscript, plus that tag's text ("(CN)"). */
+function splitRepoCountry(node: TableHastNode): { link: TableHastNode; country: string | null } {
+  const found: string[] = [];
+  const strip = (current: TableHastNode): TableHastNode => {
+    if (!current.children) return current;
+    const children: TableHastNode[] = [];
+    for (const child of current.children) {
+      if (isRepoCountry(child)) found.push(hastText(child).trim());
+      else children.push(strip(child));
+    }
+    return { ...current, children };
+  };
+  const link = strip(node);
+  return { link, country: found[0] ?? null };
+}
+
 function inlineMarkdown(node: TableHastNode): string {
   if (node.type === "text") return (node.value ?? "").replace(/\|/g, "\\|");
   if (node.type !== "element") return "";
@@ -218,7 +249,10 @@ function inlineMarkdown(node: TableHastNode): string {
     }
     case "a": {
       const href = node.properties?.href;
-      return typeof href === "string" && href !== "" ? `[${inner()}](${href})` : inner();
+      const { link, country } = splitRepoCountry(node);
+      const text = (link.children ?? []).map(inlineMarkdown).join("");
+      const markdown = typeof href === "string" && href !== "" ? `[${text}](${href})` : text;
+      return country ? `${markdown} ${country}` : markdown;
     }
     case "strong":
     case "b":

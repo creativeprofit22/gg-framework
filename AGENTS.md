@@ -35,6 +35,10 @@ pnpm monorepo for GG Coder: a multi-provider coding agent shipped as the `ggcode
 - Multi-line workflow steps need `shell: bash`; Windows PowerShell only reports the last command's status.
 - `.github/ci/size-gate.mjs` honors only `--only <artifact>` (`dist:ggcoder`, `sidecar`); positional args are ignored and every artifact gets checked. `--update` rewrites the baseline instead of failing — don't use it casually.
 - Flaky-test fixes here consistently replace fixed sleeps with fake clocks/polling; on Windows a released lock dir may still be pending delete.
+- Bash commands moved to the background are never killed for silence, only at the hard limit (`bashHardLimitMinutes`); silence only notifies. See [docs/harness-checks.md](docs/harness-checks.md).
+- Project-reported reuse (supa `skip` with `lastRun`, `reused-pass` advice) is never verification evidence; only a pass the harness observed counts.
+- A `.gg/verify-plan.json` command runs only after per-descriptor approval (`verifyPlanApprovals`, sha256 of the exact text); project MCP trust never approves it, and any change needs approval again.
+- The machine-profile defaults never set `VITEST_MAX_WORKERS` (it would override a project's `maxWorkers`/`fileParallelism: false`); user, inline and project env always win.
 
 ## Workflows
 

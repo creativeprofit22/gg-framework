@@ -178,6 +178,12 @@ const SettingsSchema = z.object({
   /** Release-age cooldown (days) for every package install the agent runs:
    *  versions younger than this are skipped. 0 disables. */
   packageCooldownDays: z.number().min(0).max(365).default(2),
+  /** Concurrency budget for build/test tools the agent runs; 0 = derive from this machine. */
+  concurrencyBudget: z.number().int().min(0).max(256).default(0),
+  /** Set CARGO_BUILD_JOBS, RUST_TEST_THREADS and pnpm workspace concurrency where unset. */
+  concurrencyDefaults: z.boolean().default(true),
+  /** Full test/build runs allowed at once across all windows; 0 = no limit. */
+  heavyCheckLimit: z.number().int().min(0).max(8).default(1),
 });
 
 export type Settings = z.infer<typeof SettingsSchema>;
@@ -214,6 +220,9 @@ export const DEFAULT_SETTINGS: Settings = {
   codexResponsesLite: "auto",
   codexStrictTools: "auto",
   packageCooldownDays: 2,
+  concurrencyBudget: 0,
+  concurrencyDefaults: true,
+  heavyCheckLimit: 1,
 };
 
 // ── Settings Manager ───────────────────────────────────────

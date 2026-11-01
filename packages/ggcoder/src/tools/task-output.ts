@@ -45,6 +45,7 @@ export interface TaskOutputToolResultDetails {
 
 export function createTaskOutputTool(
   processManager: ProcessManager,
+  getBudgetSummary?: () => string | undefined,
 ): AgentTool<typeof TaskOutputParams> {
   return {
     name: "task_output",
@@ -102,7 +103,10 @@ export function createTaskOutputTool(
       ].filter((notice): notice is string => notice !== null);
 
       const finishedWithFailure = !result.isRunning && result.exitCode !== 0;
-      const advice = finishedWithFailure && result.output ? overloadHint(result.output) : "";
+      const advice =
+        finishedWithFailure && result.output
+          ? overloadHint(result.output, getBudgetSummary?.())
+          : "";
       let output = result.output;
       let presentationCapped = false;
       if (output) {

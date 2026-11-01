@@ -69,7 +69,7 @@ function countTimeoutFailures(lines: readonly string[], output: string): number 
 }
 
 /** Advice when every failure is a timeout: the machine was likely overloaded. */
-export function overloadHint(output: string): string {
+export function overloadHint(output: string, budgetSummary?: string): string {
   const lines = output.split(/\r?\n/);
   const timeouts = countTimeoutFailures(lines, output);
   if (timeouts < MIN_TIMEOUT_FAILURES) return "";
@@ -81,6 +81,11 @@ export function overloadHint(output: string): string {
   return (
     "[Many tests failed only by timing out; the machine may have been overloaded. " +
     "Run fewer checks at once or see the machine-profile defaults in docs/harness-checks.md " +
-    "before raising timeouts.]\n"
+    "before raising timeouts." +
+    (budgetSummary
+      ? ` Concurrency budget here: ${budgetSummary}; see ` +
+        "docs/harness-checks.md#machine-profile-defaults (setting `concurrencyBudget`)."
+      : "") +
+    "]\n"
   );
 }

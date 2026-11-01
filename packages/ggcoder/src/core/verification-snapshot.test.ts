@@ -3,7 +3,12 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
-import { captureVerificationSnapshot } from "./verification-snapshot.js";
+import { createHash } from "node:crypto";
+import {
+  captureVerificationSnapshot,
+  hashWorkspaceFiles,
+  SNAPSHOT_MAX_MS,
+} from "./verification-snapshot.js";
 
 let root: string;
 beforeEach(async () => {
@@ -73,5 +78,24 @@ describe("verification workspace snapshot", () => {
     } finally {
       await fs.rm(outside, { recursive: true, force: true });
     }
+  });
+
+  it("keeps the fingerprint byte layout stable", async () => {
+    await fs.writeFile(path.join(root, "a b.ts"), "alpha\n");
+    const mode = (await fs.lstat(path.join(root, "a b.ts"))).mode;
+    const expected = createHash("sha256")
+      .update(JSON.stringify("a b.ts"))
+      .update(String(mode))
+      .update(createHash("sha256").update("alpha\n").digest())
+      .update(JSON.stringify("gone.ts"))
+      .update("missing")
+      .digest("hex");
+    expect(
+      await hashWorkspaceFiles(
+        await fs.realpath(root),
+        ["a b.ts", "gone.ts"],
+        Date.now() + SNAPSHOT_MAX_MS,
+      ),
+    ).toBe(expected);
   });
 });

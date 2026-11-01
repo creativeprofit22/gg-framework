@@ -1,5 +1,6 @@
 import type { Message, Provider, ThinkingLevel } from "@kenkaiiii/gg-ai";
 import type { CheckScope } from "./core/check-coverage.js";
+import type { ChangedFilesResult } from "./core/changed-files.js";
 
 // ── CLI Config ─────────────────────────────────────────────
 
@@ -83,6 +84,12 @@ export interface BashDiagnostics {
   sourceUnchanged?: boolean;
   /** Check inputs that did not move during the run; absent when unknown or unstable. */
   checkCoverage?: { fingerprint: string; scope: CheckScope };
+  /** Machine-profile concurrency defaults reported for this run; absent when none applied. */
+  concurrency?: { line: string; budget: number; summary: string };
+  /** Repository files this command changed outside edit/write. Absent on results without
+   *  diagnostics (background starts, errors before the run); `{ status: "skipped", reason }`
+   *  when the comparison was skipped. */
+  changedFiles?: ChangedFilesResult;
 }
 
 export interface BashToolResultDetails {

@@ -1287,6 +1287,80 @@ describe("check coverage scoped by covered files", () => {
     expect(ledger.findPriorPass(FP_TREE)?.current).toBe(false);
   });
 
+  function mutate(
+    ledger: SessionVerificationEvidenceLedger,
+    command: string,
+    changedFiles: unknown,
+  ) {
+    ledger.recordToolResult({
+      evidenceRevision: ledger.revision,
+      name: "bash",
+      args: { command },
+      isError: false,
+      sessionCwd: "/repo",
+      details: {
+        bashDiagnostics: {
+          executionId: "mutate",
+          command,
+          cwd: "/repo",
+          startedAt: Date.parse("2026-10-30T10:01:00.000Z"),
+          reason: "completed",
+          exitCode: 0,
+          changedFiles,
+        },
+      },
+    });
+  }
+
+  const comparedList = (paths: string[], complete = true) => ({
+    status: "compared",
+    root: "/repo",
+    paths: paths.map((file) => ({ path: file, kind: "modified" })),
+    complete,
+    headMoved: false,
+  });
+
+  // The mutating command is shell evidence itself; only the checks matter here.
+  const checkIds = (ids: readonly (string | undefined)[]) => ids.filter((id) => id !== "mutate");
+
+  it("narrows staleness to a bash command's compared changed-files list", () => {
+    const ledger = newLedger();
+    check(ledger, "rust-1", "cargo test", {
+      checkCoverage: { fingerprint: FP_RUST, scope: rustScope },
+    });
+    mutate(ledger, "node script.mjs", comparedList(["src/app.ts"]));
+    expect(checkIds(currentIds(ledger))).toEqual(["rust-1"]);
+    expect(ledger.findPriorPass(FP_RUST)?.current).toBe(true);
+    mutate(ledger, "node script.mjs", comparedList(["crates/core/src/lib.rs"]));
+    expect(checkIds(currentIds(ledger))).toEqual([]);
+    expect(checkIds(staleIds(ledger))).toEqual(["rust-1"]);
+  });
+
+  it.each([
+    ["a skipped list", "node script.mjs", { status: "skipped", reason: "read-only", limit: false }],
+    ["an incomplete list", "node script.mjs", comparedList(["src/app.ts"], false)],
+    ["no list", "node script.mjs", undefined],
+    ["a malformed list", "node script.mjs", { ...comparedList([]), paths: [{ path: 3 }] }],
+    ["an install", "npm install left-pad", comparedList([])],
+  ])("falls back to whole-tree staleness with %s", (_label, command, changedFiles) => {
+    const ledger = newLedger();
+    check(ledger, "rust-1", "cargo test", {
+      checkCoverage: { fingerprint: FP_RUST, scope: rustScope },
+    });
+    mutate(ledger, command, changedFiles);
+    expect(checkIds(currentIds(ledger))).toEqual([]);
+    expect(checkIds(staleIds(ledger))).toEqual(["rust-1"]);
+  });
+
+  it("still stales a whole-tree pass after a bash command that changed nothing tracked", () => {
+    const ledger = newLedger();
+    check(ledger, "tree-1", "tsc --noEmit", {
+      checkCoverage: { fingerprint: FP_TREE, scope: { kind: "tree", root: "/repo" } },
+    });
+    mutate(ledger, "node script.mjs", comparedList([]));
+    expect(checkIds(currentIds(ledger))).toEqual([]);
+  });
+
   it("stales a plan-scoped pass on edits it cannot place", () => {
     const ledger = newLedger();
     check(ledger, "rust-1", "cargo test", {

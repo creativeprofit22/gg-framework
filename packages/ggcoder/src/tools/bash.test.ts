@@ -19,6 +19,7 @@ import { useFakeHome } from "../test-support/fake-home.js";
 import { keepAliveWhileOwnerLives } from "../test-support/keep-alive.js";
 import { collectVerificationReview } from "./verification-review.js";
 import { CheckCoverageMemory } from "../core/check-coverage.js";
+import { HeavyCheckSlots, type ConcurrencySettings } from "../core/machine-profile.js";
 
 let restoreHome: (() => void) | undefined;
 let tmpHome: string;
@@ -1551,5 +1552,265 @@ describe("check coverage fingerprints", () => {
     expect(result.details.bashDiagnostics.checkCoverage).toBeUndefined();
     expect(result.content).not.toContain("reported by the project");
     expect(result.content).not.toContain("Same check passed");
+  });
+});
+
+describe("machine-profile concurrency defaults", () => {
+  const MANAGED = [
+    "CARGO_BUILD_JOBS",
+    "RUST_TEST_THREADS",
+    "npm_config_workspace_concurrency",
+    "pnpm_config_workspace_concurrency",
+    "CARGO_HOME",
+  ];
+  const isManaged = (name: string) => MANAGED.some((m) => m.toLowerCase() === name.toLowerCase());
+  let saved: [string, string | undefined][] = [];
+  const PROBE =
+    `node -e "console.log(['CARGO_BUILD_JOBS','RUST_TEST_THREADS','npm_config_workspace_concurrency']` +
+    `.map(k=>k+'='+process.env[k]).join(' '))"`;
+  const settings = (overrides: Partial<ConcurrencySettings> = {}): ConcurrencySettings => ({
+    budget: 3,
+    defaults: true,
+    heavyCheckLimit: 1,
+    ...overrides,
+  });
+  const ctx = (id: string, onUpdate?: (update: unknown) => void) => ({
+    signal: new AbortController().signal,
+    toolCallId: id,
+    onUpdate,
+  });
+  const bashTool = (
+    manager: ProcessManager,
+    concurrency: ConcurrencySettings,
+    owner?: string,
+  ): ReturnType<typeof createBashTool> =>
+    createBashTool(
+      tmpHome,
+      manager,
+      localOperations,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      () => concurrency,
+      owner ? () => owner : undefined,
+    );
+
+  beforeEach(() => {
+    // Isolate from the developer's own exports and ~/.cargo config.
+    saved = Object.keys(process.env)
+      .filter(isManaged)
+      .map((name) => [name, process.env[name]]);
+    for (const [name] of saved) delete process.env[name];
+    process.env.CARGO_HOME = path.join(tmpHome, "cargo-home");
+  });
+
+  afterEach(() => {
+    for (const name of Object.keys(process.env).filter(isManaged)) delete process.env[name];
+    for (const [name, value] of saved) if (value !== undefined) process.env[name] = value;
+  });
+
+  it("gives the child the machine defaults", async () => {
+    const out = outputText(
+      await bashTool(new ProcessManager(), settings()).execute({ command: PROBE }, ctx("defaults")),
+    );
+    expect(out).toContain(
+      "CARGO_BUILD_JOBS=3 RUST_TEST_THREADS=3 npm_config_workspace_concurrency=1",
+    );
+    // Not a build-tool command: no result line.
+    expect(out).not.toContain("[Concurrency defaults");
+  });
+
+  it("keeps the user's value and names it in the result line", async () => {
+    process.env.CARGO_BUILD_JOBS = "2";
+    const tool = bashTool(new ProcessManager(), settings());
+    expect(outputText(await tool.execute({ command: PROBE }, ctx("user-env")))).toContain(
+      "CARGO_BUILD_JOBS=2 RUST_TEST_THREADS=3",
+    );
+    const result = structuredBashResult(
+      await tool.execute({ command: "npm --version" }, ctx("line")),
+    );
+    expect(result.content).toContain(
+      "[Concurrency defaults (budget 3): RUST_TEST_THREADS=3, pnpm workspace-concurrency=1; kept yours: CARGO_BUILD_JOBS=2.]",
+    );
+    expect(result.details.bashDiagnostics.concurrency).toMatchObject({ budget: 3 });
+  }, 30_000);
+
+  it("leaves a value the project config sets, and sets nothing when turned off", async () => {
+    await fs.mkdir(path.join(tmpHome, ".cargo"), { recursive: true });
+    await fs.writeFile(path.join(tmpHome, ".cargo", "config.toml"), "[build]\njobs = 4\n");
+    const project = outputText(
+      await bashTool(new ProcessManager(), settings()).execute({ command: PROBE }, ctx("project")),
+    );
+    expect(project).toContain("CARGO_BUILD_JOBS=undefined RUST_TEST_THREADS=3");
+    const off = outputText(
+      await bashTool(new ProcessManager(), settings({ defaults: false })).execute(
+        { command: PROBE },
+        ctx("off"),
+      ),
+    );
+    expect(off).toContain(
+      "CARGO_BUILD_JOBS=undefined RUST_TEST_THREADS=undefined npm_config_workspace_concurrency=undefined",
+    );
+  });
+
+  async function writeSlowTestScript(ms: number): Promise<void> {
+    await fs.writeFile(
+      path.join(tmpHome, "package.json"),
+      JSON.stringify({ scripts: { test: `node -e "setTimeout(() => {}, ${ms})"` } }),
+    );
+  }
+
+  async function waitForFreeSlots(slots: HeavyCheckSlots): Promise<void> {
+    for (let attempt = 0; attempt < 200 && slots.held > 0; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    expect(slots.held).toBe(0);
+  }
+
+  it("refuses a second full test in the same session while one runs, and runs nothing", async () => {
+    await writeSlowTestScript(5_000);
+    const slots = new HeavyCheckSlots();
+    const manager = new ProcessManager({ heavyCheckSlots: slots });
+    const tool = bashTool(manager, settings(), "session-a");
+    try {
+      const started = outputText(
+        await tool.execute({ command: "npm test", run_in_background: true }, ctx("bg")),
+      );
+      const id = /ID: (\S+)/.exec(started)?.[1];
+      expect(id).toBeDefined();
+      expect(slots.held).toBe(1);
+      const refused = outputText(await tool.execute({ command: "npm test" }, ctx("second")));
+      expect(refused).toMatch(/^Error: `npm test` is already running as task /);
+      expect(refused).toContain(`task_output id="${id}"`);
+      expect(refused).toContain("Nothing was run.");
+      expect(manager.list()).toHaveLength(1);
+    } finally {
+      await shutdownAndWait(manager);
+    }
+    await waitForFreeSlots(slots);
+  }, 30_000);
+
+  it("queues behind another window's full test with a notice instead of refusing", async () => {
+    await writeSlowTestScript(1_500);
+    const slots = new HeavyCheckSlots();
+    const windowA = new ProcessManager({ heavyCheckSlots: slots });
+    const windowB = new ProcessManager({ heavyCheckSlots: slots });
+    const updates: string[] = [];
+    try {
+      await bashTool(windowA, settings(), "window-a").execute(
+        { command: "npm test", run_in_background: true },
+        ctx("a"),
+      );
+      const result = outputText(
+        await bashTool(windowB, settings(), "window-b").execute(
+          { command: "npm test" },
+          ctx("b", (update) => updates.push(JSON.stringify(update))),
+        ),
+      );
+      expect(updates.join("\n")).toContain("Waiting for another window's `npm test`");
+      expect(result).toMatch(/^Exit code: 0\b/);
+      expect(result).toContain(
+        "for another window's full test or build to finish before starting.",
+      );
+    } finally {
+      await shutdownAndWait(windowA);
+      await shutdownAndWait(windowB);
+    }
+    await waitForFreeSlots(slots);
+  }, 30_000);
+});
+
+describe("changed-files note", () => {
+  const run = async (tool: ReturnType<typeof createBashTool>, command: string) =>
+    structuredBashResult(
+      await tool.execute({ command }, { signal: new AbortController().signal, toolCallId: "cf" }),
+    );
+
+  async function makeRepo(): Promise<string> {
+    const repo = path.join(tmpHome, "repo");
+    await fs.mkdir(path.join(repo, "docs", "evidence"), { recursive: true });
+    await fs.writeFile(path.join(repo, "docs", "evidence", "a.png"), "old");
+    await fs.writeFile(path.join(repo, "src.ts"), "one\n");
+    for (const args of [
+      ["init", "--quiet"],
+      ["config", "user.email", "t@example.com"],
+      ["config", "user.name", "T"],
+      ["add", "."],
+      ["commit", "--quiet", "-m", "init"],
+    ]) {
+      execFileSync("git", args, { cwd: repo, stdio: "ignore" });
+    }
+    return repo;
+  }
+
+  it("lists files a command changed with protected paths first", async () => {
+    const repo = await makeRepo();
+    const plan: VerifyPlan = {
+      version: 1,
+      mode: "changed",
+      advice: [],
+      gates: [
+        {
+          id: "unit",
+          argv: ["npm", "test"],
+          cwd: ".",
+          covers: ["src.ts"],
+          fingerprint: null,
+          quietBudgetSeconds: null,
+          protectedPaths: ["docs/evidence/**"],
+        },
+      ],
+    };
+    const tool = createBashTool(
+      repo,
+      new ProcessManager(),
+      localOperations,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      () => plan,
+    );
+    const result = await run(
+      tool,
+      `node -e "const fs=require('fs');fs.writeFileSync('new.ts','n');fs.writeFileSync('docs/evidence/a.png','new')"`,
+    );
+    expect(result.content).toContain(
+      "[This command changed 2 files (not via edit/write): docs/evidence/a.png (modified, protected), new.ts (created).",
+    );
+    expect(result.details.bashDiagnostics.changedFiles).toMatchObject({
+      status: "compared",
+      complete: true,
+      paths: [
+        { path: "docs/evidence/a.png", kind: "modified" },
+        { path: "new.ts", kind: "created" },
+      ],
+    });
+  });
+
+  it("skips read-only commands and stays silent outside Git", async () => {
+    const repo = await makeRepo();
+    const readOnly = await run(createBashTool(repo, new ProcessManager()), "git status");
+    expect(readOnly.details.bashDiagnostics.changedFiles).toEqual({
+      status: "skipped",
+      reason: "read-only",
+      limit: false,
+    });
+    const outside = path.join(tmpHome, "plain");
+    await fs.mkdir(outside);
+    const plain = await run(
+      createBashTool(outside, new ProcessManager()),
+      `node -e "require('fs').writeFileSync('x.txt','x')"`,
+    );
+    expect(plain.content).not.toContain("This command changed");
+    expect(plain.details.bashDiagnostics.changedFiles).toMatchObject({ status: "skipped" });
   });
 });

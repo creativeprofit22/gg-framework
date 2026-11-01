@@ -528,3 +528,38 @@ describe("task_output readiness", () => {
     expect(await response.text()).toBe("ok");
   });
 });
+
+describe("task_output overload advice", () => {
+  const timeouts = [
+    " FAIL  src/a.test.ts > a",
+    "Error: Test timed out in 5000ms.",
+    " FAIL  src/b.test.ts > b",
+    "Error: Test timed out in 5000ms.",
+    " FAIL  src/c.test.ts > c",
+    "Error: Test timed out in 5000ms.",
+    "      Tests  3 failed | 9 passed (12)",
+  ].join("\n");
+
+  it("shows the budget summary for a check that failed only by timing out", async () => {
+    const fixture = await trackedLog(timeouts, {}, false);
+    fixture.process.exitCode = 1;
+    const result = structuredTaskOutput(
+      await createTaskOutputTool(fixture.manager, () => "budget 6 (12 threads)").execute(
+        { id: fixture.process.id },
+        toolContext,
+      ),
+    );
+    expect(result.content).toContain("the machine may have been overloaded");
+    expect(result.content).toContain("Concurrency budget here: budget 6 (12 threads);");
+  });
+
+  it("keeps the plain advice when no budget is known", async () => {
+    const fixture = await trackedLog(timeouts, {}, false);
+    fixture.process.exitCode = 1;
+    const result = structuredTaskOutput(
+      await createTaskOutputTool(fixture.manager).execute({ id: fixture.process.id }, toolContext),
+    );
+    expect(result.content).toContain("the machine may have been overloaded");
+    expect(result.content).not.toContain("Concurrency budget here");
+  });
+});

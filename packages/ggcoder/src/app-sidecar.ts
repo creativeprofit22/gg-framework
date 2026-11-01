@@ -61,6 +61,7 @@ import {
   type DecisionSummarySessionOptions,
 } from "./app-sidecar-decision-summary.js";
 import { SharedMcpClientPool } from "./core/mcp/shared-client-pool.js";
+import { HeavyCheckSlots } from "./core/machine-profile.js";
 import { RunLifecycle, type RunState } from "./core/run-lifecycle.js";
 import {
   createRunEndPayload,
@@ -707,6 +708,8 @@ async function main(): Promise<void> {
   // `?session=` query for the SSE /events stream).
   const sessions = new AppSidecarSessionRouter<SessionContext>();
   const sharedMcpPool = new SharedMcpClientPool();
+  // One heavy-check limit for every window this daemon serves.
+  const heavyCheckSlots = new HeavyCheckSlots();
   const reloadCoordinator = new AppSidecarReloadCoordinator();
 
   const broadcastAll = (type: string, data: unknown): void => {
@@ -925,6 +928,7 @@ async function main(): Promise<void> {
                 projectAutopilot,
                 broadcastNotesSnapshot,
                 sharedMcpPool,
+                heavyCheckSlots,
                 sessionReadCache,
                 durableRoadmapExecution,
                 repoPolls: getDaemonRepoPolls(),
@@ -1330,6 +1334,8 @@ async function createSession(
     projectAutopilot: AppSidecarProjectAutopilotState;
     broadcastNotesSnapshot: (snapshot: ProjectNotesSnapshot) => void;
     sharedMcpPool: SharedMcpClientPool;
+    /** Daemon-wide full test/build limit shared by every window. */
+    heavyCheckSlots: HeavyCheckSlots;
     /** Daemon-wide per-file session reads behind /projects and /sessions. */
     sessionReadCache: SessionReadCache;
     durableRoadmapExecution: boolean;
@@ -1373,6 +1379,7 @@ async function createSession(
     projectAutopilot,
     broadcastNotesSnapshot,
     sharedMcpPool,
+    heavyCheckSlots,
     sessionReadCache,
     durableRoadmapExecution,
     repoPolls,
@@ -1676,6 +1683,7 @@ async function createSession(
     // Keep MCP startup off the readiness path in both modes.
     backgroundMcpConnect: true,
     sharedMcpPool,
+    heavyCheckSlots,
     onMcpElicit: elicitations.onElicit,
     reviewCommandCreation: commandCreationReviewer(withoutDeferral(asks)),
     programmaticSetupApproval: "desktop-panel" as const,
@@ -2929,6 +2937,7 @@ async function createSession(
       additionalTools: [],
       allowedMcpServers: KEN_ALLOWED_MCP_SERVERS,
       sharedMcpPool,
+      heavyCheckSlots,
       transient: true,
       signal,
       // Ken belongs to THIS window, so its window is where an MCP prompt
@@ -2989,6 +2998,7 @@ async function createSession(
       additionalTools: [],
       allowedMcpServers: KEN_ALLOWED_MCP_SERVERS,
       sharedMcpPool,
+      heavyCheckSlots,
       transient: true,
       signal: kenAutoAbort.signal,
       // Same as Ken chat: this reviewer belongs to a window, so route prompts

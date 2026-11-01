@@ -130,7 +130,9 @@ function expectCompletePersistentDiagnostics(
   diagnostics: BashDiagnostics,
   expected: Partial<BashDiagnostics>,
 ): void {
-  expect(Object.keys(diagnostics).sort()).toEqual(Object.keys(BASH_DIAGNOSTICS_FIXTURE).sort());
+  expect(Object.keys(diagnostics).sort()).toEqual(
+    [...Object.keys(BASH_DIAGNOSTICS_FIXTURE), "changedFiles"].sort(),
+  );
   expect(diagnostics).toMatchObject({
     executionId: expect.any(String),
     pid: expect.any(Number),
@@ -148,6 +150,9 @@ function expectCompletePersistentDiagnostics(
     totalOutputBytes: expect.any(Number),
     retainedOutputBytes: expect.any(Number),
     droppedOutputBytes: expect.any(Number),
+    changedFiles: expect.objectContaining({
+      status: expect.stringMatching(/^(compared|skipped)$/),
+    }),
     ...expected,
   });
 }
@@ -1791,6 +1796,7 @@ if (selectedProbe !== undefined) {
           droppedOutputBytes: 0,
           backgroundTaskId: null,
           pipesHeldAfterExit: false,
+          changedFiles: { status: "skipped", reason: "remote workspace", limit: false },
         },
       });
     });
@@ -2182,7 +2188,9 @@ if (selectedProbe !== undefined) {
     );
     const result = structuredBashResult(rawResult);
     const diagnostics = result.details.bashDiagnostics;
-    expect(Object.keys(diagnostics).sort()).toEqual(Object.keys(BASH_DIAGNOSTICS_FIXTURE).sort());
+    expect(Object.keys(diagnostics).sort()).toEqual(
+      [...Object.keys(BASH_DIAGNOSTICS_FIXTURE), "changedFiles"].sort(),
+    );
     expect(diagnostics).toMatchObject({
       pid: null,
       command: "printf 'never-ran\\n'",

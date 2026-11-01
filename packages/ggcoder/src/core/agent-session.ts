@@ -181,6 +181,7 @@ import { MCPClientManager, getAllMcpServers } from "./mcp/index.js";
 import type { MCPElicitHandler } from "./mcp/index.js";
 import type { MCPServerConfig } from "./mcp/types.js";
 import type { SharedMcpClientLease, SharedMcpClientPool } from "./mcp/shared-client-pool.js";
+import type { HeavyCheckSlots } from "./machine-profile.js";
 import { guardSessionTool, type SessionToolGuardHost } from "./agent-session-tool-guard.js";
 import { clampMcpToolDescription, DeferredToolCatalog } from "./mcp/deferred-catalog.js";
 import {
@@ -580,6 +581,8 @@ export interface AgentSessionOptions {
    * Tool registration and allow-lists remain local to this AgentSession.
    */
   sharedMcpPool?: SharedMcpClientPool;
+  /** Daemon-scoped full test/build limit shared by every window; the CLI gets a private one. */
+  heavyCheckSlots?: HeavyCheckSlots;
   /**
    * Force 1-h prompt-cache TTL + pre-warm regardless of the user's global
    * `speedProfile` setting. Bursty read-only advisory sessions (the Ken
@@ -1361,6 +1364,14 @@ export class AgentSession {
         additionalRoots: this.additionalRoots,
       }),
       getPackageCooldownDays: () => this.settingsManager.get("packageCooldownDays"),
+      getConcurrencySettings: () => ({
+        budget: this.settingsManager.get("concurrencyBudget"),
+        defaults: this.settingsManager.get("concurrencyDefaults"),
+        heavyCheckLimit: this.settingsManager.get("heavyCheckLimit"),
+      }),
+      heavyCheckSlots: this.opts.heavyCheckSlots,
+      // Stable for this session object even when /clear assigns a new session id.
+      getHeavySlotOwner: () => this.transportSessionId,
       checkCoverage: this.checkCoverage,
       getVerifyPlan: this.getVerifyPlan,
       findPriorPass: (fingerprint) => this.verificationEvidenceLedger.findPriorPass(fingerprint),

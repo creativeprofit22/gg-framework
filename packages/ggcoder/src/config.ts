@@ -10,6 +10,7 @@ import {
   DEFAULT_FOREGROUND_LIMIT_SETTINGS,
   type ForegroundLimitSettings,
 } from "./tools/foreground-limits.js";
+import { DEFAULT_CONCURRENCY_SETTINGS, type ConcurrencySettings } from "./core/machine-profile.js";
 
 export const APP_NAME = "ggcoder";
 export const VERSION = "0.0.1";
@@ -66,6 +67,12 @@ export interface SavedSettings {
   bashInactivitySeconds?: number;
   /** Minutes before a bash command is stopped regardless of output; 0 disables. */
   bashHardLimitMinutes?: number;
+  /** Concurrency budget for build/test tools (0–256); 0 = derive from this machine. */
+  concurrencyBudget?: number;
+  /** Set CARGO_BUILD_JOBS, RUST_TEST_THREADS and pnpm workspace concurrency where unset. */
+  concurrencyDefaults?: boolean;
+  /** Full test/build runs allowed at once (0–8); 0 = no limit. */
+  heavyCheckLimit?: number;
   /** Speed optimization profile.
    *  - "baseline": current defaults (5-min cache TTL, no pre-warm)
    *  - "optimized": 1-h cache TTL, cache pre-warming on first prompt
@@ -108,6 +115,21 @@ export function foregroundLimitSettingsFrom(
       saved.bashInactivitySeconds ?? DEFAULT_FOREGROUND_LIMIT_SETTINGS.inactivitySeconds,
     hardLimitMinutes:
       saved.bashHardLimitMinutes ?? DEFAULT_FOREGROUND_LIMIT_SETTINGS.hardLimitMinutes,
+  };
+}
+
+function isIntegerInRange(value: unknown, max: number): value is number {
+  return isNonNegativeInteger(value) && value <= max;
+}
+
+/** Concurrency settings from saved settings, falling back per field to the machine-profile defaults. */
+export function concurrencySettingsFrom(
+  saved: Pick<SavedSettings, "concurrencyBudget" | "concurrencyDefaults" | "heavyCheckLimit">,
+): ConcurrencySettings {
+  return {
+    budget: saved.concurrencyBudget ?? DEFAULT_CONCURRENCY_SETTINGS.budget,
+    defaults: saved.concurrencyDefaults ?? DEFAULT_CONCURRENCY_SETTINGS.defaults,
+    heavyCheckLimit: saved.heavyCheckLimit ?? DEFAULT_CONCURRENCY_SETTINGS.heavyCheckLimit,
   };
 }
 
@@ -175,6 +197,12 @@ export function loadSavedSettings(settingsFilePath?: string): SavedSettings {
       result.bashInactivitySeconds = raw.bashInactivitySeconds;
     if (isNonNegativeInteger(raw.bashHardLimitMinutes))
       result.bashHardLimitMinutes = raw.bashHardLimitMinutes;
+    // Same bounds as SettingsSchema in core/settings-manager.ts.
+    if (isIntegerInRange(raw.concurrencyBudget, 256))
+      result.concurrencyBudget = raw.concurrencyBudget;
+    if (typeof raw.concurrencyDefaults === "boolean")
+      result.concurrencyDefaults = raw.concurrencyDefaults;
+    if (isIntegerInRange(raw.heavyCheckLimit, 8)) result.heavyCheckLimit = raw.heavyCheckLimit;
     if (raw.speedProfile === "optimized" || raw.speedProfile === "baseline") {
       result.speedProfile = raw.speedProfile;
     }

@@ -14,6 +14,8 @@ import type { VerifyGate, VerifyPlan } from "@kenkaiiii/gg-core/verify-plan";
 import { getSafeToolEnv } from "../tools/safe-env.js";
 import { resolveShell } from "./shell.js";
 import { isCheckOwnFile, isCodeFilePath } from "./verification-paths.js";
+import { changedAbsolutePaths } from "./changed-files.js";
+import { mayInstall } from "./package-cooldown.js";
 import {
   CheckCoverageMemory,
   parseSettledCheckCoverage,
@@ -1267,6 +1269,8 @@ interface BashExecutionDiagnostics {
   sourceUnchanged?: unknown;
   /** `{ fingerprint, scope }` when the check's inputs did not move during the run. */
   checkCoverage?: unknown;
+  /** Tracked files the command changed (core/changed-files.ts). */
+  changedFiles?: unknown;
 }
 
 /** One check's latest outcome since the code changes it covers. */
@@ -1281,8 +1285,15 @@ interface CoverageEntry {
 function changedPathsOf(
   call: { name: string; args: Record<string, unknown> },
   sessionCwd: string | undefined,
+  diagnostics: BashExecutionDiagnostics | undefined,
 ): string[] | null {
-  if (!sessionCwd || (call.name !== "edit" && call.name !== "write")) return null;
+  if (!sessionCwd) return null;
+  if (call.name === "bash") {
+    // Installs write gitignored dependencies the changed-files list cannot see.
+    if (mayInstall(String(call.args.command ?? ""))) return null;
+    return changedAbsolutePaths(diagnostics?.changedFiles);
+  }
+  if (call.name !== "edit" && call.name !== "write") return null;
   const paths = editTargetPaths(call.args);
   return paths.length > 0 ? paths : null;
 }
@@ -1565,7 +1576,7 @@ export class SessionVerificationEvidenceLedger {
     const provenHarmless = inputsUnchanged && gateClassification?.mayMutate === false;
     const advanced = !provenHarmless && isWorkspaceMutation(input, gateClassification);
     if (advanced) {
-      const changedPaths = changedPathsOf(input, input.sessionCwd);
+      const changedPaths = changedPathsOf(input, input.sessionCwd, diagnostics);
       const sessionCwd = input.sessionCwd ?? "";
       const previous = this.generation;
       this.generation += 1;

@@ -1,3 +1,4 @@
+import path from "node:path";
 import type { AgentTool, ToolExecuteResult } from "@kenkaiiii/gg-agent";
 import type { Provider, ThinkingLevel, ToolCall, ToolResult } from "@kenkaiiii/gg-ai";
 import type { ContextLimits } from "../core/context-limits.js";
@@ -39,6 +40,7 @@ import { createSubAgentControlTools } from "./subagent-control.js";
 import { createWebFetchTool } from "./web-fetch.js";
 import { createWebSearchTool } from "./web-search.js";
 import { createSourcePathTool } from "./source-path.js";
+import { ToolWriteLog } from "../core/changed-files.js";
 import { createTaskOutputTool } from "./task-output.js";
 import { createTaskStopTool } from "./task-stop.js";
 import { createTaskSendTool } from "./task-send.js";
@@ -68,6 +70,11 @@ import type { VerifyPlan } from "@kenkaiiii/gg-core/verify-plan";
 import type { AgentDefinition } from "../core/agents.js";
 import type { BlockedSkill, Skill } from "../core/skills.js";
 import type { AgentNotificationQueue } from "../core/agent-notifications.js";
+import {
+  HeavyCheckSlots,
+  describeLocalBudget,
+  type ConcurrencySettings,
+} from "../core/machine-profile.js";
 
 // Canonical registry of built-in tool names. Defined in prompt-hints (a leaf
 // module) so `core/agents.ts` can validate `tools:` frontmatter without
@@ -172,6 +179,12 @@ export interface CreateToolsOptions {
   getForegroundLimitSettings?: () => ForegroundLimitSettings;
   /** Package release-age cooldown in days (settings `packageCooldownDays`). */
   getPackageCooldownDays?: () => number;
+  /** Settings `concurrencyBudget` / `concurrencyDefaults` / `heavyCheckLimit`. */
+  getConcurrencySettings?: () => ConcurrencySettings;
+  /** Daemon-wide heavy-check slots shared across sessions and windows. */
+  heavyCheckSlots?: HeavyCheckSlots;
+  /** Who holds a heavy-check slot: the same owner is refused, others queue. */
+  getHeavySlotOwner?: () => string;
   /** Session memory of check outcomes by input fingerprint, shared with the evidence ledger. */
   checkCoverage?: CheckCoverageMemory;
   /** The project's verify plan (core/verify-plan-loader.ts), shared with the evidence ledger. */
@@ -257,6 +270,15 @@ export interface CreateToolsResult {
   commandCreation?: ReturnType<typeof createProgrammaticCommandTool>;
 }
 
+/** The local budget for the overload hint; a probe failure just drops it. */
+function localBudgetSummary(getSettings?: () => ConcurrencySettings): string | undefined {
+  try {
+    return describeLocalBudget(getSettings?.().budget ?? 0);
+  } catch {
+    return undefined;
+  }
+}
+
 export async function createTools(
   cwd: string,
   opts?: CreateToolsOptions,
@@ -265,6 +287,8 @@ export async function createTools(
   const ops = opts?.operations ?? localOperations;
   const processManager = new ProcessManager(ops.process, undefined, {
     notifications: opts?.notifications,
+    // The daemon passes one pool for every window; a lone CLI gets its own.
+    heavyCheckSlots: opts?.heavyCheckSlots ?? new HeavyCheckSlots(),
   });
   const planModeRef = opts?.planModeRef;
 
@@ -302,6 +326,12 @@ export async function createTools(
         await opts?.onPreFileMutation?.(filePath);
       }
     : opts?.onPreFileMutation;
+  // Writes the agent made itself; bash's changed-files note leaves them out.
+  const toolWrites = new ToolWriteLog();
+  const onFileMutated = async (filePath: string): Promise<void> => {
+    toolWrites.record(path.resolve(cwd, filePath));
+    await opts?.onFileMutated?.(filePath);
+  };
 
   // Enable native video returns from the read tool for any video-capable model
   // (Kimi/Moonshot, Gemini, MiniMax), each with its own per-model byte cap that
@@ -316,7 +346,7 @@ export async function createTools(
     owner: opts?.setupOwner,
     assertAllowed: opts?.assertSetupAllowed,
     onPreFileMutation: opts?.onPreFileMutation,
-    onFileMutated: opts?.onFileMutated,
+    onFileMutated,
   });
   const tools: AgentTool[] = [
     createReadTool(cwd, readFiles, ops, opts?.onFileRead, videoByteLimit),
@@ -325,7 +355,7 @@ export async function createTools(
       readFiles,
       ops,
       planModeRef,
-      opts?.onFileMutated,
+      onFileMutated,
       onPreFileMutation,
       getDiagnostics,
       opts?.getWriteGuardSettings,
@@ -336,7 +366,7 @@ export async function createTools(
       readFiles,
       ops,
       planModeRef,
-      opts?.onFileMutated,
+      onFileMutated,
       onPreFileMutation,
       getDiagnostics,
       opts?.getWriteGuardSettings,
@@ -354,11 +384,14 @@ export async function createTools(
       ops === localOperations ? opts?.getVerifyPlan : undefined,
       ops === localOperations ? opts?.checkCoverage : undefined,
       ops === localOperations ? opts?.findPriorPass : undefined,
+      opts?.getConcurrencySettings,
+      opts?.getHeavySlotOwner,
+      toolWrites,
     ),
     createTauriPackageTool(cwd, processManager, {
       operations: ops,
       planModeRef,
-      onFileMutated: opts?.onFileMutated,
+      onFileMutated,
       onPreFileMutation: opts?.onPreFileMutation,
       getSandboxPolicy: ops === localOperations ? opts?.getSandboxPolicy : undefined,
     }),
@@ -374,7 +407,7 @@ export async function createTools(
     createProgrammaticScanTool(cwd, {
       localFilesystem: ops === localOperations,
       planModeRef,
-      onFileMutated: opts?.onFileMutated,
+      onFileMutated,
       onPreFileMutation: opts?.onPreFileMutation,
     }),
     createFindTool(cwd),
@@ -382,7 +415,10 @@ export async function createTools(
     createLsTool(cwd, ops),
     createSourcePathTool(cwd),
     createWebFetchTool(opts?.getNetworkPolicy),
-    createTaskOutputTool(processManager),
+    createTaskOutputTool(
+      processManager,
+      ops === localOperations ? () => localBudgetSummary(opts?.getConcurrencySettings) : undefined,
+    ),
     createTaskSendTool(processManager, cwd),
     createTaskStopTool(processManager),
     createTasksTool(cwd, opts?.onTasksChanged),
@@ -515,7 +551,7 @@ export async function createTools(
           readFiles,
           adoptionOperations(cwd),
           planModeRef,
-          opts?.onFileMutated,
+          onFileMutated,
           onPreFileMutation,
           getDiagnostics,
           opts?.getWriteGuardSettings,
@@ -543,7 +579,7 @@ export async function createTools(
             model: opts?.getModel?.() ?? opts?.model ?? "no-model",
           }),
           onPreFileMutation: opts?.onPreFileMutation,
-          onFileMutated: opts?.onFileMutated,
+          onFileMutated,
         });
   if (commandCreation) tools.push(commandCreation.tool);
   const clearReadTracker = (): void => readFiles.clear();

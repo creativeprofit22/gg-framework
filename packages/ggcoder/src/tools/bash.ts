@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+import os from "node:os";
 import { z } from "zod";
 import type { AgentTool } from "@kenkaiiii/gg-agent";
 import { AdoptExitedError, type ProcessManager } from "../core/process-manager.js";
@@ -41,6 +43,21 @@ import {
   packageCooldownEnv,
   scopeCooldown,
 } from "../core/package-cooldown.js";
+import {
+  DEFAULT_CONCURRENCY_SETTINGS,
+  classifyHeavyCheck,
+  deriveConcurrencyBudget,
+  detectProjectConcurrencyConfig,
+  formatConcurrencyLine,
+  leadingCdTarget,
+  readMachineFacts,
+  resolveConcurrencyEnv,
+  scopeConcurrency,
+  type ConcurrencyEnvResult,
+  type ConcurrencySettings,
+  type HeavySlotLease,
+  type MachineFacts,
+} from "../core/machine-profile.js";
 import { classifyVerificationCommand, matchVerifyPlanGate } from "../core/verification-evidence.js";
 import {
   captureCheckInputs,
@@ -77,6 +94,17 @@ import {
 import { annotateSandboxDenial } from "../core/sandbox-feedback.js";
 import { collectVerificationReview } from "./verification-review.js";
 import { captureVerificationSnapshot } from "../core/verification-snapshot.js";
+import {
+  captureChangedFilesState,
+  diffChangedFiles,
+  formatChangedFilesNote,
+  type ChangedFilesHashCache,
+  type ChangedFilesResult,
+  type ChangedFilesRootCache,
+  type ChangedFilesSkip,
+  type ChangedFilesState,
+  type ToolWriteLog,
+} from "../core/changed-files.js";
 
 /** Tool env, plus the tweaks that only make sense inside the OS sandbox. */
 function sandboxAwareEnv(
@@ -236,6 +264,8 @@ interface ForegroundCommandOptions {
   launch?: SandboxLaunch;
   /** Extra env for this command only (package release-age cooldown). */
   env?: Record<string, string>;
+  /** Heavy-check slot; a hand-off passes it to the background task. */
+  heavySlot?: HeavySlotLease;
   onUpdate?: (output: string, totalBytes: number) => void;
   cleanupProcessTree?: (target: ProcessTarget) => Promise<void>;
   reapProcessWrapper?: (target: ProcessTarget) => void;
@@ -261,6 +291,7 @@ export async function executeForegroundCommand({
   processManager,
   launch,
   env,
+  heavySlot,
   onUpdate,
   cleanupProcessTree = ops.process.cleanupProcessTree,
   reapProcessWrapper: reapWrapper = ops.process.reapProcessWrapper,
@@ -482,6 +513,7 @@ export async function executeForegroundCommand({
           pid: handedOffPid,
           command,
           startedAt,
+          heavySlot,
           limits: {
             // Silence after the move only notifies; the hard limit is the kill.
             quietMs: effectiveLimits.inactivityMs,
@@ -765,6 +797,7 @@ async function executePersistentCommand({
 async function renderStructuredForegroundResult(
   execution: ForegroundCommandExecution,
   persistent: boolean,
+  budgetSummary?: string,
 ): Promise<{ content: string; details: BashToolResultDetails; isError?: boolean }> {
   const { outcome } = execution;
   const diagnostics = formatForegroundDiagnostics(outcome);
@@ -849,7 +882,7 @@ async function renderStructuredForegroundResult(
   const checkHints =
     redirectHint(command, logPath, posixShell) +
     sharedLogWarning(command, logPath, posixShell) +
-    (exitCode === "0" ? "" : overloadHint(execution.rawOutput));
+    (exitCode === "0" ? "" : overloadHint(execution.rawOutput, budgetSummary));
 
   return {
     content: `Exit code: ${exitCode}\n${leftoverNote}${silenceHint}${checkHints}${output}\n\n${diagnostics}`,
@@ -906,6 +939,20 @@ const BashParams = z.object({
     .describe("Notify on output match or silence"),
 });
 
+interface ChangedFilesWatch {
+  before: ChangedFilesState | ChangedFilesSkip;
+  mark: number;
+}
+
+function changedFilesSkip(reason: string): ChangedFilesSkip {
+  return { status: "skipped", reason, limit: false };
+}
+
+/** Union of every gate's protected paths, sorted for a stable note. */
+function protectedPatternsOf(plan: VerifyPlan | null): string[] {
+  return [...new Set((plan?.gates ?? []).flatMap((gate) => gate.protectedPaths))].sort();
+}
+
 export function createBashTool(
   cwd: string,
   processManager: ProcessManager,
@@ -923,7 +970,106 @@ export function createBashTool(
   checkCoverage?: CheckCoverageMemory,
   /** The latest identical pass and whether it is still current evidence. */
   findPriorPass?: (fingerprint: string) => { record: CheckCoverageRecord; current: boolean } | null,
+  /** Machine-profile concurrency settings; defaults apply when omitted. */
+  getConcurrencySettings: () => ConcurrencySettings = () => DEFAULT_CONCURRENCY_SETTINGS,
+  /** Heavy-check slot owner (the session id); one per tool instance when omitted. */
+  getHeavySlotOwner?: () => string,
+  /** Paths written by edit/write tools, left out of the changed-files note. */
+  toolWrites?: ToolWriteLog,
 ): AgentTool<typeof BashParams> {
+  const fallbackOwner = randomUUID();
+  const changedFilesCache: ChangedFilesHashCache = new Map();
+  const changedFilesRoot: ChangedFilesRootCache = {};
+  // Fail open: a capture problem never changes the command's result.
+  const beginChangedFiles = async (
+    command: string,
+  ): Promise<ChangedFilesWatch | ChangedFilesSkip> => {
+    if (ops !== localOperations) return changedFilesSkip("remote workspace");
+    if (isReadOnlyCommand(command)) return changedFilesSkip("read-only");
+    const mark = toolWrites?.mark() ?? 0;
+    return {
+      before: await captureChangedFilesState(cwd, {
+        cache: changedFilesCache,
+        rootCache: changedFilesRoot,
+      }),
+      mark,
+    };
+  };
+  const finishChangedFiles = async (
+    watch: ChangedFilesWatch | ChangedFilesSkip,
+  ): Promise<ChangedFilesResult> => {
+    if (!("before" in watch)) return watch;
+    const { before, mark } = watch;
+    if (before.status === "skipped") return before;
+    try {
+      const after = await captureChangedFilesState(cwd, {
+        cache: changedFilesCache,
+        previous: before,
+      });
+      if (after.status === "skipped") return after;
+      return diffChangedFiles(before, after, {
+        excludePaths: toolWrites?.writtenSince(mark) ?? [],
+        sessionCwd: cwd,
+      });
+    } catch {
+      return changedFilesSkip("capture failed");
+    }
+  };
+  let machineFacts: MachineFacts | null = null;
+  // Defaults only for local spawns; fail open, since a miss just means no defaults.
+  const resolveSpawnConcurrency = async (command: string): Promise<ConcurrencyEnvResult | null> => {
+    const settings = getConcurrencySettings();
+    if (!settings.defaults || ops !== localOperations) return null;
+    try {
+      machineFacts ??= readMachineFacts();
+      const target = leadingCdTarget(command, cwd);
+      const projectConfig = await detectProjectConcurrencyConfig({
+        dirs: target ? [target, cwd] : [cwd],
+        homeDir: os.homedir(),
+        cargoHome: process.env.CARGO_HOME,
+      });
+      return resolveConcurrencyEnv({
+        profile: deriveConcurrencyBudget(machineFacts, settings.budget),
+        sourceEnv: process.env,
+        platform: process.platform,
+        projectConfig,
+        command,
+      });
+    } catch (error) {
+      log("WARN", "bash", "Concurrency defaults skipped", { error: (error as Error).message });
+      return null;
+    }
+  };
+  type HeavyGate =
+    { ok: true; lease: HeavySlotLease | null; notice: string } | { ok: false; response: string };
+  const acquireHeavySlot = async (
+    command: string,
+    signal: AbortSignal,
+    onUpdate:
+      ((update: { type: "bash_progress"; output: string; totalBytes: number }) => void) | undefined,
+  ): Promise<HeavyGate> => {
+    const heavy = ops === localOperations ? classifyHeavyCheck(command) : null;
+    const limit = getConcurrencySettings().heavyCheckLimit;
+    if (!heavy || !(limit > 0)) return { ok: true, lease: null, notice: "" };
+    const result = await processManager.acquireHeavySlot(
+      heavy.label,
+      getHeavySlotOwner?.() ?? fallbackOwner,
+      limit,
+      signal,
+      (message) => onUpdate?.({ type: "bash_progress", output: `[${message}]\n`, totalBytes: 0 }),
+    );
+    if (!result.ok) {
+      return {
+        ok: false,
+        response: result.aborted ? CANCELLED_BEFORE_START : `Error: ${result.message}`,
+      };
+    }
+    const notice =
+      result.waitedMs > 0
+        ? `[Waited ${formatDuration(result.waitedMs)} for another window's full test or build to finish before starting.]`
+        : "";
+    return { ok: true, lease: result.lease, notice };
+  };
   // Lazily created on the first persist:true call; one session per tool
   // instance (i.e. per agent session), owned by the shared process manager.
   let sessionShell: PersistentShell | null = null;
@@ -1070,6 +1216,20 @@ export function createBashTool(
       const cooldownEnv = install
         ? packageCooldownEnv(command, { days: cooldownDays, now: Date.now(), cwd, versions })
         : {};
+      const concurrency = await resolveSpawnConcurrency(command);
+      const concurrencyLine = concurrency ? formatConcurrencyLine(concurrency, command) : "";
+      const spawnEnv = { ...(concurrency?.env ?? {}), ...cooldownEnv };
+      const withConcurrency = <T extends { details: BashToolResultDetails }>(rendered: T): T => {
+        if (concurrency && concurrencyLine) {
+          rendered.details.bashDiagnostics.concurrency = {
+            line: concurrencyLine,
+            budget: concurrency.profile.budget,
+            summary: concurrency.summary,
+          };
+        }
+        return rendered;
+      };
+      const joinNotices = (...parts: string[]): string => parts.filter(Boolean).join("\n");
       // bun has no env setting: the cooldown goes in as a flag.
       const runCommand = install
         ? bunCooldownCommand(command, cooldownDays, versions.bun ?? null)
@@ -1143,29 +1303,50 @@ export function createBashTool(
           quietBudgetSeconds: gateQuietSeconds,
         });
         if (context.signal.aborted) return CANCELLED_BEFORE_START;
-        const execution = await executePersistentCommand({
-          command,
-          runCommand: scopeCooldown(runCommand, cooldownEnv),
-          cwd,
-          timeoutMs: persistentLimits.hardMs ?? NO_DEADLINE,
-          inactivityMs: persistentLimits.inactivityMs ?? 0,
-          signal: context.signal,
-          processManager,
-          shell: sessionShell,
-          onUpdate: context.onUpdate
-            ? (output, totalBytes) =>
-                context.onUpdate?.({ type: "bash_progress", output, totalBytes })
-            : undefined,
-        });
-        const rendered = withCooldownHint(
-          await renderStructuredForegroundResult(execution, true),
-          execution,
-          install,
-          cooldownDays,
+        const persistentGate = await acquireHeavySlot(command, context.signal, context.onUpdate);
+        if (!persistentGate.ok) return persistentGate.response;
+        const persistentWatch = await beginChangedFiles(command);
+        let execution: ForegroundCommandExecution;
+        try {
+          execution = await executePersistentCommand({
+            command,
+            runCommand: scopeConcurrency(scopeCooldown(runCommand, cooldownEnv), concurrency),
+            cwd,
+            timeoutMs: persistentLimits.hardMs ?? NO_DEADLINE,
+            inactivityMs: persistentLimits.inactivityMs ?? 0,
+            signal: context.signal,
+            processManager,
+            shell: sessionShell,
+            onUpdate: context.onUpdate
+              ? (output, totalBytes) =>
+                  context.onUpdate?.({ type: "bash_progress", output, totalBytes })
+              : undefined,
+          });
+        } finally {
+          persistentGate.lease?.release();
+        }
+        const rendered = withConcurrency(
+          withCooldownHint(
+            await renderStructuredForegroundResult(execution, true, concurrency?.summary),
+            execution,
+            install,
+            cooldownDays,
+          ),
         );
+        const persistentChanged = await finishChangedFiles(persistentWatch);
+        rendered.details.bashDiagnostics.changedFiles = persistentChanged;
+        const persistentNotices = joinNotices(
+          persistentGate.notice,
+          concurrencyLine,
+          formatChangedFilesNote(
+            persistentChanged,
+            protectedPatternsOf(getVerifyPlan?.() ?? null),
+          ) ?? "",
+        );
+        const content = annotateSandboxDenial(rendered.content, sessionSandboxed);
         return {
           ...rendered,
-          content: annotateSandboxDenial(rendered.content, sessionSandboxed),
+          content: persistentNotices ? `${content}\n\n${persistentNotices}` : content,
         };
       }
       if (commandMode === "background") {
@@ -1176,13 +1357,25 @@ export function createBashTool(
           return `Error: OS sandbox unavailable; command was not run: ${(error as Error).message}`;
         }
         if (context.signal.aborted) return CANCELLED_BEFORE_START;
-        const result = await processManager.start(runCommand, cwd, launch, wakeRules, cooldownEnv);
+        const backgroundGate = await acquireHeavySlot(command, context.signal, context.onUpdate);
+        if (!backgroundGate.ok) return backgroundGate.response;
+        // start() owns the lease from here: released when the task exits or start fails.
+        const result = await processManager.start(
+          runCommand,
+          cwd,
+          launch,
+          wakeRules,
+          spawnEnv,
+          backgroundGate.lease ?? undefined,
+        );
         const watchWarnings = backgroundWatchWarnings(command);
+        const backgroundNotices = joinNotices(backgroundGate.notice, concurrencyLine);
         return (
           `Background process started.\n` +
           `ID: ${result.id}\n` +
           `PID: ${result.pid}\n` +
           `Log: ${result.logFile}\n` +
+          (backgroundNotices ? `${backgroundNotices}\n` : "") +
           (wakeRules
             ? result.wakeArmed
               ? `Wake rules armed: ${[
@@ -1226,112 +1419,139 @@ export function createBashTool(
       // when workspace inputs are unchanged across the run (upstream's snapshot
       // rule). Both snapshots are taken inside this call, so nothing the
       // command writes can land before the "before" snapshot.
-      const verifyPlan = getVerifyPlan?.() ?? null;
-      const classification = classifyVerificationCommand(command, {
-        posixShell: !shell.isCmdFallback,
-        verifyPlan,
-      });
-      const isLocal = ops === localOperations;
-      // Fingerprint check inputs (argv, cwd, env, HEAD, covered files) once
-      // before the run; the whole-tree hash doubles as the snapshot below.
-      const coverageArgs: CaptureCheckInputsArgs | null =
-        checkCoverage && isLocal && (classification.accepted || classification.snapshotEligible)
-          ? {
-              cwd,
-              command,
-              shellPath: shell.file,
-              env: sandboxAwareEnv(launch.sandboxed, cooldownEnv),
-              gate: matchVerifyPlanGate(verifyPlan, command),
-              signal: context.signal,
-            }
-          : null;
-      const checkBefore = coverageArgs ? await captureCheckInputs(coverageArgs) : null;
-      const treeHash = (inputs: CheckInputs | null): Promise<string | null> =>
-        inputs?.scope.kind === "tree"
-          ? Promise.resolve(inputs.contentHash)
-          : captureVerificationSnapshot(cwd);
-      const inputsBefore =
-        isLocal && classification.snapshotEligible === true
-          ? await treeHash(checkBefore)
-          : undefined;
-      const notices: string[] = [];
-      if (checkBefore) {
-        const prior = findPriorPass?.(checkBefore.fingerprint);
-        if (prior) notices.push(formatPriorPassNotice(prior.record, prior.current));
-      }
-      if (coverageArgs) {
-        const reported = formatProjectReportedPasses(verifyPlan);
-        if (reported) notices.push(reported);
-      }
-      // Stop may have landed while the launch was being prepared. The abort
-      // listener below would never fire for an already-aborted signal.
-      if (context.signal.aborted) return CANCELLED_BEFORE_START;
-
-      const execution = await executeForegroundCommand({
-        command,
-        cwd,
-        timeoutMs: limits.hardMs ?? NO_DEADLINE,
-        limits,
-        signal: context.signal,
-        ops,
-        processManager,
-        launch,
-        onUpdate: context.onUpdate
-          ? (output, totalBytes) =>
-              context.onUpdate?.({ type: "bash_progress", output, totalBytes })
-          : undefined,
-        env: cooldownEnv,
-      });
-      const rendered = withCooldownHint(
-        await renderStructuredForegroundResult(execution, false),
-        execution,
-        install,
-        cooldownDays,
-      );
-      // A hand-off is still running: its "after" state does not exist yet.
-      const handedOff = rendered.details.bashDiagnostics.reason === "backgrounded";
-      let checkAfter: CheckInputs | null = null;
-      if (coverageArgs && checkBefore && !handedOff) {
-        checkAfter = await captureCheckInputs(coverageArgs);
-        // Stored only when the inputs did not move during the run.
-        if (checkAfter?.fingerprint === checkBefore.fingerprint) {
-          rendered.details.bashDiagnostics.checkCoverage = {
-            fingerprint: checkAfter.fingerprint,
-            scope: checkAfter.scope,
-          };
+      // Before the input snapshot: a queued run must fingerprint the tree it starts on.
+      const foregroundGate = await acquireHeavySlot(command, context.signal, context.onUpdate);
+      if (!foregroundGate.ok) return foregroundGate.response;
+      const heavyLease = foregroundGate.lease;
+      // A hand-off moves the lease to the background task, which releases it on exit.
+      let leaseHandedOff = false;
+      try {
+        const verifyPlan = getVerifyPlan?.() ?? null;
+        const classification = classifyVerificationCommand(command, {
+          posixShell: !shell.isCmdFallback,
+          verifyPlan,
+        });
+        const isLocal = ops === localOperations;
+        // Fingerprint check inputs (argv, cwd, env, HEAD, covered files) once
+        // before the run; the whole-tree hash doubles as the snapshot below.
+        const coverageArgs: CaptureCheckInputsArgs | null =
+          checkCoverage && isLocal && (classification.accepted || classification.snapshotEligible)
+            ? {
+                cwd,
+                command,
+                shellPath: shell.file,
+                env: sandboxAwareEnv(launch.sandboxed, spawnEnv),
+                gate: matchVerifyPlanGate(verifyPlan, command),
+                signal: context.signal,
+              }
+            : null;
+        const [checkBefore, changedWatch] = await Promise.all([
+          coverageArgs ? captureCheckInputs(coverageArgs) : Promise.resolve(null),
+          beginChangedFiles(command),
+        ]);
+        const treeHash = (inputs: CheckInputs | null): Promise<string | null> =>
+          inputs?.scope.kind === "tree"
+            ? Promise.resolve(inputs.contentHash)
+            : captureVerificationSnapshot(cwd);
+        const inputsBefore =
+          isLocal && classification.snapshotEligible === true
+            ? await treeHash(checkBefore)
+            : undefined;
+        const notices: string[] = [];
+        if (foregroundGate.notice) notices.push(foregroundGate.notice);
+        if (concurrencyLine) notices.push(concurrencyLine);
+        if (checkBefore) {
+          const prior = findPriorPass?.(checkBefore.fingerprint);
+          if (prior) notices.push(formatPriorPassNotice(prior.record, prior.current));
         }
-      }
-      const backgroundTaskId = rendered.details.bashDiagnostics.backgroundTaskId;
-      if (coverageArgs && checkBefore && handedOff && backgroundTaskId) {
-        checkCoverage?.trackHandoff(backgroundTaskId, checkBefore, coverageArgs);
-      }
-      if (inputsBefore !== undefined && !handedOff) {
-        const inputsAfter = inputsBefore === null ? null : await treeHash(checkAfter);
-        rendered.details.bashDiagnostics.sourceUnchanged =
-          inputsBefore !== null && inputsAfter === inputsBefore;
-      }
-      const sandboxed = annotateSandboxDenial(rendered.content, launch.sandboxed);
-      const result = {
-        ...rendered,
-        content: notices.length > 0 ? `${sandboxed}\n\n${notices.join("\n")}` : sandboxed,
-      };
-      const diagnostics = rendered.details.bashDiagnostics;
-      if (
-        !review ||
-        context.signal.aborted ||
-        diagnostics?.reason !== "completed" ||
-        diagnostics.exitCode !== 0
-      ) {
-        return result;
-      }
-      const inspection = await collectVerificationReview(cwd, context.signal);
-      return {
-        ...result,
-        content: `${result.content}
+        if (coverageArgs) {
+          const reported = formatProjectReportedPasses(verifyPlan);
+          if (reported) notices.push(reported);
+        }
+        // Stop may have landed while the launch was being prepared. The abort
+        // listener below would never fire for an already-aborted signal.
+        if (context.signal.aborted) return CANCELLED_BEFORE_START;
+
+        const execution = await executeForegroundCommand({
+          command,
+          cwd,
+          timeoutMs: limits.hardMs ?? NO_DEADLINE,
+          limits,
+          signal: context.signal,
+          ops,
+          processManager,
+          launch,
+          onUpdate: context.onUpdate
+            ? (output, totalBytes) =>
+                context.onUpdate?.({ type: "bash_progress", output, totalBytes })
+            : undefined,
+          env: spawnEnv,
+          heavySlot: heavyLease ?? undefined,
+        });
+        const rendered = withConcurrency(
+          withCooldownHint(
+            await renderStructuredForegroundResult(execution, false, concurrency?.summary),
+            execution,
+            install,
+            cooldownDays,
+          ),
+        );
+        // A hand-off is still running: its "after" state does not exist yet.
+        const handedOff = rendered.details.bashDiagnostics.reason === "backgrounded";
+        leaseHandedOff = handedOff;
+        if (!handedOff) heavyLease?.release();
+        const changedFiles = handedOff
+          ? Promise.resolve(changedFilesSkip("handed off before it finished"))
+          : finishChangedFiles(changedWatch);
+        let checkAfter: CheckInputs | null = null;
+        if (coverageArgs && checkBefore && !handedOff) {
+          checkAfter = await captureCheckInputs(coverageArgs);
+          // Stored only when the inputs did not move during the run.
+          if (checkAfter?.fingerprint === checkBefore.fingerprint) {
+            rendered.details.bashDiagnostics.checkCoverage = {
+              fingerprint: checkAfter.fingerprint,
+              scope: checkAfter.scope,
+            };
+          }
+        }
+        const backgroundTaskId = rendered.details.bashDiagnostics.backgroundTaskId;
+        if (coverageArgs && checkBefore && handedOff && backgroundTaskId) {
+          checkCoverage?.trackHandoff(backgroundTaskId, checkBefore, coverageArgs);
+        }
+        if (inputsBefore !== undefined && !handedOff) {
+          const inputsAfter = inputsBefore === null ? null : await treeHash(checkAfter);
+          rendered.details.bashDiagnostics.sourceUnchanged =
+            inputsBefore !== null && inputsAfter === inputsBefore;
+        }
+        const changed = await changedFiles;
+        rendered.details.bashDiagnostics.changedFiles = changed;
+        const changedNote = formatChangedFilesNote(changed, protectedPatternsOf(verifyPlan));
+        if (changedNote) notices.push(changedNote);
+        const sandboxed = annotateSandboxDenial(rendered.content, launch.sandboxed);
+        const result = {
+          ...rendered,
+          content: notices.length > 0 ? `${sandboxed}\n\n${notices.join("\n")}` : sandboxed,
+        };
+        const diagnostics = rendered.details.bashDiagnostics;
+        if (
+          !review ||
+          context.signal.aborted ||
+          diagnostics?.reason !== "completed" ||
+          diagnostics.exitCode !== 0
+        ) {
+          return result;
+        }
+        const inspection = await collectVerificationReview(cwd, context.signal);
+        return {
+          ...result,
+          content: `${result.content}
 
 --- Independent read-only review ---
 ${await renderBashOutput(inspection)}`,
-      };
+        };
+      } finally {
+        if (!leaseHandedOff) heavyLease?.release();
+      }
     },
   };
 }

@@ -73,6 +73,7 @@ import { AuthStorage, readStoredBaseUrlSync } from "./core/auth-storage.js";
 import { SessionManager, type TurnMetricPayload } from "./core/session-manager.js";
 import {
   ensureAppDirs,
+  concurrencySettingsFrom,
   foregroundLimitSettingsFrom,
   getAppPaths,
   loadSavedSettings,
@@ -781,6 +782,7 @@ async function runInkTUI(opts: {
     getThinkingLevel: () => activeThinkingLevel,
     getMaxPerModel: () => opts.subagentMaxPerModel,
     getForegroundLimitSettings: () => foregroundLimitSettingsFrom(savedSettings),
+    getConcurrencySettings: () => concurrencySettingsFrom(savedSettings),
   });
 
   // MCP startup can involve `npx` installing/booting servers. Do it after the

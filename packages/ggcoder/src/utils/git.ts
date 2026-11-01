@@ -303,7 +303,8 @@ async function probeDriverOverrides(options: BackgroundGitOptions): Promise<stri
           ],
           {
             cwd: options.cwd,
-            timeoutMs: PROBE_TIMEOUT_MS,
+            // Never outlive the caller's budget (changed-files caps a capture at 1.5 s).
+            timeoutMs: Math.min(PROBE_TIMEOUT_MS, options.timeoutMs ?? PROBE_TIMEOUT_MS),
             signal: options.signal,
             env: options.env,
             isolateRepository: options.isolateRepository,

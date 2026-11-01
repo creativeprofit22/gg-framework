@@ -78,3 +78,33 @@ describe("SettingsManager verify-plan approvals", () => {
     expect(second.isVerifyPlanApproved(dir, DESCRIPTOR)).toBe(true);
   });
 });
+
+describe("SettingsManager concurrency settings", () => {
+  it("defaults to an auto budget, env defaults on and one heavy check at a time", async () => {
+    const settings = await load();
+    expect(settings.get("concurrencyBudget")).toBe(0);
+    expect(settings.get("concurrencyDefaults")).toBe(true);
+    expect(settings.get("heavyCheckLimit")).toBe(1);
+  });
+
+  it("reads saved values and falls back to defaults for invalid ones", async () => {
+    await fs.writeFile(
+      file,
+      JSON.stringify({ concurrencyBudget: 4, concurrencyDefaults: false, heavyCheckLimit: 0 }),
+      "utf-8",
+    );
+    const saved = await load();
+    expect(saved.get("concurrencyBudget")).toBe(4);
+    expect(saved.get("concurrencyDefaults")).toBe(false);
+    expect(saved.get("heavyCheckLimit")).toBe(0);
+
+    await fs.writeFile(
+      file,
+      JSON.stringify({ concurrencyBudget: 2.5, heavyCheckLimit: 99 }),
+      "utf-8",
+    );
+    const invalid = await load();
+    expect(invalid.get("concurrencyBudget")).toBe(0);
+    expect(invalid.get("heavyCheckLimit")).toBe(1);
+  });
+});

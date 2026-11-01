@@ -1,11 +1,12 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { slowRevParseGit } from "../test-support/slow-git.js";
 import {
+  BackgroundGitError,
   getGitDirtyFileCount,
   isGitRepo,
   runBackgroundGit,
@@ -17,7 +18,12 @@ const tempDirs: string[] = [];
 
 afterEach(async () => {
   vi.unstubAllEnvs();
-  await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+  // Retries: on Windows a just-killed git can still hold its cwd briefly.
+  await Promise.all(
+    tempDirs
+      .splice(0)
+      .map((dir) => rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })),
+  );
 });
 
 describe("getGitDirtyFileCount", () => {
@@ -110,4 +116,55 @@ describe("isolateRepository", () => {
     });
     expect(await realpath(isolated.stdout.trim())).toBe(await realpath(path.join(cwd, ".git")));
   });
+});
+
+describe("runBackgroundGit timeout budget", () => {
+  async function expectKilledWithin(promise: Promise<unknown>, maxMs: number): Promise<void> {
+    const started = Date.now();
+    const error = await promise.then(
+      () => null,
+      (reason: unknown) => reason,
+    );
+    expect(Date.now() - started).toBeLessThan(maxMs);
+    expect(error).toBeInstanceOf(BackgroundGitError);
+    expect((error as BackgroundGitError).killed).toBe(true);
+  }
+
+  it("rejects a tiny budget quickly with a killed error", async () => {
+    const cwd = await mkdtemp(path.join(tmpdir(), "gg-git-budget-"));
+    tempDirs.push(cwd);
+    await execFileAsync("git", ["init", "-q"], { cwd });
+
+    await expectKilledWithin(
+      runBackgroundGit(["status", "--porcelain"], { cwd, timeoutMs: 1 }),
+      1_500,
+    );
+  });
+
+  // Regression: the driver probe before status/diff used a fixed 2 s timeout,
+  // so a slow `git config` overran the caller's budget.
+  it.skipIf(process.platform === "win32")(
+    "caps the driver probe at the caller's budget",
+    async () => {
+      const cwd = await mkdtemp(path.join(tmpdir(), "gg-git-budget-"));
+      tempDirs.push(cwd);
+      await execFileAsync("git", ["init", "-q"], { cwd });
+      const shimDir = await mkdtemp(path.join(tmpdir(), "gg-slow-config-"));
+      tempDirs.push(shimDir);
+      const realGit = (await execFileAsync("sh", ["-c", "command -v git"])).stdout.trim();
+      const shim = path.join(shimDir, "git");
+      // `exec` so the timeout kills sleep itself, not a shell that leaves it holding stdout.
+      await writeFile(
+        shim,
+        `#!/bin/sh\ncase " $* " in *" config "*) exec sleep 5 ;; esac\nexec "${realGit}" "$@"\n`,
+      );
+      await chmod(shim, 0o755);
+      vi.stubEnv("PATH", `${shimDir}${path.delimiter}${process.env.PATH ?? ""}`);
+
+      await expectKilledWithin(
+        runBackgroundGit(["status", "--porcelain"], { cwd, timeoutMs: 300 }),
+        1_500,
+      );
+    },
+  );
 });

@@ -14,6 +14,7 @@ import type { AgentNotificationQueue } from "./agent-notifications.js";
 import { createCommandWatchdog, type CommandWatchdog } from "./command-watchdog.js";
 import { watchExitSettle } from "../tools/exit-settle.js";
 import { log } from "./logger.js";
+import { HeavyCheckSlots, type HeavySlotLease, type HeavySlotResult } from "./machine-profile.js";
 
 export interface BackgroundProcess {
   id: string;
@@ -74,6 +75,8 @@ export interface AdoptOptions {
    * far plus when output was last seen (the silence clock carries over).
    */
   takeOver: (id: string) => { seedOutput: string; lastOutputAt: number };
+  /** Heavy-check lease the foreground run held; released when the child closes. The caller keeps it if adopt throws. */
+  heavySlot?: HeavySlotLease;
 }
 
 /** The child already exited; the caller should settle it in the foreground. */
@@ -312,6 +315,8 @@ export interface ProcessManagerOptions {
   terminalSettlementMs?: number;
   /** Queue for bounded progress and terminal process notifications. */
   notifications?: AgentNotificationQueue;
+  /** Heavy-check slots shared by every session in this daemon; defaults to a private pool. */
+  heavyCheckSlots?: HeavyCheckSlots;
   /** Legacy platform overrides retained for deterministic process-tree tests. */
   platform?: NodeJS.Platform;
   kill?: typeof process.kill;
@@ -412,6 +417,7 @@ export class ProcessManager {
   /** Processes the agent or host is deliberately stopping: their non-zero exit
    *  is the stop working, not news, so it must not raise an urgent alert. */
   private stopping = new Set<string>();
+  private readonly heavySlots: HeavyCheckSlots;
 
   constructor(options?: ProcessManagerOptions);
   constructor(
@@ -440,6 +446,21 @@ export class ProcessManager {
         backgroundLogRoot: lifecycleOrOptions.backgroundLogRoot ?? lifecycleOrOptions.bgDir,
       };
     }
+    this.heavySlots = this.options.heavyCheckSlots ?? new HeavyCheckSlots();
+  }
+
+  /**
+   * Take a heavy-check slot before starting a full test or build. Queues behind
+   * other sessions, refuses when this owner already holds one; never kills.
+   */
+  acquireHeavySlot(
+    label: string,
+    owner: string,
+    limit: number,
+    signal?: AbortSignal,
+    onWait?: (message: string) => void,
+  ): Promise<HeavySlotResult> {
+    return this.heavySlots.acquire({ label, owner, limit, signal, onWait });
   }
 
   /** Register session-owned cleanup and return an idempotent unregister function. */
@@ -941,6 +962,7 @@ export class ProcessManager {
     logFile: string;
     logStream: Writable;
     onEarlyClose: () => void;
+    heavySlot?: HeavySlotLease;
   }): { register(pid: number, startedAt: number): BackgroundProcess; endLog(): void } {
     const { id, child, command, logFile, logStream } = options;
     let settleNativeClose!: () => void;
@@ -970,6 +992,7 @@ export class ProcessManager {
     const onClose = (code: number | null, signal: NodeJS.Signals | null): void => {
       settleNativeClose();
       endLog();
+      options.heavySlot?.release();
       if (!proc) {
         options.onEarlyClose();
         return;
@@ -1017,6 +1040,7 @@ export class ProcessManager {
         };
         this.processes.set(id, proc);
         this.children.set(id, child);
+        options.heavySlot?.attachTask(id);
         this.completions.set(id, completion);
         this.nativeCloseDeferreds.set(id, { child, promise: nativeClose, cancel: null });
         child.unref();
@@ -1033,6 +1057,24 @@ export class ProcessManager {
     wake?: WakeRules,
     /** Extra env for this process (e.g. the package release-age cooldown). */
     extraEnv: Record<string, string> = {},
+    /** Heavy-check lease; released when the child closes or the start fails. */
+    heavySlot?: HeavySlotLease,
+  ): Promise<StartResult> {
+    try {
+      return await this.startTracked(command, cwd, launch, wake, extraEnv, heavySlot);
+    } catch (error) {
+      heavySlot?.release();
+      throw error;
+    }
+  }
+
+  private async startTracked(
+    command: string,
+    cwd: string,
+    launch: SandboxLaunch | undefined,
+    wake: WakeRules | undefined,
+    extraEnv: Record<string, string>,
+    heavySlot: HeavySlotLease | undefined,
   ): Promise<StartResult> {
     if (this.closing) throw new Error("Process manager is shutting down");
     const { id, logFile, logStream } = await this.openBackgroundLog();
@@ -1068,6 +1110,7 @@ export class ProcessManager {
         command,
         logFile,
         logStream,
+        heavySlot,
         onEarlyClose: () => {
           if (!startupSettled) {
             startupSettled = true;
@@ -1155,6 +1198,7 @@ export class ProcessManager {
       logFile,
       logStream,
       onEarlyClose: () => {},
+      heavySlot: options.heavySlot,
     });
     child.on("error", () => {});
     child.stdout?.on("error", () => {});

@@ -64,6 +64,16 @@ describe("overloadHint", () => {
     expect(hint.endsWith("]\n")).toBe(true);
   });
 
+  it("shows the applied concurrency budget and links the profile section", () => {
+    const hint = overloadHint(vitestTimeouts, "budget 6 (12 threads, ~6 cores est., 24 GiB)");
+    expect(hint).toContain("machine-profile defaults in docs/harness-checks.md");
+    expect(hint).toContain(
+      "Concurrency budget here: budget 6 (12 threads, ~6 cores est., 24 GiB); see " +
+        "docs/harness-checks.md#machine-profile-defaults (setting `concurrencyBudget`).]\n",
+    );
+    expect(overloadHint(vitestTimeouts)).not.toContain("Concurrency budget here");
+  });
+
   it("counts jest and node:test timeout lines too", () => {
     const output = [
       "thrown: Exceeded timeout of 5000 ms for a test.",

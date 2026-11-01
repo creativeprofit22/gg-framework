@@ -5,6 +5,7 @@ import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  concurrencySettingsFrom,
   foregroundLimitSettingsFrom,
   loadSavedSettings,
   projectScopeAllowed,
@@ -313,5 +314,74 @@ describe("removeRetiredSeededSkills", () => {
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("concurrency settings", () => {
+  it("parses concurrency keys and maps them, including concurrencyDefaults: false", () => {
+    const settingsPath = tempSettingsPath();
+    fs.writeFileSync(
+      settingsPath,
+      JSON.stringify({ concurrencyBudget: 6, concurrencyDefaults: false, heavyCheckLimit: 0 }),
+      "utf-8",
+    );
+
+    const settings = loadSavedSettings(settingsPath);
+
+    expect(settings.concurrencyBudget).toBe(6);
+    expect(settings.concurrencyDefaults).toBe(false);
+    expect(settings.heavyCheckLimit).toBe(0);
+    expect(concurrencySettingsFrom(settings)).toEqual({
+      budget: 6,
+      defaults: false,
+      heavyCheckLimit: 0,
+    });
+  });
+
+  it.each([
+    ["negative", -1, "false", -1],
+    ["non-integer", 1.5, 0, 1.5],
+    ["out of range", 257, "yes", 9],
+    ["string", "4", null, "1"],
+  ])(
+    "drops %s concurrency values and falls back to defaults",
+    (_label, budget, defaults, heavy) => {
+      const settingsPath = tempSettingsPath();
+      fs.writeFileSync(
+        settingsPath,
+        JSON.stringify({
+          concurrencyBudget: budget,
+          concurrencyDefaults: defaults,
+          heavyCheckLimit: heavy,
+        }),
+        "utf-8",
+      );
+
+      const settings = loadSavedSettings(settingsPath);
+
+      expect(settings.concurrencyBudget).toBeUndefined();
+      expect(settings.concurrencyDefaults).toBeUndefined();
+      expect(settings.heavyCheckLimit).toBeUndefined();
+      expect(concurrencySettingsFrom(settings)).toEqual({
+        budget: 0,
+        defaults: true,
+        heavyCheckLimit: 1,
+      });
+    },
+  );
+
+  it("accepts the upper bounds", () => {
+    const settingsPath = tempSettingsPath();
+    fs.writeFileSync(
+      settingsPath,
+      JSON.stringify({ concurrencyBudget: 256, heavyCheckLimit: 8 }),
+      "utf-8",
+    );
+
+    expect(concurrencySettingsFrom(loadSavedSettings(settingsPath))).toEqual({
+      budget: 256,
+      defaults: true,
+      heavyCheckLimit: 8,
+    });
   });
 });

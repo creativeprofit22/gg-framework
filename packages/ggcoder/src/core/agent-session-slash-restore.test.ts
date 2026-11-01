@@ -283,6 +283,70 @@ describe("slash-command restore", () => {
     }
   }, 20_000);
 
+  it("runs the user's own global steroids.md instead of the built-in /steroids", async () => {
+    const { AgentSession } = await import("./agent-session.js");
+    const globalDir = path.join(tmpHome, ".gg", "commands");
+    await fs.mkdir(globalDir, { recursive: true });
+    await fs.writeFile(
+      path.join(globalDir, "steroids.md"),
+      "---\nname: steroids\ndescription: Custom steroids\n---\nGLOBAL STEROIDS RECIPE.",
+      "utf-8",
+    );
+    const session = new AgentSession({
+      provider: "anthropic",
+      model: "claude-test",
+      cwd: tmpProject,
+      systemPrompt: "sys",
+    });
+    await session.initialize();
+    try {
+      await session.prompt("/steroids");
+      const body = session.getMessages().find((m) => m.role === "user")!.content as string;
+      expect(body).toContain("GLOBAL STEROIDS RECIPE.");
+      expect(body).not.toContain("Phase 0: Profile the project");
+    } finally {
+      await session.dispose();
+    }
+  }, 20_000);
+
+  it("runs a project steroids.md instead of the built-in /steroids", async () => {
+    const { AgentSession } = await import("./agent-session.js");
+    await writeCustomCommand("steroids", "PROJECT STEROIDS RECIPE.");
+    const session = new AgentSession({
+      provider: "anthropic",
+      model: "claude-test",
+      cwd: tmpProject,
+      systemPrompt: "sys",
+    });
+    await session.initialize();
+    try {
+      await session.prompt("/steroids");
+      const body = session.getMessages().find((m) => m.role === "user")!.content as string;
+      expect(body).toContain("PROJECT STEROIDS RECIPE.");
+      expect(body).not.toContain("Phase 0: Profile the project");
+    } finally {
+      await session.dispose();
+    }
+  }, 20_000);
+
+  it("runs the built-in /steroids when no custom steroids.md exists", async () => {
+    const { AgentSession } = await import("./agent-session.js");
+    const session = new AgentSession({
+      provider: "anthropic",
+      model: "claude-test",
+      cwd: tmpProject,
+      systemPrompt: "sys",
+    });
+    await session.initialize();
+    try {
+      await session.prompt("/steroids");
+      const body = session.getMessages().find((m) => m.role === "user")!.content as string;
+      expect(body).toContain("Phase 0: Profile the project");
+    } finally {
+      await session.dispose();
+    }
+  }, 20_000);
+
   it("accepts approved focus while rejecting invalid focus, references and attachments", async () => {
     const { AgentSession } = await import("./agent-session.js");
     const session = new AgentSession({

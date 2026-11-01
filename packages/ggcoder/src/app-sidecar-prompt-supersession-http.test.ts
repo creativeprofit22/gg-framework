@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import ts from "typescript";
 import { expect, it, vi } from "vitest";
@@ -8,6 +9,13 @@ import { handleAppSidecarChatResearchPrompt } from "./app-sidecar-chat-research-
 import { withRealSidecar } from "./test-support/real-sidecar.js";
 import { isAppSidecarSessionBusy } from "./app-sidecar-session-mutation.js";
 import { isProgrammaticCodeMode } from "./app-sidecar-programmatic-execution.js";
+import { loadWorkspaceCustomCommands } from "./core/custom-commands.js";
+import {
+  CUSTOM_OVERRIDABLE_PROMPT_COMMANDS,
+  getPromptCommand,
+  PROMPT_COMMANDS,
+} from "./core/prompt-commands.js";
+import { mentionedPaths, slashCommandName } from "./core/trophies/engine.js";
 
 it.each(["research", "attachment", "accepted"] as const)(
   "controller supersession follows acceptance: %s",
@@ -215,3 +223,71 @@ it.each(["cancelling", "cancel_failed", "new-question"] as const)(
     }
   },
 );
+
+it("prompt trophies count a user's override of an overridable built-in as custom", async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "gg-trophy-commands-"));
+  const project = path.join(home, "project");
+  vi.stubEnv("HOME", home);
+  vi.stubEnv("USERPROFILE", home);
+  vi.stubEnv("GG_AGENT_DIR", path.join(home, ".gg"));
+  try {
+    const commands = path.join(home, ".gg", "commands");
+    await fs.mkdir(commands, { recursive: true });
+    await fs.mkdir(project);
+    for (const name of ["steroids", "init"])
+      await fs.writeFile(path.join(commands, `${name}.md`), `My own ${name} recipe`);
+    const source = ts.createSourceFile(
+      "app-sidecar.ts",
+      await fs.readFile(new URL("./app-sidecar.ts", import.meta.url), "utf8"),
+      ts.ScriptTarget.ES2022,
+      true,
+    );
+    const declarations: ts.FunctionDeclaration[] = [];
+    const visit = (node: ts.Node) => {
+      if (ts.isFunctionDeclaration(node) && node.name?.text === "recordPromptTrophies")
+        declarations.push(node);
+      ts.forEachChild(node, visit);
+    };
+    visit(source);
+    expect(declarations).toHaveLength(1);
+    const recorded: unknown[] = [];
+    const bindings = {
+      slashCommandName,
+      mentionedPaths,
+      getPromptCommand,
+      CUSTOM_OVERRIDABLE_PROMPT_COMMANDS,
+      PROMPT_COMMANDS,
+      session: { loadCustomCommands: () => loadWorkspaceCustomCommands([project]) },
+      trophies: { recordPrompt: async (prompt: unknown) => void recorded.push(prompt) },
+      opts: { id: "pane" },
+      cwd: project,
+      fs,
+      path,
+      log: (...args: unknown[]) => {
+        throw new Error(`unexpected log: ${JSON.stringify(args)}`);
+      },
+    };
+    const javascript = ts.transpileModule(declarations[0]!.getText(source), {
+      compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext },
+    }).outputText;
+    const record = new Function(
+      ...Object.keys(bindings),
+      `${javascript}\nreturn recordPromptTrophies;`,
+    )(...Object.values(bindings)) as (input: {
+      text: string;
+      attachments: number;
+      enhanced: boolean;
+      steer: boolean;
+      expands: boolean;
+    }) => Promise<void>;
+    for (const text of ["/steroids", "/init"])
+      await record({ text, attachments: 0, enhanced: false, steer: false, expands: true });
+    expect(recorded).toEqual([
+      expect.objectContaining({ command: "steroids", customCommand: true }),
+      expect.objectContaining({ command: "init", customCommand: false }),
+    ]);
+  } finally {
+    vi.unstubAllEnvs();
+    await fs.rm(home, { recursive: true, force: true });
+  }
+});

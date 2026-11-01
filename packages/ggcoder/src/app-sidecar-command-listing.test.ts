@@ -152,6 +152,41 @@ describe("setup-first desktop discovery", () => {
     ]);
   });
 
+  it("lists the user's own global /steroids instead of the built-in, exactly once", async () => {
+    const globalDir = path.join(root, "home", ".gg", "commands");
+    await fs.mkdir(globalDir, { recursive: true });
+    await fs.writeFile(
+      path.join(globalDir, "steroids.md"),
+      "---\nname: steroids\ndescription: Custom steroids\n---\nCustom steroids body.",
+    );
+    const rows = (await appSidecarCodeCommandsResponse(cwd)).commands.filter(
+      (item) => item.name === "steroids",
+    );
+    expect(rows).toEqual([
+      expect.objectContaining({
+        description: "Custom steroids",
+        source: "custom",
+        origin: "global-custom",
+      }),
+    ]);
+  });
+
+  it("lists a project /steroids instead of the built-in, exactly once", async () => {
+    await command("steroids");
+    const rows = (await appSidecarCodeCommandsResponse(cwd)).commands.filter(
+      (item) => item.name === "steroids",
+    );
+    expect(rows).toEqual([expect.objectContaining({ source: "custom", origin: "project-custom" })]);
+  });
+
+  it("lists the built-in /steroids exactly once when no custom file exists", async () => {
+    const rows = (await appSidecarCodeCommandsResponse(cwd)).commands.filter(
+      (item) => item.name === "steroids",
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.source).not.toBe("custom");
+  });
+
   it("re-reads command creation and removal without restarting discovery", async () => {
     expect(
       (await appSidecarCodeCommandsResponse(cwd)).commands.some((item) => item.name === "fresh"),

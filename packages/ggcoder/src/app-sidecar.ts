@@ -224,7 +224,11 @@ import {
   isThinkingLevelSupported,
   resolveInitialThinkingLevel,
 } from "./core/thinking-level.js";
-import { PROMPT_COMMANDS } from "./core/prompt-commands.js";
+import {
+  CUSTOM_OVERRIDABLE_PROMPT_COMMANDS,
+  getPromptCommand,
+  PROMPT_COMMANDS,
+} from "./core/prompt-commands.js";
 import { AppSidecarProgrammaticChat, bindProgrammaticAssessmentEvents, programmaticChatIdentity } from "./app-sidecar-programmatic-chat.js";
 import {
   handleAppSidecarProgrammaticExecution,
@@ -4502,9 +4506,11 @@ async function createSession(
     try {
       const name = input.attachments === 0 ? slashCommandName(input.text) : null;
       const command = name && (input.expands || name === "add-dir") ? name : null;
+      // Mirrors agent-session: a user's own file replaces an overridable built-in.
+      const builtin = command === null ? undefined : getPromptCommand(command);
       const customCommand =
         command !== null &&
-        !PROMPT_COMMANDS.some((c) => c.name === command || c.aliases.includes(command)) &&
+        (!builtin || CUSTOM_OVERRIDABLE_PROMPT_COMMANDS.has(builtin.name)) &&
         (await session.loadCustomCommands()).some((c) => c.name.toLowerCase() === command);
       const root = path.resolve(cwd);
       let fileMentions = 0;

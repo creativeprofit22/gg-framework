@@ -110,6 +110,26 @@ describe("terminal live custom command resolution", () => {
     },
   );
 
+  it.each(["steroids", "commit"])(
+    "runs a project or global custom /%s instead of the built-in",
+    async (name) => {
+      const builtin = PROMPT_COMMANDS.find((command) => command.name === name)!;
+      const none = options(`/${name} focus`);
+      expect(await submitPromptCommand(none)).toBe(true);
+      expect(none.runAgent).toHaveBeenCalledWith(expandPromptCommand(builtin.prompt, "focus"));
+
+      await writeCommand(path.join(getAppPaths().agentDir, "commands"), name, "Global recipe");
+      const global = options(`/${name} focus`);
+      expect(await submitPromptCommand(global)).toBe(true);
+      expect(global.runAgent).toHaveBeenCalledWith(expandPromptCommand("Global recipe", "focus"));
+
+      await writeCommand(path.join(cwd, ".gg/commands"), name, "Project recipe");
+      const project = options(`/${name} focus`);
+      expect(await submitPromptCommand(project)).toBe(true);
+      expect(project.runAgent).toHaveBeenCalledWith(expandPromptCommand("Project recipe", "focus"));
+    },
+  );
+
   it("does no inventory work for ordinary input or built-in prompts", async () => {
     const load = vi.spyOn(customCommandLoader, "loadCustomCommands");
     const discover = vi.spyOn(discoveryModule, "discoverCommands");

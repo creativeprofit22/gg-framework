@@ -2,7 +2,11 @@ import type React from "react";
 import { workflowQueuePolicyError } from "../core/workflow-busy-policy.js";
 import type { ImageAttachment } from "../utils/image.js";
 import { getModel } from "../core/model-registry.js";
-import { PROMPT_COMMANDS } from "../core/prompt-commands.js";
+import {
+  CUSTOM_OVERRIDABLE_PROMPT_COMMANDS,
+  getPromptCommand,
+  PROMPT_COMMANDS,
+} from "../core/prompt-commands.js";
 import {
   createProgrammaticReadinessReader,
   programmaticReadinessGuidance,
@@ -58,12 +62,17 @@ export async function submitPromptCommand({
       "Review and select an opportunity in Opportunities, then approve its separate task. Direct /programmatic-run does not authorize execution.",
     );
   }
-  if (!parseSlashCommandInput(trimmed)) return false;
+  const parsed = parseSlashCommandInput(trimmed);
+  if (!parsed) return false;
   // Host actions have already intercepted their exact invocation shapes. The
   // palette is only a display projection, never an executable body cache.
-  const promptCommandRoute =
-    routePromptCommandInput(trimmed, PROMPT_COMMANDS) ??
-    routePromptCommandInput(trimmed, PROMPT_COMMANDS, await loadCustomCommands(cwd));
+  const overridable = CUSTOM_OVERRIDABLE_PROMPT_COMMANDS.has(
+    getPromptCommand(parsed.name)?.name ?? "",
+  );
+  const promptCommandRoute = overridable
+    ? routePromptCommandInput(trimmed, PROMPT_COMMANDS, await loadCustomCommands(cwd))
+    : (routePromptCommandInput(trimmed, PROMPT_COMMANDS) ??
+      routePromptCommandInput(trimmed, PROMPT_COMMANDS, await loadCustomCommands(cwd)));
   if (!promptCommandRoute) return false;
 
   const { cmdName } = promptCommandRoute;

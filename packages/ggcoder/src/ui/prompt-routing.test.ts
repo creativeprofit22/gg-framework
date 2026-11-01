@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { routePromptCommandInput } from "./prompt-routing.js";
 import { expandPromptCommand } from "../core/prompt-command-expansion.js";
+import { PROMPT_COMMANDS, getPromptCommand } from "../core/prompt-commands.js";
 
 const commands = [
   { name: "builtin", aliases: ["alias"], description: "Fixture", prompt: "Built-in prompt" },
@@ -39,6 +40,28 @@ describe("prompt command routing", () => {
     for (const input of ["/mycommand focus", "/unknown", "ordinary text", "/"]) {
       expect(routePromptCommandInput(input, commands, customCommands)).toBeNull();
     }
+  });
+
+  it.each(["steroids", "commit"])("lets a custom /%s replace the built-in body", (name) => {
+    const route = routePromptCommandInput(`/${name} focus`, PROMPT_COMMANDS, [
+      { name, prompt: "My own recipe" },
+    ]);
+    expect(route).toMatchObject({ cmdName: name, cmdArgs: "focus", promptText: "My own recipe" });
+  });
+
+  it.each(["steroids", "commit", "init"])("runs the built-in /%s with no custom file", (name) => {
+    expect(routePromptCommandInput(`/${name}`, PROMPT_COMMANDS, [])?.promptText).toBe(
+      getPromptCommand(name)?.prompt,
+    );
+  });
+
+  it("keeps a non-overridable built-in over a same-named custom command", () => {
+    const builtin = getPromptCommand("init")?.prompt;
+    expect(builtin).toBeTruthy();
+    expect(
+      routePromptCommandInput("/init", PROMPT_COMMANDS, [{ name: "init", prompt: "Shadow" }])
+        ?.promptText,
+    ).toBe(builtin);
   });
 
   it("retains built-in precedence over custom commands", () => {

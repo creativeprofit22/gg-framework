@@ -4,7 +4,7 @@ import path from "node:path";
 import type { Provider, TextContent, ImageContent, VideoContent } from "@kenkaiiii/gg-ai";
 import type { ImageAttachment } from "../utils/image.js";
 import { VIDEO_MEDIA_TYPES } from "../utils/image.js";
-import { PROMPT_COMMANDS } from "../core/prompt-commands.js";
+import { CUSTOM_OVERRIDABLE_PROMPT_COMMANDS, PROMPT_COMMANDS } from "../core/prompt-commands.js";
 import { parseSlashCommandInput } from "../core/slash-commands.js";
 import { expandPromptCommand } from "../core/prompt-command-expansion.js";
 import type { CustomCommand } from "../core/custom-commands.js";
@@ -18,8 +18,11 @@ export function routePromptCommandInput(
   if (!parsed) return null;
   const { name: cmdName, args: cmdArgs } = parsed;
   const builtinCmd = promptCommands.find((c) => c.name === cmdName || c.aliases.includes(cmdName));
-  const customCmd = !builtinCmd ? customCommands.find((c) => c.name === cmdName) : undefined;
-  const promptText = builtinCmd?.prompt ?? customCmd?.prompt;
+  // Same rule as AgentSession: custom commands fill unclaimed names and
+  // replace only the overridable built-ins (e.g. a user's own /commit).
+  const customCanReplace = !builtinCmd || CUSTOM_OVERRIDABLE_PROMPT_COMMANDS.has(builtinCmd.name);
+  const customCmd = customCanReplace ? customCommands.find((c) => c.name === cmdName) : undefined;
+  const promptText = customCmd?.prompt ?? builtinCmd?.prompt;
   if (!promptText) return null;
   return {
     cmdName,

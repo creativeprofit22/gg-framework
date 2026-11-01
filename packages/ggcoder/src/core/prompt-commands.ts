@@ -524,11 +524,14 @@ Tell the user indexing is starting and can take a few minutes (each repo is a fu
 
 /**
  * Built-ins a user's own custom command of the same name replaces (project
- * or global). Every other built-in keeps its name, as before. `/commit` is a
- * personal workflow: a hand-tuned recipe, such as atomic grouped commits,
- * must not be silently shadowed by the generic single-commit built-in.
+ * or global). Every other built-in keeps its name, as before. These are
+ * personal workflows: a hand-tuned recipe, such as atomic grouped commits or
+ * a richer /steroids report, must not be silently shadowed by the built-in.
  */
-export const CUSTOM_OVERRIDABLE_PROMPT_COMMANDS: ReadonlySet<string> = new Set(["commit"]);
+export const CUSTOM_OVERRIDABLE_PROMPT_COMMANDS: ReadonlySet<string> = new Set([
+  "commit",
+  "steroids",
+]);
 
 /** Look up a prompt command by name or alias and render session-aware instructions. */
 export function getPromptCommand(

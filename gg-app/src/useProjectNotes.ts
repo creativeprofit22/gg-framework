@@ -595,7 +595,11 @@ export function useProjectNotes(
         void readAuthoritativeNotes();
         return;
       }
-      if (!isNotesChangeEvent(event)) return;
+      if (!isNotesChangeEvent(event)) {
+        // A cut-off or malformed snapshot still means Notes changed; re-read instead of staying stale.
+        if (event.type === "notes_change") void readAuthoritativeNotes();
+        return;
+      }
       if (modeRef.current === "unsupported") {
         void readAuthoritativeNotes();
         return;

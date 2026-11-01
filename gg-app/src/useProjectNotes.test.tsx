@@ -2922,3 +2922,28 @@ describe("useProjectNotes sidecar authority", () => {
     ).toHaveLength(2);
   });
 });
+
+describe("useProjectNotes cut-off pushed snapshots", () => {
+  it("re-reads Notes when a pushed snapshot fails validation", async () => {
+    const cwd = "/work/project";
+    const server = new FakeNotesServer();
+    server.snapshots.set(cwd, { projectKey: cwd, revision: 3, document: notes("planning") });
+    const client = server.connect(cwd);
+    const storage = new MemoryStorage();
+    const hook = renderHook(() => useProjectNotes(cwd, hookOptions(client, storage)));
+    await waitFor(() => expect(hook.result.current.document.reference).toBe("planning"));
+    const reads = client.getCalls;
+
+    server.snapshots.set(cwd, { projectKey: cwd, revision: 4, document: notes("phase done") });
+    act(() =>
+      client.emit({
+        type: "notes_change",
+        data: { projectKey: cwd, revision: 4, document: "[TRUNCATED]" },
+      }),
+    );
+
+    await waitFor(() => expect(hook.result.current.document.reference).toBe("phase done"));
+    expect(hook.result.current.revision).toBe(4);
+    expect(client.getCalls).toBe(reads + 1);
+  });
+});

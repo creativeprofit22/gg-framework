@@ -1,4 +1,5 @@
 import type http from "node:http";
+import { redactValue } from "@kenkaiiii/gg-ai";
 
 export interface DisposableSessionContext {
   dispose: () => void | Promise<void>;
@@ -20,6 +21,21 @@ export function sessionEventFrame(
 
 export function sessionEventSseData(sessionId: string, type: string, data: unknown): string {
   return `data: ${JSON.stringify(sessionEventFrame(sessionId, type, data))}\n\n`;
+}
+
+export function redactedSessionEventSseData(
+  sessionId: string,
+  type: string,
+  data: unknown,
+  secrets: readonly string[],
+): string {
+  // The pane rejects a cut-off Notes snapshot, so Notes skip the size caps (secrets are still redacted).
+  const limits =
+    type === "notes_change"
+      ? { maxEntries: Number.POSITIVE_INFINITY, maxDepth: Number.POSITIVE_INFINITY }
+      : {};
+  const safePayload = redactValue(sessionEventFrame(sessionId, type, data), { secrets, ...limits });
+  return `data: ${JSON.stringify(safePayload)}\n\n`;
 }
 
 /** Owns daemon-session identity, request selection, and disposal semantics. */

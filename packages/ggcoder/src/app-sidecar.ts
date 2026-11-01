@@ -24,7 +24,6 @@ import { spawn, type ChildProcess } from "node:child_process";
 import {
   GGAIError,
   environmentSecrets,
-  redactValue,
   type ToolResultContent,
 } from "@kenkaiiii/gg-ai";
 import type { AddressInfo } from "node:net";
@@ -359,7 +358,10 @@ import {
 import { createAskUserTool } from "./tools/ask-user.js";
 import { commandCreationReviewer } from "./core/programmatic/command-creation.js";
 import { AppSidecarReloadCoordinator } from "./app-sidecar-reload.js";
-import { AppSidecarSessionRouter, sessionEventFrame } from "./app-sidecar-session-router.js";
+import {
+  AppSidecarSessionRouter,
+  redactedSessionEventSseData,
+} from "./app-sidecar-session-router.js";
 import type { PhaseDeletionSession } from "./app-sidecar-phase-deletion.js";
 import type { AppSidecarNotesHandler } from "./app-sidecar-notes.js";
 import {
@@ -1489,9 +1491,7 @@ async function createSession(
   let clientSeq = 0;
 
   function sseFrame(type: string, data: unknown): string {
-    const taggedPayload = sessionEventFrame(opts.id, type, data);
-    const safePayload = redactValue(taggedPayload, { secrets: environmentSecrets(process.env) });
-    return `data: ${JSON.stringify(safePayload)}\n\n`;
+    return redactedSessionEventSseData(opts.id, type, data, environmentSecrets(process.env));
   }
 
   let readKenState: () => KenState | null = () => null;

@@ -3,6 +3,7 @@ import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   AppSidecarSessionRouter,
+  redactedSessionEventSseData,
   sessionEventSseData,
   type SessionEventFrame,
 } from "./app-sidecar-session-router.js";
@@ -364,5 +365,30 @@ describe("AppSidecarSessionRouter HTTP isolation", () => {
     expect(first.dispose).toHaveBeenCalledOnce();
     expect(second.dispose).toHaveBeenCalledOnce();
     expect([...router.values()]).toEqual([]);
+  });
+});
+
+describe("redactedSessionEventSseData", () => {
+  const parse = (frame: string) => JSON.parse(frame.slice("data: ".length)) as SessionEventFrame;
+  const large = { items: Array.from({ length: 12_000 }, (_, index) => ({ index })) };
+
+  it("keeps a large, deep Notes snapshot whole and still redacts secrets", () => {
+    const secret = "notes-secret-value-123";
+    let deep: unknown = { leaf: true };
+    for (let level = 0; level < 25; level += 1) deep = { child: deep };
+    const data = { ...large, deep, note: `key ${secret}` };
+
+    const frame = parse(redactedSessionEventSseData("s", "notes_change", data, [secret]));
+
+    expect(frame).toEqual({
+      sessionId: "s",
+      type: "notes_change",
+      data: { ...large, deep, note: "key [REDACTED]" },
+    });
+  });
+
+  it("keeps the size cap for other events", () => {
+    const frame = parse(redactedSessionEventSseData("s", "tool_output", large, []));
+    expect(JSON.stringify(frame.data)).toContain("[TRUNCATED]");
   });
 });

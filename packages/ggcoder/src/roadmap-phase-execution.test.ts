@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { approvedPlanArtifactContent } from "./app-sidecar-plan-gate.js";
 import {
   captureGitWorkspaceSnapshot,
@@ -10,6 +10,7 @@ import {
   createApprovedPlan,
   isLegacyPlanImportEligible,
   planStepId,
+  RepositoryUnverifiableError,
   resolveExecutionPlanSnapshot,
   sha256,
   workspaceSnapshotsEqual,
@@ -64,6 +65,42 @@ describe("durable roadmap workspace snapshots", () => {
     const second = await captureRepositoryIdentity(repository, "project-key");
     expect(second).toEqual(first);
     expect(JSON.stringify(first)).not.toContain("secret");
+  });
+
+  describe("unverifiable repositories", () => {
+    let scratch: string;
+
+    beforeEach(async () => {
+      scratch = await fs.mkdtemp(path.join(os.tmpdir(), "gg-roadmap-unverifiable-"));
+      // Keep Git from discovering an enclosing repository above the temp directory.
+      vi.stubEnv("GIT_CEILING_DIRECTORIES", scratch);
+    });
+
+    afterEach(async () => {
+      vi.unstubAllEnvs();
+      await fs.rm(scratch, { recursive: true, force: true });
+    });
+
+    it("reports a plain directory as not a repository", async () => {
+      const directory = path.join(scratch, "plain");
+      await fs.mkdir(directory);
+      const error = await captureGitWorkspaceSnapshot(directory, "project-key").catch(
+        (caught: unknown) => caught,
+      );
+      expect(error).toBeInstanceOf(RepositoryUnverifiableError);
+      expect(error).toMatchObject({ code: "repository-unverifiable", reason: "not-a-repository" });
+    });
+
+    it("reports a repository without commits as having no commits", async () => {
+      const directory = path.join(scratch, "empty");
+      await fs.mkdir(directory);
+      execFileSync("git", ["init", "--quiet"], { cwd: directory });
+      const error = await captureGitWorkspaceSnapshot(directory, "project-key").catch(
+        (caught: unknown) => caught,
+      );
+      expect(error).toBeInstanceOf(RepositoryUnverifiableError);
+      expect(error).toMatchObject({ reason: "no-commits" });
+    });
   });
 });
 

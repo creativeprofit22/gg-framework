@@ -5,6 +5,8 @@ import {
   AppSidecarRoadmapToolHost,
   type AppSidecarRoadmapToolSession,
 } from "./app-sidecar-roadmap-tool-host.js";
+import * as logger from "./core/logger.js";
+import { RepositoryUnverifiableError } from "./roadmap-repository-errors.js";
 import { RoadmapCheckpointParams } from "./tools/roadmap-checkpoint.js";
 import { RoadmapStatusParams } from "./tools/roadmap-status.js";
 
@@ -231,4 +233,52 @@ describe("AppSidecarRoadmapToolHost", () => {
       expect(reconciliations.owner("/project")).toBeUndefined();
     },
   );
+
+  it("explains a classified Git timeout when a checkpoint cannot capture the workspace", async () => {
+    const logSpy = vi.spyOn(logger, "log").mockImplementation(() => {});
+    const checkpointPhaseExecutionStep = vi.fn();
+    const host = new AppSidecarRoadmapToolHost({
+      cwd: "/project",
+      repository: { recordRoadmapStatusUpdate: vi.fn(), checkpointPhaseExecutionStep },
+      reconciliations: new AppSidecarRoadmapReconciliationCoordinator(),
+      projectAutopilot: { isEnabled: () => false },
+      captureWorkspaceSnapshot: async () => {
+        throw new RepositoryUnverifiableError("git-timeout");
+      },
+      mutateWithLeaseFence: async (operation) => ({
+        status: "executed" as const,
+        value: await operation(),
+      }),
+      broadcastNotesSnapshot: vi.fn(),
+    });
+    const tool = host
+      .createSessionTools("coding", owningSession)
+      .find((candidate) => candidate.name === "roadmap_checkpoint")!;
+    const input = RoadmapCheckpointParams.parse({
+      phase_id: "phase-1",
+      plan_hash: "5".repeat(64),
+      step_id: "6".repeat(64),
+      expected_revision: 4,
+    });
+
+    try {
+      const result = JSON.parse(String(await tool.execute(input, {} as never)));
+      expect(result).toMatchObject({
+        result: "repository-unverifiable",
+        phaseId: "phase-1",
+        revision: 4,
+      });
+      expect(result.message).toContain("took too long");
+      expect(result.message).toContain("retry the checkpoint");
+      expect(logSpy).toHaveBeenCalledWith(
+        "WARN",
+        "app-sidecar",
+        "repository verification failed",
+        expect.objectContaining({ reason: "git-timeout" }),
+      );
+      expect(checkpointPhaseExecutionStep).not.toHaveBeenCalled();
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
 });

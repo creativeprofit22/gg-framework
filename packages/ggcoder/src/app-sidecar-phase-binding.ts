@@ -25,6 +25,7 @@ import {
   type RoadmapPhaseLeaseMarkerV1,
 } from "./phase-context.js";
 import { publishCommittedNotesSnapshot } from "./app-sidecar-committed-notes.js";
+import { log } from "./core/logger.js";
 import { safeToolEnvironmentDigest } from "./core/verification-evidence.js";
 import type {
   ProjectNotesPhaseBindingRequest,
@@ -35,6 +36,10 @@ import {
   isGitAncestor,
   resolveExecutionPlanSnapshot,
 } from "./roadmap-phase-execution.js";
+import {
+  RepositoryUnverifiableError,
+  repositoryUnverifiableDiagnostics,
+} from "./roadmap-repository-errors.js";
 import type {
   PhaseLeaseFenceInput,
   PhaseLeaseContext,
@@ -617,7 +622,16 @@ async function executePhaseExecutionReconciliation(
   let currentWorkspace;
   try {
     currentWorkspace = await captureWorkspace(state.cwd, loaded.snapshot.projectKey);
-  } catch {
+  } catch (error) {
+    // The status stays workspace-mismatch (gg-core contract); the log keeps the real cause.
+    if (error instanceof RepositoryUnverifiableError) {
+      log(
+        "WARN",
+        "app-sidecar",
+        "repository verification failed",
+        repositoryUnverifiableDiagnostics(error),
+      );
+    }
     return { status: "workspace-mismatch" };
   }
   const isAncestor = options.isAncestor ?? isGitAncestor;

@@ -1,6 +1,4 @@
-import { withoutQwenRuntimeSecret } from "./tools/safe-env.js";
 import { createHash, timingSafeEqual } from "node:crypto";
-import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
 import type {
@@ -13,17 +11,18 @@ import { approvedPlanArtifactContent } from "./app-sidecar-plan-gate.js";
 import { isDeepStrictEqual } from "node:util";
 import { extractPlanSteps } from "./utils/plan-steps.js";
 
-const GIT_TIMEOUT_MS = 10_000;
-const GIT_MAX_BUFFER = 64 * 1024 * 1024;
+import {
+  createRoadmapGit,
+  ROADMAP_SNAPSHOT_BUDGET_MS,
+  RoadmapGitError,
+  type RoadmapGit,
+} from "./roadmap-git.js";
+import {
+  classifyRoadmapGitFailure,
+  RepositoryUnverifiableError,
+} from "./roadmap-repository-errors.js";
 
-export class RepositoryUnverifiableError extends Error {
-  readonly code = "repository-unverifiable";
-
-  constructor(message = "The Git repository could not be verified.") {
-    super(message);
-    this.name = "RepositoryUnverifiableError";
-  }
-}
+export { RepositoryUnverifiableError };
 
 export interface ApprovedPlanInput {
   planId: string;
@@ -215,15 +214,21 @@ export async function captureGitWorkspaceSnapshot(
   cwd: string,
   projectKey: string,
 ): Promise<NotesWorkspaceSnapshotV1> {
-  const root = await gitText(cwd, ["rev-parse", "--show-toplevel"]);
-  if (!root) throw new RepositoryUnverifiableError();
-  const repository = await captureRepositoryIdentity(root, projectKey);
-  const headCommit = await gitText(root, ["rev-parse", "HEAD"]);
-  if (!/^[a-f0-9]{40}$/.test(headCommit)) throw new RepositoryUnverifiableError();
+  const deadlineMs = Date.now() + ROADMAP_SNAPSHOT_BUDGET_MS;
+  const root = await gitText(
+    createRoadmapGit(cwd, { deadlineMs }),
+    ["rev-parse", "--show-toplevel"],
+    "find the repository root",
+  );
+  if (!root) throw new RepositoryUnverifiableError("not-a-repository");
+  const git = createRoadmapGit(root, { deadlineMs });
+  const repository = await captureRepositoryIdentity(root, projectKey, git);
+  const headCommit = await gitText(git, ["rev-parse", "HEAD"], "read HEAD");
+  if (!/^[a-f0-9]{40}$/.test(headCommit)) throw new RepositoryUnverifiableError("no-commits");
 
-  let prior = await captureWorktree(root);
+  let prior = await captureWorktree(git, root);
   for (let attempt = 0; attempt < 2; attempt += 1) {
-    const next = await captureWorktree(root);
+    const next = await captureWorktree(git, root);
     if (prior.digest === next.digest && prior.clean === next.clean) {
       return {
         version: 1,
@@ -235,19 +240,22 @@ export async function captureGitWorkspaceSnapshot(
     }
     prior = next;
   }
-  throw new RepositoryUnverifiableError("The workspace changed while it was being captured.");
+  throw new RepositoryUnverifiableError("workspace-changing");
 }
 
 export async function captureRepositoryIdentity(
   cwd: string,
   projectKey: string,
+  git: RoadmapGit = createRoadmapGit(cwd),
 ): Promise<NotesRepositoryIdentityV1> {
-  const roots = (await gitText(cwd, ["rev-list", "--max-parents=0", "HEAD"]))
+  const roots = (
+    await gitText(git, ["rev-list", "--max-parents=0", "HEAD"], "read the commit history")
+  )
     .split(/\r?\n/)
     .filter((value) => /^[a-f0-9]{40}$/.test(value))
     .sort();
-  if (roots.length === 0) throw new RepositoryUnverifiableError();
-  const remote = await tryGitText(cwd, ["remote", "get-url", "origin"]);
+  if (roots.length === 0) throw new RepositoryUnverifiableError("no-commits");
+  const remote = await tryGitText(git, ["remote", "get-url", "origin"], "read the origin remote");
   const identityHash = sha256(
     JSON.stringify({ roots, remote: remote ? normalizeRemoteIdentity(remote) : null }),
   );
@@ -260,7 +268,7 @@ export async function isGitAncestor(
   descendant: string,
 ): Promise<boolean> {
   try {
-    await runGit(cwd, ["merge-base", "--is-ancestor", ancestor, descendant]);
+    await createRoadmapGit(cwd)(["merge-base", "--is-ancestor", ancestor, descendant]);
     return true;
   } catch {
     return false;
@@ -272,13 +280,21 @@ interface WorktreeCapture {
   clean: boolean;
 }
 
-async function captureWorktree(root: string): Promise<WorktreeCapture> {
-  const [status, index, trackedChanges, untracked] = await Promise.all([
-    runGit(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]),
-    runGit(root, ["ls-files", "--stage", "-z"]),
-    runGit(root, ["diff", "--name-only", "-z", "--diff-filter=ACDMRTUXB"]),
-    runGit(root, ["ls-files", "--others", "--exclude-standard", "-z"]),
-  ]);
+async function captureWorktree(git: RoadmapGit, root: string): Promise<WorktreeCapture> {
+  let status: Buffer;
+  let index: Buffer;
+  let trackedChanges: Buffer;
+  let untracked: Buffer;
+  try {
+    [status, index, trackedChanges, untracked] = await Promise.all([
+      git(["status", "--porcelain=v1", "-z", "--untracked-files=all"]),
+      git(["ls-files", "--stage", "-z"]),
+      git(["diff", "--name-only", "-z", "--diff-filter=ACDMRTUXB"]),
+      git(["ls-files", "--others", "--exclude-standard", "-z"]),
+    ]);
+  } catch (error) {
+    throw classifyRoadmapGitFailure(error, "read the worktree");
+  }
   const entries = [...new Set([...nulList(trackedChanges), ...nulList(untracked)])].sort();
   const hash = createHash("sha256");
   hash.update("index\0").update(index).update("\0status\0").update(status);
@@ -295,12 +311,16 @@ async function hashContainedPath(
   relative: string,
 ) {
   if (!relative || path.isAbsolute(relative) || relative.split(/[\\/]/).includes("..")) {
-    throw new RepositoryUnverifiableError("Git returned an unsafe workspace path.");
+    throw new RepositoryUnverifiableError("unsafe-workspace", {
+      message: "Git returned an unsafe workspace path.",
+    });
   }
   const absolute = path.resolve(root, relative);
   const contained = path.relative(root, absolute);
   if (contained.startsWith("..") || path.isAbsolute(contained)) {
-    throw new RepositoryUnverifiableError("Git returned a path outside the repository.");
+    throw new RepositoryUnverifiableError("unsafe-workspace", {
+      message: "Git returned a path outside the repository.",
+    });
   }
   let stat;
   try {
@@ -316,7 +336,11 @@ async function hashContainedPath(
     hash.update("symlink\0").update(await fs.readlink(absolute));
     return;
   }
-  if (!stat.isFile()) throw new RepositoryUnverifiableError("Workspace entry is not a file.");
+  if (!stat.isFile()) {
+    throw new RepositoryUnverifiableError("unsafe-workspace", {
+      message: "Workspace entry is not a file.",
+    });
+  }
   hash.update(`file\0${stat.mode & 0o111 ? "executable" : "regular"}\0`);
   const handle = await fs.open(absolute, "r");
   try {
@@ -365,38 +389,20 @@ function constantTimeHexEqual(left: string, right: string): boolean {
   return timingSafeEqual(Buffer.from(left, "hex"), Buffer.from(right, "hex"));
 }
 
-async function gitText(cwd: string, args: string[]): Promise<string> {
+async function gitText(git: RoadmapGit, args: string[], step: string): Promise<string> {
   try {
-    return (await runGit(cwd, args)).toString("utf8").trim();
-  } catch {
-    throw new RepositoryUnverifiableError();
+    return (await git(args)).toString("utf8").trim();
+  } catch (error) {
+    throw classifyRoadmapGitFailure(error, step);
   }
 }
 
-async function tryGitText(cwd: string, args: string[]): Promise<string | null> {
+// A missing remote is a real answer; a timeout must not silently change the repository identity.
+async function tryGitText(git: RoadmapGit, args: string[], step: string): Promise<string | null> {
   try {
-    return (await runGit(cwd, args)).toString("utf8").trim() || null;
-  } catch {
-    return null;
+    return (await git(args)).toString("utf8").trim() || null;
+  } catch (error) {
+    if (error instanceof RoadmapGitError && error.kind === "exit") return null;
+    throw classifyRoadmapGitFailure(error, step);
   }
-}
-
-function runGit(cwd: string, args: string[]): Promise<Buffer> {
-  return new Promise((resolve, reject) => {
-    execFile(
-      "git",
-      args,
-      {
-        env: withoutQwenRuntimeSecret(),
-        cwd,
-        encoding: "buffer",
-        timeout: GIT_TIMEOUT_MS,
-        maxBuffer: GIT_MAX_BUFFER,
-      },
-      (error, stdout) => {
-        if (error) reject(error);
-        else resolve(Buffer.isBuffer(stdout) ? stdout : Buffer.from(stdout));
-      },
-    );
-  });
 }

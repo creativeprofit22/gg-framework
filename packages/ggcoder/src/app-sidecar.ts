@@ -269,6 +269,10 @@ import {
   runVerifyPlanStatusRequest,
 } from "./app-sidecar-verify-plan.js";
 import { initLogger, log } from "./core/logger.js";
+import {
+  repositoryUnverifiableDiagnostics,
+  repositoryUnverifiableNotice,
+} from "./roadmap-repository-errors.js";
 import { installTerminationHandlers } from "./core/shutdown.js";
 import { handleGoalRoutes } from "./app-sidecar/goal-routes.js";
 import { goalStatePayload } from "./app-sidecar/goal-state.js";
@@ -968,7 +972,17 @@ async function main(): Promise<void> {
                 snapshotPath: err.snapshotPath,
               });
             } else if (err instanceof RepositoryUnverifiableError) {
-              daemonJson(res, 409, { error: message, code: err.code });
+              const notice = repositoryUnverifiableNotice(err, "try again");
+              log(
+                "WARN",
+                "app-sidecar",
+                "repository verification failed",
+                repositoryUnverifiableDiagnostics(err),
+              );
+              daemonJson(res, 409, {
+                error: `${notice.message} ${notice.guidance}`,
+                code: err.code,
+              });
             } else {
               daemonJson(res, 500, { error: message });
             }
@@ -6669,12 +6683,19 @@ async function createSession(
               ...phaseCheckpointFailurePayload(err),
             } satisfies PlanMutationFailure);
           } else if (err instanceof RepositoryUnverifiableError && activePhase) {
+            const notice = repositoryUnverifiableNotice(err);
+            log(
+              "WARN",
+              "app-sidecar",
+              "repository verification failed",
+              repositoryUnverifiableDiagnostics(err),
+            );
             json(res, 409, {
               status: "failed",
               code: err.code,
               operationId: mutation.operationId,
-              message: err.message,
-              guidance: "Open this project from a Git repository, then retry approval.",
+              message: notice.message,
+              guidance: notice.guidance,
               retryable: true,
               phaseId: activePhase.phase.id,
             } satisfies PlanMutationFailure);

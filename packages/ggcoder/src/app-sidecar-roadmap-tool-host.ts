@@ -3,12 +3,18 @@ import type { NotesWorkspaceSnapshotV1 } from "@kenkaiiii/gg-core/project-notes"
 import type { AppSidecarProjectAutopilotState } from "./app-sidecar-autopilot-state.js";
 import type { AppSidecarRoadmapReconciliationCoordinator } from "./app-sidecar-roadmap-reconciliation.js";
 import type { PhaseStatusLeaseFailure } from "./app-sidecar-phase-binding.js";
+import { log } from "./core/logger.js";
 import type { ActivePhaseContextV1 } from "./phase-context.js";
 import type {
   NotesReference,
   ProjectNotesRepository,
   ProjectNotesSnapshot,
 } from "./project-notes-repository.js";
+import {
+  RepositoryUnverifiableError,
+  repositoryUnverifiableDiagnostics,
+  repositoryUnverifiableNotice,
+} from "./roadmap-repository-errors.js";
 import {
   createRoadmapCheckpointTool,
   type RoadmapCheckpointInput,
@@ -107,8 +113,8 @@ export class AppSidecarRoadmapToolHost {
         let workspace: NotesWorkspaceSnapshotV1;
         try {
           workspace = await captureWorkspaceSnapshot!();
-        } catch {
-          return { kind: "workspace-unavailable" as const };
+        } catch (error) {
+          return { kind: "workspace-unavailable" as const, error };
         }
         const outcome = await repository.checkpointPhaseExecutionStep!(cwd, {
           phaseId: input.phase_id,
@@ -130,12 +136,25 @@ export class AppSidecarRoadmapToolHost {
         };
       }
       if (fenced.value.kind === "workspace-unavailable") {
+        const { error } = fenced.value;
+        let message =
+          "The checkpoint was not saved because the Git workspace could not be verified.";
+        if (error instanceof RepositoryUnverifiableError) {
+          log(
+            "WARN",
+            "app-sidecar",
+            "repository verification failed",
+            repositoryUnverifiableDiagnostics(error),
+          );
+          const notice = repositoryUnverifiableNotice(error, "retry the checkpoint");
+          message = `The checkpoint was not saved. ${notice.message} ${notice.guidance}`;
+        }
         return {
           result: "repository-unverifiable",
           phaseId: input.phase_id,
           stepId: input.step_id,
           revision: input.expected_revision,
-          message: "The checkpoint was not saved because the Git workspace could not be verified.",
+          message,
         };
       }
       const outcome = fenced.value.outcome;

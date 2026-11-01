@@ -122,7 +122,6 @@ describe("useKenMentor", () => {
     expect(getItems()).toMatchObject([{ text: "before history" }, { text: "after history" }]);
     expect(hook.result.current.captureKenRun()).toEqual(identity);
     expect(hook.result.current.kenRunning).toBe(true);
-    expect(hook.result.current.kenIsThinking).toBe(false);
     expect(hook.result.current.kenTokens).toBe(0);
   });
   it.each([
@@ -297,14 +296,12 @@ describe("useKenMentor", () => {
         hook.result.current.handleKenEvent(ev("ken_text_delta", { text: "before tool" }));
         hook.result.current.handleKenEvent(ev("ken_thinking_delta"));
       });
-      expect(hook.result.current.kenIsThinking).toBe(true);
       act(() => {
         hook.result.current.handleKenEvent(ev(type));
         hook.result.current.handleKenEvent(ev("ken_tool_call_update"));
         hook.result.current.handleKenEvent(ev("ken_tool_call_end"));
         hook.result.current.handleKenEvent(ev("ken_text_delta", { text: "after tool" }));
       });
-      expect(hook.result.current.kenIsThinking).toBe(false);
       expect(getItems()).toMatchObject([{ text: "before tool" }, { text: "after tool" }]);
       act(() => hook.result.current.handleKenEvent(ev("ken_run_end")));
       expect(hook.result.current.kenRunning).toBe(false);

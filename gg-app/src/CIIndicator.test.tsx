@@ -110,6 +110,58 @@ describe("CIIndicator", () => {
     expect(container.querySelector(".shimmer-text")).toBeNull();
   });
 
+  it("always shows CI that GitHub refused to start, with icon, date, reason and link", () => {
+    vi.useFakeTimers();
+    const refused: GitHubCI = {
+      ...running,
+      completed: 6,
+      failed: 4,
+      active: false,
+      conclusion: "not_started",
+      lastSuccessAt: "2026-09-07T14:33:18Z",
+      notStartedStreak: 10,
+    };
+    // Never observed in flight: a 3-second billing refusal must still show.
+    const { container } = render(<CIIndicator ci={refused} />);
+    const status = screen.getByRole("status");
+    expect(status.getAttribute("data-status")).toBe("not-started");
+    const since = new Intl.DateTimeFormat(undefined, {
+      day: "numeric",
+      month: "short",
+      timeZone: "UTC",
+    }).format(Date.parse("2026-09-07T14:33:18Z"));
+    const button = screen.getByText(`CI hasn't run since ${since}`);
+    expect(container.querySelector(".chat-head-ci-icon")?.getAttribute("aria-hidden")).toBe("true");
+    expect(button.getAttribute("aria-label")).toBe(
+      `CI hasn't run since ${since}: GitHub refused to start it (10+ runs in a row; check billing or spending limit). Open GitHub Actions`,
+    );
+    expect(screen.queryByLabelText("Dismiss CI failure")).toBeNull();
+    act(() => vi.advanceTimersByTime(60_000));
+    expect(screen.getByRole("status")).toBeDefined();
+    fireEvent.click(button);
+    expect(openUrl).toHaveBeenCalledWith(refused.url);
+  });
+
+  it("shows refused CI even after the same run was dismissed as a failure", () => {
+    const { rerender } = render(<CIIndicator ci={running} />);
+    const failure: GitHubCI = { ...running, failed: 1, active: false, conclusion: "failure" };
+    rerender(<CIIndicator ci={failure} />);
+    fireEvent.click(screen.getByLabelText("Dismiss CI failure"));
+    expect(screen.queryByRole("status")).toBeNull();
+    rerender(<CIIndicator ci={{ ...failure, conclusion: "not_started" }} />);
+    expect(screen.getByRole("status").getAttribute("data-status")).toBe("not-started");
+    expect(screen.getByText("CI not starting")).toBeDefined();
+    expect(screen.queryByLabelText("Dismiss CI failure")).toBeNull();
+  });
+
+  it("says CI is not starting when the last green run is unknown", () => {
+    render(<CIIndicator ci={{ ...running, active: false, conclusion: "not_started" }} />);
+    const button = screen.getByText("CI not starting");
+    expect(button.getAttribute("aria-label")).toBe(
+      "CI not starting: GitHub refused to start it (check billing or spending limit). Open GitHub Actions",
+    );
+  });
+
   it("does not paint a cancelled run green", () => {
     vi.useFakeTimers();
     const { rerender } = render(<CIIndicator ci={running} />);

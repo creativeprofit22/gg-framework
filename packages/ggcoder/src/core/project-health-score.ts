@@ -142,8 +142,13 @@ function hygieneCategory(scan: ProjectHealthScan): CategoryDraft {
   };
 }
 
+// GitHub refusing to start CI (billing) is not a broken build: no cap, its own finding.
+function ciNotStarted(ci: GitHubCI | null): boolean {
+  return !!ci && !ci.stale && ci.conclusion === "not_started";
+}
+
 function ciFailed(ci: GitHubCI | null): boolean {
-  if (!ci || ci.stale) return false;
+  if (!ci || ci.stale || ciNotStarted(ci)) return false;
   return ci.failed > 0 || ci.conclusion === "failure";
 }
 
@@ -159,7 +164,15 @@ function safetyCategory(scan: ProjectHealthScan, ci: GitHubCI | null): CategoryD
   }
   // Only judge CI results when there is a workflow to produce them.
   if (scan.hasCIWorkflow) {
-    checks.push({ ok: !ciFailed(ci), points: 10, missing: "Latest CI run failed" });
+    checks.push(
+      ciNotStarted(ci)
+        ? {
+            ok: false,
+            points: 10,
+            missing: "CI isn't running: GitHub refused to start the latest run",
+          }
+        : { ok: !ciFailed(ci), points: 10, missing: "Latest CI run failed" },
+    );
   }
   const possible = checks.reduce((sum, check) => sum + check.points, 0);
   const earned = checks.reduce((sum, check) => sum + (check.ok ? check.points : 0), 0);

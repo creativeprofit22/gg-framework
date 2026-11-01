@@ -383,6 +383,8 @@ describe("transparent status leases", () => {
           cwd,
           gitCwd: cwd,
           refreshGitHubCounts: async () => {},
+          gitHubCI: null,
+          maybeNotifyCINotStarted: () => {},
           ciPoll: { refresh: async () => {} },
           repoWatch: { ci: { refresh: async () => {} } },
           finishOwnedGeneration: () => observed.push("cleanup"),

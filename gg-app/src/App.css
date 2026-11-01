@@ -3648,6 +3648,15 @@ select {
 .chat-head-ci[data-status="passed"] .chat-head-ci-link {
   color: var(--success);
 }
+/* GitHub refused to start CI (billing): caution, with an icon so colour isn't the only signal. */
+.chat-head-ci[data-status="not-started"] .chat-head-ci-link {
+  color: var(--caution);
+}
+.chat-head-ci-icon {
+  flex: none;
+  margin-right: var(--space-2);
+  vertical-align: -1px;
+}
 /* Hover matches the sibling chips (brighten, no underline) — the status color
    itself wins on equal specificity, so red stays red and green stays green. */
 /* Chip metrics come from .chat-head-title; the shimmer span must not bold it

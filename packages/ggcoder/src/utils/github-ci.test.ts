@@ -9,7 +9,16 @@ vi.mock("./github.js", () => ({ getGitHubRepoSlug: repo }));
 vi.mock("./git.js", () => ({
   runBackgroundGit: (args: string[], options: unknown) => exec("git", args, options),
 }));
-import { getGitHubCI, startGitHubCIPoll } from "./github-ci.js";
+import {
+  createCINotStartedNotifier,
+  createCINotStartedNotify,
+  getGitHubCI,
+  getGitHubCIHistory,
+  startGitHubCIPoll,
+  type GitHubCI,
+  type NotStartedCache,
+} from "./github-ci.js";
+import supa from "./__fixtures__/github-ci/supa-2026-10-30.json";
 
 const sha = "a".repeat(40);
 const run = (
@@ -248,5 +257,301 @@ describe("CI polling lifecycle", () => {
     stops.push(poll.stop);
     await vi.advanceTimersByTimeAsync(0);
     expect(exec.mock.calls.every((call) => call[0] === "git")).toBe(true);
+  });
+});
+
+// Recorded with gh api from supa on 2026-10-30: GitHub refused every job for billing.
+describe("CI that GitHub refused to start (recorded supa fixture)", () => {
+  type Handler = (endpoint: string) => unknown;
+  const refusedRun = 41139224468;
+  const endpoints = () =>
+    exec.mock.calls.filter((call) => call[0] === "gh").map((call) => call[1][3] as string);
+  const recorded: Handler = (endpoint) => {
+    const annotation = /check-runs\/(\d+)\/annotations/.exec(endpoint);
+    if (annotation) {
+      return (supa.annotations as Record<string, unknown>)[annotation[1] ?? ""] ?? [];
+    }
+    const attempt = /runs\/(\d+)\/attempts\/(\d+)\/jobs/.exec(endpoint);
+    if (attempt) {
+      const page = (supa.jobs as Record<string, unknown>)[`${attempt[1]}.${attempt[2]}`];
+      if (!page) throw new Error(`no recorded jobs for ${endpoint}`);
+      return [page];
+    }
+    if (endpoint.includes("head_sha=")) return [supa.runsForSha];
+    if (endpoint.includes("status=success")) return supa.lastSuccess;
+    if (endpoint.includes("actions/runs?branch=")) return supa.branchRuns;
+    if (endpoint === "repos/owner/supa") return { default_branch: supa.defaultBranch };
+    throw new Error(`unexpected endpoint ${endpoint}`);
+  };
+  const serve = (handler: Handler = recorded) =>
+    exec.mockImplementation(async (file: string, args: string[]) => {
+      if (file === "git") return { stdout: head };
+      return { stdout: JSON.stringify(handler(args[3])) };
+    });
+  const realFailure = {
+    id: 99,
+    status: "completed",
+    conclusion: "failure",
+    runner_id: 7,
+    runner_name: "GitHub Actions 7",
+    steps: [{ name: "test", conclusion: "failure" }],
+  };
+
+  beforeEach(() => {
+    head = supa.sha;
+    repo.mockResolvedValue(supa.slug);
+    serve();
+  });
+
+  it("classifies the recorded run as not started, distinct from failure", async () => {
+    expect(await getGitHubCI(supa.slug, supa.sha)).toMatchObject({
+      url: `https://github.com/owner/supa/actions/runs/${refusedRun}`,
+      active: false,
+      total: 5,
+      failed: 4,
+      conclusion: "not_started",
+    });
+    const annotationCall = exec.mock.calls.find((call) =>
+      String(call[1][3]).includes("/annotations"),
+    );
+    // One bounded, non-paginated annotation request for the run's first non-skipped job.
+    expect(annotationCall?.[1].slice(3)).toEqual([
+      "repos/owner/supa/check-runs/124349121098/annotations?per_page=10",
+    ]);
+  });
+
+  it("keeps a real failure in another workflow as failure", async () => {
+    const other = { ...supa.runsForSha.workflow_runs[0], id: 500, workflow_id: 2 };
+    serve((endpoint) => {
+      if (endpoint.includes("head_sha=")) {
+        return [{ workflow_runs: [...supa.runsForSha.workflow_runs, other] }];
+      }
+      if (endpoint.includes("runs/500/attempts/1/jobs")) return [{ jobs: [realFailure] }];
+      return recorded(endpoint);
+    });
+    expect(await getGitHubCI(supa.slug, supa.sha)).toMatchObject({ conclusion: "failure" });
+  });
+
+  it("keeps zero-step jobs without GitHub's refusal annotation as failure", async () => {
+    const cache: NotStartedCache = new Map();
+    serve((endpoint) =>
+      endpoint.includes("/annotations")
+        ? [{ message: "Process completed with exit code 1." }]
+        : recorded(endpoint),
+    );
+    expect(await getGitHubCI(supa.slug, supa.sha, undefined, cache)).toMatchObject({
+      conclusion: "failure",
+    });
+    expect(cache.get(`${refusedRun}.1`)).toBe(false);
+    serve((endpoint) => (endpoint.includes("/annotations") ? [] : recorded(endpoint)));
+    expect(await getGitHubCI(supa.slug, supa.sha)).toMatchObject({ conclusion: "failure" });
+  });
+
+  it("falls back to failure without caching when the annotation request fails", async () => {
+    const cache: NotStartedCache = new Map();
+    serve((endpoint) => {
+      if (endpoint.includes("/annotations")) throw new Error("HTTP 502");
+      return recorded(endpoint);
+    });
+    expect(await getGitHubCI(supa.slug, supa.sha, undefined, cache)).toMatchObject({
+      conclusion: "failure",
+    });
+    expect(cache.size).toBe(0);
+    serve();
+    expect(await getGitHubCI(supa.slug, supa.sha, undefined, cache)).toMatchObject({
+      conclusion: "not_started",
+    });
+  });
+
+  it("asks for annotations once per run attempt when given a cache", async () => {
+    const cache: NotStartedCache = new Map();
+    await getGitHubCI(supa.slug, supa.sha, undefined, cache);
+    await getGitHubCI(supa.slug, supa.sha, undefined, cache);
+    expect(endpoints().filter((endpoint) => endpoint.includes("/annotations"))).toHaveLength(1);
+    expect(cache.get(`${refusedRun}.1`)).toBe(true);
+  });
+
+  it("finds the last green default-branch run and the refusal streak", async () => {
+    const cache: NotStartedCache = new Map();
+    expect(await getGitHubCIHistory(supa.slug, { cache })).toEqual({
+      defaultBranch: "main",
+      lastSuccessAt: "2026-09-07T14:33:18Z",
+      notStartedStreak: 10,
+    });
+    expect(endpoints()).toEqual(
+      expect.arrayContaining([
+        "repos/owner/supa",
+        "repos/owner/supa/actions/runs?branch=main&status=success&per_page=1",
+        "repos/owner/supa/actions/runs?branch=main&per_page=10",
+      ]),
+    );
+    exec.mockClear();
+    await getGitHubCIHistory(supa.slug, { cache, defaultBranch: "main" });
+    // Cached runs and branch: only the two run lists are requested again.
+    expect(endpoints()).toHaveLength(2);
+  });
+
+  it("stops the streak at the first run that actually ran", async () => {
+    const runs = supa.branchRuns.workflow_runs.map((run, index) =>
+      index === 2 ? { ...run, conclusion: "success" } : run,
+    );
+    serve((endpoint) =>
+      endpoint.includes("actions/runs?branch=main&per_page")
+        ? { workflow_runs: runs }
+        : recorded(endpoint),
+    );
+    expect(await getGitHubCIHistory(supa.slug)).toMatchObject({ notStartedStreak: 2 });
+    serve((endpoint) =>
+      endpoint.includes("status=success") ? { workflow_runs: [] } : recorded(endpoint),
+    );
+    expect(await getGitHubCIHistory(supa.slug)).toMatchObject({ lastSuccessAt: null });
+  });
+
+  it("attaches history to a not-started poll and refetches it at most every 10 minutes", async () => {
+    let now = Date.parse("2026-10-31T00:00:00Z");
+    const changed = vi.fn();
+    const poll = startGitHubCIPoll("/project", changed, { now: () => now });
+    stops.push(poll.stop);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(changed.mock.lastCall?.[0]).toMatchObject({
+      conclusion: "not_started",
+      lastSuccessAt: "2026-09-07T14:33:18Z",
+      notStartedStreak: 10,
+    });
+    const history = () => endpoints().filter((endpoint) => endpoint.includes("status=success"));
+    now += 9 * 60_000;
+    await poll.refresh();
+    expect(history()).toHaveLength(1);
+    now += 60_000;
+    await poll.refresh();
+    expect(history()).toHaveLength(2);
+    expect(endpoints().filter((endpoint) => endpoint === "repos/owner/supa")).toHaveLength(1);
+  });
+
+  it("fails open when history is unavailable and stays stale on rate limits", async () => {
+    serve((endpoint) => {
+      if (endpoint.includes("branch=")) throw new Error("HTTP 403: API rate limit exceeded");
+      return recorded(endpoint);
+    });
+    const changed = vi.fn();
+    const poll = startGitHubCIPoll("/project", changed);
+    stops.push(poll.stop);
+    await vi.advanceTimersByTimeAsync(0);
+    const ci = changed.mock.lastCall?.[0] as GitHubCI;
+    expect(ci.conclusion).toBe("not_started");
+    expect(ci).not.toHaveProperty("lastSuccessAt");
+    exec.mockImplementation(async (file: string) => {
+      if (file === "git") return { stdout: head };
+      throw new Error("HTTP 403: API rate limit exceeded");
+    });
+    await poll.refresh();
+    expect(changed.mock.lastCall?.[0]).toMatchObject({ conclusion: "not_started", stale: true });
+  });
+
+  it("does not look up history for CI that ran", async () => {
+    head = sha;
+    repo.mockResolvedValue("owner/repo");
+    runs = [run(10, 1, "completed", "failure")];
+    jobs = [job(1, "completed", "failure")];
+    exec.mockImplementation(async (file: string, args: string[]) => ({
+      stdout:
+        file === "git"
+          ? head
+          : JSON.stringify(args[3].includes("/jobs?") ? [{ jobs }] : [{ workflow_runs: runs }]),
+    }));
+    const changed = vi.fn();
+    stops.push(startGitHubCIPoll("/project", changed).stop);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(changed.mock.lastCall?.[0].conclusion).toBe("failure");
+    expect(endpoints().some((endpoint) => endpoint.includes("branch="))).toBe(false);
+  });
+});
+
+describe("createCINotStartedNotifier", () => {
+  const lastGreen = Date.parse("2026-09-07T14:33:18Z");
+  const day = 86_400_000;
+  const refused = (extra: Partial<GitHubCI> = {}): GitHubCI => ({
+    key: "k",
+    url: "https://github.com/owner/supa/actions/runs/1",
+    total: 5,
+    completed: 5,
+    failed: 4,
+    active: false,
+    conclusion: "not_started",
+    lastSuccessAt: "2026-09-07T14:33:18Z",
+    notStartedStreak: 10,
+    ...extra,
+  });
+
+  it("stays silent below the 3-day threshold and fires above it", () => {
+    const early = createCINotStartedNotifier({ now: () => lastGreen + 2.9 * day });
+    expect(early("s", refused())).toBeNull();
+    const notice = createCINotStartedNotifier({ now: () => lastGreen + 3.1 * day })("s", refused());
+    expect(notice).toContain("since 2026-09-07");
+    expect(notice).toContain("the last 10+ runs");
+    expect(notice).toMatch(/Status notice only; not verification evidence\.$/);
+  });
+
+  it("notifies once per session id", () => {
+    const notify = createCINotStartedNotifier({ now: () => lastGreen + 30 * day });
+    expect(notify("a", refused())).not.toBeNull();
+    expect(notify("a", refused())).toBeNull();
+    expect(notify("b", refused())).not.toBeNull();
+  });
+
+  it("stays silent while history is unknown, stale, or CI is not refused", () => {
+    const notify = createCINotStartedNotifier({ now: () => lastGreen + 30 * day });
+    expect(notify("s", refused({ lastSuccessAt: undefined }))).toBeNull();
+    expect(notify("s", refused({ stale: true }))).toBeNull();
+    expect(notify("s", refused({ conclusion: "failure" }))).toBeNull();
+    expect(notify("s", null)).toBeNull();
+    // Silence must not use up the session's one notice.
+    expect(notify("s", refused())).not.toBeNull();
+  });
+
+  it("reports a default branch that never succeeded", () => {
+    const notice = createCINotStartedNotifier()(
+      "s",
+      refused({ lastSuccessAt: null, notStartedStreak: 1 }),
+    );
+    expect(notice).toContain("no successful run on the default branch");
+    expect(notice).toContain("the latest run");
+  });
+});
+
+describe("createCINotStartedNotify", () => {
+  const lastGreen = Date.parse("2026-09-07T14:33:18Z");
+  const steady: GitHubCI = {
+    key: "k",
+    url: "https://github.com/owner/supa/actions/runs/1",
+    total: 5,
+    completed: 5,
+    failed: 5,
+    active: false,
+    conclusion: "not_started",
+    lastSuccessAt: "2026-09-07T14:33:18Z",
+    notStartedStreak: 10,
+  };
+
+  it("tells a later conversation in the same window once, without repeating the first", () => {
+    let sessionId = "first";
+    const notify = vi.fn();
+    const session = { getConversationIdentity: () => ({ sessionId }), notify };
+    const check = createCINotStartedNotify(() => session, {
+      now: () => lastGreen + 4 * 86_400_000,
+    });
+
+    check(steady); // window open: poll replays the latest value
+    check(steady); // first conversation's run
+    expect(notify).toHaveBeenCalledTimes(1);
+
+    sessionId = "second"; // new conversation; the poll stays silent
+    check(steady);
+    check(steady);
+    expect(notify.mock.calls.map(([id]) => id)).toEqual([
+      "github-ci-not-started",
+      "github-ci-not-started",
+    ]);
+    expect(notify.mock.lastCall?.[1]).toMatch(/Status notice only; not verification evidence\.$/);
   });
 });

@@ -401,3 +401,20 @@ export type ContinuationCommitResponse = ContinuationCommitResponseBase &
         acceptedMessageId?: never;
       }
   );
+
+/** CI status for the title bar, shared by the daemon and the desktop bridge. Never verification evidence. */
+export interface GitHubCI {
+  key: string;
+  url: string;
+  total: number;
+  completed: number;
+  failed: number;
+  active: boolean;
+  /** "not_started": GitHub refused to start every finished run (billing or spending limit). */
+  conclusion: "success" | "failure" | "cancelled" | "not_started" | null;
+  stale?: boolean;
+  /** ISO time of the last successful default-branch run; null = none found; absent = unknown. */
+  lastSuccessAt?: string | null;
+  /** Consecutive newest default-branch runs GitHub refused to start (capped at 10). */
+  notStartedStreak?: number;
+}

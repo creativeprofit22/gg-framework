@@ -163,6 +163,31 @@ describe("scoreProjectHealth", () => {
     expect(stale?.score).toBe(100);
   });
 
+  it("reports CI that GitHub refused to start separately from a failed run", () => {
+    const notStarted = {
+      key: "k",
+      url: "https://github.com/o/r/actions/runs/1",
+      total: 4,
+      completed: 4,
+      failed: 4,
+      active: false,
+      conclusion: "not_started" as const,
+      lastSuccessAt: "2026-09-07T14:33:18Z",
+    };
+    const health = scoreProjectHealth(clean, notStarted);
+    expect(health?.categories.find((c) => c.id === "safety")).toMatchObject({
+      score: 90,
+      findings: ["CI isn't running: GitHub refused to start the latest run"],
+    });
+    // Not a broken build, so no failed-CI cap.
+    expect(health).toMatchObject({ score: 97, cappedBy: null });
+    const noWorkflow = scoreProjectHealth({ ...clean, hasCIWorkflow: false }, notStarted);
+    expect(noWorkflow?.categories.find((c) => c.id === "safety")?.findings).toEqual([
+      "No CI workflow",
+    ]);
+    expect(scoreProjectHealth(clean, { ...notStarted, stale: true })?.score).toBe(100);
+  });
+
   it("weights debt by density", () => {
     const debt = category(
       { ...clean, debt: { todos: 20, suppressions: 5, anyTypes: 0, lines: 10_000 } },

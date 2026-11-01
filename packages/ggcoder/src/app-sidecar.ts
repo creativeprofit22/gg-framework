@@ -198,7 +198,7 @@ import {
 } from "./core/model-registry.js";
 import { resolveStartOrFallback } from "./core/resolve-start.js";
 import { getGitBranch, getGitDirtyFileCount, isGitRepo } from "./utils/git.js";
-import { type GitHubCI } from "./utils/github-ci.js";
+import { createCINotStartedNotify, type GitHubCI } from "./utils/github-ci.js";
 import type { ProjectHealthScan } from "./core/project-health-scan.js";
 import { scoreProjectHealth, type ProjectHealth } from "./core/project-health-score.js";
 import { createRepoPolls, type RepoPolls } from "./app-sidecar/repo-polls.js";
@@ -2260,6 +2260,8 @@ async function createSession(
   let gitHubIssues: number | null = null;
   let gitHubPRs: number | null = null;
   let gitHubCI: GitHubCI | null = null;
+  // Tells this window's agent once per conversation when GitHub keeps refusing CI.
+  const maybeNotifyCINotStarted = createCINotStartedNotify(() => session);
   let projectHealthScan: ProjectHealthScan | null = null;
   let scoredHealth: { scan: ProjectHealthScan; ci: GitHubCI | null; health: ProjectHealth | null } | null = null;
   function currentProjectHealth(): ProjectHealth | null {
@@ -3089,6 +3091,8 @@ async function createSession(
       ? runLifecycle.begin(abortOwnedWork).generation
       : runLifecycle.generation;
     if (ownsGeneration) pendingCancelDrain = null;
+    // A new or loaded conversation hears the CI notice before its first prompt.
+    maybeNotifyCINotStarted(gitHubCI);
     // Progress (Ranks): completed, non-canceled runs with ≥1 assistant turn earn
     // XP — prompt + any commits authored during the run window.
     const runStartedAt = Date.now();
@@ -4196,6 +4200,7 @@ async function createSession(
         })
       : null;
     const ci = repoPolls.gitHubCI.subscribe(repoKey, (next) => {
+      maybeNotifyCINotStarted(next);
       if (JSON.stringify(next) === JSON.stringify(gitHubCI)) return;
       gitHubCI = next;
       broadcast("extras", footerExtras());

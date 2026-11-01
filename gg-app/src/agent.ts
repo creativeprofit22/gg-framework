@@ -28,6 +28,7 @@ import type {
   ContinuationAcceptedEvent,
   ContinuationDestination,
   DesktopSessionUXState,
+  GitHubCI,
   KenState,
   KenTarget,
   KenRunIdentity,
@@ -363,16 +364,7 @@ export interface JiwaSnapshot {
 }
 
 /** Title-bar progress only; never substitutes for the agent's verification gate. */
-export interface GitHubCI {
-  key: string;
-  url: string;
-  total: number;
-  completed: number;
-  failed: number;
-  active: boolean;
-  conclusion: "success" | "failure" | "cancelled" | null;
-  stale?: boolean;
-}
+export type { GitHubCI } from "@kenkaiiii/gg-core/desktop-session-ux";
 
 /** A skill the sidecar's safety scan refused to load (it is simply absent). */
 export interface BlockedSkill {

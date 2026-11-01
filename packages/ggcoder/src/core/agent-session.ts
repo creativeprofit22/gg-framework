@@ -346,6 +346,7 @@ export function outputCapForRequest(options: {
   model: string;
   maxTokens: number;
   threshold: number;
+  compactAtTokens?: number;
   accountId?: string;
 }): number {
   const totalWindow = getContextWindow(options.model, { provider: options.provider });
@@ -357,6 +358,7 @@ export function outputCapForRequest(options: {
       accountId: options.accountId,
     }),
     threshold: options.threshold,
+    compactAtTokens: options.compactAtTokens,
     accountId: options.accountId,
   });
   const room = totalWindow - targetTokens;
@@ -1270,6 +1272,7 @@ export class AgentSession {
       model: this.model,
       maxTokens: this.maxTokens,
       threshold: this.settingsManager.get("compactThreshold"),
+      compactAtTokens: this.settingsManager.get("compactAtTokens"),
       accountId,
     });
   }
@@ -6968,6 +6971,7 @@ export class AgentSession {
     // if the user switches models while credential resolution is pending.
     const { provider, model, thinkingLevel, maxTokens: requestedMaxTokens, baseUrl } = this;
     const threshold = this.settingsManager.get("compactThreshold");
+    const compactAtTokens = this.settingsManager.get("compactAtTokens");
     const creds = await this.resolveRunCredentials(provider, {
       storageKeys: this.currentAuthStorageKeys(),
     });
@@ -6976,6 +6980,7 @@ export class AgentSession {
       model,
       maxTokens: requestedMaxTokens,
       threshold,
+      compactAtTokens,
       accountId: creds.accountId,
     });
     // Cheap, best-effort stack detection from the project root so terminology is

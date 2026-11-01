@@ -209,6 +209,19 @@ describe("AgentSession model switch", () => {
     ).toBe(128_000);
   });
 
+  it("caps output against the user's compactAtTokens trigger, not the default", () => {
+    // OpenRouter is uncapped, so a 900K setting lifts the trigger to 0.85 × 1M.
+    expect(
+      outputCapForRequest({
+        provider: "openrouter",
+        model: "qwen/qwen3.8-max",
+        maxTokens: 1_000_000,
+        threshold: 0.85,
+        compactAtTokens: 900_000,
+      }),
+    ).toBe(1_000_000 - 850_000);
+  });
+
   it("keeps the click-time model paired with its credentials during a switch", async () => {
     const session = await createSession();
     let release!: () => void;

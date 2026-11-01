@@ -92,8 +92,9 @@ const MODEL_WINDOW_CAPS: Readonly<Record<string, number>> = {
 const DEFAULT_LATENCY_WINDOW_CAP = 400_000;
 
 /**
- * Default absolute trigger for every provider and model (settings
- * `compactAtTokens` overrides it; set it higher to compact later). Measured on
+ * Default absolute trigger for every provider, model and transport except
+ * `codex_oauth`, which has no default ceiling (see resolveCompactionPolicy).
+ * Settings `compactAtTokens` overrides it; set it higher to compact later. Measured on
  * claude-opus-5-5, 122K turns with ~100% cache reads: TTFT p50 1.1s <50K,
  * 1.9s at 200K, 2.8s at 400K, then 4.0–4.4s from 500K. gpt-6-astra (3.6s →
  * 6.6s by 200K) and mimo-v2.6-pro rise the same way, so the curve is not
@@ -126,7 +127,7 @@ export function resolveCompactionPolicy(options: {
   contextWindow: number;
   threshold?: number;
   /** Absolute trigger ceiling (settings `compactAtTokens`; unset =
-   *  {@link DEFAULT_COMPACT_AT_TOKENS}). The trigger is
+   *  {@link DEFAULT_COMPACT_AT_TOKENS}; no absolute ceiling on codex_oauth). The trigger is
    *  min(threshold × window, compactAtTokens). Compaction collapses history to a summary plus
    *  a small recent tail, so the context lands far below this target and the
    *  trigger does not re-fire on the next turn. */

@@ -19,7 +19,9 @@ const SettingsSchema = z.object({
   /** Absolute auto-compaction trigger in tokens. The trigger is
    *  min(compactThreshold × window, compactAtTokens). Unset = 400,000
    *  (DEFAULT_COMPACT_AT_TOKENS: keeps time-to-first-token down on 1M-window
-   *  models); set higher to compact later. */
+   *  models), except OpenAI Codex OAuth, where the window-derived trigger
+   *  applies so an explicit context profile (Experimental Astra) is kept; set
+   *  higher to compact later. */
   compactAtTokens: z.number().int().min(20_000).optional(),
   /** Bash binary for the shell tool. `auto` = first bash on PATH (current
    *  behaviour); `system` = /bin/bash on macOS (faster spawn), same as auto

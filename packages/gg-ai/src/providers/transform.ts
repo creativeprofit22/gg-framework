@@ -874,8 +874,7 @@ export function toAnthropicCacheControl(
 ): { type: "ephemeral"; ttl?: "1h" } | undefined {
   const resolved = retention ?? "short";
   if (resolved === "none") return undefined;
-  const ttl =
-    resolved === "long" && (!baseUrl || baseUrl.includes("api.anthropic.com")) ? "1h" : undefined;
+  const ttl = resolved === "long" && isDirectAnthropicApi(baseUrl) ? "1h" : undefined;
   return { type: "ephemeral", ...(ttl && { ttl }) } as { type: "ephemeral"; ttl?: "1h" };
 }
 

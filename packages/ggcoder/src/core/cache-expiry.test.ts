@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Message, PreparedContext, Usage } from "@kenkaiiii/gg-ai";
 import { CacheDiagnostics } from "./cache-diagnostics.js";
 import {
@@ -11,6 +11,14 @@ import {
 const MIN = 60_000;
 
 describe("resolveCacheTtl", () => {
+  // No-baseUrl cases fall back to ANTHROPIC_BASE_URL, so pin it per test.
+  beforeEach(() => {
+    vi.stubEnv("ANTHROPIC_BASE_URL", "");
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
   it.each([
     [{ provider: "anthropic", model: "claude", cacheRetention: "short" as const }, 5 * MIN],
     [{ provider: "anthropic", model: "claude", cacheRetention: "long" as const }, 60 * MIN],
@@ -38,6 +46,15 @@ describe("resolveCacheTtl", () => {
     expect(
       resolveCacheTtl({ provider: "openai", model: "gpt-6", cacheRetention: "short" })?.confidence,
     ).toBe("may_be_cold");
+  });
+
+  it("mirrors the wire's first-party check, not a substring match", () => {
+    const long = { provider: "anthropic", model: "c", cacheRetention: "long" as const };
+    expect(resolveCacheTtl({ ...long, baseUrl: "http://api.anthropic.com.evil.test" })?.ttlMs).toBe(
+      5 * MIN,
+    );
+    vi.stubEnv("ANTHROPIC_BASE_URL", "https://proxy.example.com");
+    expect(resolveCacheTtl(long)?.ttlMs).toBe(5 * MIN);
   });
 
   it("returns null when no TTL is requested or known", () => {

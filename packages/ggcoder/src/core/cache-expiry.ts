@@ -1,4 +1,4 @@
-import type { CacheRetention } from "@kenkaiiii/gg-ai";
+import { isDirectAnthropicApi, type CacheRetention } from "@kenkaiiii/gg-ai";
 
 /**
  * Cold-prompt-cache detection (mirrors langchain-ai/deepagents#6477's
@@ -42,7 +42,7 @@ export function resolveCacheTtl(input: CacheTtlInput): CacheTtlPolicy | null {
     // gg-ai/src/providers/transform.ts `toAnthropicCacheControl`: "long" sends
     // `ttl: "1h"` only on the first-party endpoint; everything else sends a bare
     // `{type: "ephemeral"}`, which is Anthropic's 5-minute default.
-    const firstParty = !input.baseUrl || input.baseUrl.includes("api.anthropic.com");
+    const firstParty = isDirectAnthropicApi(input.baseUrl);
     if (input.cacheRetention === "long" && firstParty) {
       return {
         ttlMs: 60 * MINUTE,

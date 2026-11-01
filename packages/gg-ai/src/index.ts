@@ -127,6 +127,7 @@ export { resolveToolSchema } from "./utils/zod-to-json-schema.js";
 export {
   clampProviderContextImages,
   dropInvalidToolCalls,
+  isDirectAnthropicApi,
   isValidToolCallName,
   toolCallNameRuleFor,
   TOOL_CALL_NAME_RULES,

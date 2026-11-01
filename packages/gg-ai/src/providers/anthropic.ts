@@ -336,8 +336,7 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
   const useStreaming = options.streaming !== false && !options.prewarm;
 
   const cacheControl = toAnthropicCacheControl(options.cacheRetention, options.baseUrl);
-  const supportsFirstPartyToolExtras =
-    !options.baseUrl || options.baseUrl.includes("api.anthropic.com");
+  const supportsFirstPartyToolExtras = isDirectAnthropicApi(options.baseUrl);
   const downgradedImages = downgradeUnsupportedImages(options.messages, options.supportsImages);
   const downgradedMessages = downgradeUnsupportedVideos(downgradedImages, options.supportsVideo);
   // Server-side refusal fallback: first-party API only, and not once this config

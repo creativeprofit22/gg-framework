@@ -1,9 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import {
   clampProviderContextImages,
   downgradeUnsupportedVideos,
   providerImageDropCount,
+  toAnthropicCacheControl,
   toAnthropicMessages,
   toAnthropicThinking,
   toAnthropicTools,
@@ -1264,5 +1265,28 @@ describe("toLocalReasoningEffort", () => {
   it("never emits xhigh, which no local server accepts", () => {
     const levels = ["low", "medium", "high", "xhigh", "max", "ultra"] as const;
     expect(levels.map((l) => toLocalReasoningEffort(l))).not.toContain("xhigh");
+  });
+});
+
+describe("toAnthropicCacheControl first-party 1h TTL", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("sends ttl 1h only to the first-party endpoint", () => {
+    vi.stubEnv("ANTHROPIC_BASE_URL", "");
+    expect(toAnthropicCacheControl("long", undefined)).toEqual({ type: "ephemeral", ttl: "1h" });
+    expect(toAnthropicCacheControl("long", "https://api.anthropic.com")).toEqual({
+      type: "ephemeral",
+      ttl: "1h",
+    });
+  });
+
+  it("uses the wire's first-party check, not a substring match", () => {
+    expect(toAnthropicCacheControl("long", "http://api.anthropic.com.evil.test")).toEqual({
+      type: "ephemeral",
+    });
+    vi.stubEnv("ANTHROPIC_BASE_URL", "https://proxy.example.com");
+    expect(toAnthropicCacheControl("long", undefined)).toEqual({ type: "ephemeral" });
   });
 });

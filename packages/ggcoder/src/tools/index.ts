@@ -191,6 +191,8 @@ export interface CreateToolsOptions {
   getVerifyPlan?: () => VerifyPlan | null;
   /** The latest identical pass and whether the ledger still holds it current. */
   findPriorPass?: (fingerprint: string) => { record: CheckCoverageRecord; current: boolean } | null;
+  /** Settings `bashPath` (see ResolveShellOpts); read once when tools are built. */
+  getBashPath?: () => string | undefined;
   /**
    * Lazily read whether `grep` may use the external `rg` scanner when present
    * (grepUseRipgrep). Defaults to enabled when omitted.
@@ -302,7 +304,7 @@ export async function createTools(
       ? async (filePath: string, content: string, source?: EditSource): Promise<string> =>
           opts?.deferLspDiagnostics
             ? lspManager.queueDiagnosticsAfterWrite(filePath, content, source)
-            : lspManager.diagnosticsAfterWrite(filePath, content, source)
+            : lspManager.diagnosticsWithinBudget(filePath, content, source)
       : undefined;
   // Same local-only reasoning as LSP: the index reads the workspace from disk.
   const testImpact =
@@ -376,7 +378,7 @@ export async function createTools(
       processManager,
       ops,
       planModeRef,
-      undefined,
+      opts?.getBashPath ? { bashPath: opts.getBashPath() } : undefined,
       opts?.getNetworkPolicy,
       ops === localOperations ? opts?.getSandboxPolicy : undefined,
       opts?.getForegroundLimitSettings,

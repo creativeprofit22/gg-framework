@@ -24,6 +24,7 @@ import {
   type VideoContent,
   type ToolCall,
   type ToolResult,
+  preconnectProvider,
 } from "@kenkaiiii/gg-ai";
 import { EventBus, type McpToolEventIdentity } from "./event-bus.js";
 import { flagUntrustedToolResult } from "./injection-detect.js";
@@ -141,6 +142,7 @@ import { ensureAppDirs } from "../config.js";
 import {
   buildSubAgentSystemPrompt,
   buildSystemPrompt,
+  type ApprovedPlanPromptContent,
   type SystemPromptEnvironment,
 } from "../system-prompt.js";
 import {
@@ -160,7 +162,7 @@ import type { DirectCommandExecutor } from "./programmatic/execution.js";
 import type { BackgroundProcess } from "./process-manager.js";
 import type { DebugManager } from "../tools/debug.js";
 import { REVIEW_REJECTED_BEFORE_START } from "../tools/bash.js";
-import { buildProcessCompletionFollowUp } from "./process-gate.js";
+import { buildProcessCompletionFollowUp, mergeCompletionGateFollowUps } from "./process-gate.js";
 import { PLAN_SUBMISSION_NUDGE, shouldNudgePlanSubmission } from "./plan-submission-gate.js";
 import { canonicalProjectKey } from "../project-notes-repository.js";
 import {
@@ -228,7 +230,11 @@ import {
 import { extractPlanSteps, findCompletedMarkers } from "../utils/plan-steps.js";
 import { readFileSync } from "node:fs";
 import { clampThinkingForPlanMode } from "./thinking-level.js";
-import { pruneStaleToolResults, shouldPruneToolResults } from "./compaction/tool-result-pruner.js";
+import {
+  pruneMinimumTokens,
+  pruneStaleToolResults,
+  shouldPruneToolResults,
+} from "./compaction/tool-result-pruner.js";
 import { discoverAgents, type AgentDefinition } from "./agents.js";
 import { enhancePrompt, type EnhanceResult } from "../utils/prompt-enhancer.js";
 import { detectLanguages, detectProjectStack, type LanguageId } from "./language-detector.js";
@@ -252,6 +258,7 @@ import {
   type SemanticLoopVerdict,
 } from "./semantic-loop-check.js";
 import { buildEnvDeltaMessage, buildLanguageUpdateMessage } from "./env-delta.js";
+import { buildPlanStateMessage, samePlanState, type PlanPromptState } from "./plan-delta.js";
 import { listProjectFiles, type ProjectFileList } from "./project-files.js";
 import {
   wrapSteeringText,
@@ -468,6 +475,9 @@ export interface AgentSessionOptions {
    * resumable identity.
    */
   transient?: boolean;
+  /** Pre-open the provider connection at session start / model switch / prewarm.
+   *  Default: on, except transient sessions and under the test runner. */
+  preconnect?: boolean;
   /**
    * Told when an agent loop starts (true) and when the outermost one ends
    * (false), however it ended. Nested loops (a template prompt inside a run)
@@ -767,11 +777,50 @@ export interface AgentSessionState {
 // ── Agent Session ──────────────────────────────────────────
 
 /** A prompt that asks for the live web (see AgentSession.attachWebSearchIfAsked). */
+/** True when the transcript holds a native (server-side) `web_search` call. */
+export function historyUsesNativeWebSearch(messages: readonly Message[]): boolean {
+  for (const message of messages) {
+    if (message.role !== "assistant" || !Array.isArray(message.content)) continue;
+    for (const part of message.content) {
+      if (part.type === "server_tool_call" && part.name === "web_search") return true;
+      if (part.type === "raw") {
+        const data = part.data as { type?: unknown; name?: unknown } | undefined;
+        if (data?.type === "server_tool_use" && data.name === "web_search") return true;
+      }
+    }
+  }
+  return false;
+}
+
 const WEB_INTENT =
   /\b(?:web|internet|online|google|googling|website|look (?:it |this |that )?up|(?:latest|newest|current) (?:version|release|news|docs?|documentation)|release notes|news)\b/i;
 
 /** Distinct security rows one run may add to the chat (and session file). */
 const MAX_SECURITY_ROWS_PER_RUN = 20;
+
+/** How long dispose waits for a post-turn compaction before aborting it. */
+export const DISPOSE_COMPACTION_WAIT_MS = 2_500;
+/** Grace after aborting it, for the compaction to unwind. */
+const DISPOSE_COMPACTION_ABORT_GRACE_MS = 500;
+
+/** Resolves true if `promise` settles within `ms`, else false. Never rejects. */
+async function settleWithin(promise: Promise<unknown>, ms: number): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<false>((resolve) => {
+    timer = setTimeout(() => resolve(false), ms);
+  });
+  try {
+    return await Promise.race([
+      promise.then(
+        () => true,
+        () => true,
+      ),
+      timeout,
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 /**
  * A chat row's target: first line, no control or bidi-override characters
@@ -944,6 +993,8 @@ export class AgentSession {
   private renderedEnvironment: SystemPromptEnvironment = {};
   /** Project files as of the first prompt build (undefined until then). */
   private projectFiles: ProjectFileList | null | undefined;
+  /** `git ls-files` started at the top of initialize(), overlapping the rest of setup. */
+  private projectFilesPending?: Promise<ProjectFileList | null>;
   /** Wall-clock start of the current run; scopes the background-process gate. */
   private runStartedAt = 0;
   /** Gate injections spent this run, capped by MAX_PROCESS_GATE_INJECTIONS. */
@@ -962,6 +1013,8 @@ export class AgentSession {
   private compactionArmedForNextRun = false;
   /** In-flight post-turn (background) compaction, if any. */
   private postTurnCompaction?: Promise<void>;
+  /** Aborts the in-flight post-turn compaction (dispose caps its wait). */
+  private postTurnCompactionAbort?: AbortController;
   private lastCompactionCompacted = false;
   private compactionRetryAfter = 0;
   /**
@@ -1062,6 +1115,10 @@ export class AgentSession {
   private readonly reportedProjectMcpSkips = new Set<string>();
   /** Servers whose latest connect attempt on the current MCP manager failed. */
   private readonly failedMcpServers = new Map<string, { requiresAuth: boolean }>();
+  /** Deferred built-ins in tier order, fixed at session start. Sent as the
+   * provider's on-demand catalog (see gg-ai `deferredTools`) so promoting one
+   * loads it through the transcript and the cached tools block stays put. */
+  private deferredToolCatalog: AgentTool[] = [];
   private provider: Provider;
   private model: string;
   private openAICodexContextProfile: OpenAICodexContextProfile = "stable";
@@ -1083,6 +1140,14 @@ export class AgentSession {
   private agentPrompt?: string;
   /** Stable prompt prefix retained separately from the volatile uncached tail. */
   private baseSystemPrompt = "";
+  /** Plan state rendered into the cached system prompt. */
+  private promptPlanState: PlanPromptState = { planMode: false, approvedPlan: undefined };
+  /** Plan state the model has been told (prompt or appended notice). */
+  private seenPlanState: PlanPromptState = { planMode: false, approvedPlan: undefined };
+  /** Plan notice waiting for the next request, with the state it describes. */
+  private pendingPlanNotice: { message: Message; state: PlanPromptState } | null = null;
+  /** Latest plan notice appended — re-announced if compaction drops it. */
+  private lastPlanNotice: Message | null = null;
   /**
    * Project languages whose style packs and verify commands are in the
    * standard prompt. Only ever grows within a session (same policy as the
@@ -1218,6 +1283,12 @@ export class AgentSession {
     // is an npm round-trip (~0.3–3s) on the user's first prompt; start it now
     // so it overlaps session setup and the user's typing instead.
     if (this.provider === "anthropic") void getClaudeCliUserAgent().catch(() => {});
+    // The prompt's file list is a `git ls-files` (~30 ms on a mid-size repo)
+    // that nothing before buildBasePrompt depends on: start it now so it runs
+    // alongside settings/auth/skills/tools instead of after them.
+    if (!this.customSystemPrompt && this.projectFiles === undefined) {
+      this.projectFilesPending = listProjectFiles(this.cwd);
+    }
 
     const paths = await ensureAppDirs();
 
@@ -1375,6 +1446,7 @@ export class AgentSession {
       checkCoverage: this.checkCoverage,
       getVerifyPlan: this.getVerifyPlan,
       findPriorPass: (fingerprint) => this.verificationEvidenceLedger.findPriorPass(fingerprint),
+      getBashPath: () => this.settingsManager.get("bashPath"),
       getNetworkPolicy: () => ({
         mode: this.settingsManager.get("networkMode"),
         allow: this.settingsManager.get("networkAllow"),
@@ -1481,6 +1553,11 @@ export class AgentSession {
       if (deferred.length > 0) {
         this.deferredBuiltinToolNames = deferred.map((tool) => tool.name);
         this.deferredBuiltinTools = new Map(deferred.map((tool) => [tool.name, tool]));
+        // Advisory-only tools stay out of the provider's on-demand catalog: only
+        // an active advisory turn may surface them.
+        this.deferredToolCatalog = deferred.filter(
+          (tool) => !ADVISORY_ONLY_TOOL_NAMES.has(tool.name),
+        );
         this.mcpCatalog ??= new DeferredToolCatalog(this.contextLimits);
         this.mcpCatalog.add(deferred);
         this.ensureToolSearchTool();
@@ -1629,6 +1706,7 @@ export class AgentSession {
     }
 
     this.eventBus.emit("session_start", { sessionId: this.sessionId });
+    this.preconnect();
   }
 
   /**
@@ -2078,7 +2156,6 @@ export class AgentSession {
             }
           }
           this.registerTools(promoted);
-          await this.rebuildSystemPromptInPlace();
         },
         async (toolName) => {
           if (this.liveMcpTools.has(toolName)) return undefined;
@@ -2122,7 +2199,13 @@ export class AgentSession {
   private nativeWebSearchOn(): boolean {
     if (this.provider !== "anthropic") return true;
     if (!this.deferredBuiltinToolNames.includes("web_search")) return true;
-    return this.registeredTools.has("web_search");
+    if (this.registeredTools.has("web_search")) return true;
+    // A restored, branched or compacted conversation can already hold native
+    // `web_search` blocks from when the tool was attached. Anthropic rejects
+    // any request whose history references a server tool that is not declared
+    // (400 "`server_tool_use` block references `web_search`…"), so the history
+    // itself keeps native search on.
+    return historyUsesNativeWebSearch(this.messages);
   }
 
   /**
@@ -2176,7 +2259,20 @@ export class AgentSession {
         const result = await tool.execute(args, context);
         if (followUps.when(args)) {
           const missing = followUps.names.filter((name) => !this.registeredTools.has(name));
-          if (missing.length > 0) this.promoteDeferredBuiltins(missing);
+          const promoted = missing.length > 0 ? this.promoteDeferredBuiltins(missing) : [];
+          // Only tools the guarded registry actually made live load here.
+          const loaded = promoted
+            .map((tool) => tool.name)
+            .filter((name) => this.tools.some((tool) => tool.name === name));
+          if (loaded.length > 0) {
+            // The trigger's result is where the follow-ups load (cache-safe
+            // transports load them in the transcript, not the tools block).
+            const structured = typeof result === "string" ? { content: result } : result;
+            return {
+              ...structured,
+              loadedTools: [...(structured.loadedTools ?? []), ...loaded],
+            };
+          }
         }
         return result;
       },
@@ -3071,6 +3167,11 @@ export class AgentSession {
       this.renderedEnvironment,
       this.promptEnvironment(),
     );
+    // Plan mode toggled / plan approved mid-run: appended, never re-rendered.
+    const planNotice = this.takePlanNotice();
+    if (planNotice) {
+      log("INFO", "session", "Injecting plan state update instead of rebuilding the prompt");
+    }
     if (environmentDelta) {
       // The model has now been told; only a further change re-triggers this.
       this.renderedEnvironment = this.promptEnvironment();
@@ -3151,13 +3252,15 @@ export class AgentSession {
       });
       return [
         ...(environmentDelta ? [environmentDelta] : []),
+        ...(planNotice ? [planNotice] : []),
         ...steeringMessages,
         ...(notificationMessage ? [notificationMessage] : []),
       ];
     }
-    if (environmentDelta || notificationMessage) {
+    if (environmentDelta || planNotice || notificationMessage) {
       return [
         ...(environmentDelta ? [environmentDelta] : []),
+        ...(planNotice ? [planNotice] : []),
         ...(notificationMessage ? [notificationMessage] : []),
       ];
     }
@@ -3476,26 +3579,32 @@ export class AgentSession {
           },
         ]
       : [];
-    const childCompletionFollowUp = buildSubAgentCompletionFollowUp(this.subAgentManager);
-    if (childCompletionFollowUp) return [...diagnosticMessages, ...childCompletionFollowUp];
+    const childCompletionFollowUp = buildSubAgentCompletionFollowUp(this.subAgentManager) ?? [];
 
     // Background processes started this run and never read block completion:
     // their progress/exit checkpoints only land on the steering path, which an
-    // agent about to stop never reaches.
-    const processFollowUp = buildProcessCompletionFollowUp(
-      this.processManager?.list() ?? [],
-      this.runStartedAt,
-      this.processGateInjected,
-    );
-    if (processFollowUp) {
+    // agent about to stop never reaches. Sent in the same follow-up as the
+    // child-agent gate: one forced turn can collect both, where returning them
+    // one per stop cost a separate model round-trip each.
+    const processFollowUp =
+      buildProcessCompletionFollowUp(
+        this.processManager?.list() ?? [],
+        this.runStartedAt,
+        this.processGateInjected,
+      ) ?? [];
+    if (processFollowUp.length > 0) {
       this.processGateInjected += 1;
       log("INFO", "process-gate", "Injecting background-process completion gate", {
         injected: String(this.processGateInjected),
       });
-      return [...diagnosticMessages, ...processFollowUp];
     }
 
-    if (diagnosticMessages.length > 0) return diagnosticMessages;
+    const gateMessages = mergeCompletionGateFollowUps(
+      diagnosticMessages,
+      childCompletionFollowUp,
+      processFollowUp,
+    );
+    if (gateMessages) return gateMessages;
 
     await this.rerunRefusedCheck();
 
@@ -3703,6 +3812,7 @@ export class AgentSession {
         model: this.model,
         contextWindow,
         threshold: this.settingsManager.get("compactThreshold"),
+        compactAtTokens: this.settingsManager.get("compactAtTokens"),
         accountId: creds.accountId,
         approvedPlanPath: this.approvedPlanPath,
       });
@@ -3776,6 +3886,7 @@ export class AgentSession {
         provider: this.provider,
         model: resolveTransportModel(this.provider, this.model),
         tools: options.disableTools ? [] : this.tools,
+        ...(options.disableTools ? {} : { deferredTools: this.deferredToolCatalog }),
         webSearch: options.disableTools ? false : () => this.nativeWebSearchOn(),
         maxTokens: this.requestMaxTokens(accountId),
         maxTurns: this.opts.maxTurns,
@@ -3845,10 +3956,15 @@ export class AgentSession {
               promptCacheKey: this.getPromptCacheKey(),
             },
           });
-          log("INFO", "cache", "Prepared context", {
-            sessionId: this.sessionId || this.transportSessionId,
-            data: JSON.stringify(report),
-          });
+          // "Context cache outcome" (persistTurnMetric) repeats this whole report
+          // with usage attached, so only log the prepared report on its own when
+          // it carries a cache-relevant change or risk worth seeing pre-response.
+          if (report.changes.length > 0 || report.thinkingPrefixRiskBlocks > 0) {
+            log("INFO", "cache", "Prepared context", {
+              sessionId: this.sessionId || this.transportSessionId,
+              data: JSON.stringify(report),
+            });
+          }
           if (report.thinkingPrefixRiskBlocks > 0) {
             log("WARN", "cache", "Possible signed-thinking prefix mismatch; not server verified", {
               sessionId: this.sessionId || this.transportSessionId,
@@ -3927,6 +4043,7 @@ export class AgentSession {
               model: this.model,
               contextWindow,
               threshold: this.settingsManager.get("compactThreshold"),
+              compactAtTokens: this.settingsManager.get("compactAtTokens"),
               accountId,
               approvedPlanPath: this.approvedPlanPath,
             });
@@ -3953,7 +4070,10 @@ export class AgentSession {
             // anchors; drop the retained usage afterwards since it counted the
             // pruned content.
             if (shouldPruneToolResults(activeTokens, policy.targetTokens)) {
-              const pruneResult = pruneStaleToolResults(messages);
+              const cacheCold = this.getCacheExpiryStatus()?.expired ?? false;
+              const pruneResult = pruneStaleToolResults(messages, {
+                minimumTokens: pruneMinimumTokens(activeTokens, cacheCold),
+              });
               if (pruneResult.pruned) {
                 this.cacheDiagnostics.noteEdit("tool_prune", pruneResult.freedTokens);
                 this.providerContext = null;
@@ -3976,6 +4096,14 @@ export class AgentSession {
             // An approved plan runs as ONE run, so step boundaries are only
             // visible here, between model steps — not after the run ends.
             const planStep = this.observePlanStepProgress(messages, contextWindow, activeTokens);
+            // The decision line carries the outcome (compact=) next to its inputs.
+            const overLimit = shouldCompact(
+              messages,
+              contextWindow,
+              policy.threshold,
+              activeTokens,
+              policy.targetTokens,
+            );
             log("INFO", "compaction", "In-flight compaction decision", {
               provider: this.provider,
               model: this.model,
@@ -3983,19 +4111,10 @@ export class AgentSession {
               contextWindow: String(contextWindow),
               activeTokens: String(activeTokens),
               triggerLimit: String(policy.targetTokens),
+              compact: String(overLimit || Boolean(planStep?.compact)),
               ...(planStep ? { planStep: `${planStep.compact} (${planStep.reason})` } : {}),
             });
-            if (
-              !shouldCompact(
-                messages,
-                contextWindow,
-                policy.threshold,
-                activeTokens,
-                policy.targetTokens,
-              ) &&
-              !planStep?.compact
-            )
-              return messages;
+            if (!overLimit && !planStep?.compact) return messages;
           }
 
           // compact() operates on this.messages, while an earlier transform may
@@ -4308,6 +4427,7 @@ export class AgentSession {
     // booted on e.g. Kimi (256K) keeps sending that cap after switching to a
     // smaller model (Opus 128K), which the provider rejects.
     this.maxTokens = this.resolveMaxTokens(model);
+    if (changed) this.preconnect();
     this.eventBus.emit("model_change", {
       provider: this.provider,
       model: this.model,
@@ -4688,6 +4808,7 @@ export class AgentSession {
       model: this.model,
       contextWindow,
       threshold: this.settingsManager.get("compactThreshold"),
+      compactAtTokens: this.settingsManager.get("compactAtTokens"),
       accountId: creds.accountId,
       approvedPlanPath: this.approvedPlanPath,
     });
@@ -4722,9 +4843,11 @@ export class AgentSession {
       activeTokens: activeTokens === undefined ? "estimated" : String(activeTokens),
       triggerLimit: String(policy.targetTokens),
     });
+    const postTurnAbort = new AbortController();
+    this.postTurnCompactionAbort = postTurnAbort;
     this.postTurnCompaction = (async () => {
       try {
-        await this.compact(creds, "automatic");
+        await this.compact(creds, "automatic", undefined, postTurnAbort.signal);
         if (this.lastCompactionCompacted) {
           // Arm re-grounding for the next turn. resetHookState clears
           // compactionOccurred at run start, before the injection point, so
@@ -4746,6 +4869,8 @@ export class AgentSession {
         );
       } finally {
         this.postTurnCompaction = undefined;
+        if (this.postTurnCompactionAbort === postTurnAbort)
+          this.postTurnCompactionAbort = undefined;
       }
     })();
   }
@@ -4760,9 +4885,15 @@ export class AgentSession {
     mode: "manual" | "automatic" | "forced" = "manual",
     /** User-stated focus (`/compact <focus>`): what must survive verbatim. */
     focus?: string,
+    /** Extra abort source (post-turn compaction, cancelled by dispose). */
+    abortSignal?: AbortSignal,
   ): Promise<void> {
     this.contextProfileLocked = !this.getOpenAICodexContextProfileEligibility().canChange;
     this.lastCompactionCompacted = false;
+    const compactionSignal =
+      abortSignal && this.opts.signal
+        ? AbortSignal.any([this.opts.signal, abortSignal])
+        : (abortSignal ?? this.opts.signal);
     const creds =
       existingCredentials ??
       (await this.resolveRunCredentials(this.provider, {
@@ -4778,6 +4909,7 @@ export class AgentSession {
       model: this.model,
       contextWindow,
       threshold: this.settingsManager.get("compactThreshold"),
+      compactAtTokens: this.settingsManager.get("compactAtTokens"),
       accountId: creds.accountId,
       approvedPlanPath: this.approvedPlanPath,
     });
@@ -4797,7 +4929,7 @@ export class AgentSession {
         baseUrl: this.baseUrl ?? creds.baseUrl,
         contextWindow,
         targetTokens: policy.targetTokens,
-        signal: this.opts.signal,
+        signal: compactionSignal,
         approvedPlanPath: this.approvedPlanPath,
         focus,
       });
@@ -4818,7 +4950,7 @@ export class AgentSession {
       }
     } else {
       const conversationId = this.conversationId;
-      await this.sessionManager.withCompactionLease(conversationId, this.opts.signal, async () => {
+      await this.sessionManager.withCompactionLease(conversationId, compactionSignal, async () => {
         let sourceFingerprint = computeSourceFingerprint(this.messages);
         const canonicalPath = await this.sessionManager.resolveCanonicalSession(
           conversationId,
@@ -5912,7 +6044,7 @@ export class AgentSession {
       this.approvedPlanPath = undefined;
       this.approvedPlanConsumption = undefined;
     }
-    await this.rebuildSystemPromptInPlace();
+    await this.applyPlanStateChange();
   }
 
   /** Legacy path-based plan activation. Durable app handoffs use the exact-content record below. */
@@ -5920,7 +6052,64 @@ export class AgentSession {
     this.approvedPlanPath = approvedPlanPath;
     this.approvedPlanConsumption = undefined;
     this.approvedPlanPhaseContext = undefined;
-    await this.rebuildSystemPromptInPlace();
+    await this.applyPlanStateChange();
+  }
+
+  /** The approved plan exactly as {@link buildBasePrompt} renders it. */
+  private async approvedPlanForPrompt(): Promise<ApprovedPlanPromptContent | undefined> {
+    if (this.approvedPlanHydrationDeferred) return undefined;
+    if (this.approvedPlanConsumption) {
+      return {
+        content: this.approvedPlanConsumption.content,
+        approvedPlanPath: this.approvedPlanConsumption.approvedPlanPath,
+      };
+    }
+    const approvedPlanPath = this.approvedPlanPath;
+    if (!approvedPlanPath) return undefined;
+    const content = await fs.readFile(approvedPlanPath, "utf-8").catch(() => undefined);
+    return content === undefined ? undefined : { content, approvedPlanPath };
+  }
+
+  private async currentPlanPromptState(): Promise<PlanPromptState> {
+    return { planMode: this.planModeRef.current, approvedPlan: await this.approvedPlanForPrompt() };
+  }
+
+  /**
+   * Before the conversation starts, render plan state into the prompt. After,
+   * the prompt is a cached prefix: queue an appended notice instead, so the
+   * cached bytes stay identical (a rebuild re-sent the whole history).
+   */
+  private async applyPlanStateChange(): Promise<void> {
+    if (this.customSystemPrompt || this.agentPrompt !== undefined) return;
+    if (!this.messages.some((message) => message.role !== "system")) {
+      this.pendingPlanNotice = null;
+      await this.rebuildSystemPromptInPlace();
+      return;
+    }
+    const state = await this.currentPlanPromptState();
+    const message = buildPlanStateMessage(this.seenPlanState, state);
+    this.pendingPlanNotice = message ? { message, state } : null;
+  }
+
+  /** The plan notice to append now, if any (pending, or a compacted-away one). */
+  private takePlanNotice(): Message | null {
+    if (this.pendingPlanNotice) {
+      const { message, state } = this.pendingPlanNotice;
+      this.pendingPlanNotice = null;
+      this.seenPlanState = state;
+      this.lastPlanNotice = message;
+      return message;
+    }
+    if (
+      this.lastPlanNotice &&
+      !samePlanState(this.seenPlanState, this.promptPlanState) &&
+      !this.messages.includes(this.lastPlanNotice)
+    ) {
+      const again: Message = { ...this.lastPlanNotice };
+      this.lastPlanNotice = again;
+      return again;
+    }
+    return null;
   }
 
   persistApprovedPlanConsumption(
@@ -6133,7 +6322,11 @@ export class AgentSession {
     if (this.customSystemPrompt) return this.customSystemPrompt;
     // Listed once: a rebuild (plan mode, /add-dir, compaction) must not churn the
     // prompt as the agent adds files.
-    if (this.projectFiles === undefined) this.projectFiles = await listProjectFiles(this.cwd);
+    if (this.projectFiles === undefined) {
+      const pending = this.projectFilesPending;
+      this.projectFilesPending = undefined;
+      this.projectFiles = await (pending ?? listProjectFiles(this.cwd));
+    }
     const toolNames = this.tools.map((tool) => tool.name);
     const deferredToolNames = this.deferredToolNamesForPrompt(toolNames);
     // Whatever is rendered now is what the model has been told.
@@ -6200,6 +6393,13 @@ export class AgentSession {
    * update is saved in order with the rest of the conversation.
    */
   private async announceNewLanguages(): Promise<void> {
+    const planNotice = this.takePlanNotice();
+    if (planNotice) {
+      this.messages.push(planNotice);
+      await this.persistMessage(planNotice);
+      this.lastPersistedIndex = this.messages.length;
+      log("INFO", "session", "Appended plan state update instead of rebuilding the prompt");
+    }
     if (!this.hasReply()) return; // the next request rebuilds the prompt instead
     this.refreshActiveLanguages();
     const fresh = new Set(
@@ -6262,6 +6462,10 @@ export class AgentSession {
     if (this.customSystemPrompt) return;
     const rebuilt = await this.buildBasePrompt(this.planModeRef.current, this.approvedPlanPath);
     this.baseSystemPrompt = rebuilt;
+    this.promptPlanState = await this.currentPlanPromptState();
+    this.seenPlanState = this.promptPlanState;
+    this.pendingPlanNotice = null;
+    this.lastPlanNotice = null;
     const content = this.withSystemPromptTail(rebuilt);
     if (this.messages[0]?.role === "system") {
       this.messages[0] = { role: "system", content };
@@ -6827,6 +7031,32 @@ export class AgentSession {
   private runLoopDepth = 0;
   private lastRealRequestAt = 0;
   private lastPrewarmAt = 0;
+  /** Last connection pre-open per provider origin (see {@link preconnect}). */
+  private readonly preconnectedAt = new Map<string, number>();
+
+  /**
+   * Fire-and-forget: open the TLS connection to the active provider before the
+   * first request, through the shared keep-alive pool. Zero tokens — an
+   * unauthenticated HEAD; skipped for local endpoints and throttled per origin.
+   * Transient sessions (one-shot tools) and test runs never touch the network here.
+   */
+  private preconnect(): void {
+    const enabled = this.opts.preconnect ?? (this.opts.transient !== true && !process.env.VITEST);
+    if (!enabled) return;
+    const provider = this.provider;
+    void this.authStorage
+      .resolveCredentials(provider, { storageKeys: this.currentAuthStorageKeys() })
+      .then((creds) => {
+        if (provider !== this.provider) return;
+        preconnectProvider({
+          provider,
+          baseUrl: this.baseUrl ?? creds.baseUrl,
+          accountId: creds.accountId,
+          warmedAt: this.preconnectedAt,
+        });
+      })
+      .catch(() => {});
+  }
   private prewarmController: AbortController | null = null;
 
   /**
@@ -6837,6 +7067,8 @@ export class AgentSession {
    * first real reply is a cache read instead of a cold write.
    */
   async prewarm(signal?: AbortSignal): Promise<{ ok: boolean; reason: string; usage?: Usage }> {
+    // Every provider: the user is typing, so the first request is seconds away.
+    this.preconnect();
     if (this.provider !== "anthropic") return { ok: false, reason: "provider" };
     if (this.settingsManager?.get("cachePrewarm") === false) {
       return { ok: false, reason: "disabled" };
@@ -6889,6 +7121,7 @@ export class AgentSession {
         model: this.model,
         messages,
         tools: this.tools,
+        deferredTools: this.deferredToolCatalog,
         webSearch: this.nativeWebSearchOn(),
         maxTokens: this.requestMaxTokens(creds.accountId),
         thinking: this.planModeRef.current
@@ -7087,7 +7320,19 @@ export class AgentSession {
     this.semanticLoop.controller?.abort();
     this.semanticLoop.verdict = null;
     this.verifyPlanLoader?.dispose();
-    await this.settlePostTurnCompaction();
+    // Quiesce any in-flight post-turn compaction BEFORE tearing down state.
+    // Capped: a hung summary call must not hold MCP/LSP/sub-agent teardown and
+    // window close hostage. Past the cap it is aborted (compact() checks the
+    // signal before replacing history), with a short grace to unwind.
+    if (this.postTurnCompaction) {
+      const pending = this.postTurnCompaction;
+      const settledInTime = await settleWithin(pending, DISPOSE_COMPACTION_WAIT_MS);
+      if (!settledInTime) {
+        log("WARN", "compaction", "Post-turn compaction still running at dispose — aborting");
+        this.postTurnCompactionAbort?.abort();
+        await settleWithin(pending, DISPOSE_COMPACTION_ABORT_GRACE_MS);
+      }
+    }
     this.cacheDiagnostics.reset();
     this.diagnosticsRecorder?.finalize();
     this.managerAbortSignal?.removeEventListener("abort", this.managerAbortHandler);
@@ -7181,9 +7426,15 @@ export class AgentSession {
     );
     // Use the leaf from the header to walk the correct branch
     const loadedMessages = this.sessionManager.getMessages(loaded.entries, loaded.header.leafId);
-    const savedCompletionReview = [...loaded.entries]
-      .reverse()
-      .find((entry) => entry.type === "custom" && entry.kind === COMPLETION_REVIEW_STATE_KIND);
+    // Backward scan for the latest host checkpoint (no full copy).
+    let savedCompletionReview: (typeof loaded.entries)[number] | undefined;
+    for (let i = loaded.entries.length - 1; i >= 0; i--) {
+      const entry = loaded.entries[i];
+      if (entry?.type === "custom" && entry.kind === COMPLETION_REVIEW_STATE_KIND) {
+        savedCompletionReview = entry;
+        break;
+      }
+    }
     this.opts.completionReview?.restore(
       savedCompletionReview?.type === "custom" ? savedCompletionReview.data : null,
     );
@@ -7283,6 +7534,7 @@ export class AgentSession {
       model: this.model,
       contextWindow,
       threshold: this.settingsManager.get("compactThreshold"),
+      compactAtTokens: this.settingsManager.get("compactAtTokens"),
       accountId: creds.accountId,
       approvedPlanPath: this.approvedPlanPath,
     });

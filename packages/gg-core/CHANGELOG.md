@@ -1,5 +1,24 @@
 # @kenkaiiii/gg-core
 
+## 5.88.1
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.88.1
+
+## 5.88.0
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.88.0
+
+## 5.87.3
+
+### Patch Changes
+
+- Updated dependencies
+  - @kenkaiiii/gg-ai@5.87.3
+
 ## 5.87.2
 
 ### Patch Changes

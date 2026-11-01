@@ -39,6 +39,7 @@ import { formatSidecarError, sidecarSensitiveValues } from "./app-sidecar-error.
 import { runSubagentWorkerMode } from "./modes/subagent-worker-mode.js";
 import type { MessageProvenance, Provider, ThinkingLevel } from "@kenkaiiii/gg-ai";
 import { setStreamDiagnostic } from "@kenkaiiii/gg-agent";
+import { streamDiagLevel } from "./core/stream-diag-level.js";
 import { AgentSession } from "./core/agent-session.js";
 import type {
   DesktopContextSnapshot,
@@ -142,6 +143,8 @@ import {
 } from "./hf-pull.js";
 import { cleanupToolOutputs } from "./tools/overflow.js";
 import { readCappedBody } from "./utils/http-body.js";
+import { pruneDiagnosticsRecords } from "./core/internal-diagnostics.js";
+import { pruneCheckpointSessions } from "./core/checkpoint-store.js";
 import {
   GEMINI_API_KEY,
   XIAOMI_CREDITS_KEY,
@@ -654,9 +657,9 @@ async function main(): Promise<void> {
       phase === "idle_timeout_fired" ||
       phase === "hard_timeout_fired" ||
       phase === "stall_exhausted";
-    // A session stuck on the non-streaming fallback costs real money and real
-    // latency; it does not belong in the INFO noise floor.
-    log(phase === "non_streaming_session" ? "WARN" : "INFO", "stream", phase, {
+    const level = streamDiagLevel(phase, data);
+    if (level === null) return;
+    log(level, "stream", phase, {
       ...(data ?? {}),
       ...(includeRuntime
         ? {
@@ -698,12 +701,38 @@ async function main(): Promise<void> {
   // omits Homebrew/Cargo/version-manager dirs, so the agent can't find node,
   // git, python, rg, etc. Enrich process.env.PATH from the login shell once,
   // before anything spawns (bash tool, background tasks, LSP, git helpers all
-  // inherit it). Best-effort — never blocks startup beyond its internal cap.
-  await enrichProcessPath();
+  // inherit it). Best-effort, capped internally. Not awaited here: it overlaps
+  // the rest of boot (nothing below spawns), and the HTTP handler holds every
+  // request until it settles, so no window-driven spawn can see the bare PATH.
+  let pathReady = false;
+  const pathReadyPromise = enrichProcessPath()
+    .catch(() => {})
+    .finally(() => {
+      pathReady = true;
+    });
 
   // Sweep recoverable full tool outputs (~/.gg/tool-output/) older than 48h.
   // Fire-and-forget: cleanup must never delay or break startup.
   void cleanupToolOutputs().catch(() => {});
+  // ~/.gg/diagnostics/sessions records older than 30 days (best-effort, non-blocking).
+  void pruneDiagnosticsRecords()
+    .then(({ removed, freedBytes }) => {
+      if (removed > 0) {
+        log("INFO", "diagnostics", "Pruned old diagnostics records", {
+          removed: String(removed),
+          freedBytes: String(freedBytes),
+        });
+      }
+    })
+    .catch(() => {});
+  // ~/.gg/checkpoints/<session> folders untouched for 30 days (best-effort, non-blocking).
+  void pruneCheckpointSessions()
+    .then(({ removed }) => {
+      if (removed > 0) {
+        log("INFO", "checkpoints", "Pruned old checkpoint folders", { removed: String(removed) });
+      }
+    })
+    .catch(() => {});
 
   // Daily malicious-package feed (OSV MAL-, npm + PyPI): deferred, background,
   // fail-silent; at most one sync a day (core/threat-feed.ts).
@@ -822,7 +851,7 @@ async function main(): Promise<void> {
 
   const { subscriptionUsage } = createUsageService(auth);
 
-  const server = http.createServer(
+  const handleRequest =
     wrapSidecarHandler((req: http.IncomingMessage, res: http.ServerResponse) => {
       const url = req.url ?? "/";
       const method = req.method ?? "GET";
@@ -1131,8 +1160,15 @@ async function main(): Promise<void> {
       if (handleAppSidecarPhaseCancellationRoute(method, url, res, ctx, phaseCancellations)) return;
 
       ctx.handle(req, res, url, method);
-    }, "app-sidecar.http"),
-  );
+    }, "app-sidecar.http");
+  // PATH enrichment overlaps boot; hold every request until it settles.
+  const server = http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
+    if (!pathReady) {
+      void pathReadyPromise.then(() => handleRequest(req, res));
+      return;
+    }
+    handleRequest(req, res);
+  });
   server.listen(port, host, () => {
     const addr = server.address() as AddressInfo;
     // The Rust shell reads this line to learn the daemon port (it already
@@ -4194,7 +4230,8 @@ async function createSession(
     if (tasksPollStopped) return;
     tasksPoll = setTimeout(() => {
       const tasks = session.listBackgroundProcesses();
-      const next = JSON.stringify(tasks);
+      // Common case: no tasks now and none last time — nothing to serialize.
+      const next = tasks.length === 0 ? "[]" : JSON.stringify(tasks);
       if (next !== lastTasksJson) {
         lastTasksJson = next;
         broadcast("tasks", { tasks });

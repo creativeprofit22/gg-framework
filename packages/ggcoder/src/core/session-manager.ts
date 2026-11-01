@@ -15,11 +15,16 @@ import type { OpenAICodexContextProfile } from "@kenkaiiii/gg-core/models";
 import { withFileLock } from "@kenkaiiii/gg-core";
 import { ASK_USER_INTERRUPTED_TEXT } from "./ask-user.js";
 import { log } from "./logger.js";
+
+/** Sibling turn record a sub-agent writes next to its child transcript. */
+const TURN_RECORD_SUFFIX = ".turn.json";
 import { encodeCwd } from "./encode-cwd.js";
 import { getUserSessionPrompt } from "./session-preview.js";
 import {
+  SESSION_INFO_INDEX_FILE,
   SESSION_SUMMARY_INDEX_FILE,
   SessionSummaryIndex,
+  type IndexedSessionInfo,
   type IndexedSessionSummary,
 } from "./session-summary-index.js";
 import type { CompletedItem } from "../ui/app-items.js";
@@ -533,6 +538,7 @@ export class SessionManager {
   private sealedTails = new Set<string>();
   /** Fingerprint-checked summary caches, one per storage directory. */
   private summaryIndexes = new Map<string, SessionSummaryIndex>();
+  private infoIndexes = new Map<string, SessionSummaryIndex<IndexedSessionInfo>>();
   /** Called once per error code when session persistence fails (e.g. ENOSPC). */
   onPersistError?: (error: NodeJS.ErrnoException) => void;
 
@@ -1239,7 +1245,7 @@ export class SessionManager {
   }
 
   async list(cwd: string): Promise<SessionInfo[]> {
-    return this.summarize(await this.sessionCandidates(this.dirForCwd(cwd)));
+    return this.summarize(this.dirForCwd(cwd));
   }
 
   /**
@@ -1274,8 +1280,18 @@ export class SessionManager {
    * A conversation can span several files (compaction forks a fresh one), so
    * without this collapse a resumed thread appears once per checkpoint.
    */
-  private async summarize(candidates: string[]): Promise<SessionInfo[]> {
-    const summaries = await Promise.all(candidates.map((file) => this.readSessionInfo(file)));
+  private async summarize(directory: string): Promise<SessionInfo[]> {
+    const resolved = path.resolve(directory);
+    let index = this.infoIndexes.get(resolved);
+    if (!index) {
+      index = SessionSummaryIndex.forInfo(resolved);
+      this.infoIndexes.set(resolved, index);
+    }
+    // Fingerprint-cached full parses: only files changed since the last scan
+    // are re-read, so results stay identical to a fresh full parse.
+    const summaries = await index.summaries(await this.sessionCandidates(resolved), (candidate) =>
+      this.readSessionInfo(candidate),
+    );
     return SessionManager.dedupeByConversation(summaries);
   }
 
@@ -1365,6 +1381,10 @@ export class SessionManager {
         bases.add(path.resolve(plainSessionPath(entryPath)));
       } else if (entry.isDirectory() && entry.name.endsWith(".jsonl.assets")) {
         bases.add(path.resolve(entryPath.slice(0, -".assets".length)));
+      } else if (entry.isFile() && entry.name.endsWith(TURN_RECORD_SUFFIX)) {
+        // Sub-agent turn records (<child>.jsonl.turn.json) can outlive their
+        // transcript; track them so retention can clear the orphan too.
+        bases.add(path.resolve(entryPath.slice(0, -TURN_RECORD_SUFFIX.length)));
       }
     }
     return [...bases];
@@ -1408,12 +1428,18 @@ export class SessionManager {
         if (this.isProtectedSessionBase(basePath, keepBases)) continue;
         try {
           const resolved = await resolveSessionPath(basePath);
-          const stat = await fs.stat(resolved);
+          // An orphaned turn record (transcript already gone) ages on its own
+          // mtime; lstat so a symlink is judged — and later unlinked — as the
+          // link itself, never followed out of the sessions directory.
+          const stat = await fs
+            .stat(resolved)
+            .catch(() => fs.lstat(`${basePath}${TURN_RECORD_SUFFIX}`));
           if (stat.mtimeMs >= cutoffMs) continue;
           for (const target of [
             basePath,
             archiveSessionPath(basePath),
             sessionAssetDir(basePath),
+            `${basePath}${TURN_RECORD_SUFFIX}`,
           ]) {
             const removed = await this.removeStoragePath(target);
             result.deletedFiles += removed.deletedFiles;
@@ -1427,7 +1453,9 @@ export class SessionManager {
       // the emptied directory can still be removed.
       if ((await this.sessionCandidates(directory)).length === 0) {
         await fs.unlink(path.join(directory, SESSION_SUMMARY_INDEX_FILE)).catch(() => {});
+        await fs.unlink(path.join(directory, SESSION_INFO_INDEX_FILE)).catch(() => {});
         this.summaryIndexes.delete(path.resolve(directory));
+        this.infoIndexes.delete(path.resolve(directory));
       }
       await fs.rmdir(directory).catch(() => {});
     }

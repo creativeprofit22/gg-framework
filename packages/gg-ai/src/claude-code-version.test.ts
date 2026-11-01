@@ -47,23 +47,23 @@ describe("parseRequiredClaudeCodeVersion", () => {
 
 describe("noteRequiredClaudeCodeVersion", () => {
   it("raises the cached version past a stale cache and reports a retry", async () => {
-    await fs.writeFile(cacheFile(), JSON.stringify({ version: "2.1.278", fetchedAt: Date.now() }));
+    await fs.writeFile(cacheFile(), JSON.stringify({ version: "2.1.900", fetchedAt: Date.now() }));
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () => new Response(JSON.stringify({ version: "2.1.280" }), { status: 200 })),
+      vi.fn(async () => new Response(JSON.stringify({ version: "2.1.920" }), { status: 200 })),
     );
 
     const { noteRequiredClaudeCodeVersion, getClaudeCliUserAgent } = await load();
     expect(
       await noteRequiredClaudeCodeVersion(
-        "Claude Code 2.1.278 does not support this model; version 2.1.280 or newer is required.",
+        "Claude Code 2.1.900 does not support this model; version 2.1.920 or newer is required.",
       ),
     ).toBe(true);
-    expect(await getClaudeCliUserAgent()).toBe("claude-cli/2.1.280 (external, cli)");
+    expect(await getClaudeCliUserAgent()).toBe("claude-cli/2.1.920 (external, cli)");
   });
 
   it("falls back to the demanded version when npm is unreachable", async () => {
-    await fs.writeFile(cacheFile(), JSON.stringify({ version: "2.1.278", fetchedAt: Date.now() }));
+    await fs.writeFile(cacheFile(), JSON.stringify({ version: "2.1.900", fetchedAt: Date.now() }));
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => {
@@ -72,19 +72,19 @@ describe("noteRequiredClaudeCodeVersion", () => {
     );
 
     const { noteRequiredClaudeCodeVersion, getClaudeCodeVersion } = await load();
-    expect(await noteRequiredClaudeCodeVersion("version 2.1.280 or newer is required.")).toBe(true);
-    expect(await getClaudeCodeVersion()).toBe("2.1.280");
+    expect(await noteRequiredClaudeCodeVersion("version 2.1.920 or newer is required.")).toBe(true);
+    expect(await getClaudeCodeVersion()).toBe("2.1.920");
   });
 
   it("does not retry when the cached version already satisfies the requirement", async () => {
-    await fs.writeFile(cacheFile(), JSON.stringify({ version: "2.1.281", fetchedAt: Date.now() }));
+    await fs.writeFile(cacheFile(), JSON.stringify({ version: "2.1.921", fetchedAt: Date.now() }));
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () => new Response(JSON.stringify({ version: "2.1.281" }), { status: 200 })),
+      vi.fn(async () => new Response(JSON.stringify({ version: "2.1.921" }), { status: 200 })),
     );
 
     const { noteRequiredClaudeCodeVersion } = await load();
-    expect(await noteRequiredClaudeCodeVersion("version 2.1.280 or newer is required.")).toBe(
+    expect(await noteRequiredClaudeCodeVersion("version 2.1.920 or newer is required.")).toBe(
       false,
     );
   });
@@ -101,38 +101,38 @@ describe("getClaudeCodeVersion", () => {
   }
 
   it("serves a fresh disk cache without touching npm", async () => {
-    await writeCache("2.1.300", Date.now());
+    await writeCache("2.1.900", Date.now());
     const fetchMock = vi.fn(async () => new Response(JSON.stringify({ version: "9.9.9" })));
     vi.stubGlobal("fetch", fetchMock);
     const mod = await load();
-    expect(await mod.getClaudeCodeVersion()).toBe("2.1.300");
+    expect(await mod.getClaudeCodeVersion()).toBe("2.1.900");
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("serves a stale disk cache at once and refreshes it in the background", async () => {
-    await writeCache("2.1.300", Date.now() - 3 * 24 * 60 * 60 * 1000);
+    await writeCache("2.1.900", Date.now() - 3 * 24 * 60 * 60 * 1000);
     let release!: () => void;
     const gate = new Promise<void>((r) => (release = r));
     const fetchMock = vi.fn(async () => {
       await gate;
-      return new Response(JSON.stringify({ version: "2.1.400" }));
+      return new Response(JSON.stringify({ version: "2.1.950" }));
     });
     vi.stubGlobal("fetch", fetchMock);
     const mod = await load();
 
     // Returns before the (blocked) npm request completes.
-    expect(await mod.getClaudeCodeVersion()).toBe("2.1.300");
+    expect(await mod.getClaudeCodeVersion()).toBe("2.1.900");
     expect(fetchMock).toHaveBeenCalledTimes(1);
 
     release();
     await mod.pendingClaudeCodeVersionRefresh();
-    expect(await mod.getClaudeCodeVersion()).toBe("2.1.400");
+    expect(await mod.getClaudeCodeVersion()).toBe("2.1.950");
     const disk = JSON.parse(await fs.readFile(cacheFile(), "utf8")) as { version: string };
-    expect(disk.version).toBe("2.1.400");
+    expect(disk.version).toBe("2.1.950");
   });
 
   it("does not let a background refresh lower a version Anthropic demanded", async () => {
-    await writeCache("2.1.300", Date.now() - 3 * 24 * 60 * 60 * 1000);
+    await writeCache("2.1.900", Date.now() - 3 * 24 * 60 * 60 * 1000);
     let release!: () => void;
     const gate = new Promise<void>((r) => (release = r));
     let calls = 0;
@@ -144,21 +144,21 @@ describe("getClaudeCodeVersion", () => {
         // noteRequiredClaudeCodeVersion and is offline.
         if (calls === 1) {
           await gate;
-          return new Response(JSON.stringify({ version: "2.1.350" }));
+          return new Response(JSON.stringify({ version: "2.1.950" }));
         }
         throw new Error("offline");
       }),
     );
     const mod = await load();
-    expect(await mod.getClaudeCodeVersion()).toBe("2.1.300");
-    expect(await mod.noteRequiredClaudeCodeVersion("version 2.1.400 or newer is required.")).toBe(
+    expect(await mod.getClaudeCodeVersion()).toBe("2.1.900");
+    expect(await mod.noteRequiredClaudeCodeVersion("version 2.1.990 or newer is required.")).toBe(
       true,
     );
     release();
     await mod.pendingClaudeCodeVersionRefresh();
-    expect(await mod.getClaudeCodeVersion()).toBe("2.1.400");
+    expect(await mod.getClaudeCodeVersion()).toBe("2.1.990");
     const disk = JSON.parse(await fs.readFile(cacheFile(), "utf8")) as { version: string };
-    expect(disk.version).toBe("2.1.400");
+    expect(disk.version).toBe("2.1.990");
   });
 
   it("waits for npm when there is no disk cache", async () => {
@@ -179,5 +179,36 @@ describe("getClaudeCodeVersion", () => {
     );
     const mod = await load();
     expect(await mod.getClaudeCodeVersion()).toMatch(/^\d+\.\d+\.\d+$/);
+  });
+});
+
+describe("Claude Code version floor (issue #126)", () => {
+  it("keeps the built-in fallback at or above Anthropic's 2.1.280 minimum", async () => {
+    const { CLAUDE_CODE_FALLBACK_VERSION } = await load();
+    const [major = 0, minor = 0, patch = 0] = CLAUDE_CODE_FALLBACK_VERSION.split(".").map(Number);
+    expect(major * 1e6 + minor * 1e3 + patch).toBeGreaterThanOrEqual(2_001_280);
+  });
+
+  it("never serves a cached version older than the fallback", async () => {
+    await fs.writeFile(cacheFile(), JSON.stringify({ version: "2.1.75", fetchedAt: Date.now() }));
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ version: "9.9.9" })));
+    vi.stubGlobal("fetch", fetchMock);
+    const mod = await load();
+    expect(await mod.getClaudeCodeVersion()).toBe(mod.CLAUDE_CODE_FALLBACK_VERSION);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("does not report a retry for a demand the floor already satisfies", async () => {
+    await fs.writeFile(cacheFile(), JSON.stringify({ version: "2.1.278", fetchedAt: Date.now() }));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new Error("offline");
+      }),
+    );
+    const mod = await load();
+    expect(await mod.noteRequiredClaudeCodeVersion("version 2.1.280 or newer is required.")).toBe(
+      false,
+    );
   });
 });

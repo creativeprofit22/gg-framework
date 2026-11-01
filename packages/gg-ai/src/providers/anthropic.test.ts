@@ -14,6 +14,12 @@ const createMock = vi.fn();
 const streamMock = vi.fn();
 const withOptionsMock = vi.fn();
 
+// OAuth cases must not reach npm or the real ~/.gg version cache.
+vi.mock("../claude-code-version.js", async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  getClaudeCliUserAgent: vi.fn(async () => "claude-cli/2.1.999 (external, cli)"),
+}));
+
 vi.mock("@anthropic-ai/sdk", () => {
   class APIError extends Error {
     status: number | undefined;
@@ -307,7 +313,8 @@ describe("Anthropic serialized HTTP tool schemas", () => {
           await prewarmAnthropicCache({
             model: "claude-test",
             apiKey: "test-key",
-            system: "test",
+            // Above the cacheable minimum, or prewarm sends nothing.
+            system: "test ".repeat(1200),
             tools,
           });
         } else {
@@ -471,12 +478,14 @@ describe.each(["none", "short", "long"] as const)(
             requestOptions as Parameters<typeof client.messages.create>[1],
           );
         try {
-          await prewarmAnthropicCache({ ...options, system: "test" });
+          // Above the model's cacheable minimum, or prewarm sends nothing.
+          const system = "test ".repeat(1200);
+          await prewarmAnthropicCache({ ...options, system });
           await streamAnthropic({
             ...options,
             provider: "anthropic",
             messages: [
-              { role: "system", content: "test" },
+              { role: "system", content: system },
               { role: "user", content: "." },
             ],
           }).response;
@@ -1521,7 +1530,7 @@ describe("streamAnthropic prewarm", () => {
     provider: "anthropic" as const,
     model: "claude-opus-5-5",
     messages: [
-      { role: "system" as const, content: "system prompt" },
+      { role: "system" as const, content: "system prompt ".repeat(400) },
       { role: "user" as const, content: "hello" },
     ],
     tools: [
@@ -1569,5 +1578,18 @@ describe("streamAnthropic prewarm", () => {
     }).response;
     expect(createMock).not.toHaveBeenCalled();
     expect(response.usage).toEqual({ inputTokens: 0, outputTokens: 0 });
+  });
+
+  it("skips the request when the prefix is below the model's cacheable minimum", async () => {
+    await setupMock();
+    createMock.mockClear();
+    // ~1.4k tokens: under Haiku 4.5's 4,096 minimum, over Opus 5.5's 512.
+    const small = { ...base, thinking: undefined, prewarm: true };
+    const skipped = await streamAnthropic({ ...small, model: "claude-haiku-4-5-20251001" })
+      .response;
+    expect(createMock).not.toHaveBeenCalled();
+    expect(skipped.usage).toEqual({ inputTokens: 0, outputTokens: 0 });
+    await streamAnthropic({ ...small, model: "claude-opus-5-5" }).response;
+    expect(createMock).toHaveBeenCalledTimes(1);
   });
 });

@@ -22,6 +22,48 @@ export interface ChangelogEntry {
 /** Newest first. Prepended by the `/release` flow. */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.99.1",
+    date: "2026-11-01",
+    items: [
+      "Picking up an old chat just works again. If GG Coder had searched the web earlier in a conversation, reopening it after the last update could bounce back with an `HTTP 400` error. I fixed it, so every saved chat continues right where you left off.",
+      "Helpers report back once, cleanly. After you collect a helper's result, you no longer get a second \"it's done\" ping, and the app now clears out checkpoint folders older than `30 days` on startup, freeing up to `51 MB` on a busy machine.",
+    ],
+  },
+  {
+    version: "0.99.0",
+    date: "2026-11-01",
+    items: [
+      "Long sessions just got a lot snappier. I now tidy conversations up at `400k` tokens instead of letting them balloon toward a million, and pulling in a new tool mid-chat no longer throws away the prompt cache, so replies start sooner and cost less.",
+      "Really long sessions keep their memory now. When a giant conversation gets summarized, I shrink and retry instead of falling back to a thin file list, so GG Coder still knows your goal and everything it already did.",
+      "Everyday tools are faster. `find` runs up to `49x` quicker in big repos, helpers spin up sooner, and their reports land with the answer on top instead of cut off at the end.",
+      "GG Coder now cleans up after itself. Old checkpoints, diagnostics and helper leftovers clear out after `30 days`, logs are about a third smaller, and your prompts never get written into debug logs.",
+    ],
+  },
+  {
+    version: "0.98.2",
+    date: "2026-11-01",
+    items: [
+      "Signing in with your Claude account just got sturdier. GG Coder now always speaks to Anthropic as a current Claude Code, even on a first launch with no internet, so `Opus 5.5` never gets turned away for an outdated version.",
+    ],
+  },
+  {
+    version: "0.98.1",
+    date: "2026-10-31",
+    items: [
+      "No more getting bounced back with `Set a workspace folder first` on a fresh install. Settings now tells you when the default folder isn't saved yet, and one press of `Enter` locks it in so Code, Chat and Motion open right up.",
+    ],
+  },
+  {
+    version: "0.98.0",
+    date: "2026-10-31",
+    items: [
+      "GG Coder now runs on `Linux`. Grab the `.deb` for Ubuntu and Debian or the `.rpm` for Fedora, install it, and you get the exact same app as on Mac and Windows, with updates landing right inside the app.",
+      "Ken's activity bar now looks just like the main one, with the same `Stop` key and the tool panel toggle right beside it, so keeping an eye on him or cutting him off takes one click.",
+      "Home feels right at every size. The mode plates and tagline grow together in big windows and all `five` modes stay on one tidy row even in the smallest window.",
+      "`Notes` in the side panel now wrap properly instead of running off the edge, so long notes stay readable.",
+    ],
+  },
+  {
     version: "0.97.5",
     date: "2026-10-28",
     items: [

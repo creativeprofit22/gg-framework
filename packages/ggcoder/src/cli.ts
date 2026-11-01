@@ -81,6 +81,7 @@ import {
 } from "./config.js";
 import { initLogger, log, closeLogger } from "./core/logger.js";
 import { setStreamDiagnostic } from "@kenkaiiii/gg-agent";
+import { streamDiagLevel } from "./core/stream-diag-level.js";
 import { setProviderDiagnostic } from "@kenkaiiii/gg-ai";
 import { buildSystemPrompt } from "./system-prompt.js";
 import { PROMPT_COMMANDS } from "./core/prompt-commands.js";
@@ -88,8 +89,9 @@ import { UI_SLASH_COMMANDS } from "./ui/submit-slash-commands.js";
 import { detectPromptCommand } from "./core/session-history.js";
 import { createTools } from "./tools/index.js";
 import { cleanupToolOutputs } from "./tools/overflow.js";
+import { pruneDiagnosticsRecords } from "./core/internal-diagnostics.js";
 import { spawnedTasks, type SpawnedTaskArgs } from "./tools/subagent-shared.js";
-import { CheckpointStore } from "./core/checkpoint-store.js";
+import { CheckpointStore, pruneCheckpointSessions } from "./core/checkpoint-store.js";
 import { ResearchSourceLedger } from "./core/research-sources.js";
 import { VerifyPlanLoader } from "./core/verify-plan-loader.js";
 import { isVerifyPlanApprovedIn } from "./core/verify-plan-approval.js";
@@ -562,9 +564,8 @@ async function runInkTUI(opts: {
 
   // Wire stream stall diagnostics into the debug log
   setStreamDiagnostic((phase, data) => {
-    // A session stuck on the non-streaming fallback costs real money and real
-    // latency; it does not belong in the INFO noise floor.
-    const level = phase === "non_streaming_session" ? "WARN" : "INFO";
+    const level = streamDiagLevel(phase, data);
+    if (level === null) return;
     log(level, "stream", phase, data as Record<string, unknown>);
   });
   setProviderDiagnostic((phase, data) => {
@@ -880,6 +881,7 @@ async function runInkTUI(opts: {
           model,
           contextWindow,
           threshold: savedSettings.compactThreshold,
+          compactAtTokens: savedSettings.compactAtTokens,
           accountId: creds.accountId,
         });
         const activeTokens = undefined;
@@ -1086,6 +1088,25 @@ async function runInkTUI(opts: {
       .catch(() => {});
     // Sweep recoverable full tool outputs (~/.gg/tool-output/) older than 48h.
     void cleanupToolOutputs().catch(() => {});
+    // ~/.gg/checkpoints/<session> folders untouched for 30 days (best-effort, non-blocking).
+    void pruneCheckpointSessions()
+      .then(({ removed }) => {
+        if (removed > 0) {
+          log("INFO", "checkpoints", "Pruned old checkpoint folders", { removed: String(removed) });
+        }
+      })
+      .catch(() => {});
+    // ~/.gg/diagnostics/sessions records older than 30 days (best-effort, non-blocking).
+    void pruneDiagnosticsRecords()
+      .then(({ removed, freedBytes }) => {
+        if (removed > 0) {
+          log("INFO", "diagnostics", "Pruned old diagnostics records", {
+            removed: String(removed),
+            freedBytes: String(freedBytes),
+          });
+        }
+      })
+      .catch(() => {});
   }
 
   await renderApp({

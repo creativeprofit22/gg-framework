@@ -124,6 +124,7 @@ export async function runInteractive(config: CliConfig): Promise<void> {
       model,
       contextWindow,
       threshold: savedSettings.compactThreshold,
+      compactAtTokens: savedSettings.compactAtTokens,
       accountId: creds.accountId,
     });
     if (

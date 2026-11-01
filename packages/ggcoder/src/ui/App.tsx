@@ -32,7 +32,7 @@ import {
   type SubAgentManager,
   type SubAgentSnapshot,
 } from "../core/subagent-manager.js";
-import { buildProcessCompletionFollowUp } from "../core/process-gate.js";
+import { buildHostCompletionGateFollowUp } from "../core/process-gate.js";
 import { useAgentLoop, type StreamSnapshot, type UserContent } from "./hooks/useAgentLoop.js";
 import { useTranscriptHistory } from "./hooks/useTranscriptHistory.js";
 import type { PasteInfo } from "./components/InputArea.js";
@@ -57,7 +57,7 @@ import {
   type OpenAICodexContextProfile,
 } from "../core/model-registry.js";
 import { SessionManager, type TurnMetricPayload } from "../core/session-manager.js";
-import { log } from "../core/logger.js";
+import { describeUserInput, log } from "../core/logger.js";
 import {
   getPendingUpdate,
   startPeriodicUpdateCheck,
@@ -1803,22 +1803,18 @@ export function App(props: AppProps) {
       // nudges per step so a genuinely blocked agent surfaces.
       getFollowUpMessages: useCallback(() => {
         const childCompletionFollowUp = buildSubAgentCompletionFollowUp(props.subAgentManager);
-        if (childCompletionFollowUp) return childCompletionFollowUp;
 
         // Background processes started this run and never read block
         // completion: their progress/exit checkpoints only reach the agent on
-        // the steering path, which a run about to stop never reaches.
-        const runStartedAt = agentLoopRef.current?.runStartRef.current ?? 0;
-        const gate = processGateRef.current;
-        const processFollowUp = buildProcessCompletionFollowUp(
+        // the steering path, which a run about to stop never reaches. Sent in
+        // one follow-up with the child-agent gate: one forced turn, not two.
+        const gateFollowUp = buildHostCompletionGateFollowUp(
+          childCompletionFollowUp,
           props.processManager?.list() ?? [],
-          runStartedAt,
-          gate.injected,
+          agentLoopRef.current?.runStartRef.current ?? 0,
+          processGateRef.current,
         );
-        if (processFollowUp) {
-          gate.injected += 1;
-          return processFollowUp;
-        }
+        if (gateFollowUp) return gateFollowUp;
 
         return null;
       }, [props.subAgentManager, props.processManager]),
@@ -1970,11 +1966,10 @@ export function App(props: AppProps) {
       if (trimmed.startsWith("/")) {
         log("INFO", "command", `Slash command: ${trimmed}`);
       } else {
-        const truncated = trimmed.length > 100 ? trimmed.slice(0, 100) + "..." : trimmed;
         log(
           "INFO",
           "input",
-          `User input: ${truncated}${inputImages.length > 0 ? ` (+${inputImages.length} image${inputImages.length > 1 ? "s" : ""})` : ""}`,
+          `User input: ${describeUserInput(trimmed)}${inputImages.length > 0 ? ` (+${inputImages.length} image${inputImages.length > 1 ? "s" : ""})` : ""}`,
         );
         // Re-detect on every user submit — cheap (fs stats only). Catches
         // external changes between turns and ensures non-writing prompts still

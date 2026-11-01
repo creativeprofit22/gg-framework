@@ -1,4 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
+import { anthropicMinCacheableTokens, estimatePrefixTokens } from "./cache-minimums.js";
 import type {
   ContentPart,
   ServerToolCall,
@@ -18,6 +19,11 @@ import {
   providerHtmlErrorMessage,
 } from "../errors.js";
 import { StreamResult } from "../utils/event-stream.js";
+import {
+  CLAUDE_CODE_FALLBACK_VERSION,
+  claudeCliUserAgent,
+  getClaudeCliUserAgent,
+} from "../claude-code-version.js";
 import { mergeProviderOptions } from "../utils/provider-options.js";
 import {
   downgradeUnsupportedImages,
@@ -28,6 +34,8 @@ import {
   toAnthropicThinking,
   toAnthropicToolChoice,
   toAnthropicTools,
+  planDeferredTools,
+  supportsAnthropicDeferredTools,
   isAdaptiveThinkingModel,
   isForcedToolChoice,
   rejectsForcedToolChoice,
@@ -174,9 +182,19 @@ export function sumUsageIterations(usage: unknown): IterationTotals | null {
   return totals;
 }
 
+/** OAuth callers that don't pass `userAgent` get the live Claude Code version. */
+async function withClaudeUserAgent<T extends { apiKey?: string; userAgent?: string }>(
+  options: T,
+): Promise<T> {
+  if (options.userAgent || !options.apiKey?.startsWith("sk-ant-oat")) return options;
+  return { ...options, userAgent: await getClaudeCliUserAgent() };
+}
+
 function createClient(options: StreamOptions): Anthropic {
   const isOAuth = options.apiKey?.startsWith("sk-ant-oat");
-  const userAgent = isOAuth ? (options.userAgent ?? "claude-cli/2.1.75 (external, cli)") : "";
+  const userAgent = isOAuth
+    ? (options.userAgent ?? claudeCliUserAgent(CLAUDE_CODE_FALLBACK_VERSION))
+    : "";
   const cacheKey = `${options.apiKey ?? ""}|${options.baseUrl ?? ""}|${userAgent}`;
 
   // Skip cache when a custom fetch is provided (tests, React Native, etc.) —
@@ -237,11 +255,13 @@ export async function prewarmAnthropicCache(options: {
   signal?: AbortSignal;
 }): Promise<void> {
   try {
-    const client = createClient({
-      apiKey: options.apiKey,
-      baseUrl: options.baseUrl,
-      userAgent: options.userAgent,
-    } as StreamOptions);
+    const client = createClient(
+      await withClaudeUserAgent({
+        apiKey: options.apiKey,
+        baseUrl: options.baseUrl,
+        userAgent: options.userAgent,
+      } as StreamOptions),
+    );
     const cacheControl = toAnthropicCacheControl(options.cacheRetention ?? "long", options.baseUrl);
     const { system, messages } = toAnthropicMessages(
       [
@@ -269,6 +289,12 @@ export async function prewarmAnthropicCache(options: {
       }),
       ...(options.serverTools ?? []),
     ];
+    if (
+      estimatePrefixTokens(fullSystem, tools.length ? tools : undefined) <
+      anthropicMinCacheableTokens(options.model)
+    ) {
+      return;
+    }
     await client.messages.create(
       {
         model: options.model,
@@ -317,7 +343,7 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
     );
   }
 
-  const client = createClient(options);
+  const client = createClient(await withClaudeUserAgent(options));
   const isOAuth = options.apiKey?.startsWith("sk-ant-oat");
   // Prewarm uses a single non-streaming request: the stream flag is not part of
   // the prompt-cache key, and a 1-token response needs no incremental events.
@@ -337,8 +363,21 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
     options.provider !== "minimax" &&
     isDirectAnthropicApi(options.baseUrl) &&
     !anthropicServerFallback.disabled.has(fallbackKey);
+  // Deferred tool loading (tool search): the whole on-demand catalog rides in
+  // `tools` with defer_loading from the first request, and a promotion loads
+  // its tool through a tool_reference in the transcript, so the cached tools
+  // block never changes. Without it, each promotion grew `tools` and rewrote
+  // the entire cached prefix (measured: cache read 0 after every tool_search).
+  const deferredPlan =
+    options.provider === "anthropic" &&
+    isDirectAnthropicApi(options.baseUrl) &&
+    supportsAnthropicDeferredTools(options.model)
+      ? planDeferredTools(options.tools, options.deferredTools, downgradedMessages)
+      : undefined;
+  const toolReferences = deferredPlan?.loaded;
   const { system: rawSystem, messages } = toAnthropicMessages(downgradedMessages, cacheControl, {
     fallbackBlocks: useServerFallback,
+    toolReferences,
   });
   // Fast mode (`speed: "fast"` + its beta) is a first-party-API feature; never
   // send it to Anthropic-compatible endpoints (MiniMax, gateways).
@@ -398,7 +437,9 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
     ...(options.temperature != null && !thinking ? { temperature: options.temperature } : {}),
     ...(options.topP != null ? { top_p: options.topP } : {}),
     ...(options.stop ? { stop_sequences: options.stop } : {}),
-    ...(options.tools?.length || options.serverTools?.length || options.webSearch
+    ...((deferredPlan?.live ?? options.tools)?.length ||
+    options.serverTools?.length ||
+    options.webSearch
       ? (() => {
           // Build the tools array with server-side tools taking precedence over
           // client tools that share their name. Anthropic rejects duplicate tool
@@ -411,16 +452,16 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
             const name = (t as { name?: string }).name;
             if (name) reservedServerNames.add(name);
           }
-          const clientTools = options.tools?.length
-            ? toAnthropicTools(
-                options.tools.filter((t) => !reservedServerNames.has(t.name)),
-                {
-                  ...(supportsFirstPartyToolExtras && cacheControl ? { cacheControl } : {}),
-                  ...(supportsFirstPartyToolExtras && fineGrainedToolStreamingEnabled()
-                    ? { enableFineGrainedToolStreaming: true }
-                    : {}),
-                },
-              )
+          const notReserved = (t: { name: string }) => !reservedServerNames.has(t.name);
+          const liveTools = deferredPlan?.live ?? options.tools ?? [];
+          const clientTools = liveTools.length
+            ? toAnthropicTools(liveTools.filter(notReserved), {
+                ...(supportsFirstPartyToolExtras && cacheControl ? { cacheControl } : {}),
+                ...(supportsFirstPartyToolExtras && fineGrainedToolStreamingEnabled()
+                  ? { enableFineGrainedToolStreaming: true }
+                  : {}),
+                ...(deferredPlan ? { deferred: deferredPlan.deferred.filter(notReserved) } : {}),
+              })
             : [];
           return {
             tools: [
@@ -445,6 +486,19 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
     ...(useFastMode ? { speed: "fast" } : {}),
     stream: useStreaming,
   } as Anthropic.MessageCreateParams;
+  // A prefix below the model's minimum cacheable size is never cached: the
+  // prewarm would write nothing, so skip it.
+  if (
+    options.prewarm &&
+    estimatePrefixTokens(baseParams.system, baseParams.tools) <
+      anthropicMinCacheableTokens(options.model)
+  ) {
+    return {
+      message: { role: "assistant", content: [] },
+      stopReason: "end_turn",
+      usage: { inputTokens: 0, outputTokens: 0 },
+    };
+  }
   // Caller-supplied provider-specific body fields; they only fill unset fields.
   const params = mergeProviderOptions(baseParams, options.providerOptions);
 
@@ -500,8 +554,10 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
       };
       const retryParams = {
         ...rest,
-        messages: toAnthropicMessages(downgradedMessages, cacheControl, { fallbackBlocks: false })
-          .messages,
+        messages: toAnthropicMessages(downgradedMessages, cacheControl, {
+          fallbackBlocks: false,
+          toolReferences,
+        }).messages,
       } as Anthropic.MessageCreateParams;
       return create(
         retryParams,

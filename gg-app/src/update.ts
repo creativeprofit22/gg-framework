@@ -11,6 +11,7 @@ import {
 import type { SafeTauriUnlisten } from "./tauri-listener";
 import { appBuildInfo } from "./build-info";
 import { installUpdateForBuild } from "./update-policy";
+import { claimUpdateCheck, recordUpdateCheck, versionFromStorageEvent } from "./update-schedule";
 
 export type UpdatePhase = "idle" | "checking" | "available" | "installing" | "completed" | "error";
 
@@ -32,6 +33,16 @@ export interface UpdateInfo {
 
 const POLL_INTERVAL_MS = 60 * 60 * 1000;
 const MAX_PROGRESS_LINES = 8;
+/** In-window signal: one hook's check found an update the others should load. */
+const UPDATE_FOUND_EVENT = "gg-update-found";
+
+function storageOrNull(): Storage | null {
+  try {
+    return localStorage;
+  } catch {
+    return null;
+  }
+}
 
 interface Deferred {
   promise: Promise<void>;
@@ -86,7 +97,9 @@ export function useAppUpdate(): UpdateInfo {
   const [installerPath, setInstallerPath] = useState<string | null>(null);
   const localListenerReady = useRef<Deferred | null>(null);
 
-  const runCheck = useCallback(async (): Promise<void> => {
+  const hasUpdateRef = useRef(false);
+
+  const runCheck = useCallback(async (force = false): Promise<void> => {
     // Local Fork builds use the reviewed source-merge flow and must never contact
     // the production updater endpoint.
     if (appBuildInfo.localPatched) {
@@ -120,9 +133,19 @@ export function useAppUpdate(): UpdateInfo {
       setPhase((current) => (current === "installing" ? current : "available"));
       return;
     }
+    // One check per lease across all windows/hooks (update-schedule.ts).
+    const storage = storageOrNull();
+    const decision = force ? { kind: "check" as const } : claimUpdateCheck(storage, Date.now());
+    if (decision.kind === "skip") return;
     setPhase((current) => (current === "installing" ? current : "checking"));
     try {
       const found = await check();
+      hasUpdateRef.current = Boolean(found?.available);
+      if (decision.kind === "check") {
+        recordUpdateCheck(storage, Date.now(), found?.available ? found.version : null);
+        // storage events skip the writing window; tell this window's other hook.
+        if (found?.available) window.dispatchEvent(new Event(UPDATE_FOUND_EVENT));
+      }
       if (found?.available) {
         setUpdate(found);
         setPhase((current) => (current === "installing" ? current : "available"));
@@ -140,7 +163,20 @@ export function useAppUpdate(): UpdateInfo {
   useEffect(() => {
     void runCheck();
     const id = setInterval(() => void runCheck(), POLL_INTERVAL_MS);
-    return () => clearInterval(id);
+    // Another window's check found an update: fetch this window's own handle.
+    const onStorage = (e: StorageEvent): void => {
+      if (!hasUpdateRef.current && versionFromStorageEvent(e.key, e.newValue)) void runCheck(true);
+    };
+    const onFound = (): void => {
+      if (!hasUpdateRef.current) void runCheck(true);
+    };
+    window.addEventListener("storage", onStorage);
+    window.addEventListener(UPDATE_FOUND_EVENT, onFound);
+    return () => {
+      clearInterval(id);
+      window.removeEventListener("storage", onStorage);
+      window.removeEventListener(UPDATE_FOUND_EVENT, onFound);
+    };
   }, [runCheck]);
 
   useEffect(() => {

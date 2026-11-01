@@ -13,6 +13,7 @@ import {
   buildProgrammaticProfileProposal,
   persistProgrammaticProfile,
 } from "./programmatic/profile.js";
+import { toolText } from "../test-support/tool-text.js";
 
 vi.mock("@kenkaiiii/gg-agent", async () => {
   const actual = await vi.importActual<typeof GgAgentModule>("@kenkaiiii/gg-agent");
@@ -233,7 +234,7 @@ describe("AgentSession built-in tool tiering", () => {
       const toolSearch = (session as unknown as { tools: AgentTool[] }).tools.find(
         (tool) => tool.name === "tool_search",
       );
-      const result = String(
+      const result = toolText(
         await toolSearch?.execute({ query: "capture screenshot" }, TOOL_CONTEXT),
       );
       expect(result).not.toContain("screenshot:");
@@ -464,6 +465,59 @@ describe("AgentSession built-in tool tiering", () => {
     }
   }, 20_000);
 
+  it("keeps native web search on when the restored history already used it", async () => {
+    // Regression: a resumed/compacted session whose history holds native
+    // web_search blocks, but whose live tool list was rebuilt without the
+    // promoted tool, was rejected by Anthropic (400 "server_tool_use block
+    // references web_search, but web_search is not defined in tools").
+    const session = await createSession();
+    try {
+      const s = session as unknown as { nativeWebSearchOn(): boolean; messages: unknown[] };
+      expect(s.nativeWebSearchOn()).toBe(false);
+      s.messages.push(
+        { role: "user", content: "Does Outlook need IT approval?" },
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "server_tool_call",
+              id: "srvtoolu_1",
+              name: "web_search",
+              input: { query: "entra admin consent" },
+            },
+            {
+              type: "server_tool_result",
+              toolUseId: "srvtoolu_1",
+              resultType: "web_search_tool_result",
+              data: { type: "web_search_tool_result", tool_use_id: "srvtoolu_1", content: [] },
+            },
+            { type: "text", text: "Personal accounts never need IT." },
+          ],
+        },
+      );
+      expect(s.nativeWebSearchOn()).toBe(true);
+    } finally {
+      await session.dispose();
+    }
+  }, 20_000);
+
+  it("detects native web search in raw server_tool_use history blocks", async () => {
+    const { historyUsesNativeWebSearch } = await import("./agent-session.js");
+    expect(
+      historyUsesNativeWebSearch([
+        { role: "assistant", content: [{ type: "text", text: "no search" }] },
+      ] as never),
+    ).toBe(false);
+    expect(
+      historyUsesNativeWebSearch([
+        {
+          role: "assistant",
+          content: [{ type: "raw", data: { type: "server_tool_use", name: "web_search" } }],
+        },
+      ] as never),
+    ).toBe(true);
+  });
+
   it("attaches native web search up front when the human prompt asks for the web", async () => {
     const session = await createSession();
     try {
@@ -628,14 +682,14 @@ describe("AgentSession built-in tool tiering", () => {
       const toolSearch = (session as unknown as { tools: AgentTool[] }).tools.find(
         (tool) => tool.name === "tool_search",
       );
-      const added = String(await toolSearch?.execute({ query: "corpus add" }, TOOL_CONTEXT));
+      const added = toolText(await toolSearch?.execute({ query: "corpus add" }, TOOL_CONTEXT));
       expect(added).not.toContain("research_corpus");
       expect(added).toContain("steroids:");
-      const missed = String(await toolSearch?.execute({ query: "zzqx" }, TOOL_CONTEXT));
+      const missed = toolText(await toolSearch?.execute({ query: "zzqx" }, TOOL_CONTEXT));
       expect(missed).toContain("Still in the catalog");
       expect(missed).not.toContain("research_corpus");
       expect(liveToolNames(session)).not.toContain("research_corpus");
-      const history = String(await toolSearch?.execute({ query: "git history" }, TOOL_CONTEXT));
+      const history = toolText(await toolSearch?.execute({ query: "git history" }, TOOL_CONTEXT));
       expect(history).not.toContain("git_history");
       expect(missed).not.toContain("git_history");
     } finally {

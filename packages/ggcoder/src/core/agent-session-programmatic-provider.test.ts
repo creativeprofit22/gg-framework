@@ -32,6 +32,7 @@ import { programmaticLifecycleStateV1Schema } from "./programmatic/contracts.js"
 import type { AdvisoryEvidence } from "./programmatic/advisory.js";
 import { createProgrammaticScanTool } from "../tools/programmatic-scan.js";
 import { DESKTOP_COMMAND_DISCOVERY_OPTIONS } from "../app-sidecar-command-listing.js";
+import { toolText } from "../test-support/tool-text.js";
 
 // Only the network-facing provider stream is scripted. AgentSession and the agent loop are real.
 vi.mock("@kenkaiiii/gg-ai", async (importOriginal) => ({
@@ -2023,7 +2024,7 @@ it("keeps non-coder sessions out of command discovery and assessment expansion",
     const search = (session as unknown as { tools: AgentTool[] }).tools.find(
       (tool) => tool.name === "tool_search",
     )!;
-    const found = String(
+    const found = toolText(
       await search.execute(
         { query: "command_information" },
         { signal: new AbortController().signal, toolCallId: "fixture" },

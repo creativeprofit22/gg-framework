@@ -5,7 +5,11 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Provider, ThinkingLevel } from "@kenkaiiii/gg-ai";
 import type { AgentDefinition } from "./agents.js";
-import { buildSubAgentCompletionFollowUp, SubAgentManager } from "./subagent-manager.js";
+import {
+  buildSubAgentCompletionFollowUp,
+  NESTED_DEFAULT_MAX_PER_MODEL,
+  SubAgentManager,
+} from "./subagent-manager.js";
 import { SubAgentStore, type PersistedSubAgentRecord } from "./subagent-store.js";
 import { readTurnRecord, writeTurnRecord } from "./subagent-turn-record.js";
 import { AgentNotificationQueue } from "./agent-notifications.js";
@@ -42,6 +46,7 @@ function manager(
     cwd?: string;
     sessionRootDir?: string;
     maxPerModel?: number;
+    subAgentDepth?: number;
     notifications?: AgentNotificationQueue;
     adoptionPollMs?: number;
     provider?: Provider;
@@ -66,6 +71,7 @@ function manager(
     getThinkingLevel: options.getThinkingLevel,
     getCacheKey: () => "parent-cache",
     getMaxPerModel: () => options.maxPerModel,
+    subAgentDepth: options.subAgentDepth ?? 0,
     workerEntry,
     idleTimeoutMs: options.idleTimeoutMs,
     store: options.store,
@@ -234,7 +240,7 @@ describe("SubAgentManager", () => {
       options: {
         model: "gpt-6.1-sol",
         allowedTools: ["read", "grep", "find", "ls"],
-        promptCacheKey: "parent-cache:subagent:gpt-6.1-sol:default",
+        promptCacheKey: expect.stringMatching(/^parent-cache:subagent:gpt-6\.1-sol:default:.+$/),
         turnTimeoutMs: 120_000,
       },
     });
@@ -255,7 +261,7 @@ describe("SubAgentManager", () => {
     expect(initializeCall?.[2]).toMatchObject({
       options: {
         model: "gpt-6.1-sol",
-        promptCacheKey: "parent-cache:subagent:gpt-6.1-sol:fake",
+        promptCacheKey: expect.stringMatching(/^parent-cache:subagent:gpt-6\.1-sol:fake:.+$/),
       },
     });
   });
@@ -341,6 +347,23 @@ describe("SubAgentManager", () => {
     });
   });
 
+  it("caps a nested manager per model by default, but not the top level", async () => {
+    const nested = manager({ subAgentDepth: 1 });
+    const held = await Promise.all([1, 2].map((n) => nested.spawn(`n-${n}`, "hold", "fake")));
+    await expect(nested.spawn("n-3", "hold", "fake")).rejects.toThrow(
+      `At most ${NESTED_DEFAULT_MAX_PER_MODEL} agents may run at once on model`,
+    );
+    // An explicit setting wins over the nested default.
+    const configured = manager({ subAgentDepth: 1, maxPerModel: 3 });
+    const three = await Promise.all(
+      [1, 2, 3].map((n) => configured.spawn(`c-${n}`, "hold", "fake")),
+    );
+    for (const child of [...held, ...three]) {
+      const owner = held.includes(child) ? nested : configured;
+      expect(await owner.sendMessage(child.agent_id, "release")).toBe(1);
+    }
+  });
+
   it("returns after launch and overlaps eight child turns", async () => {
     const instance = manager();
     // "hold" turns run until released, so all eight are provably still active
@@ -403,8 +426,13 @@ describe("SubAgentManager", () => {
     const instance = manager({ notifications });
 
     const child = await instance.spawn("notify-child", "fast", "fake");
-    // Event-driven, but NOT a collection: the parent never calls wait().
-    await instance.wait([child.agent_id], "all", 1_000);
+    // Event-driven, NOT a collection: poll the state instead of wait().
+    const isDone = () =>
+      instance.list().some((a) => a.agent_id === child.agent_id && a.state === "completed");
+    for (let i = 0; i < 200 && !isDone(); i++) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(isDone()).toBe(true);
 
     const drained = notifications.drain();
     expect(drained).toHaveLength(1);
@@ -413,6 +441,16 @@ describe("SubAgentManager", () => {
     expect(drained[0]!.text).toContain("completed");
     expect(drained[0]!.text).toContain("wait_agent");
     expect(drained[0]!.text.length).toBeLessThanOrEqual(512);
+  });
+
+  it("drops the queued completion notice once wait() collects the output", async () => {
+    const notifications = new AgentNotificationQueue();
+    const instance = manager({ notifications });
+    const child = await instance.spawn("collected-child", "fast", "fake");
+    const waited = await instance.wait([child.agent_id], "all", 1_000);
+    expect(waited.agents[0]!.state).toBe("completed");
+    // The parent already has the output: no duplicate "is completed" turn.
+    expect(notifications.drain().filter((n) => n.id === child.agent_id)).toHaveLength(0);
   });
 
   it("sends acceptance checks with the turn and surfaces the verdict", async () => {
@@ -424,9 +462,15 @@ describe("SubAgentManager", () => {
     ];
 
     const child = await instance.spawn("checked", "fast", "fake", { checks });
+    // Read the completion notice before wait() collects (and clears) it.
+    const isDone = () =>
+      instance.list().some((a) => a.agent_id === child.agent_id && a.state === "completed");
+    for (let i = 0; i < 200 && !isDone(); i++) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(notifications.drain()[0]!.text).toContain("Acceptance checks: 0/2 passed.");
     const agent = (await instance.wait([child.agent_id], "all", 1_000)).agents[0]!;
     expect(agent.acceptance).toBe("0/2 passed");
-    expect(notifications.drain()[0]!.text).toContain("Acceptance checks: 0/2 passed.");
 
     // A follow-up without checks clears the previous turn's verdict.
     await instance.followup(child.agent_id, "fast");

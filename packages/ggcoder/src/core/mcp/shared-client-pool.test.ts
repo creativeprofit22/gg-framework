@@ -12,6 +12,8 @@ import {
 } from "./tool-identity.js";
 import type { CachedTool } from "./catalog-cache.js";
 import type { MCPServerConfig } from "./types.js";
+import { toolText } from "../../test-support/tool-text.js";
+import type { ToolExecuteResult } from "@kenkaiiii/gg-agent";
 
 vi.mock("./defaults.js", () => ({
   getAllMcpServers: async (): Promise<MCPServerConfig[]> => [
@@ -327,7 +329,7 @@ describe("SharedMcpClientPool", () => {
     await vi.waitFor(() => expect(activations).toHaveLength(3));
 
     const results = await Promise.all(activations);
-    expect(results).toEqual([
+    expect(results.map((result) => toolText(result as ToolExecuteResult))).toEqual([
       expect.stringContaining("1 tool(s) now available"),
       expect.stringContaining("1 tool(s) now available"),
       expect.stringContaining("1 tool(s) now available"),

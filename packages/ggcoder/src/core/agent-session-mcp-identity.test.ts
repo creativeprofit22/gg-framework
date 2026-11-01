@@ -19,6 +19,7 @@ import {
   withMcpToolIdentity,
   type McpToolIdentity,
 } from "./mcp/tool-identity.js";
+import { toolText } from "../test-support/tool-text.js";
 
 vi.mock("@kenkaiiii/gg-agent", async () => {
   const actual = await vi.importActual<typeof GgAgentModule>("@kenkaiiii/gg-agent");
@@ -178,7 +179,7 @@ describe("AgentSession MCP identity boundary", () => {
     internals.addMcpTools([live]);
 
     const toolSearch = internals.registeredTools.get("tool_search");
-    const result = String(await toolSearch?.execute({ query: "needle cached" }, TOOL_CONTEXT));
+    const result = toolText(await toolSearch?.execute({ query: "needle cached" }, TOOL_CONTEXT));
     expect(result).toContain(identity.providerName);
 
     const promoted = internals.registeredTools.get(identity.providerName);
@@ -413,7 +414,7 @@ describe("AgentSession MCP identity boundary", () => {
       expect(internals.registeredTools.has(identity.providerName)).toBe(false);
 
       const toolSearch = internals.registeredTools.get("tool_search");
-      const discovery = String(await toolSearch?.execute({ query: "live-tool" }, TOOL_CONTEXT));
+      const discovery = toolText(await toolSearch?.execute({ query: "live-tool" }, TOOL_CONTEXT));
       expect(discovery).toContain(identity.providerName);
       const added = internals.registeredTools.get(identity.providerName);
       expect(added).toBeDefined();
@@ -486,7 +487,7 @@ describe("AgentSession MCP identity boundary", () => {
           expect(internals.liveMcpTools.has(identity.providerName)).toBe(false);
           const search = internals.registeredTools.get("tool_search");
           if (search) {
-            expect(String(await search.execute({ query: "needle" }, TOOL_CONTEXT))).not.toContain(
+            expect(toolText(await search.execute({ query: "needle" }, TOOL_CONTEXT))).not.toContain(
               identity.providerName,
             );
           }
@@ -504,7 +505,7 @@ describe("AgentSession MCP identity boundary", () => {
         expect(connectTransport).toHaveBeenCalledOnce();
         expect(acquire).toHaveBeenCalledTimes(serverName === "kencode-search" ? 1 : 0);
         const search = internals.registeredTools.get("tool_search")!;
-        expect(String(await search.execute({ query: "needle" }, TOOL_CONTEXT))).toContain(
+        expect(toolText(await search.execute({ query: "needle" }, TOOL_CONTEXT))).toContain(
           identity.providerName,
         );
         const promoted = internals.registeredTools.get(identity.providerName)!;

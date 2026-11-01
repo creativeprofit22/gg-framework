@@ -336,7 +336,7 @@ export function Composer({
                 submit();
               } else if (e.key === "Escape") {
                 // Cancel the build if it's running; otherwise cancel Ken so the
-                // "esc to cancel" on his bar actually works.
+                // Escape stops him too, like the Stop key on his bar.
                 if (slashOpen) setInput("");
                 else if (running && !cancelling) requestCancel();
                 else if (kenRunning) void cancelKen();

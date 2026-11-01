@@ -6478,7 +6478,7 @@ describe("AgentPane lifecycle", () => {
         kenState: { conversationId: "old", activationEpoch: "old", activeRunId: "old-run" },
       } as AgentModule.AgentState),
     );
-    expect(screen.queryByRole("button", { name: "esc to cancel" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Cancel Ken's reply" })).toBeNull();
     act(() => {
       emit("ready", { running: false, kenState: { ...ken, activeRunId: ken.runId } });
       emit("ken_text_delta", { ken, text: "reconnected mentor output" });
@@ -6490,7 +6490,7 @@ describe("AgentPane lifecycle", () => {
         "reconnected mentor output",
       ),
     );
-    fireEvent.click(screen.getByRole("button", { name: "esc to cancel" }));
+    fireEvent.click(screen.getByRole("button", { name: "Cancel Ken's reply" }));
     expect(pane.cancelKen).toHaveBeenCalledWith(ken);
   });
 
@@ -6520,7 +6520,7 @@ describe("AgentPane lifecycle", () => {
       const pending = deferred<void>();
       vi.mocked(pane.cancelKen).mockReturnValue(pending.promise);
       render(<AgentPane client={pane} target={target} workspaceOwnsSessionLifecycle />);
-      const cancel = await screen.findByRole("button", { name: "esc to cancel" });
+      const cancel = await screen.findByRole("button", { name: "Cancel Ken's reply" });
       fireEvent.click(cancel);
       expect(pane.cancelKen).toHaveBeenCalledWith(identity);
       act(() =>
@@ -6532,10 +6532,10 @@ describe("AgentPane lifecycle", () => {
         pending.reject(new Error("cancel rejected for captured run"));
       });
       expect(screen.queryByText(/cancel rejected for captured run/) !== null).toBe(!replace);
-      expect(screen.getByRole("button", { name: "esc to cancel" })).toBeTruthy();
+      expect(screen.getByRole("button", { name: "Cancel Ken's reply" })).toBeTruthy();
       if (replace) {
         act(() => emit("ken_run_end", { ken: identity }));
-        expect(screen.getByRole("button", { name: "esc to cancel" })).toBeTruthy();
+        expect(screen.getByRole("button", { name: "Cancel Ken's reply" })).toBeTruthy();
       }
     },
   );
@@ -6604,7 +6604,7 @@ describe("AgentPane lifecycle", () => {
             : "@Ken next?",
       );
     else expect(input.value).not.toBe("@Ken next?");
-    expect(screen.queryByRole("button", { name: "esc to cancel" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Cancel Ken's reply" })).toBeNull();
   });
 
   it("reports a rejected mentor send without claiming a run started", async () => {

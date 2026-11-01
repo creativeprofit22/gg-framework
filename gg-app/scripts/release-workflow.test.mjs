@@ -25,3 +25,11 @@ describe("release framework build", () => {
     expect(buildStep).toMatch(/^ {8}shell: bash\s*$/m);
   });
 });
+
+describe("release platform matrix", () => {
+  // Local Fork: ships Windows + Apple Silicon macOS only (upstream also ships Linux).
+  it("ships no Linux leg and never AppImage", () => {
+    expect(workflow).not.toMatch(/^ {10}- platform: ubuntu/m);
+    expect(workflow).not.toMatch(/--bundles [^"\n]*appimage/i);
+  });
+});

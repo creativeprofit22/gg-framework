@@ -1,5 +1,35 @@
 # @kenkaiiii/ggcoder
 
+## 5.88.1
+
+### Patch Changes
+
+- Fix restored Anthropic sessions whose history used native web search failing with HTTP 400 ("server_tool_use block references web_search"), drop the duplicate sub-agent completion notice after wait_agent collects a result, and prune old checkpoint folders at desktop app startup.
+  - @kenkaiiii/gg-ai@5.88.1
+  - @kenkaiiii/gg-agent@5.88.1
+  - @kenkaiiii/gg-core@5.88.1
+
+## 5.88.0
+
+### Minor Changes
+
+- Speed and cost pass: cache-safe tool loading on Anthropic and Codex, 1h cache tail anchor, earlier default compaction (400k) with overflow-safe summaries, leaner sub-agent and tool output, OpenAI SDK retries removed, 30s keep-alive and connection pre-open, faster find/read and session resume, log volume cut and retention for diagnostics, checkpoints and sub-agent files, plus new compactAtTokens and bashPath settings.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.88.0
+- @kenkaiiii/gg-agent@5.88.0
+- @kenkaiiii/gg-core@5.88.0
+
+## 5.87.3
+
+### Patch Changes
+
+- Updated dependencies
+  - @kenkaiiii/gg-ai@5.87.3
+  - @kenkaiiii/gg-agent@5.87.3
+  - @kenkaiiii/gg-core@5.87.3
+
 ## 5.87.2
 
 ### Patch Changes

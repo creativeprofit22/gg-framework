@@ -15,6 +15,7 @@ import type { AgentSession } from "./core/agent-session.js";
 import { DeferredToolCatalog } from "./core/mcp/deferred-catalog.js";
 import { useFakeHome } from "./test-support/fake-home.js";
 import { createToolSearchTool } from "./tools/tool-search.js";
+import { toolText } from "./test-support/tool-text.js";
 
 const observedProviderToolNames = vi.hoisted(() => [] as string[][]);
 const observedNativeWebSearch = vi.hoisted(() => [] as boolean[]);
@@ -182,7 +183,7 @@ describe("app sidecar Research capability contract", () => {
         "late_mutator is unavailable while Research Agent is active",
       );
 
-      const discovery = String(await toolSearch.execute({ query: "code" }, TOOL_CONTEXT));
+      const discovery = toolText(await toolSearch.execute({ query: "code" }, TOOL_CONTEXT));
       expect(discovery).not.toContain("mcp__kencode-search__searchCode");
       expect(discovery).not.toContain("mcp__unknown-mutator__write");
       expect(catalog.names()).toEqual([

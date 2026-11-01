@@ -11,7 +11,12 @@ import { StreamResult } from "../utils/event-stream.js";
 import { providerDiag } from "../utils/diag.js";
 import { mergeProviderOptions } from "../utils/provider-options.js";
 import { normalizePromptCacheKey } from "./prompt-cache-key.js";
-import { downgradeUnsupportedImages, downgradeUnsupportedVideos } from "./transform.js";
+import {
+  downgradeUnsupportedImages,
+  downgradeUnsupportedVideos,
+  planDeferredTools,
+  supportsResponsesToolSearch,
+} from "./transform.js";
 import { extractRequestIdFromMessage } from "../utils/request-id.js";
 import { providerFetch } from "../utils/provider-fetch.js";
 import { consumeResponsesEvents } from "./responses-stream.js";
@@ -103,10 +108,27 @@ async function* runStream(
   const downgradedImages = downgradeUnsupportedImages(options.messages, options.supportsImages);
   // Codex (GPT OAuth) has no video support — always strip video to a placeholder.
   const downgraded = downgradeUnsupportedVideos(downgradedImages, options.supportsVideo);
-  const { system, input } = serializeResponsesInput(
-    downgraded,
-    createCodexInputAdapter(options.supportsImages),
-  );
+  // Client tool search (GPT-5.4+): a promoted tool is loaded by a
+  // tool_search_output in the transcript instead of growing `tools`, which
+  // would miss the whole cached prefix (live: cached 0 → 5,248 of 5,413).
+  const deferredPlan = supportsResponsesToolSearch(options.model)
+    ? planDeferredTools(options.tools, options.deferredTools, downgraded)
+    : undefined;
+  const strict = (options.strictTools ?? true) ? true : null;
+  const toolSearchLoads = deferredPlan
+    ? new Map(
+        [...deferredPlan.loaded].map((name) => {
+          const tool = deferredPlan.byName.get(name);
+          const [wire] = tool ? serializeResponsesTools([tool], { strict }) : [];
+          return [name, { ...(wire as Record<string, unknown>), defer_loading: true }] as const;
+        }),
+      )
+    : undefined;
+  const liveTools = deferredPlan?.live ?? options.tools;
+  const { system, input } = serializeResponsesInput(downgraded, {
+    ...createCodexInputAdapter(options.supportsImages),
+    ...(toolSearchLoads ? { toolSearchLoads } : {}),
+  });
 
   const profile = codexRequestProfile(options.model, options.thinking, options.responsesLite);
   const body: Record<string, unknown> = {
@@ -115,7 +137,7 @@ async function* runStream(
     stream: true,
     instructions: system,
     input,
-    tool_choice: serializeResponsesToolChoice(options.toolChoice, options.tools, {
+    tool_choice: serializeResponsesToolChoice(options.toolChoice, liveTools, {
       transportName: "OpenAI Codex",
       supportsNamedTool: false,
     }),
@@ -123,10 +145,8 @@ async function* runStream(
     include: ["reasoning.encrypted_content"],
   };
 
-  if (options.tools?.length) {
-    body.tools = serializeResponsesTools(options.tools, {
-      strict: (options.strictTools ?? true) ? true : null,
-    });
+  if (liveTools?.length) {
+    body.tools = serializeResponsesTools(liveTools, { strict });
   }
   // Always set a prompt_cache_key. OpenAI uses this key to route requests
   // with the same prefix to the same cache shard — without it, the codex

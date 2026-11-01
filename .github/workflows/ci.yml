@@ -121,6 +121,7 @@ jobs:
           # one is reported in the `app` job, which bundles it).
           node .github/ci/size-gate.mjs --only dist:ggcoder
           node .github/ci/startup-gate.mjs
+          node .github/ci/sidecar-startup-gate.mjs
 
       # Lint and formatting are OS-independent, so one leg is enough.
       - name: Lint + format check
@@ -491,8 +492,7 @@ jobs:
       # throwaway user profile, and requires a visible window plus a packaged
       # ggnode child running the packaged bundle.
       #
-      # Only the Windows matrix leg pays the release-build cost; the macOS and
-      # Linux legs run in parallel and stay fast.
+      # The macOS leg skips the release build; it runs in parallel and stays fast.
       - name: Packaged app smoke (MSI build + launch)
         if: runner.os == 'Windows'
         working-directory: gg-app

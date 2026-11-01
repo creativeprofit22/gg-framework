@@ -141,6 +141,13 @@ export interface ResponsesInputAdapter {
   encodeToolResultId?: (id: string) => string;
   serializeRawAssistantPart?: (data: Record<string, unknown>) => unknown | undefined;
   includeToolResultImages?: boolean;
+  /**
+   * Wire definitions (with `defer_loading: true`) of deferred tools loaded
+   * through the transcript. A tool result naming one in `loadedTools` is
+   * followed by a client `tool_search_call`/`tool_search_output` pair, so the
+   * tool becomes callable without changing the top-level `tools` array.
+   */
+  toolSearchLoads?: ReadonlyMap<string, unknown>;
 }
 
 export interface SerializedResponsesInput {
@@ -155,6 +162,8 @@ export function serializeResponsesInput(
 ): SerializedResponsesInput {
   let system: string | undefined;
   const input: unknown[] = [];
+  const loadedTools = new Set<string>();
+  let toolLoads = 0;
 
   for (const message of messages) {
     if (message.role === "system") {
@@ -218,6 +227,31 @@ export function serializeResponsesInput(
         call_id: adapter.encodeToolResultId?.(result.toolCallId) ?? result.toolCallId,
         output: output.length > 0 ? output : "(see attached image)",
       });
+      const loads = adapter.toolSearchLoads;
+      const names = loads
+        ? (result.loadedTools ?? []).filter((name) => loads.has(name) && !loadedTools.has(name))
+        : [];
+      if (loads && names.length > 0) {
+        for (const name of names) loadedTools.add(name);
+        // Ordinal ids: history only appends, so every request rebuilds them.
+        const loadId = `gg_tool_load_${++toolLoads}`;
+        input.push(
+          {
+            type: "tool_search_call",
+            call_id: loadId,
+            execution: "client",
+            status: "completed",
+            arguments: { query: names.join(" "), limit: names.length },
+          },
+          {
+            type: "tool_search_output",
+            call_id: loadId,
+            execution: "client",
+            status: "completed",
+            tools: names.map((name) => loads.get(name)),
+          },
+        );
+      }
       if (adapter.includeToolResultImages && Array.isArray(result.content)) {
         for (const block of result.content) {
           if (block.type === "image") toolImages.push(block);

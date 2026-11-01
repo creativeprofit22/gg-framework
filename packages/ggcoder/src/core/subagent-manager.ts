@@ -21,6 +21,7 @@ import {
 import {
   boundSubAgentOutput,
   childSubAgentEnv,
+  currentSubAgentDepth,
   resolveSubAgentCliEntry,
   selectSubAgent,
   subAgentCacheKey,
@@ -111,6 +112,9 @@ export interface SubAgentManagerOptions {
    *  counts under that model, not the parent's. Only ever
    *  reduces concurrency below the global ACTIVE_LIMIT. */
   getMaxPerModel?: () => number | undefined;
+  /** This manager's own sub-agent depth (0 = top-level session). Defaults to
+   *  GG_SUBAGENT_DEPTH; injectable for tests. */
+  subAgentDepth?: number;
   onState?: (snapshot: SubAgentSnapshot) => void;
   /**
    * Push queue for child-completion notifications. When set, a finished child
@@ -142,6 +146,14 @@ interface WorkerRecord extends SubAgentSnapshot {
 
 /** Children that may be starting or running at once. */
 export const ACTIVE_LIMIT = 8;
+/**
+ * Default per-model cap for a manager that is itself running inside a child
+ * (depth >= 1). The top level keeps the full ACTIVE_LIMIT so a goal run with
+ * 4-6 workers is untouched, but without a nested default every child could
+ * fan out 8 more — 8 × 8 × 8 processes at blocking depth 3, each with a
+ * 50-turn budget. An explicit `subagentMaxPerModel` setting still wins.
+ */
+export const NESTED_DEFAULT_MAX_PER_MODEL = 2;
 const RETAINED_WORKER_LIMIT = 8;
 const SNAPSHOT_LIMIT = 20;
 /**
@@ -525,6 +537,7 @@ export class SubAgentManager {
             this.options.getCacheKey?.(),
             selection.model,
             selection.agentDef?.name ?? "default",
+            agentId,
           ),
           sessionRootDir: this.sessionRootDir,
           turnTimeoutMs: overrides?.turnTimeoutMs,
@@ -745,6 +758,9 @@ export class SubAgentManager {
   }
 
   private markCollected(agentId: string): void {
+    // The parent has the output now; a still-queued "is completed … collect it
+    // with wait_agent" notice would only repeat it on the next turn.
+    this.options.notifications?.clear("subagent", agentId);
     const worker = this.workers.get(agentId);
     if (worker) {
       worker.collected = true;
@@ -882,6 +898,7 @@ export class SubAgentManager {
             this.options.getCacheKey?.(),
             model,
             agentDef?.name ?? "default",
+            worker.agent_id,
           ),
           sessionRootDir: this.sessionRootDir,
           childSessionPath,
@@ -1128,7 +1145,9 @@ export class SubAgentManager {
 
   /** Enforce the optional per-model cap against the resolved child model. */
   private assertModelCapacity(model: string): void {
-    const cap = this.options.getMaxPerModel?.();
+    const depth = this.options.subAgentDepth ?? currentSubAgentDepth();
+    const cap =
+      this.options.getMaxPerModel?.() ?? (depth >= 1 ? NESTED_DEFAULT_MAX_PER_MODEL : undefined);
     if (cap === undefined) return;
     const activeOnModel = [...this.workers.values()].filter(
       (worker) => this.isActive(worker) && worker.model === model,

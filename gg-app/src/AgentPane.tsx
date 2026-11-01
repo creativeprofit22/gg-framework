@@ -698,9 +698,6 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     kenRunning,
     kenTokens,
     kenRunStartTs,
-    kenIsThinking,
-    kenThinkingStartTs,
-    kenThinkingAccumMs,
     handleKenEvent,
     hydrateKen,
     clearKenStream,
@@ -5544,10 +5541,9 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
                   <KenActivityBar
                     runStartTs={kenRunStartTs}
                     tokens={kenTokens}
-                    isThinking={kenIsThinking}
-                    thinkingStartTs={kenThinkingStartTs}
-                    thinkingAccumMs={kenThinkingAccumMs}
                     onCancel={() => cancelCurrentKen()}
+                    toolsHidden={toolsHidden}
+                    onToggleTools={toggleTools}
                   />
                 ) : (
                   <ActivityBar

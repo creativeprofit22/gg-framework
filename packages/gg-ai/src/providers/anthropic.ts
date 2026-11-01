@@ -35,7 +35,8 @@ import {
   toAnthropicToolChoice,
   toAnthropicTools,
   planDeferredTools,
-  supportsAnthropicDeferredTools,
+  usesDeferredToolLoading,
+  isDirectAnthropicApi,
   isAdaptiveThinkingModel,
   isForcedToolChoice,
   rejectsForcedToolChoice,
@@ -128,22 +129,7 @@ function serverFallbackKey(options: StreamOptions): string {
   return `${options.baseUrl ?? process.env.ANTHROPIC_BASE_URL ?? ""}|${auth}`;
 }
 
-/**
- * True only for the first-party Claude API (`https://api.anthropic.com`). The
- * SDK falls back to `ANTHROPIC_BASE_URL` when no baseUrl is passed, so that is
- * checked too. Bedrock / Vertex / Foundry / proxies / Anthropic-compatible
- * third parties (MiniMax) don't support server-side fallback.
- */
-export function isDirectAnthropicApi(baseUrl: string | undefined): boolean {
-  const effective = baseUrl ?? process.env.ANTHROPIC_BASE_URL;
-  if (!effective) return true;
-  try {
-    const url = new URL(effective);
-    return url.protocol === "https:" && url.hostname === "api.anthropic.com";
-  } catch {
-    return false;
-  }
-}
+export { isDirectAnthropicApi } from "./transform.js";
 
 /** A 400 that rejects the server-side-fallback param or its beta header. */
 function isServerFallbackRejection(err: unknown): boolean {
@@ -368,12 +354,10 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
   // its tool through a tool_reference in the transcript, so the cached tools
   // block never changes. Without it, each promotion grew `tools` and rewrote
   // the entire cached prefix (measured: cache read 0 after every tool_search).
-  const deferredPlan =
-    options.provider === "anthropic" &&
-    isDirectAnthropicApi(options.baseUrl) &&
-    supportsAnthropicDeferredTools(options.model)
-      ? planDeferredTools(options.tools, options.deferredTools, downgradedMessages)
-      : undefined;
+  // Same predicate as stream.ts diagnostics, so the observed tools block matches the wire.
+  const deferredPlan = usesDeferredToolLoading(options)
+    ? planDeferredTools(options.tools, options.deferredTools, downgradedMessages)
+    : undefined;
   const toolReferences = deferredPlan?.loaded;
   const { system: rawSystem, messages } = toAnthropicMessages(downgradedMessages, cacheControl, {
     fallbackBlocks: useServerFallback,

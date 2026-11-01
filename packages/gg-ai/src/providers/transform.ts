@@ -822,6 +822,23 @@ export function supportsAnthropicDeferredTools(model: string): boolean {
   );
 }
 
+/**
+ * True only for the first-party Claude API (`https://api.anthropic.com`). The
+ * SDK falls back to `ANTHROPIC_BASE_URL` when no baseUrl is passed, so that is
+ * checked too. Bedrock / Vertex / Foundry / proxies / Anthropic-compatible
+ * third parties (MiniMax) don't support server-side fallback.
+ */
+export function isDirectAnthropicApi(baseUrl: string | undefined): boolean {
+  const effective = baseUrl ?? process.env.ANTHROPIC_BASE_URL;
+  if (!effective) return true;
+  try {
+    const url = new URL(effective);
+    return url.protocol === "https:" && url.hostname === "api.anthropic.com";
+  } catch {
+    return false;
+  }
+}
+
 /** Responses models with client-executed `tool_search` (GPT-5.4 and later). */
 export function supportsResponsesToolSearch(model: string): boolean {
   return /^gpt-(5\.[4-9]|[6-9])/.test(model);
@@ -841,8 +858,7 @@ export function usesDeferredToolLoading(options: {
   accountId?: string;
 }): boolean {
   if (options.provider === "anthropic") {
-    const firstParty = !options.baseUrl || options.baseUrl.includes("api.anthropic.com");
-    return firstParty && supportsAnthropicDeferredTools(options.model);
+    return isDirectAnthropicApi(options.baseUrl) && supportsAnthropicDeferredTools(options.model);
   }
   if (options.provider === "openai" && options.accountId) {
     return supportsResponsesToolSearch(options.model);

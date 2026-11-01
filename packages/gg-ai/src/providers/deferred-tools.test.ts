@@ -49,7 +49,10 @@ function anthropicTools(live: Tool[], messages: Message[]): string {
 }
 
 describe("deferred tool loading", () => {
-  afterEach(() => vi.unstubAllGlobals());
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
+  });
 
   it("keeps the Anthropic tools block byte-identical across a promotion", () => {
     const before = anthropicTools([read, search], [user]);
@@ -147,5 +150,18 @@ describe("deferred tool loading", () => {
     }
     // No catalog → no plan → providers send `tools` exactly as before.
     expect(planDeferredTools([read], undefined, [user])).toBeUndefined();
+  });
+
+  it("uses the wire's first-party check, not a substring match", () => {
+    const model = "claude-sonnet-5-5";
+    expect(
+      usesDeferredToolLoading({
+        provider: "anthropic",
+        model,
+        baseUrl: "http://api.anthropic.com.evil.test",
+      }),
+    ).toBe(false);
+    vi.stubEnv("ANTHROPIC_BASE_URL", "https://proxy.example.com");
+    expect(usesDeferredToolLoading({ provider: "anthropic", model })).toBe(false);
   });
 });

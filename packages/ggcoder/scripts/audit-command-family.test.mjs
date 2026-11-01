@@ -230,3 +230,9 @@ test("reports stay concise and say N/A when nothing is created", async () => {
     }
   }
 });
+
+test("audit commands do not end reports with a task-list hint", async () => {
+  for (const name of family) {
+    assert.doesNotMatch(await readCommand(name), /Open the task list/i, `${name}.md`);
+  }
+});

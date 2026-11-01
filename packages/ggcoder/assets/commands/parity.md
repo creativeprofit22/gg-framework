@@ -70,7 +70,7 @@ Outside `/ship`, when a confirmed finding belongs to another command, do not cre
 
 **Report.** Keep the reply as short as possible: print only the command's summary block and one line per task or entry. No headings, intro or closing prose, bold lead sentence, notes on what passed, or repeated scope detail. Leave out summary lines whose value is zero or n/a, and sections with no entries.
 
-**Report footer.** After the task lines, add `Routed: <N>` and `Already tracked: <N>` only when non-zero, with one line per entry. If tasks were created, end with: `Tasks created. Open the task list (Ctrl+T in the terminal, or the Tasks button in the desktop app) and run them.`
+**Report footer.** After the task lines, add `Routed: <N>` and `Already tracked: <N>` only when non-zero, with one line per entry.
 
 **Nothing to create.** If this run created no tasks, the first line of the reply is exactly `N/A`. Add lines after it only for `Routed`, `Needs decision` or `Skipped` entries, and in `/ship` the `Ship status:` line; otherwise `N/A` is the whole reply.
 

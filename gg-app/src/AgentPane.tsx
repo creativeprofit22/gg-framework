@@ -2229,8 +2229,8 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       // null = the fetch failed; keep whatever the picker already had.
       if (available) setModels(available);
       setModelsFailed(available === null);
-      await refreshCommands();
-      if (!isCurrent()) return;
+      // The slash catalog can take seconds to build; readiness must not wait on it.
+      void refreshCommands();
       // Project task list for the Tasks modal + nav button.
       try {
         const projectTasks = await listTasks();

@@ -2218,6 +2218,33 @@ describe("command refresh ordering (mocked native transport)", () => {
     const more = await screen.findByRole("group", { name: "More" });
     expect(within(more).getByText("Arrange")).toBeTruthy();
   });
+  it("becomes ready while the command catalog is still loading", async () => {
+    const pane = client("slow-catalog", 1);
+    const catalog = deferred<AgentModule.SlashCommand[] | null>();
+    vi.mocked(pane.listCommands).mockReturnValue(catalog.promise);
+    vi.mocked(pane.getState).mockResolvedValue({
+      ...agentState("azure:gpt-test"),
+      gitDirtyFileCount: 2,
+    });
+    render(<AgentPane client={pane} target={target} />);
+
+    await waitFor(() => expect(pane.listTasks).toHaveBeenCalled());
+    await waitFor(() => expect(screen.queryByText(/connecting to agent/)).toBeNull());
+    expect(screen.queryByTitle("Run /commit")).toBeNull();
+
+    await act(async () => {
+      catalog.resolve([
+        {
+          name: "commit",
+          aliases: [],
+          description: "Commit changes",
+          source: "built-in",
+          input: { text: "optional", references: "optional", attachments: "optional" },
+        },
+      ]);
+    });
+    await screen.findByTitle("Run /commit");
+  });
 });
 
 describe("AgentPane question acknowledgement", () => {

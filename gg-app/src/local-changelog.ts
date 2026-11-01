@@ -53,10 +53,20 @@ export const CURRENT_LOCAL_RELEASE_NOTES = requireCurrentReleaseNotes(releaseNot
 /** Newest first. Maintained only by the Local Fork release flow. */
 export const LOCAL_CHANGELOG: LocalChangelogEntry[] = [
   {
-    id: "local-2026-10-29-upstream-0975-gg-world",
+    id: "local-2026-11-01-upstream-0991-snappier-sessions",
     label: CURRENT_LOCAL_RELEASE_NOTES.label,
     date: CURRENT_LOCAL_RELEASE_NOTES.date,
     items: CURRENT_LOCAL_RELEASE_NOTES.sections.flatMap(({ items }) => items),
+  },
+  {
+    id: "local-2026-10-29-upstream-0975-gg-world",
+    label: "Upstream 0.97.5, with GG World",
+    date: "2026-10-29",
+    items: [
+      "Say hello to `GG World`, the 3D hangout that replaces GG Royale. Open it with the `World` button on Home or the `World` key on the deck: walk around with other players, chat, grab a drink, and sit at an in-game PC that opens your own Supah Coder. `Back` always brings you home. An optional online save keeps your progress, wardrobe and level, and it only switches on after you say yes.",
+      "Big, ambitious tasks no longer get stuck on `retrying`. When Claude takes a long, silent think before a big answer, GG now lets it finish, for up to `30 minutes`, instead of cutting it off and starting over, so you get the result instead of a spinner.",
+      "Your agent travels lighter. It keeps code comments to one short line, only where the why isn't obvious, and everyday work now loads just the skills that measurably changed results: `durable` for anything that could lose data and `compliance-guard` for privacy and tracking. The rest, two code-search tools that went unused, and the old `/setup-skills` workflow are gone, so runs spend fewer steps on detours.",
+    ],
   },
   {
     id: "local-2026-10-25-upstream-0963-pixel-wake-bubble",

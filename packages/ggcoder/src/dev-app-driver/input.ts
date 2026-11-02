@@ -114,6 +114,19 @@ export async function clickAt(client: InputClient, point: Point): Promise<void> 
   await pointerRelease(client, point);
 }
 
+/** One trusted mouse-wheel step; positive deltaY scrolls down whatever is under the point. */
+export async function wheelAt(client: InputClient, point: Point, deltaY: number): Promise<void> {
+  assertPoint(point);
+  if (!Number.isFinite(deltaY)) throw new RangeError(`Invalid wheel delta: ${deltaY}`);
+  await client.send("Input.dispatchMouseEvent", {
+    type: "mouseWheel",
+    x: point.x,
+    y: point.y,
+    deltaX: 0,
+    deltaY,
+  });
+}
+
 export async function captureScreenshot(client: InputClient): Promise<Buffer> {
   const image = await client.send("Page.captureScreenshot", { format: "png" });
   const data =

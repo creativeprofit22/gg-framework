@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { closeSync, existsSync, openSync, readFileSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -12,6 +12,7 @@ import {
   attachDevApp,
   captureScreenshot,
   condition,
+  configureFakeProvider,
   createDevAppDriver,
   createIsolatedProfile,
   describeElement,
@@ -24,8 +25,10 @@ import {
   elementGone,
   focusOn,
   formatSnapshot,
+  isAppWindowTarget,
   isRef,
   launchDevApp,
+  listTargets,
   observeScript,
   pageChanged,
   parsePageState,
@@ -34,26 +37,43 @@ import {
   resolveKey,
   seedAgentPaneScript,
   snapshotScript,
+  startFakeProvider,
   systemClock,
   textAppears,
   textGone,
   type ActionOutcome,
   type ControlClient,
   type DevAppSession,
+  type DevTarget,
   type DriverClock,
   type Expectation,
+  type FakeProvider,
   type FetchLike,
+  type IsolatedProfile,
   type Observation,
   type PageState,
   type PaneSelector,
   type SpawnDevApp,
 } from "../dev-app-driver/index.js";
 import { downscaleForPreview, shrinkToFit } from "../utils/image.js";
+import { killProcessTree } from "../utils/process.js";
 
 const ACT_DEFAULT_MS = 5_000;
 const ACT_MAX_MS = 30_000;
-const LAUNCH_DEFAULT_MS = 180_000;
-const LAUNCH_MAX_MS = 300_000;
+// One launch call waits this long; the app keeps starting in the background after it returns.
+const LAUNCH_DEFAULT_MS = 120_000;
+const LAUNCH_MAX_MS = 240_000;
+// A cold Rust build plus the daemon's first start took about 8 minutes on 2026-11-02.
+const LAUNCH_READY_MS = 1_200_000;
+// Part of a launch call kept for rendering, opening a pane and the first snapshot.
+const LAUNCH_FINISH_RESERVE_MS = 30_000;
+const LAUNCH_LOG_TAIL_CHARS = 4_000;
+// A wheel step either scrolls at once or never does, so a short default keeps "already at the end" quick.
+const SCROLL_DEFAULT_MS = 1_500;
+const WHEEL_STEP_PX = 600;
+const LOCAL_FORK_IDENTITY = "com.ggcoder.local-fork";
+// The replay smoke's daemon wrapper: the real daemon with only Azure traffic sent to a loopback URL.
+const FAKE_PROVIDER_SIDECAR = path.join("scripts", "dev-app-replay-dev-smoke.mjs");
 // Below the default call deadline, so one stuck request never outlives the call that sent it.
 const REQUEST_TIMEOUT_MS = 4_500;
 const MAX_CHANGE_LINES = 12;
@@ -87,7 +107,7 @@ const ExpectSpec = z.object({
 });
 
 const DevAppParams = z.object({
-  action: z.enum(["open", "snapshot", "act", "close"]).describe("What to do"),
+  action: z.enum(["open", "snapshot", "act", "window", "close"]).describe("What to do"),
   mode: z
     .enum(["attach", "launch"])
     .optional()
@@ -99,10 +119,28 @@ const DevAppParams = z.object({
     .max(65_535)
     .optional()
     .describe("open attach: the control port the user gave"),
+  provider: z
+    .enum(["fake"])
+    .optional()
+    .describe(
+      'open launch: "fake" connects a local scripted AI provider, so prompts get instant canned replies ("Fake reply N: …") without a login',
+    ),
   pane: z.string().min(1).optional().describe("snapshot/act: workspace pane id (default focused)"),
   screenshot: z.boolean().optional().describe("snapshot: also return a PNG"),
-  kind: z.enum(["type", "press", "click", "send_prompt"]).optional().describe("act: input kind"),
-  text: z.string().optional().describe("act type/send_prompt: text"),
+  kind: z
+    .enum(["type", "press", "click", "send_prompt", "scroll", "select"])
+    .optional()
+    .describe("act: input kind"),
+  text: z
+    .string()
+    .optional()
+    .describe("act type/send_prompt: text; select: the option's label or value"),
+  direction: z
+    .enum(["up", "down"])
+    .optional()
+    .describe(
+      "act scroll: one wheel step this way, over ref or the window middle; omit it with ref to scroll that element into view",
+    ),
   key: z.string().optional().describe("act press: key name such as Enter, Escape, Tab, a"),
   modifiers: z
     .array(z.enum(["alt", "ctrl", "meta", "shift"]))
@@ -112,7 +150,11 @@ const DevAppParams = z.object({
   ref: z
     .string()
     .optional()
-    .describe("act type/click: element ref from the latest snapshot, e.g. e7"),
+    .describe("act type/click/select/scroll: element ref from the latest snapshot, e.g. e7"),
+  window: z
+    .string()
+    .optional()
+    .describe("window: id from the window list to switch to; omit it to list the app's windows"),
   expect: ExpectSpec.optional().describe(
     "act: expected result (inferred when omitted); snapshot: wait until it holds, without acting",
   ),
@@ -159,14 +201,14 @@ const NEXT_STEP: Record<DevAppErrorCode, string> = {
   unsupported_platform: 'start the dev app yourself and use open with mode "attach"',
   launch_failed:
     "check gg-app dependencies are installed and the dev app starts (pnpm --filter gg-app tauri dev), then retry",
-  target_gone: "call dev_app open again",
+  target_gone: "call dev_app window to list the app's windows and switch to one, or open again",
   pane_not_found: "take a snapshot without pane, or pass a pane id the page shows",
   stale_ref: "take a new snapshot and use a ref from it",
   element_covered:
     "close what covers it (Escape closes menus and dialogs), take a snapshot, then retry",
   element_disabled:
     "make it enabled first (for example fill required fields) or pick another element",
-  element_offscreen: "scroll it into view or enlarge the window, take a snapshot, then retry",
+  element_offscreen: "act scroll with that ref to bring it into view, take a snapshot, then retry",
   menu_swallowed_key:
     'press Escape to close the menu, then press Enter with expect status_is "Working"',
   timed_out:
@@ -195,12 +237,45 @@ export interface DevAppConnection {
   generation: number | null;
 }
 
+export type LaunchOutcome =
+  { ok: true; session: DevAppSession } | { ok: false; error: unknown; output: string };
+
+/** A launched app that is still starting; it outlives the call that started it. */
+export interface PendingLaunch {
+  readonly port: number;
+  readonly project: string;
+  /** Prompts go to the local fake provider instead of a real model. */
+  readonly fake: boolean;
+  readonly startedAt: number;
+  /** Never rejects. */
+  readonly outcome: Promise<LaunchOutcome>;
+  /** Last lines the dev app printed so far. */
+  output(): string;
+  cancel(): Promise<void>;
+  /** Synchronous kill for process exit. */
+  cancelNow(): void;
+}
+
 /** Holds the one live dev app connection of an agent session; `shutdown` on dispose. */
 export class DevAppManager {
   private connection: DevAppConnection | undefined;
+  private pending: PendingLaunch | undefined;
 
   get current(): DevAppConnection | undefined {
     return this.connection;
+  }
+
+  get launching(): PendingLaunch | undefined {
+    return this.pending;
+  }
+
+  startLaunch(launch: PendingLaunch): void {
+    this.pending = launch;
+  }
+
+  /** Hands a finished launch to the caller without stopping it. */
+  takeLaunch(launch: PendingLaunch): void {
+    if (this.pending === launch) this.pending = undefined;
   }
 
   /** Swaps the connection without stopping the previous one (used to keep ownership on reconnect). */
@@ -211,8 +286,14 @@ export class DevAppManager {
   /** Swaps the connection and stops the previous one (kills its tree only if this session owns it). */
   async replace(next: DevAppConnection | undefined): Promise<DevAppConnection | undefined> {
     const previous = this.connection;
+    const launching = this.pending;
     this.connection = next;
-    if (previous && previous !== next) await previous.session.stop();
+    this.pending = undefined;
+    try {
+      if (previous && previous !== next) await previous.session.stop();
+    } finally {
+      await launching?.cancel();
+    }
     return previous;
   }
 
@@ -223,11 +304,15 @@ export class DevAppManager {
   /** For `process.on("exit")`: Node runs no awaited work there, so `shutdown` would never kill. */
   shutdownNow(): void {
     const previous = this.connection;
+    const launching = this.pending;
     this.connection = undefined;
-    try {
-      previous?.session.stopNow();
-    } catch {
-      // Exiting anyway; nothing left to report to.
+    this.pending = undefined;
+    for (const stop of [() => previous?.session.stopNow(), () => launching?.cancelNow()]) {
+      try {
+        stop();
+      } catch {
+        // Exiting anyway; nothing left to report to.
+      }
     }
   }
 }
@@ -251,6 +336,7 @@ export interface DevAppToolDependencies {
   ) => Promise<{ buffer: Buffer; mediaType: string }>;
   previewImage?: (buffer: Buffer) => Promise<Buffer>;
   now?: () => Date;
+  startFakeProvider?: () => Promise<FakeProvider>;
 }
 
 function message(error: unknown): string {
@@ -315,6 +401,32 @@ function budget(requested: number | undefined, fallback: number, max: number): n
   return Math.min(requested ?? fallback, max);
 }
 
+const ANSI = new RegExp(String.fromCharCode(27) + String.raw`\[[0-9;?]*[A-Za-z]`, "g");
+
+/** The end of the launch log without terminal colours; empty when it cannot be read. */
+function readLogTail(file: string): string {
+  try {
+    const text = readFileSync(file, "utf8");
+    return text.slice(-LAUNCH_LOG_TAIL_CHARS).replace(ANSI, "").replace(/\r/g, "\n");
+  } catch {
+    return "";
+  }
+}
+
+function lastLines(text: string, count: number): string[] {
+  return text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line !== "")
+    .slice(-count)
+    .map((line) => (line.length > 200 ? `${line.slice(0, 200)}…` : line));
+}
+
+function duration(ms: number): string {
+  const seconds = Math.max(0, Math.round(ms / 1000));
+  return seconds < 60 ? `${seconds} s` : `${Math.floor(seconds / 60)} min ${seconds % 60} s`;
+}
+
 function quote(text: string): string {
   return JSON.stringify(text.length > 60 ? `${text.slice(0, 60)}…` : text);
 }
@@ -349,6 +461,99 @@ function valueGrew(locator: string, text: string, label: string): Expectation {
         : "pending";
     },
   };
+}
+
+/** In-page text of an option as the snapshot shows it. */
+const OPTION_LABEL = `(o) => String(o.textContent || '').replace(/\\s+/g, ' ').trim()`;
+
+/** Chooses an option in a native dropdown the way a user's pick does: selection, then input/change events. */
+function selectOptionScript(locator: string, want: string): string {
+  return `(() => {
+    const el = ${locator};
+    if (!el || typeof el !== 'object') return { problem: 'element not found', block: 'missing' };
+    if (typeof el.problem === 'string') return el;
+    if (el.tagName !== 'SELECT') return { problem: 'it is not a native dropdown; click it, take a snapshot, then click the option', block: 'invalid' };
+    if (el.disabled === true || el.hasAttribute('disabled')) return { problem: 'the dropdown is disabled', block: 'disabled' };
+    const want = ${JSON.stringify(want)};
+    const label = ${OPTION_LABEL};
+    const options = [...el.querySelectorAll('option')];
+    const match = options.find((o) => label(o) === want) || options.find((o) => o.getAttribute('value') === want);
+    if (!match) return { problem: 'no option ' + JSON.stringify(want) + ' (options: ' + options.slice(0, 12).map(label).join(', ') + ')', block: 'invalid' };
+    if (match.disabled === true || match.hasAttribute('disabled')) return { problem: 'option ' + JSON.stringify(want) + ' is disabled', block: 'disabled' };
+    el.focus();
+    match.selected = true;
+    const View = el.ownerDocument.defaultView;
+    el.dispatchEvent(new View.Event('input', { bubbles: true }));
+    el.dispatchEvent(new View.Event('change', { bubbles: true }));
+    return 'done';
+  })()`;
+}
+
+function optionChosen(locator: string, want: string): Expectation {
+  return condition(
+    `the dropdown shows ${quote(want)}`,
+    `(() => {
+      const el = ${locator};
+      if (!el || typeof el.problem === 'string' || el.tagName !== 'SELECT') return false;
+      const o = (el.selectedOptions && el.selectedOptions[0]) || el.querySelector('option[selected]') || el.querySelector('option');
+      return Boolean(o) && ((${OPTION_LABEL})(o) === ${JSON.stringify(want)} || o.getAttribute('value') === ${JSON.stringify(want)});
+    })()`,
+  );
+}
+
+function scrollIntoViewScript(locator: string): string {
+  return `(() => {
+    const el = ${locator};
+    if (!el || typeof el !== 'object') return { problem: 'element not found', block: 'missing' };
+    if (typeof el.problem === 'string') return el;
+    if (typeof el.scrollIntoView !== 'function') return { problem: 'the element cannot scroll into view', block: 'invalid' };
+    el.scrollIntoView({ block: 'center', inline: 'nearest' });
+    return 'done';
+  })()`;
+}
+
+function inView(locator: string, ref: string): Expectation {
+  return condition(
+    `${ref} is in view`,
+    `(() => {
+      const el = ${locator};
+      if (!el || typeof el.problem === 'string') return false;
+      const r = el.getBoundingClientRect();
+      const x = r.left + r.width / 2, y = r.top + r.height / 2;
+      return r.width > 0 && r.height > 0 && x >= 0 && y >= 0 && x < innerWidth && y < innerHeight;
+    })()`,
+  );
+}
+
+/** Every scrolled element and its offset, so any scroll anywhere shows up as a change. */
+const SCROLL_POSITIONS = `(() => {
+  const out = [];
+  const all = document.querySelectorAll('*');
+  for (let i = 0; i < all.length; i++) {
+    const el = all[i];
+    const top = Math.round(Number(el.scrollTop) || 0), left = Math.round(Number(el.scrollLeft) || 0);
+    if (top || left) out.push(el.tagName + '.' + String(el.className || '').slice(0, 40) + ':' + top + ',' + left);
+  }
+  return out.join(' ');
+})()`;
+
+function scrolled(direction: "up" | "down"): Expectation {
+  return {
+    label: `something scrolled ${direction}`,
+    probe: SCROLL_POSITIONS,
+    judge: (observed, baseline) => (observed.probe !== baseline.probe ? "met" : "pending"),
+    describeTimeout: () =>
+      `nothing scrolled (already at the ${direction === "down" ? "bottom" : "top"}, or nothing scrollable there)`,
+  };
+}
+
+function windowId(target: DevTarget): string {
+  return `w${(target.id ?? "").slice(0, 8).toLowerCase()}`;
+}
+
+function windowLabel(target: DevTarget): string {
+  if (/whatsnew/i.test(target.url)) return "What's new window";
+  return target.title ? `window ${quote(target.title)}` : "app window";
 }
 
 function snapOf(observation: Observation | null): string[] {
@@ -469,6 +674,8 @@ function fromActionError(error: DevAppActionError, context: ActContext): DevAppT
       return new DevAppToolError("element_offscreen", what);
     case "unfocusable":
       return new DevAppToolError("contradicted", `${what}${saw}`);
+    case "invalid":
+      return new DevAppToolError("invalid_input", what);
     default:
       break;
   }
@@ -522,6 +729,7 @@ export function createDevAppTool(
   const shrinkImage = deps.shrinkImage ?? shrinkToFit;
   const previewImage = deps.previewImage ?? downscaleForPreview;
   const now = deps.now ?? (() => new Date());
+  const startProvider = deps.startFakeProvider ?? startFakeProvider;
   const hiddenPaths = new Set<string>();
 
   function scrub(text: string): string {
@@ -557,8 +765,18 @@ export function createDevAppTool(
     };
   }
 
+  function stillStarting(launching: PendingLaunch): DevAppToolError {
+    return new DevAppToolError(
+      "not_attached",
+      `the dev app is still starting (${duration(baseClock.now() - launching.startedAt)} so far)`,
+      'call open with mode "launch" again to wait for it',
+    );
+  }
+
   function requireConnection(): DevAppConnection {
     const connection = manager.current;
+    const launching = manager.launching;
+    if (!connection && launching) throw stillStarting(launching);
     if (!connection) throw new DevAppToolError("not_attached", "no dev app connection is open");
     const gone = connection.session.client.goneReason;
     if (gone !== null) throw new DevAppToolError("target_gone", `the app page went away (${gone})`);
@@ -749,6 +967,210 @@ export function createDevAppTool(
     }
   }
 
+  async function startLaunch(
+    appDir: string,
+    tauriCli: string,
+    fake: boolean,
+  ): Promise<PendingLaunch> {
+    const port = await reservePort();
+    const root = await createProfileRoot();
+    hiddenPaths.add(root);
+    let profile: IsolatedProfile;
+    let logFd: number;
+    let provider: FakeProvider | null = null;
+    const logFile = path.join(root, "launch.log");
+    try {
+      profile = createIsolatedProfile(root);
+      if (fake) {
+        provider = await startProvider();
+        configureFakeProvider(profile, LOCAL_FORK_IDENTITY);
+      }
+      logFd = openSync(logFile, "a");
+    } catch (error) {
+      await provider?.close().catch(() => {});
+      await removeProfileRoot(root).catch(() => {});
+      throw new DevAppToolError("launch_failed", `the isolated profile failed (${message(error)})`);
+    }
+    const providerEnv: Record<string, string> = provider
+      ? {
+          GG_SIDECAR_PATH: path.join(appDir, FAKE_PROVIDER_SIDECAR),
+          GG_DEV_APP_REPLAY_MODE: "sidecar",
+          GG_DEV_APP_REPLAY_PROVIDER: provider.url,
+        }
+      : {};
+    const closeProvider = async (): Promise<void> => {
+      await provider?.close().catch(() => {});
+    };
+    const closeLog = (): void => {
+      try {
+        closeSync(logFd);
+      } catch {
+        // Already closed.
+      }
+    };
+    const controller = new AbortController();
+    let pid: number | null = null;
+    let settled: LaunchOutcome | null = null;
+    let ready: Promise<DevAppSession>;
+    try {
+      ready = launchDevApp({
+        appDir,
+        configPath: path.join(appDir, "src-tauri", "tauri.local.conf.json"),
+        env: devAppEnvironment(env, profile, {
+          cdpPort: port,
+          extra: { ...rustToolchain(env), ...providerEnv },
+        }),
+        cdpPort: port,
+        readyDeadlineMs: LAUNCH_READY_MS,
+        stdio: ["ignore", logFd, logFd],
+        tauriCli,
+        // Not the call's clock: the app keeps starting after the call that launched it returns.
+        clock: abortableClock(baseClock, controller.signal),
+        connect: guardedConnect(port),
+        onSpawn: (spawned) => {
+          pid = spawned;
+        },
+        ...(deps.fetch ? { fetch: deps.fetch } : {}),
+        ...(deps.spawn ? { spawn: deps.spawn } : {}),
+        ...(deps.terminate ? { terminate: deps.terminate } : {}),
+        ...(deps.terminateNow ? { terminateNow: deps.terminateNow } : {}),
+      });
+    } catch (error) {
+      ready = Promise.reject(error);
+    }
+    const outcome = ready.then(
+      (session): LaunchOutcome => {
+        closeLog();
+        return {
+          ok: true,
+          session: {
+            ...session,
+            stop: async () => {
+              try {
+                await session.stop();
+              } finally {
+                await closeProvider();
+                await removeProfileRoot(root).catch(() => {});
+              }
+            },
+            stopNow: () => {
+              session.stopNow();
+              void closeProvider();
+            },
+          },
+        };
+      },
+      async (error: unknown): Promise<LaunchOutcome> => {
+        closeLog();
+        const output = readLogTail(logFile);
+        await closeProvider();
+        await removeProfileRoot(root).catch(() => {});
+        return { ok: false, error, output };
+      },
+    );
+    void outcome.then((result) => {
+      settled = result;
+    });
+    return {
+      port,
+      project: profile.project,
+      fake,
+      startedAt: baseClock.now(),
+      outcome,
+      output: () => readLogTail(logFile),
+      cancel: async () => {
+        controller.abort();
+        const result = await outcome;
+        if (result.ok) await result.session.stop();
+      },
+      cancelNow: () => {
+        controller.abort();
+        const result: LaunchOutcome | null = settled;
+        if (result?.ok) result.session.stopNow();
+        else if (pid !== null) (deps.terminateNow ?? killProcessTree)(pid);
+        void closeProvider();
+      },
+    };
+  }
+
+  function launchFailure(result: Extract<LaunchOutcome, { ok: false }>): DevAppToolError {
+    const { error } = result;
+    if (error instanceof DevAppToolError) return error;
+    if (error instanceof AmbiguousTargetError) {
+      return new DevAppToolError("ambiguous_target", error.message);
+    }
+    const lines = lastLines(result.output, 6);
+    const output = lines.length > 0 ? `; its last output:\n${lines.join("\n")}\n` : "";
+    return new DevAppToolError(
+      "launch_failed",
+      `the dev app did not become ready (${message(error)})${output}`,
+    );
+  }
+
+  /** Waits for a launch within this call; when it is not ready yet, reports progress instead of failing. */
+  async function awaitLaunch(
+    pending: PendingLaunch,
+    args: DevAppArgs,
+    clock: DriverClock,
+    signal: AbortSignal,
+    resumed: boolean,
+  ): Promise<string> {
+    const ms = budget(args.deadline_ms, LAUNCH_DEFAULT_MS, LAUNCH_MAX_MS);
+    const end = clock.now() + ms;
+    const readyWait = ms - Math.min(LAUNCH_FINISH_RESERVE_MS, Math.floor(ms / 4));
+    const stop = new AbortController();
+    const result = await Promise.race([
+      pending.outcome,
+      clock.sleep(readyWait, stop.signal).then(() => null),
+    ]);
+    stop.abort();
+    const elapsed = duration(baseClock.now() - pending.startedAt);
+    if (result === null) {
+      if (signal.aborted) {
+        throw new DevAppToolError(
+          "aborted",
+          `stopped waiting after ${elapsed}; the dev app keeps starting in the background`,
+          'call open with mode "launch" again to keep waiting, or close to stop it',
+        );
+      }
+      const latest = lastLines(pending.output(), 1)[0];
+      return [
+        `The dev app is still starting (${elapsed} so far; a Rust rebuild can take several minutes). It keeps starting in the background.`,
+        latest ? `Latest output: ${latest}` : "No output yet.",
+        'Next: call open with mode "launch" again to keep waiting (it does not start a second app), or close to stop it.',
+      ].join("\n");
+    }
+    manager.takeLaunch(pending);
+    if (!result.ok) throw launchFailure(result);
+    const connection: DevAppConnection = {
+      port: pending.port,
+      session: result.session,
+      generation: null,
+    };
+    await manager.replace(connection);
+    // Keep a second of the budget for the snapshot itself.
+    await waitForContent(connection, Math.min(RENDER_WAIT_MS, end - clock.now() - 1000), clock);
+    const opened = await ensureAgentPane(
+      connection,
+      pending.project,
+      Math.min(RENDER_WAIT_MS, end - clock.now() - 1000),
+      clock,
+    );
+    const pane = opened
+      ? ` Its workspace was empty, so a Code agent pane was opened on an empty scratch project${pending.fake ? "" : " (the isolated profile is signed out)"}.`
+      : "";
+    const took = resumed ? ` It took ${elapsed} to start.` : "";
+    const provider = pending.fake
+      ? ' Prompts go to a fake local AI provider that answers "Fake reply N: <start of your message>"; no real model or login.'
+      : "";
+    return firstSnapshot(
+      connection,
+      `Launched the dev app with an isolated profile (control port ${pending.port}); this session owns it, and close stops it.${took}${pane}${provider}`,
+      clock,
+      Math.min(ACT_DEFAULT_MS, end - clock.now()),
+    );
+  }
+
   async function launch(
     args: DevAppArgs,
     clock: DriverClock,
@@ -760,6 +1182,16 @@ export function createDevAppTool(
         `launching the dev app needs Windows (this is ${platform})`,
       );
     }
+    const fake = args.provider === "fake";
+    const resumed = manager.launching;
+    if (resumed && resumed.fake !== fake) {
+      throw new DevAppToolError(
+        "invalid_input",
+        `a launch ${resumed.fake ? "with" : "without"} the fake provider is already starting`,
+        `call open launch ${resumed.fake ? 'with provider "fake"' : "without provider"} to keep waiting, or close it first`,
+      );
+    }
+    if (resumed) return awaitLaunch(resumed, args, clock, signal, true);
     const appDir = findAppDir(cwd, fileExists);
     if (!appDir) {
       throw new DevAppToolError(
@@ -776,77 +1208,17 @@ export function createDevAppTool(
         "run pnpm install, then retry",
       );
     }
-    const ms = budget(args.deadline_ms, LAUNCH_DEFAULT_MS, LAUNCH_MAX_MS);
-    const end = clock.now() + ms;
-    await manager.replace(undefined);
-    const port = await reservePort();
-    const root = await createProfileRoot();
-    hiddenPaths.add(root);
-    let launched: DevAppSession;
-    let project: string;
-    try {
-      const profile = createIsolatedProfile(root);
-      project = profile.project;
-      launched = await launchDevApp({
-        appDir,
-        configPath: path.join(appDir, "src-tauri", "tauri.local.conf.json"),
-        env: devAppEnvironment(env, profile, { cdpPort: port, extra: rustToolchain(env) }),
-        cdpPort: port,
-        readyDeadlineMs: ms,
-        tauriCli,
-        clock,
-        connect: guardedConnect(port),
-        ...(deps.fetch ? { fetch: deps.fetch } : {}),
-        ...(deps.spawn ? { spawn: deps.spawn } : {}),
-        ...(deps.terminate ? { terminate: deps.terminate } : {}),
-        ...(deps.terminateNow ? { terminateNow: deps.terminateNow } : {}),
-      });
-    } catch (error) {
-      await removeProfileRoot(root).catch(() => {});
-      if (signal.aborted) {
-        throw new DevAppToolError(
-          "aborted",
-          "the launch was cancelled and the app it started was stopped",
-        );
-      }
-      if (error instanceof DevAppToolError) throw error;
-      if (error instanceof AmbiguousTargetError)
-        throw new DevAppToolError("ambiguous_target", error.message);
+    if (fake && !fileExists(path.join(appDir, FAKE_PROVIDER_SIDECAR))) {
       throw new DevAppToolError(
         "launch_failed",
-        `the dev app did not become ready (${message(error)})`,
+        "the fake provider's daemon wrapper is missing from gg-app/scripts",
+        "launch without provider, or restore the replay smoke script",
       );
     }
-    const session: DevAppSession = {
-      ...launched,
-      stop: async () => {
-        try {
-          await launched.stop();
-        } finally {
-          await removeProfileRoot(root).catch(() => {});
-        }
-      },
-      stopNow: () => launched.stopNow(),
-    };
-    const connection: DevAppConnection = { port, session, generation: null };
-    await manager.replace(connection);
-    // Keep a second of the budget for the snapshot itself.
-    await waitForContent(connection, Math.min(RENDER_WAIT_MS, end - clock.now() - 1000), clock);
-    const opened = await ensureAgentPane(
-      connection,
-      project,
-      Math.min(RENDER_WAIT_MS, end - clock.now() - 1000),
-      clock,
-    );
-    const pane = opened
-      ? " Its workspace was empty, so a Code agent pane was opened on an empty scratch project (the isolated profile is signed out)."
-      : "";
-    return firstSnapshot(
-      connection,
-      `Launched the dev app with an isolated profile (control port ${port}); this session owns it, and close stops it.${pane}`,
-      clock,
-      Math.min(ACT_DEFAULT_MS, end - clock.now()),
-    );
+    await manager.replace(undefined);
+    const pending = await startLaunch(appDir, tauriCli, fake);
+    manager.startLaunch(pending);
+    return awaitLaunch(pending, args, clock, signal, false);
   }
 
   async function attach(
@@ -856,6 +1228,8 @@ export function createDevAppTool(
   ): Promise<string> {
     const current = manager.current;
     const port = args.port ?? (current?.session.owned ? current.port : undefined);
+    const launching = manager.launching;
+    if (port === undefined && launching) throw stillStarting(launching);
     if (port === undefined) {
       throw new DevAppToolError(
         "endpoint_refused",
@@ -1024,7 +1398,12 @@ ${await snapshot(connection, pane, left, clock)}`;
         `${kind} does not take ref; click the element first (or use type with ref), then press`,
       );
     }
-    const ms = budget(args.deadline_ms, ACT_DEFAULT_MS, ACT_MAX_MS);
+    const wheel = kind === "scroll" ? args.direction : undefined;
+    const ms = budget(
+      args.deadline_ms,
+      wheel !== undefined ? SCROLL_DEFAULT_MS : ACT_DEFAULT_MS,
+      ACT_MAX_MS,
+    );
     const end = clock.now() + ms;
     const remaining = (): number => {
       const left = end - clock.now();
@@ -1041,6 +1420,18 @@ ${await snapshot(connection, pane, left, clock)}`;
     }
     if (kind === "click" && locator === undefined) {
       throw new DevAppToolError("invalid_input", "click needs ref from the latest snapshot");
+    }
+    if (kind === "select" && (locator === undefined || text === "")) {
+      throw new DevAppToolError(
+        "invalid_input",
+        "select needs ref (a dropdown from the latest snapshot) and text (the option's label or value)",
+      );
+    }
+    if (kind === "scroll" && locator === undefined && wheel === undefined) {
+      throw new DevAppToolError(
+        "invalid_input",
+        "scroll needs direction (up or down), or ref to scroll that element into view",
+      );
     }
     if (kind === "press") {
       if (!args.key) throw new DevAppToolError("invalid_input", "press needs key");
@@ -1072,6 +1463,10 @@ ${await snapshot(connection, pane, left, clock)}`;
 
     async function inferred(): Promise<Expectation> {
       if (kind === "click") return pageChanged(pane);
+      if (kind === "select") return optionChosen(locator ?? "null", text);
+      if (kind === "scroll") {
+        return wheel !== undefined ? scrolled(wheel) : inView(locator ?? "null", args.ref ?? "");
+      }
       if (kind === "press") {
         const page = await before();
         if (args.key === "Escape" && page.menuOpen) {
@@ -1121,6 +1516,25 @@ ${await snapshot(connection, pane, left, clock)}`;
           ...options,
           ...(args.modifiers ? { modifiers: args.modifiers } : {}),
         });
+      } else if (kind === "select") {
+        outcome = await driver.perform(
+          `select ${quote(text)} in ${args.ref ?? ""}`,
+          selectOptionScript(locator ?? "null", text),
+          options,
+        );
+      } else if (kind === "scroll" && wheel !== undefined) {
+        outcome = await driver.wheel(
+          `scroll ${wheel}${args.ref ? ` over ${args.ref}` : ""}`,
+          locator ?? null,
+          wheel === "down" ? WHEEL_STEP_PX : -WHEEL_STEP_PX,
+          options,
+        );
+      } else if (kind === "scroll") {
+        outcome = await driver.perform(
+          `scroll ${args.ref ?? ""} into view`,
+          scrollIntoViewScript(locator ?? "null"),
+          options,
+        );
       } else {
         outcome = await driver.clickElement(`click ${args.ref ?? ""}`, locator ?? "null", options);
       }
@@ -1131,8 +1545,99 @@ ${await snapshot(connection, pane, left, clock)}`;
     }
   }
 
+  /** Lists the app's windows, or moves this connection to one of them (ownership is kept). */
+  async function windows(args: DevAppArgs, clock: DriverClock): Promise<string> {
+    const connection = manager.current;
+    const launching = manager.launching;
+    if (!connection && launching) throw stillStarting(launching);
+    if (!connection) throw new DevAppToolError("not_attached", "no dev app connection is open");
+    const ms = budget(args.deadline_ms, ACT_DEFAULT_MS, ACT_MAX_MS);
+    const end = clock.now() + ms;
+    let listed: DevTarget[];
+    try {
+      listed = await within(
+        listTargets(connection.port, {
+          ...(deps.fetch ? { fetch: deps.fetch } : {}),
+          signal: AbortSignal.timeout(ms),
+        }),
+        ms,
+        clock,
+        "listing the app's windows",
+      );
+    } catch (error) {
+      if (error instanceof DevAppToolError) throw error;
+      throw new DevAppToolError(
+        "endpoint_refused",
+        `the app's window list did not answer on port ${connection.port} (${message(error)})`,
+      );
+    }
+    const all = listed
+      .filter((target) => isAppWindowTarget(target) && target.id !== undefined)
+      .sort((a, b) => (a.id ?? "").localeCompare(b.id ?? ""));
+    const current = connection.session.target.id;
+    const list = all
+      .map(
+        (target) =>
+          `${windowId(target)} ${windowLabel(target)}${target.id === current ? " [current]" : ""}`,
+      )
+      .join("\n");
+    if (args.window === undefined) {
+      if (all.length === 0) return "No app windows are open.";
+      return `App windows (${all.length}):\n${list}\n\nNext: call window with window set to an id to switch.`;
+    }
+    const target = all.find((candidate) => windowId(candidate) === args.window);
+    if (!target) {
+      throw new DevAppToolError(
+        "invalid_input",
+        `no window ${JSON.stringify(args.window)}; open windows:\n${list || "none"}\n`,
+        "call window without window to list the ids again",
+      );
+    }
+    const left = (): number => Math.max(100, end - clock.now());
+    if (target.id === current && connection.session.client.goneReason === null) {
+      return firstSnapshot(connection, `Already on ${windowLabel(target)}.`, clock, left());
+    }
+    const client = await within(
+      guardedConnect(connection.port)(target.webSocketDebuggerUrl),
+      left(),
+      clock,
+      "connecting to the window",
+    );
+    const previous = connection.session;
+    const session: DevAppSession = {
+      ...previous,
+      target,
+      client,
+      stop: async () => {
+        client.close();
+        await previous.stop();
+      },
+      stopNow: () => {
+        client.close();
+        previous.stopNow();
+      },
+    };
+    previous.client.close();
+    const next: DevAppConnection = { port: connection.port, session, generation: null };
+    manager.set(next);
+    return firstSnapshot(
+      next,
+      `Switched to ${windowLabel(target)} (${windowId(target)}). Refs from the previous window no longer work.`,
+      clock,
+      left(),
+    );
+  }
+
   async function close(): Promise<string> {
     const connection = manager.current;
+    if (!connection && manager.launching) {
+      try {
+        await manager.replace(undefined);
+      } catch (error) {
+        return `Stopping the dev app that was still starting failed: ${message(error)}`;
+      }
+      return "Stopped the dev app this session was still starting.";
+    }
     if (!connection) return "No dev app connection is open.";
     try {
       await manager.replace(undefined);
@@ -1176,6 +1681,8 @@ ${await snapshot(connection, pane, left, clock)}`;
       case "act":
         if (isPlanModeActive(planModeRef)) return planModeRestriction("dev_app act");
         return act(args, clock);
+      case "window":
+        return windows(args, clock);
       case "close":
         return close();
     }
@@ -1187,11 +1694,17 @@ ${await snapshot(connection, pane, left, clock)}`;
       "Drive the running GG desktop dev app (Tauri + Vite on :1420). GG desktop dev app only; use " +
       "screenshot for other URLs. open: attach to the control port the user gave, or launch it " +
       "(Windows, isolated profile). snapshot: pane state plus visible interactive elements with refs " +
-      "like e7 (screenshot:true adds a PNG; expect waits until it holds first, without acting). act: type, press, click a ref, or send_prompt; each " +
+      "like e7 (screenshot:true adds a PNG; expect waits until it holds first, without acting). act: type, press, click a ref, " +
+      "send_prompt, scroll (a wheel step, or a ref into view) or select (a dropdown option); each " +
       "returns confirmed/contradicted/unreadable and what changed (expect is inferred when omitted). " +
-      "close stops only an app this session launched. One connection per session.",
+      "window: list the app's windows (What's new, extra project windows) or switch to one. " +
+      "close stops only an app this session launched. One connection per session. A launch that " +
+      "is not ready within its call keeps starting in the background; call open launch again to keep waiting. " +
+      'open launch with provider "fake" answers prompts with canned replies, for chat flows without a login.',
     parameters: DevAppParams,
     executionMode: "sequential",
+    // Above the longest launch call, so the loop never cuts a call off mid-wait.
+    timeoutMs: LAUNCH_MAX_MS + 60_000,
     async execute(args: DevAppArgs, context: ToolContext) {
       try {
         const result = await run(args, context);

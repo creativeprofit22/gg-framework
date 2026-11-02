@@ -13,6 +13,7 @@ import {
   pointerPress,
   pointerRelease,
   pressKey,
+  wheelAt,
 } from "./input.js";
 import type { Point } from "./input.js";
 import {
@@ -28,7 +29,7 @@ export type Verdict = "confirmed" | "contradicted" | "unreadable";
 
 /** Why a pre-check refused to send input. */
 export type BlockReason =
-  "missing" | "stale" | "disabled" | "covered" | "offscreen" | "unfocusable";
+  "missing" | "stale" | "disabled" | "covered" | "offscreen" | "unfocusable" | "invalid";
 
 const BLOCK_REASONS: ReadonlySet<string> = new Set([
   "missing",
@@ -37,6 +38,8 @@ const BLOCK_REASONS: ReadonlySet<string> = new Set([
   "covered",
   "offscreen",
   "unfocusable",
+  // The page step refused its arguments (for example a dropdown option that does not exist).
+  "invalid",
 ]);
 
 export interface ActionOutcome {
@@ -161,6 +164,18 @@ export interface DevAppDriver {
   clickElement(
     label: string,
     locator: string,
+    options: CheckedActionOptions,
+  ): Promise<ActionOutcome>;
+  /**
+   * Runs an in-page step that answers "done" or `{ problem, block }`; a problem sends nothing.
+   * The step itself is the input (for example choosing a dropdown option or scrolling into view).
+   */
+  perform(label: string, script: string, options: CheckedActionOptions): Promise<ActionOutcome>;
+  /** Mouse wheel over the element a locator yields, or over the middle of the window. */
+  wheel(
+    label: string,
+    locator: string | null,
+    deltaY: number,
     options: CheckedActionOptions,
   ): Promise<ActionOutcome>;
   pointerDown(
@@ -386,21 +401,53 @@ export function createDevAppDriver({
     { expect, ...options }: CheckedActionOptions,
   ): Promise<ActionOutcome> {
     return act(label, expect, options, async () => {
-      const target = await evaluateFlag(clickScript(locator));
-      const record = isRecord(target) ? target : {};
-      if (typeof record.problem === "string") {
-        throw new NotSent(record.problem, blockOf(record.block, "missing"));
-      }
-      const { x, y } = record;
-      if (typeof x !== "number" || typeof y !== "number")
-        throw new Error("could not measure the element");
+      const { x, y } = await measured(locator);
       await pointerMove(client, { x, y });
       await pointerPress(client, { x, y });
       await pointerRelease(client, { x, y });
     });
   }
 
+  async function measured(locator: string): Promise<Point> {
+    const target = await evaluateFlag(clickScript(locator));
+    const record = isRecord(target) ? target : {};
+    if (typeof record.problem === "string") {
+      throw new NotSent(record.problem, blockOf(record.block, "missing"));
+    }
+    const { x, y } = record;
+    if (typeof x !== "number" || typeof y !== "number")
+      throw new Error("could not measure the element");
+    return { x, y };
+  }
+
   return {
+    perform(label, script, { expect, ...options }) {
+      return act(label, expect, options, async () => {
+        const result = await evaluateFlag(script);
+        if (result === "done") return;
+        const record = isRecord(result) ? result : {};
+        if (typeof record.problem === "string") {
+          throw new NotSent(record.problem, blockOf(record.block, "missing"));
+        }
+        throw new Error(`unexpected answer from the page: ${JSON.stringify(result)}`);
+      });
+    },
+    wheel(label, locator, deltaY, { expect, ...options }) {
+      return act(label, expect, options, async () => {
+        const point =
+          locator === null
+            ? await evaluateFlag(`({ x: innerWidth / 2, y: innerHeight / 2 })`).then((value) => {
+                const record = isRecord(value) ? value : {};
+                const { x, y } = record;
+                if (typeof x !== "number" || typeof y !== "number")
+                  throw new Error("could not measure the window");
+                return { x, y };
+              })
+            : await measured(locator);
+        await pointerMove(client, point);
+        await wheelAt(client, point, deltaY);
+      });
+    },
     type(text, { into, intoElement, expect, ...options }) {
       if (text.length === 0) throw new RangeError("type needs non-empty text");
       const locator = intoElement ?? (into !== undefined ? selectorLocator(into) : undefined);

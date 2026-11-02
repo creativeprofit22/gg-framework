@@ -21,12 +21,17 @@ Don't park the agent on a sleep or a log watcher waiting for the app: every `dev
 | ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `open`     | `attach` to the control port the user gave (loopback only, exactly one `:1420` app page), or `launch` the dev app on Windows with an isolated profile and a free port. Replaces any earlier connection. Returns a first snapshot. |
 | `snapshot` | Pane state (draft, menu, status, focus) plus the visible interactive elements, each with a short ref such as `e7`. `screenshot: true` adds a PNG saved under `.gg/screenshots/`. With `expect`, waits until it holds (below).     |
-| `act`      | `type`, `press` (with modifiers), `click` a ref, or `send_prompt`. Each returns a verdict, the expectation, and what changed. When `expect` is omitted, one is inferred.                                                          |
+| `act`      | `type`, `press` (with modifiers), `click` a ref, `send_prompt`, `scroll` or `select` (below). Each returns a verdict, the expectation, and what changed. When `expect` is omitted, one is inferred.                               |
+| `window`   | Lists the app's windows (main, What's new, extra project windows) with ids like `wa1b2c3d4`; with `window: "<id>"` moves the connection to that window. Ownership is kept, so `close` still stops a launched app.                 |
 | `close`    | Closes the connection. Stops the app only if this session launched it; an attached app keeps running.                                                                                                                             |
 
 ### Launch or attach
 
-- **Launch** (`open` with `mode: "launch"`, Windows only): runs `tauri dev --no-watch` with `gg-app/src-tauri/tauri.local.conf.json` (Local Fork identity), a fresh isolated profile, a free control port and a minimized window. Startup may compile Rust, so the default deadline is 180 s (max 300 s). Refused in plan mode.
+- **Launch** (`open` with `mode: "launch"`, Windows only): runs `tauri dev --no-watch` with `gg-app/src-tauri/tauri.local.conf.json` (Local Fork identity), a fresh isolated profile, a free control port and a minimized window. Refused in plan mode.
+  - A cold start (Rust build plus the daemon's first start) can take about 8 minutes, longer than any one call may run. So the app starts in the background: one call waits up to its deadline (default 120 s, max 240 s), then returns either the first snapshot or "still starting" with the app's latest output line. Call `open` with `mode: "launch"` again to keep waiting; it resumes the same start and never starts a second app.
+  - The start gives up after 20 minutes. If it fails or exits, the next `open` reports `launch_failed` with the app's last output lines.
+  - While it is starting, `snapshot` and `act` say so instead of failing silently. Cancelling a call only stops the waiting; `close` (or the session ending) stops the app.
+  - `provider: "fake"` makes chat flows testable without a login: the tool starts a loopback stand-in for the Azure Responses API that streams `Fake reply N: <start of the message>`, makes `azure:fixture` the profile's default model, and runs the real daemon through the replay smoke's wrapper (`gg-app/scripts/dev-app-replay-dev-smoke.mjs`, sidecar mode), which sends only that provider's traffic to the stand-in. It stops with the app. No real model is involved.
 - **Attach** (`open` with `mode: "attach"` and `port`): connects to an app the user already started. The control port exists only in a **debug** build and only when the user opts in: `smoke_browser_args` in `gg-app/src-tauri/src/windows.rs` adds `--remote-debugging-port` only when `GG_PHASE25_DEV_FIXTURE_SKIP_ORPHAN_SWEEP=1` and `GG_PHASE25_DEV_FIXTURE_CDP_PORT=<port>` are set; `GG_APP_DEV_SMOKE_WINDOW` must then be `minimized` or `visible`. Use an isolated `WEBVIEW2_USER_DATA_FOLDER`. The driver's `devAppEnvironment` builds exactly this environment. Release builds never open the port.
 
 ### Snapshot, and waiting with `expect`
@@ -46,7 +51,13 @@ Verdicts:
 - `unreadable`: the page could not be read (error `[page_unreadable]`).
 - No verdict before the deadline: `[timed_out]`, with what was last seen.
 
-When `expect` is omitted it is inferred: `type` into the composer → the draft becomes the old draft plus the text; `press Escape` with a menu or dialog open → it closes; `click` or other keys → the page changed; `send_prompt` → the prompt left the composer and the pane shows `Working`. `send_prompt` needs an empty composer.
+When `expect` is omitted it is inferred: `type` into the composer → the draft becomes the old draft plus the text; `press Escape` with a menu or dialog open → it closes; `click` or other keys → the page changed; `send_prompt` → the prompt left the composer and the pane shows `Working`; `select` → the dropdown shows the option; `scroll` with a ref → that element is in view; `scroll` with a direction → something on the page scrolled. `send_prompt` needs an empty composer.
+
+### Scroll and dropdowns
+
+- `scroll` with `ref` (no `direction`) scrolls that element into view, the fix for `[element_offscreen]`.
+- `scroll` with `direction: "up" | "down"` sends one 600 px mouse-wheel step over `ref` (a scrollable list) or the middle of the window. It defaults to a 1.5 s deadline, so "already at the end" comes back quickly as `[timed_out]` with "nothing scrolled".
+- `select` with `ref` (a native dropdown, shown as `combobox`) and `text` (the option's label or value) picks it the way a user does: it selects the option, then fires `input` and `change`. An unknown option is `[invalid_input]` with the real options listed; a disabled one is `[element_disabled]`. Custom menus are not native dropdowns: click them, snapshot, then click the option.
 
 ### Recovering from a swallowed send
 
@@ -69,19 +80,19 @@ Every error reads `[code] what happened. Next: what to do.`
 | `endpoint_refused`     | The port is not loopback or does not serve the GG dev app page on `:1420`; `attach` also uses it when no app page answers on the port. | Check the port; use `screenshot` for other URLs.                                        |
 | `ambiguous_target`     | More than one GG dev app page is open, so the tool refuses to guess.                                                                   | Close extra dev app windows, then `open` again.                                         |
 | `unsupported_platform` | `launch` on a non-Windows host.                                                                                                        | Start the dev app yourself and attach.                                                  |
-| `launch_failed`        | The dev app did not start or no app page appeared in time.                                                                             | Check gg-app dependencies and that `pnpm --filter gg-app tauri dev` starts, then retry. |
-| `target_gone`          | The window or page closed or reloaded under the connection.                                                                            | `open` again.                                                                           |
+| `launch_failed`        | The dev app did not start or no app page appeared in time; the error ends with the app's last output lines.                            | Check gg-app dependencies and that `pnpm --filter gg-app tauri dev` starts, then retry. |
+| `target_gone`          | The window or page closed or reloaded under the connection.                                                                            | `window` to list and switch windows, or `open` again.                                   |
 | `pane_not_found`       | The `pane` id is not on the page.                                                                                                      | Snapshot without `pane`, or pass an id the page shows.                                  |
 | `stale_ref`            | The ref is from an older snapshot or its element was removed.                                                                          | Take a new snapshot and use a ref from it.                                              |
 | `element_covered`      | Something (menu, dialog) covers the element.                                                                                           | Close it (Escape closes menus and dialogs), snapshot, retry.                            |
 | `element_disabled`     | The element is disabled.                                                                                                               | Enable it first or pick another element.                                                |
-| `element_offscreen`    | The element is outside the viewport.                                                                                                   | Scroll it into view or enlarge the window, snapshot, retry.                             |
+| `element_offscreen`    | The element is outside the viewport.                                                                                                   | `act scroll` with that ref, snapshot, retry.                                            |
 | `menu_swallowed_key`   | A menu was open, so Enter went to the menu; nothing was sent.                                                                          | Press Escape, then press Enter with `expect` `status_is "Working"`.                     |
 | `timed_out`            | The deadline passed without a verdict.                                                                                                 | Snapshot to see the state; retry with a longer `deadline_ms` if the app is slow.        |
 | `contradicted`         | The page shows the expected result did not happen.                                                                                     | Snapshot, check what happened, adjust the action or expectation.                        |
 | `page_unreadable`      | The page, or a CSS selector you passed, could not be read.                                                                             | Check the selector, snapshot, retry.                                                    |
 | `invalid_input`        | Arguments are missing or invalid.                                                                                                      | Fix the arguments and call again.                                                       |
-| `aborted`              | The call was cancelled.                                                                                                                | Call again if the work is still needed.                                                 |
+| `aborted`              | The call was cancelled. A launch that was still starting keeps starting.                                                               | Call again if the work is still needed; `close` stops a starting launch.                |
 
 ## Debug-only limits
 
@@ -89,7 +100,7 @@ Every error reads `[code] what happened. Next: what to do.`
 - `launch` is Windows-only; elsewhere, attach to an app the user started.
 - No raw page-script action: the agent can only snapshot and act through the fixed actions.
 - Plan mode refuses `act` and `open` with `launch`; `snapshot` (with or without `expect`), attach and `close` stay allowed.
-- Every call has a deadline (act/snapshot/attach 5 s by default, 30 s at most; launch 180 s by default, 300 s at most) and stops when the call is cancelled.
+- Every call has a deadline (act/snapshot/attach 5 s by default, 30 s at most; launch 120 s by default, 240 s at most) and stops when the call is cancelled. The tool sets its own agent-loop limit (300 s) above the longest launch call; before 2026-11-02 the loop's default 300 s limit cut off cold launches and reported them as cancelled.
 - Output never shows the debugger address, profile paths or environment secrets. The daemon's `x-gg-token`/`x-gg-session` headers stay in Rust and are never readable from the page.
 
 ## Native replay smoke

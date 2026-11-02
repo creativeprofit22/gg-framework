@@ -19,6 +19,13 @@ export type FetchLike = (url: string, init: { signal?: AbortSignal }) => Promise
 
 const APP_URL = /^http:\/\/(?:localhost|127\.0\.0\.1):1420(?:\/|$)/;
 
+/** Any window of the dev app on 1420, including the What's New window; never DevTools. */
+export function isAppWindowTarget(target: DevTarget): boolean {
+  return (
+    target.type === "page" && APP_URL.test(target.url) && !target.url.startsWith("devtools://")
+  );
+}
+
 /** The Vite dev page on 1420; never DevTools or the WebView2 "what's new" page. */
 export function isAppPageTarget(target: DevTarget): boolean {
   return (

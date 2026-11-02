@@ -174,6 +174,8 @@ export class DomControlClient implements ControlClient {
   onKey: (key: string, modifiers: number) => void = () => {};
   /** App behaviour for a click on the element under the pointer. */
   onClick: (element: Element) => void = () => {};
+  /** App behaviour for a mouse-wheel step at a point. */
+  onWheel: (x: number, y: number, deltaY: number) => void = () => {};
   /** Runs before every read or script; lets a test stall or detach the page. */
   beforeEvaluate: ((expression: string) => Promise<void> | void) | null = null;
   screenshot = Buffer.from("fake-png").toString("base64");
@@ -207,6 +209,8 @@ export class DomControlClient implements ControlClient {
         document as Document & { elementFromPoint(x: number, y: number): Element | null }
       ).elementFromPoint(Number(params.x), Number(params.y));
       if (hit) this.onClick(hit);
+    } else if (method === "Input.dispatchMouseEvent" && params.type === "mouseWheel") {
+      this.onWheel(Number(params.x), Number(params.y), Number(params.deltaY));
     } else if (method === "Page.captureScreenshot") {
       return { data: this.screenshot };
     }

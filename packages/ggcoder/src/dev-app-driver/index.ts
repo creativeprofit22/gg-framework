@@ -12,6 +12,7 @@ export {
   connectToDevWebview,
   findAppTarget,
   isAppPageTarget,
+  isAppWindowTarget,
   listTargets,
   type DevTarget,
   type FetchLike,
@@ -36,6 +37,7 @@ export {
   pointerRelease,
   pressKey,
   resolveKey,
+  wheelAt,
   type InputClient,
   type KeyDescriptor,
   type Point,
@@ -103,3 +105,11 @@ export {
   type UiSnapshot,
 } from "./snapshot.js";
 export { seedAgentPaneScript, WORKSPACE_LAYOUT_KEY } from "./workspace.js";
+export {
+  configureFakeProvider,
+  FAKE_PROVIDER_MODEL,
+  fakeReply,
+  lastUserText,
+  startFakeProvider,
+  type FakeProvider,
+} from "./fake-provider.js";

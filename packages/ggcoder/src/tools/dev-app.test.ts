@@ -1,5 +1,5 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { EOL, tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { StructuredToolResult } from "@kenkaiiii/gg-agent";
@@ -22,6 +22,7 @@ import {
 
 const PORT = 9333;
 const PID = 4242;
+const FAKE_URL = "http://127.0.0.1:5555/openai/v1/responses";
 const TOKEN = "ggtok-fixture-7f3a9c2e1b5d";
 
 let dir: string;
@@ -64,6 +65,8 @@ function harness(options: HarnessOptions = {}) {
     terminatedNow: [] as number[],
     removed: [] as string[],
     spawnError: null as ((options: DevAppSpawnOptions) => Error) | null,
+    exitCode: null as number | null,
+    providerClosed: 0,
     onClient: (_client: DomControlClient): void => {},
   };
   const root = path.join(dir, "profile-root");
@@ -82,7 +85,13 @@ function harness(options: HarnessOptions = {}) {
     spawn: (_command, args, spawnOptions) => {
       if (state.spawnError) throw state.spawnError(spawnOptions);
       state.spawned.push({ args, options: spawnOptions });
-      return { pid: PID, exitCode: null, once: () => undefined };
+      return {
+        pid: PID,
+        get exitCode() {
+          return state.exitCode;
+        },
+        once: () => undefined,
+      };
     },
     terminate: async (pid) => {
       state.terminated.push(pid);
@@ -101,6 +110,13 @@ function harness(options: HarnessOptions = {}) {
     shrinkImage: async (buffer, mediaType) => ({ buffer, mediaType }),
     previewImage: async (buffer) => buffer,
     now: () => new Date("2026-11-01T00:00:00.000Z"),
+    startFakeProvider: async () => ({
+      url: FAKE_URL,
+      requests: () => 0,
+      close: async () => {
+        state.providerClosed += 1;
+      },
+    }),
   };
   const tool = createDevAppTool(dir, manager, planModeRef, deps);
   const execute = (args: Record<string, unknown>, signal = new AbortController().signal) =>
@@ -314,15 +330,78 @@ describe("dev_app open launch", () => {
     expect(h.state.removed).toEqual([h.root]);
   });
 
-  it("stops the owned tree when the call is aborted while waiting", async () => {
+  it("keeps starting in the background when the call is aborted, and close stops it", async () => {
     const h = harness({ targets: [] });
     const controller = new AbortController();
     h.clock.at(1000, () => controller.abort());
     const error = await failure(h.call({ action: "open", mode: "launch" }, controller.signal));
     expect(error.code).toBe("aborted");
+    expect(error.message).toMatch(/keeps starting in the background/);
+    expect(h.state.terminated).toEqual([]);
+    expect(h.manager.launching).toBeDefined();
+
+    expect(await h.call({ action: "close" })).toBe(
+      "Stopped the dev app this session was still starting.",
+    );
     expect(h.state.terminated).toEqual([PID]);
     expect(h.state.removed).toEqual([h.root]);
-    expect(h.manager.current).toBeUndefined();
+    expect(h.manager.launching).toBeUndefined();
+  });
+
+  it("reports progress when not ready within the call, and the next open finishes the same launch", async () => {
+    const h = harness({ targets: [] });
+    h.clock.at(500, () =>
+      appendFileSync(path.join(h.root, "launch.log"), "   Compiling gg-app v0.99.1" + EOL),
+    );
+    const first = await h.call({ action: "open", mode: "launch", deadline_ms: 8000 });
+    expect(first).toContain("The dev app is still starting");
+    expect(first).toContain("Latest output: Compiling gg-app v0.99.1");
+    expect(first).not.toContain(h.root);
+    expect(h.clock.time).toBeLessThanOrEqual(8000);
+
+    const snapshot = await failure(h.call({ action: "snapshot" }));
+    expect(snapshot.code).toBe("not_attached");
+    expect(snapshot.message).toMatch(/still starting.*Next: call open with mode "launch" again/);
+
+    h.state.targets = [appTarget()];
+    const second = await h.call({ action: "open", mode: "launch" });
+    expect(second).toContain("Launched the dev app with an isolated profile");
+    expect(second).toMatch(/It took \d+ s to start/);
+    expect(second).toMatch(/Snapshot 1 · pane pane-a/);
+    expect(h.state.spawned).toHaveLength(1);
+    expect(h.manager.launching).toBeUndefined();
+    expect(h.manager.current?.session.owned).toBe(true);
+  });
+
+  it("reports a start that failed in the background with the app's last output", async () => {
+    const h = harness({ targets: [] });
+    const first = await h.call({ action: "open", mode: "launch", deadline_ms: 4000 });
+    expect(first).toContain("still starting");
+    const esc = String.fromCharCode(27);
+    appendFileSync(
+      path.join(h.root, "launch.log"),
+      `${esc}[1m${esc}[91merror${esc}[0m: linking with link.exe failed` + EOL,
+    );
+    h.state.exitCode = 1;
+    const error = await failure(h.call({ action: "open", mode: "launch" }));
+    expect(error.code).toBe("launch_failed");
+    expect(error.message).toContain("exited before readiness (1)");
+    expect(error.message).toContain("error: linking with link.exe failed");
+    expect(h.state.removed).toEqual([h.root]);
+    expect(h.manager.launching).toBeUndefined();
+  });
+
+  it("shutdownNow kills a launch that is still starting", async () => {
+    const h = harness({ targets: [] });
+    await h.call({ action: "open", mode: "launch", deadline_ms: 2000 });
+    h.manager.shutdownNow();
+    expect(h.state.terminatedNow).toEqual([PID]);
+    expect(h.manager.launching).toBeUndefined();
+  });
+
+  it("sets its own loop deadline above the longest launch call", () => {
+    const h = harness();
+    expect(h.tool.timeoutMs).toBeGreaterThan(240_000);
   });
 
   it("replaces an attached connection without stopping that app", async () => {
@@ -822,5 +901,247 @@ describe("dev_app slash command replay (simulated page)", () => {
     });
     expect(result).toMatch(/^confirmed: /);
     expect(h.clock.time - start).toBeLessThan(15_000);
+  });
+});
+
+describe("dev_app act select", () => {
+  const DROPDOWN = `<label for="theme">Theme</label><select id="theme" data-rect="700,100,200,30"><option>Dark</option><option value="light">Light</option><option disabled>Retro</option></select><button data-rect="700,200,80,30">Plain</button>`;
+
+  async function withDropdown() {
+    const h = harness({ html: appShellHtml({ extra: DROPDOWN }) });
+    const first = await h.call({ action: "open", mode: "attach", port: PORT });
+    return { ...h, first, ref: refFor(first, "Theme") };
+  }
+
+  it("picks an option by label, fires change, and confirms the dropdown shows it", async () => {
+    const h = await withDropdown();
+    const changes: string[] = [];
+    h.page.find("#theme").addEventListener("change", (event) => changes.push(event.type));
+    const out = await h.call({ action: "act", kind: "select", ref: h.ref, text: "Light" });
+    expect(out).toMatch(/^confirmed: select "Light" in e\d+ — the dropdown shows "Light"/);
+    expect(out).toContain('combobox "Theme" value="Light"');
+    expect(changes).toEqual(["change"]);
+  });
+
+  it("picks an option by value", async () => {
+    const h = await withDropdown();
+    const out = await h.call({ action: "act", kind: "select", ref: h.ref, text: "light" });
+    expect(out).toMatch(/^confirmed: /);
+  });
+
+  it("lists the real options when the option does not exist, and changes nothing", async () => {
+    const h = await withDropdown();
+    const error = await failure(
+      h.call({ action: "act", kind: "select", ref: h.ref, text: "Solarized" }),
+    );
+    expect(error.code).toBe("invalid_input");
+    expect(error.message).toContain('no option "Solarized" (options: Dark, Light, Retro)');
+    expect(error.message).toContain("nothing was sent");
+    expect(h.page.find("#theme").querySelector("option[selected]")).toBeNull();
+  });
+
+  it("refuses a disabled option and an element that is not a dropdown", async () => {
+    const h = await withDropdown();
+    const disabled = await failure(
+      h.call({ action: "act", kind: "select", ref: h.ref, text: "Retro" }),
+    );
+    expect(disabled.code).toBe("element_disabled");
+    const snap = await h.call({ action: "snapshot" });
+    const plain = await failure(
+      h.call({ action: "act", kind: "select", ref: refFor(snap, "Plain"), text: "Dark" }),
+    );
+    expect(plain.code).toBe("invalid_input");
+    expect(plain.message).toContain("not a native dropdown");
+  });
+
+  it("needs a ref and an option", async () => {
+    const h = await withDropdown();
+    const error = await failure(h.call({ action: "act", kind: "select", text: "Light" }));
+    expect(error.code).toBe("invalid_input");
+    expect(error.message).toMatch(/select needs ref/);
+  });
+});
+
+describe("dev_app act scroll", () => {
+  const BELOW = `<div class="list" data-rect="700,0,300,800"><button class="far" data-rect="700,1500,120,30">Far away</button></div>`;
+
+  it("scrolls an offscreen element into view by ref", async () => {
+    const h = harness({ html: appShellHtml({ extra: BELOW }) });
+    const first = await h.call({ action: "open", mode: "attach", port: PORT });
+    expect(first).toMatch(/button "Far away" \[offscreen\]/);
+    const far = h.page.find(".far");
+    Object.defineProperty(far, "scrollIntoView", {
+      configurable: true,
+      value: () => far.setAttribute("data-rect", "700,400,120,30"),
+    });
+    const out = await h.call({ action: "act", kind: "scroll", ref: refFor(first, "Far away") });
+    expect(out).toMatch(/^confirmed: scroll e\d+ into view — e\d+ is in view/);
+    expect(out).toContain('- button "Far away" [offscreen]');
+    expect(out).toContain('+ button "Far away"');
+  });
+
+  it("wheels one step down over the window middle and confirms something scrolled", async () => {
+    const h = harness({ html: appShellHtml({ extra: BELOW }) });
+    await h.call({ action: "open", mode: "attach", port: PORT });
+    const wheels: number[][] = [];
+    h.client().onWheel = (x, y, deltaY) => {
+      wheels.push([x, y, deltaY]);
+      Object.defineProperty(h.page.find(".list"), "scrollTop", { configurable: true, value: 600 });
+    };
+    const out = await h.call({ action: "act", kind: "scroll", direction: "down" });
+    expect(out).toMatch(/^confirmed: scroll down — something scrolled down/);
+    expect(wheels).toEqual([[640, 400, 600]]);
+  });
+
+  it("says quickly when nothing scrolls", async () => {
+    const h = harness();
+    await h.call({ action: "open", mode: "attach", port: PORT });
+    const start = h.clock.time;
+    const error = await failure(h.call({ action: "act", kind: "scroll", direction: "up" }));
+    expect(error.code).toBe("timed_out");
+    expect(error.message).toContain("nothing scrolled (already at the top");
+    expect(h.clock.time - start).toBeLessThanOrEqual(1500);
+  });
+
+  it("needs a direction or a ref", async () => {
+    const h = harness();
+    await h.call({ action: "open", mode: "attach", port: PORT });
+    const error = await failure(h.call({ action: "act", kind: "scroll" }));
+    expect(error.code).toBe("invalid_input");
+    expect(error.message).toMatch(/scroll needs direction/);
+  });
+});
+
+describe("dev_app window", () => {
+  const MAIN = appTarget({ id: "AAAA1111main", title: "GG Coder Local Fork" });
+  const NOTES = appTarget({
+    id: "BBBB2222notes",
+    url: "http://127.0.0.1:1420/index.html?whatsnew=1",
+    webSocketDebuggerUrl: `ws://127.0.0.1:${PORT}/devtools/page/NOTES`,
+  });
+  const TOOLS = appTarget({
+    id: "CCCC3333tools",
+    url: "devtools://devtools/inspector.html",
+    webSocketDebuggerUrl: `ws://127.0.0.1:${PORT}/devtools/page/TOOLS`,
+  });
+
+  it("lists the app's windows, including What's new, and marks the current one", async () => {
+    const h = harness({ targets: [NOTES, MAIN, TOOLS] });
+    await h.call({ action: "open", mode: "attach", port: PORT });
+    const out = await h.call({ action: "window" });
+    expect(out).toBe(
+      [
+        "App windows (2):",
+        'waaaa1111 window "GG Coder Local Fork" [current]',
+        "wbbbb2222 What's new window",
+        "",
+        "Next: call window with window set to an id to switch.",
+      ].join("\n"),
+    );
+  });
+
+  it("switches to another window, closes the old connection and drops old refs", async () => {
+    const h = harness({ targets: [MAIN, NOTES] });
+    await h.call({ action: "open", mode: "attach", port: PORT });
+    const oldClient = h.client();
+    const out = await h.call({ action: "window", window: "wbbbb2222" });
+    expect(out).toMatch(/^Switched to What's new window \(wbbbb2222\)\. Refs from the previous/);
+    expect(out).toMatch(/Snapshot \d+ · /);
+    expect(h.state.connected.at(-1)).toBe(`ws://127.0.0.1:${PORT}/devtools/page/NOTES`);
+    expect(oldClient.closed).toBe(true);
+    expect(await h.call({ action: "window" })).toContain("wbbbb2222 What's new window [current]");
+  });
+
+  it("keeps the right to stop a launched app after switching windows", async () => {
+    const h = harness({ targets: [MAIN, NOTES] });
+    await h.call({ action: "open", mode: "launch" });
+    await h.call({ action: "window", window: "wbbbb2222" });
+    expect(await h.call({ action: "close" })).toBe(
+      "Closed the connection and stopped the dev app this session launched.",
+    );
+    expect(h.state.terminated).toEqual([PID]);
+    expect(h.client().closed).toBe(true);
+  });
+
+  it("refuses an unknown window id and lists the real ones", async () => {
+    const h = harness({ targets: [MAIN, NOTES] });
+    await h.call({ action: "open", mode: "attach", port: PORT });
+    const error = await failure(h.call({ action: "window", window: "w123" }));
+    expect(error.code).toBe("invalid_input");
+    expect(error.message).toContain("waaaa1111");
+    expect(error.message).toContain("wbbbb2222");
+  });
+
+  it("still lists windows after the current window closed", async () => {
+    const h = harness({ targets: [MAIN, NOTES] });
+    await h.call({ action: "open", mode: "attach", port: PORT });
+    await h.call({ action: "window", window: "wbbbb2222" });
+    h.client().gone("window closed");
+    h.state.targets = [MAIN];
+    const snapshot = await failure(h.call({ action: "snapshot" }));
+    expect(snapshot.message).toMatch(/Next: call dev_app window/);
+    const out = await h.call({ action: "window", window: "waaaa1111" });
+    expect(out).toMatch(/^Switched to window "GG Coder Local Fork"/);
+  });
+
+  it("needs an open connection", async () => {
+    const h = harness();
+    expect((await failure(h.call({ action: "window" }))).code).toBe("not_attached");
+  });
+});
+
+describe("dev_app launch with the fake provider", () => {
+  it("routes the daemon to the fake provider and makes it the default model", async () => {
+    const h = harness();
+    const out = await h.call({ action: "open", mode: "launch", provider: "fake" });
+    expect(out).toContain("Prompts go to a fake local AI provider");
+    const env = h.state.spawned[0]?.options.env ?? {};
+    expect(env.GG_SIDECAR_PATH).toMatch(/scripts[\\/]dev-app-replay-dev-smoke\.mjs$/);
+    expect(env.GG_DEV_APP_REPLAY_MODE).toBe("sidecar");
+    expect(env.GG_DEV_APP_REPLAY_PROVIDER).toBe(FAKE_URL);
+    const settings = JSON.parse(
+      readFileSync(
+        path.join(h.root, "home", ".gg", "identities", "com.ggcoder.local-fork", "settings.json"),
+        "utf8",
+      ),
+    ) as Record<string, unknown>;
+    expect(settings).toMatchObject({ defaultProvider: "azure", defaultModel: "azure:fixture" });
+
+    await h.call({ action: "close" });
+    expect(h.state.terminated).toEqual([PID]);
+    expect(h.state.providerClosed).toBe(1);
+  });
+
+  it("launches without it by default", async () => {
+    const h = harness();
+    const out = await h.call({ action: "open", mode: "launch" });
+    expect(out).not.toContain("fake");
+    expect(h.state.spawned[0]?.options.env?.GG_SIDECAR_PATH).toBeUndefined();
+  });
+
+  it("stops the fake provider when the start fails", async () => {
+    const h = harness({ targets: [] });
+    await h.call({ action: "open", mode: "launch", provider: "fake", deadline_ms: 2000 });
+    h.state.exitCode = 1;
+    expect((await failure(h.call({ action: "open", mode: "launch", provider: "fake" }))).code).toBe(
+      "launch_failed",
+    );
+    expect(h.state.providerClosed).toBe(1);
+  });
+
+  it("will not resume a start with a different provider choice", async () => {
+    const h = harness({ targets: [] });
+    await h.call({ action: "open", mode: "launch", deadline_ms: 2000 });
+    const error = await failure(h.call({ action: "open", mode: "launch", provider: "fake" }));
+    expect(error.code).toBe("invalid_input");
+    expect(error.message).toContain("a launch without the fake provider is already starting");
+    expect(h.state.spawned).toHaveLength(1);
+  });
+
+  it("reports a missing daemon wrapper before starting anything", async () => {
+    const h = harness({ fileExists: (file) => !file.endsWith("dev-app-replay-dev-smoke.mjs") });
+    const error = await failure(h.call({ action: "open", mode: "launch", provider: "fake" }));
+    expect(error.code).toBe("launch_failed");
+    expect(h.state.spawned).toHaveLength(0);
   });
 });

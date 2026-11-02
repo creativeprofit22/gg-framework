@@ -55,6 +55,8 @@ export interface LaunchDevAppOptions extends DevAppDependencies {
   accept?: (target: DevTarget) => boolean;
   stdio?: StdioOptions;
   tauriCli?: string;
+  /** Called once the owned process exists, so a caller can still kill it before readiness. */
+  onSpawn?: (pid: number) => void;
 }
 
 export interface VerifiedTerminationDependencies {
@@ -195,6 +197,7 @@ export async function launchDevApp({
   spawn = nodeSpawn as unknown as SpawnDevApp,
   terminate = defaultTerminate,
   terminateNow = (pid: number) => killProcessTree(pid),
+  onSpawn,
 }: LaunchDevAppOptions): Promise<DevAppSession> {
   assertPort(cdpPort);
   assertDeadline("readyDeadlineMs", readyDeadlineMs);
@@ -211,6 +214,7 @@ export async function launchDevApp({
   if (typeof pid !== "number" || !Number.isInteger(pid)) {
     throw new Error("Developer app did not expose a process id");
   }
+  onSpawn?.(pid);
   let spawnError: Error | null = null;
   child.once("error", (error) => {
     spawnError = error;

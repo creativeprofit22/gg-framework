@@ -1072,23 +1072,44 @@ export function toAnthropicMessages(
               (name) => toolReferences.has(name) && !referencedTools.has(name),
             )
           : [];
+        const original = toAnthropicToolResultContent(result.content);
         if (refs.length === 0) {
+          // An is_error tool_result may hold only text (API 400), so a failed
+          // result's media follows the tool_result blocks as user content.
+          if (
+            result.isError &&
+            typeof original !== "string" &&
+            original.some((part) => part.type !== "text")
+          ) {
+            const text = original.filter((part) => part.type === "text" && part.text !== "");
+            trailing.push(
+              { type: "text", text: `Attachments from failed tool call ${toolUseId}:` },
+              ...original.filter((part) => part.type !== "text"),
+            );
+            return {
+              type: "tool_result" as const,
+              tool_use_id: toolUseId,
+              content: text.length > 0 ? text : "(no text output)",
+              is_error: true,
+            };
+          }
           return {
             type: "tool_result" as const,
             tool_use_id: toolUseId,
-            content: toAnthropicToolResultContent(result.content),
+            content: original,
             is_error: result.isError,
           };
         }
         for (const name of refs) referencedTools.add(name);
-        const original = toAnthropicToolResultContent(result.content);
         const parts = typeof original === "string" ? [{ type: "text", text: original }] : original;
         const first = parts.findIndex((part) => part.type === "text" && part.text !== "");
+        const label = `Result of tool call ${toolUseId}${result.isError ? " (failed)" : ""}`;
+        if (first === -1 && result.isError) trailing.push({ type: "text", text: `${label}.` });
         parts.forEach((part, index) => {
           if (part.type === "text" && part.text === "") return;
           trailing.push(
             index === first && part.type === "text"
-              ? { type: "text", text: `Result of tool call ${toolUseId}:\n${part.text}` }
+              ? { type: "text", text: `${label}:\n${part.text}` }
               : part,
           );
         });
@@ -1096,7 +1117,9 @@ export function toAnthropicMessages(
           type: "tool_result" as const,
           tool_use_id: toolUseId,
           content: refs.map((name) => ({ type: "tool_reference" as const, tool_name: name })),
-          is_error: result.isError,
+          // is_error forbids tool_reference content; the labelled text after
+          // it carries the failure instead.
+          is_error: result.isError ? undefined : result.isError,
         };
       });
       out.push({

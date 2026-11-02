@@ -165,3 +165,76 @@ describe("deferred tool loading", () => {
     expect(usesDeferredToolLoading({ provider: "anthropic", model })).toBe(false);
   });
 });
+
+describe("failed tool results on Anthropic", () => {
+  const isTextOnlyWhenError = (content: unknown): boolean =>
+    (content as Array<Record<string, unknown>>).every(
+      (block) =>
+        block.type !== "tool_result" ||
+        block.is_error !== true ||
+        typeof block.content === "string" ||
+        (block.content as Array<{ type: string }>).every((part) => part.type === "text"),
+    );
+
+  it("keeps a failed loading call's references and carries the error as text", () => {
+    const failedLoad: Message = {
+      role: "tool",
+      content: [
+        {
+          type: "tool_result",
+          toolCallId: "call_1",
+          content: "Invalid arguments for tool `steroids`",
+          isError: true,
+          loadedTools: ["steroids"],
+        },
+      ],
+    };
+    const plan = planDeferredTools([read, search, steroids], catalog, [user, call, failedLoad]);
+    const { messages } = toAnthropicMessages([user, call, failedLoad], undefined, {
+      toolReferences: plan?.loaded,
+    });
+    const content = messages.at(-1)?.content;
+    expect(isTextOnlyWhenError(content)).toBe(true);
+    expect(content).toEqual([
+      {
+        type: "tool_result",
+        tool_use_id: "call_1",
+        content: [{ type: "tool_reference", tool_name: "steroids" }],
+      },
+      {
+        type: "text",
+        text: "Result of tool call call_1 (failed):\nInvalid arguments for tool `steroids`",
+      },
+    ]);
+  });
+
+  it("moves media out of a failed tool_result", () => {
+    const failedImage: Message = {
+      role: "tool",
+      content: [
+        {
+          type: "tool_result",
+          toolCallId: "call_1",
+          content: [
+            { type: "text", text: "server error" },
+            { type: "image", mediaType: "image/png", data: "AAAA" },
+          ],
+          isError: true,
+        },
+      ],
+    };
+    const { messages } = toAnthropicMessages([user, call, failedImage]);
+    const content = messages.at(-1)?.content;
+    expect(isTextOnlyWhenError(content)).toBe(true);
+    expect(content).toEqual([
+      {
+        type: "tool_result",
+        tool_use_id: "call_1",
+        content: [{ type: "text", text: "server error" }],
+        is_error: true,
+      },
+      { type: "text", text: "Attachments from failed tool call call_1:" },
+      { type: "image", source: { type: "base64", media_type: "image/png", data: "AAAA" } },
+    ]);
+  });
+});

@@ -4,7 +4,16 @@ import { createHash, randomUUID } from "node:crypto";
 import { imageOriginals } from "../../packages/ggcoder/src/test-support/image-originals";
 import path from "node:path";
 import { useCallback, useState } from "react";
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  createEvent,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, onTestFailed, vi } from "vitest";
 import type * as AgentModule from "./agent";
 import type { PaneSwapViewState } from "./usePaneSwapViewState";
@@ -1508,6 +1517,211 @@ describe("queued cancellation ordering (mocked native transport)", () => {
     expect(container.querySelector(".user-msg.queued")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Cancel queued message" }));
     expect(pane.cancelQueued).toHaveBeenCalledWith("q1");
+  });
+});
+
+describe("slash menu keyboard (mocked native transport)", () => {
+  const SLASH_COMMANDS: AgentModule.SlashCommand[] = [
+    {
+      name: "steroids-plus",
+      aliases: [],
+      description: "Bigger example search",
+      input: { text: "optional", references: "optional", attachments: "optional" },
+      source: "built-in",
+    },
+    {
+      name: "steroids",
+      aliases: [],
+      description: "Real-repo examples",
+      input: { text: "optional", references: "optional", attachments: "optional" },
+      source: "built-in",
+    },
+    {
+      name: "plan",
+      aliases: [],
+      description: "Plan before building",
+      input: { text: "optional", references: "optional", attachments: "optional" },
+      source: "built-in",
+    },
+    {
+      name: "add-dir",
+      aliases: [],
+      description: "Add project folder",
+      input: { text: "optional", references: "none", attachments: "none" },
+      source: "built-in",
+    },
+    {
+      name: "compact",
+      aliases: [],
+      description: "Compact the conversation",
+      input: { text: "none", references: "optional", attachments: "optional" },
+      source: "built-in",
+    },
+  ];
+
+  async function renderSlashPane(
+    paneId: string,
+    running = false,
+  ): Promise<{ pane: PaneAgentClient; input: HTMLTextAreaElement }> {
+    const pane = client(paneId, 8);
+    vi.mocked(pane.listCommands).mockResolvedValue(SLASH_COMMANDS);
+    if (running) {
+      vi.mocked(pane.getState).mockResolvedValue({
+        ...agentState("azure:gpt-test"),
+        running: true,
+        runState: "running",
+      });
+    }
+    render(<AgentPane client={pane} target={target} />);
+    const input = (await screen.findByRole("textbox")) as HTMLTextAreaElement;
+    await waitFor(() => expect(pane.listCommands).toHaveBeenCalled());
+    return { pane, input };
+  }
+
+  async function typeSlash(input: HTMLTextAreaElement, value: string): Promise<void> {
+    fireEvent.change(input, { target: { value } });
+    await screen.findByRole("listbox", { name: "plays" });
+  }
+
+  it("sends an exactly typed command on Enter instead of completing it (2026-11-01 smoke)", async () => {
+    const { pane, input } = await renderSlashPane("pane-slash-exact");
+    await typeSlash(input, "/steroids");
+    expect(screen.getAllByRole("option")[0]?.getAttribute("aria-selected")).toBe("true");
+    expect(
+      within(screen.getAllByRole("option")[0] as HTMLElement).getByText("/steroids"),
+    ).toBeTruthy();
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => expect(pane.sendPrompt).toHaveBeenCalledWith("/steroids", [], undefined));
+    expect(pane.sendPrompt).toHaveBeenCalledOnce();
+  });
+
+  it("completes a wrong-case command on Enter, then sends the canonical name", async () => {
+    const { pane, input } = await renderSlashPane("pane-slash-wrong-case");
+    await typeSlash(input, "/Steroids");
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(input.value).toBe("/steroids ");
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => expect(pane.sendPrompt).toHaveBeenCalledOnce());
+    expect(vi.mocked(pane.sendPrompt).mock.calls[0]?.[0].trim()).toBe("/steroids");
+  });
+
+  it("completes a wrong-case no-text command without a trailing space, then sends it", async () => {
+    const { pane, input } = await renderSlashPane("pane-slash-wrong-case-none");
+    await typeSlash(input, "/COMPACT");
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(input.value).toBe("/compact");
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+    await screen.findByRole("listbox", { name: "plays" });
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => expect(pane.sendPrompt).toHaveBeenCalledWith("/compact", [], undefined));
+    expect(pane.sendPrompt).toHaveBeenCalledOnce();
+  });
+
+  it("completes a partial match on Enter without sending", async () => {
+    const { pane, input } = await renderSlashPane("pane-slash-partial");
+    await typeSlash(input, "/ster");
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(input.value).toBe("/steroids-plus ");
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it("completes on Tab even when the command is typed exactly", async () => {
+    const { pane, input } = await renderSlashPane("pane-slash-tab");
+    await typeSlash(input, "/steroids");
+    fireEvent.keyDown(input, { key: "Tab" });
+    expect(input.value).toBe("/steroids ");
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it("sends a command followed by a trailing space on Enter", async () => {
+    const { pane, input } = await renderSlashPane("pane-slash-space");
+    fireEvent.change(input, { target: { value: "/steroids " } });
+    expect(screen.queryByRole("listbox", { name: "plays" })).toBeNull();
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => expect(pane.sendPrompt).toHaveBeenCalledOnce());
+    expect(vi.mocked(pane.sendPrompt).mock.calls[0]?.[0].trim()).toBe("/steroids");
+  });
+
+  it("closes only the menu on Escape, keeps the draft and does not cancel the run", async () => {
+    const { pane, input } = await renderSlashPane("pane-slash-escape", true);
+    await typeSlash(input, "/ster");
+    expect(input.getAttribute("data-slash-menu-open")).toBe("true");
+    const event = createEvent.keyDown(input, { key: "Escape" });
+    fireEvent(input, event);
+    expect(event.defaultPrevented).toBe(true);
+    expect(screen.queryByRole("listbox", { name: "plays" })).toBeNull();
+    expect(input.value).toBe("/ster");
+    expect(input.getAttribute("data-slash-menu-open")).toBe("false");
+    expect(input.getAttribute("aria-controls")).toBeNull();
+    expect(input.getAttribute("aria-activedescendant")).toBeNull();
+    expect(pane.cancel).not.toHaveBeenCalled();
+
+    fireEvent.change(input, { target: { value: "/stero" } });
+    expect(await screen.findByRole("listbox", { name: "plays" })).toBeTruthy();
+    expect(input.getAttribute("data-slash-menu-open")).toBe("true");
+  });
+
+  it("moves the highlight with the arrow keys and exposes it to assistive tech", async () => {
+    const { pane, input } = await renderSlashPane("pane-slash-arrows");
+    await typeSlash(input, "/ster");
+    const list = screen.getByRole("listbox", { name: "plays" });
+    expect(input.getAttribute("aria-autocomplete")).toBe("list");
+    expect(input.getAttribute("aria-haspopup")).toBe("listbox");
+    expect(input.getAttribute("aria-expanded")).toBeNull();
+    expect(input.getAttribute("aria-controls")).toBe(list.id);
+    const options = () => screen.getAllByRole("option");
+    expect(input.getAttribute("aria-activedescendant")).toBe(options()[0]?.id);
+
+    fireEvent.keyDown(input, { key: "ArrowDown" });
+    expect(input.getAttribute("aria-activedescendant")).toBe(options()[1]?.id);
+    expect(options()[1]?.getAttribute("aria-selected")).toBe("true");
+    fireEvent.keyDown(input, { key: "ArrowUp" });
+    expect(input.getAttribute("aria-activedescendant")).toBe(options()[0]?.id);
+    fireEvent.keyDown(input, { key: "ArrowUp" });
+    expect(input.getAttribute("aria-activedescendant")).toBe(options()[1]?.id);
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(input.value).toBe("/steroids ");
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it("completes the highlighted row when the user arrows off an exact match", async () => {
+    const { pane, input } = await renderSlashPane("pane-slash-arrow-off");
+    await typeSlash(input, "/steroids");
+    fireEvent.keyDown(input, { key: "ArrowDown" });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(input.value).toBe("/steroids-plus ");
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it("completes a mouse-picked row and keeps focus in the composer", async () => {
+    const { pane, input } = await renderSlashPane("pane-slash-mouse");
+    input.focus();
+    await typeSlash(input, "/");
+    const row = screen.getByText("/plan").closest("button");
+    if (!row) throw new Error("missing /plan row");
+    expect(fireEvent.mouseDown(row)).toBe(false);
+    fireEvent.click(row);
+    expect(input.value).toBe("/plan ");
+    expect(document.activeElement).toBe(input);
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it("opens the folder picker for an exactly typed /add-dir on Enter", async () => {
+    nativeMocks.openDialog.mockResolvedValueOnce(null);
+    const { pane, input } = await renderSlashPane("pane-slash-add-dir");
+    await typeSlash(input, "/add-dir");
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => expect(nativeMocks.openDialog).toHaveBeenCalledOnce());
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it("keeps completing an exactly typed /schedule on Enter", async () => {
+    const { pane, input } = await renderSlashPane("pane-slash-schedule");
+    await typeSlash(input, "/schedule");
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(input.value).toBe("/schedule ");
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
   });
 });
 

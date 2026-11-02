@@ -142,6 +142,14 @@ const GoalWorld = lazy(() =>
 import { CompactionNotice } from "./CompactionNotice";
 import { ModelSelect } from "./ModelSelect";
 import { SlashMenu } from "./SlashMenu";
+import {
+  orderSlashMatches,
+  slashMenuInputAria,
+  slashMenuKeyAction,
+  slashQueryFor,
+  slashTokenFor,
+  type SlashMenuKeyAction,
+} from "./slash-menu-keys";
 import { QueuedBar } from "./QueuedBar";
 import { ScheduleHint } from "./ScheduleHint";
 import {
@@ -943,6 +951,8 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     };
   }, [refreshCommands, invalidateCommandRequests]);
   const [slashIndex, setSlashIndex] = useState(0);
+  // Escape hides the slash menu for this exact draft; any edit brings it back.
+  const [slashDismissedFor, setSlashDismissedFor] = useState<string | null>(null);
   // Caret offset in the composer, tracked so the `/schedule` hint can highlight
   // the slot the user is currently typing in.
   const [caret, setCaret] = useState(0);
@@ -2776,8 +2786,8 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
 
   // Workflow commands matching the current `/prefix` (only while the input is a
   // single `/token` with no space yet). Empty when not in slash mode.
-  const slashQuery =
-    input.startsWith("/") && !input.includes(" ") ? input.slice(1).toLowerCase() : null;
+  const slashQuery = slashQueryFor(input);
+  const slashToken = slashTokenFor(input);
   // `/schedule ` (past the command token) swaps the palette for the argument
   // hint. An invalid draft is blocked from being sent to the agent.
   const scheduleDraft = isScheduleDraft(input);
@@ -2786,13 +2796,18 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   const scheduleInvalid = scheduleParse !== null && !scheduleParse.ok;
   const slashMatches =
     slashQuery !== null
-      ? menuCommands(commands).filter(
-          (c) =>
-            c.name.toLowerCase().startsWith(slashQuery) ||
-            c.aliases.some((a) => a.toLowerCase().startsWith(slashQuery)),
+      ? orderSlashMatches(
+          menuCommands(commands).filter(
+            (c) =>
+              c.name.toLowerCase().startsWith(slashQuery) ||
+              c.aliases.some((a) => a.toLowerCase().startsWith(slashQuery)),
+          ),
+          slashQuery,
         )
       : [];
-  const slashOpen = slashMatches.length > 0;
+  const slashHasMatches = slashMatches.length > 0;
+  const slashOpen = slashHasMatches && slashDismissedFor !== input;
+  const slashListId = useId();
   const discoveringCommands = input.startsWith("/") && !/\s/.test(input);
   useEffect(() => {
     if (discoveringCommands) void refreshCommands();
@@ -2910,6 +2925,19 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     }
     if (cmd.input.text === "none") setEnhancement(null);
     requestAnimationFrame(() => inputRef.current?.focus());
+  }
+
+  function runSlashMenuAction(action: SlashMenuKeyAction): void {
+    if (action.kind === "move") {
+      setSlashIndex((i) => (i + action.delta + slashMatches.length) % slashMatches.length);
+    } else if (action.kind === "complete") {
+      pickSlashCommand(action.command);
+    } else if (action.kind === "send") {
+      if (action.picker) pickSlashCommand(action.command);
+      else submit();
+    } else {
+      setSlashDismissedFor(input);
+    }
   }
 
   async function pickWorkspaceDirectory(command: "add-dir" | "remove-dir"): Promise<void> {
@@ -4053,14 +4081,14 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   useEffect(() => {
     if (enhancing || !hydrated) return setEnhanceHintVisible(false);
     if (input.trim().length === 0) return setEnhanceHintVisible(false);
-    if (slashOpen || mentionOpen) return setEnhanceHintVisible(false);
+    if (slashHasMatches || mentionOpen) return setEnhanceHintVisible(false);
     // Never offer to rewrite a `/schedule` draft: the enhancer rewrites prose
     // and would happily mangle the `| 15m` argument tail into something the
     // parser rejects.
     if (scheduleDraft) return setEnhanceHintVisible(false);
     if (enhancement && enhancement.enhanced === input) return setEnhanceHintVisible(false);
     setEnhanceHintVisible(true);
-  }, [input, enhancing, hydrated, slashOpen, mentionOpen, scheduleDraft, enhancement]);
+  }, [input, enhancing, hydrated, slashHasMatches, mentionOpen, scheduleDraft, enhancement]);
 
   // Both typed `@Ken` prompts and composer quick actions use this path so Ken's
   // transcript identity and transport stay identical. Quick actions opt out of
@@ -5583,6 +5611,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
                   ) : (
                     slashOpen && (
                       <SlashMenu
+                        id={slashListId}
                         commands={slashMatches}
                         activeIndex={clampedSlashIndex}
                         onSelect={pickSlashCommand}
@@ -5682,6 +5711,11 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
                             : undefined
                         }
                         value={input}
+                        {...slashMenuInputAria({
+                          open: slashOpen,
+                          listId: slashListId,
+                          activeIndex: clampedSlashIndex,
+                        })}
                         placeholder={
                           planReview !== null
                             ? "Approve or dismiss the pending plan to continue…"
@@ -5710,6 +5744,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
                           lastKeystrokeAtRef.current = now;
                           setInput(event.target.value);
                           setSlashIndex(0);
+                          setSlashDismissedFor(null);
                           setCaret(event.target.selectionStart ?? event.target.value.length);
                           // Typing exits history-recall mode so ↑/↓ start fresh next time.
                           if (historyIndex !== null) setHistoryIndex(null);
@@ -5741,6 +5776,16 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
                             e.preventDefault();
                             return;
                           }
+                          const slashAction =
+                            slashOpen && !mentionOpen && slashToken !== null
+                              ? slashMenuKeyAction({
+                                  key: e.key,
+                                  shiftKey: e.shiftKey,
+                                  token: slashToken,
+                                  matches: slashMatches,
+                                  activeIndex: clampedSlashIndex,
+                                })
+                              : null;
                           if (mentionOpen && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
                             e.preventDefault();
                             const delta = e.key === "ArrowDown" ? 1 : -1;
@@ -5757,19 +5802,9 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
                           } else if (mentionOpen && e.key === "Escape") {
                             e.preventDefault();
                             setMention(null);
-                          } else if (slashOpen && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
+                          } else if (slashAction) {
                             e.preventDefault();
-                            const delta = e.key === "ArrowDown" ? 1 : -1;
-                            setSlashIndex(
-                              (i) => (i + delta + slashMatches.length) % slashMatches.length,
-                            );
-                          } else if (
-                            slashOpen &&
-                            (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey))
-                          ) {
-                            e.preventDefault();
-                            const cmd = slashMatches[clampedSlashIndex];
-                            if (cmd) pickSlashCommand(cmd);
+                            runSlashMenuAction(slashAction);
                           } else if (e.key === "ArrowUp" || e.key === "ArrowDown") {
                             // Menus are closed here (handled above), so arrows recall sent
                             // prompts shell-style — unless the caret is mid-text in a
@@ -5785,8 +5820,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
                           } else if (e.key === "Escape") {
                             // Cancel the build if it's running; otherwise cancel Ken so the
                             // "esc to cancel" on his bar actually works.
-                            if (slashOpen) setInput("");
-                            else if (running && !cancelling) requestCancel();
+                            if (running && !cancelling) requestCancel();
                             else if (kenRunning) cancelCurrentKen();
                           }
                         }}

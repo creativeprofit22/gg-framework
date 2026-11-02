@@ -1,5 +1,13 @@
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -10,8 +18,10 @@ import {
   installedSmokeBuildRequested,
   installerManifest,
   INSTALLED_SMOKE_IDENTITY,
+  LOCAL_CARGO_RELEASE_SETTINGS,
   LOCAL_FORK_IDENTITY,
   localBuildConfigPaths,
+  localCargoBuildEnv,
   missingPhaseLeaseRegressionGuards,
   PHASE_LEASE_REGRESSION_GATE,
   phaseLeaseRegressionGateArgs,
@@ -454,5 +464,50 @@ describe("Cargo.toml restoration", () => {
       }),
     ).toThrow(buildError);
     expect(readFileSync(cargoTomlPath)).toEqual(originalCargoToml);
+  });
+});
+
+describe("local-only Cargo settings", () => {
+  const srcTauri = join(here, "..", "src-tauri");
+
+  it("adds only incremental release builds and leaves the input untouched", () => {
+    const base = { PATH: "C:/bin", CARGO_BUILD_JOBS: "6" };
+    const childEnv = localCargoBuildEnv(base);
+
+    expect(LOCAL_CARGO_RELEASE_SETTINGS).toEqual({ CARGO_PROFILE_RELEASE_INCREMENTAL: "true" });
+    expect(childEnv).toEqual({ ...base, CARGO_PROFILE_RELEASE_INCREMENTAL: "true" });
+    expect(base).toEqual({ PATH: "C:/bin", CARGO_BUILD_JOBS: "6" });
+    expect(Object.keys(childEnv)).not.toContain("CARGO_TARGET_DIR");
+    expect(Object.keys(childEnv).filter((key) => /OPT_LEVEL|LTO/.test(key))).toEqual([]);
+  });
+
+  it("lets a user-set Cargo value win", () => {
+    expect(localCargoBuildEnv({ CARGO_PROFILE_RELEASE_INCREMENTAL: "false" })).toEqual({
+      CARGO_PROFILE_RELEASE_INCREMENTAL: "false",
+    });
+    expect(localCargoBuildEnv({ cargo_profile_release_incremental: "false" })).toEqual({
+      cargo_profile_release_incremental: "false",
+    });
+    expect(localCargoBuildEnv({ CARGO_INCREMENTAL: "0" })).toEqual({ CARGO_INCREMENTAL: "0" });
+  });
+
+  it("passes the settings to the Tauri build child only", () => {
+    const source = readFileSync(join(here, "build-local-hotfix.mjs"), "utf8");
+    const moduleEnv = source.match(/^const env = .*$/m)?.[0];
+    expect(moduleEnv).toBeDefined();
+    expect(moduleEnv).not.toContain("CARGO_");
+    const main = source.slice(source.indexOf("async function main()"));
+    expect(main.match(/localCargoBuildEnv\(/g)).toHaveLength(1);
+    expect(main).toContain(
+      "run(pnpm, tauriBuildArgs(process.platform, configPaths), localCargoBuildEnv(env))",
+    );
+  });
+
+  it("leaves the official release and CI build settings untouched", () => {
+    const baseConfig = JSON.parse(readFileSync(join(srcTauri, "tauri.conf.json"), "utf8"));
+    expect(baseConfig.bundle?.windows?.nsis?.compression).toBeUndefined();
+    expect(readFileSync(join(srcTauri, "Cargo.toml"), "utf8")).not.toMatch(/^\[profile/m);
+    expect(existsSync(join(srcTauri, ".cargo", "config.toml"))).toBe(false);
+    expect(existsSync(join(srcTauri, ".cargo", "config"))).toBe(false);
   });
 });

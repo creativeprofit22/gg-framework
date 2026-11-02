@@ -51,6 +51,9 @@ describe("Local Fork native identity", () => {
     });
     expect(localConfig.bundle.createUpdaterArtifacts).toBe(false);
     expect(localConfig.plugins.updater.endpoints).toEqual([]);
+    // Faster installer packing for local builds only; release keeps Tauri's LZMA default.
+    expect(localConfig.bundle.windows.nsis.compression).toBe("zlib");
+    expect(baseConfig.bundle?.windows?.nsis?.compression).toBeUndefined();
     expect(baseConfig).toMatchObject({
       productName: "GG Coder",
       identifier: "com.ggcoder.app",

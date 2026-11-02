@@ -8,7 +8,8 @@
     "windows": {
       "nsis": {
         "installerHooks": "windows/nsis-hooks.nsh",
-        "installMode": "currentUser"
+        "installMode": "currentUser",
+        "compression": "zlib"
       }
     }
   },

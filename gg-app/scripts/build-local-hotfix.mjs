@@ -50,6 +50,23 @@ export const INSTALLED_SMOKE_TAURI_CONFIG = Object.freeze({
   },
   plugins: { updater: { endpoints: [] } },
 });
+// Local-only Rust settings for the Tauri build child; release/CI builds never run this script.
+export const LOCAL_CARGO_RELEASE_SETTINGS = Object.freeze({
+  CARGO_PROFILE_RELEASE_INCREMENTAL: "true",
+});
+
+export function localCargoBuildEnv(baseEnv) {
+  // Windows env names are case-insensitive, so match them that way.
+  const isSet = (name) => Object.keys(baseEnv).some((key) => key.toUpperCase() === name);
+  const childEnv = { ...baseEnv };
+  for (const [name, value] of Object.entries(LOCAL_CARGO_RELEASE_SETTINGS)) {
+    if (isSet(name)) continue;
+    // CARGO_INCREMENTAL overrides the profile setting, so the user's choice wins.
+    if (name === "CARGO_PROFILE_RELEASE_INCREMENTAL" && isSet("CARGO_INCREMENTAL")) continue;
+    childEnv[name] = value;
+  }
+  return childEnv;
+}
 export const LOCAL_INSTALLER_MANIFEST_SCHEMA_VERSION = 2;
 export const INSTALLED_SMOKE_MANIFEST_NAME = "latest-installed-smoke-installer.json";
 const RELEASE_NOTES_PATH = "gg-app/src/local-release-notes.json";
@@ -257,11 +274,11 @@ function runPhaseLeaseRegressionGate() {
   }
 }
 
-function run(command, args) {
+function run(command, args, childEnv = env) {
   console.log(`> ${command} ${args.join(" ")}`);
   const result = spawnSync(command, args, {
     cwd: repoRoot,
-    env,
+    env: childEnv,
     shell: process.platform === "win32",
     stdio: "inherit",
   });
@@ -619,7 +636,7 @@ async function main() {
   requireSuccess(run(pnpm, ["--filter", "gg-app", "bundle:sidecar"]));
   const bundleBuildStartedAt = Date.now();
   const buildStatus = runWithCargoTomlRestored(cargoTomlPath, () =>
-    run(pnpm, tauriBuildArgs(process.platform, configPaths)),
+    run(pnpm, tauriBuildArgs(process.platform, configPaths), localCargoBuildEnv(env)),
   );
   if (buildStatus !== 0) process.exit(buildStatus);
   const installer = freshInstallerForPlatform(

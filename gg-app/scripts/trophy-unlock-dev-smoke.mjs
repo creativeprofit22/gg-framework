@@ -2,6 +2,11 @@ import assert from "node:assert/strict";
 import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  condition,
+  createDevAppDriver,
+  DevAppActionError,
+} from "../../packages/ggcoder/dist/dev-app-driver/index.js";
 import { runCrossPaneProjectIsolationSmoke } from "./cross-pane-project-isolation-dev-smoke.mjs";
 
 /*
@@ -31,14 +36,9 @@ const evidence = {
   status: "running",
 };
 
-async function waitFor(client, expression, label, timeoutMs = 20000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (await client.evaluate(expression)) return;
-    await new Promise((done) => setTimeout(done, 75));
-  }
-  throw new Error(`Trophy smoke timed out: ${label}`);
-}
+// Every wait goes through the shared driver: 20 s deadline, 75 ms polling.
+const driverFor = (client) => createDevAppDriver({ client, deadlineMs: 20000, pollMs: 75 });
+const waitFor = (driver, expression, label) => driver.waitFor(label, condition(label, expression));
 
 const PANE = "trophy-right";
 const OTHER = { primary: PANE, [PANE]: "primary" };
@@ -86,12 +86,12 @@ const measure = (pane) => `(() => {
   };
 })()`;
 
-async function earnAndCheck(client, label, pane = PANE) {
+async function earnAndCheck(client, driver, label, pane = PANE) {
   await client.evaluate(
     `window.__TAURI_INTERNALS__.invoke("agent_prompt", { paneId: ${JSON.stringify(pane)}, text: "scene:trophy", attachments: [], meta: null })`,
   );
   await waitFor(
-    client,
+    driver,
     `Boolean(document.querySelector("#workspace-pane-${pane} .trophy-unlock .tu-wrap[data-flat]"))`,
     `${label}: face-up trophy card`,
   );
@@ -124,10 +124,9 @@ async function earnAndCheck(client, label, pane = PANE) {
   // Let it file away before the next one.
   await client.evaluate(`document.activeElement?.blur(); true`);
   await waitFor(
-    client,
+    driver,
     `!document.querySelector("#workspace-pane-${pane} .trophy-unlock")`,
     `${label}: card files away`,
-    20000,
   );
 }
 
@@ -151,14 +150,15 @@ async function verifyWorkspace({ client, projectA, projectB }) {
   await client.evaluate(
     `localStorage.setItem('gg-workspace-layout-recursive:main', ${JSON.stringify(JSON.stringify(layout))}); location.reload(); true`,
   );
+  const driver = driverFor(client);
   await waitFor(
-    client,
+    driver,
     `document.querySelectorAll('[data-pane-id]').length === 2 && document.querySelectorAll('[data-pane-id] textarea').length === 2`,
     "two developer panes",
   );
   try {
-    await earnAndCheck(client, "wide");
-    await earnAndCheck(client, "wide-left", "primary");
+    await earnAndCheck(client, driver, "wide");
+    await earnAndCheck(client, driver, "wide-left", "primary");
     await client.send("Emulation.setDeviceMetricsOverride", {
       width: 640,
       height: 720,
@@ -166,8 +166,8 @@ async function verifyWorkspace({ client, projectA, projectB }) {
       mobile: false,
     });
     await new Promise((done) => setTimeout(done, 400));
-    await earnAndCheck(client, "narrow");
-    await earnAndCheck(client, "narrow-left", "primary");
+    await earnAndCheck(client, driver, "narrow");
+    await earnAndCheck(client, driver, "narrow-left", "primary");
     await client.send("Emulation.setDeviceMetricsOverride", {
       width: 900,
       height: 480,
@@ -175,10 +175,19 @@ async function verifyWorkspace({ client, projectA, projectB }) {
       mobile: false,
     });
     await new Promise((done) => setTimeout(done, 400));
-    await earnAndCheck(client, "short");
-    await earnAndCheck(client, "short-left", "primary");
+    await earnAndCheck(client, driver, "short");
+    await earnAndCheck(client, driver, "short-left", "primary");
   } catch (error) {
-    evidence.assertion = error instanceof Error ? error.message.slice(0, 1200) : String(error);
+    // A driver failure keeps its verdict and reason; the page description can carry project names.
+    evidence.assertion =
+      error instanceof DevAppActionError
+        ? `${error.outcome.action} ${error.outcome.verdict} (${error.outcome.expectation}): ${error.outcome.reason}`.slice(
+            0,
+            1200,
+          )
+        : error instanceof Error
+          ? error.message.slice(0, 1200)
+          : String(error);
     throw error;
   } finally {
     await client.send("Emulation.clearDeviceMetricsOverride").catch(() => {});

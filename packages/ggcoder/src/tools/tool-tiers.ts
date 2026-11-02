@@ -117,6 +117,7 @@ export const DEFERRED_TOOL_NAMES: readonly string[] = [
   "git_history",
   "screenshot",
   "debug",
+  "dev_app",
   "generate_image",
   "tasks",
   "checklist",

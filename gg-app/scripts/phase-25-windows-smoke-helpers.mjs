@@ -1,117 +1,15 @@
-import { mkdirSync } from "node:fs";
 import net from "node:net";
-import { join } from "node:path";
+
+// Moved to the shared dev-app driver; re-exported so existing smokes keep their imports.
+export {
+  DevCdpClient,
+  connectToDevWebview,
+  createIsolatedProfile,
+  sanitizedSmokeEnvironment,
+} from "../../packages/ggcoder/dist/dev-app-driver/index.js";
 
 export const PHASE25_TOAST_TITLE = "Roadmap reminder due";
 export const PHASE25_TOAST_BODY = "Open GG Coder to review it.";
-
-export class DevCdpClient {
-  constructor(socket, { requestTimeoutMs = 15000 } = {}) {
-    this.socket = socket;
-    this.requestTimeoutMs = requestTimeoutMs;
-    this.closed = false;
-    this.nextId = 1;
-    this.pending = new Map();
-    socket.addEventListener("message", (event) => {
-      let message;
-      try {
-        message = JSON.parse(String(event.data));
-      } catch {
-        this.fail(new Error("invalid dev fixture debugging response"));
-        return;
-      }
-      if (message.method === "Inspector.detached" || message.method === "Inspector.targetCrashed") {
-        this.fail(new Error("dev fixture debugging target detached"));
-        return;
-      }
-      if (!message.id) return;
-      const pending = this.pending.get(message.id);
-      if (!pending) return;
-      this.pending.delete(message.id);
-      clearTimeout(pending.timer);
-      if (message.error) pending.reject(new Error(message.error.message));
-      else pending.resolve(message.result);
-    });
-    socket.addEventListener("close", () =>
-      this.fail(new Error("dev fixture debugging connection closed")),
-    );
-    socket.addEventListener("error", () =>
-      this.fail(new Error("dev fixture debugging connection failed")),
-    );
-  }
-
-  fail(error) {
-    if (this.closed) return;
-    this.closed = true;
-    for (const pending of this.pending.values()) {
-      clearTimeout(pending.timer);
-      pending.reject(error);
-    }
-    this.pending.clear();
-    this.socket.close();
-  }
-
-  static async connect(webSocketUrl) {
-    const socket = new WebSocket(webSocketUrl);
-    await new Promise((resolveOpen, reject) => {
-      const timer = setTimeout(() => {
-        socket.close();
-        reject(new Error("dev fixture debugging connection timed out"));
-      }, 10000);
-      socket.addEventListener(
-        "open",
-        () => {
-          clearTimeout(timer);
-          resolveOpen();
-        },
-        { once: true },
-      );
-      socket.addEventListener(
-        "error",
-        () => {
-          clearTimeout(timer);
-          reject(new Error("could not connect to the dev fixture"));
-        },
-        { once: true },
-      );
-    });
-    return new DevCdpClient(socket);
-  }
-
-  send(method, params = {}) {
-    if (this.closed) return Promise.reject(new Error("dev fixture debugging connection closed"));
-    const id = this.nextId++;
-    return new Promise((resolveSend, reject) => {
-      const timer = setTimeout(() => {
-        this.fail(new Error(`dev fixture debugging request timed out: ${method}`));
-      }, this.requestTimeoutMs);
-      this.pending.set(id, { resolve: resolveSend, reject, timer });
-      try {
-        this.socket.send(JSON.stringify({ id, method, params }));
-      } catch (error) {
-        this.fail(error);
-      }
-    });
-  }
-
-  async evaluate(expression) {
-    const result = await this.send("Runtime.evaluate", {
-      expression,
-      awaitPromise: true,
-      returnByValue: true,
-    });
-    if (result.exceptionDetails) {
-      throw new Error(
-        `Dev fixture evaluation failed: ${result.exceptionDetails.exception?.description ?? result.exceptionDetails.text}`,
-      );
-    }
-    return result.result?.value;
-  }
-
-  close() {
-    this.fail(new Error("dev fixture debugging connection closed"));
-  }
-}
 
 // Real WebView DOM measurements, not screenshots or a second browser stack.
 // Metrics override is CSS viewport emulation; it does not resize the OS window.
@@ -438,64 +336,6 @@ export async function measureReviewDockIsolation(client, { capture = async () =>
     await client.evaluate("document.documentElement.style.zoom = ''; true");
     await client.send("Emulation.clearDeviceMetricsOverride");
   }
-}
-
-export async function connectToDevWebview(
-  cdpPort,
-  waitFor,
-  acceptTarget = (candidate) => !String(candidate.url).startsWith("devtools://"),
-) {
-  const target = await waitFor("dev fixture debugging target", async () => {
-    const response = await fetch(`http://127.0.0.1:${cdpPort}/json/list`, {
-      signal: AbortSignal.timeout(5000),
-    });
-    if (!response.ok) return null;
-    const targets = await response.json();
-    return targets.find(
-      (candidate) =>
-        candidate.type === "page" &&
-        typeof candidate.webSocketDebuggerUrl === "string" &&
-        acceptTarget(candidate),
-    );
-  });
-  return DevCdpClient.connect(target.webSocketDebuggerUrl);
-}
-
-export function createIsolatedProfile(root, projectDir = join(root, "project")) {
-  const home = join(root, "home");
-  const paths = {
-    root,
-    home,
-    appData: join(home, "AppData", "Roaming"),
-    localAppData: join(home, "AppData", "Local"),
-    temp: join(root, "temp"),
-    webview2: join(root, "webview2"),
-    project: projectDir,
-    audit: join(root, "audit"),
-    screenshots: join(root, "screenshots"),
-  };
-  for (const directory of Object.values(paths)) mkdirSync(directory, { recursive: true });
-  return paths;
-}
-
-export function sanitizedSmokeEnvironment(baseEnvironment, paths, fixtureVariables = {}) {
-  const environment = {};
-  for (const [key, value] of Object.entries(baseEnvironment)) {
-    if (/^(GG_|TAURI_|WEBVIEW2_)/i.test(key)) continue;
-    if (value !== undefined) environment[key] = value;
-  }
-  return {
-    ...environment,
-    HOME: paths.home,
-    USERPROFILE: paths.home,
-    APPDATA: paths.appData,
-    LOCALAPPDATA: paths.localAppData,
-    TEMP: paths.temp,
-    TMP: paths.temp,
-    WEBVIEW2_USER_DATA_FOLDER: paths.webview2,
-    GG_APP_CWD: paths.project,
-    ...fixtureVariables,
-  };
 }
 
 function errorMessage(error) {

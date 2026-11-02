@@ -327,6 +327,124 @@
       "hash": "0c24bb40af86b49f45d143c2fb22efb40397975f61f824d2ded602bbabe34e30"
     },
     {
+      "name": "dev_app",
+      "description": "Drive the running GG desktop dev app (Tauri + Vite on :1420). GG desktop dev app only; use screenshot for other URLs. open: attach to the control port the user gave, or launch it (Windows, isolated profile). snapshot: pane state plus visible interactive elements with refs like e7 (screenshot:true adds a PNG; expect waits until it holds first, without acting). act: type, press, click a ref, or send_prompt; each returns confirmed/contradicted/unreadable and what changed (expect is inferred when omitted). close stops only an app this session launched. One connection per session.",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "open",
+              "snapshot",
+              "act",
+              "close"
+            ],
+            "description": "What to do"
+          },
+          "mode": {
+            "description": "open: attach to a running dev app, or launch one (Windows only)",
+            "type": "string",
+            "enum": [
+              "attach",
+              "launch"
+            ]
+          },
+          "port": {
+            "description": "open attach: the control port the user gave",
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 65535
+          },
+          "pane": {
+            "description": "snapshot/act: workspace pane id (default focused)",
+            "type": "string",
+            "minLength": 1
+          },
+          "screenshot": {
+            "description": "snapshot: also return a PNG",
+            "type": "boolean"
+          },
+          "kind": {
+            "description": "act: input kind",
+            "type": "string",
+            "enum": [
+              "type",
+              "press",
+              "click",
+              "send_prompt"
+            ]
+          },
+          "text": {
+            "description": "act type/send_prompt: text",
+            "type": "string"
+          },
+          "key": {
+            "description": "act press: key name such as Enter, Escape, Tab, a",
+            "type": "string"
+          },
+          "modifiers": {
+            "description": "act press: held modifiers",
+            "maxItems": 4,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "alt",
+                "ctrl",
+                "meta",
+                "shift"
+              ]
+            }
+          },
+          "ref": {
+            "description": "act type/click: element ref from the latest snapshot, e.g. e7",
+            "type": "string"
+          },
+          "expect": {
+            "description": "act: expected result (inferred when omitted); snapshot: wait until it holds, without acting",
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "text_appears",
+                  "text_gone",
+                  "element_appears",
+                  "element_gone",
+                  "draft_equals",
+                  "focus_on",
+                  "menu_open",
+                  "menu_closed",
+                  "dialog_open",
+                  "dialog_closed",
+                  "status_is"
+                ],
+                "description": "What must become true after acting"
+              },
+              "value": {
+                "description": "text_*: text; element_*: CSS selector (element_gone also takes a ref); draft_equals: draft; focus_on: selector or ref; status_is: status",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "deadline_ms": {
+            "description": "Time limit (act/snapshot/attach default 5000, max 30000; launch default 180000, max 300000)",
+            "type": "integer",
+            "minimum": 100,
+            "maximum": 300000
+          }
+        },
+        "required": [
+          "action"
+        ]
+      },
+      "hash": "a0b8ed248307bb017069835593e46302b46b066d99d6294148baef1b5530a613"
+    },
+    {
       "name": "edit",
       "description": "Edit files. `old_text`: verbatim, unique unless replace_all. Or `span` (from read anchors:true) + full replacement `lines`. Re-send only failed edits.",
       "schema": {

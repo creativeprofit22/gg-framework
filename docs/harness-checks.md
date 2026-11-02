@@ -18,6 +18,8 @@ One owner per concern. "Later" means a following Roadmap phase adds it.
 
 Later ggcoder and gg-app code imports plan types only from `@kenkaiiii/gg-core/verify-plan`. Don't add parallel types.
 
+The `dev_app` agent tool, which drives the running desktop dev app for UI checks, and the Lightpanda ideas it borrows are described in [dev-app-tool.md](dev-app-tool.md).
+
 ## Contract (version 1)
 
 A plan is `{ version: 1, mode: "changed" | "full", gates, advice? }`. Each gate is `{ id, argv, cwd?, covers?, fingerprint?, quietBudgetSeconds?, protectedPaths? }`; missing optional fields become `"."`, `[]` or `null`.

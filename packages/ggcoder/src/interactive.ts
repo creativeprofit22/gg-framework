@@ -54,14 +54,17 @@ export async function runInteractive(config: CliConfig): Promise<void> {
   // Same startup-warning line as an expired login: plain, never a prompt.
   for (const blocked of blockedSkills)
     console.warn(chalk.yellow(`⚠ ${blockedSkillNotice(blocked)}`));
-  const { tools, processManager, lspManager, debugManager } = await createTools(cwd, {
-    skills,
-    blockedSkills,
-    provider,
-    model,
-    authStorage,
-    getForegroundLimitSettings: () => foregroundLimitSettingsFrom(savedSettings),
-  });
+  const { tools, processManager, lspManager, debugManager, devAppManager } = await createTools(
+    cwd,
+    {
+      skills,
+      blockedSkills,
+      provider,
+      model,
+      authStorage,
+      getForegroundLimitSettings: () => foregroundLimitSettingsFrom(savedSettings),
+    },
+  );
   const systemPrompt =
     config.systemPrompt ??
     (await buildSystemPrompt(
@@ -77,6 +80,7 @@ export async function runInteractive(config: CliConfig): Promise<void> {
     processManager.shutdownAll();
     lspManager?.shutdownAll();
     debugManager?.shutdown();
+    devAppManager?.shutdownNow();
   });
 
   // Initialize messages and session

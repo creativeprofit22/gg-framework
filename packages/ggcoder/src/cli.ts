@@ -756,6 +756,7 @@ async function runInkTUI(opts: {
     clearReadTracker,
     lspManager,
     debugManager,
+    devAppManager,
     subAgentManager,
   } = await createTools(cwd, {
     commandDiscovery: { workspaceActions: UI_SLASH_COMMANDS },
@@ -831,6 +832,7 @@ async function runInkTUI(opts: {
     processManager.shutdownAll();
     lspManager?.shutdownAll();
     debugManager?.shutdown();
+    devAppManager?.shutdownNow();
     mcpManager.dispose().catch(() => {});
     verifyPlanLoader.dispose();
   });

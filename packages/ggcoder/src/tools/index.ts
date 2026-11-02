@@ -11,6 +11,7 @@ import { ProcessManager } from "../core/process-manager.js";
 import { LspManager } from "../core/lsp/manager.js";
 import { TestImpactIndex } from "../core/test-impact.js";
 import { createDebugTool, DebugManager } from "./debug.js";
+import { createDevAppTool, DevAppManager } from "./dev-app.js";
 import type { EditSource } from "../core/lsp/edit-telemetry.js";
 import { createReadTool } from "./read.js";
 import { getVideoByteLimit } from "../core/model-registry.js";
@@ -268,6 +269,8 @@ export interface CreateToolsResult {
   testImpact?: TestImpactIndex;
   /** Owner of the live `debug` session; callers `shutdown()` it on exit. Local only. */
   debugManager?: DebugManager;
+  /** Owner of the live `dev_app` connection; callers `shutdown()` it on exit. Local only. */
+  devAppManager?: DevAppManager;
   subAgentManager?: SubAgentManager;
   commandCreation?: ReturnType<typeof createProgrammaticCommandTool>;
 }
@@ -310,6 +313,7 @@ export async function createTools(
   const testImpact =
     (opts?.editImpact ?? true) && ops === localOperations ? new TestImpactIndex(cwd) : undefined;
   const debugManager = ops === localOperations ? new DebugManager() : undefined;
+  const devAppManager = ops === localOperations ? new DevAppManager() : undefined;
   const getDiagnostics =
     lspDiagnostics || testImpact
       ? async (filePath: string, content: string, source?: EditSource): Promise<string> => {
@@ -431,6 +435,8 @@ export async function createTools(
     ...(debugManager
       ? [createDebugTool(cwd, debugManager, ops, planModeRef, opts?.getSandboxPolicy)]
       : []),
+    // Drives the dev app over a loopback control port on this machine.
+    ...(devAppManager ? [createDevAppTool(cwd, devAppManager, planModeRef)] : []),
   ];
 
   // Local corpus of real repos; only when the CLI is actually on this machine.
@@ -601,6 +607,7 @@ export async function createTools(
     lspManager,
     ...(testImpact && { testImpact }),
     ...(debugManager && { debugManager }),
+    ...(devAppManager && { devAppManager }),
     subAgentManager,
     commandCreation,
     programmaticProfile,

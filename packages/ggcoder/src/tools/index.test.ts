@@ -6,6 +6,7 @@ import type { AgentDefinition } from "../core/agents.js";
 import { ResearchSourceLedger } from "../core/research-sources.js";
 import type { CreateToolsResult } from "./index.js";
 import { createTools } from "./index.js";
+import { localOperations } from "./operations.js";
 import type { VerifyPlan } from "@kenkaiiii/gg-core/verify-plan";
 import { useFakeHome } from "../test-support/fake-home.js";
 
@@ -258,5 +259,23 @@ describe("createTools verify-plan wiring", () => {
     expect(createCall).toContain("getVerifyPlan: () => verifyPlanLoader.get(),");
     expect(createCall).toContain("verifyPlanLoader.noteFileMutated(filePath)");
     expect(tui.match(/verifyPlanLoader\.dispose\(\);/g)).toHaveLength(2);
+  });
+});
+
+describe("createTools dev_app wiring", () => {
+  it("registers dev_app with a manager only for local operations", async () => {
+    const local = await createTools(process.cwd(), { steroidsBin: null, lspDiagnostics: false });
+    results.push(local);
+    expect(local.tools.some((tool) => tool.name === "dev_app")).toBe(true);
+    expect(local.devAppManager).toBeDefined();
+
+    const remote = await createTools(process.cwd(), {
+      steroidsBin: null,
+      lspDiagnostics: false,
+      operations: { ...localOperations },
+    });
+    results.push(remote);
+    expect(remote.tools.some((tool) => tool.name === "dev_app")).toBe(false);
+    expect(remote.devAppManager).toBeUndefined();
   });
 });

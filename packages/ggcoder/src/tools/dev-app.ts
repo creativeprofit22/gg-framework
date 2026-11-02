@@ -1,0 +1,1215 @@
+import { existsSync } from "node:fs";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { createServer } from "node:net";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { z } from "zod";
+import type { AgentTool, StructuredToolResult, ToolContext } from "@kenkaiiii/gg-agent";
+import { environmentSecrets, redactText } from "@kenkaiiii/gg-ai";
+import { isPlanModeActive, planModeRestriction } from "../core/runtime-mode.js";
+import {
+  AmbiguousTargetError,
+  attachDevApp,
+  captureScreenshot,
+  condition,
+  createDevAppDriver,
+  createIsolatedProfile,
+  describeElement,
+  describePageState,
+  DevAppActionError,
+  DevCdpClient,
+  devAppEnvironment,
+  draftEquals,
+  elementAppears,
+  elementGone,
+  focusOn,
+  formatSnapshot,
+  isRef,
+  launchDevApp,
+  observeScript,
+  pageChanged,
+  parsePageState,
+  parseSnapshot,
+  refLocatorScript,
+  resolveKey,
+  seedAgentPaneScript,
+  snapshotScript,
+  systemClock,
+  textAppears,
+  textGone,
+  type ActionOutcome,
+  type ControlClient,
+  type DevAppSession,
+  type DriverClock,
+  type Expectation,
+  type FetchLike,
+  type Observation,
+  type PageState,
+  type PaneSelector,
+  type SpawnDevApp,
+} from "../dev-app-driver/index.js";
+import { downscaleForPreview, shrinkToFit } from "../utils/image.js";
+
+const ACT_DEFAULT_MS = 5_000;
+const ACT_MAX_MS = 30_000;
+const LAUNCH_DEFAULT_MS = 180_000;
+const LAUNCH_MAX_MS = 300_000;
+// Below the default call deadline, so one stuck request never outlives the call that sent it.
+const REQUEST_TIMEOUT_MS = 4_500;
+const MAX_CHANGE_LINES = 12;
+const RENDER_WAIT_MS = 30_000;
+// The transcript skeleton shows until the pane's session has loaded.
+const PANE_LOADING_SCRIPT = `Boolean(document.querySelector('.agent-pane .transcript-skeleton'))`;
+const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]"]);
+
+const EXPECT_KINDS = [
+  "text_appears",
+  "text_gone",
+  "element_appears",
+  "element_gone",
+  "draft_equals",
+  "focus_on",
+  "menu_open",
+  "menu_closed",
+  "dialog_open",
+  "dialog_closed",
+  "status_is",
+] as const;
+
+const ExpectSpec = z.object({
+  kind: z.enum(EXPECT_KINDS).describe("What must become true after acting"),
+  value: z
+    .string()
+    .optional()
+    .describe(
+      "text_*: text; element_*: CSS selector (element_gone also takes a ref); draft_equals: draft; focus_on: selector or ref; status_is: status",
+    ),
+});
+
+const DevAppParams = z.object({
+  action: z.enum(["open", "snapshot", "act", "close"]).describe("What to do"),
+  mode: z
+    .enum(["attach", "launch"])
+    .optional()
+    .describe("open: attach to a running dev app, or launch one (Windows only)"),
+  port: z
+    .number()
+    .int()
+    .min(1)
+    .max(65_535)
+    .optional()
+    .describe("open attach: the control port the user gave"),
+  pane: z.string().min(1).optional().describe("snapshot/act: workspace pane id (default focused)"),
+  screenshot: z.boolean().optional().describe("snapshot: also return a PNG"),
+  kind: z.enum(["type", "press", "click", "send_prompt"]).optional().describe("act: input kind"),
+  text: z.string().optional().describe("act type/send_prompt: text"),
+  key: z.string().optional().describe("act press: key name such as Enter, Escape, Tab, a"),
+  modifiers: z
+    .array(z.enum(["alt", "ctrl", "meta", "shift"]))
+    .max(4)
+    .optional()
+    .describe("act press: held modifiers"),
+  ref: z
+    .string()
+    .optional()
+    .describe("act type/click: element ref from the latest snapshot, e.g. e7"),
+  expect: ExpectSpec.optional().describe(
+    "act: expected result (inferred when omitted); snapshot: wait until it holds, without acting",
+  ),
+  deadline_ms: z
+    .number()
+    .int()
+    .min(100)
+    .max(LAUNCH_MAX_MS)
+    .optional()
+    .describe(
+      `Time limit (act/snapshot/attach default ${ACT_DEFAULT_MS}, max ${ACT_MAX_MS}; launch default ${LAUNCH_DEFAULT_MS}, max ${LAUNCH_MAX_MS})`,
+    ),
+});
+
+type DevAppArgs = z.infer<typeof DevAppParams>;
+type ExpectArgs = z.infer<typeof ExpectSpec>;
+
+export type DevAppErrorCode =
+  | "not_attached"
+  | "endpoint_refused"
+  | "ambiguous_target"
+  | "unsupported_platform"
+  | "launch_failed"
+  | "target_gone"
+  | "pane_not_found"
+  | "stale_ref"
+  | "element_covered"
+  | "element_disabled"
+  | "element_offscreen"
+  | "menu_swallowed_key"
+  | "timed_out"
+  | "contradicted"
+  | "page_unreadable"
+  | "invalid_input"
+  | "aborted";
+
+const NEXT_STEP: Record<DevAppErrorCode, string> = {
+  not_attached:
+    'call dev_app open (mode "attach" with the port the user gave, or mode "launch" on Windows)',
+  endpoint_refused:
+    "check the port belongs to the GG dev app (its Vite page on :1420); use screenshot for other URLs",
+  ambiguous_target:
+    "close the extra dev app windows so exactly one app page is open, then open again",
+  unsupported_platform: 'start the dev app yourself and use open with mode "attach"',
+  launch_failed:
+    "check gg-app dependencies are installed and the dev app starts (pnpm --filter gg-app tauri dev), then retry",
+  target_gone: "call dev_app open again",
+  pane_not_found: "take a snapshot without pane, or pass a pane id the page shows",
+  stale_ref: "take a new snapshot and use a ref from it",
+  element_covered:
+    "close what covers it (Escape closes menus and dialogs), take a snapshot, then retry",
+  element_disabled:
+    "make it enabled first (for example fill required fields) or pick another element",
+  element_offscreen: "scroll it into view or enlarge the window, take a snapshot, then retry",
+  menu_swallowed_key:
+    'press Escape to close the menu, then press Enter with expect status_is "Working"',
+  timed_out:
+    "take a snapshot to see the current state; retry with a longer deadline_ms if the app is slow",
+  contradicted:
+    "take a snapshot, check what actually happened, then adjust the action or expectation",
+  page_unreadable: "check any CSS selector you passed, take a snapshot, then retry",
+  invalid_input: "fix the arguments and call again",
+  aborted: "call again if the work is still needed",
+};
+
+/** Message shape: `[code] what happened. Next: what to do`. */
+export class DevAppToolError extends Error {
+  override name = "DevAppToolError";
+  readonly code: DevAppErrorCode;
+  constructor(code: DevAppErrorCode, what: string, next: string = NEXT_STEP[code]) {
+    super(`[${code}] ${what.replace(/[.\s]+$/, "")}. Next: ${next}.`);
+    this.code = code;
+  }
+}
+
+export interface DevAppConnection {
+  port: number;
+  session: DevAppSession;
+  /** Registry generation of the latest snapshot; refs from any other one are stale. */
+  generation: number | null;
+}
+
+/** Holds the one live dev app connection of an agent session; `shutdown` on dispose. */
+export class DevAppManager {
+  private connection: DevAppConnection | undefined;
+
+  get current(): DevAppConnection | undefined {
+    return this.connection;
+  }
+
+  /** Swaps the connection without stopping the previous one (used to keep ownership on reconnect). */
+  set(next: DevAppConnection | undefined): void {
+    this.connection = next;
+  }
+
+  /** Swaps the connection and stops the previous one (kills its tree only if this session owns it). */
+  async replace(next: DevAppConnection | undefined): Promise<DevAppConnection | undefined> {
+    const previous = this.connection;
+    this.connection = next;
+    if (previous && previous !== next) await previous.session.stop();
+    return previous;
+  }
+
+  async shutdown(): Promise<void> {
+    await this.replace(undefined).catch(() => {});
+  }
+
+  /** For `process.on("exit")`: Node runs no awaited work there, so `shutdown` would never kill. */
+  shutdownNow(): void {
+    const previous = this.connection;
+    this.connection = undefined;
+    try {
+      previous?.session.stopNow();
+    } catch {
+      // Exiting anyway; nothing left to report to.
+    }
+  }
+}
+
+export interface DevAppToolDependencies {
+  clock?: DriverClock;
+  fetch?: FetchLike;
+  connect?: (webSocketUrl: string) => Promise<ControlClient>;
+  spawn?: SpawnDevApp;
+  terminate?: (pid: number) => Promise<void>;
+  terminateNow?: (pid: number) => void;
+  platform?: NodeJS.Platform;
+  env?: Record<string, string | undefined>;
+  reservePort?: () => Promise<number>;
+  createProfileRoot?: () => Promise<string>;
+  removeProfileRoot?: (root: string) => Promise<void>;
+  fileExists?: (file: string) => boolean;
+  shrinkImage?: (
+    buffer: Buffer,
+    mediaType: string,
+  ) => Promise<{ buffer: Buffer; mediaType: string }>;
+  previewImage?: (buffer: Buffer) => Promise<Buffer>;
+  now?: () => Date;
+}
+
+function message(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function reserveLoopbackPort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const server = createServer();
+    server.unref();
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      const port = isRecord(address) && typeof address.port === "number" ? address.port : 0;
+      server.close(() => (port > 0 ? resolve(port) : reject(new Error("no free port"))));
+    });
+  });
+}
+
+/** Aborting makes time jump past every deadline and wakes every sleep, so waits end at once. */
+function abortableClock(base: DriverClock, signal: AbortSignal): DriverClock {
+  return {
+    now: () => (signal.aborted ? Number.MAX_SAFE_INTEGER / 2 : base.now()),
+    sleep: (ms, inner) => base.sleep(ms, inner ? AbortSignal.any([inner, signal]) : signal),
+  };
+}
+
+const TIMEOUT = Symbol("timeout");
+
+async function within<T>(
+  work: Promise<T>,
+  ms: number,
+  clock: DriverClock,
+  what: string,
+): Promise<T> {
+  work.catch(() => {});
+  const stop = new AbortController();
+  const timeout = clock.sleep(ms, stop.signal).then(() => TIMEOUT);
+  const result = await Promise.race([work, timeout]);
+  stop.abort();
+  if (result === TIMEOUT)
+    throw new DevAppToolError("timed_out", `${what} took longer than ${ms} ms`);
+  return result as T;
+}
+
+/** The isolated profile moves HOME, so point cargo/rustup back at the user's real toolchain. */
+function rustToolchain(env: Record<string, string | undefined>): Record<string, string> {
+  const home = env.USERPROFILE ?? env.HOME ?? "";
+  const toolchain: Record<string, string> = {};
+  const cargo = env.CARGO_HOME ?? (home ? path.join(home, ".cargo") : undefined);
+  const rustup = env.RUSTUP_HOME ?? (home ? path.join(home, ".rustup") : undefined);
+  if (cargo) toolchain.CARGO_HOME = cargo;
+  if (rustup) toolchain.RUSTUP_HOME = rustup;
+  return toolchain;
+}
+
+function budget(requested: number | undefined, fallback: number, max: number): number {
+  return Math.min(requested ?? fallback, max);
+}
+
+function quote(text: string): string {
+  return JSON.stringify(text.length > 60 ? `${text.slice(0, 60)}…` : text);
+}
+
+function stateExpectation(label: string, holds: (page: PageState) => boolean): Expectation {
+  return { label, judge: (observed) => (holds(observed.page) ? "met" : "pending") };
+}
+
+/** In-page read of a field's text: input/textarea value, else contenteditable text. */
+function fieldTextProbe(locator: string): string {
+  return `(() => {
+    const el = ${locator};
+    if (!el || typeof el !== 'object' || typeof el.problem === 'string' || el === document.body) return null;
+    if (typeof el.value === 'string' && el.matches('input, textarea')) return el.value;
+    return el.isContentEditable === true || el.getAttribute('contenteditable') === 'true' ? el.textContent : null;
+  })()`;
+}
+
+function valueGrew(locator: string, text: string, label: string): Expectation {
+  return {
+    label,
+    probe: fieldTextProbe(locator),
+    judge(observed, baseline) {
+      if (typeof baseline.probe !== "string") {
+        return { contradicted: "no text field is focused or targeted" };
+      }
+      const now = observed.probe;
+      return typeof now === "string" &&
+        now.length === baseline.probe.length + text.length &&
+        now.includes(text)
+        ? "met"
+        : "pending";
+    },
+  };
+}
+
+function snapOf(observation: Observation | null): string[] {
+  const probe = observation?.probe;
+  if (!isRecord(probe) || !("snap" in probe)) return [];
+  const snapshot = parseSnapshot(probe.snap);
+  return typeof snapshot === "string" ? [] : snapshot.elements.map(describeElement);
+}
+
+/** Every expectation also records the element list, so results can say what appeared or went. */
+function withElements(expectation: Expectation, pane: PaneSelector): Expectation {
+  const unwrap = (observation: Observation): Observation => ({
+    page: observation.page,
+    probe: isRecord(observation.probe) ? (observation.probe.inner ?? null) : null,
+  });
+  const describeTimeout = expectation.describeTimeout;
+  return {
+    ...expectation,
+    probe: `({ inner: ${expectation.probe ?? "null"}, snap: ${snapshotScript({ pane, register: false })} })`,
+    judge: (observed, baseline) => expectation.judge(unwrap(observed), unwrap(baseline)),
+    ...(describeTimeout
+      ? {
+          describeTimeout: (observed: Observation, baseline: Observation) =>
+            describeTimeout(unwrap(observed), unwrap(baseline)),
+        }
+      : {}),
+  };
+}
+
+function focusText(page: PageState): string {
+  const focused = page.focused;
+  if (!focused) return "nothing";
+  return `${focused.tag}${focused.label ? ` ${quote(focused.label)}` : ""}`;
+}
+
+function describeChanges(baseline: Observation | null, observed: Observation | null): string[] {
+  if (!baseline || !observed) return [];
+  const before = baseline.page;
+  const after = observed.page;
+  const changes: string[] = [];
+  const field = (name: string, from: string, to: string): void => {
+    if (from !== to) changes.push(`${name} ${from} → ${to}`);
+  };
+  field(
+    "draft",
+    before.draft === null ? "none" : quote(before.draft),
+    after.draft === null ? "none" : quote(after.draft),
+  );
+  field("menu", before.menuOpen ? "open" : "closed", after.menuOpen ? "open" : "closed");
+  field("dialog", before.modalOpen ? "open" : "closed", after.modalOpen ? "open" : "closed");
+  field("status", before.status ?? "none", after.status ?? "none");
+  field("phase", before.phase ?? "none", after.phase ?? "none");
+  field("queued", String(before.queued), String(after.queued));
+  field(
+    "composer",
+    before.composerDisabled ? "disabled" : "enabled",
+    after.composerDisabled ? "disabled" : "enabled",
+  );
+  field("focus", focusText(before), focusText(after));
+  const remaining = new Map<string, number>();
+  for (const line of snapOf(baseline)) remaining.set(line, (remaining.get(line) ?? 0) + 1);
+  const added: string[] = [];
+  for (const line of snapOf(observed)) {
+    const count = remaining.get(line) ?? 0;
+    if (count > 0) remaining.set(line, count - 1);
+    else added.push(line);
+  }
+  const removed = [...remaining].flatMap(([line, count]) => Array<string>(count).fill(line));
+  changes.push(...added.map((line) => `+ ${line}`), ...removed.map((line) => `- ${line}`));
+  if (changes.length <= MAX_CHANGE_LINES) return changes;
+  return [
+    ...changes.slice(0, MAX_CHANGE_LINES),
+    `${changes.length - MAX_CHANGE_LINES} more changes not shown`,
+  ];
+}
+
+function formatOutcome(outcome: ActionOutcome): string {
+  const changes = describeChanges(outcome.baseline, outcome.observed);
+  return [
+    `${outcome.verdict}: ${outcome.action} — ${outcome.expectation}`,
+    `reason: ${outcome.reason}`,
+    changes.length > 0
+      ? `changed:\n${changes.map((line) => `  ${line}`).join("\n")}`
+      : "changed: nothing visible",
+    `elapsed ${outcome.elapsedMs} ms`,
+  ].join("\n");
+}
+
+interface ActContext {
+  client: ControlClient;
+  kind: string;
+  key?: string | undefined;
+  explicit: boolean;
+}
+
+function fromActionError(error: DevAppActionError, context: ActContext): DevAppToolError {
+  const outcome = error.outcome;
+  const seen = outcome.observed ?? outcome.baseline;
+  const saw = seen ? `; saw ${describePageState(seen.page)}` : "";
+  const what = `${outcome.action} ${outcome.verdict} (${outcome.expectation}): ${outcome.reason}`;
+  // An open dialog sits over the composer, so the prompt never reached it.
+  const behindDialog =
+    outcome.verdict === "contradicted" &&
+    outcome.baseline?.page.modalOpen === true &&
+    context.kind === "send_prompt";
+  if (behindDialog && outcome.blockedBy !== "stale" && outcome.blockedBy !== "missing") {
+    return new DevAppToolError("element_covered", `${what}${saw}`);
+  }
+  switch (outcome.blockedBy) {
+    case "stale":
+    case "missing":
+      return new DevAppToolError("stale_ref", what);
+    case "covered":
+      return new DevAppToolError("element_covered", what);
+    case "disabled":
+      return new DevAppToolError("element_disabled", what);
+    case "offscreen":
+      return new DevAppToolError("element_offscreen", what);
+    case "unfocusable":
+      return new DevAppToolError("contradicted", `${what}${saw}`);
+    default:
+      break;
+  }
+  if (context.client.goneReason !== null) return new DevAppToolError("target_gone", what);
+  if (outcome.reason.includes("the pane is not on the page")) {
+    return new DevAppToolError("pane_not_found", what);
+  }
+  if (outcome.verdict === "unreadable") {
+    if (/deadline/.test(outcome.reason)) return new DevAppToolError("timed_out", `${what}${saw}`);
+    return new DevAppToolError("page_unreadable", what);
+  }
+  const menuOpen =
+    outcome.baseline?.page.menuOpen === true || outcome.observed?.page.menuOpen === true;
+  const keyToMenu =
+    context.kind === "send_prompt" ||
+    (context.kind === "press" && context.key !== "Escape" && !context.explicit);
+  if (menuOpen && keyToMenu) return new DevAppToolError("menu_swallowed_key", `${what}${saw}`);
+  if (outcome.reason.startsWith("not met within")) {
+    return new DevAppToolError("timed_out", `${what}${saw}`);
+  }
+  return new DevAppToolError("contradicted", `${what}${saw}`);
+}
+
+function findAppDir(cwd: string, exists: (file: string) => boolean): string | null {
+  for (const dir of [cwd, path.join(cwd, "gg-app")]) {
+    if (exists(path.join(dir, "src-tauri", "tauri.local.conf.json"))) return dir;
+  }
+  return null;
+}
+
+export function createDevAppTool(
+  cwd: string,
+  manager: DevAppManager,
+  planModeRef?: { current: boolean },
+  deps: DevAppToolDependencies = {},
+): AgentTool<typeof DevAppParams> {
+  const baseClock = deps.clock ?? systemClock;
+  const env = deps.env ?? process.env;
+  const platform = deps.platform ?? process.platform;
+  const connect =
+    deps.connect ??
+    ((url: string): Promise<ControlClient> =>
+      DevCdpClient.connect(url, { requestTimeoutMs: REQUEST_TIMEOUT_MS }));
+  const reservePort = deps.reservePort ?? reserveLoopbackPort;
+  const createProfileRoot =
+    deps.createProfileRoot ?? (() => mkdtemp(path.join(tmpdir(), "gg-dev-app-")));
+  const removeProfileRoot =
+    deps.removeProfileRoot ??
+    ((root: string) => rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }));
+  const fileExists = deps.fileExists ?? existsSync;
+  const shrinkImage = deps.shrinkImage ?? shrinkToFit;
+  const previewImage = deps.previewImage ?? downscaleForPreview;
+  const now = deps.now ?? (() => new Date());
+  const hiddenPaths = new Set<string>();
+
+  function scrub(text: string): string {
+    let result = text.replace(/\bwss?:\/\/\S+/gi, "[debugger address hidden]");
+    for (const hidden of hiddenPaths) result = result.split(hidden).join("[profile]");
+    return redactText(result, { secrets: environmentSecrets(env) });
+  }
+
+  /** Loopback-only, and only the port that was asked for. */
+  function guardedConnect(port: number) {
+    return (url: string): Promise<ControlClient> => {
+      let parsed: URL;
+      try {
+        parsed = new URL(url);
+      } catch {
+        throw new DevAppToolError(
+          "endpoint_refused",
+          "the app page reported an unusable debugger address",
+        );
+      }
+      if (
+        parsed.protocol !== "ws:" ||
+        !LOOPBACK_HOSTS.has(parsed.hostname) ||
+        Number(parsed.port) !== port
+      ) {
+        throw new DevAppToolError(
+          "endpoint_refused",
+          `the app page's debugger is not on this machine's loopback port ${port}`,
+        );
+      }
+      parsed.hostname = "127.0.0.1";
+      return connect(parsed.toString());
+    };
+  }
+
+  function requireConnection(): DevAppConnection {
+    const connection = manager.current;
+    if (!connection) throw new DevAppToolError("not_attached", "no dev app connection is open");
+    const gone = connection.session.client.goneReason;
+    if (gone !== null) throw new DevAppToolError("target_gone", `the app page went away (${gone})`);
+    return connection;
+  }
+
+  function refLocator(connection: DevAppConnection, ref: string): string {
+    if (!isRef(ref))
+      throw new DevAppToolError("invalid_input", `${JSON.stringify(ref)} is not a ref like e7`);
+    if (connection.generation === null) {
+      throw new DevAppToolError(
+        "stale_ref",
+        `${ref} cannot be used before a snapshot on this connection`,
+      );
+    }
+    return refLocatorScript(ref, connection.generation);
+  }
+
+  async function snapshot(
+    connection: DevAppConnection,
+    pane: PaneSelector,
+    ms: number,
+    clock: DriverClock,
+  ): Promise<string> {
+    const driver = createDevAppDriver({ client: connection.session.client, clock, deadlineMs: ms });
+    let outcome: ActionOutcome;
+    try {
+      outcome = await driver.waitFor(
+        "snapshot",
+        {
+          label: "snapshot",
+          probe: snapshotScript({ pane, register: true }),
+          judge: () => "met",
+        },
+        { pane, deadlineMs: ms },
+      );
+    } catch (error) {
+      if (error instanceof DevAppActionError) {
+        throw fromActionError(error, {
+          client: connection.session.client,
+          kind: "snapshot",
+          explicit: true,
+        });
+      }
+      throw error;
+    }
+    const observed = outcome.observed;
+    const parsed = parseSnapshot(observed?.probe);
+    if (typeof parsed === "string" || !observed) {
+      if (parsed === "pane not found") {
+        throw new DevAppToolError("pane_not_found", `no pane ${JSON.stringify(pane)} on the page`);
+      }
+      throw new DevAppToolError("page_unreadable", `the snapshot failed (${String(parsed)})`);
+    }
+    connection.generation = parsed.generation;
+    return formatSnapshot(observed.page, parsed);
+  }
+
+  async function screenshotResult(
+    connection: DevAppConnection,
+    text: string,
+    ms: number,
+    clock: DriverClock,
+  ): Promise<StructuredToolResult> {
+    const raw = await within(
+      captureScreenshot(connection.session.client),
+      ms,
+      clock,
+      "the screenshot",
+    );
+    const stamp = now().toISOString().replace(/[:.]/g, "-");
+    const relative = path.join(".gg", "screenshots", `dev-app-${stamp}.png`);
+    const outPath = path.join(cwd, relative);
+    await mkdir(path.dirname(outPath), { recursive: true });
+    await writeFile(outPath, raw);
+    let fitted: { buffer: Buffer; mediaType: string };
+    try {
+      fitted = await shrinkImage(raw, "image/png");
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: scrub(
+              `${text}\n\nScreenshot saved to ${relative} but could not be prepared for viewing: ${message(error)}`,
+            ),
+          },
+        ],
+      };
+    }
+    const preview = await previewImage(fitted.buffer).catch(() => fitted.buffer);
+    return {
+      content: [
+        { type: "text", text: scrub(`${text}\n\nScreenshot: ${relative} [${fitted.mediaType}]`) },
+        { type: "image", mediaType: fitted.mediaType, data: fitted.buffer.toString("base64") },
+      ],
+      details: {
+        outPath,
+        imagePreviews: [
+          { base64: preview.toString("base64"), mediaType: fitted.mediaType, path: outPath },
+        ],
+      },
+    };
+  }
+
+  /** A freshly launched window is blank for a few seconds; snapshotting it then misleads the next act. */
+  async function waitForContent(
+    connection: DevAppConnection,
+    ms: number,
+    clock: DriverClock,
+  ): Promise<void> {
+    if (ms <= 0) return;
+    const driver = createDevAppDriver({ client: connection.session.client, clock, deadlineMs: ms });
+    try {
+      await driver.waitFor(
+        "the app to render",
+        {
+          label: "the app shows interactive elements",
+          probe: snapshotScript({ register: false }),
+          judge: (observed) => {
+            const parsed = parseSnapshot(observed.probe);
+            return typeof parsed !== "string" && parsed.elements.length > 0 ? "met" : "pending";
+          },
+        },
+        { deadlineMs: ms },
+      );
+    } catch (error) {
+      if (!(error instanceof DevAppActionError)) throw error;
+    }
+  }
+
+  /** Returns true when it had to open an agent pane (the composer is then ready, or time ran out). */
+  async function ensureAgentPane(
+    connection: DevAppConnection,
+    cwd: string,
+    ms: number,
+    clock: DriverClock,
+  ): Promise<boolean> {
+    const { client } = connection.session;
+    const end = clock.now() + ms;
+    let seeded = false;
+    let checkReady = false;
+    for (;;) {
+      const remaining = end - clock.now();
+      if (remaining <= 0 || client.goneReason !== null) return seeded;
+      try {
+        if (!seeded && !checkReady) {
+          const result = await within(
+            client.evaluate(seedAgentPaneScript(cwd)),
+            remaining,
+            clock,
+            "opening an agent pane",
+          );
+          if (result === "seeded") seeded = checkReady = true;
+          else if (result === "has-pane") checkReady = true;
+          else if (result !== "missing") return false;
+        } else {
+          const state = parsePageState(
+            await within(client.evaluate(observeScript()), remaining, clock, "reading the pane"),
+          );
+          // The composer renders before the session loads, and Enter is ignored until it has.
+          const loading = await within(
+            client.evaluate(PANE_LOADING_SCRIPT),
+            remaining,
+            clock,
+            "reading the pane",
+          );
+          if (state?.paneFound && state.draft !== null && loading === false) return seeded;
+        }
+      } catch {
+        // The page reloads after seeding; reads fail until it is back.
+      }
+      await clock.sleep(Math.min(100, Math.max(0, end - clock.now())));
+    }
+  }
+
+  async function firstSnapshot(
+    connection: DevAppConnection,
+    header: string,
+    clock: DriverClock,
+    ms = ACT_DEFAULT_MS,
+  ) {
+    if (ms < 100) return `${header}\n\nNo time was left for a first snapshot; take one now.`;
+    try {
+      return `${header}\n\n${await snapshot(connection, null, ms, clock)}`;
+    } catch (error) {
+      return `${header}\n\nFirst snapshot failed: ${message(error)}`;
+    }
+  }
+
+  async function launch(
+    args: DevAppArgs,
+    clock: DriverClock,
+    signal: AbortSignal,
+  ): Promise<string> {
+    if (platform !== "win32") {
+      throw new DevAppToolError(
+        "unsupported_platform",
+        `launching the dev app needs Windows (this is ${platform})`,
+      );
+    }
+    const appDir = findAppDir(cwd, fileExists);
+    if (!appDir) {
+      throw new DevAppToolError(
+        "launch_failed",
+        "no gg-app/src-tauri/tauri.local.conf.json in the working directory",
+        "run from the repository root or the gg-app folder",
+      );
+    }
+    const tauriCli = path.join(appDir, "node_modules", "@tauri-apps", "cli", "tauri.js");
+    if (!fileExists(tauriCli)) {
+      throw new DevAppToolError(
+        "launch_failed",
+        "the Tauri CLI is not installed in gg-app",
+        "run pnpm install, then retry",
+      );
+    }
+    const ms = budget(args.deadline_ms, LAUNCH_DEFAULT_MS, LAUNCH_MAX_MS);
+    const end = clock.now() + ms;
+    await manager.replace(undefined);
+    const port = await reservePort();
+    const root = await createProfileRoot();
+    hiddenPaths.add(root);
+    let launched: DevAppSession;
+    let project: string;
+    try {
+      const profile = createIsolatedProfile(root);
+      project = profile.project;
+      launched = await launchDevApp({
+        appDir,
+        configPath: path.join(appDir, "src-tauri", "tauri.local.conf.json"),
+        env: devAppEnvironment(env, profile, { cdpPort: port, extra: rustToolchain(env) }),
+        cdpPort: port,
+        readyDeadlineMs: ms,
+        tauriCli,
+        clock,
+        connect: guardedConnect(port),
+        ...(deps.fetch ? { fetch: deps.fetch } : {}),
+        ...(deps.spawn ? { spawn: deps.spawn } : {}),
+        ...(deps.terminate ? { terminate: deps.terminate } : {}),
+        ...(deps.terminateNow ? { terminateNow: deps.terminateNow } : {}),
+      });
+    } catch (error) {
+      await removeProfileRoot(root).catch(() => {});
+      if (signal.aborted) {
+        throw new DevAppToolError(
+          "aborted",
+          "the launch was cancelled and the app it started was stopped",
+        );
+      }
+      if (error instanceof DevAppToolError) throw error;
+      if (error instanceof AmbiguousTargetError)
+        throw new DevAppToolError("ambiguous_target", error.message);
+      throw new DevAppToolError(
+        "launch_failed",
+        `the dev app did not become ready (${message(error)})`,
+      );
+    }
+    const session: DevAppSession = {
+      ...launched,
+      stop: async () => {
+        try {
+          await launched.stop();
+        } finally {
+          await removeProfileRoot(root).catch(() => {});
+        }
+      },
+      stopNow: () => launched.stopNow(),
+    };
+    const connection: DevAppConnection = { port, session, generation: null };
+    await manager.replace(connection);
+    // Keep a second of the budget for the snapshot itself.
+    await waitForContent(connection, Math.min(RENDER_WAIT_MS, end - clock.now() - 1000), clock);
+    const opened = await ensureAgentPane(
+      connection,
+      project,
+      Math.min(RENDER_WAIT_MS, end - clock.now() - 1000),
+      clock,
+    );
+    const pane = opened
+      ? " Its workspace was empty, so a Code agent pane was opened on an empty scratch project (the isolated profile is signed out)."
+      : "";
+    return firstSnapshot(
+      connection,
+      `Launched the dev app with an isolated profile (control port ${port}); this session owns it, and close stops it.${pane}`,
+      clock,
+      Math.min(ACT_DEFAULT_MS, end - clock.now()),
+    );
+  }
+
+  async function attach(
+    args: DevAppArgs,
+    clock: DriverClock,
+    signal: AbortSignal,
+  ): Promise<string> {
+    const current = manager.current;
+    const port = args.port ?? (current?.session.owned ? current.port : undefined);
+    if (port === undefined) {
+      throw new DevAppToolError(
+        "endpoint_refused",
+        "attach needs the control port the user gave (no dev app was launched in this session)",
+        'ask the user which port the dev app exposes, or use mode "launch"',
+      );
+    }
+    if (current && current.port === port && current.session.client.goneReason === null) {
+      return firstSnapshot(current, `Already connected to the dev app on port ${port}.`, clock);
+    }
+    const ms = budget(args.deadline_ms, ACT_DEFAULT_MS, ACT_MAX_MS);
+    let attached: DevAppSession;
+    try {
+      attached = await attachDevApp({
+        cdpPort: port,
+        deadlineMs: ms,
+        clock,
+        connect: guardedConnect(port),
+        ...(deps.fetch ? { fetch: deps.fetch } : {}),
+      });
+    } catch (error) {
+      if (signal.aborted) throw new DevAppToolError("aborted", "attaching was cancelled");
+      if (error instanceof DevAppToolError) throw error;
+      if (error instanceof AmbiguousTargetError)
+        throw new DevAppToolError("ambiguous_target", error.message);
+      throw new DevAppToolError(
+        "endpoint_refused",
+        `no single GG dev app page answered on 127.0.0.1:${port} (${message(error)})`,
+      );
+    }
+    if (current && current.port === port && current.session.owned) {
+      // Reconnecting to the app this session launched keeps the right to stop it.
+      const owner = current.session;
+      const session: DevAppSession = {
+        ...attached,
+        owned: true,
+        pid: owner.pid,
+        stop: async () => {
+          attached.client.close();
+          await owner.stop();
+        },
+        stopNow: () => {
+          attached.client.close();
+          owner.stopNow();
+        },
+      };
+      const connection: DevAppConnection = { port, session, generation: null };
+      manager.set(connection);
+      return firstSnapshot(
+        connection,
+        `Reconnected to the dev app this session launched (port ${port}).`,
+        clock,
+      );
+    }
+    const connection: DevAppConnection = { port, session: attached, generation: null };
+    await manager.replace(connection);
+    return firstSnapshot(
+      connection,
+      `Attached to the dev app on port ${port} (${attached.target.url}). This session did not start it, so close leaves it running.`,
+      clock,
+    );
+  }
+
+  function explicitExpectation(spec: ExpectArgs, connection: DevAppConnection): Expectation {
+    const value = (): string => {
+      if (spec.value === undefined || (spec.kind !== "draft_equals" && spec.value === "")) {
+        throw new DevAppToolError("invalid_input", `expect ${spec.kind} needs a value`);
+      }
+      return spec.value;
+    };
+    switch (spec.kind) {
+      case "text_appears":
+        return textAppears(value());
+      case "text_gone":
+        return textGone(value());
+      case "element_appears": {
+        const selector = value();
+        if (isRef(selector)) {
+          throw new DevAppToolError(
+            "invalid_input",
+            "element_appears needs a CSS selector, not a ref",
+          );
+        }
+        return elementAppears(selector);
+      }
+      case "element_gone": {
+        const target = value();
+        if (!isRef(target)) return elementGone(target);
+        const locator = refLocator(connection, target);
+        return condition(
+          `${target} is gone`,
+          `(() => { const el = ${locator}; return !el || typeof el.problem === 'string' || !el.isConnected; })()`,
+        );
+      }
+      case "draft_equals":
+        return draftEquals(value());
+      case "focus_on": {
+        const target = value();
+        if (!isRef(target)) return focusOn(target);
+        const locator = refLocator(connection, target);
+        return condition(
+          `focus is on ${target}`,
+          `(() => ${locator})() === document.activeElement`,
+        );
+      }
+      case "menu_open":
+        return stateExpectation("a menu is open", (page) => page.menuOpen);
+      case "menu_closed":
+        return stateExpectation("no menu is open", (page) => !page.menuOpen);
+      case "dialog_open":
+        return stateExpectation("a dialog is open", (page) => page.modalOpen);
+      case "dialog_closed":
+        return stateExpectation("no dialog is open", (page) => !page.modalOpen);
+      case "status_is": {
+        const status = value();
+        return stateExpectation(
+          `pane status is ${quote(status)}`,
+          (page) => page.status === status,
+        );
+      }
+    }
+  }
+
+  /** Read-only wait for a result (for example reply text), so no sleep or log watcher is needed. */
+  async function waitThenSnapshot(
+    connection: DevAppConnection,
+    spec: ExpectArgs,
+    pane: PaneSelector,
+    ms: number,
+    clock: DriverClock,
+  ): Promise<string> {
+    const expectation = explicitExpectation(spec, connection);
+    const end = clock.now() + ms;
+    const client = connection.session.client;
+    const driver = createDevAppDriver({ client, clock, deadlineMs: ms });
+    let outcome: ActionOutcome;
+    try {
+      outcome = await driver.waitFor(expectation.label, withElements(expectation, pane), {
+        pane,
+        deadlineMs: ms,
+      });
+    } catch (error) {
+      if (error instanceof DevAppActionError) {
+        throw fromActionError(error, { client, kind: "snapshot", explicit: true });
+      }
+      throw error;
+    }
+    const left = end - clock.now();
+    if (left < 100) {
+      return `${formatOutcome(outcome)}
+
+No time was left for a snapshot; take one now.`;
+    }
+    return `${formatOutcome(outcome)}
+
+${await snapshot(connection, pane, left, clock)}`;
+  }
+
+  async function act(args: DevAppArgs, clock: DriverClock): Promise<string> {
+    const connection = requireConnection();
+    const kind = args.kind;
+    if (!kind) throw new DevAppToolError("invalid_input", "act needs kind");
+    if (args.ref !== undefined && (kind === "press" || kind === "send_prompt")) {
+      throw new DevAppToolError(
+        "invalid_input",
+        `${kind} does not take ref; click the element first (or use type with ref), then press`,
+      );
+    }
+    const ms = budget(args.deadline_ms, ACT_DEFAULT_MS, ACT_MAX_MS);
+    const end = clock.now() + ms;
+    const remaining = (): number => {
+      const left = end - clock.now();
+      if (left <= 0)
+        throw new DevAppToolError("timed_out", `the ${ms} ms deadline passed before acting`);
+      return left;
+    };
+    const pane: PaneSelector = args.pane ?? null;
+    const client = connection.session.client;
+    const locator = args.ref !== undefined ? refLocator(connection, args.ref) : undefined;
+    const text = args.text ?? "";
+    if ((kind === "type" || kind === "send_prompt") && text.trim() === "") {
+      throw new DevAppToolError("invalid_input", `${kind} needs non-empty text`);
+    }
+    if (kind === "click" && locator === undefined) {
+      throw new DevAppToolError("invalid_input", "click needs ref from the latest snapshot");
+    }
+    if (kind === "press") {
+      if (!args.key) throw new DevAppToolError("invalid_input", "press needs key");
+      try {
+        resolveKey(args.key);
+      } catch (error) {
+        throw new DevAppToolError("invalid_input", message(error));
+      }
+    }
+    const driver = createDevAppDriver({ client, clock, deadlineMs: ms });
+    const context: ActContext = {
+      client,
+      kind,
+      key: args.key,
+      explicit: args.expect !== undefined,
+    };
+    const explicit = args.expect ? explicitExpectation(args.expect, connection) : null;
+
+    async function before(): Promise<PageState> {
+      try {
+        return await within(driver.observe(pane), remaining(), clock, "reading the page");
+      } catch (error) {
+        if (error instanceof DevAppToolError) throw error;
+        if (client.goneReason !== null) throw new DevAppToolError("target_gone", message(error));
+        if (/deadline/.test(message(error))) throw new DevAppToolError("timed_out", message(error));
+        throw new DevAppToolError("page_unreadable", message(error));
+      }
+    }
+
+    async function inferred(): Promise<Expectation> {
+      if (kind === "click") return pageChanged(pane);
+      if (kind === "press") {
+        const page = await before();
+        if (args.key === "Escape" && page.menuOpen) {
+          return stateExpectation("the menu closed", (state) => !state.menuOpen);
+        }
+        if (args.key === "Escape" && page.modalOpen) {
+          return stateExpectation("the dialog closed", (state) => !state.modalOpen);
+        }
+        return pageChanged(pane);
+      }
+      const target = locator ?? "document.activeElement";
+      const isComposer = await within(
+        client.evaluate(
+          `(() => { const el = ${target}; return Boolean(el && typeof el.matches === 'function' && el.matches('textarea.input')); })()`,
+        ),
+        remaining(),
+        clock,
+        "reading the page",
+      );
+      if (isComposer === true) {
+        const page = await before();
+        if (page.draft !== null) return draftEquals(page.draft + text);
+      }
+      return valueGrew(target, text, `${args.ref ?? "the focused field"} gains ${quote(text)}`);
+    }
+
+    try {
+      if (kind === "send_prompt") {
+        const sent = await driver.sendPrompt(text, { pane, deadlineMs: remaining() });
+        if (!explicit) return formatOutcome(sent);
+        const after = await driver.waitFor(explicit.label, withElements(explicit, pane), {
+          pane,
+          deadlineMs: remaining(),
+        });
+        return `${formatOutcome(sent)}\n\n${formatOutcome(after)}`;
+      }
+      const expect = withElements(explicit ?? (await inferred()), pane);
+      const options = { pane, deadlineMs: remaining(), expect };
+      let outcome: ActionOutcome;
+      if (kind === "type") {
+        outcome = await driver.type(text, {
+          ...options,
+          ...(locator ? { intoElement: locator } : {}),
+        });
+      } else if (kind === "press") {
+        outcome = await driver.press(args.key ?? "", {
+          ...options,
+          ...(args.modifiers ? { modifiers: args.modifiers } : {}),
+        });
+      } else {
+        outcome = await driver.clickElement(`click ${args.ref ?? ""}`, locator ?? "null", options);
+      }
+      return formatOutcome(outcome);
+    } catch (error) {
+      if (error instanceof DevAppActionError) throw fromActionError(error, context);
+      throw error;
+    }
+  }
+
+  async function close(): Promise<string> {
+    const connection = manager.current;
+    if (!connection) return "No dev app connection is open.";
+    try {
+      await manager.replace(undefined);
+    } catch (error) {
+      return `Closed the connection, but stopping the dev app failed: ${message(error)}`;
+    }
+    return connection.session.owned
+      ? "Closed the connection and stopped the dev app this session launched."
+      : "Closed the connection. The dev app keeps running (this session did not start it).";
+  }
+
+  async function run(
+    args: DevAppArgs,
+    context: ToolContext,
+  ): Promise<string | StructuredToolResult> {
+    const clock = abortableClock(baseClock, context.signal);
+    switch (args.action) {
+      case "open":
+        if (args.mode === "launch") {
+          if (isPlanModeActive(planModeRef)) return planModeRestriction("dev_app launch");
+          return launch(args, clock, context.signal);
+        }
+        if (args.mode === "attach") return attach(args, clock, context.signal);
+        throw new DevAppToolError("invalid_input", 'open needs mode "attach" or "launch"');
+      case "snapshot": {
+        const connection = requireConnection();
+        const ms = budget(args.deadline_ms, ACT_DEFAULT_MS, ACT_MAX_MS);
+        const end = clock.now() + ms;
+        const text = args.expect
+          ? await waitThenSnapshot(connection, args.expect, args.pane ?? null, ms, clock)
+          : await snapshot(connection, args.pane ?? null, ms, clock);
+        if (!args.screenshot) return text;
+        const left = end - clock.now();
+        if (left <= 0)
+          throw new DevAppToolError(
+            "timed_out",
+            `no time was left for the screenshot within ${ms} ms`,
+          );
+        return screenshotResult(connection, text, left, clock);
+      }
+      case "act":
+        if (isPlanModeActive(planModeRef)) return planModeRestriction("dev_app act");
+        return act(args, clock);
+      case "close":
+        return close();
+    }
+  }
+
+  return {
+    name: "dev_app",
+    description:
+      "Drive the running GG desktop dev app (Tauri + Vite on :1420). GG desktop dev app only; use " +
+      "screenshot for other URLs. open: attach to the control port the user gave, or launch it " +
+      "(Windows, isolated profile). snapshot: pane state plus visible interactive elements with refs " +
+      "like e7 (screenshot:true adds a PNG; expect waits until it holds first, without acting). act: type, press, click a ref, or send_prompt; each " +
+      "returns confirmed/contradicted/unreadable and what changed (expect is inferred when omitted). " +
+      "close stops only an app this session launched. One connection per session.",
+    parameters: DevAppParams,
+    executionMode: "sequential",
+    async execute(args: DevAppArgs, context: ToolContext) {
+      try {
+        const result = await run(args, context);
+        if (typeof result === "string") return scrub(result);
+        return result;
+      } catch (error) {
+        if (
+          context.signal.aborted &&
+          !(error instanceof DevAppToolError && error.code === "aborted")
+        ) {
+          throw new DevAppToolError("aborted", scrub(`the call was cancelled (${message(error)})`));
+        }
+        if (error instanceof DevAppToolError) {
+          error.message = scrub(error.message);
+          throw error;
+        }
+        throw new Error(scrub(message(error)), { cause: error });
+      }
+    },
+  };
+}

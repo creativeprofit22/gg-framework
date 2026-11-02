@@ -161,6 +161,7 @@ import type { ProgrammaticSetupInspection } from "./programmatic/setup-inspectio
 import type { DirectCommandExecutor } from "./programmatic/execution.js";
 import type { BackgroundProcess } from "./process-manager.js";
 import type { DebugManager } from "../tools/debug.js";
+import type { DevAppManager } from "../tools/dev-app.js";
 import { REVIEW_REJECTED_BEFORE_START } from "../tools/bash.js";
 import { buildProcessCompletionFollowUp, mergeCompletionGateFollowUps } from "./process-gate.js";
 import { PLAN_SUBMISSION_NUDGE, shouldNudgePlanSubmission } from "./plan-submission-gate.js";
@@ -1070,6 +1071,7 @@ export class AgentSession {
   private programmaticProfile?: CreateToolsResult["programmaticProfile"];
   private setupInspection?: ProgrammaticSetupInspection;
   private debugManager?: DebugManager;
+  private devAppManager?: DevAppManager;
   private subAgentManager?: SubAgentManager;
   /**
    * Out-of-band push notifications (finished children, background-process
@@ -1369,6 +1371,7 @@ export class AgentSession {
       recordBashReads,
       lspManager,
       debugManager,
+      devAppManager,
       subAgentManager,
       commandCreation,
       programmaticProfile,
@@ -1582,6 +1585,7 @@ export class AgentSession {
     this.commandCreation = commandCreation;
     this.programmaticProfile = programmaticProfile;
     this.debugManager = debugManager;
+    this.devAppManager = devAppManager;
     this.subAgentManager = subAgentManager;
     this.bindManagerCancellation(this.opts.signal);
 
@@ -7348,6 +7352,7 @@ export class AgentSession {
     this.debugManager?.shutdown();
     await Promise.all([
       ...processes,
+      this.devAppManager?.shutdown(),
       this.subAgentManager?.shutdownAll(),
       this.disposeMcpConnections(),
     ]);

@@ -99,3 +99,13 @@ describe("bash tool summary", () => {
     expect(summary).toBe(expected);
   });
 });
+
+describe("dev_app tool label", () => {
+  it.each([
+    { done: false, expected: "Driving app" },
+    { done: true, expected: "Drove app" },
+  ])("labels done=$done as $expected", ({ done, expected }) => {
+    const parts = buildToolLineParts("dev_app", { action: "snapshot" }, { done });
+    expect(parts[0]).toMatchObject({ text: expected, bold: true });
+  });
+});

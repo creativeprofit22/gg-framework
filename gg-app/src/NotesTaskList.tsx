@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { PlusIcon } from "@phosphor-icons/react";
 import { NotesCompletedGroup } from "./NotesCompletedGroup";
 import { NotesTaskRowActions } from "./NotesTaskRowActions";
@@ -7,7 +7,7 @@ import type { NotesTask } from "./notes-types";
 
 interface Props {
   tasks: NotesTask[];
-  addInputRef: RefObject<HTMLInputElement | null>;
+  addInputRef: RefObject<HTMLTextAreaElement | null>;
   onCreateTask(text: string): void;
   onEditTask(id: string, text: string): void;
   onToggleTask(id: string): void;
@@ -18,10 +18,22 @@ interface Props {
 }
 
 type Direction = "up" | "down";
-type FocusTarget = "check" | "actions";
+type FocusTarget = "check" | "actions" | Direction;
 
 /** Where focus goes after an action reorders, regroups, or re-renders a row. */
 type FocusRequest = { taskId: string; target: FocusTarget } | { addInput: true };
+
+/** A row moved to the top or bottom disables the arrow just used; focus its partner. */
+function focusTarget(
+  refs: Map<FocusTarget, Map<string, HTMLElement>>,
+  taskId: string,
+  target: FocusTarget,
+): HTMLElement | undefined {
+  const element = refs.get(target)?.get(taskId);
+  if (target !== "up" && target !== "down") return element;
+  if (element instanceof HTMLButtonElement && !element.disabled) return element;
+  return refs.get(target === "up" ? "down" : "up")?.get(taskId) ?? element;
+}
 
 export function NotesTaskList({
   tasks,
@@ -39,8 +51,17 @@ export function NotesTaskList({
   const [editText, setEditText] = useState("");
   const [announcement, setAnnouncement] = useState("");
   const [focusRequest, setFocusRequest] = useState<FocusRequest | null>(null);
-  const checkboxRefs = useRef(new Map<string, HTMLElement>());
-  const triggerRefs = useRef(new Map<string, HTMLElement>());
+  const focusRefs = useRef(new Map<FocusTarget, Map<string, HTMLElement>>());
+
+  // Grow the one-line field with its text; "auto" first so it can also shrink.
+  useLayoutEffect(() => {
+    const field = addInputRef.current;
+    if (!field) return;
+    field.style.height = "auto";
+    if (!draft) return;
+    const borders = field.offsetHeight - field.clientHeight;
+    field.style.height = `${field.scrollHeight + borders}px`;
+  }, [addInputRef, draft]);
 
   // Re-runs when the groups change, so a moved or reopened row is focused once it lands
   // in its new place. A target that is not shown yet keeps the request waiting.
@@ -51,15 +72,18 @@ export function NotesTaskList({
       setFocusRequest(null);
       return;
     }
-    const refs = focusRequest.target === "check" ? checkboxRefs : triggerRefs;
-    const element = refs.current.get(focusRequest.taskId);
+    const element = focusTarget(focusRefs.current, focusRequest.taskId, focusRequest.target);
     if (!element || !element.isConnected || element.closest("[hidden]") !== null) return;
     element.focus();
     setFocusRequest(null);
   }, [addInputRef, focusRequest, groups]);
 
   const registerElement = (target: FocusTarget, id: string, element: HTMLElement | null): void => {
-    const refs = target === "check" ? checkboxRefs.current : triggerRefs.current;
+    let refs = focusRefs.current.get(target);
+    if (!refs) {
+      refs = new Map();
+      focusRefs.current.set(target, refs);
+    }
     if (element) refs.set(id, element);
     else refs.delete(id);
   };
@@ -189,8 +213,12 @@ export function NotesTaskList({
                   : null
               }
               triggerRef={(element) => registerElement("actions", task.id, element)}
+              moveButtonRef={(direction, element) => registerElement(direction, task.id, element)}
               onTriggerKeyDown={movable ? moveShortcut(task, "actions") : undefined}
-              onMove={(direction) => moveTask(task, direction, "actions")}
+              onMoveButtonKeyDown={(direction) => moveShortcut(task, direction)}
+              onMove={(direction, source) =>
+                moveTask(task, direction, source === "arrow" ? direction : "actions")
+              }
               onEdit={() => startEdit(task)}
               onArchive={() => archiveTask(task)}
             />
@@ -211,12 +239,19 @@ export function NotesTaskList({
       >
         <label htmlFor="notes-add-task">New task</label>
         <div className="notes-add-controls">
-          <input
+          <textarea
             ref={addInputRef}
             id="notes-add-task"
+            rows={1}
             value={draft}
-            onChange={(event) => setDraft(event.target.value)}
+            // Tasks are one line: pasted line breaks become spaces; long text wraps.
+            onChange={(event) => setDraft(event.target.value.replace(/\r?\n/g, " "))}
             onKeyDown={(event) => {
+              if (event.key === "Enter" && !event.nativeEvent.isComposing) {
+                event.preventDefault();
+                addTask();
+                return;
+              }
               // Escape first clears a typed task; only an empty field lets it close Notes.
               if (event.key !== "Escape" || !draft) return;
               event.preventDefault();

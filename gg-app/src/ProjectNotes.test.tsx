@@ -5085,6 +5085,46 @@ describe("ProjectNotes", () => {
     );
   });
 
+  it("adds a task with Enter and moves tasks with the row arrows", async () => {
+    const cwd = "/work/task-arrows";
+    const client = new FakeProjectNotesClient(cwd);
+    client.seed(cwd, notes("reference", 2));
+    render(<ProjectNotes cwd={cwd} client={client} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Notes, 2 unfinished tasks" }));
+    const field = screen.getByLabelText("New task") as HTMLTextAreaElement;
+    expect(field.tagName).toBe("TEXTAREA");
+    fireEvent.change(field, { target: { value: "Pasted\nlines" } });
+    expect(field.value).toBe("Pasted lines");
+    fireEvent.keyDown(field, { key: "Enter" });
+    await waitFor(() =>
+      expect(client.snapshots.get(canonicalProjectKey(cwd))?.document.tasks).toHaveLength(3),
+    );
+    expect(field.value).toBe("");
+
+    const arrow = (name: string): HTMLButtonElement =>
+      screen.getByRole("button", { name }) as HTMLButtonElement;
+    expect(arrow("Move up: Task 1").disabled).toBe(true);
+    expect(arrow("Move down: Pasted lines").disabled).toBe(true);
+
+    fireEvent.click(arrow("Move up: Task 2"));
+    await waitFor(() =>
+      expect(client.snapshots.get(canonicalProjectKey(cwd))?.document.tasks[0]?.text).toBe(
+        "Task 2",
+      ),
+    );
+    // Now first, its up arrow is disabled, so focus lands on its down arrow.
+    await waitFor(() => expect(globalThis.document.activeElement).toBe(arrow("Move down: Task 2")));
+    expect(arrow("Move up: Task 2").disabled).toBe(true);
+
+    fireEvent.click(arrow("Move down: Task 2"));
+    await waitFor(() =>
+      expect(client.snapshots.get(canonicalProjectKey(cwd))?.document.tasks[0]?.text).toBe(
+        "Task 1",
+      ),
+    );
+  });
+
   it("keeps done tasks in a collapsed Completed section without Move controls", async () => {
     const cwd = "/work/task-completed-group";
     const client = new FakeProjectNotesClient(cwd);

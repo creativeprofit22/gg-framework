@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState } from "react";
-import { DotsThreeIcon } from "@phosphor-icons/react";
+import { ArrowDownIcon, ArrowUpIcon, DotsThreeIcon } from "@phosphor-icons/react";
 import { theme } from "./theme";
 
 type Direction = "up" | "down";
@@ -10,8 +10,13 @@ interface Props {
   move: { canMoveUp: boolean; canMoveDown: boolean } | null;
   /** Receives the trigger so the list can return focus to it after an action. */
   triggerRef(element: HTMLButtonElement | null): void;
+  /** Receives each visible move arrow, for the same focus return. */
+  moveButtonRef(direction: Direction, element: HTMLButtonElement | null): void;
   onTriggerKeyDown?(event: React.KeyboardEvent<HTMLButtonElement>): void;
-  onMove(direction: Direction): void;
+  onMoveButtonKeyDown(
+    direction: Direction,
+  ): (event: React.KeyboardEvent<HTMLButtonElement>) => void;
+  onMove(direction: Direction, source: "arrow" | "menu"): void;
   onEdit(): void;
   onArchive(): void;
 }
@@ -36,7 +41,9 @@ export function NotesTaskRowActions({
   taskText,
   move,
   triggerRef,
+  moveButtonRef,
   onTriggerKeyDown,
+  onMoveButtonKeyDown,
   onMove,
   onEdit,
   onArchive,
@@ -57,7 +64,7 @@ export function NotesTaskRowActions({
             disabled: !move.canMoveUp,
             danger: false,
             separatorBefore: false,
-            onSelect: () => onMove("up"),
+            onSelect: () => onMove("up", "menu"),
           },
           {
             key: "down",
@@ -66,7 +73,7 @@ export function NotesTaskRowActions({
             disabled: !move.canMoveDown,
             danger: false,
             separatorBefore: false,
-            onSelect: () => onMove("down"),
+            onSelect: () => onMove("down", "menu"),
           },
         ]
       : []),
@@ -129,47 +136,70 @@ export function NotesTaskRowActions({
   };
 
   return (
-    <div className="notes-task-menu" ref={rootRef}>
-      <button
-        ref={(element) => {
-          triggerElement.current = element;
-          triggerRef(element);
-        }}
-        type="button"
-        className="notes-btn-quiet notes-task-menu-trigger"
-        title="Task actions"
-        aria-label={`Task actions: ${taskText}`}
-        aria-haspopup="menu"
-        aria-expanded={open}
-        aria-controls={open ? menuId : undefined}
-        aria-keyshortcuts={move ? "Alt+ArrowUp Alt+ArrowDown" : undefined}
-        onKeyDown={onTriggerKeyDown}
-        onClick={() => setOpen((current) => !current)}
-      >
-        <DotsThreeIcon size={16} weight="bold" aria-hidden="true" />
-      </button>
-      {open && (
-        <div
-          ref={menuRef}
-          id={menuId}
-          className="winlayout-menu notes-task-menu-list"
-          style={{ background: theme.surface2, borderColor: theme.border }}
-          role="menu"
-          aria-label={`Actions for ${taskText}`}
-          onKeyDown={onMenuKeyDown}
+    <div className="notes-task-tools">
+      {move &&
+        (["up", "down"] as const).map((direction) => {
+          const label = direction === "up" ? "Move up" : "Move down";
+          const Icon = direction === "up" ? ArrowUpIcon : ArrowDownIcon;
+          return (
+            <button
+              key={direction}
+              ref={(element) => moveButtonRef(direction, element)}
+              type="button"
+              className="notes-btn-quiet notes-task-move-button"
+              title={`${label} (Alt+${direction === "up" ? "↑" : "↓"})`}
+              aria-label={`${label}: ${taskText}`}
+              aria-keyshortcuts={direction === "up" ? "Alt+ArrowUp" : "Alt+ArrowDown"}
+              disabled={direction === "up" ? !move.canMoveUp : !move.canMoveDown}
+              onKeyDown={onMoveButtonKeyDown(direction)}
+              onClick={() => onMove(direction, "arrow")}
+            >
+              <Icon size={14} weight="bold" aria-hidden="true" />
+            </button>
+          );
+        })}
+      <div className="notes-task-menu" ref={rootRef}>
+        <button
+          ref={(element) => {
+            triggerElement.current = element;
+            triggerRef(element);
+          }}
+          type="button"
+          className="notes-btn-quiet notes-task-menu-trigger"
+          title="Task actions"
+          aria-label={`Task actions: ${taskText}`}
+          aria-haspopup="menu"
+          aria-expanded={open}
+          aria-controls={open ? menuId : undefined}
+          aria-keyshortcuts={move ? "Alt+ArrowUp Alt+ArrowDown" : undefined}
+          onKeyDown={onTriggerKeyDown}
+          onClick={() => setOpen((current) => !current)}
         >
-          {items.map((item) => (
-            <MenuEntry
-              key={item.key}
-              item={item}
-              onSelect={() => {
-                close(false);
-                item.onSelect();
-              }}
-            />
-          ))}
-        </div>
-      )}
+          <DotsThreeIcon size={16} weight="bold" aria-hidden="true" />
+        </button>
+        {open && (
+          <div
+            ref={menuRef}
+            id={menuId}
+            className="winlayout-menu notes-task-menu-list"
+            style={{ background: theme.surface2, borderColor: theme.border }}
+            role="menu"
+            aria-label={`Actions for ${taskText}`}
+            onKeyDown={onMenuKeyDown}
+          >
+            {items.map((item) => (
+              <MenuEntry
+                key={item.key}
+                item={item}
+                onSelect={() => {
+                  close(false);
+                  item.onSelect();
+                }}
+              />
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

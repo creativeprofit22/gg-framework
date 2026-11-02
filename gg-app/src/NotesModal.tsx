@@ -252,7 +252,7 @@ export function NotesModalContent({
     void deletion.begin(phase, "delete");
   };
   const currentFocusInputRef = useRef<HTMLTextAreaElement>(null);
-  const addInputRef = useRef<HTMLInputElement>(null);
+  const addInputRef = useRef<HTMLTextAreaElement>(null);
   const tabRefs = useRef<Record<NotesTab, HTMLButtonElement | null>>({
     overview: null,
     roadmap: null,

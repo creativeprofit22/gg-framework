@@ -274,6 +274,7 @@
 .notes-add-controls button,
 .notes-task-actions button,
 .notes-task-menu-trigger,
+.notes-task-move-button,
 .notes-archive-toggle,
 .notes-roadmap-reorder-handle {
   flex: 0 0 auto;
@@ -306,6 +307,7 @@
 .notes-add-controls button:hover:not(:disabled),
 .notes-task-actions button:hover:not(:disabled),
 .notes-task-menu-trigger:hover:not(:disabled),
+.notes-task-move-button:hover:not(:disabled),
 .notes-archive-toggle:hover:not(:disabled),
 .notes-roadmap-reorder-handle:hover:not(:disabled) {
   filter: brightness(1.18);
@@ -329,6 +331,7 @@
 .notes-add-controls button:disabled,
 .notes-task-actions button:disabled,
 .notes-task-menu-trigger:disabled,
+.notes-task-move-button:disabled,
 .notes-archive-toggle:disabled,
 .notes-roadmap-reorder-handle:disabled {
   cursor: default;
@@ -1407,7 +1410,7 @@ button.notes-btn-quiet.notes-btn-danger:is(:hover, :focus-visible):not(:disabled
     margin: -9px;
   }
   /* The add-task row is a primary touch target: field and button meet the 44px floor. */
-  .notes-add-controls input,
+  .notes-add-controls textarea,
   .notes-add-controls button {
     box-sizing: border-box;
     min-height: 44px;
@@ -1446,7 +1449,7 @@ button.notes-btn-quiet.notes-btn-danger:is(:hover, :focus-visible):not(:disabled
   align-items: stretch;
   gap: var(--space-4);
 }
-.notes-add-controls input,
+.notes-add-controls textarea,
 .notes-edit-form input,
 .notes-field textarea {
   box-sizing: border-box;
@@ -1461,12 +1464,17 @@ button.notes-btn-quiet.notes-btn-danger:is(:hover, :focus-visible):not(:disabled
   line-height: var(--line-height-sm);
   outline: none;
 }
-.notes-add-controls input,
+.notes-add-controls textarea,
 .notes-edit-form input {
   padding: var(--space-4) var(--space-5);
 }
-.notes-add-controls input {
+/* One line at rest, like a text field; NotesTaskList grows it with the text. */
+.notes-add-controls textarea {
+  display: block;
   flex: 1 1 auto;
+  max-height: 160px;
+  resize: none;
+  overflow-y: auto;
 }
 .notes-field textarea {
   display: block;
@@ -2539,15 +2547,25 @@ button.notes-btn-quiet.notes-btn-danger:is(:hover, :focus-visible):not(:disabled
 .notes-task-row > .notes-task-check {
   flex: 1 1 0;
 }
+.notes-task-tools {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: flex-start;
+  gap: var(--space-1);
+}
 .notes-task-menu {
   position: relative;
   flex: 0 0 auto;
+}
+.notes-task-menu,
+.notes-task-move-button {
   margin-top: -6px;
   margin-bottom: -6px;
 }
 /* 32px is the fine-pointer floor for icon-only controls; the negative margins keep
    the row as tall as its text. */
-.notes-task-menu-trigger {
+.notes-task-menu-trigger,
+.notes-task-move-button {
   display: inline-grid;
   place-items: center;
   box-sizing: border-box;
@@ -2575,12 +2593,27 @@ button.notes-btn-quiet.notes-btn-danger:is(:hover, :focus-visible):not(:disabled
 .notes-task-menu-list .notes-task-menu-danger {
   color: var(--error);
 }
-/* The add button is a quiet icon on the field's line; Enter also submits. */
+/* Mouse users see the arrows on the row they point at or focus; touch always shows them. */
+@media (hover: hover) and (pointer: fine) {
+  .notes-task-row .notes-task-move-button {
+    opacity: 0;
+  }
+  .notes-task-row:is(:hover, :focus-within) .notes-task-move-button {
+    opacity: 1;
+  }
+  .notes-task-row:is(:hover, :focus-within) .notes-task-move-button:disabled {
+    opacity: 0.4;
+  }
+}
+/* The add button is a quiet icon on the field's line; Enter also submits. It stays
+   on the last line (36px = the one-line field) while the field grows. */
 .notes-add-controls .notes-add-submit {
   display: inline-grid;
   place-items: center;
+  align-self: flex-end;
   box-sizing: border-box;
   min-width: 36px;
+  height: 36px;
   padding: 0 var(--space-3);
 }
 @media (pointer: coarse) {
@@ -2592,11 +2625,13 @@ button.notes-btn-quiet.notes-btn-danger:is(:hover, :focus-visible):not(:disabled
   .notes-modal .notes-task-check input[type="checkbox"]:focus-visible {
     outline-offset: -13px;
   }
-  .notes-task-menu {
+  .notes-task-menu,
+  .notes-task-move-button {
     margin-top: -12px;
     margin-bottom: -12px;
   }
   .notes-task-menu-trigger,
+  .notes-task-move-button,
   .notes-add-controls .notes-add-submit {
     min-width: 44px;
     min-height: 44px;
@@ -2887,7 +2922,7 @@ button.notes-btn-quiet.notes-btn-danger:is(:hover, :focus-visible):not(:disabled
   .notes-roadmap-proposals > ul,
   .notes-roadmap-history ol,
   .notes-roadmap-row,
-  .notes-add-controls input,
+  .notes-add-controls textarea,
   .notes-phase-form input,
   .notes-phase-form textarea,
   .notes-reference-form input,

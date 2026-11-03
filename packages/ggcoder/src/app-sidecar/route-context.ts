@@ -3,15 +3,20 @@ import type { AuthStorage } from "../core/auth-storage.js";
 import type { GoalRecord } from "../core/goals-store.js";
 import type { RunClaim } from "../core/run-claim.js";
 import type { AppPaths } from "../config.js";
+import type { ShellRunner } from "./shell-runs.js";
 import type { TrophyManager } from "./trophy-manager.js";
 
 /**
  * Local Fork adapter: the narrow slice of upstream's SessionRouteContext that
- * upstream route modules ported onto the monolithic app-sidecar.ts read.
+ * upstream route modules (Goal, shell) ported onto the monolithic app-sidecar.ts read.
  * app-sidecar.ts builds this from its closure state inside createSession.
  */
 export interface SessionRouteContext {
   readonly paths: AppPaths;
+  readonly cwd: string;
+  readonly mode: "code" | "chat" | "motion";
+  /** Commands the user runs themselves (`!cmd`). */
+  readonly shell: ShellRunner;
   readonly session: AgentSession;
   readonly running: boolean;
   readonly autopilotActive: boolean;

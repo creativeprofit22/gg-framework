@@ -16,6 +16,8 @@ mod decisions;
 mod events;
 mod identity;
 mod local_patched_update;
+#[cfg(target_os = "macos")]
+mod macos_event_guard;
 mod notifications;
 mod paths;
 mod process;
@@ -129,6 +131,8 @@ pub fn run() {
         }
     }
     install_panic_diagnostics();
+    #[cfg(target_os = "macos")]
+    macos_event_guard::install();
     let logging = native_log_builder(
         cfg!(debug_assertions),
         std::env::var_os("GG_APP_DEV_LOG_DIR").as_deref(),
@@ -199,6 +203,7 @@ pub fn run() {
             commands::files::read_dropped_file_attachment,
             commands::files::open_project_path,
             commands::files::open_image_data,
+            commands::files::read_chat_image,
             commands::files::open_url,
             commands::agent::agent_state,
             commands::notes::agent_notes_get,
@@ -243,6 +248,10 @@ pub fn run() {
             commands::agent::agent_ken_prompt,
             commands::agent::agent_ken_cancel,
             commands::agent::agent_autopilot_set,
+            commands::agent::agent_shell_run,
+            commands::agent::agent_shell_cancel,
+            commands::agent::agent_shell_trust,
+            commands::agent::agent_shell_suggestions,
             commands::agent::agent_accept_plan,
             commands::agent::agent_revise_plan,
             commands::agent::agent_new_session,

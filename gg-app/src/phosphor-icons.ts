@@ -71,6 +71,7 @@ export { StopIcon } from "@phosphor-icons/react/Stop";
 export { SunHorizonIcon } from "@phosphor-icons/react/SunHorizon";
 export { SyringeIcon } from "@phosphor-icons/react/Syringe";
 export { TagIcon } from "@phosphor-icons/react/Tag";
+export { TerminalIcon } from "@phosphor-icons/react/Terminal";
 export { TextAlignLeftIcon } from "@phosphor-icons/react/TextAlignLeft";
 export { TrashIcon } from "@phosphor-icons/react/Trash";
 export { WarningCircleIcon } from "@phosphor-icons/react/WarningCircle";

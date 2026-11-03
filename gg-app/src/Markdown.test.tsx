@@ -228,8 +228,6 @@ describe("Markdown links", () => {
   });
 
   it.each([
-    "file:///E:/image.png",
-    "E:/image.png",
     "README.md:12",
     "Dockerfile:12",
     "Makefile:12:3",
@@ -238,8 +236,27 @@ describe("Markdown links", () => {
     "data:12",
   ])("keeps image exception %s blocked", (destination) => {
     render(<Markdown>{`![local](${destination})`}</Markdown>);
-    expect(screen.getByRole("img").getAttribute("src")).toBeFalsy();
+    expect(screen.queryByRole("img")).toBeNull();
+    expect(invoke).not.toHaveBeenCalledWith("read_chat_image", expect.anything());
   });
+
+  // Upstream 0.100.0 shows local images by reading them through the app; the
+  // webview itself still never loads a disk path.
+  it.each(["file:///E:/image.png", "E:/image.png"])(
+    "reads local image %s through the app, never as a raw src",
+    async (destination) => {
+      invoke.mockImplementationOnce(async (command: string) =>
+        command === "read_chat_image" ? { mediaType: "image/png", data: "iVBORw0KGgo=" } : null,
+      );
+      render(<Markdown>{`![local](${destination})`}</Markdown>);
+      const img = await screen.findByRole("img", { name: "local" });
+      expect(img.getAttribute("src")).toBe("data:image/png;base64,iVBORw0KGgo=");
+      expect(invoke).toHaveBeenCalledWith("read_chat_image", {
+        paneId: "primary",
+        path: "E:/image.png",
+      });
+    },
+  );
 
   it.each([
     "https://example.com",

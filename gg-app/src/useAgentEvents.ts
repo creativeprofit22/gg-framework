@@ -137,6 +137,8 @@ export interface AgentEventsDeps {
   hydrateKen?: (value: unknown, replaceHistory?: boolean) => void;
   /** Autopilot event delegate — consulted first; autopilot events early-return. */
   handleAutopilotEvent: (e: SidecarEvent) => boolean;
+  /** The user's own `!` commands: consulted first; their events early-return. */
+  handleShellEvent?: (e: SidecarEvent) => boolean;
   /** Whole-task status sees events before delegates consume their frames. */
   handleActivityEvent?: (e: SidecarEvent) => void;
 
@@ -212,6 +214,7 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
     handleKenEvent,
     hydrateKen,
     handleAutopilotEvent,
+    handleShellEvent,
     handleActivityEvent,
     setState,
     setTasks,
@@ -727,6 +730,7 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
         onProgrammaticAssessment?.(event);
         return;
       }
+      if (handleShellEvent?.(e)) return;
       const d = e.data as Record<string, unknown>;
       if (
         (e.type === "tool_call_start" || e.type === "tool_call_end") &&
@@ -1832,6 +1836,7 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
       programmaticGeneration,
       stateRef,
       onAstraStateChange,
+      handleShellEvent,
       handleActivityEvent,
       appendAssistant,
       pushItem,

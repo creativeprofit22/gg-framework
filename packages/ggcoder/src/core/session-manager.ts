@@ -259,7 +259,10 @@ export interface AppMarkerPayload extends RecordedPosition {
      *  can review what the run's tools already changed; never auto-resumed. */
     | "interrupted_run"
     /** A safety block (or infected installed package); `data` carries { rule, target }. */
-    | "security";
+    | "security"
+    /** A command the user ran themselves (`!cmd`); `data` carries
+     *  { runId, command, cwd, exitCode, durationMs, cancelled, output, truncated }. */
+    | "shell";
   afterMessageCount: number;
   /** Kind-specific display fields (reason/title/headline/kenSent/counts/…). */
   data: Record<string, unknown>;
@@ -2085,7 +2088,8 @@ export class SessionManager {
             kind === "import" ||
             kind === "interrupted_run" ||
             kind === "plan_gate" ||
-            kind === "security")
+            kind === "security" ||
+            kind === "shell")
         ) {
           return [
             {

@@ -90,6 +90,7 @@ import {
   type AskUserPrompt,
   type PaneAgentClient,
   type PaneSessionTarget,
+  type ShellSuggestion,
   workspaceProductName,
   NewSessionError,
   PlanMutationError,
@@ -123,7 +124,9 @@ import {
 } from "./goal-progress";
 import { latestKenLine } from "./goal-ken-talk";
 import { kenStatusOf, lastRunOf } from "./goal-ken-status";
-import type { Item as GoalTranscriptItem } from "./transcript-item";
+import type { Item as GoalTranscriptItem, ShellItem } from "./transcript-item";
+import { ShellBlock } from "./ShellBlock";
+import type { ShellActions } from "./useShellRuns";
 import {
   FINISH_SETTLE_MS,
   goalFinishOf,
@@ -160,6 +163,9 @@ import {
 } from "./scheduleCommand";
 import { useSchedules } from "./useSchedules";
 import { FileMentionMenu } from "./FileMentionMenu";
+import { ShellCommandMenu } from "./ShellCommandMenu";
+import { shellCommandFromInput, shellItemFromHistory, useShellRuns } from "./useShellRuns";
+import { filterShellSuggestions, shellEnterPicks } from "./shell-menu";
 import { ReferencedFiles, appendReferencedFiles, parseReferencedFiles } from "./ReferencedFiles";
 import { TasksModal, type TasksLoadState } from "./TasksModal";
 import { ChecklistScreen, type ChecklistLoad, type ChecklistNotice } from "./ChecklistScreen";
@@ -322,18 +328,23 @@ const DEFAULT_INPUT_PLACEHOLDER = `Type a message, / commands, @ files, ${MENTOR
 const INPUT_PLACEHOLDERS = [
   DEFAULT_INPUT_PLACEHOLDER,
   `Need a second opinion? Ask ${MENTOR_HANDLE}`,
+  "Start with ! to run a command, like !git status",
   `Stuck on what to do next? Ask ${MENTOR_HANDLE}`,
   DEFAULT_INPUT_PLACEHOLDER,
+  "Run tests yourself with !pnpm test, then ask GG to fix them",
   `Want a second set of eyes? Ask ${MENTOR_HANDLE}`,
   `Unsure how to proceed? Ask ${MENTOR_HANDLE}`,
+  "!ls runs in this project. GG sees the output next message",
   `Need a quick review? Ask ${MENTOR_HANDLE}`,
 ] as const;
 const RUNNING_INPUT_PLACEHOLDERS = [
   "Agent is working. Add a follow-up if you want",
   "Got another thought? Queue it here",
+  "Run a command while you wait, like !git diff",
   "Agent is on it. You can stack the next note",
   "Thinking ahead? Drop the next instruction",
   "Keep going. Your next message will queue up",
+  "Check something yourself with !, it won't interrupt GG",
 ] as const;
 const INPUT_PLACEHOLDER_INTERVAL_MS = 12_000;
 const PLACEHOLDER_SHUFFLE_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
@@ -380,7 +391,7 @@ function allClearCopy(seed: string | undefined, fallbackId: number): string {
 function shufflePlaceholderFrame(target: string, frame: number): string {
   const revealCount = Math.ceil((target.length * frame) / PLACEHOLDER_SHUFFLE_FRAMES);
   return Array.from(target, (char, index) => {
-    if (index < revealCount || /\s|[.,?/@]/.test(char)) return char;
+    if (index < revealCount || /\s|[.,?/@!]/.test(char)) return char;
     const pick = Math.floor(Math.random() * PLACEHOLDER_SHUFFLE_CHARS.length);
     return PLACEHOLDER_SHUFFLE_CHARS[pick];
   }).join("");
@@ -488,6 +499,8 @@ export type Item =
   // normal @Ken reply bubble (Ken dot + text), not a separate marker style.
   // `phase` selects the message: he prompted GG Coder (with the `body` he sent),
   // gave the all-clear, needs a human (with `reason`), or hit the round cap.
+  // A command the user ran themselves with `!cmd` (upstream 0.100.0).
+  | ShellItem
   | {
       kind: "autopilot";
       id: number;
@@ -735,6 +748,12 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   // it appears in the title bar only while a level/rank celebration plays.
   const [rankCelebrateNonce, setRankCelebrateNonce] = useState<string | null>(null);
   const [input, setInput] = useState("");
+  const [shellSuggestions, setShellSuggestions] = useState<ShellSuggestion[]>([]);
+  const [shellIndex, setShellIndex] = useState(0);
+  // The input the `!` picker was closed for (Esc or a pick); it reopens on edit.
+  const [shellMenuDismissedFor, setShellMenuDismissedFor] = useState<string | null>(null);
+  // The input the user last moved the picker's highlight for (up/down keys).
+  const [shellNavigatedFor, setShellNavigatedFor] = useState<string | null>(null);
   const [placeholderIndex, setPlaceholderIndex] = useState(0);
   const [displayPlaceholder, setDisplayPlaceholder] = useState(DEFAULT_INPUT_PLACEHOLDER);
   const displayPlaceholderRef = useRef(DEFAULT_INPUT_PLACEHOLDER);
@@ -2128,6 +2147,22 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     if (goalId) setGoalRuns((runs) => recordRun(runs, { ...run, goalId }));
   }, []);
 
+  // `!cmd`: the user's own commands, run through this pane's client.
+  const focusComposer = useCallback(() => inputRef.current?.focus(), []);
+  const shellRuns = useShellRuns({ setItems, nextId, liveText, focusComposer, toast, api: client });
+  const {
+    shellTrusted,
+    refreshShellTrust,
+    revokeShellTrust,
+    submitShell,
+    markShellShared,
+    handleShellEvent,
+  } = shellRuns;
+  const shellActions = useMemo(
+    () => ({ confirm: shellRuns.confirm, stop: shellRuns.stop }),
+    [shellRuns.confirm, shellRuns.stop],
+  );
+
   const { handleEvent, pushItem, acceptSubmission, endStreamingText, replacePlanReview } =
     useAgentEvents({
       client,
@@ -2136,6 +2171,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       handleKenEvent,
       hydrateKen,
       handleAutopilotEvent,
+      handleShellEvent,
       handleActivityEvent,
       setState,
       setTasks,
@@ -2280,6 +2316,8 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       // Hydrate the transcript when resuming an existing session — the webview
       // only sees live SSE events, so past messages must be fetched explicitly.
       const history = await listHistory();
+      const pendingShellRuns = Array.isArray(st?.pendingShellRuns) ? st.pendingShellRuns : [];
+      void refreshShellTrust().catch(() => {});
       if (
         !isCurrent() ||
         generation !== generationRef.current ||
@@ -2372,6 +2410,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
                 };
               if (h.infoKind === "video_warning")
                 return { kind: "info", id: nextId(), text: VIDEO_CAPABILITY_WARNING };
+              if (h.shell) return shellItemFromHistory(h.shell, nextId(), pendingShellRuns);
               // Ken "Send to GG Coder" prompts: restore the shimmer label, not the
               // full prompt body (matches live).
               if (h.kenSent && h.role === "user")
@@ -2477,6 +2516,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     captureKenHydration,
     clearKenStream,
     paneId,
+    refreshShellTrust,
   ]);
 
   useEffect(() => {
@@ -2860,7 +2900,42 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   // `@`-mention picker: open whenever a mention token is active and the search
   // returned at least one file. Clamp the highlighted row to the result count.
   // Never open while `@Ken` is active — that token addresses Ken, not a file.
-  const mentionOpen = mention !== null && fileMatches.length > 0 && !kenActive;
+  // `!cmd`: the input runs a command instead of messaging the agent.
+  const shellMode = workspaceMode === "code" && shellCommandFromInput(input) !== null;
+  // Entering `!` loads the picker's commands (history counts change per run).
+  const listShellSuggestions = client.listShellSuggestions;
+  useEffect(() => {
+    if (!shellMode) return;
+    let live = true;
+    void listShellSuggestions().then((list) => {
+      if (live) setShellSuggestions(list);
+    });
+    return () => {
+      live = false;
+    };
+  }, [shellMode, listShellSuggestions]);
+  const shellMatches = useMemo(
+    () => (shellMode ? filterShellSuggestions(shellSuggestions, input.slice(1)) : []),
+    [shellMode, shellSuggestions, input],
+  );
+  const shellMenuOpen = shellMatches.length > 0 && shellMenuDismissedFor !== input;
+  const shellActiveIndex = shellMatches.length > 0 ? shellIndex % shellMatches.length : 0;
+  function pickShellSuggestion(suggestion: ShellSuggestion): void {
+    const next = `!${suggestion.command}`;
+    setInput(next);
+    setShellIndex(0);
+    // A picked command is complete: close the picker until the user edits it.
+    setShellMenuDismissedFor(next);
+    requestAnimationFrame(() => {
+      const el = inputRef.current;
+      if (!el) return;
+      el.focus();
+      el.setSelectionRange(next.length, next.length);
+    });
+  }
+  const mentionOpen = mention !== null && fileMatches.length > 0 && !kenActive && !shellMode;
+  // A command is run as typed, so there is nothing to enhance.
+  const enhancePillVisible = enhanceHintVisible && !shellMode;
   const clampedFileIndex = fileMatches.length > 0 ? fileIndex % fileMatches.length : 0;
 
   // True when `text` is a known workflow command invocation (first token).
@@ -3190,6 +3265,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     // hint that the directory you just chose went nowhere.
     const disposition = submitDisposition(trimmed, readyRef.current, running);
     if (disposition === "ignore") return null;
+    markShellShared();
     const queued = disposition === "queue" || opts?.followsPrompt === true;
     const supersedesQuestion = hasOpenAsk();
     // Keep approval controls and queue state unchanged until the host accepts.
@@ -4192,6 +4268,20 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     }
     if (!readyRef.current || planReview !== null) return;
     if (!trimmed && attachments.length === 0 && mentionedPaths.length === 0) return;
+
+    // `!cmd` runs a command for the user, in the project folder, with no agent
+    // turn. Attachments and file chips stay in the composer for the next message.
+    const shellCommand = workspaceMode === "code" ? shellCommandFromInput(input) : null;
+    if (shellCommand !== null) {
+      if (!shellCommand) return;
+      recordHistory(trimmed);
+      stickToBottomRef.current = true;
+      submitShell(shellCommand, state?.cwd ?? "");
+      setInput("");
+      setSlashIndex(0);
+      setMention(null);
+      return;
+    }
     const noInputError = noInputSlashSubmissionError(
       input,
       commands,
@@ -4272,6 +4362,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
         promptSubmissionPendingRef.current = null;
     };
     recordHistory(trimmed);
+    markShellShared();
     // A user send always re-pins to the bottom — they want to see their message.
     stickToBottomRef.current = true;
     // Referenced files are appended to the prompt as a small block so the agent
@@ -5240,6 +5331,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
                           onImageLoad: maybeScrollToBottom,
                           onAskAnswer: handleAskAnswer,
                           onAskType: handleAskType,
+                          shellActions,
                         }),
                       )}
                     </LiveTextContext.Provider>
@@ -5628,7 +5720,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
                 <div
                   className={`inputwrap${isFileDragOver ? " dragover" : ""}${
                     scheduleInvalid ? " schedule-invalid" : ""
-                  }`}
+                  }${shellMode ? " shell-mode" : ""}`}
                 >
                   <WorkingBeam active={running || kenRunning || autopilotReviewing} />
                   {scheduleDraft ? (
@@ -5661,6 +5753,16 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
                         setPaletteOpen(false);
                         submitText(`/${cmd.name}`);
                       }}
+                    />
+                  )}
+                  {shellMenuOpen && (
+                    <ShellCommandMenu
+                      suggestions={shellMatches}
+                      activeIndex={shellActiveIndex}
+                      trusted={shellTrusted}
+                      onRevokeTrust={() => void revokeShellTrust()}
+                      onSelect={pickShellSuggestion}
+                      onHover={setShellIndex}
                     />
                   )}
                   {mentionOpen && !noReferenceSlashCommand && (
@@ -5729,7 +5831,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
                       )}
                       <textarea
                         ref={attachInput}
-                        className={`input${enhanceAnim ? " input-anim" : ""}${kenActive ? " input-ken" : ""}`}
+                        className={`input${enhanceAnim ? " input-anim" : ""}${kenActive ? " input-ken" : ""}${shellMode ? " input-shell" : ""}`}
                         rows={1}
                         // No-input commands stay keyboard-submittable while preventing edits.
                         readOnly={enhanceAnim !== null || noInputSlashCommand !== null}
@@ -5815,7 +5917,29 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
                                   activeIndex: clampedSlashIndex,
                                 })
                               : null;
-                          if (mentionOpen && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
+                          if (shellMenuOpen && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
+                            e.preventDefault();
+                            const n = shellMatches.length;
+                            const delta = e.key === "ArrowDown" ? 1 : -1;
+                            setShellIndex((i) => (((i + delta) % n) + n) % n);
+                            setShellNavigatedFor(input);
+                          } else if (
+                            shellMenuOpen &&
+                            (e.key === "Tab" ||
+                              (e.key === "Enter" &&
+                                !e.shiftKey &&
+                                shellEnterPicks(input, shellNavigatedFor)))
+                          ) {
+                            e.preventDefault();
+                            const picked = shellMatches[shellActiveIndex];
+                            if (picked) pickShellSuggestion(picked);
+                          } else if (shellMenuOpen && e.key === "Escape") {
+                            e.preventDefault();
+                            setShellMenuDismissedFor(input);
+                          } else if (
+                            mentionOpen &&
+                            (e.key === "ArrowDown" || e.key === "ArrowUp")
+                          ) {
                             e.preventDefault();
                             const delta = e.key === "ArrowDown" ? 1 : -1;
                             setFileIndex(
@@ -5899,30 +6023,39 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
                       />
                       <button
                         type="button"
-                        className={`icon-circle icon-circle-primary composer-send-icon${running ? " is-stop" : ""}`}
-                        aria-label={running ? "Stop response" : "Send message"}
+                        className={`icon-circle icon-circle-primary composer-send-icon${running && !shellMode ? " is-stop" : ""}`}
+                        aria-label={
+                          shellMode ? "Run command" : running ? "Stop response" : "Send message"
+                        }
                         title={
-                          running
-                            ? cancelling
-                              ? "Stopping…"
-                              : "Stop response"
-                            : attachmentsLoading
-                              ? "Loading attachments…"
-                              : "Send message"
+                          shellMode
+                            ? "Run command"
+                            : running
+                              ? cancelling
+                                ? "Stopping…"
+                                : "Stop response"
+                              : attachmentsLoading
+                                ? "Loading attachments…"
+                                : "Send message"
                         }
                         disabled={
-                          running
-                            ? cancelling
-                            : !readyRef.current ||
+                          shellMode
+                            ? !readyRef.current ||
                               planReview !== null ||
-                              attachmentsLoading ||
-                              (!input.trim() &&
-                                attachments.length === 0 &&
-                                mentionedPaths.length === 0)
+                              !shellCommandFromInput(input)
+                            : running
+                              ? cancelling
+                              : !readyRef.current ||
+                                planReview !== null ||
+                                attachmentsLoading ||
+                                (!input.trim() &&
+                                  attachments.length === 0 &&
+                                  mentionedPaths.length === 0)
                         }
-                        onClick={running ? requestCancel : submit}
+                        // A command runs alongside the agent, so mid-run this is Run, not Stop.
+                        onClick={running && !shellMode ? requestCancel : submit}
                       >
-                        {running ? (
+                        {running && !shellMode ? (
                           <SquareIcon size={12} weight="fill" />
                         ) : (
                           <ArrowUpIcon size={16} />
@@ -5937,10 +6070,10 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
                     // stay clear of the status row's "esc to cancel". Always mounted (so it
                     // can transition both ways); the `visible` class fades/slides it in
                     // when there's text and out when there isn't.
-                    <div className={`enhance-pill-host${enhanceHintVisible ? " visible" : ""}`}>
+                    <div className={`enhance-pill-host${enhancePillVisible ? " visible" : ""}`}>
                       <ActionMetal
                         active={
-                          enhanceHintVisible &&
+                          enhancePillVisible &&
                           !enhancing &&
                           !enhanceOverLimit &&
                           planReview === null
@@ -5958,15 +6091,15 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
                             : "Enhance prompt — clearer wording + correct terms"
                         }
                         aria-describedby={
-                          enhanceOverLimit && enhanceHintVisible ? enhanceLimitReasonId : undefined
+                          enhanceOverLimit && enhancePillVisible ? enhanceLimitReasonId : undefined
                         }
                         disabled={
                           planReview !== null ||
                           enhancing ||
-                          !enhanceHintVisible ||
+                          !enhancePillVisible ||
                           enhanceOverLimit
                         }
-                        aria-hidden={!enhanceHintVisible}
+                        aria-hidden={!enhancePillVisible}
                         onClick={() => void runEnhance()}
                       >
                         {enhancing ? "Enhancing…" : "Enhance?"}
@@ -5975,7 +6108,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
                   )}
                 </div>
 
-                {enhanceOverLimit && enhanceHintVisible && (
+                {enhanceOverLimit && enhancePillVisible && (
                   <p id={enhanceLimitReasonId} role="status" style={{ color: theme.textDim }}>
                     {enhanceLimitReason}
                   </p>
@@ -6231,6 +6364,7 @@ const TranscriptRowBody = memo(function TranscriptRowBody({
   onImageLoad,
   onAskAnswer,
   onAskType,
+  shellActions,
 }: {
   item: Item;
   /** This is the Ken reply currently streaming in, so his face talks. */
@@ -6245,6 +6379,7 @@ const TranscriptRowBody = memo(function TranscriptRowBody({
     sendNow?: boolean,
   ) => void;
   onAskType?: (itemId: number, promptId: string, questionId: string, seed?: string) => void;
+  shellActions?: ShellActions;
 }): React.ReactElement | null {
   const paneId = useContext(PaneIdContext);
   switch (item.kind) {
@@ -6368,6 +6503,12 @@ const TranscriptRowBody = memo(function TranscriptRowBody({
       return (
         <div className="line info" data-swap-row={item.id} style={{ color: theme.textDim }}>
           {item.text}
+        </div>
+      );
+    case "shell":
+      return (
+        <div data-swap-row={item.id}>
+          <ShellBlock item={item} actions={shellActions} onGrow={onImageLoad} />
         </div>
       );
     case "security":

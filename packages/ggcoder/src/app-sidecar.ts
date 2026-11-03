@@ -307,6 +307,8 @@ import {
   goalCritterPick,
   loadGoalBriefExtras,
 } from "./goals-agent/goals-agent.js";
+import { finishShellRun, handleShellRoutes } from "./app-sidecar/shell-routes.js";
+import { ShellRunner } from "./app-sidecar/shell-runs.js";
 import type { SessionRouteContext } from "./app-sidecar/route-context.js";
 import { keepAwake } from "./app-sidecar/keep-awake.js";
 import { searchProjectFiles } from "./app-sidecar/file-search.js";
@@ -527,6 +529,18 @@ interface HistoryEntryForWire {
   infoKind?: "video_warning";
   /** Safety-block chat row (persisted `security` app marker). */
   security?: { rule: string; target: string };
+  /** A command the user ran themselves (persisted `shell` app marker). */
+  shell?: {
+    runId: string;
+    command: string;
+    cwd: string;
+    exitCode: number | null;
+    durationMs: number;
+    cancelled: boolean;
+    output: string;
+    truncated: boolean;
+    error?: string;
+  };
   /** Image previews; `text` carries verbatim warnings rendered once before them. */
   toolImages?: Array<{ src: string; path?: string }>;
   /** Failed MCP result restored as a durable transcript row. */
@@ -4526,6 +4540,9 @@ async function createSession(
       // Skills the safety scan kept out; the app shows each once (toast).
       blockedSkills: session.getBlockedSkills(),
       installedThreats: session.getInstalledThreats().map(({ key, message }) => ({ key, message })),
+      // The user's own commands still waiting to reach the agent with their
+      // next message (a reopened window shows them as pending).
+      pendingShellRuns: session.getPendingUserShellRunIds(),
       running,
       runState: runLifecycle.state,
       ready: true,
@@ -4595,10 +4612,18 @@ async function createSession(
     }
   }
 
-  // Narrow adapter for upstream's Goal routes. Getters read the live closure
-  // state, so a goal started or a run begun after creation is visible.
+  // Commands the user runs themselves (`!cmd`, upstream shell routes).
+  const shell = new ShellRunner({
+    emit: (type, data) => broadcast(type, data),
+    onEnd: (run) => finishShellRun(goalRouteCtx, run),
+  });
+  // Narrow adapter for upstream's Goal and shell routes. Getters read the live
+  // closure state, so a goal started or a run begun after creation is visible.
   const goalRouteCtx: SessionRouteContext = {
     paths,
+    cwd,
+    mode,
+    shell,
     get session() {
       return session;
     },
@@ -5213,6 +5238,22 @@ async function createSession(
             } else if (marker.kind === "error" && typeof d.headline === "string") {
               const error = restoreAppErrorPayload(d);
               if (error) history.push({ role: "assistant", text: "", error });
+            } else if (marker.kind === "shell" && typeof d.command === "string") {
+              history.push({
+                role: "assistant",
+                text: "",
+                shell: {
+                  runId: typeof d.runId === "string" ? d.runId : "",
+                  command: d.command,
+                  cwd: typeof d.cwd === "string" ? d.cwd : "",
+                  exitCode: typeof d.exitCode === "number" ? d.exitCode : null,
+                  durationMs: typeof d.durationMs === "number" ? d.durationMs : 0,
+                  cancelled: d.cancelled === true,
+                  output: typeof d.output === "string" ? d.output : "",
+                  truncated: d.truncated === true,
+                  ...(typeof d.error === "string" ? { error: d.error } : {}),
+                },
+              });
             } else if (marker.kind === "interrupted_run") {
               // Rendered as an error row: the run's tools already changed the
               // repo, so the user needs to see it and decide what to do. We
@@ -7618,6 +7659,7 @@ async function createSession(
       });
       return;
     }
+    if (handleShellRoutes(goalRouteCtx, req, res, url, method)) return;
 
     json(res, 404, { error: "not found" });
   }
@@ -7632,6 +7674,7 @@ async function createSession(
     // started. Otherwise they keep streaming tokens and running tools on a
     // session that is being torn down.
     abortOwnedWork();
+    shell.stopAll();
     idleWake?.dispose();
     cancelHfPull();
     releaseRunAwake?.();
@@ -7666,6 +7709,7 @@ async function createSession(
   }
 
   function stopBackgroundProcesses(): void {
+    shell.stopAll();
     session.stopBackgroundProcesses();
     kenSession?.stopBackgroundProcesses();
     kenAutoSession?.stopBackgroundProcesses();

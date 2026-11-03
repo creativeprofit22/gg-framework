@@ -40,7 +40,7 @@ import {
   TextAlignLeftIcon,
   WarningIcon,
 } from "./phosphor-icons";
-import { openUrlStrict, sendPrompt } from "./agent";
+import { openProjectPath, openUrlStrict, readChatImage, sendPrompt } from "./agent";
 import { PRODUCT_DISPLAY_NAME } from "./brand";
 import { STEROIDS_COLLAPSIBLE_TABLE_MARKER } from "@kenkaiiii/gg-core/slash-command-contract";
 import { codeLanguage, codeNodeText } from "./markdown-prompt";
@@ -96,8 +96,14 @@ interface Props {
   contentRef?: React.RefObject<HTMLDivElement | null>;
 }
 
-// Only link destinations get local-path exceptions; images retain the default filter.
-function markdownUrlTransform(value: string, key: string): string {
+// Link destinations get local-path exceptions. Image sources keep `file://`,
+// Windows drive paths and raster `data:` so MarkdownImage can read the file;
+// everything else gets the default safety filter.
+function markdownUrlTransform(value: string, key: string, node?: { tagName?: string }): string {
+  if (key === "src" && node?.tagName === "img") {
+    if (/^[a-z]:(?:[/\\]|%5c)/i.test(value)) return value.replace(/%5c/gi, "/");
+    if (/^(file:\/\/|data:image\/(png|jpeg|gif|webp|bmp);)/i.test(value)) return value;
+  }
   if (key === "href") {
     // Markdown percent-encodes Windows backslashes before this transform.
     if (/^[a-z]:(?:[/\\]|%5c)/i.test(value)) return value.replace(/%5c/gi, "/");
@@ -256,6 +262,82 @@ function tableBodyRowCount(node: ExtraProps["node"]): number {
     }
   }
   return rows;
+}
+
+function fileName(path: string): string {
+  return (
+    path
+      .replace(/[?#].*$/, "")
+      .split(/[\\/]/)
+      .filter(Boolean)
+      .pop() ?? path
+  );
+}
+
+type LocalImage = { path: string; url: string | null };
+
+/**
+ * An image in a reply. The webview can't load disk paths (or, by CSP, web
+ * images), so local files are read through the app and anything that still
+ * can't be shown becomes a link to it instead of a broken "?" icon.
+ * Spans throughout: markdown images sit inside a <p>.
+ */
+function MarkdownImage({ src, alt }: { src?: string; alt?: string }): React.ReactElement | null {
+  const paneId = useContext(PaneIdContext);
+  const inline = src !== undefined && /^(data|blob):/i.test(src);
+  const local = src && !inline && !isExternalHref(src) ? src : undefined;
+  const [loaded, setLoaded] = useState<LocalImage | null>(null);
+  const [broken, setBroken] = useState<string | null>(null);
+  useEffect(() => {
+    if (!local) return;
+    let live = true;
+    void readChatImage(local, paneId).then((url) => {
+      if (live) setLoaded({ path: local, url });
+    });
+    return () => {
+      live = false;
+    };
+  }, [local, paneId]);
+
+  // Still streaming in, or a URL react-markdown's filter removed.
+  if (!src) return alt ? <span className="md-img-alt">{alt}</span> : null;
+  // Web images stay blocked (CSP: no tracking pixels from model output).
+  const url = inline ? src : !local ? null : loaded?.path === local ? loaded.url : undefined;
+  if (url === undefined) {
+    return (
+      <span className="md-img-loading" role="status">
+        Loading image {fileName(src)}…
+      </span>
+    );
+  }
+  if (url === null || broken === url) {
+    return (
+      <span className="md-img-missing">
+        Couldn't show image: <ExternalLink href={src}>{alt || fileName(src)}</ExternalLink>
+      </span>
+    );
+  }
+  const open = (): void => {
+    if (local) void openProjectPath(local, paneId, "url");
+  };
+  return (
+    <span
+      className={`img-card md-img${local ? " img-card-clickable" : ""}`}
+      role={local ? "button" : undefined}
+      tabIndex={local ? 0 : undefined}
+      aria-label={local ? `Open ${alt || fileName(local)}` : undefined}
+      title={local}
+      onClick={open}
+      onKeyDown={(e) => {
+        if (!local || (e.key !== "Enter" && e.key !== " ")) return;
+        e.preventDefault();
+        open();
+      }}
+    >
+      <img className="img-thumb" src={url} alt={alt ?? ""} onError={() => setBroken(url)} />
+      {local && <span className="img-cap">{alt || fileName(local)}</span>}
+    </span>
+  );
 }
 
 /**
@@ -1328,6 +1410,7 @@ const WORD_FADE_HOLD_MS = 450;
 const PLUGINS = [rehypeHighlight, rehypeArrows, rehypeTables];
 const COMPONENTS = {
   a: ExternalLink,
+  img: MarkdownImage,
   ol: StepList,
   pre: PreBlock,
   // Fork: MarkdownTable is upstream's scroll wrapper plus the shared table card

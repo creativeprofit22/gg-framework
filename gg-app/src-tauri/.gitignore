@@ -10,3 +10,4 @@
 /binaries/
 /sidecar/
 /sidecar.candidate/
+/sidecar-deps.stamp.json

@@ -536,15 +536,6 @@ export function localBuildConfigPaths(srcTauriRoot, installedSmoke = false) {
   ];
 }
 
-export function installedSmokeBuildRequested(args, platform) {
-  if (args.length === 0) return false;
-  if (args.length !== 1 || args[0] !== "--installed-smoke") {
-    throw new Error("Usage: build-local-hotfix.mjs [--installed-smoke]");
-  }
-  if (platform !== "win32") throw new Error("Installed Smoke packaging requires Windows.");
-  return true;
-}
-
 function fileMetadata(path) {
   const bytes = readFileSync(path);
   return {

@@ -19,7 +19,6 @@ import {
   decidePackageBuild,
   FRAMEWORK_PACKAGES,
   freshInstallerForPlatform,
-  installedSmokeBuildRequested,
   installerManifest,
   INSTALLED_SMOKE_IDENTITY,
   LOCAL_CARGO_RELEASE_SETTINGS,
@@ -359,15 +358,6 @@ describe("Tauri build arguments", () => {
       "--config",
       smokePaths[1],
     ]);
-  });
-
-  it("requires an explicit Windows-only Installed Smoke flavor", () => {
-    expect(installedSmokeBuildRequested([], "win32")).toBe(false);
-    expect(installedSmokeBuildRequested(["--installed-smoke"], "win32")).toBe(true);
-    expect(() => installedSmokeBuildRequested(["--installed-smoke"], "darwin")).toThrow(
-      "requires Windows",
-    );
-    expect(() => installedSmokeBuildRequested(["--unknown"], "win32")).toThrow("Usage");
   });
 });
 
@@ -819,6 +809,10 @@ describe("framework package build stamps", () => {
   it("parses the force flag alone or with Installed Smoke and rejects anything else", () => {
     expect(parseLocalBuildArgs([], "win32")).toEqual({
       installedSmoke: false,
+      forcePackageBuilds: false,
+    });
+    expect(parseLocalBuildArgs(["--installed-smoke"], "win32")).toEqual({
+      installedSmoke: true,
       forcePackageBuilds: false,
     });
     expect(parseLocalBuildArgs(["--force-package-builds"], "darwin")).toEqual({

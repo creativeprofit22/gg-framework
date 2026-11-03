@@ -3,6 +3,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   utimesSync,
@@ -13,7 +14,10 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  buildFrameworkPackages,
   committedReleaseNotes,
+  decidePackageBuild,
+  FRAMEWORK_PACKAGES,
   freshInstallerForPlatform,
   installedSmokeBuildRequested,
   installerManifest,
@@ -23,12 +27,15 @@ import {
   localBuildConfigPaths,
   localCargoBuildEnv,
   missingPhaseLeaseRegressionGuards,
+  parseLocalBuildArgs,
   PHASE_LEASE_REGRESSION_GATE,
   phaseLeaseRegressionGateArgs,
   readAppSidecarSources,
+  readPackageBuildStamp,
   releaseNotesEnvelope,
   runWithCargoTomlRestored,
   tauriBuildArgs,
+  treeContentHash,
   validateLocalReleaseNotes,
   windowsNsisPayloadMetadata,
 } from "./build-local-hotfix.mjs";
@@ -509,5 +516,357 @@ describe("local-only Cargo settings", () => {
     expect(readFileSync(join(srcTauri, "Cargo.toml"), "utf8")).not.toMatch(/^\[profile/m);
     expect(existsSync(join(srcTauri, ".cargo", "config.toml"))).toBe(false);
     expect(existsSync(join(srcTauri, ".cargo", "config"))).toBe(false);
+  });
+});
+
+describe("sidecar dependency reuse opt-in", () => {
+  const repoRoot = join(here, "..", "..");
+
+  it("turns reuse on only for the local hotfix bundle step", () => {
+    const source = readFileSync(join(here, "build-local-hotfix.mjs"), "utf8");
+    const main = source.slice(source.indexOf("async function main()"));
+    expect(main).toContain('run(pnpm, ["--filter", "gg-app", "bundle:sidecar", "--reuse-deps"])');
+  });
+
+  it.each([
+    ".github/workflows/ci.yml",
+    ".github/workflows/release.yml",
+    ".github/workflows/phase-26-macos-dev.yml",
+    ".github/ci/size-gate.mjs",
+    "gg-app/package.json",
+    "gg-app/scripts/smoke-sidecar.mjs",
+  ])("keeps %s on the full-copy path", (path) => {
+    expect(readFileSync(join(repoRoot, ...path.split("/")), "utf8")).not.toContain("--reuse-deps");
+  });
+});
+
+describe("framework package build stamps", () => {
+  const repoRoot = join(here, "..", "..");
+  const nodeVersion = "v22.0.0";
+
+  type BuildOptions = {
+    force?: boolean;
+    nodeVersion?: string;
+    fail?: string;
+    readFile?: (path: string) => Buffer;
+  };
+
+  function packagesFixture(): { root: string; stampDir: string } {
+    const root = mkdtempSync(join(tmpdir(), "gg-local-packages-"));
+    temporaryDirectories.push(root);
+    writeFileSync(join(root, "tsconfig.json"), '{"compilerOptions":{}}\n');
+    writeFileSync(join(root, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
+    for (const { name, dir } of FRAMEWORK_PACKAGES) {
+      const packageRoot = join(root, "packages", dir);
+      mkdirSync(join(packageRoot, "src", "nested"), { recursive: true });
+      writeFileSync(join(packageRoot, "package.json"), JSON.stringify({ name, version: "1.0.0" }));
+      writeFileSync(join(packageRoot, "tsconfig.json"), '{"extends":"../../tsconfig.json"}\n');
+      if (dir === "ggcoder") writeFileSync(join(packageRoot, "tsconfig.build.json"), "{}\n");
+      else writeFileSync(join(packageRoot, "tsup.config.ts"), "export default {};\n");
+      writeFileSync(join(packageRoot, "src", "index.ts"), `export const name = "${dir}";\n`);
+      writeFileSync(join(packageRoot, "src", "nested", "util.ts"), "export const util = 1;\n");
+    }
+    return { root, stampDir: join(root, ".gg", "local-fixes", "package-build-stamps") };
+  }
+
+  function build(root: string, stampDir: string, options: BuildOptions = {}) {
+    const calls: string[] = [];
+    const logs: string[] = [];
+    const result = buildFrameworkPackages({
+      root,
+      stampDir,
+      force: options.force ?? false,
+      nodeVersion: options.nodeVersion ?? nodeVersion,
+      platform: "win32",
+      arch: "x64",
+      log: (line: string) => logs.push(line),
+      ...(options.readFile ? { readFile: options.readFile } : {}),
+      runBuild: (packageName: string) => {
+        calls.push(packageName);
+        if (packageName === options.fail) return 2;
+        const pkg = FRAMEWORK_PACKAGES.find(({ name }) => name === packageName);
+        const packageRoot = join(root, "packages", pkg!.dir);
+        mkdirSync(join(packageRoot, "dist"), { recursive: true });
+        writeFileSync(
+          join(packageRoot, "dist", "index.js"),
+          readFileSync(join(packageRoot, "src", "index.ts")),
+        );
+        return 0;
+      },
+    });
+    return { ...result, calls, logs };
+  }
+
+  const all = FRAMEWORK_PACKAGES.map(({ name }) => name);
+  const stampFile = (stampDir: string, dir: string) => join(stampDir, `${dir}.json`);
+
+  it("keeps the gg-ai → gg-agent → gg-core → ggcoder order and dependency table", () => {
+    expect(FRAMEWORK_PACKAGES.map(({ name, deps }) => [name, [...deps]])).toEqual([
+      ["@kenkaiiii/gg-ai", []],
+      ["@kenkaiiii/gg-agent", ["gg-ai"]],
+      ["@kenkaiiii/gg-core", ["gg-ai"]],
+      ["@kenkaiiii/ggcoder", ["gg-ai", "gg-agent", "gg-core"]],
+    ]);
+  });
+
+  it("builds every package on the first run and stamps each one", () => {
+    const { root, stampDir } = packagesFixture();
+    const first = build(root, stampDir);
+    expect(first.status).toBe(0);
+    expect(first.calls).toEqual(all);
+    for (const { name, dir } of FRAMEWORK_PACKAGES) {
+      const read = readPackageBuildStamp(stampFile(stampDir, dir));
+      expect(read.ok).toBe(true);
+      expect(read.ok && read.stamp.package).toBe(name);
+    }
+  });
+
+  it("skips every package when nothing changed", () => {
+    const { root, stampDir } = packagesFixture();
+    build(root, stampDir);
+    const second = build(root, stampDir);
+    expect(second.status).toBe(0);
+    expect(second.calls).toEqual([]);
+    expect(second.results.map(({ built, reason }) => [built, reason])).toEqual(
+      all.map(() => [false, "inputs and output unchanged"]),
+    );
+  });
+
+  it("rebuilds a changed package and its dependants only", () => {
+    const { root, stampDir } = packagesFixture();
+    build(root, stampDir);
+    writeFileSync(
+      join(root, "packages", "gg-core", "src", "nested", "util.ts"),
+      "export const util = 2;\n",
+    );
+    const next = build(root, stampDir);
+    expect(next.calls).toEqual(["@kenkaiiii/gg-core", "@kenkaiiii/ggcoder"]);
+    expect(next.results.find(({ name }) => name === "@kenkaiiii/gg-core")?.reason).toBe(
+      "inputs changed",
+    );
+    expect(build(root, stampDir).calls).toEqual([]);
+  });
+
+  it("rebuilds a package when a source file is added", () => {
+    const { root, stampDir } = packagesFixture();
+    build(root, stampDir);
+    writeFileSync(join(root, "packages", "gg-agent", "src", "extra.ts"), "export {};\n");
+    expect(build(root, stampDir).calls).toEqual(["@kenkaiiii/gg-agent", "@kenkaiiii/ggcoder"]);
+  });
+
+  it.each([
+    [
+      "gg-ai package.json",
+      "packages/gg-ai/package.json",
+      '{"name":"@kenkaiiii/gg-ai","version":"1.0.1"}',
+    ],
+    ["gg-ai tsup config", "packages/gg-ai/tsup.config.ts", "export default { clean: false };\n"],
+    ["root lockfile", "pnpm-lock.yaml", "lockfileVersion: '9.1'\n"],
+    ["root tsconfig", "tsconfig.json", '{"compilerOptions":{"strict":true}}\n'],
+  ])("rebuilds everything when the %s changes", (_label, path, content) => {
+    const { root, stampDir } = packagesFixture();
+    build(root, stampDir);
+    writeFileSync(join(root, ...path.split("/")), content);
+    expect(build(root, stampDir).calls).toEqual(all);
+  });
+
+  it("rebuilds a package when an optional config file appears", () => {
+    const { root, stampDir } = packagesFixture();
+    build(root, stampDir);
+    writeFileSync(join(root, "packages", "ggcoder", "tsup.config.ts"), "export default {};\n");
+    expect(build(root, stampDir).calls).toEqual(["@kenkaiiii/ggcoder"]);
+  });
+
+  it("rebuilds everything when the Node version changes", () => {
+    const { root, stampDir } = packagesFixture();
+    build(root, stampDir);
+    expect(build(root, stampDir, { nodeVersion: "v24.0.0" }).calls).toEqual(all);
+  });
+
+  it("rebuilds a package with missing output and cascades to its dependants", () => {
+    const { root, stampDir } = packagesFixture();
+    build(root, stampDir);
+    rmSync(join(root, "packages", "gg-ai", "dist"), { force: true, recursive: true });
+    const next = build(root, stampDir);
+    expect(next.calls).toEqual(all);
+    expect(next.results.map(({ reason }) => reason)).toEqual([
+      "output missing",
+      "a package it depends on was rebuilt",
+      "a package it depends on was rebuilt",
+      "a package it depends on was rebuilt",
+    ]);
+  });
+
+  it("rebuilds a package whose output is empty or was edited after stamping", () => {
+    const { root, stampDir } = packagesFixture();
+    build(root, stampDir);
+    writeFileSync(join(root, "packages", "gg-agent", "dist", "index.js"), "tampered\n");
+    const edited = build(root, stampDir);
+    expect(edited.calls).toEqual(["@kenkaiiii/gg-agent", "@kenkaiiii/ggcoder"]);
+    expect(edited.results[1]?.reason).toBe("output changed since it was stamped");
+
+    rmSync(join(root, "packages", "ggcoder", "dist"), { force: true, recursive: true });
+    mkdirSync(join(root, "packages", "ggcoder", "dist"));
+    const empty = build(root, stampDir);
+    expect(empty.calls).toEqual(["@kenkaiiii/ggcoder"]);
+    expect(empty.results[3]?.reason).toBe("output missing");
+  });
+
+  it("rebuilds and restamps everything when forced", () => {
+    const { root, stampDir } = packagesFixture();
+    build(root, stampDir);
+    const forced = build(root, stampDir, { force: true });
+    expect(forced.calls).toEqual(all);
+    expect(forced.results.every(({ reason }) => reason === "forced")).toBe(true);
+    expect(build(root, stampDir).calls).toEqual([]);
+  });
+
+  it("stops at a failed build, removes its old stamp and leaves later packages unbuilt", () => {
+    const { root, stampDir } = packagesFixture();
+    build(root, stampDir);
+    writeFileSync(
+      join(root, "packages", "gg-agent", "src", "index.ts"),
+      "export const changed = 1;\n",
+    );
+    const failed = build(root, stampDir, { fail: "@kenkaiiii/gg-agent" });
+    expect(failed.status).toBe(2);
+    expect(failed.calls).toEqual(["@kenkaiiii/gg-agent"]);
+    expect(failed.results.map(({ name, built }) => [name, built])).toEqual([
+      ["@kenkaiiii/gg-ai", false],
+      ["@kenkaiiii/gg-agent", false],
+    ]);
+    expect(existsSync(stampFile(stampDir, "gg-agent"))).toBe(false);
+    expect(readdirSync(stampDir).filter((name) => name.endsWith(".tmp"))).toEqual([]);
+    expect(build(root, stampDir).calls).toEqual(["@kenkaiiii/gg-agent", "@kenkaiiii/ggcoder"]);
+  });
+
+  it.each([
+    ["is not valid JSON", () => "{not json", "stamp is not valid JSON"],
+    [
+      "has another schema",
+      (stamp: Record<string, unknown>) => JSON.stringify({ ...stamp, schema: "other/1" }),
+      "stamp schema differs",
+    ],
+    [
+      "fails its checksum",
+      (stamp: Record<string, unknown>) => JSON.stringify({ ...stamp, output: "0".repeat(64) }),
+      "stamp checksum mismatch",
+    ],
+    [
+      "has malformed fields",
+      (stamp: Record<string, unknown>) => JSON.stringify({ ...stamp, fingerprint: "short" }),
+      "stamp fields are malformed",
+    ],
+  ])("rebuilds when the stamp %s", (_label, corrupt, reason) => {
+    const { root, stampDir } = packagesFixture();
+    build(root, stampDir);
+    const path = stampFile(stampDir, "gg-ai");
+    writeFileSync(path, corrupt(JSON.parse(readFileSync(path, "utf8"))));
+    const next = build(root, stampDir);
+    expect(next.calls).toEqual(all);
+    expect(next.results[0]?.reason).toBe(reason);
+  });
+
+  it("rebuilds when a stamp is missing", () => {
+    const { root, stampDir } = packagesFixture();
+    build(root, stampDir);
+    rmSync(stampFile(stampDir, "gg-core"));
+    const next = build(root, stampDir);
+    expect(next.calls).toEqual(["@kenkaiiii/gg-core", "@kenkaiiii/ggcoder"]);
+    expect(next.results[2]?.reason).toBe("no stamp");
+  });
+
+  it("rebuilds a package and its dependants when its inputs cannot be hashed", () => {
+    const { root, stampDir } = packagesFixture();
+    build(root, stampDir);
+    const failingSource = join(root, "packages", "gg-core", "src", "index.ts");
+    const readFile = (path: string) => {
+      if (path === failingSource) throw Object.assign(new Error("locked"), { code: "EBUSY" });
+      return readFileSync(path);
+    };
+    const next = build(root, stampDir, { readFile });
+    expect(next.calls).toEqual(["@kenkaiiii/gg-core", "@kenkaiiii/ggcoder"]);
+    expect(next.results[2]?.reason).toBe("inputs could not be hashed (locked)");
+    expect(existsSync(stampFile(stampDir, "gg-core"))).toBe(false);
+    expect(build(root, stampDir).calls).toEqual(["@kenkaiiii/gg-core", "@kenkaiiii/ggcoder"]);
+  });
+
+  it("treats any error in the build check as a reason to build", () => {
+    const { root, stampDir } = packagesFixture();
+    build(root, stampDir);
+    const decision = decidePackageBuild({
+      stampPath: stampFile(stampDir, "gg-ai"),
+      pkg: "@kenkaiiii/gg-ai",
+      fingerprint: JSON.parse(readFileSync(stampFile(stampDir, "gg-ai"), "utf8")).fingerprint,
+      outputDir: join(root, "packages", "gg-ai", "dist"),
+      readFile: () => {
+        throw new Error("disk gone");
+      },
+    });
+    expect(decision).toEqual({ build: true, reason: "build check failed: disk gone" });
+  });
+
+  it("hashes trees by content and path, independent of timestamps", () => {
+    const { root } = packagesFixture();
+    const src = join(root, "packages", "gg-ai", "src");
+    const before = treeContentHash(src);
+    utimesSync(join(src, "index.ts"), new Date(0), new Date(0));
+    expect(treeContentHash(src)).toEqual(before);
+    writeFileSync(join(src, "index.ts"), "export const name = 'changed';\n");
+    expect(treeContentHash(src).hash).not.toBe(before.hash);
+  });
+
+  it("parses the force flag alone or with Installed Smoke and rejects anything else", () => {
+    expect(parseLocalBuildArgs([], "win32")).toEqual({
+      installedSmoke: false,
+      forcePackageBuilds: false,
+    });
+    expect(parseLocalBuildArgs(["--force-package-builds"], "darwin")).toEqual({
+      installedSmoke: false,
+      forcePackageBuilds: true,
+    });
+    expect(parseLocalBuildArgs(["--installed-smoke", "--force-package-builds"], "win32")).toEqual({
+      installedSmoke: true,
+      forcePackageBuilds: true,
+    });
+    expect(() => parseLocalBuildArgs(["--installed-smoke"], "darwin")).toThrow(
+      "Installed Smoke packaging requires Windows.",
+    );
+    expect(() => parseLocalBuildArgs(["--unknown"], "win32")).toThrow("Usage");
+    expect(() =>
+      parseLocalBuildArgs(["--force-package-builds", "--force-package-builds"], "win32"),
+    ).toThrow("Usage");
+  });
+
+  it("runs the package step through the stamps with the real pnpm build command", () => {
+    const source = readFileSync(join(here, "build-local-hotfix.mjs"), "utf8");
+    const main = source.slice(source.indexOf("async function main()"));
+    expect(main).toContain(
+      'runBuild: (packageName) => run(pnpm, ["--filter", packageName, "build"])',
+    );
+    expect(main).toContain('join(repoRoot, ".gg", "local-fixes", "package-build-stamps")');
+    expect(main).toContain("force: forcePackageBuilds");
+  });
+
+  it("leaves the root build unchanged", () => {
+    const rootPackage = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8"));
+    expect(rootPackage.scripts.build).toBe("pnpm -r build");
+  });
+
+  it.each([
+    ".github/workflows/ci.yml",
+    ".github/workflows/release.yml",
+    ".github/workflows/phase-26-macos-dev.yml",
+    ".github/ci/size-gate.mjs",
+    "package.json",
+    "gg-app/package.json",
+    "packages/gg-ai/package.json",
+    "packages/gg-agent/package.json",
+    "packages/gg-core/package.json",
+    "packages/ggcoder/package.json",
+  ])("keeps %s free of package build stamps", (path) => {
+    const text = readFileSync(join(repoRoot, ...path.split("/")), "utf8");
+    expect(text).not.toContain("package-build-stamps");
+    expect(text).not.toContain("--force-package-builds");
   });
 });

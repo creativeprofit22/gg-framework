@@ -1,7 +1,17 @@
 // Build an unsigned local-patched installer. Official release builds are unchanged.
 import { createHash } from "node:crypto";
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, statSync, writeFileSync, readFileSync } from "node:fs";
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+  readFileSync,
+} from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -594,8 +604,300 @@ function writeInstallerManifest(metadata, manifestName = "latest-installer.json"
   console.log(`Payload SHA-256: ${metadata.payload.sha256}`);
 }
 
+// Local Fork: skip framework package builds whose inputs and output are unchanged.
+export const PACKAGE_BUILD_STAMP_SCHEMA = "gg-local-package-build/1";
+export const FRAMEWORK_PACKAGES = Object.freeze([
+  Object.freeze({ name: "@kenkaiiii/gg-ai", dir: "gg-ai", deps: Object.freeze([]) }),
+  Object.freeze({ name: "@kenkaiiii/gg-agent", dir: "gg-agent", deps: Object.freeze(["gg-ai"]) }),
+  Object.freeze({ name: "@kenkaiiii/gg-core", dir: "gg-core", deps: Object.freeze(["gg-ai"]) }),
+  Object.freeze({
+    name: "@kenkaiiii/ggcoder",
+    dir: "ggcoder",
+    deps: Object.freeze(["gg-ai", "gg-agent", "gg-core"]),
+  }),
+]);
+const PACKAGE_CONFIG_FILES = Object.freeze([
+  "package.json",
+  "tsconfig.json",
+  "tsconfig.build.json",
+  "tsup.config.ts",
+]);
+const ROOT_BUILD_INPUT_FILES = Object.freeze(["tsconfig.json", "pnpm-lock.yaml"]);
+
+function packageStampSha256(data) {
+  return createHash("sha256").update(data).digest("hex");
+}
+
+function packageStampJson(value) {
+  if (Array.isArray(value)) return `[${value.map(packageStampJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    const keys = Object.keys(value).sort();
+    return `{${keys.map((key) => `${JSON.stringify(key)}:${packageStampJson(value[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+const compareText = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+const isPackageStampHash = (value) => typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
+
+/** Content hash of every file under dir; links and special files throw so the caller builds. */
+export function treeContentHash(dir, readFile = readFileSync) {
+  const files = [];
+  const visit = (absolute, relative) => {
+    for (const entry of readdirSync(absolute, { withFileTypes: true })) {
+      const path = join(absolute, entry.name);
+      const rel = relative ? `${relative}/${entry.name}` : entry.name;
+      if (entry.isSymbolicLink()) throw new Error(`refusing to hash a link: ${rel}`);
+      if (entry.isDirectory()) visit(path, rel);
+      else if (entry.isFile())
+        files.push({ path: rel, sha256: packageStampSha256(readFile(path)) });
+      else throw new Error(`refusing to hash a special file: ${rel}`);
+    }
+  };
+  if (!lstatSync(dir).isDirectory()) throw new Error(`not a directory: ${dir}`);
+  visit(dir, "");
+  files.sort((a, b) => compareText(a.path, b.path));
+  return { hash: packageStampSha256(packageStampJson(files)), files: files.length };
+}
+
+function optionalFileHash(path, readFile) {
+  try {
+    return packageStampSha256(readFile(path));
+  } catch (error) {
+    if (error?.code === "ENOENT") return null;
+    throw error;
+  }
+}
+
+export function packageBuildFingerprintInputs({
+  root,
+  pkg,
+  dependencyFingerprints,
+  nodeVersion = process.version,
+  platform = process.platform,
+  arch = process.arch,
+  readFile = readFileSync,
+}) {
+  const packageRoot = join(root, "packages", pkg.dir);
+  const dependencies = {};
+  for (const dir of pkg.deps) {
+    const fingerprint = dependencyFingerprints[dir];
+    if (!isPackageStampHash(fingerprint)) throw new Error(`no fingerprint for dependency ${dir}`);
+    dependencies[dir] = fingerprint;
+  }
+  return {
+    schema: PACKAGE_BUILD_STAMP_SCHEMA,
+    package: pkg.name,
+    source: treeContentHash(join(packageRoot, "src"), readFile).hash,
+    config: Object.fromEntries(
+      PACKAGE_CONFIG_FILES.map((name) => [
+        name,
+        optionalFileHash(join(packageRoot, name), readFile),
+      ]),
+    ),
+    root: Object.fromEntries(
+      ROOT_BUILD_INPUT_FILES.map((name) => [name, optionalFileHash(join(root, name), readFile)]),
+    ),
+    runtime: { nodeVersion, platform, arch },
+    dependencies,
+  };
+}
+
+export function packageBuildFingerprint(inputs) {
+  return packageStampSha256(packageStampJson(inputs));
+}
+
+function packageStampChecksum({ schema, package: name, fingerprint, output }) {
+  return packageStampSha256(packageStampJson({ schema, package: name, fingerprint, output }));
+}
+
+export function readPackageBuildStamp(path) {
+  let raw;
+  try {
+    raw = readFileSync(path, "utf8");
+  } catch (error) {
+    return {
+      ok: false,
+      reason: error?.code === "ENOENT" ? "no stamp" : `stamp unreadable (${error?.code})`,
+    };
+  }
+  let stamp;
+  try {
+    stamp = JSON.parse(raw);
+  } catch {
+    return { ok: false, reason: "stamp is not valid JSON" };
+  }
+  if (!stamp || typeof stamp !== "object" || Array.isArray(stamp)) {
+    return { ok: false, reason: "stamp is not an object" };
+  }
+  if (stamp.schema !== PACKAGE_BUILD_STAMP_SCHEMA) {
+    return { ok: false, reason: "stamp schema differs" };
+  }
+  const valid =
+    typeof stamp.package === "string" &&
+    isPackageStampHash(stamp.fingerprint) &&
+    isPackageStampHash(stamp.output) &&
+    isPackageStampHash(stamp.checksum);
+  if (!valid) return { ok: false, reason: "stamp fields are malformed" };
+  if (packageStampChecksum(stamp) !== stamp.checksum) {
+    return { ok: false, reason: "stamp checksum mismatch" };
+  }
+  return { ok: true, stamp };
+}
+
+export function writePackageBuildStamp(path, { pkg, fingerprint, output }) {
+  const fields = { schema: PACKAGE_BUILD_STAMP_SCHEMA, package: pkg, fingerprint, output };
+  mkdirSync(dirname(path), { recursive: true });
+  const temporary = `${path}.${process.pid}.tmp`;
+  writeFileSync(
+    temporary,
+    `${JSON.stringify({ ...fields, checksum: packageStampChecksum(fields) })}\n`,
+  );
+  renameSync(temporary, path);
+}
+
+export function invalidatePackageBuildStamp(path) {
+  rmSync(path, { force: true });
+}
+
+/** Skip only when the stamp, the inputs and the built output all agree; any doubt builds. */
+export function decidePackageBuild({
+  stampPath,
+  pkg,
+  fingerprint,
+  outputDir,
+  force = false,
+  dependencyBuilt = false,
+  readFile = readFileSync,
+}) {
+  try {
+    if (force) return { build: true, reason: "forced" };
+    if (dependencyBuilt) return { build: true, reason: "a package it depends on was rebuilt" };
+    if (!fingerprint) return { build: true, reason: "inputs could not be hashed" };
+    const read = readPackageBuildStamp(stampPath);
+    if (!read.ok) return { build: true, reason: read.reason };
+    if (read.stamp.package !== pkg) return { build: true, reason: "stamp is for another package" };
+    if (read.stamp.fingerprint !== fingerprint) return { build: true, reason: "inputs changed" };
+    if (!existsSync(outputDir)) return { build: true, reason: "output missing" };
+    const output = treeContentHash(outputDir, readFile);
+    if (output.files === 0) return { build: true, reason: "output missing" };
+    if (output.hash !== read.stamp.output) {
+      return { build: true, reason: "output changed since it was stamped" };
+    }
+    return { build: false, reason: "inputs and output unchanged" };
+  } catch (error) {
+    return { build: true, reason: `build check failed: ${error?.message ?? String(error)}` };
+  }
+}
+
+/** Builds in dependency order; a rebuilt package rebuilds every package that depends on it. */
+export function buildFrameworkPackages({
+  root,
+  stampDir,
+  runBuild,
+  packages = FRAMEWORK_PACKAGES,
+  force = false,
+  log = console.log,
+  nodeVersion = process.version,
+  platform = process.platform,
+  arch = process.arch,
+  readFile = readFileSync,
+  now = Date.now,
+}) {
+  const fingerprints = {};
+  const built = new Set();
+  const results = [];
+  for (const pkg of packages) {
+    const startedAt = now();
+    let fingerprint = null;
+    let fingerprintError = null;
+    try {
+      fingerprint = packageBuildFingerprint(
+        packageBuildFingerprintInputs({
+          root,
+          pkg,
+          dependencyFingerprints: fingerprints,
+          nodeVersion,
+          platform,
+          arch,
+          readFile,
+        }),
+      );
+    } catch (error) {
+      fingerprintError = error?.message ?? String(error);
+    }
+    fingerprints[pkg.dir] = fingerprint;
+    const stampPath = join(stampDir, `${pkg.dir}.json`);
+    const outputDir = join(root, "packages", pkg.dir, "dist");
+    const decision = decidePackageBuild({
+      stampPath,
+      pkg: pkg.name,
+      fingerprint,
+      outputDir,
+      force,
+      dependencyBuilt: pkg.deps.some((dir) => built.has(dir)),
+      readFile,
+    });
+    const reason =
+      fingerprintError && decision.reason === "inputs could not be hashed"
+        ? `inputs could not be hashed (${fingerprintError})`
+        : decision.reason;
+    if (!decision.build) {
+      results.push({ name: pkg.name, built: false, reason, ms: now() - startedAt });
+      log(`Skipping ${pkg.name} build: ${reason}`);
+      continue;
+    }
+    log(`Building ${pkg.name}: ${reason}`);
+    // An interrupted or failed build must leave no stamp behind.
+    invalidatePackageBuildStamp(stampPath);
+    const status = runBuild(pkg.name);
+    if (status !== 0) {
+      results.push({
+        name: pkg.name,
+        built: false,
+        reason: `build failed (exit ${status})`,
+        ms: now() - startedAt,
+      });
+      return { status, results };
+    }
+    built.add(pkg.dir);
+    if (fingerprint) {
+      try {
+        const output = treeContentHash(outputDir, readFile);
+        if (output.files === 0) throw new Error("build produced no output");
+        writePackageBuildStamp(stampPath, { pkg: pkg.name, fingerprint, output: output.hash });
+      } catch (error) {
+        invalidatePackageBuildStamp(stampPath);
+        log(`Not stamping ${pkg.name} (next run rebuilds it): ${error?.message ?? String(error)}`);
+      }
+    }
+    results.push({ name: pkg.name, built: true, reason, ms: now() - startedAt });
+  }
+  return { status: 0, results };
+}
+
+export function parseLocalBuildArgs(args, platform) {
+  const allowed = new Set(["--installed-smoke", "--force-package-builds"]);
+  if (args.some((arg) => !allowed.has(arg)) || new Set(args).size !== args.length) {
+    throw new Error("Usage: build-local-hotfix.mjs [--installed-smoke] [--force-package-builds]");
+  }
+  const installedSmoke = args.includes("--installed-smoke");
+  if (installedSmoke && platform !== "win32") {
+    throw new Error("Installed Smoke packaging requires Windows.");
+  }
+  return { installedSmoke, forcePackageBuilds: args.includes("--force-package-builds") };
+}
+
+function logStepTime(label, startedAt) {
+  console.log(`Step time: ${label} ${((Date.now() - startedAt) / 1000).toFixed(1)} s`);
+}
+
 async function main() {
-  const installedSmoke = installedSmokeBuildRequested(process.argv.slice(2), process.platform);
+  const buildStartedAt = Date.now();
+  const { installedSmoke, forcePackageBuilds } = parseLocalBuildArgs(
+    process.argv.slice(2),
+    process.platform,
+  );
   const identity = installedSmoke ? INSTALLED_SMOKE_IDENTITY : LOCAL_FORK_IDENTITY;
   const configPaths = localBuildConfigPaths(srcTauri, installedSmoke);
   const releaseMetadata = committedReleaseNotes(repoRoot);
@@ -618,26 +920,41 @@ async function main() {
     rustShell: readIdentityRustShell(srcTauri),
   });
 
+  let stepStartedAt = Date.now();
   if (!env.GG_NODE_SOURCE) {
     const stagedNode = stagedNodePath();
     if (existsSync(stagedNode)) env.GG_NODE_SOURCE = stagedNode;
     else requireSuccess(run(pnpm, ["--filter", "gg-app", "stage:node"]));
   }
-  for (const packageName of [
-    "@kenkaiiii/gg-ai",
-    "@kenkaiiii/gg-agent",
-    "@kenkaiiii/gg-core",
-    "@kenkaiiii/ggcoder",
-  ]) {
-    requireSuccess(run(pnpm, ["--filter", packageName, "build"]));
+  logStepTime("stage node", stepStartedAt);
+  stepStartedAt = Date.now();
+  const packageBuild = buildFrameworkPackages({
+    root: repoRoot,
+    stampDir: join(repoRoot, ".gg", "local-fixes", "package-build-stamps"),
+    force: forcePackageBuilds,
+    runBuild: (packageName) => run(pnpm, ["--filter", packageName, "build"]),
+  });
+  for (const { name, built, ms } of packageBuild.results) {
+    console.log(`Step time: ${name} ${built ? "build" : "skip"} ${(ms / 1000).toFixed(1)} s`);
   }
+  requireSuccess(packageBuild.status);
+  // The safety tests below exercise ggcoder, so its build step must have run last.
+  if (packageBuild.results.at(-1)?.name !== "@kenkaiiii/ggcoder") {
+    throw new Error("Framework package step did not finish with @kenkaiiii/ggcoder.");
+  }
+  logStepTime("framework packages", stepStartedAt);
   // Runs against the freshly built packages, before anything is bundled.
+  stepStartedAt = Date.now();
   runPhaseLeaseRegressionGate();
-  requireSuccess(run(pnpm, ["--filter", "gg-app", "bundle:sidecar"]));
+  logStepTime("Roadmap safety tests", stepStartedAt);
+  stepStartedAt = Date.now();
+  requireSuccess(run(pnpm, ["--filter", "gg-app", "bundle:sidecar", "--reuse-deps"]));
+  logStepTime("sidecar bundle", stepStartedAt);
   const bundleBuildStartedAt = Date.now();
   const buildStatus = runWithCargoTomlRestored(cargoTomlPath, () =>
     run(pnpm, tauriBuildArgs(process.platform, configPaths), localCargoBuildEnv(env)),
   );
+  logStepTime("Tauri build", bundleBuildStartedAt);
   if (buildStatus !== 0) process.exit(buildStatus);
   const installer = freshInstallerForPlatform(
     srcTauri,
@@ -660,6 +977,7 @@ async function main() {
     installerManifest(installer, payload, releaseMetadata, payloadMetadata, identity),
     installedSmoke ? INSTALLED_SMOKE_MANIFEST_NAME : undefined,
   );
+  logStepTime("total", buildStartedAt);
 }
 
 const invokedDirectly = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];

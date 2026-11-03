@@ -53,10 +53,29 @@ export const CURRENT_LOCAL_RELEASE_NOTES = requireCurrentReleaseNotes(releaseNot
 /** Newest first. Maintained only by the Local Fork release flow. */
 export const LOCAL_CHANGELOG: LocalChangelogEntry[] = [
   {
-    id: "local-2026-11-01-upstream-0991-snappier-sessions",
+    id: "local-2026-11-03-upstream-01001-chat-terminal",
     label: CURRENT_LOCAL_RELEASE_NOTES.label,
     date: CURRENT_LOCAL_RELEASE_NOTES.date,
     items: CURRENT_LOCAL_RELEASE_NOTES.sections.flatMap(({ items }) => items),
+  },
+  {
+    id: "local-2026-11-01-upstream-0991-snappier-sessions",
+    label: "Upstream 0.99.1, with snappier long sessions",
+    date: "2026-11-01",
+    items: [
+      "Long sessions feel a lot snappier. GG now tidies a conversation up at `400k` tokens instead of letting it balloon toward a million, and pulling in a new tool mid-chat no longer throws away the prompt cache, so replies start sooner and cost less. When a giant chat gets summarized, it shrinks and retries instead of falling back to a thin file list, so your agent still knows your goal and what it already did.",
+      "Everyday tools are quicker and tidier. `find` runs up to `49x` faster in big repos, helpers start sooner and report back once, with the answer on top, and old checkpoints, diagnostics and helper leftovers clear out after `30 days`. Your prompts never get written into debug logs.",
+      "Picking up an old chat just works again. If GG had searched the web earlier in a conversation, reopening it could bounce back with an `HTTP 400` error; now every saved chat continues where you left off. Signing in with your Claude account is sturdier too: GG always presents itself as a current Claude Code, even on a first launch with no internet, so `Opus 5.5` never gets turned away.",
+      "Ken's activity bar now matches the main one, with the same `Stop` key and the tool panel toggle right beside it. Home's mode plates and tagline grow together in big windows and stay on one tidy row in small ones, and `Notes` in the side panel wrap instead of running off the edge. On a fresh install, Settings marks the suggested folder `Not saved yet.`, so one press of `Save folder` gets Code, Chat and Motion going.",
+      "Your own limits still win. If you set when conversations get tidied up, GG honours that number everywhere, and if you signed in with ChatGPT, the larger context you picked is kept instead of being cut back to `400k`.",
+      "`Find ideas` now searches big projects area by area and reads your Git history too. Step 2 shows each area as it goes, early finds appear in Review marked `Still checking` while the rest finish, `Stop search` halts everything at once, and an area that failed offers `Try this area again` without redoing the others.",
+      "When GitHub refuses to start your CI, usually because of a billing or spending limit, the CI badge in the title bar now says the checks haven't run instead of looking like an ordinary failure. Your agent is told once, so it stops waiting on checks that never ran.",
+      "Your agent is gentler on your PC and clearer with you. Whole-project tests and builds from different windows take turns instead of all running at once, a long check moved to the background is never stopped just for going quiet, and after each command your agent sees exactly which files changed. A project's own check plan runs only the commands you've approved. Replies use plainer words, and your agent stops to ask only when it truly needs your call.",
+      "`Notes` tasks are quicker to sort. Every open task now has its own up and down arrows, so one click reorders it without opening the row menu. The `New task` field grows as you type, turns pasted line breaks into spaces, and `Enter` adds the task right away.",
+      "Typing a full slash command and pressing `Enter` now sends it, instead of only filling in the name and making you press `Enter` again. If the capitals are off, like `/Commit`, GG fixes the name first. Claude also no longer stops a turn with an error when a failed tool sent back an image or brought in a new tool.",
+      "Smaller fixes add up. Panes are ready sooner because they no longer wait for the slash-command list, big `Notes` no longer show stale content, and when a Roadmap Git check fails you get the real reason, like Git taking too long on a busy disk, with what to do next. A custom `/steroids` command of your own now replaces the built-in one, just like a custom `/commit`.",
+      "Research tables are easier to scan. Licences are coloured by how freely you can reuse the code, a country tag after a repo shows the country's name on hover, and number and date columns still sort correctly when some rows hold a placeholder like `n/a`.",
+    ],
   },
   {
     id: "local-2026-10-29-upstream-0975-gg-world",

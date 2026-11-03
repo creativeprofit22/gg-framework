@@ -1,4 +1,4 @@
-import { ArrowsDownUpIcon, CheckIcon, XIcon } from "@phosphor-icons/react";
+import { ArrowsDownUpIcon, CheckIcon, XIcon } from "./phosphor-icons";
 import type { RoadmapPhaseMoveDraft } from "@kenkaiiii/gg-core/roadmap-workflow";
 import { RoadmapPhaseOrderComparison } from "./RoadmapPhaseOrderComparison";
 

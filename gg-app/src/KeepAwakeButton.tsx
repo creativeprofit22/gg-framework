@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { CoffeeIcon } from "@phosphor-icons/react";
+import { CoffeeIcon } from "./phosphor-icons";
 import { theme } from "./theme";
 import { Badge } from "./Badge";
 import { getKeepAwake, setKeepAwake } from "./agent";

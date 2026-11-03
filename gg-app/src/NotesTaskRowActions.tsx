@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState } from "react";
-import { ArrowDownIcon, ArrowUpIcon, DotsThreeIcon } from "@phosphor-icons/react";
+import { ArrowDownIcon, ArrowUpIcon, DotsThreeIcon } from "./phosphor-icons";
 import { theme } from "./theme";
 
 type Direction = "up" | "down";

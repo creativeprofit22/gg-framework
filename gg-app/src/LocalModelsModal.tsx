@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { ArrowsClockwiseIcon, XIcon } from "@phosphor-icons/react";
+import { ArrowsClockwiseIcon, XIcon } from "./phosphor-icons";
 import { theme } from "./theme";
 import { Modal } from "./Modal";
 import { ModalDismissButton } from "./modal-embed";

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { XIcon } from "@phosphor-icons/react";
+import { XIcon } from "./phosphor-icons";
 import {
   isManuallyRunnableTaskStatus,
   isRunnableTaskStatus,

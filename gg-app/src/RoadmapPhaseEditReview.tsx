@@ -1,4 +1,4 @@
-import { CheckIcon, PencilSimpleIcon, XIcon } from "@phosphor-icons/react";
+import { CheckIcon, PencilSimpleIcon, XIcon } from "./phosphor-icons";
 import type {
   RoadmapPhaseEditDraft,
   RoadmapPhaseFieldChange,

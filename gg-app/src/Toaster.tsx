@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { InfoIcon, CheckCircleIcon, WarningIcon, XCircleIcon, XIcon } from "@phosphor-icons/react";
+import { InfoIcon, CheckCircleIcon, WarningIcon, XCircleIcon, XIcon } from "./phosphor-icons";
 import { theme } from "./theme";
 import {
   subscribeToasts,

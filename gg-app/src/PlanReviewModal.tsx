@@ -1,6 +1,6 @@
 import { PLAN_REVISION_FEEDBACK_MAX_CHARS } from "@kenkaiiii/gg-core/plan-review";
 import { useEffect, useId, useRef, useState } from "react";
-import { SealCheckIcon } from "@phosphor-icons/react";
+import { SealCheckIcon } from "./phosphor-icons";
 import { MENTOR_DISPLAY_NAME } from "./brand";
 import { theme } from "./theme";
 import { Markdown } from "./LazyMarkdown";

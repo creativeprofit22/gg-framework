@@ -1,5 +1,5 @@
 import { useLayoutEffect, useRef } from "react";
-import { AtIcon, XIcon } from "@phosphor-icons/react";
+import { AtIcon, XIcon } from "./phosphor-icons";
 import { theme } from "./theme";
 import { pinSize, usePresenceList } from "./usePresenceList";
 

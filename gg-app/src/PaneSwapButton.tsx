@@ -1,4 +1,4 @@
-import { ArrowLeftIcon, ArrowRightIcon, ArrowsLeftRightIcon } from "@phosphor-icons/react";
+import { ArrowLeftIcon, ArrowRightIcon, ArrowsLeftRightIcon } from "./phosphor-icons";
 import { useId, type Ref } from "react";
 
 export interface PaneSwapButtonProps {

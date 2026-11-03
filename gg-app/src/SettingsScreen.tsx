@@ -6,7 +6,7 @@ import {
   PuzzlePieceIcon,
   PaperPlaneTiltIcon,
   SyringeIcon,
-} from "@phosphor-icons/react";
+} from "./phosphor-icons";
 import { BackButton } from "./BackButton";
 import { Badge } from "./Badge";
 import { EmbeddedModal } from "./modal-embed";

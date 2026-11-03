@@ -1,10 +1,5 @@
 import { useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
-import {
-  CaretDownIcon,
-  CaretRightIcon,
-  CornersInIcon,
-  CornersOutIcon,
-} from "@phosphor-icons/react";
+import { CaretDownIcon, CaretRightIcon, CornersInIcon, CornersOutIcon } from "./phosphor-icons";
 
 export interface ReviewDockItem {
   id: "plan" | "roadmap";

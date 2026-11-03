@@ -1,5 +1,5 @@
 import { useEffect, useId, useMemo, useState, type CSSProperties } from "react";
-import { DownloadSimpleIcon } from "@phosphor-icons/react";
+import { DownloadSimpleIcon } from "./phosphor-icons";
 import { getVersion } from "@tauri-apps/api/app";
 import { error as logError } from "@tauri-apps/plugin-log";
 import { HomeTitle } from "./HomeTitle";

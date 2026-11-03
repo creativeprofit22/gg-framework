@@ -237,7 +237,7 @@ import {
   ListChecksIcon,
   SparkleIcon,
   SquareIcon,
-} from "@phosphor-icons/react";
+} from "./phosphor-icons";
 import { ActionDial, type DialOption } from "./ActionDial";
 import {
   COMPOSER_ACTION_IDS,

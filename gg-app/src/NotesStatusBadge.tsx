@@ -9,7 +9,7 @@ import {
   ProhibitIcon,
   WarningCircleIcon,
   type Icon,
-} from "@phosphor-icons/react";
+} from "./phosphor-icons";
 import { NOTES_PHASE_STATUS_PRESENTATION } from "./notes-lifecycle-presentation";
 import type { NotesPhaseStatus } from "./notes-types";
 

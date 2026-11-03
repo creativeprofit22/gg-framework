@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { FileTextIcon, FolderSimpleIcon, PlusIcon, XIcon } from "@phosphor-icons/react";
+import { FileTextIcon, FolderSimpleIcon, PlusIcon, XIcon } from "./phosphor-icons";
 import { theme } from "./theme";
 
 /** Mirrors the sidecar's limit in ggcoder `core/goals-store.ts`. */

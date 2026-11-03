@@ -1,5 +1,5 @@
 import { useLayoutEffect, useRef } from "react";
-import { FileTextIcon, FilmStripIcon, XIcon } from "@phosphor-icons/react";
+import { FileTextIcon, FilmStripIcon, XIcon } from "./phosphor-icons";
 import { theme } from "./theme";
 import type { PendingAttachment } from "./attachments";
 import { pinSize, usePresenceList } from "./usePresenceList";

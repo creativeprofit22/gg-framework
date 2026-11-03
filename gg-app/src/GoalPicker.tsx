@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { TrashIcon } from "@phosphor-icons/react";
+import { TrashIcon } from "./phosphor-icons";
 import { theme } from "./theme";
 import {
   waitForReady,

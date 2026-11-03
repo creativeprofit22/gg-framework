@@ -1,10 +1,6 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
-import {
-  ClockCounterClockwiseIcon,
-  GraduationCapIcon,
-  YoutubeLogoIcon,
-} from "@phosphor-icons/react";
+import { ClockCounterClockwiseIcon, GraduationCapIcon, YoutubeLogoIcon } from "./phosphor-icons";
 import { getVersion } from "@tauri-apps/api/app";
 import { openUrl, openWhatsNewWindow } from "./agent";
 import { Badge } from "./Badge";

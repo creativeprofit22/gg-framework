@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState } from "react";
-import { CheckIcon, CaretDownIcon } from "@phosphor-icons/react";
+import { CheckIcon, CaretDownIcon } from "./phosphor-icons";
 import { FloatingSurface } from "./FloatingSurface";
 import { useScrollEdges } from "./popover";
 

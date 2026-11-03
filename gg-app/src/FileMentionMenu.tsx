@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { FileTextIcon } from "@phosphor-icons/react";
+import { FileTextIcon } from "./phosphor-icons";
 import { theme } from "./theme";
 import type { FileHit } from "./agent";
 import { useScrollEdges } from "./popover";

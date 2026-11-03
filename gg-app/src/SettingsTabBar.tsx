@@ -1,5 +1,5 @@
 import { useLayoutEffect, useRef } from "react";
-import type { Icon } from "@phosphor-icons/react";
+import type { Icon } from "./phosphor-icons";
 import { viewportScale } from "./motion-geometry";
 
 /**

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from "react";
-import { TrashIcon } from "@phosphor-icons/react";
+import { TrashIcon } from "./phosphor-icons";
 import {
   deleteJiwa,
   deleteMemory,

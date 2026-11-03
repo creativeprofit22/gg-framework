@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState } from "react";
-import { DotsThreeIcon } from "@phosphor-icons/react";
+import { DotsThreeIcon } from "./phosphor-icons";
 import { theme } from "./theme";
 
 export interface PickerMoreItem {

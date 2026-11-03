@@ -2,12 +2,7 @@ import { canonicalProjectKey, isNotesPhasePresent } from "@kenkaiiii/gg-core/pro
 import type { SlashCommand } from "./agent";
 import { forwardRef, useEffect, useId, useImperativeHandle, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import {
-  DatabaseIcon,
-  HardDrivesIcon,
-  WarningCircleIcon,
-  WarningIcon,
-} from "@phosphor-icons/react";
+import { DatabaseIcon, HardDrivesIcon, WarningCircleIcon, WarningIcon } from "./phosphor-icons";
 import { DeferredNotesModal } from "./DeferredNotesModal";
 import { NotesDisclosure } from "./NotesDisclosure";
 import { RoadmapReminderAlert } from "./RoadmapReminderAlert";

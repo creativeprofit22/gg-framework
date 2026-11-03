@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { DotsSixVerticalIcon } from "@phosphor-icons/react";
+import { DotsSixVerticalIcon } from "./phosphor-icons";
 import { isNotesPhasePresent } from "@kenkaiiii/gg-core/project-notes";
 import {
   planRoadmapPhaseMove,

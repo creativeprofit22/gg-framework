@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState } from "react";
-import { SquaresFourIcon } from "@phosphor-icons/react";
+import { SquaresFourIcon } from "./phosphor-icons";
 import { setupWindows, arrangeAllWindows } from "./agent";
 import { supportsNativeSelectPopup } from "./platform";
 import { playSound } from "./sounds";

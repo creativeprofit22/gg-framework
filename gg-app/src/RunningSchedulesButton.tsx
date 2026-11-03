@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState } from "react";
-import { StopIcon } from "@phosphor-icons/react";
+import { StopIcon } from "./phosphor-icons";
 import { createPortal } from "react-dom";
 import { theme } from "./theme";
 import { FloatingSurface } from "./FloatingSurface";

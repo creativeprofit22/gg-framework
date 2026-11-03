@@ -5,7 +5,7 @@ import {
   GitBranchIcon,
   ListChecksIcon,
   XIcon,
-} from "@phosphor-icons/react";
+} from "./phosphor-icons";
 import {
   isRoadmapPhaseEditDraft,
   isRoadmapPhaseMoveDraft,

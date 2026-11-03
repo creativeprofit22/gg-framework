@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef } from "react";
 import { createPortal } from "react-dom";
-import { XIcon } from "@phosphor-icons/react";
+import { XIcon } from "./phosphor-icons";
 import { theme } from "./theme";
 import { withViewTransition } from "./view-transition";
 import { ModalEmbedProvider, useEmbedHostNamed, useModalEmbedState } from "./modal-embed";

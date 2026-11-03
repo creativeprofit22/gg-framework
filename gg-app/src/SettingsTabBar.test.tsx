@@ -2,7 +2,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { useState } from "react";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { GearSixIcon, KeyIcon, SyringeIcon } from "@phosphor-icons/react";
+import { GearSixIcon, KeyIcon, SyringeIcon } from "./phosphor-icons";
 import { SettingsTabBar, type SettingsTab } from "./SettingsTabBar";
 
 afterEach(() => {

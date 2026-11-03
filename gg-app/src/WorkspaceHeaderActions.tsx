@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { ListChecksIcon, PlusIcon } from "@phosphor-icons/react";
+import { ListChecksIcon, PlusIcon } from "./phosphor-icons";
 import type { ProjectTask, WorkspaceMode } from "./agent";
 import { Icon } from "./icons";
 import { WindowLayoutButton } from "./WindowLayoutButton";

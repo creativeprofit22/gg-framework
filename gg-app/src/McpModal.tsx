@@ -1,11 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import {
-  CheckCircleIcon,
-  XCircleIcon,
-  LockIcon,
-  MinusCircleIcon,
-  XIcon,
-} from "@phosphor-icons/react";
+import { CheckCircleIcon, XCircleIcon, LockIcon, MinusCircleIcon, XIcon } from "./phosphor-icons";
 import { theme } from "./theme";
 import { Modal } from "./Modal";
 import { ModalDismissButton, useModalEmbedState } from "./modal-embed";

@@ -1,6 +1,6 @@
 import { useEffect, useId, useState } from "react";
 import { open as openFolderDialog } from "@tauri-apps/plugin-dialog";
-import { PencilSimpleIcon, XIcon } from "@phosphor-icons/react";
+import { PencilSimpleIcon, XIcon } from "./phosphor-icons";
 import { theme } from "./theme";
 import {
   waitForReady,

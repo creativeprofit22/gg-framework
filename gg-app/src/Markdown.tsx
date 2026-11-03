@@ -39,7 +39,7 @@ import {
   TagIcon,
   TextAlignLeftIcon,
   WarningIcon,
-} from "@phosphor-icons/react";
+} from "./phosphor-icons";
 import { openUrlStrict, sendPrompt } from "./agent";
 import { PRODUCT_DISPLAY_NAME } from "./brand";
 import { STEROIDS_COLLAPSIBLE_TABLE_MARKER } from "@kenkaiiii/gg-core/slash-command-contract";

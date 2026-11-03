@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { XIcon } from "@phosphor-icons/react";
+import { XIcon } from "./phosphor-icons";
 import { theme } from "./theme";
 import type { QueuedMessage } from "./agent";
 import { pinSize, usePresenceList } from "./usePresenceList";

@@ -7,7 +7,7 @@ import {
   ListChecksIcon,
   MinusCircleIcon,
   WarningCircleIcon,
-} from "@phosphor-icons/react";
+} from "./phosphor-icons";
 import type { ChecklistEntry, ChecklistSnapshot } from "./agent";
 import { SettingsTabBar, type SettingsTab } from "./SettingsTabBar";
 import "./ChecklistScreen.css";

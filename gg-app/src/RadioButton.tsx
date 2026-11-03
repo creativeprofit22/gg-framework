@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useId, useRef, useState } from "react";
-import { PauseIcon, PlayIcon, HeadphonesIcon, SpeakerHighIcon } from "@phosphor-icons/react";
+import { PauseIcon, PlayIcon, HeadphonesIcon, SpeakerHighIcon } from "./phosphor-icons";
 import { theme } from "./theme";
 import { getRadioState, setRadio, setRadioVolume, type RadioStation } from "./agent";
 import { Modal } from "./Modal";

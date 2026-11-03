@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from "react";
-import { PlusIcon } from "@phosphor-icons/react";
+import { PlusIcon } from "./phosphor-icons";
 import { NotesCompletedGroup } from "./NotesCompletedGroup";
 import { NotesTaskRowActions } from "./NotesTaskRowActions";
 import { groupNotesTasks, isCompletedNotesTask } from "./notes-status";

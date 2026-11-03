@@ -1,6 +1,6 @@
 import type { AskAnswerDelta } from "./ask-user";
 import { memo, useLayoutEffect, useRef, useState } from "react";
-import { AtIcon } from "@phosphor-icons/react";
+import { AtIcon } from "./phosphor-icons";
 import { theme } from "./theme";
 import { ChatErrorNotice } from "./ChatErrorNotice";
 import { openImageDataUrl, openProjectPath } from "./agent";

@@ -7,7 +7,7 @@ import {
   DotsSixVerticalIcon,
   SquareSplitHorizontalIcon,
   SquareSplitVerticalIcon,
-} from "@phosphor-icons/react";
+} from "./phosphor-icons";
 import { AgentPane, type AgentPaneProps } from "./AgentPane";
 import { PaneDropOverlay, PANE_DRAG_MIME } from "./PaneDropOverlay";
 import { PRIMARY_PANE_ID } from "./pane-routing";

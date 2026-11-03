@@ -53,7 +53,8 @@ function runGate() {
     [path.join(root, ".github/ci/size-gate.mjs"), "--only", "frontend:initial"],
     {
       encoding: "utf8",
-      timeout: 10_000,
+      // A timed-out child reports status null, not 1; allow for a loaded parallel run.
+      timeout: 30_000,
     },
   );
 }

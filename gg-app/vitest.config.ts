@@ -11,8 +11,9 @@ export default defineConfig({
   test: {
     globals: true,
     // Windows fork fan-out repeatedly exceeded worker startup limits in the
-    // full suite. A single thread worker also avoids competing sidecar fixtures.
-    ...(process.platform === "win32" ? { pool: "threads" as const, maxWorkers: 1 } : {}),
+    // full suite, so use threads. One worker made the suite ~4x slower; four
+    // keeps the real-sidecar fixtures within their startup budget.
+    ...(process.platform === "win32" ? { pool: "threads" as const, maxWorkers: 4 } : {}),
     // `scripts/**` covers the pure helpers of the packaged Windows smoke: the
     // smoke itself only runs on Windows, but its MSI-selection and
     // PID-ownership logic is safety-critical and must be verified on every OS.

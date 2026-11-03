@@ -328,7 +328,7 @@
     },
     {
       "name": "dev_app",
-      "description": "Drive the running GG desktop dev app (Tauri + Vite on :1420). GG desktop dev app only; use screenshot for other URLs. open: attach to the control port the user gave, or launch it (Windows, isolated profile). snapshot: pane state plus visible interactive elements with refs like e7 (screenshot:true adds a PNG; expect waits until it holds first, without acting). act: type, press, click a ref, or send_prompt; each returns confirmed/contradicted/unreadable and what changed (expect is inferred when omitted). close stops only an app this session launched. One connection per session.",
+      "description": "Drive the running GG desktop dev app (Tauri + Vite on :1420). GG desktop dev app only; use screenshot for other URLs. open: attach to the control port the user gave, or launch it (Windows, isolated profile). snapshot: pane state plus visible interactive elements with refs like e7 (screenshot:true adds a PNG; expect waits until it holds first, without acting). act: type, press, click a ref, send_prompt, scroll (a wheel step, or a ref into view) or select (a dropdown option); each returns confirmed/contradicted/unreadable and what changed (expect is inferred when omitted). window: list the app's windows (What's new, extra project windows) or switch to one. close stops only an app this session launched. One connection per session. A launch that is not ready within its call keeps starting in the background; call open launch again to keep waiting. open launch with provider \"fake\" answers prompts with canned replies, for chat flows without a login.",
       "schema": {
         "type": "object",
         "properties": {
@@ -338,6 +338,7 @@
               "open",
               "snapshot",
               "act",
+              "window",
               "close"
             ],
             "description": "What to do"
@@ -356,6 +357,13 @@
             "minimum": 1,
             "maximum": 65535
           },
+          "provider": {
+            "description": "open launch: \"fake\" connects a local scripted AI provider, so prompts get instant canned replies (\"Fake reply N: …\") without a login",
+            "type": "string",
+            "enum": [
+              "fake"
+            ]
+          },
           "pane": {
             "description": "snapshot/act: workspace pane id (default focused)",
             "type": "string",
@@ -372,12 +380,22 @@
               "type",
               "press",
               "click",
-              "send_prompt"
+              "send_prompt",
+              "scroll",
+              "select"
             ]
           },
           "text": {
-            "description": "act type/send_prompt: text",
+            "description": "act type/send_prompt: text; select: the option's label or value",
             "type": "string"
+          },
+          "direction": {
+            "description": "act scroll: one wheel step this way, over ref or the window middle; omit it with ref to scroll that element into view",
+            "type": "string",
+            "enum": [
+              "up",
+              "down"
+            ]
           },
           "key": {
             "description": "act press: key name such as Enter, Escape, Tab, a",
@@ -398,7 +416,11 @@
             }
           },
           "ref": {
-            "description": "act type/click: element ref from the latest snapshot, e.g. e7",
+            "description": "act type/click/select/scroll: element ref from the latest snapshot, e.g. e7",
+            "type": "string"
+          },
+          "window": {
+            "description": "window: id from the window list to switch to; omit it to list the app's windows",
             "type": "string"
           },
           "expect": {
@@ -432,17 +454,17 @@
             ]
           },
           "deadline_ms": {
-            "description": "Time limit (act/snapshot/attach default 5000, max 30000; launch default 180000, max 300000)",
+            "description": "Time limit (act/snapshot/attach default 5000, max 30000; launch default 120000, max 240000)",
             "type": "integer",
             "minimum": 100,
-            "maximum": 300000
+            "maximum": 240000
           }
         },
         "required": [
           "action"
         ]
       },
-      "hash": "a0b8ed248307bb017069835593e46302b46b066d99d6294148baef1b5530a613"
+      "hash": "b4983a384ba44d9e831bdef82e33c6157b71fee0abb47e83481aa3ac8dba5874"
     },
     {
       "name": "edit",

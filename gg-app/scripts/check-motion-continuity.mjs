@@ -269,6 +269,15 @@ async function contentChecks(page, traces) {
   }
 }
 
+// The checklist is a Deck tool: the More keypad opens it, its panel head closes it.
+async function openChecklist(page) {
+  if ((await page.getByRole("region", { name: "More" }).count()) === 0)
+    await page.getByRole("button", { name: "More", exact: true }).click();
+  await page.getByRole("button", { name: "Checklist", exact: true }).click();
+}
+async function closeChecklist(page) {
+  await page.getByRole("button", { name: "Close Checklist", exact: true }).click();
+}
 async function checklistChecks(page, traces) {
   const input = page.locator("textarea.input");
   await input.fill("Fictional selected draft stays intact");
@@ -283,7 +292,7 @@ async function checklistChecks(page, traces) {
     await page.evaluate((mode) => {
       window.motionBridge.checklist = mode;
     }, mode);
-    await page.getByRole("button", { name: "Checklist", exact: true }).click();
+    await openChecklist(page);
     await page
       .getByText(
         mode === "loading"
@@ -294,18 +303,34 @@ async function checklistChecks(page, traces) {
         { exact: true },
       )
       .waitFor();
-    await page.evaluate(() =>
-      window.motionBridge.emit({
-        type: "text_delta",
-        data: { text: " Fictional hidden streaming continuation." },
-      }),
+    // Unique per round, so a wait never matches an earlier round's text.
+    const continuation = `Fictional ${mode} streaming continuation.`;
+    await page.evaluate(
+      (text) =>
+        window.motionBridge.emit({
+          type: "text_delta",
+          // The trailing space completes the last word; streaming holds a partial one.
+          data: { text: ` ${text} ` },
+        }),
+      continuation,
     );
-    // useAgentEvents buffers later deltas for 100ms. Deliver to the live store
-    // while Activity is hidden, rather than testing an event still in transit.
-    await page.waitForTimeout(120);
-    await page.getByRole("button", { name: "Back to chat" }).click();
-    // View Transition commits asynchronously; compare visible layout, not the
-    // zero geometry of Activity's still-hidden DOM during snapshot capture.
+    // The Deck keeps the chat on screen beside the checklist, so the reply
+    // lands and plays its entrance there. Close only once it has settled:
+    // any word entrance after closing is a replay.
+    await page.waitForFunction(
+      (text) => {
+        const transcript = document.querySelector(".transcript");
+        return (
+          transcript?.textContent?.includes(text) &&
+          [...transcript.querySelectorAll(".md-word")].every((word) =>
+            word.getAnimations().every((a) => a.playState === "finished"),
+          )
+        );
+      },
+      continuation,
+      { timeout: 5000 },
+    );
+    await closeChecklist(page);
     await input.waitFor({ state: "visible" });
     assert.equal(await input.inputValue(), "Fictional selected draft stays intact");
     assert.deepEqual(await input.evaluate((el) => [el.selectionStart, el.selectionEnd]), [10, 18]);
@@ -331,8 +356,8 @@ async function checklistChecks(page, traces) {
         .filter((a) => a.playState === "running" || a.playState === "paused").length,
     }));
     assert(
-      returnedText.text.includes("Fictional hidden streaming continuation."),
-      `${mode}: hidden stream content is already revealed: ${JSON.stringify({ tail: returnedText.text.slice(-700), enteringWords: returnedText.enteringWords })}`,
+      returnedText.text.includes(continuation),
+      `${mode}: stream content is already revealed: ${JSON.stringify({ tail: returnedText.text.slice(-700), enteringWords: returnedText.enteringWords })}`,
     );
     assert.equal(returnedText.enteringWords, 0, `${mode}: old word entrances cannot replay`);
     traces.push({ name: `checklist-${mode}`, before, after, returnedText });
@@ -389,8 +414,8 @@ async function fallbackChecks(page, url, traces) {
       );
     assert.equal(traveling, 0, `${mode}: no layout travel`);
     await input.fill("Fictional preserved fallback draft");
-    await page.getByRole("button", { name: "Checklist", exact: true }).click();
-    await page.getByRole("button", { name: "Back to chat" }).click();
+    await openChecklist(page);
+    await closeChecklist(page);
     assert.equal(await input.inputValue(), "Fictional preserved fallback draft");
     assert.deepEqual(await page.evaluate(() => window.motionBridge.unknown), []);
     traces.push({ name: mode, passed: true });
@@ -418,25 +443,39 @@ async function toolTransaction(page, events, traces) {
     for (const animation of animations) animation.finish();
     const last = row.getBoundingClientRect().top;
     await new Promise(requestAnimationFrame);
+    const finalScroll = transcript.scrollTop;
+    // Resize observers run after this frame's callbacks; a second frame
+    // catches a correction they would apply after the animated commit.
+    await new Promise(requestAnimationFrame);
     return {
       before,
       first,
       middle,
       last,
+      settled: row.getBoundingClientRect().top,
       scroll,
-      finalScroll: transcript.scrollTop,
+      finalScroll,
       count: animations.length,
       bottom: transcript.scrollHeight - transcript.clientHeight - transcript.scrollTop,
     };
   }, events);
   traces.push({ name: "tool-layout", ...result });
   if (!record) {
-    assert(result.count > 0, "Tool geometry uses a coordinated transition");
+    // The fork's tool feed keeps a fixed height while it fills, so only a
+    // change that moves the conversation owes a transition.
+    assert(
+      result.count > 0 || Math.abs(result.last - result.before) <= 1,
+      `Tool geometry uses a coordinated transition: ${JSON.stringify(result)}`,
+    );
     assert(
       Math.abs(result.first - result.before) <= 1,
       `First tool frame must be continuous: ${JSON.stringify(result)}`,
     );
     assert(Math.abs(result.finalScroll - result.scroll) <= 1, "No late tool scroll correction");
+    assert(
+      Math.abs(result.settled - result.last) <= 1,
+      `No late tool layout jump: ${JSON.stringify(result)}`,
+    );
     assert(Math.abs(result.bottom) <= 2, "Tool change retains bottom follow");
   }
 }
@@ -448,7 +487,11 @@ try {
     original.replace("/src/main.tsx", "/scripts/fixtures/motion-continuity.tsx"),
   );
   const outDir = path.join(temporary, "dist");
-  await build({ root, build: { outDir, rolldownOptions: { input: entry } } });
+  // The mock bridge must install before shared chunks (agent.ts) read Tauri internals.
+  await build({
+    root,
+    build: { outDir, rolldownOptions: { input: entry, output: { strictExecutionOrder: true } } },
+  });
   server = await preview({ root, build: { outDir }, preview: { host: "127.0.0.1", port: 0 } });
   const address = server.httpServer.address();
   assert(address && typeof address !== "string");
@@ -495,7 +538,7 @@ try {
         });
         try {
           await page.goto(url);
-          await page.getByRole("button", { name: "Checklist", exact: true }).waitFor();
+          await page.getByRole("button", { name: "More", exact: true }).waitFor();
           const input = page.locator("textarea.input");
           await input.fill(
             Array.from({ length: 18 }, (_, i) => `Fictional draft line ${i}`).join("\n"),
@@ -619,14 +662,14 @@ try {
           await trace(
             page,
             "checklist-open",
-            () => page.getByRole("button", { name: "Checklist", exact: true }).click(),
+            () => openChecklist(page),
             ".transcript > :last-child",
             traces,
           );
           await trace(
             page,
             "checklist-return",
-            () => page.getByRole("button", { name: "Back to chat" }).click(),
+            () => closeChecklist(page),
             ".transcript > :last-child",
             traces,
           );
@@ -745,7 +788,10 @@ try {
                   const animations = document
                     .getAnimations()
                     .filter((a) => a.effect?.pseudoElement?.includes("view-transition"));
-                  const exits = animations.filter((a) => a.animationName === "surface-out");
+                  // Dialogs exit with surface-out; popovers and menus with pop-out.
+                  const exits = animations.filter((a) =>
+                    ["surface-out", "pop-out"].includes(a.animationName),
+                  );
                   for (const a of exits) {
                     a.pause();
                     a.currentTime = 75;
@@ -765,20 +811,6 @@ try {
               return transition;
             };
           });
-          await trace(
-            page,
-            "background-open",
-            () => page.getByTitle("Background tasks", { exact: true }).click(),
-            ".bgtasks-menu",
-            traces,
-          );
-          await trace(
-            page,
-            "background-close",
-            () => page.getByTitle("Background tasks", { exact: true }).click(),
-            ".bgtasks-menu",
-            traces,
-          );
           for (const method of ["toggle", "escape", "outside", "select"]) {
             await page.getByRole("button", { name: "Fixture choice", exact: true }).click();
             await trace(
@@ -807,7 +839,10 @@ try {
           await trace(
             page,
             "schedule-last-stop",
-            () => page.getByRole("button", { name: "stop", exact: true }).click(),
+            () =>
+              page
+                .getByRole("button", { name: "Stop schedule: Fictional schedule", exact: true })
+                .click(),
             ".schedules-menu",
             traces,
           );

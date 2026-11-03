@@ -817,11 +817,30 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     segments: PromptSegment[];
     isCurrent: () => boolean;
   } | null>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const liveRegionRef = useRef<HTMLDivElement>(null);
+  const chatLayout = useMemo(
+    () =>
+      createChatLayoutMotion(() => ({
+        transcript: scrollRef.current,
+        surfaces: [liveRegionRef.current],
+      })),
+    [],
+  );
   // Number of messages queued mid-run (injected as steering by the sidecar).
   const [queuedCount, setQueuedCount] = useState(0);
   // Pending queued messages, so each can be cancelled individually. Kept
   // alongside the count because the sidecar is the source of truth for both.
-  const [queuedMessages, setQueuedMessages] = useState<QueuedMessage[]>([]);
+  const [queuedMessages, updateQueuedMessages] = useState<QueuedMessage[]>([]);
+  // Upstream 9494aa2c: dock changes move the conversation, so record where it
+  // is before the update and let the commit glide it into place.
+  const setQueuedMessages = useCallback(
+    (update: Parameters<typeof updateQueuedMessages>[0]) => {
+      chatLayout.capture();
+      updateQueuedMessages(update);
+    },
+    [chatLayout],
+  );
   const [state, setState] = useState<AgentState | null>(null);
   // Transient "KEN IS ON"/"KEN IS OFF" takeover banner shown when Autopilot
   // is toggled. Null = not showing; the banner clears itself via `onDone`
@@ -864,7 +883,14 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     });
   }, [cancel, cancelling]);
   const [status, setStatus] = useState("connecting to agent\u2026");
-  const [liveToolFeed, setLiveToolFeed] = useState<LiveToolEntry[]>([]);
+  const [liveToolFeed, updateLiveToolFeed] = useState<LiveToolEntry[]>([]);
+  const setLiveToolFeed = useCallback(
+    (update: Parameters<typeof updateLiveToolFeed>[0]) => {
+      chatLayout.capture();
+      updateLiveToolFeed(update);
+    },
+    [chatLayout],
+  );
   const [tokens, setTokens] = useState(0);
   const [doneStatus, setDoneStatus] = useState<string | null>(null);
   // Pending plan awaiting an explicit workflow-gate decision in the review dock.
@@ -1116,14 +1142,18 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       return false;
     }
   });
-  const setToolsHiddenPersisted = useCallback((hidden: boolean) => {
-    try {
-      localStorage.setItem("gg-tools-hidden", hidden ? "1" : "0");
-    } catch {
-      /* ignore */
-    }
-    setToolsHidden(hidden);
-  }, []);
+  const setToolsHiddenPersisted = useCallback(
+    (hidden: boolean) => {
+      try {
+        localStorage.setItem("gg-tools-hidden", hidden ? "1" : "0");
+      } catch {
+        /* ignore */
+      }
+      chatLayout.capture();
+      setToolsHidden(hidden);
+    },
+    [chatLayout],
+  );
   const toggleTools = useCallback(
     () => setToolsHiddenPersisted(!toolsHidden),
     [toolsHidden, setToolsHiddenPersisted],
@@ -1345,16 +1375,6 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   // re-capture state). Lets turn_end pick the right context-token formula by
   // provider without re-subscribing the SSE listener on every state change.
   const stateRef = useRef<AgentState | null>(null);
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const liveRegionRef = useRef<HTMLDivElement>(null);
-  const chatLayout = useMemo(
-    () =>
-      createChatLayoutMotion(() => ({
-        transcript: scrollRef.current,
-        surfaces: [liveRegionRef.current],
-      })),
-    [],
-  );
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const projectNotesActionsRef = useRef<ProjectNotesPromptActions>(null);
   const observedSessionResetOperationsRef = useRef<Set<string>>(new Set());
@@ -1414,14 +1434,6 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     lastScrollTopRef.current = el.scrollTop;
   }, []);
 
-  // Motion continuity (upstream 9494aa2c): commit captured layout before paint.
-  useLayoutEffect(() => {
-    if (chatLayout.commit(stickToBottomRef.current, scrollToBottom) && scrollRef.current) {
-      lastScrollTopRef.current = scrollRef.current.scrollTop;
-    }
-  });
-  useLayoutEffect(() => () => chatLayout.cancel(), [chatLayout, hydrateNonce]);
-
   // Same as scrollToBottom, but a no-op while the user has scrolled up to read.
   const maybeScrollToBottom = useCallback(() => {
     if (stickToBottomRef.current) scrollToBottom();
@@ -1434,6 +1446,15 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   const transcriptFrameRef = useRef<HTMLDivElement>(null);
   const dockElRef = useRef<HTMLDivElement | null>(null);
   const dockRoRef = useRef<ResizeObserver | null>(null);
+  const syncDockHeight = useCallback((): boolean => {
+    const frame = transcriptFrameRef.current;
+    const dock = dockElRef.current;
+    if (!frame || !dock) return false;
+    const height = nextDockHeight(dock, frame.style.getPropertyValue("--dock-h"));
+    if (height === null) return false;
+    frame.style.setProperty("--dock-h", height);
+    return true;
+  }, []);
   const dockRef = useCallback(
     (dock: HTMLDivElement | null) => {
       dockRoRef.current?.disconnect();
@@ -1441,12 +1462,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       dockElRef.current = dock;
       if (!dock) return;
       const apply = (): void => {
-        const frame = transcriptFrameRef.current;
-        if (!frame) return;
-        const height = nextDockHeight(dock, frame.style.getPropertyValue("--dock-h"));
-        if (height === null) return;
-        frame.style.setProperty("--dock-h", height);
-        maybeScrollToBottom();
+        if (syncDockHeight()) maybeScrollToBottom();
       };
       apply();
       if (typeof ResizeObserver === "undefined") return;
@@ -1454,8 +1470,21 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       observer.observe(dock);
       dockRoRef.current = observer;
     },
-    [maybeScrollToBottom],
+    [maybeScrollToBottom, syncDockHeight],
   );
+
+  // Motion continuity (upstream 9494aa2c): commit captured layout before paint.
+  // The dock floats, so its reserved height is synced here first: waiting for
+  // its ResizeObserver would move the conversation a frame later, unanimated.
+  useLayoutEffect(() => {
+    const dockMoved = syncDockHeight();
+    if (chatLayout.commit(stickToBottomRef.current, scrollToBottom)) {
+      if (scrollRef.current) lastScrollTopRef.current = scrollRef.current.scrollTop;
+    } else if (dockMoved) {
+      maybeScrollToBottom();
+    }
+  });
+  useLayoutEffect(() => () => chatLayout.cancel(), [chatLayout, hydrateNonce]);
 
   // Track the user's scroll intent by direction, not distance: while a reply
   // streams, every commit re-pins, so any "near the bottom" allowance snapped a

@@ -11,6 +11,27 @@ const state = {
   model: "fixture-model",
   running: false,
 };
+// Every pane the app creates gets one fictional session; events go to the latest.
+const panes = new Map<string, { generation: number; sessionId: string }>();
+let activePane: string | null = null;
+let queuedPrompts = 0;
+function openPane(paneId: string): number {
+  const generation = (panes.get(paneId)?.generation ?? 0) + 1;
+  panes.set(paneId, { generation, sessionId: `fixture-session-${paneId}-${generation}` });
+  activePane = paneId;
+  queueMicrotask(() => void emit("agent-pane-ready", { paneId, generation }));
+  return generation;
+}
+function paneStatus(paneId: string): {
+  ready: boolean;
+  error: null;
+  generation: number;
+  sessionId: string;
+} {
+  const pane = panes.get(paneId);
+  if (!pane) throw new Error(`pane '${paneId}' does not exist`);
+  return { ready: true, error: null, ...pane };
+}
 export const bridge = {
   unknown: [] as string[],
   prompts: [] as unknown[],
@@ -23,12 +44,29 @@ export const bridge = {
     }),
   // Mock IPC delivers listeners synchronously. Commit those updates before
   // returning so the runner can inspect WAAPI before its first frame.
-  emit: (event: SidecarEvent): Promise<void> => flushSync(() => emit("agent-event", event)),
+  emit: (event: SidecarEvent): Promise<void> =>
+    flushSync(() => {
+      const pane = activePane === null ? undefined : panes.get(activePane);
+      if (!pane) throw new Error("Fixture pane is not ready");
+      if (event.type === "run_start") state.running = true;
+      if (event.type === "run_end") state.running = false;
+      return emit("agent-event", { paneId: activePane, sessionId: pane.sessionId, ...event });
+    }),
 };
 mockWindows("main");
 mockIPC(
   (command, payload) => {
+    const paneId = String((payload as { paneId?: unknown } | undefined)?.paneId ?? "primary");
     switch (command) {
+      case "agent_pane_create":
+      case "agent_pane_restore":
+        return openPane(paneId);
+      case "agent_pane_status":
+        return paneStatus(paneId);
+      case "agent_pane_dispose":
+        panes.delete(paneId);
+        return null;
+      case "agent_pane_copy_restore":
       case "window_restore_target":
         return { mode: "code", cwd: state.cwd, sessionPath: null };
       case "sidecar_port":
@@ -115,15 +153,66 @@ mockIPC(
             },
           ],
         };
+      case "app_local_patched_update_status":
+        return {
+          available: false,
+          currentSourceSha: "fixture",
+          upstreamIntegrated: true,
+          origin: "unavailable",
+        };
+      case "plugin:app|version":
+        return "0.0.0-fixture";
+      case "app_settings_get":
+        return { projectsRoot: "/fictional", configured: true };
+      case "app_auth_status":
+        return { providers: [] };
+      case "agent_trophies":
+        return {
+          trophies: [],
+          categories: [],
+          earned: 0,
+          total: 0,
+          unlocked: [],
+          eventNonce: null,
+        };
+      case "agent_roadmap_phase_draft_get":
+        return { status: "ok", draft: null };
+      case "agent_notes_get":
+        return {
+          status: "ok",
+          recoveredFromBackup: false,
+          snapshot: {
+            projectKey: "fixture-project",
+            revision: 0,
+            document: {
+              version: 3,
+              reference: "",
+              currentFocus: "",
+              tasks: [],
+              handoff: { text: "", updatedAt: null, readAt: null },
+              updatedAt: "2026-10-07T00:00:00.000Z",
+              legacyImportedAt: null,
+              phases: [],
+              references: [],
+            },
+          },
+        };
+      case "qwen_cloud_connection_status":
+        return { ok: false, code: "native-unavailable" };
+      case "agent_verify_plan_status":
+        return null;
       case "agent_prompt":
         bridge.prompts.push(payload);
-        return null;
+        // Like the daemon: a prompt sent during a run waits in the queue.
+        if (!state.running) return { queued: false, count: 0 };
+        queuedPrompts += 1;
+        return { queued: true, count: queuedPrompts, queueId: `q${queuedPrompts}`, steers: false };
       case "plugin:log|log":
       case "plugin:window|set_title":
         return null;
       default:
         bridge.unknown.push(command);
-        console.error(`Unsupported fixture bridge call: ${command}`);
+        console.error(`Unsupported fixture bridge call: ${command} ${JSON.stringify(payload)}`);
         throw new Error(`Unsupported fixture bridge call: ${command}`);
     }
   },

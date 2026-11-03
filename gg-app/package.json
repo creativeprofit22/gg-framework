@@ -31,7 +31,7 @@
     "evidence:workspace-shell": "node scripts/workspace-shell-evidence.mjs",
     "nav": "node scripts/dev-nav.mjs",
     "test": "pnpm test:parallel && pnpm test:updater-serial && pnpm test:installer-serial && pnpm test:launcher-serial && pnpm test:workspace-narrow && pnpm test:review-dock && pnpm test:workspace-shell-evidence && pnpm test:whats-new-loading",
-    "test:parallel": "vitest run --exclude scripts/update-with-local-fixes.test.ts --exclude scripts/install-local-patched.test.mjs --exclude scripts/launch-local-patched.test.mjs --exclude scripts/workspace-shell-evidence.test.mjs",
+    "test:parallel": "vitest run --project ui --project node",
     "test:updater-serial": "vitest run scripts/update-with-local-fixes.test.ts --no-file-parallelism",
     "test:installer-serial": "vitest run scripts/install-local-patched.test.mjs --no-file-parallelism",
     "test:launcher-serial": "vitest run scripts/launch-local-patched.test.mjs --no-file-parallelism",

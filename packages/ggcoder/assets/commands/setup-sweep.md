@@ -46,6 +46,13 @@ Detect:
   - monorepo/workspace markers
   - generated/build/vendor folders to exclude, including per-package copies (`**/dist`, `**/node_modules`, `**/target`)
   - tool state, backups, or snapshot folders that contain copies of source (e.g. `.gg/`), which would otherwise surface as fake duplicates or drift
+- Tracked files that need a reading tier other than source:
+  - generated or vendored files committed to git (codegen output, lockfile-like snapshots, bundled third-party code, minified assets)
+  - data folders: JSON/YAML/CSV fixtures, i18n strings, schema or seed data
+- Cross-area pairs, i.e. two places that must agree:
+  - Rust and TypeScript sharing types or commands (e.g. `src-tauri` + a frontend: serde structs vs TS types, `generate_handler!` vs `invoke` names)
+  - lists that must match: mirrored enums, registries, status values, event names
+  - docs that describe code: command/flag/config references, examples
 
 If no meaningful project files exist, stop and report that there is nothing to configure.
 
@@ -199,8 +206,31 @@ Use this shape:
     "sourceGlobs": ["<actual source globs for this project>"],
     "testGlobs": ["<actual test globs for this project>"],
     "routeGlobs": ["<actual route globs if applicable>"],
-    "configGlobs": ["<actual config globs>"],
-    "docsGlobs": ["<actual docs globs>"]
+    "configGlobs": ["<actual config and data globs>"],
+    "docsGlobs": ["<actual docs globs>"],
+    "generatedGlobs": ["<tracked generated or vendored globs>"]
+  },
+  "readingTiers": {
+    "source": "full",
+    "test": "light",
+    "docs": "light",
+    "config": "light",
+    "generated": "automated"
+  },
+  "readingDepth": {
+    "full": "Open every assigned line range with the read tool and check it for all three lanes: Prune, Refactor (with the refactoring skill's thresholds) and Drift.",
+    "light": "Open every assigned line range with the read tool, but check only this list: references to files, symbols, commands or config keys that no longer exist; tests, fixtures or data for removed behavior; docs, examples or data that disagree with the code; values that must match code (enums, event names, defaults). Skip the Refactor smell review.",
+    "automated": "Not opened by helpers. Covered only by the configured analyzers and the planner's file hashes; reported as automated checks only, never as read."
+  },
+  "crossArea": {
+    "pairs": [
+      {
+        "kind": "rust-ts-types|must-match-list|docs-vs-code",
+        "a": "<path or glob>",
+        "b": "<path or glob>",
+        "note": "<what must agree>"
+      }
+    ]
   },
   "analyzers": {
     "safe": [
@@ -239,6 +269,23 @@ Field rules:
 - `coverage` says what a command checks: `files` (accepts file paths), `package` (one workspace package), or `repo` (whole repository). Prefer a `files` or `package` variant whenever the tool supports one.
 - Commands that take runtime input use curly placeholders that `/sweep` fills in: `{files}` for scoped paths and `{name}` for a module or symbol name. Never use angle brackets in generated commands.
 - `skip` starts empty. The user adds `{ "path": "<file>", "symbol": "<optional name>", "reason": "<why>" }` entries for findings they have accepted or rejected, so later sweeps do not re-raise them.
+- Tier globs decide how each file is read. The planner checks them in this order and the first match wins: `generatedGlobs` → `testGlobs` → any `commands/*.md` (always source) → `configGlobs` → `docsGlobs` → `sourceGlobs`/`routeGlobs`. Data files (fixtures, i18n, schema or seed data) go in `configGlobs`. Tracked generated or vendored files go in `generatedGlobs`; build output that is not tracked stays in `excludeGlobs`.
+- `readingTiers` maps each planner tier (`source`, `test`, `docs`, `config`, `generated`) to `full`, `light` or `automated`. Keep the defaults above unless the user asks otherwise: source and command files are read in full; tests, docs and data are read lightly; generated files get automated checks only.
+- `readingDepth` holds the exact text helpers follow for each depth. Copy it unchanged: "light" still opens every assigned line, so read counts stay honest.
+- `crossArea.pairs` lists the detected pairs that must agree. Use an empty array when there are none.
+
+## Step 4.5: Check every file has a tier
+
+Run the sweep planner against the new config:
+
+```bash
+node "${GG_AGENT_DIR:-$HOME/.gg}/scripts/sweep-plan.mjs" --out .gg/sweep/setup-check.json
+```
+
+- Exit 0: every tracked file has a tier or is excluded. Continue.
+- Exit 2: **stop.** The planner lists files that match no pattern. Group them by folder and extension, then use `ask_user` once per group: source, test, docs, config/data, generated, or exclude, with your recommended pick marked. Add the answers to the matching globs in `.gg/sweep.config.json` and run the planner again until it exits 0. Never guess a tier.
+- Exit 1 because the script is missing or the folder is not a git repository: do not guess. Note in the Step 7 report that `/sweep --all` will not be available until it is fixed (reinstalling GG Coder's `/setup-sweep` installs the scripts into `~/.gg/scripts/`).
+- Exit 1 or 3 for any other reason: show the error and fix the config before continuing.
 
 ## Step 5: Generate `.gg/commands/sweep.md`
 
@@ -253,19 +300,22 @@ The generated command must include:
 - Merge/dedupe/conflict pass.
 - Task creation rules with exact files and verification commands.
 - Tight report format.
+- Whole-repo `--all` runs: plan, shared notes, waves of helpers, the read ledger with one retry, and one cross-area pass.
+- Honest counts: in scope, read (receipt-backed, by tier), automated checks only, unread with causes.
+- `--resume` from `.gg/sweep/plan.json` and `ledger.json` in a fresh session.
 
 ### Project-local `/sweep` template
 
 ````markdown
 ---
-argument-hint: [natural-language scope | recent | --all | --map [focus] | --merge]
+argument-hint: [natural-language scope | recent | --all | --resume | --map [focus] | --merge]
 description: Sweep this project for dead code, refactor opportunities, and duplicate/drifted implementations; creates concrete task-pane tasks.
-allowed-tools: tasks, Bash, Read, Grep, Glob, LS, subagent, steroids, ask_user
+allowed-tools: tasks, Bash, Read, Grep, Glob, LS, subagent, steroids, ask_user, spawn_agent, wait_agent, Write
 ---
 
 # Sweep
 
-Run a scoped code-health sweep for this project. Accept natural-language scopes like `the onboarding flow`, `calendar posting`, `whatever we just changed`, or exact paths. Do not edit project files.
+Run a scoped code-health sweep for this project. Accept natural-language scopes like `the onboarding flow`, `calendar posting`, `whatever we just changed`, or exact paths. Do not edit project files; the only files a sweep writes are run-state files under `.gg/sweep/` for `--all` and `--resume`.
 
 Configured project: <detected project summary>.
 Config file: `.gg/sweep.config.json`.
@@ -302,6 +352,114 @@ Run once after all area sweeps finish and before fixing anything.
 3. Order survivors by severity, then dependency order, with Prune before Refactor on the same files. The task pane keeps creation order, so if the order changed, remove and re-add the survivors in the final order with their prompts unchanged.
 4. Report before/after counts, each merge with its reason, and the final order. End with: `Run the tasks one at a time and commit after each. Press CTRL + T to open the task pane.`
 
+## Whole-repo run: `--all` and `--resume`
+
+These replace Steps 1–3; the run then continues with Steps 4–6. Every in-scope file is read once, in chunks, and the run keeps its state in `.gg/sweep/` so a fresh session can finish it.
+
+- Planner: `node "${GG_AGENT_DIR:-$HOME/.gg}/scripts/sweep-plan.mjs"`. Ledger (checks which planned lines helpers really read): `node "${GG_AGENT_DIR:-$HOME/.gg}/scripts/sweep-ledger.mjs"`. If either is missing, stop and tell the user to re-run `/setup-sweep`.
+- State files, the only files this run writes:
+  - `.gg/sweep/plan.json`, `.gg/sweep/ledger.json`: written by the scripts.
+  - `.gg/sweep/helpers.json`: `[{ agentId, chunk, state, error, receipt, transcript }]`, one record per finished helper, the fields `wait_agent` returned plus the chunk id.
+  - `.gg/sweep/run.json`: `{ "stage": "plan|waves|ledger|retry|cross-area|tasks|done", "wave": 0, "updated": "ISO time" }`.
+  - `.gg/sweep/notes.md`, `.gg/sweep/analyzers.md`.
+  - `.gg/sweep/findings/{chunk}--{agentId}.json`: one file per helper reply, so a retry or a later plan that reuses a chunk id never replaces earlier findings. Never overwrite a findings file.
+  - `.gg/sweep/findings.prev/`: findings from earlier plans of this run, moved there by **Resume rules** step 2.
+
+### W1. Start or resume
+
+1. If `git status --short` shows uncommitted changes, say sweeps should start from committed work and suggest `/commit`; continue anyway. For `--all`, confirm with `ask_user` that a whole-repo sweep is wanted (it is broad and creates more tasks).
+2. `--resume` with no unfinished run (`.gg/sweep/run.json` missing or its stage `done`): say so and stop.
+3. If `.gg/sweep/run.json` exists and its stage is not `done`, use `ask_user`: resume that run (recommended) or start fresh. Resuming: apply **Resume rules** below, then continue at the stage `run.json` names.
+4. Start fresh when the user chose it, or for `--all` when `run.json` is missing or its stage is `done`: before W2, move any existing `plan.json`, `ledger.json`, `helpers.json`, `run.json`, `notes.md`, `analyzers.md`, `*.prev.json`, `findings/` and `findings.prev/` from `.gg/sweep/` into `.gg/sweep/old-{YYYYMMDDHHMMSS}/`. Leave `setup-check.json` in place. A finished run's helper records, findings and ledger belong to its plan, and chunk ids repeat between plans, so keeping them would skip new chunks and fail the ledger.
+
+### W2. Plan
+
+Run the planner. It reads `.gg/sweep.config.json` and writes `.gg/sweep/plan.json`.
+
+- Exit 2: stop. List the files it prints, grouped by folder, and tell the user to add them to a tier glob or `excludeGlobs` in `.gg/sweep.config.json`, or re-run `/setup-sweep`. Never guess a tier.
+- Exit 1 or 3: stop and show the error.
+- Exit 0: continue. `plan.counts` holds the in-scope counts (`byTier`, `binary`). On a fresh run, write `[]` to `.gg/sweep/helpers.json` and set `run.json` stage to `plan`, so the ledger always has a helpers file, even when a session dies during the first wave or W4 starts no helpers because every tier is `automated`.
+
+### W3. Analyzers and shared notes
+
+Run the safe analyzers once over the repo (Step 2 rules) and save each command, exit code and the concise leads per file to `.gg/sweep/analyzers.md`. Load the `refactoring` skill, then write `.gg/sweep/notes.md`, which every helper gets: the project summary; the `readingDepth` text for each tier from the config; the Lane A–C checklists and classifications from Step 3; the refactoring skill's thresholds; the `skip` list; the Steroids rules; the findings format below.
+
+### W4. Waves
+
+A chunk is **pending** only when all of these hold: its tier is not marked `automated` in `readingTiers`; it has no record in `helpers.json`; and, when `ledger.json` exists for the current `plan.json`, at least one of its ranges there (ranges whose `chunk` is its id) has a status other than `read` or `automated`. So a chunk whose ranges the ledger already marks read, such as reads carried over by **Resume rules** step 2, is not sent again. Unread ranges of chunks that already have a `helpers.json` record go only through W6's single retry, never back through W4. Hand them out in waves of up to 8 helpers, the engine's `ACTIVE_LIMIT`: one `spawn_agent` call per wave, one task per chunk. If the engine refuses a task (for example a per-model cap), move that chunk to the next wave; never resend a refused wave unchanged.
+
+Each task gets `context_files: [".gg/sweep/notes.md"]` and a prompt with:
+
+- the chunk id and its depth from `readingTiers` (`full` or `light`)
+- the exact entries; open each with `read`, using `offset` = start and `limit` = end − start + 1
+- the analyzer leads for those files from `analyzers.md`
+- these rules: cover Prune, Refactor and Drift for these files only (read other files only to confirm a lead); do not edit files, spawn helpers, or run commands that change anything; only the `read` tool counts as reading, so never use shell or search output in place of reading an assigned range.
+
+Findings format, the helper's whole reply: one fenced `json` block, then a final line `END-SWEEP-FINDINGS`.
+
+```json
+{
+  "chunk": "source-001",
+  "findings": [
+    {
+      "lane": "prune|refactor|drift",
+      "classification": "DELETE",
+      "severity": "High",
+      "file": "src/a.ts",
+      "line": 42,
+      "evidence": "what the lines show",
+      "fix": "concrete fix direction",
+      "verify": "command or manual check"
+    }
+  ],
+  "crossArea": [
+    {
+      "kind": "rust-ts-types|must-match-list|docs-vs-code",
+      "here": "src/a.ts:10",
+      "other": "src-tauri/src/x.rs",
+      "note": "what must agree"
+    }
+  ],
+  "checked": ["src/a.ts"]
+}
+```
+
+At most 25 findings (keep the strongest), each text field at most 300 characters, and the whole reply under 30,000 characters, because the engine cuts longer helper output.
+
+### W5. Collect
+
+Wait with `wait_agent` for one `agent_id` at a time: one call caps its total output at 60,000 characters, so waiting on several helpers at once cuts the later ones short. A chunk is **partial** when its output contains `[output truncated at`, lacks the `END-SWEEP-FINDINGS` line, or its JSON does not parse; keep whatever findings do parse. After each wave, append one record per helper to `helpers.json`, save its reply to `findings/{chunk}--{agentId}.json` (with `"partial": true` when partial), and update `run.json`. Retries reuse chunk ids, so the agent id keeps every attempt's file; never overwrite or merge into an existing findings file.
+
+### W6. Ledger and one retry
+
+Run the ledger with `--plan .gg/sweep/plan.json --helpers .gg/sweep/helpers.json`, plus `--previous .gg/sweep/ledger.json` when that file exists (`--previous` applies only to a ledger written for the current `plan.json`; W1 moves older ledgers away), plus one `--automated-tier {tier}` for each tier `readingTiers` marks `automated`.
+
+- Exit 0: every planned range was read or has automated checks only.
+- Exit 4: hand out the chunks in `ledger.retry`, plus partial chunks with a request for compact output (at most 10 findings), **once**, in waves as in W4–W5. Then run the ledger again with the same flags plus `--final`. Do not retry again; whatever stays unread is reported with its cause.
+- Exit 1: stop and show the error.
+
+### W7. Cross-area pass
+
+Spawn one more helper. It is not a plan chunk, so it gets no `helpers.json` record. Give it `crossArea.pairs` from the config plus the helpers' `crossArea` leads (deduplicated, at most 40), and have it check things that compare two places:
+
+- Rust vs TypeScript types: serde structs and enums vs the TypeScript types they cross into (field names after `rename_all`, optional vs required), `generate_handler!` registrations vs frontend `invoke("...")` names, emitted event names vs listeners.
+- Lists that must match: mirrored enums, registries, status values, event names, config keys.
+- Docs vs code: commands, flags, config keys and paths in docs that no longer match the code.
+
+It uses the same findings format and limits with `"chunk": "cross-area"`; save its reply to `findings/cross-area--{agentId}.json`.
+
+### W8. Tasks and report
+
+Set `run.json` stage to `tasks`. Run Steps 4–5 over every file in `findings/` and `findings.prev/`, one findings file at a time to keep context small. A chunk can have several files (a partial first attempt and its retry, or an earlier plan's chunk with the same id); Step 4's dedupe merges their repeated findings, so read all of them rather than only the newest; the pending `Fix /sweep:` check in Step 4 stops a resumed run from adding tasks twice. Set the stage to `done`, then report with Step 6, taking counts from `plan.json` and the final `ledger.json` (`counts.byTier` for files; the Unread causes per file as Step 6 says, since `counts.byCause` counts line ranges).
+
+### Resume rules
+
+Never trust an old read of a changed file.
+
+1. Read `run.json`, `plan.json` and `ledger.json`. If `helpers.json` is missing, write `[]` to it first. Compare `git rev-parse HEAD` with `plan.gitCommit`, and run the ledger as in W6 (without `--final`); it re-hashes every planned file and marks changed ranges `changed-since-plan`. Exit 4 is expected here (ranges are still unread): continue. Exit 1: stop and show the error.
+2. If HEAD differs or `counts.byCause` shows any `changed-since-plan`: move `plan.json` to `plan.prev.json`, `ledger.json` to `ledger.prev.json` and `helpers.json` to `helpers.prev.json`; re-run the planner (handle its exit codes as in W2); write `[]` to `helpers.json`; then run the ledger with `--helpers .gg/sweep/helpers.json --previous .gg/sweep/ledger.prev.json --previous-plan .gg/sweep/plan.prev.json --final` plus the `--automated-tier` flags. This `--final` run normally exits 4, because the new plan's unread ranges wait for W4; continue. Exit 1: stop and show the error. Only reads of unchanged files carry over. Move every file in `findings/` into `findings.prev/` (names include the agent id, so they never collide with files already there), then remove from those moved files the `findings` and `crossArea` entries whose file changed (`changed-since-plan`). New chunk and retry ids restart from 001 and reuse old names, so findings for unchanged files must not stay in `findings/`; their reads carried over and they will not be read again.
+3. Continue at W4 with the chunks that are **pending** under W4's rule (no `helpers.json` record and, in the current `ledger.json`, at least one range not `read` or `automated`), or at the stage `run.json` names if it is later.
+
 ## Step 1: Resolve scope
 
 If `$ARGUMENTS` is empty or equals `recent`, resolve scope from:
@@ -313,7 +471,7 @@ If `$ARGUMENTS` is empty or equals `recent`, resolve scope from:
 
 Drop files matching the configured `excludeGlobs`.
 
-If `$ARGUMENTS` is `--all`, use the configured source, route, config, docs, and test globs for a whole-repo sweep. Warn that this is broader and may produce more findings; continue only if the user confirms.
+If `$ARGUMENTS` is `--all` or `--resume`, follow **Whole-repo run** above instead of Steps 1–3.
 
 Otherwise treat `$ARGUMENTS` as natural language. Resolve it by:
 
@@ -331,6 +489,8 @@ Build a scope map:
 If confidence is low, multiple unrelated domains match, or the scope exceeds roughly 80 source files without `--all`, ask a clarifying question before continuing.
 
 Record whether any scoped file has uncommitted changes (`git status --short -- {files}`); Step 6 uses it.
+
+Give every scoped file a tier with the config's globs, in the planner's order (first match wins): `generatedGlobs` → `testGlobs` → any `commands/*.md` (source) → `configGlobs` → `docsGlobs` → `sourceGlobs`/`routeGlobs`. Binary files and files in a tier `readingTiers` marks `automated` get automated checks only. Lanes read the rest at their tier's `readingDepth`.
 
 Rank hotspots: count recent changes per scoped file with `git log --since=90.days --format= --name-only -- {files} | sort | uniq -c | sort -rn`. Files that change often and are complex are reviewed first and break severity ties.
 
@@ -364,6 +524,7 @@ Each lane receives:
 - exact files to read
 - configured framework/language notes
 - the task creation rules below
+- each file's reading depth from `readingDepth`, and the rule that only the `read` tool counts as reading
 
 Each lane returns one finding per entry: classification, suggested severity, `file:line` evidence, what is wrong, fix direction, and verification command. It also lists what it checked when it has no findings.
 
@@ -494,12 +655,22 @@ Reply with:
 ```text
 Sweep scope: <resolved natural-language scope>
 Scope confidence: <high|medium|low>
-Files scanned: <N primary, N adjacent>
+In scope: <N> files (<source N, test N, docs N, config N, generated N, binary N>; <N primary, N adjacent> for narrow scopes)
+Read (receipt-backed): <N> files — full: <N>; light: <N> (<basis: ledger line ranges | lane receipts, file-level>)
+Automated checks only: <N> files (<generated N, binary N>)
+Unread: <N> files not fully read (<cause N, ...>)
+Partial chunks: <N> (--all and --resume only)
 Analyzers run: <N> (<list short ids>)
 Findings accepted: <N> (<N Critical, N High, N Medium, N Low>)
 Tasks created: <N>
 Skipped/rejected: <N>
 ```
+
+Counts must come from evidence, never from the file list alone:
+
+- `--all` and `--resume`: from `plan.json` and the final `ledger.json`. A file counts as read only when the ledger marks it `read`; `partial` and `unread` files count as unread, with the ledger's causes.
+- Unread causes are per file, so they add up to the Unread file count: count each `ledger.files[]` entry whose `status` is `unread` or `partial` once, under the cause of its unread ranges that comes first in this order: `changed-since-plan`, `never-assigned`, `evidence-unreadable`, `helper-failed`, `helper-timed-out`, `helper-skipped`. `counts.byCause` counts unread line ranges, not files; show it only as optional range-level detail (for example `ranges: never-assigned 5`).
+- Narrow scopes: in scope comes from the scope map and tier globs. A file counts as read only when a lane's receipt shows an `ok` `read` of it. If a receipt is cut short (`+N more`), files it does not name count as unread with cause `receipt cut short`; a lane that failed or timed out makes its unread files `helper-failed` or `helper-timed-out`. Counts are file-level, so say `lane receipts, file-level`.
 
 Then one line per task:
 
@@ -537,6 +708,7 @@ After writing the files:
 - Confirm there are no unreplaced placeholders such as `<detected...>` or `<insert...>`. Runtime `{files}`/`{name}` placeholders are allowed.
 - Run each safe analyzer once (fill runtime placeholders with a known-used file or symbol) and confirm it exits and produces meaningful output. A tracing command must find at least one known importer. Fix or drop any command that fails or silently matches nothing.
 - Confirm optional commands are marked `requiresConfirmation: true`.
+- Confirm `readingTiers` has all five tiers (`source`, `test`, `docs`, `config`, `generated`), each set to `full`, `light` or `automated`, and that the Step 4.5 planner check exited 0.
 - Confirm no command mutates source, dependencies, lockfiles, DB, or git state without explicit confirmation.
 
 ## Step 7: Report
@@ -551,6 +723,8 @@ Setup scouts: <not needed | used: Stack, Analyzer, Verification>
 Safe analyzers: <N>
 Optional analyzers: <N>
 Verification commands: <list or none>
+Reading tiers: <source full, test light, docs light, config light, generated automated>
+Planner check: <passed: N files in N chunks | unavailable: reason>
 ```
 
 Then tell the user they can run examples like:
@@ -560,4 +734,5 @@ Then tell the user they can run examples like:
 /sweep whatever we just changed
 /sweep the onboarding flow
 /sweep --all
+/sweep --resume
 ```

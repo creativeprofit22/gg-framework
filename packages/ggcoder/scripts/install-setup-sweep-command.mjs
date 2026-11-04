@@ -8,25 +8,38 @@ export const canonicalSetupSweepCommandPath = fileURLToPath(
   new URL("../assets/commands/setup-sweep.md", import.meta.url),
 );
 
-export function resolveSetupSweepCommandTarget(
-  agentDir = process.env.GG_AGENT_DIR || path.join(homedir(), ".gg"),
-) {
+// The generated /sweep runs these from <agentDir>/scripts; the ledger imports the planner.
+export const canonicalSweepScriptPaths = ["sweep-plan.mjs", "sweep-ledger.mjs"].map((name) =>
+  fileURLToPath(new URL(`../assets/scripts/${name}`, import.meta.url)),
+);
+
+function resolveAgentDir(agentDir = process.env.GG_AGENT_DIR || path.join(homedir(), ".gg")) {
   if (!path.isAbsolute(agentDir)) throw new Error("GG_AGENT_DIR must be absolute");
-  return path.join(path.normalize(agentDir), "commands", "setup-sweep.md");
+  return path.normalize(agentDir);
 }
 
-export async function installSetupSweepCommand({ agentDir } = {}) {
-  const source = await readFile(canonicalSetupSweepCommandPath);
-  const target = resolveSetupSweepCommandTarget(agentDir);
-  const commandsDir = path.dirname(target);
-  await mkdir(commandsDir, { recursive: true, mode: 0o700 });
+export function resolveSetupSweepCommandTarget(agentDir) {
+  return path.join(resolveAgentDir(agentDir), "commands", "setup-sweep.md");
+}
 
-  const directoryInfo = await lstat(commandsDir);
+export function resolveSweepScriptsDir(agentDir) {
+  return path.join(resolveAgentDir(agentDir), "scripts");
+}
+
+async function installFile(sourcePath, target, label) {
+  const source = await readFile(sourcePath);
+  const directory = path.dirname(target);
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+
+  const directoryInfo = await lstat(directory);
   if (!directoryInfo.isDirectory() || directoryInfo.isSymbolicLink()) {
-    throw new Error(`Commands path must be a real directory: ${commandsDir}`);
+    throw new Error(`${label} path must be a real directory: ${directory}`);
   }
 
-  const temporary = path.join(commandsDir, `.setup-sweep.md.${process.pid}.${randomUUID()}.tmp`);
+  const temporary = path.join(
+    directory,
+    `.${path.basename(target)}.${process.pid}.${randomUUID()}.tmp`,
+  );
   try {
     await writeFile(temporary, source, { flag: "wx", mode: 0o600 });
     await rename(temporary, target);
@@ -36,10 +49,26 @@ export async function installSetupSweepCommand({ agentDir } = {}) {
   }
 
   return {
-    source: canonicalSetupSweepCommandPath,
+    source: sourcePath,
     target,
     sha256: createHash("sha256").update(source).digest("hex"),
   };
+}
+
+export async function installSetupSweepCommand({ agentDir } = {}) {
+  const command = await installFile(
+    canonicalSetupSweepCommandPath,
+    resolveSetupSweepCommandTarget(agentDir),
+    "Commands",
+  );
+  const scriptsDir = resolveSweepScriptsDir(agentDir);
+  const scripts = [];
+  for (const sourcePath of canonicalSweepScriptPaths) {
+    scripts.push(
+      await installFile(sourcePath, path.join(scriptsDir, path.basename(sourcePath)), "Scripts"),
+    );
+  }
+  return { ...command, scripts };
 }
 
 const invokedPath = process.argv[1] ? pathToFileURL(path.resolve(process.argv[1])).href : "";
@@ -48,4 +77,8 @@ if (import.meta.url === invokedPath) {
   console.log(`Installed /setup-sweep: ${result.target}`);
   console.log(`Canonical source: ${result.source}`);
   console.log(`SHA-256: ${result.sha256}`);
+  for (const script of result.scripts) {
+    console.log(`Installed script: ${script.target}`);
+    console.log(`SHA-256: ${script.sha256}`);
+  }
 }

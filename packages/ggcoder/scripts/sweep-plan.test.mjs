@@ -1,13 +1,18 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 import {
+  BINARY_EXTENSIONS,
   DEFAULT_SETTINGS,
+  READ_LIMITS,
+  TURN_TOOL_RESULT_CHAR_CAP,
+  TURN_TOOL_RESULT_CHAR_FLOOR,
   buildPlan,
   checkCoverage,
   classify,
@@ -18,6 +23,7 @@ import {
   main,
   packChunks,
   pageRanges,
+  renderedChars,
   resolveSettings,
   serializePlan,
   toPosixRelative,
@@ -152,7 +158,7 @@ test("a file over 50 KB with few lines is split by bytes; one huge line is flagg
   const oneLine = p.files.find((f) => f.path === "src/one-line.ts");
   assert.equal(oneLine.lines, 1);
   assert.deepEqual(oneLine.pages, [
-    { start: 1, end: 1, chunk: oneLine.pages[0].chunk, oversizedLine: true },
+    { start: 1, end: 1, chars: 200, chunk: oneLine.pages[0].chunk, oversizedLine: true },
   ]);
   assert.equal(p.files.find((f) => f.path === "src/wide.ts").pages.length, 2);
   assert.deepEqual(checkCoverage(p), []);
@@ -311,6 +317,8 @@ test("repeat runs are byte-identical, excludes drop files and binaries are liste
     "src/b/c.ts": lines(7),
     "dist/bundle.js": lines(100),
     "assets/logo.png": png,
+    "assets/icon.svg": "<svg/>",
+    "src/long.ts": `${"y".repeat(40000)}\n`,
     "README.md": lines(3),
   });
   const first = io();
@@ -334,8 +342,14 @@ test("repeat runs are byte-identical, excludes drop files and binaries are liste
   );
   assert.deepEqual(
     written.binary.map((b) => [b.path, b.bytes]),
-    [["assets/logo.png", 8]],
+    [
+      ["assets/icon.svg", 6],
+      ["assets/logo.png", 8],
+    ],
   );
+  assert.equal(written.files.find((f) => f.path === "src/long.ts").chars, 40008);
+  assert.ok(written.chunks.every((c) => typeof c.chars === "number"));
+  assert.ok(written.files.every((f) => typeof f.chars === "number" || Array.isArray(f.pages)));
   assert.equal(isBinary(png), true);
   assert.deepEqual(checkCoverage(written), []);
   assert.ok(bytesA.toString("utf8").endsWith("}\n"));
@@ -380,4 +394,173 @@ test("line counting treats CRLF as one break and counts a last line without newl
   assert.equal(countLines(Buffer.from("a")), 1);
   assert.equal(countLines(Buffer.from("a\r\nb\r\n")), 2);
   assert.equal(countLines(Buffer.from("a\nb")), 2);
+});
+
+test("rendered chars match the read tool's numbered lines, CR, non-ASCII and wide numbers", () => {
+  const text = ["a\r", "b", "üé😀", "plain"];
+  const buf = Buffer.from(text.join("\n") + "\n");
+  const shown = text.map((l, i) => `${String(i + 1).padStart(6, " ")}\t${l}`).join("\n");
+  // One newline per line, so the last line's newline counts too.
+  assert.equal(renderedChars(buf, 1, 4), shown.length + 1);
+  assert.equal(renderedChars(buf, 2, 2), 6 + 1 + 1 + 1);
+  assert.equal(renderedChars(Buffer.alloc(0), 1, 1), 0);
+
+  const many = lines(1000001);
+  // Line 999,999 has a 6-digit prefix; 1,000,000 and 1,000,001 need 7.
+  assert.equal(renderedChars(many, 999999, 1000001), 9 + 10 + 10);
+});
+
+test("long-line files in one folder split by characters, not lines", () => {
+  const files = {};
+  for (let i = 1; i <= 6; i++) files[`src/wide/f${i}.ts`] = Buffer.from(`${"y".repeat(40000)}\n`);
+  const p = plan(files);
+  assert.ok(p.chunks.reduce((sum, c) => sum + c.lines, 0) <= DEFAULT_SETTINGS.chunkLines);
+  assert.deepEqual(
+    p.chunks.map((c) => c.entries.length),
+    [4, 2],
+  );
+  for (const c of p.chunks) {
+    if (c.entries.length > 1) assert.ok(c.chars <= DEFAULT_SETTINGS.chunkChars, c.id);
+  }
+  assert.equal(p.chunks[0].chars, 4 * 40008);
+  assert.deepEqual(checkCoverage(p), []);
+
+  const broken = structuredClone(p);
+  broken.chunks[0].chars += 1;
+  assert.match(checkCoverage(broken).join("\n"), /says 160033 chars but holds 160032/);
+  const over = structuredClone(p);
+  over.settings.chunkChars = 100000;
+  assert.match(checkCoverage(over).join("\n"), /over chunkChars 100000/);
+});
+
+test("character packing keeps a chunk at exactly the budget and splits one char over", () => {
+  const unit = (p, chars) => ({ path: p, tier: "source", start: 1, end: 1, lines: 1, chars });
+  const settings = { ...DEFAULT_SETTINGS };
+  const half = DEFAULT_SETTINGS.chunkChars / 2;
+
+  const exact = packChunks([unit("a/one.ts", half), unit("a/two.ts", half)], settings);
+  assert.equal(exact.length, 1);
+  assert.equal(exact[0].chars, DEFAULT_SETTINGS.chunkChars);
+
+  const over = packChunks([unit("b/one.ts", half), unit("b/two.ts", half + 1)], settings);
+  assert.deepEqual(
+    over.map((c) => [c.entries.map((e) => e.path), c.chars]),
+    [
+      [["b/one.ts"], half],
+      [["b/two.ts"], half + 1],
+    ],
+  );
+
+  // Units from plans written before chunkChars carry no chars and pack by lines alone.
+  const legacy = packChunks(
+    [
+      { path: "c/one.ts", tier: "source", start: 1, end: 1, lines: 1 },
+      { path: "c/two.ts", tier: "source", start: 1, end: 1, lines: 1 },
+    ],
+    { chunkLines: 4000, maxFilesPerChunk: 50 },
+  );
+  assert.equal(legacy.length, 1);
+});
+
+test("settings: chunkChars stays under the per-turn cap and above one page", async (t) => {
+  const pageChars = DEFAULT_SETTINGS.pageBytes + DEFAULT_SETTINGS.pageLines * 8;
+  assert.equal(resolveSettings({ chunkChars: TURN_TOOL_RESULT_CHAR_CAP + 1 }).ok, false);
+  assert.equal(resolveSettings({ chunkChars: TURN_TOOL_RESULT_CHAR_CAP }).ok, true);
+  assert.equal(resolveSettings({ chunkChars: pageChars - 1 }).ok, false);
+  assert.equal(resolveSettings({ chunkChars: pageChars }).ok, true);
+
+  const root = await makeRepo(t, { "src/a.ts": lines(5) });
+  const bad = io();
+  assert.equal(main(["--chunk-chars", "240001"], { cwd: root, ...bad }), 1);
+  assert.match(bad.err.join(""), /chunkChars must be at most 240000/);
+  const good = io();
+  assert.equal(main(["--chunk-chars", "200000"], { cwd: root, ...good }), 0, good.err.join(""));
+  assert.equal(JSON.parse(await readFile(planPath(root), "utf8")).settings.chunkChars, 200000);
+  assert.match(good.out.join(""), /largest chunk 45 chars \(source-001\), per-turn cap 240,000/);
+});
+
+test(".svg in any case is planned as binary whatever its content", () => {
+  const p = plan(
+    { "src/a.ts": lines(2), "src/icon.svg": "<svg/>\n", "src/LOGO.SVG": "<svg/>\n" },
+    config({ sourceGlobs: ["**/*.ts", "**/*.svg", "**/*.SVG"] }),
+  );
+  assert.deepEqual(
+    p.binary.map((b) => b.path),
+    ["src/LOGO.SVG", "src/icon.svg"],
+  );
+  assert.deepEqual(
+    p.files.map((f) => f.path),
+    ["src/a.ts"],
+  );
+  assert.equal(isBinary(Buffer.from("<svg/>"), "x/y.Svg"), true);
+  assert.equal(isBinary(Buffer.from("text"), "x/y.ts"), false);
+});
+
+const repoFile = (rel) =>
+  readFileSync(fileURLToPath(new URL(`../${rel}`, import.meta.url)), "utf8");
+
+function capture(text, re, where) {
+  const m = re.exec(text);
+  assert.ok(m, `${where}: ${re} not found; re-check the value copied from it`);
+  return m;
+}
+
+const toNumber = (s) => Number(s.replace(/[_,]/g, ""));
+
+test("engine limits copied into the planner and setup-sweep.md match the engine source", () => {
+  const session = repoFile("src/core/agent-session.ts");
+  const turn = capture(
+    session,
+    /Math\.max\(\s*([\d_]+),\s*Math\.min\(\s*Math\.floor\(\s*contextChars \* 0\.15\s*\),\s*([\d_]+)\s*\)\s*\)/,
+    "src/core/agent-session.ts",
+  );
+  const floor = toNumber(turn[1]);
+  const cap = toNumber(turn[2]);
+  assert.equal(TURN_TOOL_RESULT_CHAR_CAP, cap);
+  assert.equal(TURN_TOOL_RESULT_CHAR_FLOOR, floor);
+  assert.ok(DEFAULT_SETTINGS.chunkChars + 60000 <= cap, "chunkChars keeps a 60,000 margin");
+
+  const manager = repoFile("src/core/subagent-manager.ts");
+  const where = "src/core/subagent-manager.ts";
+  const constant = (name) =>
+    toNumber(
+      capture(manager, new RegExp(`^(?:export )?const ${name} = ([\\d_]+);`, "m"), where)[1],
+    );
+  const activeLimit = constant("ACTIVE_LIMIT");
+  const waitLimit = constant("WAIT_OUTPUT_LIMIT");
+  const perAgentLimit = constant("WAIT_OUTPUT_PER_AGENT_LIMIT");
+
+  const truncate = repoFile("src/tools/truncate.ts");
+  const maxLines = toNumber(
+    capture(truncate, /^export const MAX_LINES = ([\d_]+);/m, "src/tools/truncate.ts")[1],
+  );
+  const bytes = capture(
+    truncate,
+    /^export const MAX_BYTES = ([\d_]+)(?:\s*\*\s*([\d_]+))?;/m,
+    "src/tools/truncate.ts",
+  );
+  const maxBytes = toNumber(bytes[1]) * (bytes[2] === undefined ? 1 : toNumber(bytes[2]));
+  assert.deepEqual(READ_LIMITS, { lines: maxLines, bytes: maxBytes });
+
+  const readTool = repoFile("src/tools/read.ts");
+  capture(readTool, /\btruncateHead\(content\)/, "src/tools/read.ts");
+  assert.doesNotMatch(readTool, /\btruncateHead\(content,/, "read.ts overrides truncate limits");
+  const set = capture(
+    readTool,
+    /export const BINARY_EXTENSIONS = new Set\(\[([^\]]*)\]\)/,
+    "src/tools/read.ts",
+  );
+  const engineExts = [...set[1].matchAll(/"([^"]+)"/g)].map((m) => m[1]).sort();
+  assert.ok(engineExts.length > 0, "src/tools/read.ts: no BINARY_EXTENSIONS entries found");
+  assert.deepEqual([...BINARY_EXTENSIONS], [...new Set(engineExts)]);
+
+  const doc = repoFile("assets/commands/setup-sweep.md");
+  const docWhere = "assets/commands/setup-sweep.md";
+  const stated = (re) => toNumber(capture(doc, re, docWhere)[1]);
+  assert.equal(stated(/waves of up to (\d+) helpers, the engine's `ACTIVE_LIMIT`/), activeLimit);
+  assert.equal(stated(/whole reply under ([\d,]+) characters/), perAgentLimit);
+  assert.equal(stated(/caps its total output at ([\d,]+) characters/), waitLimit);
+  assert.equal(stated(/per-turn tool-result cap of ([\d,]+) characters/), cap);
+  assert.equal(stated(/as low as ([\d,]+)/), floor);
+  assert.equal(stated(/`chunkChars`, default ([\d,]+)/), DEFAULT_SETTINGS.chunkChars);
 });

@@ -395,6 +395,51 @@ test("a retry round, then what stays unread", () => {
   assert.equal(final.stillUnread.length, 3);
 });
 
+test("a retry round re-packs unread ranges under chunkChars; old plans without chars still retry", () => {
+  const wide = () => Buffer.from(`${"y".repeat(90)}\n`.repeat(10));
+  const built = buildPlan({
+    files: ["a", "b", "c", "d"].map((n) => ({ path: `src/${n}.ts`, content: wide() })),
+    config: { scopeResolution: scope() },
+    settings: { pageLines: 100, pageBytes: 1000, chunkLines: 4000, chunkChars: 2000 },
+  });
+  assert.equal(built.ok, true);
+  const plan = built.plan;
+  assert.deepEqual(
+    plan.chunks.map((c) => [c.entries.length, c.chars]),
+    [
+      [2, 1960],
+      [2, 1960],
+    ],
+  );
+  const retryOf = (p) =>
+    buildLedger({
+      plan: p,
+      helpers: [helper()],
+      sessions: new Map([["h1", session([])]]),
+      platform: "linux",
+      root: ROOT,
+    }).retry;
+
+  const retry = retryOf(plan);
+  assert.deepEqual(
+    retry.map((c) => [c.id, c.entries.map((e) => e.path)]),
+    [
+      ["retry-source-001", ["src/a.ts", "src/b.ts"]],
+      ["retry-source-002", ["src/c.ts", "src/d.ts"]],
+    ],
+  );
+  assert.deepEqual(Object.keys(retry[0]).sort(), ["entries", "id", "lines", "tier"]);
+
+  const legacy = structuredClone(plan);
+  delete legacy.settings.chunkChars;
+  for (const f of legacy.files) delete f.chars;
+  for (const c of legacy.chunks) delete c.chars;
+  assert.deepEqual(
+    retryOf(legacy).map((c) => [c.id, c.entries.length]),
+    [["retry-source-001", 4]],
+  );
+});
+
 test("same input gives the same bytes, whatever the helper order", () => {
   const helpers = [helper(), helper({ agentId: "h0", chunk: "docs-001" })];
   const sessions = new Map([

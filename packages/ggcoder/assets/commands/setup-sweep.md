@@ -379,6 +379,7 @@ Run the planner. It reads `.gg/sweep.config.json` and writes `.gg/sweep/plan.jso
 - Exit 2: stop. List the files it prints, grouped by folder, and tell the user to add them to a tier glob or `excludeGlobs` in `.gg/sweep.config.json`, or re-run `/setup-sweep`. Never guess a tier.
 - Exit 1 or 3: stop and show the error.
 - Exit 0: continue. `plan.counts` holds the in-scope counts (`byTier`, `binary`). On a fresh run, write `[]` to `.gg/sweep/helpers.json` and set `run.json` stage to `plan`, so the ledger always has a helpers file, even when a session dies during the first wave or W4 starts no helpers because every tier is `automated`.
+- Chunks are sized by lines and by characters as `read` shows them (`chunkChars`, default 180,000), so a helper that opens all its ranges in one turn stays under the engine's per-turn tool-result cap of 240,000 characters. Models with smaller context windows get a lower cap, as low as 100,000; for them, set `sweepPlan.chunkChars` in `.gg/sweep.config.json` under that cap. Report the planner's `largest chunk` line with the plan counts.
 
 ### W3. Analyzers and shared notes
 

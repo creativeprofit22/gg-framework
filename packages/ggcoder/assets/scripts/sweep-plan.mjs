@@ -14,18 +14,83 @@ export const GENERATED_BY = "sweep-plan";
 export const TIERS = Object.freeze(["source", "test", "docs", "config", "generated"]);
 export const SETTINGS_KEYS = Object.freeze([
   "chunkLines",
+  "chunkChars",
   "maxFilesPerChunk",
   "pageLines",
   "pageBytes",
 ]);
 export const DEFAULT_SETTINGS = Object.freeze({
   chunkLines: 4000,
+  // 60,000 (25%) under TURN_TOOL_RESULT_CHAR_CAP: room for result wrappers, truncation
+  // notices and other tool calls a helper makes in the same turn.
+  chunkChars: 180000,
   maxFilesPerChunk: 50,
   pageLines: 1800,
   pageBytes: 45000,
 });
 // The read tool's limits; a page must never exceed them.
 export const READ_LIMITS = Object.freeze({ lines: 2000, bytes: 51200 });
+// Copies of engine values (this script is installed alone, so it cannot import them);
+// the drift test in sweep-plan.test.mjs fails when they differ from the engine source.
+// Per-turn cap on the summed text of one turn's tool results; small-context models get less.
+export const TURN_TOOL_RESULT_CHAR_CAP = 240000;
+export const TURN_TOOL_RESULT_CHAR_FLOOR = 100000;
+// Extensions the read tool refuses as "Binary file" whatever their content.
+export const BINARY_EXTENSIONS = Object.freeze(
+  [
+    ".7z",
+    ".asar",
+    ".avi",
+    ".bin",
+    ".bz2",
+    ".class",
+    ".dat",
+    ".db",
+    ".dll",
+    ".doc",
+    ".docx",
+    ".dylib",
+    ".eot",
+    ".exe",
+    ".flac",
+    ".gz",
+    ".ico",
+    ".idx",
+    ".mkv",
+    ".mov",
+    ".mp3",
+    ".mp4",
+    ".node",
+    ".o",
+    ".obj",
+    ".otf",
+    ".pack",
+    ".pdf",
+    ".ppt",
+    ".pptx",
+    ".pyc",
+    ".rar",
+    ".snap",
+    ".so",
+    ".sqlite",
+    ".sqlite3",
+    ".svg",
+    ".tar",
+    ".ttf",
+    ".wasm",
+    ".wav",
+    ".woff",
+    ".woff2",
+    ".xls",
+    ".xlsx",
+    ".zip",
+  ].sort(),
+);
+const BINARY_EXTENSION_SET = new Set(BINARY_EXTENSIONS);
+// The read tool shows only a one-line "too long to show" notice for an oversized line.
+export const OVERSIZED_LINE_CHARS = 200;
+// Widest line-number prefix the page bound allows for (7 digits + tab).
+const MAX_PREFIX_CHARS = 8;
 const BINARY_SNIFF_BYTES = 8192;
 const GLOB_KEYS = Object.freeze([
   "excludeGlobs",
@@ -38,7 +103,7 @@ const GLOB_KEYS = Object.freeze([
 ]);
 
 const USAGE = `Usage: node sweep-plan.mjs [--root <dir>] [--config <path>] [--out <path>]
-       [--chunk-lines N] [--max-files N] [--page-lines N] [--page-bytes N]
+       [--chunk-lines N] [--chunk-chars N] [--max-files N] [--page-lines N] [--page-bytes N]
        node sweep-plan.mjs --verify <plan.json>
 Exit codes: 0 ok, 1 usage or IO error, 2 files match no sweep pattern, 3 coverage check failed.`;
 
@@ -171,8 +236,34 @@ export function countLines(buf) {
   return buf[buf.length - 1] === 10 ? n : n + 1;
 }
 
-export function isBinary(buf) {
-  return buf.subarray(0, BINARY_SNIFF_BYTES).includes(0);
+/** A NUL byte near the start, or an extension the read tool refuses. */
+export function isBinary(buf, filePath = "") {
+  const ext = path.posix.extname(toPosixRelative(filePath)).toLowerCase();
+  return BINARY_EXTENSION_SET.has(ext) || buf.subarray(0, BINARY_SNIFF_BYTES).includes(0);
+}
+
+/** UTF-16 length of each line as the read tool splits it (on LF only, so a CR stays). */
+function decodedLineLengths(buf) {
+  return buf.length === 0
+    ? []
+    : buf
+        .toString("utf8")
+        .split("\n")
+        .map((l) => l.length);
+}
+
+function sumRendered(lengths, start, end) {
+  let total = 0;
+  for (let n = Math.max(start, 1); n <= end && n <= lengths.length; n++) {
+    // "<line number padded to 6><tab><line><newline>"
+    total += Math.max(6, String(n).length) + 1 + lengths[n - 1] + 1;
+  }
+  return total;
+}
+
+/** Characters the read tool shows for 1-based lines start..end of buf. */
+export function renderedChars(buf, start, end) {
+  return sumRendered(decodedLineLengths(buf), start, end);
 }
 
 /** Consecutive 1-based inclusive line ranges, each within both limits. */
@@ -238,6 +329,20 @@ export function resolveSettings(...layers) {
       error: `chunkLines (${settings.chunkLines}) must be at least pageLines (${settings.pageLines})`,
     };
   }
+  if (settings.chunkChars > TURN_TOOL_RESULT_CHAR_CAP) {
+    return {
+      ok: false,
+      error: `chunkChars must be at most ${TURN_TOOL_RESULT_CHAR_CAP} (the engine's per-turn tool-result cap)`,
+    };
+  }
+  // The most characters one page or unpaged file can render; a smaller budget could not be kept.
+  const pageChars = settings.pageBytes + settings.pageLines * MAX_PREFIX_CHARS;
+  if (settings.chunkChars < pageChars) {
+    return {
+      ok: false,
+      error: `chunkChars (${settings.chunkChars}) must be at least pageBytes + pageLines * ${MAX_PREFIX_CHARS} (${pageChars})`,
+    };
+  }
   return { ok: true, settings };
 }
 
@@ -247,16 +352,18 @@ const folderOf = (p) => {
 };
 
 /**
- * Pack units ({ path, tier, start, end, lines }) into chunks that never mix tiers.
+ * Pack units ({ path, tier, start, end, lines, chars? }) into chunks that never mix tiers.
  * A folder starts a fresh chunk when it misses the space left but fits an empty chunk.
  */
 export function packChunks(units, settings) {
   const { chunkLines, maxFilesPerChunk } = settings;
+  // Plans written before chunkChars existed have neither the setting nor unit chars.
+  const chunkChars = settings.chunkChars ?? Infinity;
   const chunks = [];
   for (const tier of TIERS) {
     const sorted = units
       .filter((u) => u.tier === tier)
-      .map((u) => ({ ...u, folder: folderOf(u.path) }))
+      .map((u) => ({ ...u, chars: u.chars ?? 0, folder: folderOf(u.path) }))
       .sort((a, b) => cmp(a.folder, b.folder) || cmp(a.path, b.path) || a.start - b.start);
     const groups = [];
     for (const u of sorted) {
@@ -267,22 +374,27 @@ export function packChunks(units, settings) {
     const tierChunks = [];
     let cur = null;
     const open = () => {
-      cur = { id: "", tier, lines: 0, entries: [] };
+      cur = { id: "", tier, lines: 0, chars: 0, entries: [] };
       tierChunks.push(cur);
     };
-    const fits = (lines, count) =>
+    const fits = (lines, chars, count) =>
       cur !== null &&
       cur.lines + lines <= chunkLines &&
+      cur.chars + chars <= chunkChars &&
       cur.entries.length + count <= maxFilesPerChunk;
     for (const group of groups) {
       const lines = group.units.reduce((sum, u) => sum + u.lines, 0);
+      const chars = group.units.reduce((sum, u) => sum + u.chars, 0);
       const count = group.units.length;
-      const fitsEmpty = lines <= chunkLines && count <= maxFilesPerChunk;
-      if (cur !== null && cur.entries.length > 0 && !fits(lines, count) && fitsEmpty) open();
+      const fitsEmpty = lines <= chunkLines && chars <= chunkChars && count <= maxFilesPerChunk;
+      if (cur !== null && cur.entries.length > 0 && !fits(lines, chars, count) && fitsEmpty) {
+        open();
+      }
       for (const u of group.units) {
-        if (cur === null || (cur.entries.length > 0 && !fits(u.lines, 1))) open();
+        if (cur === null || (cur.entries.length > 0 && !fits(u.lines, u.chars, 1))) open();
         cur.entries.push({ path: u.path, start: u.start, end: u.end });
         cur.lines += u.lines;
+        cur.chars += u.chars;
       }
     }
     tierChunks.forEach((c, i) => {
@@ -323,7 +435,7 @@ export function buildPlan({ files, config, configHash = null, gitCommit = null, 
     }
     const raw = byPath.get(p);
     const buf = typeof raw === "function" ? raw() : raw;
-    if (isBinary(buf)) {
+    if (isBinary(buf, p)) {
       binary.push({ path: p, bytes: buf.length, sha256: sha256(buf) });
       continue;
     }
@@ -339,15 +451,22 @@ export function buildPlan({ files, config, configHash = null, gitCommit = null, 
     const lines = countLines(buf);
     const paged = lines > resolved.pageLines || buf.length > resolved.pageBytes;
     const record = { path: p, tier, lines, bytes: buf.length, sha256: sha256(buf), ranges: null };
+    const lengths = decodedLineLengths(buf);
     if (paged) {
-      record.ranges = pageRanges(buf, resolved.pageLines, resolved.pageBytes);
+      record.ranges = pageRanges(buf, resolved.pageLines, resolved.pageBytes).map((r) => ({
+        ...r,
+        chars: r.oversizedLine ? OVERSIZED_LINE_CHARS : sumRendered(lengths, r.start, r.end),
+      }));
       for (const r of record.ranges) {
-        units.push({ path: p, tier, start: r.start, end: r.end, lines: r.end - r.start + 1 });
+        const lineCount = r.end - r.start + 1;
+        units.push({ path: p, tier, start: r.start, end: r.end, lines: lineCount, chars: r.chars });
       }
     } else if (lines === 0) {
-      units.push({ path: p, tier, start: 0, end: 0, lines: 0 });
+      record.chars = 0;
+      units.push({ path: p, tier, start: 0, end: 0, lines: 0, chars: 0 });
     } else {
-      units.push({ path: p, tier, start: 1, end: lines, lines });
+      record.chars = sumRendered(lengths, 1, lines);
+      units.push({ path: p, tier, start: 1, end: lines, lines, chars: record.chars });
     }
     records.push(record);
   }
@@ -361,11 +480,11 @@ export function buildPlan({ files, config, configHash = null, gitCommit = null, 
     byTier[r.tier]++;
     const base = { path: r.path, tier: r.tier, lines: r.lines, bytes: r.bytes, sha256: r.sha256 };
     if (r.ranges === null) {
-      return { ...base, chunk: owner.get(`${r.path}\0${r.lines === 0 ? 0 : 1}`) };
+      return { ...base, chars: r.chars, chunk: owner.get(`${r.path}\0${r.lines === 0 ? 0 : 1}`) };
     }
     const pages = r.ranges.map((range) => {
       const chunk = owner.get(`${r.path}\0${range.start}`);
-      const page = { start: range.start, end: range.end, chunk };
+      const page = { start: range.start, end: range.end, chars: range.chars, chunk };
       return range.oversizedLine ? { ...page, oversizedLine: true } : page;
     });
     return { ...base, pages };
@@ -390,6 +509,27 @@ export function buildPlan({ files, config, configHash = null, gitCommit = null, 
     binary,
   };
   return { ok: true, plan };
+}
+
+/** A chunk's chars must equal its entries' chars and stay in budget unless it holds one entry. */
+function checkChunkChars(c, known, settings, problems) {
+  const entries = Array.isArray(c.entries) ? c.entries : [];
+  let sum = 0;
+  for (const e of entries) {
+    const f = known.get(e.path);
+    if (!f) continue;
+    const source = Array.isArray(f.pages) ? f.pages.find((pg) => pg.start === e.start) : f;
+    if (typeof source?.chars !== "number") {
+      problems.push(`chunk ${c.id} counts chars but ${e.path} ${e.start}-${e.end} has none`);
+      return;
+    }
+    sum += source.chars;
+  }
+  if (sum !== c.chars) problems.push(`chunk ${c.id} says ${c.chars} chars but holds ${sum}`);
+  const budget = settings?.chunkChars;
+  if (typeof budget === "number" && c.chars > budget && entries.length > 1) {
+    problems.push(`chunk ${c.id} holds ${c.chars} chars, over chunkChars ${budget}`);
+  }
 }
 
 /** Every problem that breaks "each text file line is in exactly one chunk". */
@@ -425,6 +565,7 @@ export function checkCoverage(plan) {
       actual.get(e.path).push({ start: e.start, end: e.end, chunk: c.id });
     }
     if (sum !== c.lines) problems.push(`chunk ${c.id} says ${c.lines} lines but holds ${sum}`);
+    if (typeof c.chars === "number") checkChunkChars(c, known, plan?.settings, problems);
   }
 
   for (const f of known.values()) {
@@ -498,16 +639,16 @@ export function serializePlan(plan) {
     },
     files: plan.files.map((f) => {
       const base = pick(f, ["path", "tier", "lines", "bytes", "sha256"]);
-      if (!Array.isArray(f.pages)) return { ...base, chunk: f.chunk };
+      if (!Array.isArray(f.pages)) return { ...base, chars: f.chars, chunk: f.chunk };
       const pages = f.pages.map((pg) =>
         pg.oversizedLine
-          ? { ...pick(pg, ["start", "end", "chunk"]), oversizedLine: true }
-          : pick(pg, ["start", "end", "chunk"]),
+          ? { ...pick(pg, ["start", "end", "chars", "chunk"]), oversizedLine: true }
+          : pick(pg, ["start", "end", "chars", "chunk"]),
       );
       return { ...base, pages };
     }),
     chunks: plan.chunks.map((c) => ({
-      ...pick(c, ["id", "tier", "lines"]),
+      ...pick(c, ["id", "tier", "lines", "chars"]),
       entries: c.entries.map((e) => pick(e, ["path", "start", "end"])),
     })),
     binary: plan.binary.map((b) => pick(b, ["path", "bytes", "sha256"])),
@@ -600,6 +741,7 @@ export function main(argv, io = {}) {
         config: { type: "string" },
         out: { type: "string" },
         "chunk-lines": { type: "string" },
+        "chunk-chars": { type: "string" },
         "max-files": { type: "string" },
         "page-lines": { type: "string" },
         "page-bytes": { type: "string" },
@@ -620,6 +762,7 @@ export function main(argv, io = {}) {
   const flags = {};
   for (const [flag, key] of [
     ["chunk-lines", "chunkLines"],
+    ["chunk-chars", "chunkChars"],
     ["max-files", "maxFilesPerChunk"],
     ["page-lines", "pageLines"],
     ["page-bytes", "pageBytes"],
@@ -741,6 +884,16 @@ export function main(argv, io = {}) {
   say(
     `sweep-plan: ${counts.files} files (${tiers}), ${counts.chunks} chunks, ${counts.paged} paged, ${counts.binary} binary, ${counts.excluded} excluded`,
   );
+  const largest = result.plan.chunks.reduce(
+    (m, c) => (m !== null && m.chars >= c.chars ? m : c),
+    null,
+  );
+  if (largest !== null) {
+    const fmt = (n) => n.toLocaleString("en-US");
+    say(
+      `sweep-plan: largest chunk ${fmt(largest.chars)} chars (${largest.id}), per-turn cap ${fmt(TURN_TOOL_RESULT_CHAR_CAP)}`,
+    );
+  }
   if (skipped > 0) say(`sweep-plan: skipped ${skipped} symlinks or submodules`);
   say(`sweep-plan: wrote ${outPath}`);
   return 0;

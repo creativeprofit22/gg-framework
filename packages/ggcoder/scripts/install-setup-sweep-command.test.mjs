@@ -71,7 +71,7 @@ test("setup-sweep documents Steroids and approval tools for its generated comman
 test("generated sweep template bytes remain exact and independently writable", async () => {
   assert.equal(
     createHash("sha256").update(projectSweepBytes).digest("hex"),
-    "f140a8902fd3e19dcd56086eb009adcdcaaf1a50084b2eb0432984744c399cdf",
+    "8b88bf6dbbdd144ea5c5f08cdc5398826c99b1e401f3ce5030b32158e6f000b6",
   );
   assert.equal(projectSweepBytes.includes(Buffer.from("\r\n")), false);
 

@@ -656,11 +656,19 @@ function planUnits(plan) {
   for (const f of plan.files) {
     if (Array.isArray(f.pages)) {
       for (const pg of f.pages) {
-        units.push({ path: f.path, tier: f.tier, start: pg.start, end: pg.end, chunk: pg.chunk });
+        const { start, end, chars, chunk } = pg;
+        units.push({ path: f.path, tier: f.tier, start, end, chars, chunk });
       }
     } else {
       const start = f.lines === 0 ? 0 : 1;
-      units.push({ path: f.path, tier: f.tier, start, end: f.lines, chunk: f.chunk });
+      units.push({
+        path: f.path,
+        tier: f.tier,
+        start,
+        end: f.lines,
+        chars: f.chars,
+        chunk: f.chunk,
+      });
     }
   }
   return units;

@@ -16,7 +16,13 @@ import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import { gunzipSync } from "node:zlib";
 
-import { SCHEMA_VERSION, checkCoverage, packChunks, toPosixRelative } from "./sweep-plan.mjs";
+import {
+  SCHEMA_VERSION,
+  TIERS,
+  checkCoverage,
+  packChunks,
+  toPosixRelative,
+} from "./sweep-plan.mjs";
 
 export const GENERATED_BY = "sweep-ledger";
 // Precedence order: the first cause that applies to an unread range wins.
@@ -42,9 +48,15 @@ const UNOPENED_PREFIX = "Not opened by this helper:";
 const MORE_RE = /^\+\d+ more$/;
 
 const USAGE = `Usage: node sweep-ledger.mjs --plan <plan.json> --helpers <helpers.json>
-       [--root <dir>] [--previous <ledger.json>] [--out <path>] [--final]
+       [--root <dir>] [--previous <ledger.json> [--previous-plan <old plan.json>]]
+       [--automated-tier <tier>]... [--out <path>] [--final]
 helpers.json: [{ agentId, chunk, state, error?, receipt?, transcript? }] from wait_agent.
-Exit codes: 0 every range read, 1 usage, IO or invalid plan, 4 written but some ranges unread.`;
+--automated-tier: ranges of this tier (${TIERS.join(", ")}) get automated checks only; they
+  are never unread or retried, and count as read only when a helper read them.
+--previous-plan: the plan --previous was built for; reads carry only for files whose path,
+  sha256 and range are unchanged in the new plan.
+Exit codes: 0 every range read or automated, 1 usage, IO or invalid plan, 4 written but some
+  ranges unread.`;
 
 const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
 const sha256 = (buf) => createHash("sha256").update(buf).digest("hex");
@@ -668,10 +680,20 @@ function previousRetryChunks(previous) {
   return [...byId.values()].sort((a, b) => cmp(a.id, b.id));
 }
 
-function previousReadUnits(previous) {
+function previousReadUnits(previous, previousPlan, plan) {
   const read = new Map();
   if (!isObject(previous) || !Array.isArray(previous.files)) return read;
+  // Across plans, only files with the same content hash in both plans can carry a read.
+  const oldHashes =
+    previousPlan === null
+      ? null
+      : new Map((previousPlan.files ?? []).map((f) => [f?.path, f?.sha256]));
+  const newHashes = new Map(plan.files.map((f) => [f.path, f.sha256]));
   for (const f of previous.files) {
+    if (oldHashes !== null) {
+      const oldSha = oldHashes.get(f?.path);
+      if (typeof oldSha !== "string" || oldSha !== newHashes.get(f?.path)) continue;
+    }
     for (const r of Array.isArray(f?.ranges) ? f.ranges : []) {
       if (r?.status === "read")
         read.set(unitKey(f.path, r.start), { end: r.end, evidence: r.evidence });
@@ -706,6 +728,8 @@ export function buildLedger({
   sessions = new Map(),
   currentHashes = new Map(),
   previous = null,
+  previousPlan = null,
+  automatedTiers = [],
   final = false,
   platform = process.platform,
   root,
@@ -713,7 +737,9 @@ export function buildLedger({
   home = os.homedir(),
 }) {
   const index = planPathIndex(plan, platform);
-  const retryHistory = previousRetryChunks(previous);
+  const automated = new Set(automatedTiers);
+  // Retry chunks of another plan point at its ranges, so they don't carry across plans.
+  const retryHistory = previousPlan === null ? previousRetryChunks(previous) : [];
   const chunkEntries = new Map();
   for (const c of [...plan.chunks, ...retryHistory]) {
     if (!chunkEntries.has(c.id)) chunkEntries.set(c.id, c.entries ?? []);
@@ -725,7 +751,7 @@ export function buildLedger({
     for (const e of c.entries ?? []) retriedKeys.add(unitKey(e.path, e.start));
   }
   const fileByPath = new Map(plan.files.map((f) => [f.path, f]));
-  const carried = previousReadUnits(previous);
+  const carried = previousReadUnits(previous, previousPlan, plan);
 
   const helperList = (Array.isArray(helpers) ? helpers : [])
     .map((h) => {
@@ -865,7 +891,10 @@ export function buildLedger({
       );
     }
     const range = { start: u.start, end: u.end, chunk: u.chunk, status: "read" };
-    if (!carriedRead && !covers(u, evidence, hasOkRead)) {
+    const isRead = carriedRead || covers(u, evidence, hasOkRead);
+    if (!isRead && automated.has(u.tier)) {
+      range.status = "automated";
+    } else if (!isRead) {
       range.status = "unread";
       if (changed) {
         range.cause = "changed-since-plan";
@@ -888,9 +917,14 @@ export function buildLedger({
   const files = plan.files.map((f) => {
     const ranges = rangesByPath.get(f.path) ?? [];
     const read = ranges.filter((r) => r.status === "read").length;
-    const status = read === ranges.length ? "read" : read === 0 ? "unread" : "partial";
+    const unreadCount = ranges.filter((r) => r.status === "unread").length;
+    let status = "partial";
+    if (read === ranges.length) status = "read";
+    else if (unreadCount === 0) status = "automated";
+    else if (unreadCount === ranges.length) status = "unread";
     return {
       path: f.path,
+      tier: f.tier,
       status,
       ranges: ranges.map(({ key: _key, unit: _unit, ...r }) => r),
     };
@@ -963,7 +997,7 @@ export function buildLedger({
     (a, b) => cmp(a.agentId, b.agentId) || cmp(a.claim, b.claim) || cmp(a.reason, b.reason),
   );
 
-  const unread = allRanges.filter((r) => r.status !== "read");
+  const unread = allRanges.filter((r) => r.status === "unread");
   const toRetry = final
     ? []
     : unread.filter((r) => r.cause !== "changed-since-plan" && !retriedKeys.has(r.key));
@@ -994,13 +1028,25 @@ export function buildLedger({
 
   const byCause = Object.fromEntries(CAUSES.map((c) => [c, 0]));
   for (const r of unread) byCause[r.cause]++;
+  const byTier = Object.fromEntries(
+    TIERS.map((t) => [t, { files: 0, read: 0, partial: 0, unread: 0, automated: 0 }]),
+  );
+  for (const f of files) {
+    const row = byTier[f.tier];
+    if (row === undefined) continue;
+    row.files++;
+    row[f.status]++;
+  }
+  const automatedUnits = allRanges.filter((r) => r.status === "automated").length;
   const counts = {
     files: files.length,
     filesRead: files.filter((f) => f.status === "read").length,
     units: allRanges.length,
-    read: allRanges.length - unread.length,
+    read: allRanges.length - unread.length - automatedUnits,
     unread: unread.length,
+    automated: automatedUnits,
     byCause,
+    byTier,
   };
 
   const helperRows = helperList.map((h) => ({
@@ -1039,11 +1085,17 @@ export function serializeLedger(ledger) {
   const ordered = {
     ...pick(ledger, ["schemaVersion", "generatedBy", "planSha256", "final"]),
     counts: {
-      ...pick(ledger.counts, ["files", "filesRead", "units", "read", "unread"]),
+      ...pick(ledger.counts, ["files", "filesRead", "units", "read", "unread", "automated"]),
       byCause: pick(ledger.counts.byCause, CAUSES),
+      byTier: Object.fromEntries(
+        TIERS.map((t) => [
+          t,
+          pick(ledger.counts.byTier[t], ["files", "read", "partial", "unread", "automated"]),
+        ]),
+      ),
     },
     files: ledger.files.map((f) => ({
-      ...pick(f, ["path", "status"]),
+      ...pick(f, ["path", "tier", "status"]),
       ranges: f.ranges.map((r) => ({
         ...pick(r, ["start", "end", "chunk", "status"]),
         ...(r.cause === undefined ? {} : pick(r, ["cause", "detail"])),
@@ -1130,6 +1182,8 @@ export function main(argv, io = {}) {
         helpers: { type: "string" },
         root: { type: "string" },
         previous: { type: "string" },
+        "previous-plan": { type: "string" },
+        "automated-tier": { type: "string", multiple: true },
         out: { type: "string" },
         final: { type: "boolean" },
         help: { type: "boolean" },
@@ -1145,6 +1199,16 @@ export function main(argv, io = {}) {
   }
   if (args.plan === undefined || args.helpers === undefined) {
     fail(`sweep-ledger: --plan and --helpers are required\n${USAGE}`);
+    return 1;
+  }
+  if (args["previous-plan"] !== undefined && args.previous === undefined) {
+    fail(`sweep-ledger: --previous-plan needs --previous\n${USAGE}`);
+    return 1;
+  }
+  const automatedTiers = [...new Set(args["automated-tier"] ?? [])];
+  const badTier = automatedTiers.find((t) => !TIERS.includes(t));
+  if (badTier !== undefined) {
+    fail(`sweep-ledger: unknown --automated-tier ${badTier}; expected one of ${TIERS.join(", ")}`);
     return 1;
   }
 
@@ -1185,12 +1249,29 @@ export function main(argv, io = {}) {
   }
 
   let previous = null;
+  let previousPlan = null;
   if (args.previous !== undefined) {
     const prevRead = readJson(path.resolve(cwd, args.previous), "previous ledger");
     if (!prevRead.ok) return 1;
     previous = prevRead.value;
-    if (previous?.generatedBy !== GENERATED_BY || previous?.planSha256 !== planSha256) {
-      fail("sweep-ledger: --previous is not a ledger for this plan");
+    let expectedSha = planSha256;
+    if (args["previous-plan"] !== undefined) {
+      const oldPlanRead = readJson(path.resolve(cwd, args["previous-plan"]), "previous plan");
+      if (!oldPlanRead.ok) return 1;
+      const oldPlan = oldPlanRead.value;
+      if (oldPlan?.schemaVersion !== SCHEMA_VERSION || !Array.isArray(oldPlan?.files)) {
+        fail("sweep-ledger: --previous-plan is not a sweep plan");
+        return 1;
+      }
+      previousPlan = oldPlan;
+      expectedSha = sha256(oldPlanRead.bytes);
+    }
+    if (previous?.generatedBy !== GENERATED_BY || previous?.planSha256 !== expectedSha) {
+      fail(
+        previousPlan === null
+          ? "sweep-ledger: --previous is not a ledger for this plan"
+          : "sweep-ledger: --previous is not a ledger for --previous-plan",
+      );
       return 1;
     }
   }
@@ -1225,6 +1306,8 @@ export function main(argv, io = {}) {
       sessions,
       currentHashes,
       previous,
+      previousPlan,
+      automatedTiers,
       final: args.final === true,
       platform: io.platform ?? process.platform,
       root,
@@ -1249,6 +1332,7 @@ export function main(argv, io = {}) {
     .join(", ");
   say(
     `sweep-ledger: ${counts.read}/${counts.units} ranges read (${counts.filesRead}/${counts.files} files)` +
+      (counts.automated > 0 ? `; ${counts.automated} automated checks only` : "") +
       (causes ? `; unread: ${causes}` : ""),
   );
   if (ledger.unbackedClaims.length > 0) {

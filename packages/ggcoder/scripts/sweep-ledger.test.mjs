@@ -619,3 +619,158 @@ test("CLI writes ledger.json and exits 4 while ranges are unread, 0 when all are
   await writeFile(helpersFile, JSON.stringify([{ chunk: "source-001" }]));
   assert.equal(run().code, 1);
 });
+
+// ── Automated tiers, tier counts, carrying reads across plans ─────────────
+
+test("an automated tier is neither unread nor retried, and shows in byTier", () => {
+  const ledger = ledgerFor({ calls: fullReads(), automatedTiers: ["docs"] });
+  const guide = ledger.files.find((f) => f.path === "docs/guide.md");
+  assert.equal(guide.status, "automated");
+  assert.equal(guide.ranges[0].status, "automated");
+  assert.equal(guide.ranges[0].cause, undefined);
+  assert.equal(ledger.counts.unread, 0);
+  assert.equal(ledger.counts.automated, 1);
+  assert.equal(ledger.counts.read, 3);
+  assert.equal(ledger.counts.byCause["never-assigned"], 0);
+  assert.deepEqual(ledger.retry, []);
+  assert.deepEqual(ledger.stillUnread, []);
+  assert.deepEqual(ledger.counts.byTier.docs, {
+    files: 1,
+    read: 0,
+    partial: 0,
+    unread: 0,
+    automated: 1,
+  });
+  const serialized = JSON.parse(serializeLedger(ledger));
+  assert.equal(serialized.counts.automated, 1);
+  assert.deepEqual(Object.keys(serialized.counts.byTier), [
+    "source",
+    "test",
+    "docs",
+    "config",
+    "generated",
+  ]);
+
+  // A helper that did read an automated-tier file still gets the read counted.
+  const helpers = [helper(), helper({ agentId: "h0", chunk: "docs-001" })];
+  const sessions = new Map([
+    ["h1", session(fullReads())],
+    ["h0", session([read("d1", "docs/guide.md", 1, 10)])],
+  ]);
+  const readAnyway = ledgerFor({ helpers, sessions, automatedTiers: ["docs"] });
+  assert.equal(readAnyway.files.find((f) => f.path === "docs/guide.md").status, "read");
+  assert.equal(readAnyway.counts.automated, 0);
+});
+
+test("byTier splits file counts into read, partial and unread per tier", () => {
+  const calls = [read("r1", "src/a.ts", 1, 600), read("r2", "src/big.ts", 1, 1800)];
+  const ledger = ledgerFor({ calls });
+  assert.equal(ledger.files.find((f) => f.path === "src/big.ts").status, "partial");
+  assert.deepEqual(ledger.counts.byTier.source, {
+    files: 2,
+    read: 1,
+    partial: 1,
+    unread: 0,
+    automated: 0,
+  });
+  assert.deepEqual(ledger.counts.byTier.docs, {
+    files: 1,
+    read: 0,
+    partial: 0,
+    unread: 1,
+    automated: 0,
+  });
+  assert.deepEqual(ledger.counts.byTier.test, {
+    files: 0,
+    read: 0,
+    partial: 0,
+    unread: 0,
+    automated: 0,
+  });
+});
+
+test("--previous-plan carries reads only for files unchanged between plans", () => {
+  const oldPlan = makePlan();
+  const previous = JSON.parse(serializeLedger(ledgerFor({ calls: fullReads() })));
+  assert.equal(previous.retry.length, 1);
+  const changed = buildPlan({
+    files: [
+      { path: "src/a.ts", content: lines(600) },
+      { path: "src/big.ts", content: Buffer.from("y\n".repeat(2000)) },
+      { path: "docs/guide.md", content: lines(10) },
+    ],
+    config: { scopeResolution: scope() },
+  });
+  assert.equal(changed.ok, true);
+  const ledger = buildLedger({
+    plan: changed.plan,
+    helpers: [],
+    previous,
+    previousPlan: oldPlan,
+    platform: "linux",
+    root: ROOT,
+  });
+  assert.equal(ledger.files.find((f) => f.path === "src/a.ts").status, "read");
+  assert.deepEqual(rangeOf(ledger, "src/a.ts").evidence, [
+    { agentId: "h1", toolCallId: "r1", start: 1, end: 600 },
+  ]);
+  assert.equal(ledger.files.find((f) => f.path === "src/big.ts").status, "unread");
+  assert.equal(ledger.files.find((f) => f.path === "docs/guide.md").status, "unread");
+  // The old plan's retry chunks point at its ranges, so they are dropped, not counted as tried.
+  assert.deepEqual(ledger.retryHistory, []);
+  assert.ok(ledger.retry.some((c) => c.entries.some((e) => e.path === "src/big.ts")));
+  assert.ok(ledger.retry.some((c) => c.entries.some((e) => e.path === "docs/guide.md")));
+});
+
+test("CLI checks --previous-plan against the previous ledger and validates --automated-tier", async (t) => {
+  const dir = await tempDir(t);
+  const root = path.join(dir, "repo");
+  await mkdir(path.join(root, "src"), { recursive: true });
+  await mkdir(path.join(root, "docs"), { recursive: true });
+  await writeFile(path.join(root, "src", "a.ts"), lines(600));
+  await writeFile(path.join(root, "src", "big.ts"), lines(2000));
+  await writeFile(path.join(root, "docs", "guide.md"), lines(10));
+  const planFile = path.join(dir, "plan.json");
+  await writeFile(planFile, serializePlan(makePlan()));
+  const s1 = path.join(dir, "h1.jsonl");
+  const cliReads = [
+    read("r1", "src/a.ts", 1, 600),
+    read("r2", "src/big.ts", 1, 1800),
+    read("r3", "src/big.ts", 1801, 2000, { offset: 1801 }),
+  ];
+  await writeFile(s1, sessionText({ id: "s1", cwd: root }, cliReads, "Done."));
+  const helpersFile = path.join(dir, "helpers.json");
+  await writeFile(helpersFile, JSON.stringify([helper({ transcript: s1 })]));
+  const run = (extra) => {
+    const out = io();
+    const code = main(
+      ["--plan", planFile, "--helpers", helpersFile, "--root", root, ...extra],
+      out,
+    );
+    return { code, ...out };
+  };
+
+  const automated = run(["--automated-tier", "docs"]);
+  assert.equal(automated.code, 0, automated.err.join(""));
+  assert.match(automated.out.join(""), /1 automated checks only/);
+  const ledgerFile = path.join(dir, "ledger.json");
+  assert.equal(JSON.parse(await readFile(ledgerFile, "utf8")).counts.automated, 1);
+
+  const bogus = run(["--automated-tier", "vendor"]);
+  assert.equal(bogus.code, 1);
+  assert.match(bogus.err.join(""), /unknown --automated-tier vendor/);
+
+  assert.equal(run(["--previous-plan", planFile]).code, 1);
+
+  const prev = path.join(dir, "ledger.prev.json");
+  await writeFile(prev, await readFile(ledgerFile));
+  const oldPlan = path.join(dir, "plan.prev.json");
+  await writeFile(oldPlan, await readFile(planFile));
+  const carried = run(["--previous", prev, "--previous-plan", oldPlan, "--final"]);
+  assert.equal(carried.code, 4, carried.err.join(""));
+
+  await writeFile(oldPlan, `${(await readFile(planFile, "utf8")).trimEnd()}\n\n`);
+  const mismatch = run(["--previous", prev, "--previous-plan", oldPlan]);
+  assert.equal(mismatch.code, 1);
+  assert.match(mismatch.err.join(""), /not a ledger for --previous-plan/);
+});

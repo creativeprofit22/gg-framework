@@ -239,12 +239,21 @@ Reply with:
 Sweep scope: <resolved natural-language scope>
 Mode: <project-config | baseline fallback>
 Scope confidence: <high|medium|low>
-Files scanned: <N primary, N adjacent>
+In scope: <N> files (<N primary, N adjacent>)
+Read (receipt-backed): <N> files (<basis: lane receipts, file-level | own reads, file-level>)
+Automated checks only: <N> files (<generated N, binary N>)
+Unread: <N> files not fully read (<cause N, ...>)
 Analyzers run: <N> (<list short ids>)
 Findings accepted: <N> (<N Critical, N High, N Medium, N Low>)
 Tasks created: <N>
 Skipped/rejected: <N>
 ```
+
+Counts must come from evidence, never from the file list alone:
+
+- In scope comes from the scope map. A file counts as read only when a lane's receipt (or, when lanes run sequentially, your own Read call) shows a successful read of it; grep matches alone never count.
+- Generated or binary files that were only grepped or analyzed count as automated checks only.
+- If a receipt is cut short (`+N more`), files it does not name count as unread with cause `receipt cut short`; a lane that failed or timed out makes its unread files `helper-failed` or `helper-timed-out`.
 
 Then one line per task:
 

@@ -28,7 +28,7 @@ const projectSweep = setupSweep.slice(
 test("canonical sweep bytes are pinned", () => {
   assert.equal(
     createHash("sha256").update(commandBytes).digest("hex"),
-    "aff046c4a2a36e11ff5a45b708fa888464a2ee765b410fbda765b64db8a8cf7d",
+    "6d6beec54cca282b609eaffdb9db8f43f5291ad4041f178ef8af843b79e3ac95",
   );
   assert.equal(commandBytes.includes(Buffer.from("\r\n")), false);
 });
@@ -94,6 +94,25 @@ test("standalone sweep always tells the user the next step", () => {
     command,
     /For every task, this line: `Before starting, commit any uncommitted changes/,
   );
+});
+
+test("standalone sweep reports honest file counts", () => {
+  assert.doesNotMatch(command, /Files scanned:/);
+  assert.match(command, /In scope: <N> files \(<N primary, N adjacent>\)/);
+  assert.match(command, /Read \(receipt-backed\): <N> files \(<basis: lane receipts, file-level/);
+  assert.match(command, /Automated checks only: <N> files \(<generated N, binary N>\)/);
+  assert.match(command, /Unread: <N> files not fully read \(<cause N, \.\.\.>\)/);
+  assert.match(command, /count as unread with cause `receipt cut short`/);
+  assert.match(command, /grep matches alone never count/);
+  for (const prefix of [
+    "In scope: <N> files",
+    "Read (receipt-backed): <N> files",
+    "Automated checks only: <N> files",
+    "Unread: <N> files not fully read",
+  ]) {
+    assert.ok(command.includes(prefix), `standalone sweep lacks ${prefix}`);
+    assert.ok(projectSweep.includes(prefix), `generated sweep lacks ${prefix}`);
+  }
 });
 
 test("standalone sweep maps areas and merges fix tasks across sweeps", () => {

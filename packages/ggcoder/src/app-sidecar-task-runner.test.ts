@@ -212,6 +212,7 @@ async function taskRunnerHarness(
     MAX_AUTOPILOT_ROUNDS: 1,
     kenAutoSession: null,
     finishOwnedGeneration: vi.fn(),
+    markRunSettled: () => {},
     queueMicrotask: () => {},
     // Mirrors the production barrier: nothing drains while a task turn owns the session.
     runStrandedQueue: vi.fn(async () => {

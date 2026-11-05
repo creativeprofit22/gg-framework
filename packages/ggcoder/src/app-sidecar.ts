@@ -185,7 +185,7 @@ import {
 } from "./core/auth-providers.js";
 import { VERSION, ensureAppDirs, loadSavedSettings } from "./config.js";
 import { buildMcpRows } from "./app-sidecar-mcp-rows.js";
-import { SettingsManager } from "./core/settings-manager.js";
+import { readIdleSessionCleanupMinutes, SettingsManager } from "./core/settings-manager.js";
 import {
   installPlugin,
   listInstalledPlugins,
@@ -367,6 +367,10 @@ import {
   AppSidecarSessionRouter,
   redactedSessionEventSseData,
 } from "./app-sidecar-session-router.js";
+import {
+  createSessionReaper,
+  type IdleSessionSnapshot,
+} from "./app-sidecar-session-reaper.js";
 import type { PhaseDeletionSession } from "./app-sidecar-phase-deletion.js";
 import type { AppSidecarNotesHandler } from "./app-sidecar-notes.js";
 import {
@@ -764,6 +768,43 @@ async function main(): Promise<void> {
   // One heavy-check limit for every window this daemon serves.
   const heavyCheckSlots = new HeavyCheckSlots();
   const reloadCoordinator = new AppSidecarReloadCoordinator();
+  // Frees panes whose window closed without a DELETE reaching the daemon.
+  let idleCleanupMinutes = 30;
+  let idleCleanupFallbackWarned = false;
+  const sessionReaper = createSessionReaper({
+    router: sessions,
+    now: () => Date.now(),
+    setInterval: (callback, ms) => setInterval(callback, ms),
+    clearInterval: (handle) => clearInterval(handle),
+    readTimeoutMs: async () => {
+      const read = await readIdleSessionCleanupMinutes(paths.settingsFile, idleCleanupMinutes);
+      idleCleanupMinutes = read.minutes;
+      if (read.ok) {
+        idleCleanupFallbackWarned = false;
+      } else if (!idleCleanupFallbackWarned) {
+        idleCleanupFallbackWarned = true;
+        log("WARN", "app-sidecar", "idle cleanup setting unreadable; keeping last good value", {
+          minutes: String(idleCleanupMinutes),
+          error: read.error,
+        });
+      }
+      return idleCleanupMinutes * 60_000;
+    },
+    tryAcquireMutation: () => reloadCoordinator.tryAcquireSessionMutation("DELETE"),
+    onReaped: (sessionId, idleMs) => {
+      log("INFO", "app-sidecar", "session reaped", {
+        id: sessionId,
+        idleMinutes: String(Math.round(idleMs / 60_000)),
+      });
+    },
+    onError: (sessionId, error) => {
+      captureSidecarError(error, "app-sidecar.session.reap");
+      log("WARN", "app-sidecar", "session reap failed", {
+        id: sessionId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    },
+  });
 
   const broadcastAll = (type: string, data: unknown): void => {
     for (const context of sessions.values()) context.broadcast(type, data);
@@ -1189,6 +1230,7 @@ async function main(): Promise<void> {
     // knows the token — it set GG_APP_TOKEN; the field serves other spawners).
     process.stdout.write(`GG_APP_LISTENING ${addr.port} ${authToken}\n`);
     log("INFO", "app-sidecar", "daemon listening", { port: String(addr.port), host });
+    sessionReaper.start();
   });
 
   // One daemon serves every window, so the corpus refresh runs once per app.
@@ -1236,6 +1278,7 @@ async function main(): Promise<void> {
       });
     },
     teardown: async () => {
+      sessionReaper.stop();
       // Before any await: background commands live outside the daemon's process
       // group, and the app force-kills that group after 3 s. If a slow session
       // teardown is still pending then, these would never be stopped.
@@ -1366,6 +1409,8 @@ interface SessionContext {
   ) => void;
   dispose: () => Promise<void>;
   isRunning: () => boolean;
+  /** Synchronous so the idle cleanup can check and remove in one step. */
+  idleSnapshot: () => IdleSessionSnapshot;
   /** Synchronously stop this context's background commands (all its sessions). */
   stopBackgroundProcesses: () => void;
 }
@@ -1539,6 +1584,16 @@ async function createSession(
   // ── SSE fan-out (declared before the session so plan callbacks can use it) ─
   const clients = new Set<SseClient>();
   let clientSeq = 0;
+  // Idle cleanup clock: requests, event-stream connects/disconnects and run settles count as activity.
+  let lastActivityAt = Date.now();
+  let lastRunSettledAt: number | null = null;
+  const markActivity = (): void => {
+    lastActivityAt = Date.now();
+  };
+  const markRunSettled = (): void => {
+    lastRunSettledAt = Date.now();
+    lastActivityAt = lastRunSettledAt;
+  };
 
   function sseFrame(type: string, data: unknown): string {
     return redactedSessionEventSseData(opts.id, type, data, environmentSecrets(process.env));
@@ -2699,6 +2754,7 @@ async function createSession(
       } else {
         releaseRunAwake?.();
         releaseRunAwake = null;
+        markRunSettled();
       }
       if (runState === "cancelling") broadcast("run_cancelling", { runState });
     },
@@ -3569,6 +3625,7 @@ async function createSession(
       return null;
     } finally {
       autopilotReviewing = false;
+      markRunSettled();
       const pending = pendingKenAutoModel;
       pendingKenAutoModel = null;
       if (pending) await syncKenAutoModel(pending.provider, pending.model);
@@ -3633,6 +3690,7 @@ async function createSession(
       return null;
     } finally {
       autopilotReviewing = false;
+      markRunSettled();
       // Apply any model switch that landed mid-review.
       const pending = pendingKenAutoModel;
       pendingKenAutoModel = null;
@@ -3874,6 +3932,7 @@ async function createSession(
       return outcome;
     } finally {
       autopilotActive = false;
+      markRunSettled();
       // Stale or failed reviews return without a verdict frame. Close the
       // webview's review state; cancellation and plan accept/revise already
       // settle it themselves.
@@ -4682,6 +4741,7 @@ async function createSession(
     url: string,
     method: string,
   ): void {
+    markActivity();
     if (handleGoalRoutes(goalRouteCtx, req, res, url, method)) return;
     if (roadmapSessionRoutes.handleNotesRoutes(req, res, url, method)) return;
 
@@ -4758,6 +4818,7 @@ async function createSession(
       let keepAlive: NodeJS.Timeout | undefined;
       let closed = false;
       const cleanup = (): void => {
+        if (!closed) markActivity();
         closed = true;
         if (keepAlive) clearInterval(keepAlive);
         clients.delete(client);
@@ -5915,6 +5976,7 @@ async function createSession(
           await result.completion;
         } finally {
           releaseKenAwake();
+          markRunSettled();
         }
       });
       return;
@@ -7733,6 +7795,24 @@ async function createSession(
     handle,
     dispose,
     isRunning: () => isAppSidecarSessionBusy(sessionBusyState()),
+    idleSnapshot: () => ({
+      listeners: clients.size,
+      busy:
+        isAppSidecarSessionBusy(sessionBusyState()) ||
+        session.listSubAgents().some((w) => w.state === "running" || w.state === "starting") ||
+        kenLifecycle.running ||
+        autopilotReviewing ||
+        shell.activeCount > 0 ||
+        serveController !== null,
+      waitingOnUser:
+        asks.pendingRequests.length > 0 ||
+        asks.deferredRequests.length > 0 ||
+        elicitations.pendingCount > 0 ||
+        planGate.pending() !== null,
+      holdsLease: session.getRoadmapPhaseLeaseMarker() !== undefined,
+      lastActivityAt,
+      lastRunSettledAt,
+    }),
     phaseDeletionSession: {
       getState: () => ({ ...session.getState(), cwd }),
       getBusyState: sessionBusyState,

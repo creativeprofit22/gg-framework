@@ -1108,11 +1108,15 @@ export async function setShellTrust(trusted: boolean, paneId = "primary"): Promi
  * Load a local image a reply points at (`![](/tmp/shot.png)`) as a data URL;
  * the webview can't read disk paths itself. Null when it can't be shown.
  */
-export async function readChatImage(path: string, paneId = "primary"): Promise<string | null> {
+export async function readChatImage(
+  path: string,
+  paneId = "primary",
+  kind: "path" | "url" = "url",
+): Promise<string | null> {
   let decoded: string;
   try {
-    // Same URL-syntax removal as links, so Rust resolves one literal path.
-    decoded = projectUrlPath(path);
+    // Reply links are URLs; tool image paths are literal and may contain `#`, `?` or `%`.
+    decoded = kind === "url" ? projectUrlPath(path) : path;
   } catch {
     return null;
   }

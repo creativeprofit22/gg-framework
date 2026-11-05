@@ -112,8 +112,8 @@ export type Item =
     };
 
 export interface TranscriptImage {
-  /** data: URL (base64) ready to drop into <img src>. */
-  src: string;
+  /** data: URL (base64) ready to drop into <img src>; dropped for older images, which reload from `path`. */
+  src?: string;
   /** Source file path, shown as a caption + used as a stable key. */
   path?: string;
 }

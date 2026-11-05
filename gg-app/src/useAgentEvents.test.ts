@@ -164,6 +164,29 @@ it.each(["1536x1024", "1254x1254", "1024x1024"])(
   },
 );
 
+it("keeps data only for the newest 12 live screenshots; older ones keep their path", () => {
+  const { hook, getItems } = setup();
+  for (let n = 1; n <= 13; n++) {
+    act(() =>
+      hook.result.current.handleEvent(
+        ev("tool_call_end", {
+          toolCallId: `shot-${n}`,
+          result: "Screenshot saved",
+          details: {
+            imagePreviews: [{ base64: `B${n}`, mediaType: "image/png", path: `/shots/${n}.png` }],
+          },
+        }),
+      ),
+    );
+  }
+  const images = getItems().flatMap((item) => (item.kind === "images" ? item.images : []));
+  expect(images).toHaveLength(13);
+  expect(images[0]).toEqual({ path: "/shots/1.png" });
+  expect(images.slice(1).map((image) => image.src)).toEqual(
+    Array.from({ length: 12 }, (_, i) => `data:image/png;base64,B${i + 2}`),
+  );
+});
+
 it.each(["completed", "aborted", "failed"] as const)(
   "refreshes pane commands after %s runs",
   async (outcome) => {

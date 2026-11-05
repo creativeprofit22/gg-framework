@@ -141,7 +141,7 @@ pub(crate) fn read_chat_image(
     path: String,
 ) -> Result<serde_json::Value, String> {
     // Local Fork: literal path against the originating pane's cwd; the webview
-    // strips URL syntax first (`projectUrlPath`), as for `open_project_path`.
+    // strips URL syntax (`projectUrlPath`) only for reply image links.
     let pane_id = pane_id.as_deref().unwrap_or(PRIMARY_PANE_ID);
     let cwd = pane_cwd_for(&webview, pane_id).ok_or("sidecar not ready")?;
     let file = resolve_project_path(&cwd, &path)?;

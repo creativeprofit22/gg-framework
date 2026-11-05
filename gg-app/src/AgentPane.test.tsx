@@ -638,6 +638,35 @@ describe("pane-local opening (mocked native transport)", () => {
     },
   );
 
+  it("reloads older restored screenshots from disk instead of keeping their data", async () => {
+    const pane = client("pane-restored-shots", 1);
+    vi.mocked(pane.listHistory).mockResolvedValue(
+      Array.from({ length: 13 }, (_, i) => ({
+        role: "assistant" as const,
+        text: "",
+        toolImages: [{ src: `data:image/png;base64,SENT${i + 1}`, path: `/shots/${i + 1}.png` }],
+      })),
+    );
+    nativeMocks.invoke.mockImplementation(async (command: string) =>
+      command === "read_chat_image" ? { mediaType: "image/png", data: "FROMDISK" } : undefined,
+    );
+    const view = render(<AgentPane client={pane} target={target} workspaceOwnsSessionLifecycle />);
+    await waitFor(() => expect(view.container.querySelectorAll(".img-card")).toHaveLength(13));
+    const oldest = await screen.findByRole("img", { name: "/shots/1.png" });
+    await waitFor(() => expect(oldest.getAttribute("src")).toBe("data:image/png;base64,FROMDISK"));
+    expect(nativeMocks.invoke).toHaveBeenCalledWith("read_chat_image", {
+      paneId: pane.paneId,
+      path: "/shots/1.png",
+    });
+    expect(
+      nativeMocks.invoke.mock.calls.filter(([command]) => command === "read_chat_image"),
+    ).toHaveLength(1);
+    expect(screen.getByRole("img", { name: "/shots/13.png" }).getAttribute("src")).toBe(
+      "data:image/png;base64,SENT13",
+    );
+    view.unmount();
+  });
+
   it("opens each exact original from real reopened multi-image history (mocked native open)", async () => {
     await withRealSidecar(async ({ project, manager, open, request }) => {
       const { result, images, hashes } = await imageOriginals(project);

@@ -11,7 +11,7 @@ vi.mock("@tauri-apps/api/webviewWindow", () => ({
 vi.mock("@tauri-apps/plugin-log", () => ({ error: vi.fn(), info: vi.fn() }));
 vi.mock("./toast", () => ({ toast }));
 
-import { openProjectPath } from "./agent";
+import { openProjectPath, readChatImage } from "./agent";
 
 describe("openProjectPath", () => {
   beforeEach(() => vi.resetAllMocks());
@@ -103,5 +103,25 @@ describe("openProjectPath", () => {
     invoke.mockRejectedValueOnce("file not found");
     await expect(openProjectPath("missing.md")).resolves.toBeUndefined();
     expect(toast).toHaveBeenCalledWith("Could not open file: file not found", "error");
+  });
+});
+
+describe("readChatImage", () => {
+  beforeEach(() => vi.resetAllMocks());
+
+  it("sends a literal tool image path unchanged", async () => {
+    invoke.mockResolvedValueOnce({ mediaType: "image/png", data: "AAAA" });
+    const path = "C:/proj/issue #42 100%25.png:123";
+    await expect(readChatImage(path, "pane-a", "path")).resolves.toBe("data:image/png;base64,AAAA");
+    expect(invoke).toHaveBeenCalledWith("read_chat_image", { paneId: "pane-a", path });
+  });
+
+  it("still strips URL syntax from reply image links by default", async () => {
+    invoke.mockResolvedValueOnce({ mediaType: "image/png", data: "AAAA" });
+    await readChatImage("shots/my%20shot.png#frag", "primary");
+    expect(invoke).toHaveBeenCalledWith("read_chat_image", {
+      paneId: "primary",
+      path: "shots/my shot.png",
+    });
   });
 });

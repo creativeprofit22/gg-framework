@@ -51,6 +51,7 @@ import type { Item } from "./App";
 import { readChatError } from "./chat-error";
 import type { LiveTextStore } from "./live-text";
 import { lastIssuedId } from "./transcript-item";
+import { trimOlderToolImages } from "./transcript-images";
 
 /**
  * Build-session SSE event handling + assistant-streaming helpers, extracted from
@@ -462,6 +463,7 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           }
         }
         if (item.kind === "security") return withSecurityRow(prev, item);
+        if (item.kind === "images") return trimOlderToolImages([...prev, item]);
         return [...prev, item];
       });
     },

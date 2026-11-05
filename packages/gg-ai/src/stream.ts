@@ -297,7 +297,8 @@ function requireLocalBaseUrl(baseUrl: string | undefined): string {
 /**
  * Unified streaming entry point. Returns a StreamResult that is both
  * an async iterable (for streaming events) and thenable (await for
- * the final response).
+ * the final response). Breaking out of `for await` early cancels the
+ * request and makes `response` reject with an `AbortError`.
  *
  * Providers are resolved via the provider registry. Built-in providers
  * (anthropic, openai, glm, moonshot) are registered at module load.

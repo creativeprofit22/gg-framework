@@ -29,6 +29,7 @@ Call `stream()` with a provider, model, and messages. That's the entire API.
 
 - **`for await`** gives you streaming events (`text_delta`, `thinking_delta`, `toolcall_done`, etc.)
 - **`await`** gives you the final response (`message`, `stopReason`, `usage`)
+- Breaking out of `for await` early cancels the request, and the response then rejects with an `AbortError`. If you need the final response, read to the end or `await` the result instead.
 
 Same function, same call. Dual-nature `StreamResult` — async iterable and thenable.
 

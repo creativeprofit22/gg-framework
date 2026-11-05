@@ -37,6 +37,7 @@ import {
   usesCustomNpmRegistry,
   usesCustomPypiIndex,
 } from "./package-cooldown.js";
+import { TtlLru } from "./ttl-lru.js";
 
 export type PackageEcosystem = "npm" | "PyPI";
 
@@ -86,17 +87,23 @@ const DAY_MS = 86_400_000;
 const TYPOSQUAT_NEW_DAYS = 90;
 const TYPOSQUAT_MIN_WEEKLY = 500;
 const NPM_INSTALL = new Set(["add", "install", "i"]);
+/** Registry answers are re-fetched after an hour. */
+const META_TTL_MS = 60 * 60_000;
 
-// Per-process caches; answers are stable within a session.
+// Per-process caches, capped and expiring: the app daemon runs for days.
 /**
  * OSV answers by `eco:name@version`: MAL ids, whether it has any other
- * (vulnerability) advisories, and when asked. Clean answers expire after a day.
+ * (vulnerability) advisories, and when asked. Clean answers expire after a day
+ * (checked in `osvKnown`); malware answers stay until the cap drops them.
  */
-const osvCache = new Map<string, { ids: string[]; flawed: boolean; at: number }>();
-/** Serious-flaw verdicts by `eco:name@version` (detailed OSV query), with when asked. */
-const vulnCache = new Map<string, { verdict: VulnVerdict | null; at: number }>();
-const metaCache = new Map<string, Promise<unknown>>();
-const lockfileCache = new Map<string, LockVerdict>();
+const osvCache = new TtlLru<{ ids: string[]; flawed: boolean; at: number }>(
+  5_000,
+  Number.POSITIVE_INFINITY,
+);
+/** Serious-flaw verdicts by `eco:name@version` (detailed OSV query), for a day. */
+const vulnCache = new TtlLru<{ verdict: VulnVerdict | null }>(200, DAY_MS);
+/** Registry lookups (trimmed to the fields read), shared while in flight. */
+const metaCache = new TtlLru<Promise<unknown>>(200, META_TTL_MS);
 
 // ── Parsing ───────────────────────────────────────────────
 
@@ -623,20 +630,79 @@ interface PypiDoc {
   releases?: Record<string, Array<{ upload_time_iso_8601?: string; yanked?: boolean }>>;
 }
 
+const isRecord = (v: unknown): v is Record<string, unknown> =>
+  typeof v === "object" && v !== null && !Array.isArray(v);
+
+const stringEntries = (v: Record<string, unknown>): Record<string, string> =>
+  Object.fromEntries(
+    Object.entries(v).filter((e): e is [string, string] => typeof e[1] === "string"),
+  );
+
+/** The npm packument fields the checks read: tags, versions (+ attestation flag), times. */
+function slimNpmDoc(raw: unknown): NpmDoc {
+  if (!isRecord(raw)) throw new Error("npm registry reply is not an object");
+  const out: NpmDoc = {};
+  const tags = raw["dist-tags"];
+  if (isRecord(tags)) out["dist-tags"] = stringEntries(tags);
+  if (isRecord(raw.versions)) {
+    out.versions = Object.fromEntries(
+      Object.entries(raw.versions).map(([v, doc]): [string, NpmVersionDoc] => [
+        v,
+        isRecord(doc) && isRecord(doc.dist) && doc.dist.attestations
+          ? { dist: { attestations: true } }
+          : {},
+      ]),
+    );
+  }
+  if (isRecord(raw.time)) out.time = stringEntries(raw.time);
+  return out;
+}
+
+/** The PyPI fields the checks read: latest version and per-file upload time + yanked. */
+function slimPypiDoc(raw: unknown): PypiDoc {
+  if (!isRecord(raw)) throw new Error("PyPI reply is not an object");
+  const out: PypiDoc = {};
+  if (isRecord(raw.info)) {
+    out.info = typeof raw.info.version === "string" ? { version: raw.info.version } : {};
+  }
+  if (isRecord(raw.releases)) {
+    out.releases = Object.fromEntries(
+      Object.entries(raw.releases).map(([v, files]) => [
+        v,
+        (Array.isArray(files) ? files : []).filter(isRecord).map((f) => ({
+          ...(typeof f.upload_time_iso_8601 === "string"
+            ? { upload_time_iso_8601: f.upload_time_iso_8601 }
+            : {}),
+          ...(f.yanked ? { yanked: true } : {}),
+        })),
+      ]),
+    );
+  }
+  return out;
+}
+
+function slimDownloads(raw: unknown): { downloads?: number } {
+  return isRecord(raw) && typeof raw.downloads === "number" ? { downloads: raw.downloads } : {};
+}
+
 class NotFound {}
 
 async function getJson(
   url: string,
   ctx: Ctx,
-  headers: Record<string, string> = {},
+  headers: Record<string, string>,
+  pick: (raw: unknown) => unknown,
 ): Promise<unknown> {
   const key = `${headers.accept ?? ""} ${url}`;
-  let hit = metaCache.get(key);
+  let hit = metaCache.get(key, ctx.now);
   if (!hit) {
-    hit = fetchJson(url, { headers }, ctx, true);
-    metaCache.set(key, hit);
-    // A failed fetch should be retried next install, not cached.
-    hit.catch(() => metaCache.delete(key));
+    const fetched = fetchJson(url, { headers }, ctx, true).then((raw) =>
+      raw instanceof NotFound ? raw : pick(raw),
+    );
+    hit = fetched;
+    metaCache.set(key, fetched, ctx.now);
+    // A failed fetch should be retried next install, not cached (a newer entry is kept).
+    fetched.catch(() => metaCache.deleteIf(key, fetched));
   }
   return hit;
 }
@@ -701,12 +767,12 @@ function npmDoc(name: string, full: boolean, ctx: Ctx): Promise<unknown> {
   const accept = full ? "application/json" : "application/vnd.npm.install-v1+json";
   // A full doc already fetched answers abbreviated questions too.
   const fullKey = `application/json ${NPM_REGISTRY}/${enc(name)}`;
-  if (!full && metaCache.has(fullKey))
-    return getJson(`${NPM_REGISTRY}/${enc(name)}`, ctx, { accept: "application/json" });
-  return getJson(`${NPM_REGISTRY}/${enc(name)}`, ctx, { accept });
+  if (!full && metaCache.get(fullKey, ctx.now) !== undefined)
+    return getJson(`${NPM_REGISTRY}/${enc(name)}`, ctx, { accept: "application/json" }, slimNpmDoc);
+  return getJson(`${NPM_REGISTRY}/${enc(name)}`, ctx, { accept }, slimNpmDoc);
 }
 function pypiDoc(name: string, ctx: Ctx): Promise<unknown> {
-  return getJson(`${PYPI}/${name}/json`, ctx);
+  return getJson(`${PYPI}/${name}/json`, ctx, {}, slimPypiDoc);
 }
 
 function isStable(v: string): boolean {
@@ -860,6 +926,7 @@ interface LockVerdict {
 const VERDICT_FILE = "package-verdicts.json";
 const OSV_TTL_MS = DAY_MS;
 const MAX_LOCKS = 50;
+const lockfileCache = new TtlLru<LockVerdict>(MAX_LOCKS, DAY_MS);
 
 class VerdictCache {
   private data: DiskCache = { osvClean: {}, osvFlawed: {}, locks: {} };
@@ -965,20 +1032,21 @@ const osvKey = (i: OsvItem): string => `${i.ecosystem}:${i.name}@${i.version}`;
 
 /** MAL- IDs per `eco:name@version`, one request per 1000 queries, cached (memory + disk). */
 /** A remembered OSV answer still holds: malware stays malware; "clean" is re-asked daily. */
-function osvKnown(key: string, now: number): boolean {
-  const hit = osvCache.get(key);
-  if (!hit) return false;
-  return hit.ids.length > 0 || now - hit.at < OSV_TTL_MS;
+function osvKnown(key: string, now: number): { ids: string[] } | undefined {
+  const hit = osvCache.get(key, now);
+  return hit && (hit.ids.length > 0 || now - hit.at < OSV_TTL_MS) ? hit : undefined;
 }
 
 async function osvMalware(items: OsvItem[], ctx: Ctx): Promise<Map<string, string[]>> {
-  const pending = [
-    ...new Map(
-      items
-        .filter((i) => !osvKnown(osvKey(i), ctx.now) && !ctx.cache.osvFresh(osvKey(i), ctx.now))
-        .map((i) => [osvKey(i), i]),
-    ).values(),
-  ];
+  // Answers kept locally so the cache cap can't drop one mid-check.
+  const answers = new Map<string, string[]>();
+  const queue = new Map<string, OsvItem>();
+  for (const i of items) {
+    const known = osvKnown(osvKey(i), ctx.now);
+    if (known) answers.set(osvKey(i), known.ids);
+    else if (!ctx.cache.osvFresh(osvKey(i), ctx.now)) queue.set(osvKey(i), i);
+  }
+  const pending = [...queue.values()];
   for (let start = 0; start < pending.length; start += OSV_BATCH) {
     const batch = pending.slice(start, start + OSV_BATCH);
     const body = (await fetchJson(
@@ -999,7 +1067,8 @@ async function osvMalware(items: OsvItem[], ctx: Ctx): Promise<Map<string, strin
       const all = (body.results?.[i]?.vulns ?? []).map((v) => v.id ?? "");
       const ids = all.filter((id) => id.startsWith("MAL-"));
       const flawed = all.some((id) => id !== "" && !id.startsWith("MAL-"));
-      osvCache.set(osvKey(item), { ids, flawed, at: ctx.now });
+      osvCache.set(osvKey(item), { ids, flawed, at: ctx.now }, ctx.now);
+      answers.set(osvKey(item), ids);
       // Remembered on disk with whether it had advisories, so a restart
       // neither re-asks OSV nor loses the serious-flaw trigger.
       if (ids.length === 0) ctx.cache.markClean(osvKey(item), ctx.now, flawed);
@@ -1007,7 +1076,7 @@ async function osvMalware(items: OsvItem[], ctx: Ctx): Promise<Map<string, strin
   }
   const out = new Map<string, string[]>();
   for (const i of items) {
-    const ids = osvCache.get(osvKey(i))?.ids;
+    const ids = answers.get(osvKey(i));
     if (ids && ids.length > 0) out.set(osvKey(i), ids);
   }
   return out;
@@ -1052,7 +1121,7 @@ const SERIOUS = new Set(["HIGH", "CRITICAL"]);
 /** Did the batch lookup see any non-malware advisory for this exact version? */
 function osvFlawed(item: OsvItem, ctx: Ctx): boolean {
   const key = osvKey(item);
-  const hit = osvCache.get(key);
+  const hit = osvCache.get(key, ctx.now);
   return hit ? hit.flawed : ctx.cache.osvFlawed(key, ctx.now);
 }
 
@@ -1062,8 +1131,8 @@ function osvFlawed(item: OsvItem, ctx: Ctx): boolean {
  */
 async function seriousFlaws(item: OsvItem, ctx: Ctx): Promise<VulnVerdict | null> {
   const key = osvKey(item);
-  const hit = vulnCache.get(key);
-  if (hit && ctx.now - hit.at < OSV_TTL_MS) return hit.verdict;
+  const hit = vulnCache.get(key, ctx.now);
+  if (hit) return hit.verdict;
   const body = (await fetchJson(
     OSV_QUERY_URL,
     {
@@ -1105,7 +1174,7 @@ async function seriousFlaws(item: OsvItem, ctx: Ctx): Promise<VulnVerdict | null
               .filter((f): f is string => typeof f === "string" && f.length > 0),
           ),
         };
-  vulnCache.set(key, { verdict, at: ctx.now });
+  vulnCache.set(key, { verdict }, ctx.now);
   return verdict;
 }
 
@@ -1222,7 +1291,9 @@ async function checkNamed(local: LocalCheck, ctx: Ctx): Promise<ShellThreat[]> {
       .filter((r) => r.ecosystem === "npm" && squats.has(r.name))
       .map((r) => [
         r.name,
-        safe(`downloads ${r.name}`, () => getJson(`${NPM_DOWNLOADS}/${r.name}`, ctx)),
+        safe(`downloads ${r.name}`, () =>
+          getJson(`${NPM_DOWNLOADS}/${r.name}`, ctx, {}, slimDownloads),
+        ),
       ]),
   );
   const resolved = (
@@ -1399,12 +1470,12 @@ async function checkLockfile(lock: LockfileInstall, cwd: string, ctx: Ctx): Prom
   }
   const hash = await hashInSlices(text);
   const cacheKey = `${lock.ecosystem}:${hash}:${Object.keys(ctx.feed.entries).length}`;
-  const remembered = lockfileCache.get(cacheKey) ?? ctx.cache.lock(cacheKey);
+  const remembered = lockfileCache.get(cacheKey, ctx.now) ?? ctx.cache.lock(cacheKey);
   // A lockfile verdict is re-asked of OSV at most once a day, so a package
   // flagged after the last check is still caught even if the feed is unchanged.
   const cached = remembered && ctx.now - remembered.at < DAY_MS ? remembered : undefined;
   if (cached) {
-    lockfileCache.set(cacheKey, cached);
+    lockfileCache.set(cacheKey, cached, cached.at);
     return cached.threats;
   }
   const pkgs = await parseLockfileAsync(file, text);
@@ -1451,7 +1522,7 @@ async function checkLockfile(lock: LockfileInstall, cwd: string, ctx: Ctx): Prom
   // Only cache a complete answer (OSV reached); offline answers are retried.
   if (osv !== null) {
     const verdict: LockVerdict = { at: ctx.now, threats };
-    lockfileCache.set(cacheKey, verdict);
+    lockfileCache.set(cacheKey, verdict, verdict.at);
     ctx.cache.setLock(cacheKey, verdict);
   }
   return threats;
@@ -1603,4 +1674,16 @@ export function clearPackageThreatCache(): void {
   lockfileCache.clear();
   verdictCaches.clear();
   downHosts.clear();
+}
+
+/** Test hook: the stored registry answers, once settled (failed lookups read as undefined). */
+export async function packageMetaCacheForTests(): Promise<Array<[string, unknown]>> {
+  return Promise.all(
+    metaCache
+      .entries()
+      .map(async ([key, hit]): Promise<[string, unknown]> => [
+        key,
+        await hit.catch(() => undefined),
+      ]),
+  );
 }

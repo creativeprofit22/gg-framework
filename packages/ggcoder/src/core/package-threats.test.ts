@@ -6,6 +6,7 @@ import {
   checkPackageInstall,
   clearPackageThreatCache,
   damerauLevenshtein,
+  packageMetaCacheForTests,
   parseLockfile,
   parseLockfileAsync,
   parsePackageInstalls,
@@ -433,5 +434,123 @@ describe("serious known flaws", () => {
     });
     const threats = await checkPackageInstall("npm i widget@0.21.1", flawOpts(f));
     expect(threats.map((t) => t.rule)).toEqual(["malicious-package"]);
+  });
+});
+
+describe("bounded caches", () => {
+  beforeEach(() => clearPackageThreatCache());
+
+  const T0 = Date.UTC(2026, 10, 4);
+  const at = (now: number, f: typeof fetch): PackageCheckOptions => ({
+    ...opts(f),
+    cooldownDays: 0,
+    now: () => now,
+  });
+  /** npm/PyPI registry requests (not OSV, not downloads) for `name`. */
+  const registryCalls = (f: typeof fetch, name: string): number =>
+    vi.mocked(f).mock.calls.filter(([input]) => {
+      const url = String(input);
+      return (
+        !url.includes("api.osv.dev") && !url.includes("/downloads/") && url.endsWith(`/${name}`)
+      );
+    }).length;
+
+  it("keeps at most 200 registry answers, dropping the oldest first", async () => {
+    const f = fakeNet({});
+    const names = Array.from({ length: 201 }, (_, i) => `zz-cap-${String(i).padStart(3, "0")}`);
+    expect(await checkPackageInstall(`npm i ${names.join(" ")}`, at(T0, f))).toEqual([]);
+    expect((await packageMetaCacheForTests()).length).toBeLessThanOrEqual(200);
+    await checkPackageInstall("npm i zz-cap-200", at(T0, f));
+    expect(registryCalls(f, "zz-cap-200")).toBe(1);
+    await checkPackageInstall("npm i zz-cap-000", at(T0, f));
+    expect(registryCalls(f, "zz-cap-000")).toBe(2);
+  });
+
+  it("re-fetches a registry answer once it is over an hour old", async () => {
+    const f = fakeNet({});
+    await checkPackageInstall("npm i zz-ttl", at(T0, f));
+    await checkPackageInstall("npm i zz-ttl", at(T0 + 59 * 60_000, f));
+    expect(registryCalls(f, "zz-ttl")).toBe(1);
+    await checkPackageInstall("npm i zz-ttl", at(T0 + 61 * 60_000, f));
+    expect(registryCalls(f, "zz-ttl")).toBe(2);
+  });
+
+  it("does not keep a failed registry lookup; a later check asks again", async () => {
+    // Only Date is faked, to step past the down-host window without sleeping.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(T0);
+      const osv = fakeNet({});
+      const f = vi.fn(async (input: string | URL | Request, init?: RequestInit) =>
+        String(input).includes("api.osv.dev")
+          ? osv(input, init)
+          : new Response("oops", { status: 500 }),
+      ) as unknown as typeof fetch;
+      expect(await checkPackageInstall("npm i zz-fail", at(T0, f))).toEqual([]);
+      expect(await packageMetaCacheForTests()).toEqual([]);
+      vi.setSystemTime(T0 + 3 * 60_000);
+      await checkPackageInstall("npm i zz-fail", at(T0 + 3 * 60_000, f));
+      expect(registryCalls(f, "zz-fail")).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("stores only the registry fields the checks read", async () => {
+    const osv = fakeNet({});
+    const f = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("api.osv.dev")) return osv(input, init);
+      if (url.includes("/downloads/")) {
+        return new Response(JSON.stringify({ downloads: 5e6, package: "raect", start: "x" }));
+      }
+      if (url.includes("pypi.org")) {
+        return new Response(
+          JSON.stringify({
+            info: { version: "2.0.0", description: "d".repeat(1000), author: "a" },
+            releases: {
+              "2.0.0": [
+                { upload_time_iso_8601: "2021-01-01T00:00:00Z", yanked: false, size: 1 },
+                { upload_time_iso_8601: "2021-01-02T00:00:00Z", yanked: true, digests: {} },
+              ],
+            },
+          }),
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          name: "raect",
+          readme: "r".repeat(1000),
+          "dist-tags": { latest: "2.0.0" },
+          versions: {
+            "1.0.0": { dependencies: { a: "1" }, dist: { tarball: "t" } },
+            "2.0.0": {
+              dependencies: { b: "2" },
+              dist: { tarball: "t", attestations: { url: "u" } },
+            },
+          },
+          time: { "1.0.0": "2020-01-01T00:00:00Z", "2.0.0": "2021-01-01T00:00:00Z" },
+        }),
+      );
+    }) as unknown as typeof fetch;
+    await checkPackageInstall("npm install raect", at(T0, f));
+    await checkPackageInstall("pip install requests", at(T0, f));
+    const stored = await packageMetaCacheForTests();
+    const find = (part: string): unknown => stored.find(([key]) => key.includes(part))?.[1];
+    expect(find("registry.npmjs.org/raect")).toEqual({
+      "dist-tags": { latest: "2.0.0" },
+      versions: { "1.0.0": {}, "2.0.0": { dist: { attestations: true } } },
+      time: { "1.0.0": "2020-01-01T00:00:00Z", "2.0.0": "2021-01-01T00:00:00Z" },
+    });
+    expect(find("/downloads/")).toEqual({ downloads: 5e6 });
+    expect(find("pypi.org")).toEqual({
+      info: { version: "2.0.0" },
+      releases: {
+        "2.0.0": [
+          { upload_time_iso_8601: "2021-01-01T00:00:00Z" },
+          { upload_time_iso_8601: "2021-01-02T00:00:00Z", yanked: true },
+        ],
+      },
+    });
   });
 });

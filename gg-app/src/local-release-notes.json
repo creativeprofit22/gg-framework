@@ -1,24 +1,23 @@
 {
   "schemaVersion": 1,
   "date": "2026-11-05",
-  "label": "Upstream 0.102.1, with grown-up local models",
+  "label": "Upstream 0.103.1, with GIFs and a brain for your providers",
   "sections": [
     {
-      "title": "From upstream 0.101.0 to 0.102.1",
+      "title": "From upstream 0.102.2 to 0.103.1",
       "items": [
-        "Local models just grew up. The tile is now `Local models`, and LM Studio, llama.cpp, vLLM or any OpenAI-compatible gateway is one `Add endpoint` away, with or without a key. GG learns the real context size each model runs with, and you can pin a `Context length` yourself, so long chats stop getting cut short. Your saved local model comes back after a restart, and the picker groups models by server.",
-        "Attachments arrive the way you sent them. Big files go through instead of failing quietly, GG reads PDF and EPUB files as text, and the files you attached show up by name in your sent message. If a message is over the size limit, GG tells you before sending and keeps your draft and attachments in place.",
-        "Long sessions got leaner and cheaper. On Claude, web search runs off to the side so whole result pages stop piling into your chat, web pages are read in tidy chunks that can jump straight to a `#section`, and giant command output gets trimmed at `30 KB`.",
-        "OpenRouter got more flexible. Point your key at any compatible gateway with an optional base URL, then press `Sync models` to list exactly what that endpoint serves, with real context sizes and image support.",
-        "MiniMax and Xiaomi keys just work. `MiniMax M3.1 Flash` is the new MiniMax default and your key finds its own region, and Xiaomi `Token Plan` keys from Europe and China connect instead of being rejected. `GG Goals` also starts when you tell it to, even on small local models, and one bad setting can no longer wipe the rest of your preferences.",
-        "Radio knows when to stop. If the app crashed or was force-quit, the next launch silences the leftover player, and on Windows pressing stop really stops the music."
+        "Your agent can make real animated `GIFs`. Ask for a frog walking or a rocket taking off and it draws every frame, stitches them into a looping GIF and plays it right in your chat. Once your `OpenAI` account is connected it already knows it can make images and GIFs, so no more hand-coded animations.",
+        "Waiting on an image is fun now. A glowing dot board fills in as your picture develops, with a live progress pill, and one click starts a game of `Snake` while you wait.",
+        "Every image in your chat has a `Save image` button in its corner. Click it, pick any folder, and the full-size original is yours.",
+        "The `AI Providers` page is a living brain. Providers sit in banks grouped by country, and each one you connect sends a glowing nerve into a `3D` brain that lights up as you wire in more. It looks right in a tiny window or full screen."
       ]
     },
     {
       "title": "Also in your Local Fork",
       "items": [
-        "Code search reads only what it needs. `steroids` now shows a long file's outline first, reads just the functions you ask for, and skips helpers it already showed, so the same answer takes a small fraction of the space. It needs steroids `0.8.1` or newer; if yours is older, your agent says so and tells you to run `steroids upgrade`. Repos that haven't been checked in over a week still say `STALE`, so you can tell when code may be behind.",
-        "GG Coder is now free software under the GNU AGPL-3.0. The `Source code` link on the About page opens this Local Fork's own code, not the original project's."
+        "`Save image` works in every pane. It always saves the picture from the pane that showed it, so a split window never grabs a file from the wrong project, and it works on images from your agent's tools as well as the ones in replies.",
+        "GIFs keep your saved chats light. The chat history keeps a still first frame, and when you reopen the chat the real GIF plays again as long as the file is still on your computer, so each saved GIF takes several times less room.",
+        "`Qwen Cloud` has its own card in the China bank of the new providers brain."
       ]
     }
   ]

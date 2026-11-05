@@ -53,10 +53,25 @@ export const CURRENT_LOCAL_RELEASE_NOTES = requireCurrentReleaseNotes(releaseNot
 /** Newest first. Maintained only by the Local Fork release flow. */
 export const LOCAL_CHANGELOG: LocalChangelogEntry[] = [
   {
-    id: "local-2026-11-05-upstream-01021-local-models-and-attachments",
+    id: "local-2026-11-05-upstream-01031-gifs-and-provider-brain",
     label: CURRENT_LOCAL_RELEASE_NOTES.label,
     date: CURRENT_LOCAL_RELEASE_NOTES.date,
     items: CURRENT_LOCAL_RELEASE_NOTES.sections.flatMap(({ items }) => items),
+  },
+  {
+    id: "local-2026-11-05-upstream-01021-local-models-and-attachments",
+    label: "Upstream 0.102.1, with grown-up local models",
+    date: "2026-11-05",
+    items: [
+      "Local models just grew up. The tile is now `Local models`, and LM Studio, llama.cpp, vLLM or any OpenAI-compatible gateway is one `Add endpoint` away, with or without a key. GG learns the real context size each model runs with, and you can pin a `Context length` yourself, so long chats stop getting cut short. Your saved local model comes back after a restart, and the picker groups models by server.",
+      "Attachments arrive the way you sent them. Big files go through instead of failing quietly, GG reads PDF and EPUB files as text, and the files you attached show up by name in your sent message. If a message is over the size limit, GG tells you before sending and keeps your draft and attachments in place.",
+      "Long sessions got leaner and cheaper. On Claude, web search runs off to the side so whole result pages stop piling into your chat, web pages are read in tidy chunks that can jump straight to a `#section`, and giant command output gets trimmed at `30 KB`.",
+      "OpenRouter got more flexible. Point your key at any compatible gateway with an optional base URL, then press `Sync models` to list exactly what that endpoint serves, with real context sizes and image support.",
+      "MiniMax and Xiaomi keys just work. `MiniMax M3.1 Flash` is the new MiniMax default and your key finds its own region, and Xiaomi `Token Plan` keys from Europe and China connect instead of being rejected. `GG Goals` also starts when you tell it to, even on small local models, and one bad setting can no longer wipe the rest of your preferences.",
+      "Radio knows when to stop. If the app crashed or was force-quit, the next launch silences the leftover player, and on Windows pressing stop really stops the music.",
+      "Code search reads only what it needs. `steroids` now shows a long file's outline first, reads just the functions you ask for, and skips helpers it already showed, so the same answer takes a small fraction of the space. It needs steroids `0.8.1` or newer; if yours is older, your agent says so and tells you to run `steroids upgrade`. Repos that haven't been checked in over a week still say `STALE`, so you can tell when code may be behind.",
+      "GG Coder is now free software under the GNU AGPL-3.0. The `Source code` link on the About page opens this Local Fork's own code, not the original project's.",
+    ],
   },
   {
     id: "local-2026-11-03-upstream-01001-chat-terminal",

@@ -25,7 +25,7 @@ import {
   toOpenAIMessages,
   toGlmReasoningEffort,
   toLocalReasoningEffort,
-  toOpenAIReasoningEffort,
+  effortForRequest,
   toOpenAIToolChoice,
   toOpenAITools,
 } from "./transform.js";
@@ -41,6 +41,7 @@ import {
 import { parseToolArguments } from "../utils/json.js";
 import { getEnvironment } from "../utils/env.js";
 import { PROVIDER_TRANSPORT_TIMEOUT_MS, providerFetch } from "../utils/provider-fetch.js";
+import { localBearerKey } from "../local-api-key.js";
 
 // Kimi K3's declared effort rungs (server-validated; anything else 400s).
 // Official alias mapping from Moonshot's K3 third-party-tools docs:
@@ -169,6 +170,11 @@ export function setOpenAIClientCacheKeyRuntimeForTests(runtime: OpenAIClientCach
 
 /** Shared with xai-responses.ts (upstream 0.93.4), which awaits the fork's cached client. */
 export async function createClient(options: StreamOptions): Promise<OpenAI> {
+  // A keyless local endpoint gets no Authorization header (null drops the SDK's bearer).
+  const omitAuth = options.provider === "local" && localBearerKey(options.apiKey) === undefined;
+  const defaultHeaders = omitAuth
+    ? { ...options.defaultHeaders, Authorization: null }
+    : options.defaultHeaders;
   // A custom fetch can carry runtime-specific state and must never reuse a client.
   if (options.fetch) {
     return new OpenAI({
@@ -176,7 +182,7 @@ export async function createClient(options: StreamOptions): Promise<OpenAI> {
       fetch: options.fetch,
       maxRetries: 0,
       ...(options.baseUrl ? { baseURL: options.baseUrl } : {}),
-      ...(options.defaultHeaders ? { defaultHeaders: options.defaultHeaders } : {}),
+      ...(defaultHeaders ? { defaultHeaders } : {}),
     });
   }
 
@@ -195,7 +201,7 @@ export async function createClient(options: StreamOptions): Promise<OpenAI> {
     // events). The SDK default of 2 silent retries stacked under it: one 5xx
     // cost up to 3 hidden requests plus SDK sleeps before the loop even saw it.
     maxRetries: 0,
-    ...(options.defaultHeaders ? { defaultHeaders: options.defaultHeaders } : {}),
+    ...(defaultHeaders ? { defaultHeaders } : {}),
   });
 
   // If neither Web Crypto nor Node crypto is available, skip caching rather than
@@ -322,7 +328,7 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
 
   if (options.thinking && !usesThinkingParam && !isKimiK3 && !isKimiK27 && !isLocal) {
     Object.assign(params, {
-      reasoning_effort: toOpenAIReasoningEffort(options.thinking, options.model),
+      reasoning_effort: effortForRequest(options.thinking, options.model, options.thinkingLevels),
     });
   }
 

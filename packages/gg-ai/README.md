@@ -6,7 +6,7 @@
 
 <p align="center">
   <a href="https://www.npmjs.com/package/@kenkaiiii/gg-ai"><img src="https://img.shields.io/npm/v/@kenkaiiii/gg-ai?style=for-the-badge" alt="npm version"></a>
-  <a href="../../LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge" alt="MIT License"></a>
+  <a href="../../LICENSE"><img src="https://img.shields.io/badge/License-AGPL--3.0-blue.svg?style=for-the-badge" alt="AGPL-3.0 License"></a>
 </p>
 
 One function. Flat options. Switch providers by changing a string. No adapters, no plugins, no wrapper classes.
@@ -241,4 +241,4 @@ await embed({ provider: "my-search" as Provider, model: "v1", input: ["hello"] }
 
 ## License
 
-MIT
+AGPL-3.0-only. See [LICENSE](../../LICENSE).

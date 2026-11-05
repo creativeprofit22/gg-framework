@@ -165,7 +165,9 @@ describe("app sidecar Research capability contract", () => {
       expect(observedProviderToolNames.at(-1)).toEqual(
         [...PROVIDER_VISIBLE_RESEARCH_TOOL_NAMES].sort(),
       );
-      expect(observedNativeWebSearch.at(-1)).toBe(true);
+      // Upstream 0.102: on Anthropic, the client web_search tool (allowed above) runs the
+      // native search as a side request, so the main request no longer carries it.
+      expect(observedNativeWebSearch.at(-1)).toBe(false);
       expect(observedProviderToolNames.at(-1)).not.toEqual(
         expect.arrayContaining([...REMOVED_RESEARCH_TOOLS]),
       );

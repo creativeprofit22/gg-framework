@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { execFileSync, spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
 
 const base = "adacff0230a704d33a8cfaea8265f83cee5f95dd";
 const supported = /\.(?:cjs|css|html|js|json|jsx|md|mjs|mts|ts|tsx|yaml|yml)$/i;
@@ -7,7 +8,9 @@ const generated = new Set([
   "packages/ggcoder/src/__golden__/system-prompt-prefix.md",
   "packages/ggcoder/src/tools/tool-catalog.snapshot.json",
 ]);
-const shouldCheck = (file) => Boolean(file && supported.test(file) && !generated.has(file));
+// A file deleted in the working tree (e.g. a staged merge) has nothing left to format.
+const shouldCheck = (file) =>
+  Boolean(file && supported.test(file) && !generated.has(file) && existsSync(file));
 const tracked = execFileSync(
   "git",
   ["diff", "--name-only", "--diff-filter=ACMRT", `${base}..HEAD`],

@@ -42,6 +42,8 @@ const SettingsSchema = z.object({
       "huggingface",
       "sakana",
       "xai",
+      // The desktop app's local endpoints. Rejecting it reset the whole file (#133).
+      "local",
     ])
     .default("anthropic"),
   defaultModel: z.string().optional(),
@@ -277,31 +279,62 @@ export async function readIdleSessionCleanupMinutes(
 
 // ── Settings Manager ───────────────────────────────────────
 
+/**
+ * The file's settings, merged over the defaults. A value this build rejects
+ * (a newer build's, or a bad hand edit) falls back to its default alone; it
+ * used to send every setting back to its default.
+ */
+function parseSettings(raw: Record<string, unknown>): {
+  settings: Settings;
+  rejected: string[];
+} {
+  const whole = SettingsSchema.safeParse({ ...DEFAULT_SETTINGS, ...raw });
+  if (whole.success) return { settings: whole.data, rejected: [] };
+  const kept: Record<string, unknown> = {};
+  const rejected: string[] = [];
+  for (const [key, value] of Object.entries(raw)) {
+    const field = SettingsSchema.shape[key as keyof Settings];
+    if (!field) continue;
+    if (field.safeParse(value).success) kept[key] = value;
+    else rejected.push(key);
+  }
+  return { settings: SettingsSchema.parse({ ...DEFAULT_SETTINGS, ...kept }), rejected };
+}
+
 export class SettingsManager {
   private settings: Settings = { ...DEFAULT_SETTINGS };
   private filePath: string;
   private loaded = false;
+  /** The file as read: keys this build doesn't know are written back untouched. */
+  private raw: Record<string, unknown> = {};
+  /** Keys whose value this build rejected and nothing has set since: kept as they were. */
+  private rejected = new Set<string>();
 
   constructor(filePath?: string) {
     this.filePath = filePath ?? getAppPaths().settingsFile;
   }
 
   async load(): Promise<Settings> {
+    let raw: unknown;
     try {
-      const content = await fs.readFile(this.filePath, "utf-8");
-      const raw = JSON.parse(content);
-      // Merge with defaults so new fields get default values
-      this.settings = SettingsSchema.parse({ ...DEFAULT_SETTINGS, ...raw });
+      raw = JSON.parse(await fs.readFile(this.filePath, "utf-8"));
     } catch {
-      this.settings = { ...DEFAULT_SETTINGS };
+      raw = undefined;
     }
+    this.raw =
+      raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
+    const parsed = parseSettings(this.raw);
+    this.settings = parsed.settings;
+    this.rejected = new Set(parsed.rejected);
     this.loaded = true;
     return this.settings;
   }
 
   async save(): Promise<void> {
-    const content = JSON.stringify(this.settings, null, 2);
-    await fs.writeFile(this.filePath, content, "utf-8");
+    const out: Record<string, unknown> = { ...this.raw, ...this.settings };
+    for (const key of this.rejected) out[key] = this.raw[key];
+    // Atomic: a crash mid-write left a file the next load read as all defaults.
+    await atomicWrite(this.filePath, JSON.stringify(out, null, 2));
   }
 
   get<K extends keyof Settings>(key: K): Settings[K] {
@@ -310,6 +343,7 @@ export class SettingsManager {
 
   async set<K extends keyof Settings>(key: K, value: Settings[K]): Promise<void> {
     this.settings[key] = value;
+    this.rejected.delete(key);
     await this.save();
   }
 

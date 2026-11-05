@@ -53,10 +53,21 @@ export const CURRENT_LOCAL_RELEASE_NOTES = requireCurrentReleaseNotes(releaseNot
 /** Newest first. Maintained only by the Local Fork release flow. */
 export const LOCAL_CHANGELOG: LocalChangelogEntry[] = [
   {
-    id: "local-2026-11-03-upstream-01001-chat-terminal",
+    id: "local-2026-11-05-upstream-01021-local-models-and-attachments",
     label: CURRENT_LOCAL_RELEASE_NOTES.label,
     date: CURRENT_LOCAL_RELEASE_NOTES.date,
     items: CURRENT_LOCAL_RELEASE_NOTES.sections.flatMap(({ items }) => items),
+  },
+  {
+    id: "local-2026-11-03-upstream-01001-chat-terminal",
+    label: "Upstream 0.100.1, with a terminal in the chat",
+    date: "2026-11-03",
+    items: [
+      "There's a terminal right inside the chat. Start your message with `!`, like `!git status`, and it runs in your project with live output, a `Stop` button and the exit code, while errors show up in their own colour. A picker lists the commands you've run and the ones that fit your project, GG sees the output with your next message, and nothing runs without your OK unless you pick `Always allow in this project`. API keys in your environment never show in the output; they read `[REDACTED]` instead.",
+      "Images in replies actually show up now. When GG points at a screenshot or picture on your computer, you see the real image right in the chat instead of a broken icon, and one click opens it full size.",
+      "Commands work in every pane. Each `!` command runs in that pane's own project and its output stays in that pane, so a split window never mixes up two projects. Images with Windows paths like `E:/shots/home.png` show up too, and open from the pane that showed them.",
+      "The chat holds still. When the message box, the tool feed or your queued messages change size, the conversation now glides into its new spot instead of jumping a frame later.",
+    ],
   },
   {
     id: "local-2026-11-01-upstream-0991-snappier-sessions",

@@ -1,6 +1,6 @@
 import type { AskAnswerDelta } from "./ask-user";
 import { memo, useLayoutEffect, useRef, useState } from "react";
-import { AtIcon } from "./phosphor-icons";
+import { AtIcon, FileTextIcon, FilmStripIcon } from "./phosphor-icons";
 import { theme } from "./theme";
 import { ChatErrorNotice } from "./ChatErrorNotice";
 import { openImageDataUrl, openProjectPath } from "./agent";
@@ -286,9 +286,20 @@ function TranscriptRowBody({
           ) : (
             item.text
           )}
-          {item.files && item.files.length > 0 && (
+          {((item.attachments && item.attachments.length > 0) ||
+            (item.files && item.files.length > 0)) && (
             <div className="user-files-row">
-              {item.files.map((p) => (
+              {item.attachments?.map((a, i) => (
+                <span key={`attachment-${i}`} className="user-file-chip" title={a.name}>
+                  {a.kind === "video" ? (
+                    <FilmStripIcon size={11} aria-hidden style={{ color: theme.textMuted }} />
+                  ) : (
+                    <FileTextIcon size={11} aria-hidden style={{ color: theme.textMuted }} />
+                  )}
+                  <span>{a.name}</span>
+                </span>
+              ))}
+              {item.files?.map((p) => (
                 <span key={p} className="user-file-chip" title={p}>
                   <AtIcon size={11} style={{ color: theme.accent }} />
                   <span style={{ color: theme.code }}>{p}</span>

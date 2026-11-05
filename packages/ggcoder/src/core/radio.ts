@@ -7,6 +7,7 @@ import path from "node:path";
 import type { Writable } from "node:stream";
 import { killProcessTreeAsync } from "../utils/process.js";
 import { log } from "./logger.js";
+import { forgetRadioPlayer, recordRadioPlayer } from "./radio-players.js";
 
 /**
  * Internet radio — stream a free station while you work. The gg-app windows
@@ -278,17 +279,10 @@ export function stopRadio(): void {
 function terminateChild(child: ChildProcess | null): void {
   if (!child) return;
   try {
-    // Detached children may own a process group on POSIX. Fall back to the
-    // direct child when they share the sidecar's process group.
-    if (process.platform !== "win32" && child.pid) {
-      try {
-        process.kill(-child.pid, "SIGTERM");
-      } catch {
-        child.kill("SIGTERM");
-      }
-    } else if (process.platform === "win32" && child.pid) {
+    if (process.platform === "win32" && child.pid) {
       // Windows launchers (mpv.com, package-manager shims) start the real
       // player as a child, so killing only the wrapper leaves audio playing.
+      // Async with an exit check: never blocks the daemon or hits a reused PID.
       const pid = child.pid;
       void killProcessTreeAsync({
         pid,
@@ -299,12 +293,28 @@ function terminateChild(child: ChildProcess | null): void {
           error: error instanceof Error ? error.message : String(error),
         });
       });
+    } else if (child.pid) {
+      // Detached children may own a process group on POSIX. Fall back to the
+      // direct child when they share the sidecar's process group.
+      try {
+        process.kill(-child.pid, "SIGTERM");
+      } catch {
+        child.kill("SIGTERM");
+      }
     } else {
       child.kill("SIGTERM");
     }
   } catch {
     // Already exited — nothing to do.
   }
+  forgetRadioPlayer(child.pid);
+}
+
+function trackPlayer(child: ChildProcess, url: string): void {
+  const pid = child.pid;
+  if (!pid) return;
+  recordRadioPlayer(pid, url);
+  child.once("exit", () => forgetRadioPlayer(pid));
 }
 
 export interface PlayResult {
@@ -390,6 +400,7 @@ function tryStartNativeFfmpeg(ffplayBin: string, url: string): ChildProcess | nu
   }
 }
 
+// isWsl and tryPlayOnWindowsHost derive from creativeprofit22's MIT-licensed PRs #15/#16; see NOTICE.
 /**
  * On WSL2, native Linux audio binaries can't reach the Windows audio device
  * through WSLg's bridge in any useful way for streaming — detect WSL and route
@@ -458,6 +469,7 @@ export function playRadio(stationId: string): PlayResult {
       if (child.pid && !errored) {
         currentChild = child;
         currentStationId = stationId;
+        trackPlayer(child, station.url);
         log("INFO", "radio", "playing", {
           station: station.id,
           player: "powershell.exe (wsl→host)",
@@ -497,6 +509,7 @@ export function playRadio(stationId: string): PlayResult {
         currentStationId = stationId;
         currentMpvIpcPath = mpvIpcPath;
         currentFfmpegInput = nativeFfmpeg?.stdin ?? null;
+        trackPlayer(child, station.url);
         log("INFO", "radio", "playing", {
           station: station.id,
           player: nativeFfmpeg ? "ffmpeg (AudioToolbox live gain)" : player.cmd,

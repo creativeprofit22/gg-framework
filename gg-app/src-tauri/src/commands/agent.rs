@@ -3146,6 +3146,29 @@ mod tests {
     }
 
     #[test]
+    fn prompt_submission_rejects_refused_prompts() {
+        // Upstream's prompt_result test, on the fork's richer submission parser.
+        assert_eq!(
+            parse_prompt_submission_response(
+                reqwest::StatusCode::PAYLOAD_TOO_LARGE,
+                r#"{"error":"request body too large"}"#,
+            ),
+            Err(PromptSubmissionFailure::Unknown(
+                "request body too large".to_string()
+            ))
+        );
+        assert_eq!(
+            parse_prompt_submission_response(
+                reqwest::StatusCode::CONFLICT,
+                r#"{"error":"run_cancelling","message":"The last run is still stopping."}"#,
+            ),
+            Err(PromptSubmissionFailure::Unknown(
+                "The last run is still stopping.".to_string()
+            ))
+        );
+    }
+
+    #[test]
     fn cancel_response_accepts_acknowledged_success() {
         let body = serde_json::json!({ "cancelled": true, "runState": "idle" });
         assert_eq!(

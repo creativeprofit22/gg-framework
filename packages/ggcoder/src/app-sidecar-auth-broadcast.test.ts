@@ -28,6 +28,8 @@ let port = 0;
 const daemonAuthToken = "test-daemon-bootstrap-token";
 let token = "";
 const openStreams: http.IncomingMessage[] = [];
+// Removed after the daemon exits: Windows refuses to delete a folder it still has open.
+const extraDirs: string[] = [];
 
 /** Start the daemon on an ephemeral port and wait for its listening handshake. */
 async function startDaemon(): Promise<void> {
@@ -220,7 +222,7 @@ beforeEach(async () => {
   await startDaemon();
 });
 
-afterEach(async () => {
+afterEach(async ({ task }) => {
   for (const stream of openStreams.splice(0)) stream.destroy();
   const runningDaemon = daemon;
   daemon = undefined;
@@ -234,9 +236,12 @@ afterEach(async () => {
       runningDaemon.kill("SIGKILL");
     });
   }
+  // A daemon-side hang (seen once on Windows CI) leaves no trace in the test output.
+  if (task.result?.state === "fail") await printSidecarLogTail();
   const removeOptions = { recursive: true, force: true, maxRetries: 10, retryDelay: 100 };
   await fs.rm(tmpHome, removeOptions);
   await fs.rm(tmpProject, removeOptions);
+  for (const dir of extraDirs.splice(0)) await fs.rm(dir, removeOptions);
 });
 
 describe("daemon session authorization", () => {
@@ -250,6 +255,11 @@ describe("daemon session authorization", () => {
     });
   });
 });
+async function printSidecarLogTail(): Promise<void> {
+  const logFile = path.join(tmpHome, ".gg", "gg-app-sidecar.log");
+  const text = await fs.readFile(logFile, "utf-8").catch(() => "(no sidecar log)");
+  console.error(`--- ${logFile} (last 200 lines) ---\n${text.split("\n").slice(-200).join("\n")}`);
+}
 
 describe("loopback daemon auth", () => {
   it("rejects requests without the per-launch token", async () => {
@@ -753,5 +763,232 @@ describe("dual-auth providers (OAuth + API key)", () => {
     const models = await request("GET", "/models", { session });
     const providers = (models.json.models as { provider: string }[]).map((m) => m.provider);
     expect(providers).not.toContain("gemini");
+  }, 90_000);
+
+  it("counts a stale Ollama credential only while Ollama serves models", async () => {
+    const session = await createSession();
+    await fs.writeFile(
+      path.join(tmpHome, ".gg", "auth.json"),
+      JSON.stringify({
+        "local:ollama": {
+          accessToken: "local",
+          refreshToken: "",
+          expiresAt: Date.now() + 1_000_000,
+          baseUrl: "http://127.0.0.1:11434/v1",
+        },
+      }),
+    );
+    // Holds whether or not this machine happens to be running Ollama.
+    const local = await request("POST", "/local/scan", { session });
+    const ollama = (
+      local.json.endpoints as { id: string; reachable: boolean; models: unknown[] }[]
+    ).find((e) => e.id === "ollama");
+    const status = await request("GET", "/auth/status", { session });
+    expect(status.json.localConnected).toBe(Boolean(ollama?.reachable && ollama.models.length));
+  }, 90_000);
+
+  it("counts a user-added local endpoint as connected without listing it as a tile", async () => {
+    const session = await createSession();
+    const added = await request("POST", "/local/endpoints", {
+      session,
+      body: { baseUrl: "http://127.0.0.1:9/v1", label: "Offline GW", apiKey: "sk-gateway" },
+    });
+    expect(added.status).toBe(200);
+    const status = await request("GET", "/auth/status", { session });
+    expect(status.status).toBe(200);
+    expect(status.json.localConnected).toBe(true);
+    const providers = status.json.providers as { value: string; connected: boolean }[];
+    expect(providers.map((p) => p.value)).not.toContain("local");
+    expect(providers.some((p) => p.connected)).toBe(false);
+  }, 90_000);
+});
+
+describe("saved local model across restarts", () => {
+  it("restores a local-only user's saved model once discovery finds it", async () => {
+    const gateway = http.createServer((req, res) => {
+      res.writeHead(req.url === "/v1/models" ? 200 : 404, { "content-type": "application/json" });
+      res.end(req.url === "/v1/models" ? JSON.stringify({ data: [{ id: "free-model" }] }) : "{}");
+    });
+    await new Promise<void>((resolve) => gateway.listen(0, "127.0.0.1", resolve));
+    const gatewayPort = (gateway.address() as { port: number }).port;
+    try {
+      let session = await createSession();
+      const added = await request("POST", "/local/endpoints", {
+        session,
+        body: { baseUrl: `http://127.0.0.1:${gatewayPort}/v1`, label: "GW" },
+      });
+      expect(added.status).toBe(200);
+      const saved = `local/${(added.json.endpoint as { id: string }).id}/free-model`;
+      expect((await request("POST", "/model", { session, body: { model: saved } })).status).toBe(
+        200,
+      );
+
+      const running = daemon!;
+      await new Promise<void>((resolve) => {
+        running.once("close", () => resolve());
+        running.kill("SIGKILL");
+      });
+      await startDaemon();
+      session = await createSession();
+
+      // Boot picks a model before discovery; the saved one returns after the scan.
+      let model = "";
+      for (const deadline = Date.now() + 15_000; model !== saved && Date.now() < deadline;) {
+        model = String((await request("GET", "/state", { session })).json.model);
+        if (model !== saved) await new Promise((r) => setTimeout(r, 100));
+      }
+      expect(model).toBe(saved);
+    } finally {
+      await new Promise<void>((resolve) => gateway.close(() => resolve()));
+    }
+  }, 90_000);
+});
+
+describe("starting a goal by typing", () => {
+  it("starts a briefing goal when the user types to start it, not when they ask (#133)", async () => {
+    const session = await createSession();
+    const created = await request("POST", "/goals", {
+      session,
+      body: { name: "Typed start", goal: "Write hello.txt", context: [tmpProject] },
+    });
+    expect(created.status).toBe(200);
+    const goalDir = path.join(tmpHome, ".gg", "goals", (created.json.goal as { id: string }).id);
+    const opened = await request("POST", "/session", {
+      body: { mode: "code", cwd: goalDir },
+      daemonAuth: true,
+    });
+    const goalSession = opened.json.sessionId as string;
+    const startedAt = async (): Promise<unknown> =>
+      (
+        JSON.parse(await fs.readFile(path.join(goalDir, "goal.json"), "utf8")) as {
+          startedAt?: unknown;
+        }
+      ).startedAt;
+
+    await request("POST", "/prompt", {
+      session: goalSession,
+      body: { text: "Should we start the goal now?" },
+    });
+    expect(await startedAt()).toBeUndefined();
+
+    await request("POST", "/prompt", {
+      session: goalSession,
+      body: { text: "Start the goal now" },
+    });
+    expect(typeof (await startedAt())).toBe("string");
+  }, 90_000);
+});
+
+describe("a new window after picking a local model", () => {
+  it("opens on the saved local model in a folder it has never seen (#133)", async () => {
+    const gateway = http.createServer((req, res) => {
+      res.writeHead(req.url === "/v1/models" ? 200 : 404, { "content-type": "application/json" });
+      res.end(req.url === "/v1/models" ? JSON.stringify({ data: [{ id: "free-model" }] }) : "{}");
+    });
+    await new Promise<void>((resolve) => gateway.listen(0, "127.0.0.1", resolve));
+    const gatewayPort = (gateway.address() as { port: number }).port;
+    const otherFolder = await fs.mkdtemp(path.join(os.tmpdir(), "gg-other-folder-"));
+    extraDirs.push(otherFolder);
+    try {
+      let session = await createSession();
+      const added = await request("POST", "/local/endpoints", {
+        session,
+        body: { baseUrl: `http://127.0.0.1:${gatewayPort}/v1`, label: "GW" },
+      });
+      const saved = `local/${(added.json.endpoint as { id: string }).id}/free-model`;
+      expect((await request("POST", "/model", { session, body: { model: saved } })).status).toBe(
+        200,
+      );
+
+      const running = daemon!;
+      await new Promise<void>((resolve) => {
+        running.once("close", () => resolve());
+        running.kill("SIGKILL");
+      });
+      await startDaemon();
+      // A goal window, or any project opened for the first time, has no per-folder pick.
+      const opened = await request("POST", "/session", {
+        body: { mode: "code", cwd: otherFolder },
+        daemonAuth: true,
+      });
+      expect(opened.status).toBe(200);
+      session = opened.json.sessionId as string;
+
+      let model = "";
+      for (const deadline = Date.now() + 15_000; model !== saved && Date.now() < deadline;) {
+        model = String((await request("GET", "/state", { session })).json.model);
+        if (model !== saved) await new Promise((r) => setTimeout(r, 100));
+      }
+      expect(model).toBe(saved);
+    } finally {
+      await new Promise<void>((resolve) => gateway.close(() => resolve()));
+    }
+  }, 90_000);
+});
+
+describe("a run started right at boot", () => {
+  it("waits for the saved local model instead of running on the fallback (#133)", async () => {
+    const chatModels: string[] = [];
+    let slowModels = false;
+    const gateway = http.createServer((req, res) => {
+      if (req.url === "/v1/models") {
+        // Slower than the prompt below, like a goal's kickoff beating the scan.
+        setTimeout(
+          () => {
+            res.writeHead(200, { "content-type": "application/json" });
+            res.end(JSON.stringify({ data: [{ id: "free-model" }] }));
+          },
+          slowModels ? 700 : 0,
+        );
+        return;
+      }
+      if (req.url === "/v1/chat/completions") {
+        let body = "";
+        req.on("data", (chunk: Buffer) => (body += chunk.toString()));
+        req.on("end", () => {
+          chatModels.push(String((JSON.parse(body) as { model?: unknown }).model));
+          res.writeHead(200, { "content-type": "text/event-stream" });
+          const chunk = (d: unknown): void => void res.write(`data: ${JSON.stringify(d)}\n\n`);
+          chunk({ id: "x", choices: [{ index: 0, delta: { role: "assistant", content: "ok" } }] });
+          chunk({ id: "x", choices: [{ index: 0, delta: {}, finish_reason: "stop" }] });
+          res.end("data: [DONE]\n\n");
+        });
+        return;
+      }
+      res.writeHead(404).end("{}");
+    });
+    await new Promise<void>((resolve) => gateway.listen(0, "127.0.0.1", resolve));
+    const gatewayPort = (gateway.address() as { port: number }).port;
+    try {
+      let session = await createSession();
+      const added = await request("POST", "/local/endpoints", {
+        session,
+        body: { baseUrl: `http://127.0.0.1:${gatewayPort}/v1`, label: "GW" },
+      });
+      const saved = `local/${(added.json.endpoint as { id: string }).id}/free-model`;
+      expect((await request("POST", "/model", { session, body: { model: saved } })).status).toBe(
+        200,
+      );
+
+      const running = daemon!;
+      await new Promise<void>((resolve) => {
+        running.once("close", () => resolve());
+        running.kill("SIGKILL");
+      });
+      slowModels = true;
+      await startDaemon();
+      session = await createSession();
+      expect((await request("POST", "/prompt", { session, body: { text: "hi" } })).status).toBe(
+        202,
+      );
+
+      for (const deadline = Date.now() + 15_000; chatModels.length === 0;) {
+        if (Date.now() > deadline) throw new Error("the prompt never reached the local model");
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      expect(chatModels[0]).toBe("free-model");
+    } finally {
+      await new Promise<void>((resolve) => gateway.close(() => resolve()));
+    }
   }, 90_000);
 });

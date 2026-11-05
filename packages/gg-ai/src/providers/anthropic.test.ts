@@ -661,6 +661,36 @@ describe("streamAnthropic request shaping", () => {
     ]);
   });
 
+  it("never sends sampling params, which API version 2026-10-21 rejects", async () => {
+    const { default: Anthropic } = await import("@anthropic-ai/sdk");
+    const AnthropicMock = Anthropic as unknown as {
+      nextError: Error | null;
+      nextEvents: unknown[] | null;
+    };
+    AnthropicMock.nextError = null;
+    AnthropicMock.nextEvents = [
+      { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 1 } },
+      { type: "message_stop" },
+    ];
+
+    const result = streamAnthropic({
+      provider: "anthropic",
+      model: "claude-sonnet-4-5",
+      messages: [{ role: "user", content: "hi" }],
+      apiKey: "sk-ant-test",
+      temperature: 0.2,
+      topP: 0.9,
+    });
+    for await (const _event of result) {
+      /* consume */
+    }
+
+    const params = createMock.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+    expect(params).not.toHaveProperty("temperature");
+    expect(params).not.toHaveProperty("top_p");
+    expect(params).not.toHaveProperty("top_k");
+  });
+
   it("merges providerOptions into the request without overriding core fields", async () => {
     const { default: Anthropic } = await import("@anthropic-ai/sdk");
     const AnthropicMock = Anthropic as unknown as {
@@ -1189,6 +1219,42 @@ describe("streamAnthropic error normalization", () => {
       statusCode: 500,
     } satisfies Partial<ProviderError>);
     await expect(result.response).rejects.toThrow(/usage limit reached/i);
+  });
+
+  it("labels errors from an Anthropic-compatible provider with that provider", async () => {
+    const { default: Anthropic } = await import("@anthropic-ai/sdk");
+    const AnthropicMock = Anthropic as unknown as {
+      APIError: new (
+        status: number | undefined,
+        error: unknown,
+        message: string,
+        requestID?: string | null,
+        type?: string | null,
+      ) => Error;
+      nextError: Error | null;
+      nextEvents: unknown[] | null;
+    };
+    AnthropicMock.nextEvents = null;
+    AnthropicMock.nextError = new AnthropicMock.APIError(
+      402,
+      { type: "insufficient_balance_error", message: "insufficient balance (1008)" },
+      "402 Payment Required",
+      "req_minimax_label",
+      "insufficient_balance_error",
+    );
+
+    const result = streamAnthropic({
+      provider: "minimax",
+      model: "MiniMax-M3.1-Flash",
+      baseUrl: "https://api.minimax.io/anthropic",
+      messages: [{ role: "user", content: "hi" }],
+      apiKey: "sk-cp-test",
+    });
+
+    await expect(result.response).rejects.toMatchObject({
+      provider: "minimax",
+      statusCode: 402,
+    } satisfies Partial<ProviderError>);
   });
 
   it("preserves tool arguments carried on the streamed content block start", async () => {

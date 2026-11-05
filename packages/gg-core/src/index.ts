@@ -2,6 +2,7 @@
 export type { McpServerRow } from "./mcp-management-contract.js";
 export * from "./referenced-files.js";
 export * from "./model-registry.js";
+export * from "./openrouter-catalog.js";
 export * from "./thinking-level.js";
 export * from "./qwen-cloud-token-plan.js";
 export * from "./local-models.js";
@@ -10,6 +11,8 @@ export * from "./logger.js";
 export * from "./file-lock.js";
 export * from "./claude-code-version.js";
 export * from "./auth-storage.js";
+export * from "./minimax-region.js";
+export * from "./xiaomi-region.js";
 export * from "./auth-providers.js";
 export * from "./provider-usage.js";
 export * from "./oauth/types.js";

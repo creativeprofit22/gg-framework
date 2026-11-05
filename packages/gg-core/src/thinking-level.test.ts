@@ -316,6 +316,27 @@ describe("local models", () => {
     expect(isThinkingLevelSupported("local", "local/ollama/qwen3", "xhigh")).toBe(false);
   });
 
+  it("offers exactly the ladder a synced gateway model declared", () => {
+    registerRuntimeModels([
+      {
+        ...base,
+        id: "openrouter/deepseek-flash",
+        name: "deepseek-flash",
+        provider: "openrouter",
+        supportsThinking: true,
+        maxThinkingLevel: "max",
+        thinkingLevels: ["low", "high", "xhigh", "max"],
+      },
+    ]);
+
+    expect(getSupportedThinkingLevels("openrouter", "openrouter/deepseek-flash")).toEqual([
+      "low",
+      "high",
+      "xhigh",
+      "max",
+    ]);
+  });
+
   it("offers nothing for an unknown local id (never discovered)", () => {
     expect(getSupportedThinkingLevels("local", "local/ollama/ghost")).toEqual([]);
   });
@@ -328,5 +349,23 @@ describe("local models", () => {
     expect(clampThinkingForPlanMode("medium")).toBe("medium");
     expect(clampThinkingForPlanMode("low")).toBe("low");
     expect(clampThinkingForPlanMode(undefined)).toBeUndefined();
+  });
+});
+
+describe("MiniMax thinking levels", () => {
+  it("offers M3.1 Flash's full low→max effort ladder and cycles through it", () => {
+    expect(getSupportedThinkingLevels("minimax", "MiniMax-M3.1-Flash")).toEqual([
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+    ]);
+    expect(getNextThinkingLevel("minimax", "MiniMax-M3.1-Flash", "high")).toBe("xhigh");
+    expect(getNextThinkingLevel("minimax", "MiniMax-M3.1-Flash", "max")).toBeUndefined();
+  });
+
+  it("keeps M3 as a plain on/off toggle", () => {
+    expect(getSupportedThinkingLevels("minimax", "MiniMax-M3")).toEqual(["high"]);
   });
 });

@@ -1165,6 +1165,12 @@ export async function getDroppedPathInfo(paths: string[]): Promise<DroppedPathIn
   }
 }
 
+/** A sent non-image attachment, shown by name in the user bubble. */
+export interface AttachmentChip {
+  kind: "file" | "video";
+  name: string;
+}
+
 /** A chat-input attachment (image / video / other file) sent with a prompt. */
 export interface Attachment {
   kind: "image" | "video" | "file";
@@ -1520,6 +1526,8 @@ export interface HistoryEntry {
   text: string;
   /** Attached image data URLs, reconstructed so they re-render on resume. */
   images?: string[];
+  /** Attached files and videos, by name. */
+  attachments?: AttachmentChip[];
   hook?: "ideal" | "loop_break" | "regrounding" | null;
   /** True when `text` is a recovered `/name [args]` command invocation, so the
    *  webview renders the short command chip instead of the expanded body. */
@@ -1665,6 +1673,12 @@ export interface AuthProvider {
   methods: AuthMethod[];
   apiKeyLabel?: string;
   apiKeyBaseUrl?: string;
+  /** The key may point at a compatible gateway instead of the vendor endpoint. */
+  allowCustomBaseUrl?: boolean;
+  /** Endpoint used when no custom base URL is stored. */
+  defaultBaseUrl?: string;
+  /** Custom base URL stored with the connected key, if any. */
+  currentBaseUrl?: string;
   /** When set, the API-key flow must ask which variant before submitting. */
   apiKeyVariants?: ApiKeyVariant[];
   /** Live connection status from ~/.gg/auth.json. */
@@ -1696,29 +1710,47 @@ export interface AuthProvider {
  * to show a blank list, the same failure mode as the project-folder bug. The
  * login ACTIONS (OAuth, key save, logout) still go through the sidecar.
  */
-export async function authStatus(): Promise<AuthProvider[]> {
+async function readAuthStatus(): Promise<{
+  providers?: AuthProvider[];
+  localConnected?: boolean;
+}> {
   try {
-    const res = await invoke<{ providers: AuthProvider[] }>("app_auth_status");
+    const res = await invoke<{ providers?: AuthProvider[]; localConnected?: boolean }>(
+      "app_auth_status",
+    );
     const { qwenCloudConnection } = await import("./qwen-cloud-connection");
     const qwen = await qwenCloudConnection("status");
     const connected = qwen.ok && qwen.status.credential === "saved";
-    return [
-      ...(res.providers ?? []).filter((provider) => provider.value !== "qwen-cloud"),
-      {
-        value: "qwen-cloud",
-        label: "Qwen Cloud (Token Plan)",
-        description: "Qwen, GLM and DeepSeek through Qwen Cloud Token Plan",
-        methods: ["apikey"],
-        connected,
-        connectedMethods: connected ? ["apikey"] : [],
-        nativeManaged: true,
-        ...(qwen.ok ? { qwenCloudConnection: qwen.status } : {}),
-      },
-    ];
+    return {
+      ...res,
+      providers: [
+        ...(res.providers ?? []).filter((provider) => provider.value !== "qwen-cloud"),
+        {
+          value: "qwen-cloud",
+          label: "Qwen Cloud (Token Plan)",
+          description: "Qwen, GLM and DeepSeek through Qwen Cloud Token Plan",
+          methods: ["apikey"],
+          connected,
+          connectedMethods: connected ? ["apikey"] : [],
+          nativeManaged: true,
+          ...(qwen.ok ? { qwenCloudConnection: qwen.status } : {}),
+        },
+      ],
+    };
   } catch (e) {
     await logError(`app_auth_status failed: ${String(e)}`);
-    return [];
+    return {};
   }
+}
+
+export async function authStatus(): Promise<AuthProvider[]> {
+  return (await readAuthStatus()).providers ?? [];
+}
+
+/** True when the agent has something to run on: a connected provider or a local endpoint. */
+export async function hasModelSource(): Promise<boolean> {
+  const status = await readAuthStatus();
+  return status.localConnected === true || (status.providers ?? []).some((p) => p.connected);
 }
 
 /**
@@ -1727,9 +1759,39 @@ export async function authStatus(): Promise<AuthProvider[]> {
  * user's sidecar may not have booted yet, and a sidecar round-trip would hang.
  * Throws with a user-facing message on error.
  */
-export async function authApiKey(provider: string, key: string, variant?: string): Promise<void> {
+export async function authApiKey(
+  provider: string,
+  key: string,
+  variant?: string,
+  baseUrl?: string,
+): Promise<void> {
   if (provider === "qwen-cloud") throw new Error("Use the native Qwen Cloud connection form.");
-  await invoke("app_auth_apikey", { provider, key, variant });
+  await invoke("app_auth_apikey", { provider, key, variant, baseUrl: baseUrl || undefined });
+}
+
+/** Change a connected key's base URL (empty = provider default). Throws the validation message. */
+export async function authSetBaseUrl(provider: string, baseUrl: string): Promise<void> {
+  await invoke("app_auth_baseurl", { provider, baseUrl: baseUrl.trim() || undefined });
+}
+
+export interface OpenRouterCatalogStatus {
+  synced: boolean;
+  count: number;
+  syncedAt?: number;
+  baseUrl: string;
+  /** Sync only: rows dropped because they can't call tools. */
+  skipped?: number;
+}
+
+/**
+ * The OpenRouter model list: "status", "sync" (re-read the key's endpoint
+ * `/models`; replaces the built-in list) or "reset" (back to the built-in list).
+ */
+export async function openRouterCatalog(
+  action: "status" | "sync" | "reset",
+): Promise<OpenRouterCatalogStatus> {
+  await waitForReady();
+  return await invoke<OpenRouterCatalogStatus>("agent_openrouter_catalog", { action });
 }
 
 /**
@@ -2659,6 +2721,8 @@ export interface LocalEndpointRow {
   kind: "ollama" | "lmstudio" | "llamacpp" | "vllm" | "custom";
   /** User-added endpoints can be removed; built-in ones can't. */
   custom: boolean;
+  /** Context window the user pinned for this endpoint, when set. */
+  contextLength?: number;
   reachable: boolean;
   /** Why it's unreachable, e.g. "Not running at http://127.0.0.1:11434/v1". */
   reason?: string;
@@ -2703,12 +2767,14 @@ export async function addLocalEndpoint(
   baseUrl: string,
   label?: string,
   apiKey?: string,
+  contextLength?: number,
 ): Promise<LocalModelsState> {
   await waitForReady();
   const res = await invoke<LocalModelsState>("agent_local_endpoint_add", {
     baseUrl,
     label: label ?? null,
     apiKey: apiKey ?? null,
+    contextLength: contextLength ?? null,
   });
   return unwrapLocalState(res);
 }

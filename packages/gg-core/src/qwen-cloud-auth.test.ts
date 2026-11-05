@@ -24,7 +24,7 @@ async function fixture(env = {}) {
       },
     }),
   );
-  return { file, auth: new AuthStorage(file, env) };
+  return { file, auth: new AuthStorage(file, { runtimeEnvironment: env }) };
 }
 describe("Qwen runtime auth isolation", () => {
   it("ignores plaintext records at every credential and endpoint read boundary", async () => {

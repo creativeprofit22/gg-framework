@@ -4,7 +4,6 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import type { UpdateInfo } from "./update";
 import { useAppUpdate } from "./update";
 import { error as logError } from "@tauri-apps/plugin-log";
-import { authStatus, getSettings } from "./agent";
 import { HomeScreen } from "./HomeScreen";
 import { CHANGELOG } from "./changelog";
 import { LOCAL_CHANGELOG } from "./local-changelog";
@@ -14,7 +13,7 @@ const agentMocks = vi.hoisted(() => ({
   openUrl: vi.fn(),
   waitForReady: vi.fn().mockResolvedValue(undefined),
   getSettings: vi.fn().mockResolvedValue({ configured: true, projectsRoot: "C:/projects" }),
-  authStatus: vi.fn().mockResolvedValue([]),
+  hasModelSource: vi.fn().mockResolvedValue(false),
   getServeStatus: vi.fn().mockResolvedValue({ running: false, configured: false }),
   startServe: vi.fn(),
   stopServe: vi.fn(),
@@ -81,7 +80,7 @@ beforeEach(() => {
   agentMocks.waitForReady.mockResolvedValue(undefined);
   agentMocks.getProgress.mockResolvedValue(null);
   agentMocks.getSettings.mockResolvedValue({ configured: true, projectsRoot: "C:/projects" });
-  agentMocks.authStatus.mockResolvedValue([]);
+  agentMocks.hasModelSource.mockResolvedValue(false);
   agentMocks.getServeStatus.mockResolvedValue({ running: false, configured: false });
 });
 
@@ -257,16 +256,7 @@ describe("HomeScreen What's New trigger", () => {
 describe("HomeScreen workspace actions", () => {
   it("offers Motion beside Code and Chat and opens it once set up", async () => {
     vi.mocked(useAppUpdate).mockReturnValue(updateInfo({ phase: "idle" }));
-    agentMocks.authStatus.mockResolvedValue([
-      {
-        value: "anthropic",
-        label: "Anthropic",
-        description: "",
-        methods: [],
-        connected: true,
-        connectedMethods: [],
-      },
-    ]);
+    agentMocks.hasModelSource.mockResolvedValue(true);
     await renderHome();
 
     const motion = screen.getByRole("button", { name: "Motion" });
@@ -284,16 +274,7 @@ describe("HomeScreen workspace actions", () => {
 
   it("orders the workspaces Code, Goals, Chat, Motion and opens Goals", async () => {
     vi.mocked(useAppUpdate).mockReturnValue(updateInfo({ phase: "idle" }));
-    agentMocks.authStatus.mockResolvedValue([
-      {
-        value: "anthropic",
-        label: "Anthropic",
-        description: "",
-        methods: [],
-        connected: true,
-        connectedMethods: [],
-      },
-    ]);
+    agentMocks.hasModelSource.mockResolvedValue(true);
     await renderHome();
 
     const names = ["Code", "Goals", "Chat", "Motion"];
@@ -354,8 +335,8 @@ describe("HomeScreen setup check", () => {
 
   it("offers World after Motion, never dimmed, and enters it", async () => {
     // No folder and no provider: the workspace modes are dimmed, World isn't.
-    vi.mocked(getSettings).mockResolvedValue({ projectsRoot: "", configured: false });
-    vi.mocked(authStatus).mockResolvedValue([]);
+    agentMocks.getSettings.mockResolvedValue({ projectsRoot: "", configured: false });
+    agentMocks.hasModelSource.mockResolvedValue(false);
     const onWorld = vi.fn();
     render(
       <HomeScreen
@@ -377,8 +358,8 @@ describe("HomeScreen setup check", () => {
   });
 
   it("holds the World plate down from the click until World is on screen", async () => {
-    vi.mocked(getSettings).mockResolvedValue({ projectsRoot: "", configured: false });
-    vi.mocked(authStatus).mockResolvedValue([]);
+    agentMocks.getSettings.mockResolvedValue({ projectsRoot: "", configured: false });
+    agentMocks.hasModelSource.mockResolvedValue(false);
     const props = {
       onProjects: vi.fn(),
       onGoals: vi.fn(),

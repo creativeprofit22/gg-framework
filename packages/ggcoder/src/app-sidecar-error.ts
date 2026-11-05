@@ -49,13 +49,18 @@ export function formatSidecarError(
   err: unknown,
   transform: (value: string) => string = (value) => value,
   sensitiveValues: Iterable<string> = [],
+  guidanceOverride?: (source: string | undefined, reason: string | undefined) => string | undefined,
 ): SidecarErrorDetails {
   const formatted = formatChatError(err);
   const clean = (value: string): string =>
     redactText(transform(value), { secrets: sensitiveValues, maxStringLength: 2_000 });
   const headline = clean(formatted.headline);
   const message = formatted.message ? clean(formatted.message) : undefined;
-  const guidance = clean(formatted.guidance);
+  const override = guidanceOverride?.(formatted.source, formatted.reason);
+  // An override (a local endpoint naming itself) is already user-facing; it is still redacted.
+  const guidance = override
+    ? redactText(override, { secrets: sensitiveValues, maxStringLength: 2_000 })
+    : clean(formatted.guidance);
   const requestId = safeRequestId(formatted.requestId);
 
   const diagnostic = azureMalformedStreamLogFields(err);

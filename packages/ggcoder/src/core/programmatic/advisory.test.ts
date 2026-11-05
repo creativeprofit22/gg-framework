@@ -485,7 +485,9 @@ describe("host fetch provenance", () => {
   it.each(["redirect", "llms", "markdown"])(
     "validates only the inspected identity for %s",
     async (mode) => {
-      const requested = "https://example.com/docs/page";
+      // Upstream 0.102 probes llms.txt only for a docs root, never a deep page.
+      const requested =
+        mode === "llms" ? "https://example.com/docs" : "https://example.com/docs/page";
       const actual =
         mode === "redirect"
           ? "https://example.com/actual"

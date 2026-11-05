@@ -172,6 +172,33 @@ describe("AgentSession attachment routing (app/sidecar path)", () => {
     }
   }, 20_000);
 
+  it("tells the model about saved files and refuses a prompt with an unsaved one", async () => {
+    const session = await createSession("anthropic", "claude-test");
+    try {
+      const book = {
+        kind: "file" as const,
+        name: "book.epub",
+        mediaType: "application/epub+zip",
+        data: "",
+        path: "/p/book.epub",
+      };
+      // Local Fork: an unsaved file stops the send (draft kept) instead of a silent note.
+      await expect(
+        session.promptWithAttachments("", [
+          book,
+          { kind: "file", name: "lost.pdf", mediaType: "application/pdf", data: "" },
+        ]),
+      ).rejects.toThrow('Attachment "lost.pdf" is unavailable for analysis.');
+      await session.promptWithAttachments("", [book]);
+      const texts = lastUserParts(session).map((p) => p.text);
+      expect(texts).toContain(
+        "Attached files (inspect with your tools):\n- book.epub (saved at /p/book.epub)\nThe read tool opens PDF and EPUB files as text.",
+      );
+    } finally {
+      await session.dispose();
+    }
+  }, 20_000);
+
   it("keeps inline image parts for non-GLM providers (untouched behavior)", async () => {
     const session = await createSession("anthropic", "claude-test");
     try {

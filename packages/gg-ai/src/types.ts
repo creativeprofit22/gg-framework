@@ -351,6 +351,8 @@ export interface StreamOptions {
   topP?: number;
   stop?: string[];
   thinking?: ThinkingLevel;
+  /** Effort rungs the endpoint itself declared for this model (synced gateway catalogs). */
+  thinkingLevels?: readonly ThinkingLevel[];
   apiKey?: string;
   baseUrl?: string;
   signal?: AbortSignal;

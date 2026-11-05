@@ -40,6 +40,7 @@ import { createSubAgentTool } from "./subagent.js";
 import { createSubAgentControlTools } from "./subagent-control.js";
 import { createWebFetchTool } from "./web-fetch.js";
 import { createWebSearchTool } from "./web-search.js";
+import type { SideWebSearch } from "./side-web-search.js";
 import { createSourcePathTool } from "./source-path.js";
 import { ToolWriteLog } from "../core/changed-files.js";
 import { createTaskOutputTool } from "./task-output.js";
@@ -205,6 +206,8 @@ export interface CreateToolsOptions {
    * detection happens once.
    */
   steroidsBin?: string | null;
+  /** Runs web_search as a separate provider request (Anthropic); see side-web-search.ts. */
+  sideWebSearch?: SideWebSearch;
   /**
    * Include advisory-only tools (`ADVISORY_ONLY_TOOL_NAMES`: the read-only
    * `research_corpus` facade and, with local operations, `git_history`). Off by default: ordinary hosts such as
@@ -454,12 +457,10 @@ export async function createTools(
     );
   }
 
-  // Client web search. On Anthropic it is only the deferred catalog entry for
-  // the native server tool: once promoted, the transport swaps in
-  // `web_search_20250305` (same name) instead of this schema, and a call made
-  // before promotion runs this client search. See AgentSession.nativeWebSearchOn.
+  // Client web search. On Anthropic it runs the native search in a side
+  // request (sideWebSearch), so result pages stay out of the main context.
   if (opts?.provider) {
-    tools.push(createWebSearchTool(opts?.getNetworkPolicy));
+    tools.push(createWebSearchTool(opts?.getNetworkPolicy, opts?.sideWebSearch));
   }
 
   let subAgentManager: SubAgentManager | undefined;

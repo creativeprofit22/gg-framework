@@ -108,6 +108,7 @@ async function harness(provider = "anthropic") {
     formatSidecarError,
     desktopGuidance: (text: string) => text,
     sidecarErrorSecrets: [],
+    localEndpointGuidance: () => undefined,
     captureSidecarError: vi.fn(),
     session: {
       newSession,

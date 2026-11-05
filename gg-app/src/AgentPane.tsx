@@ -97,6 +97,7 @@ import {
   pauseGoal,
   resumeGoal,
   setCritterModel,
+  type AttachmentChip,
 } from "./agent";
 import { createSafeTauriUnlisten, type SafeTauriUnlisten } from "./tauri-listener";
 import { ActivityBar } from "./ActivityBar";
@@ -238,6 +239,8 @@ import {
   ArrowUpIcon,
   PaperclipIcon,
   AtIcon,
+  FileTextIcon,
+  FilmStripIcon,
   GitBranchIcon,
   ListChecksIcon,
   SparkleIcon,
@@ -274,7 +277,15 @@ import { toast } from "./toast";
 import { SecurityNotice } from "./SecurityNotice";
 import { takeNewBlockedSkillMessages } from "./blocked-skills";
 import { collapseSecurityRows, takeNewSecurityNotices } from "./security-notices";
-import { fileToPending, toWire, attachmentToPending, type PendingAttachment } from "./attachments";
+import {
+  MAX_ATTACHMENT_BYTES,
+  attachmentBytes,
+  attachmentChips,
+  attachmentToPending,
+  fileToPending,
+  toWire,
+  type PendingAttachment,
+} from "./attachments";
 import { RoadmapPhaseDraftReviewModal } from "./RoadmapPhaseDraftReviewModal";
 import { useRoadmapDraft } from "./useRoadmapDraft";
 import { describeRoadmapDraft } from "./roadmap-phase-draft-state";
@@ -415,6 +426,8 @@ export type Item =
       command?: boolean;
       label?: string;
       images?: string[];
+      /** Attached files and videos, shown by name (images ride `images`). */
+      attachments?: AttachmentChip[];
       files?: string[];
       // Corrected-term segments from the prompt enhancer, when this message was
       // sent unedited straight after an enhance. Drives the highlighted bubble.
@@ -2450,6 +2463,9 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
                   command: h.command || label !== null,
                   ...(label !== null ? { label } : {}),
                   images: h.images && h.images.length > 0 ? h.images : undefined,
+                  ...(h.attachments && h.attachments.length > 0
+                    ? { attachments: h.attachments }
+                    : {}),
                   ...(parsed && parsed.files.length > 0 ? { files: parsed.files } : {}),
                   ...(h.enhancements && h.enhancements.length > 0
                     ? { enhancements: h.enhancements }
@@ -4356,6 +4372,17 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       return;
     }
 
+    // Over this the sidecar refuses the whole request, so stop here with the draft intact.
+    const totalBytes = attachmentBytes(attachments);
+    if (totalBytes > MAX_ATTACHMENT_BYTES) {
+      const mb = (bytes: number): number => Math.ceil(bytes / (1024 * 1024));
+      toast(
+        `Attachments are too big to send (${mb(totalBytes)} MB). The limit is ${mb(MAX_ATTACHMENT_BYTES)} MB per message.`,
+        "error",
+      );
+      return;
+    }
+
     const acceptComposer = captureComposerAcceptance();
     const isCurrent = capturePromptSession();
     promptSubmissionPendingRef.current = isCurrent;
@@ -4391,6 +4418,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
         text: trimmed,
         command: isWorkflowCommand(trimmed),
         images: queuedImgs.length > 0 ? queuedImgs : undefined,
+        attachments: attachmentChips(attachments),
         files: mentionedPaths.length > 0 ? mentionedPaths : undefined,
         enhancements: sentEnhancements,
       };
@@ -4425,6 +4453,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       text: trimmed,
       command: isWorkflowCommand(trimmed),
       images: imgPreviews.length > 0 ? imgPreviews : undefined,
+      attachments: attachmentChips(attachments),
       files: mentionedPaths.length > 0 ? mentionedPaths : undefined,
       enhancements: sentEnhancements,
     };
@@ -6448,9 +6477,20 @@ const TranscriptRowBody = memo(function TranscriptRowBody({
           ) : (
             item.text
           )}
-          {item.files && item.files.length > 0 && (
+          {((item.attachments && item.attachments.length > 0) ||
+            (item.files && item.files.length > 0)) && (
             <div className="user-files-row">
-              {item.files.map((p) => (
+              {item.attachments?.map((a, i) => (
+                <span key={`attachment-${i}`} className="user-file-chip" title={a.name}>
+                  {a.kind === "video" ? (
+                    <FilmStripIcon size={11} aria-hidden style={{ color: theme.textMuted }} />
+                  ) : (
+                    <FileTextIcon size={11} aria-hidden style={{ color: theme.textMuted }} />
+                  )}
+                  <span>{a.name}</span>
+                </span>
+              ))}
+              {item.files?.map((p) => (
                 <span key={p} className="user-file-chip" title={p}>
                   <AtIcon size={11} style={{ color: theme.accent }} />
                   <span style={{ color: theme.code }}>{p}</span>

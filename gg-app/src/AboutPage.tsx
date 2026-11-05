@@ -19,7 +19,14 @@ import {
   type ShipLevel,
   type ShipLog,
 } from "./about-ship-log";
-import { aboutLines, GG_CODER_STARTED, SKOOL_URL, YOUTUBE_URL, type KenSay } from "./about-content";
+import {
+  aboutLines,
+  GG_CODER_STARTED,
+  SKOOL_URL,
+  SOURCE_URL,
+  YOUTUBE_URL,
+  type KenSay,
+} from "./about-content";
 import "./AboutPage.css";
 
 /**
@@ -136,6 +143,19 @@ export function AboutPage(): React.ReactElement {
       )}
       {/* Credit the pixel fonts (Alagard asks for it; m5x7 is CC0, credited anyway). */}
       <p className="about-credits">Pixel fonts: m5x7 by Daniel Linssen, Alagard by Hewett Tsoi.</p>
+      {/* AGPL-3.0 "Appropriate Legal Notices": license, no warranty, where the source is. */}
+      <p className="about-credits">
+        GG Coder is free software under the GNU AGPL-3.0, with no warranty.{" "}
+        <a
+          href={SOURCE_URL}
+          onClick={(e) => {
+            e.preventDefault();
+            void openUrl(SOURCE_URL);
+          }}
+        >
+          Source code
+        </a>
+      </p>
     </div>
   );
 }

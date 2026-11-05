@@ -6,7 +6,7 @@
 
 <p align="center">
   <a href="https://www.npmjs.com/package/@kenkaiiii/gg-core"><img src="https://img.shields.io/npm/v/@kenkaiiii/gg-core?style=for-the-badge" alt="npm version"></a>
-  <a href="../../LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge" alt="MIT License"></a>
+  <a href="../../LICENSE"><img src="https://img.shields.io/badge/License-AGPL--3.0-blue.svg?style=for-the-badge" alt="AGPL-3.0 License"></a>
 </p>
 
 The shared foundation under GG Coder's app and CLI. It depends only on [`@kenkaiiii/gg-ai`](../gg-ai/README.md), never on React, Ink or the agent loop.
@@ -65,4 +65,4 @@ console.log(models.map((m) => m.id));
 
 ## License
 
-MIT
+AGPL-3.0-only. See [LICENSE](../../LICENSE).

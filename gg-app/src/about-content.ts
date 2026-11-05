@@ -2,6 +2,8 @@ import type { KenFace } from "./goal-ken-talk";
 import { formatMonthYear, type ShipLog } from "./about-ship-log";
 
 export const SKOOL_URL = "https://skool.com/kenkai";
+// Local Fork: AGPL source offer must point at this modified version, not upstream.
+export const SOURCE_URL = "https://github.com/creativeprofit22/gg-framework";
 export const YOUTUBE_URL = "https://youtube.com/@kenkaidoesai";
 
 /**

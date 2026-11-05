@@ -23,6 +23,21 @@ function formatContext(tokens: number): string {
   return String(tokens);
 }
 
+// Ollama's default for most GPUs; the agent's prompt alone fills much of it.
+const SMALL_CONTEXT = 8192;
+
+/** Whether Ollama is serving a usable model at a size too small for real work. */
+function smallOllamaContext(endpoints: readonly LocalEndpointRow[]): boolean {
+  return endpoints.some(
+    (endpoint) =>
+      endpoint.kind === "ollama" &&
+      endpoint.models.some(
+        (model) =>
+          model.supportsTools && model.contextWindowKnown && model.contextWindow <= SMALL_CONTEXT,
+      ),
+  );
+}
+
 /** The one figure worth showing inline. "?" = the server never reported it. */
 function contextLabel(model: LocalModelRow): string {
   return model.contextWindowKnown
@@ -35,12 +50,14 @@ function contextLabel(model: LocalModelRow): string {
  * length, capabilities, load state, and — for a model that can't run the agent
  * — why it's disabled.
  */
-function modelTooltip(model: LocalModelRow, endpointLabel: string): string {
-  const lines = [`${model.rawId} — ${endpointLabel}`];
+function modelTooltip(model: LocalModelRow, endpoint: LocalEndpointRow): string {
+  const lines = [`${model.rawId} — ${endpoint.label}`];
   lines.push(
-    model.contextWindowKnown
-      ? `Context: ${model.contextWindow.toLocaleString()} tokens`
-      : `Context: unknown — assuming ${model.contextWindow.toLocaleString()} tokens`,
+    endpoint.contextLength
+      ? `Context: ${model.contextWindow.toLocaleString()} tokens (set by you)`
+      : model.contextWindowKnown
+        ? `Context: ${model.contextWindow.toLocaleString()} tokens`
+        : `Context: unknown — assuming ${model.contextWindow.toLocaleString()} tokens`,
   );
   const caps: string[] = [];
   if (model.supportsTools) caps.push("tool calling");
@@ -55,9 +72,9 @@ function modelTooltip(model: LocalModelRow, endpointLabel: string): string {
 }
 
 /**
- * Ollama manager — the one local server we auto-discover and what it serves.
- * "Add endpoint" covers a moved Ollama port or a self-hosted box (LM Studio,
- * llama.cpp, vLLM all still work as custom endpoints).
+ * Local models manager. Only Ollama is found automatically; LM Studio,
+ * llama.cpp, vLLM, PolyStrata, a self-hosted box or an OpenAI-compatible
+ * gateway are each one "Add endpoint" away.
  *
  * Read-only by design: models are **chosen in the footer model selector** like
  * every other model, so there's exactly one selection surface in the app. This
@@ -75,6 +92,7 @@ export function LocalModelsModal({ onClose }: Props): React.ReactElement {
   const [url, setUrl] = useState("");
   const [label, setLabel] = useState("");
   const [apiKey, setApiKey] = useState("");
+  const [contextLength, setContextLength] = useState("");
   const [addError, setAddError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -120,7 +138,7 @@ export function LocalModelsModal({ onClose }: Props): React.ReactElement {
       const found = state.endpoints.reduce((total, e) => total + e.models.length, 0);
       toast(
         found === 0
-          ? "No models found. Start Ollama and scan again."
+          ? "No models found. Start your local server and scan again, or add an endpoint."
           : `Found ${found} local model${found === 1 ? "" : "s"}.`,
         found === 0 ? "warning" : "success",
       );
@@ -133,14 +151,26 @@ export function LocalModelsModal({ onClose }: Props): React.ReactElement {
 
   async function add(): Promise<void> {
     if (busy) return;
+    const pinText = contextLength.trim().replace(/[,_\s]/g, "");
+    const pin = pinText ? Number(pinText) : undefined;
+    if (pin !== undefined && !Number.isSafeInteger(pin)) {
+      setAddError("Context length must be a whole number of tokens, like 131072.");
+      return;
+    }
     setBusy(true);
     setAddError(null);
     try {
-      const state = await addLocalEndpoint(url, label.trim() || undefined, apiKey || undefined);
+      const state = await addLocalEndpoint(
+        url,
+        label.trim() || undefined,
+        apiKey || undefined,
+        pin,
+      );
       setEndpoints(state.endpoints);
       setUrl("");
       setLabel("");
       setApiKey("");
+      setContextLength("");
       setShowAdd(false);
       toast("Endpoint added.", "success");
     } catch (e) {
@@ -163,7 +193,7 @@ export function LocalModelsModal({ onClose }: Props): React.ReactElement {
   const totalModels = endpoints.reduce((total, e) => total + e.models.length, 0);
 
   return (
-    <Modal title="Ollama" onClose={onClose}>
+    <Modal title="Local models" onClose={onClose}>
       {/* The "nothing found" line belongs with the instruction that fixes it,
           above the endpoint rows — not stranded at the bottom of a scroll area
           the user has to reach to learn why the list looks empty. */}
@@ -180,7 +210,8 @@ export function LocalModelsModal({ onClose }: Props): React.ReactElement {
           className="mcp-empty"
           style={{ color: theme.textMuted, marginBottom: "var(--space-3)" }}
         >
-          No models yet. Start Ollama and scan, or download one from the Hugging Face tile.
+          No models yet. Start Ollama and scan, add an endpoint for LM Studio or any other server,
+          or download one from the Hugging Face tile.
         </div>
       )}
 
@@ -227,7 +258,7 @@ export function LocalModelsModal({ onClose }: Props): React.ReactElement {
                   key={model.id}
                   className="local-model-row"
                   style={{ color: model.supportsTools ? theme.text : theme.textDim }}
-                  title={modelTooltip(model, endpoint.label)}
+                  title={modelTooltip(model, endpoint)}
                 >
                   <span className="local-model-name">{model.rawId}</span>
                   <span className="local-model-meta" style={{ color: theme.textDim }}>
@@ -252,7 +283,7 @@ export function LocalModelsModal({ onClose }: Props): React.ReactElement {
             className="modal-input"
             style={{ color: theme.text, background: theme.inputBackground, width: "100%" }}
             value={url}
-            placeholder="http://127.0.0.1:11434/v1"
+            placeholder="http://127.0.0.1:1234/v1"
             autoFocus
             onChange={(e) => setUrl(e.target.value)}
             onKeyDown={(e) => {
@@ -280,6 +311,21 @@ export function LocalModelsModal({ onClose }: Props): React.ReactElement {
             placeholder="Only if your server requires one"
             onChange={(e) => setApiKey(e.target.value)}
           />
+          <div className="modal-label" style={{ color: theme.textMuted }}>
+            Context length (optional)
+          </div>
+          <input
+            className="modal-input"
+            style={{ color: theme.text, background: theme.inputBackground, width: "100%" }}
+            value={contextLength}
+            aria-label="Context length"
+            inputMode="numeric"
+            placeholder="Tokens, e.g. 131072. Leave empty to use what the server reports"
+            onChange={(e) => setContextLength(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") void add();
+            }}
+          />
           {addError && (
             <div className="login-status" style={{ color: theme.error }}>
               {addError}
@@ -288,7 +334,14 @@ export function LocalModelsModal({ onClose }: Props): React.ReactElement {
         </>
       ) : (
         <div className="modal-hint" style={{ color: theme.textDim, marginTop: "var(--space-6)" }}>
-          No tool calling = can’t run the agent. “?” context = server didn’t report one.
+          {smallOllamaContext(endpoints) && (
+            <>
+              Ollama is running these with a small context. Raise Context length in Ollama’s
+              settings, then pick the model again.{" "}
+            </>
+          )}
+          Pick a model from the model menu in a session. No tool calling = can’t run the agent. “?”
+          context = not known until the model loads.
         </div>
       )}
 

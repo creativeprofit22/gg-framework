@@ -9,11 +9,15 @@
  *   - Ollama    → `/api/show` + `/api/ps` → capabilities + running context
  *   - LM Studio → `/api/v1/models` (v0 fallback) → capabilities + loaded context
  *   - llama.cpp → `GET /props`          → `default_generation_settings.n_ctx`
- *   - vLLM/other → nothing; `max_model_len` sometimes rides the model object.
+ *   - vLLM/other → nothing; `max_model_len`, `context_length` or `meta.n_ctx`
+ *                  sometimes rides the model object.
+ *
+ * A custom endpoint may pin `contextLength`, which wins over all of the above.
  *
  * Probing never throws: an unreachable server is a normal state (the user just
  * doesn't have it running), not an error to surface.
  */
+import { LOCAL_NO_API_KEY, localBearerKey } from "@kenkaiiii/gg-ai";
 import type { ModelInfo } from "./model-registry.js";
 import { log } from "./logger.js";
 
@@ -33,6 +37,8 @@ export interface LocalEndpoint {
   apiKey?: string;
   /** True for endpoints the user added by hand (removable). */
   custom?: boolean;
+  /** User-pinned context window; wins over whatever the server reports. */
+  contextLength?: number;
 }
 
 /** One model as reported (and enriched) by a local server. */
@@ -77,8 +83,8 @@ export const DEFAULT_LOCAL_ENDPOINTS: readonly LocalEndpoint[] = [
 // Matches Ollama's smallest documented default; still a guess, not an allocation.
 export const FALLBACK_CONTEXT_WINDOW = 4096;
 
-/** Placeholder token for endpoints with no key — these servers ignore it. */
-export const LOCAL_API_KEY_PLACEHOLDER = "local";
+/** Token stored for endpoints with no key; never sent on the wire. */
+export const LOCAL_API_KEY_PLACEHOLDER = LOCAL_NO_API_KEY;
 
 const DEFAULT_PROBE_TIMEOUT_MS = 1200;
 /** Capability lookups are per-model; cap the fan-out so 40 Ollama models don't stampede. */
@@ -108,6 +114,14 @@ export function parseLocalModelId(id: string): { endpointId: string; rawId: stri
   return { endpointId: rest.slice(0, slash), rawId: rest.slice(slash + 1) };
 }
 
+/**
+ * The model's own name, for a UI that shows the endpoint separately: the last
+ * segment of the raw id, so `minimax/minimax-m2:free` reads `minimax-m2:free`.
+ */
+export function localModelShortName(rawId: string): string {
+  return rawId.slice(rawId.lastIndexOf("/") + 1) || rawId;
+}
+
 export function isLocalModelId(id: string): boolean {
   return parseLocalModelId(id) !== undefined;
 }
@@ -125,8 +139,9 @@ export function endpointRoot(baseUrl: string): string {
 }
 
 function authHeaders(endpoint: LocalEndpoint): Record<string, string> {
+  const key = localBearerKey(endpoint.apiKey);
   return {
-    Authorization: `Bearer ${endpoint.apiKey ?? LOCAL_API_KEY_PLACEHOLDER}`,
+    ...(key ? { Authorization: `Bearer ${key}` } : {}),
     Accept: "application/json",
   };
 }
@@ -195,6 +210,10 @@ interface OpenAIModelListEntry {
   id?: string;
   /** vLLM sometimes reports the real window here. */
   max_model_len?: number;
+  /** OpenRouter-style gateways report it here. */
+  context_length?: number;
+  /** llama.cpp-derived servers report the loaded allocation here. */
+  meta?: { n_ctx?: number };
 }
 interface OpenAIModelList {
   data?: OpenAIModelListEntry[];
@@ -202,6 +221,8 @@ interface OpenAIModelList {
 
 interface OllamaShowResponse {
   capabilities?: string[];
+  /** Modelfile PARAMETER lines, e.g. "num_ctx    32768\ntemperature 0.6". */
+  parameters?: string;
 }
 interface OllamaRunningModels {
   models?: { name?: string; model?: string; context_length?: number }[];
@@ -260,7 +281,12 @@ export async function probeEndpoint(
       typeof entry.id === "string" && entry.id.length > 0 && !NON_CHAT_ID_PATTERN.test(entry.id),
   );
 
-  const models = await enrich(endpoint, entries, { timeoutMs, signal });
+  const enriched = await enrich(endpoint, entries, { timeoutMs, signal });
+  const pinned = contextLength(endpoint.contextLength);
+  const models =
+    pinned === undefined
+      ? enriched
+      : enriched.map((m) => ({ ...m, contextWindow: pinned, contextWindowKnown: true }));
   log("INFO", "local-models", `Probed ${endpoint.label}`, {
     baseUrl: endpoint.baseUrl,
     models: String(models.length),
@@ -276,7 +302,30 @@ async function enrich(
   if (endpoint.kind === "lmstudio") return enrichLmStudio(endpoint, entries, options);
   if (endpoint.kind === "ollama") return enrichOllama(endpoint, entries, options);
   if (endpoint.kind === "llamacpp") return enrichLlamaCpp(endpoint, entries, options);
+  if (endpoint.kind === "custom") return enrichCustom(endpoint, entries, options);
   return entries.map((entry) => genericModel(endpoint, entry));
+}
+
+/**
+ * A user-added endpoint is often LM Studio or a llama.cpp-style server (PolyStrata,
+ * Strata) on a port we don't auto-probe. Their OpenAI model list carries no context
+ * size, which would leave every model on the 4K fallback, so ask the server's own
+ * API the way the built-in kinds do. Gateways that report sizes skip both lookups.
+ */
+async function enrichCustom(
+  endpoint: LocalEndpoint,
+  entries: (OpenAIModelListEntry & { id: string })[],
+  options: { timeoutMs: number; signal?: AbortSignal },
+): Promise<LocalModel[]> {
+  const generic = entries.map((entry) => genericModel(endpoint, entry));
+  if (generic.every((model) => model.contextWindowKnown)) return generic;
+  const root = endpointRoot(endpoint.baseUrl);
+  const props = await fetchJson<LlamaCppProps>(`${root}/props`, endpoint, options);
+  const nCtx = contextLength(props?.default_generation_settings?.n_ctx);
+  if (nCtx !== undefined) return llamaCppModels(endpoint, entries, nCtx);
+  const lmStudio = await fetchJson<LmStudioV1ModelList>(`${root}/api/v1/models`, endpoint, options);
+  if (Array.isArray(lmStudio?.models)) return enrichLmStudio(endpoint, entries, options, lmStudio);
+  return generic;
 }
 
 /**
@@ -289,7 +338,10 @@ function genericModel(
   endpoint: LocalEndpoint,
   entry: OpenAIModelListEntry & { id: string },
 ): LocalModel {
-  const declared = contextLength(entry.max_model_len);
+  const declared =
+    contextLength(entry.max_model_len) ??
+    contextLength(entry.context_length) ??
+    contextLength(entry.meta?.n_ctx);
   return {
     rawId: entry.id,
     endpointId: endpoint.id,
@@ -324,10 +376,9 @@ async function enrichOllama(
     // like `all-minilm` carry no hint, so filtering on the id alone leaves
     // embedding models in the picker as dead, tool-less rows.
     if (caps.includes("embedding") && !caps.includes("completion")) return undefined;
-    const ctx = contextLength(
-      runningModels.find((model) => model?.name === entry.id || model?.model === entry.id)
-        ?.context_length,
-    );
+    // Ollama's OpenAI endpoint serves the loaded size, else the Modelfile's
+    // num_ctx, else its own default (which only a load reveals).
+    const ctx = runningContext(runningModels, entry.id) ?? modelfileNumCtx(show?.parameters);
     return {
       rawId: entry.id,
       endpointId: endpoint.id,
@@ -343,6 +394,52 @@ async function enrichOllama(
   return enriched.filter((model): model is LocalModel => model !== undefined);
 }
 
+function runningContext(
+  models: NonNullable<OllamaRunningModels["models"]>,
+  rawId: string,
+): number | undefined {
+  return contextLength(
+    models.find((model) => model?.name === rawId || model?.model === rawId)?.context_length,
+  );
+}
+
+function modelfileNumCtx(parameters: string | undefined): number | undefined {
+  const match = /^num_ctx\s+(\d+)\s*$/m.exec(parameters ?? "");
+  return match ? contextLength(Number(match[1])) : undefined;
+}
+
+/**
+ * The context Ollama serves `rawId` with, read from `/api/ps`. With `load`, first
+ * loads the model the way a chat request would (default options), since an
+ * unloaded model's size is only decided at load time: the OpenAI endpoint
+ * ignores `num_ctx`, so this is the window the agent will really get.
+ */
+export async function ollamaServedContext(
+  endpoint: LocalEndpoint,
+  rawId: string,
+  {
+    load = false,
+    timeoutMs = 120_000,
+    signal,
+  }: { load?: boolean; timeoutMs?: number; signal?: AbortSignal } = {},
+): Promise<number | undefined> {
+  const root = endpointRoot(endpoint.baseUrl);
+  if (load) {
+    // An empty generate request only loads the model.
+    await fetchJson(`${root}/api/generate`, endpoint, {
+      timeoutMs,
+      signal,
+      method: "POST",
+      body: { model: rawId },
+    });
+  }
+  const running = await fetchJson<OllamaRunningModels>(`${root}/api/ps`, endpoint, {
+    timeoutMs: DEFAULT_PROBE_TIMEOUT_MS,
+    signal,
+  });
+  return runningContext(Array.isArray(running?.models) ? running.models : [], rawId);
+}
+
 /** Never let malformed server metadata become a request or compaction budget. */
 function contextLength(value: unknown): number | undefined {
   return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : undefined;
@@ -352,9 +449,11 @@ async function enrichLmStudio(
   endpoint: LocalEndpoint,
   entries: (OpenAIModelListEntry & { id: string })[],
   options: { timeoutMs: number; signal?: AbortSignal },
+  fetched?: LmStudioV1ModelList,
 ): Promise<LocalModel[]> {
   const root = endpointRoot(endpoint.baseUrl);
-  const detail = await fetchJson<LmStudioV1ModelList>(`${root}/api/v1/models`, endpoint, options);
+  const detail =
+    fetched ?? (await fetchJson<LmStudioV1ModelList>(`${root}/api/v1/models`, endpoint, options));
   const byId = new Map<string, LmStudioModelEntry>();
   if (Array.isArray(detail?.models)) {
     for (const model of detail.models) {
@@ -423,12 +522,22 @@ async function enrichLlamaCpp(
     endpoint,
     options,
   );
-  const nCtx = contextLength(props?.default_generation_settings?.n_ctx);
-  const known = nCtx !== undefined;
+  return llamaCppModels(
+    endpoint,
+    entries,
+    contextLength(props?.default_generation_settings?.n_ctx),
+  );
+}
+
+function llamaCppModels(
+  endpoint: LocalEndpoint,
+  entries: (OpenAIModelListEntry & { id: string })[],
+  nCtx: number | undefined,
+): LocalModel[] {
   return entries.map((entry) => ({
     ...genericModel(endpoint, entry),
-    contextWindow: known ? nCtx : FALLBACK_CONTEXT_WINDOW,
-    contextWindowKnown: known,
+    contextWindow: nCtx ?? FALLBACK_CONTEXT_WINDOW,
+    contextWindowKnown: nCtx !== undefined,
   }));
 }
 
@@ -497,7 +606,7 @@ interface CacheEntry {
 let cache: CacheEntry | undefined;
 
 function cacheKey(endpoints: readonly LocalEndpoint[]): string {
-  return endpoints.map((e) => `${e.id}@${e.baseUrl}`).join("|");
+  return endpoints.map((e) => `${e.id}@${e.baseUrl}#${e.contextLength ?? ""}`).join("|");
 }
 
 export interface DiscoverOptions extends ProbeOptions {

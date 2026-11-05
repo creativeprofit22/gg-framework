@@ -74,7 +74,7 @@ export class AuthStorage extends CoreAuthStorage {
     filePath?: string,
     private readonly environment: AzureOpenAIEnvironment = process.env,
   ) {
-    super(filePath, environment);
+    super(filePath, { runtimeEnvironment: environment });
   }
 
   override async hasProviderAuth(provider: string): Promise<boolean> {

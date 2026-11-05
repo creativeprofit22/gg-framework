@@ -1,5 +1,40 @@
 # @kenkaiiii/ggcoder
 
+## 5.91.1
+
+### Patch Changes
+
+- 8627ee6: Radio no longer keeps playing after the app crashes or is force-quit: the next start stops the leftover player, but only when it is still playing that station, so an unrelated process that reused the ID is never touched. On Windows, stopping a station now stops the real player behind a launcher too. Custom local endpoints can pin a context length (a new field in Local models), and llama.cpp-style servers that report `meta.n_ctx` get their real window. OpenRouter keys can point at a compatible gateway with an optional base URL, changeable without pasting the key again, and "Sync models" replaces the built-in OpenRouter list with what that endpoint actually serves (tool-capable models only, with their context, output cap, image support and effort levels). A model that lists its own effort levels gets exactly those in the picker, and the chosen one is sent as-is, so `max` is no longer sent as `xhigh`.
+- Updated dependencies
+- Updated dependencies [8627ee6]
+  - @kenkaiiii/gg-core@5.91.1
+  - @kenkaiiii/gg-ai@5.91.1
+  - @kenkaiiii/gg-agent@5.91.1
+
+## 5.91.0
+
+### Minor Changes
+
+- Add MiniMax M3.1 Flash (now the MiniMax default) with a real effort ladder, route MiniMax and Xiaomi Token Plan keys to the region that issued them, name the real provider in Anthropic-compatible errors, update the Anthropic SDK to 1.4, and fix goals not starting on local models.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.91.0
+- @kenkaiiii/gg-agent@5.91.0
+- @kenkaiiii/gg-core@5.91.0
+
+## 5.90.0
+
+### Minor Changes
+
+- Local models: keyless endpoints send no auth header, Ollama's real served context is learned, custom endpoints read their context size, and a saved local model is restored at startup. Web search on Anthropic runs as a side request, web_fetch reads pages in windows (offset, #section) with a length cap, bash inlines less output, and language style packs are removed.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.90.0
+- @kenkaiiii/gg-agent@5.90.0
+- @kenkaiiii/gg-core@5.90.0
+
 ## 5.89.0
 
 ### Minor Changes

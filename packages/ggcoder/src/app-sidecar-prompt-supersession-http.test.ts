@@ -211,6 +211,10 @@ it.each(["cancelling", "cancel_failed", "new-question"] as const)(
       } else {
         expect(json).toHaveBeenCalledWith({}, 409, {
           error: state === "cancelling" ? "run_cancelling" : "cancel_failed",
+          message:
+            state === "cancelling"
+              ? "The last run is still stopping."
+              : "The last run couldn't be stopped. Stop it again first.",
           runState: state,
         });
         expect(settled).not.toHaveBeenCalled();

@@ -1,6 +1,7 @@
 // Core entry point
 export { stream, localWireModelId } from "./stream.js";
 export { codexRequestProfile } from "./providers/openai-codex-request.js";
+export { LOCAL_NO_API_KEY, localBearerKey } from "./local-api-key.js";
 export {
   FAST_MODE_SUFFIX,
   describeFastModeRejection,

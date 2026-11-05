@@ -85,7 +85,9 @@ describe("tool tiering in the system prompt", () => {
       ["steroids", "research_corpus"],
     );
     // Production Local Fork wording for the hint.
-    expect(prompt).toContain("- **steroids**: Real-repo examples.");
+    expect(prompt).toContain(
+      "- **steroids**: Current open-source code, when it may be newer than your training.",
+    );
     expect(prompt).not.toContain("**research_corpus**");
     expect(prompt).not.toMatch(/read-only corpus/i);
   });
@@ -221,6 +223,22 @@ describe("tool tiering in the system prompt", () => {
     // of truth (corpus-gap and not-installed fallbacks); the index block cap
     // is still the tiering guard.
     expect(prompt.length).toBeLessThan(13_100);
+  });
+});
+
+describe("parallel tool-call steering", () => {
+  it("tells a bash-equipped agent that non-shell calls in one reply run in parallel", () => {
+    const steering = buildToolSteering(["bash", "read", "grep", "steroids"]);
+    expect(steering).toContain(
+      "Calls in one reply run in parallel, except shell commands and edits",
+    );
+    expect(steering).not.toContain("reads/searches");
+  });
+
+  it("keeps the read/search batching line for agents without bash", () => {
+    const steering = buildToolSteering(["read", "grep"]);
+    expect(steering).toContain("Batch independent reads/searches in one turn");
+    expect(steering).not.toContain("Calls in one reply run in parallel");
   });
 });
 

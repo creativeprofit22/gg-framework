@@ -195,6 +195,9 @@ const SettingsSchema = z.object({
   concurrencyDefaults: z.boolean().default(true),
   /** Full test/build runs allowed at once across all windows; 0 = no limit. */
   heavyCheckLimit: z.number().int().min(0).max(8).default(1),
+  /** Desktop daemon: close a pane session with no listener, no work and no pending
+   *  question after this many quiet minutes. 0 disables the cleanup. */
+  idleSessionCleanupMinutes: z.number().int().min(0).max(1440).default(30),
 });
 
 export type Settings = z.infer<typeof SettingsSchema>;
@@ -235,7 +238,42 @@ export const DEFAULT_SETTINGS: Settings = {
   concurrencyBudget: 0,
   concurrencyDefaults: true,
   heavyCheckLimit: 1,
+  idleSessionCleanupMinutes: 30,
 };
+
+export type IdleSessionCleanupRead =
+  { ok: true; minutes: number } | { ok: false; minutes: number; error: string };
+
+// load() resets every key to defaults if any key is bad; this reads one key and reports failure.
+export async function readIdleSessionCleanupMinutes(
+  filePath: string,
+  fallback: number,
+): Promise<IdleSessionCleanupRead> {
+  let content: string;
+  try {
+    content = await fs.readFile(filePath, "utf-8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return { ok: true, minutes: DEFAULT_SETTINGS.idleSessionCleanupMinutes };
+    }
+    return { ok: false, minutes: fallback, error: String(error) };
+  }
+  let raw: unknown;
+  try {
+    raw = JSON.parse(content);
+  } catch (error) {
+    return { ok: false, minutes: fallback, error: String(error) };
+  }
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    return { ok: false, minutes: fallback, error: "settings file is not a JSON object" };
+  }
+  const value: unknown = (raw as Record<string, unknown>).idleSessionCleanupMinutes;
+  const parsed = SettingsSchema.shape.idleSessionCleanupMinutes.safeParse(value);
+  if (!parsed.success) {
+    return { ok: false, minutes: fallback, error: "invalid idleSessionCleanupMinutes" };
+  }
+  return { ok: true, minutes: parsed.data };
+}
 
 // ── Settings Manager ───────────────────────────────────────
 

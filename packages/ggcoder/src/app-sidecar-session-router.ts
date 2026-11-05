@@ -96,10 +96,22 @@ export class AppSidecarSessionRouter<TContext extends DisposableSessionContext> 
     return context;
   }
 
+  /** Check and remove in one synchronous step, so nothing can reach the session in between. */
+  takeIf(sessionId: string, predicate: (context: TContext) => boolean): TContext | undefined {
+    const context = this.#sessions.get(sessionId);
+    if (!context || !predicate(context)) return undefined;
+    this.#sessions.delete(sessionId);
+    return context;
+  }
+
+  async disposeTaken(context: TContext): Promise<void> {
+    await context.dispose();
+  }
+
   async deleteAndDispose(sessionId: string): Promise<boolean> {
     const context = this.take(sessionId);
     if (!context) return false;
-    await context.dispose();
+    await this.disposeTaken(context);
     return true;
   }
 

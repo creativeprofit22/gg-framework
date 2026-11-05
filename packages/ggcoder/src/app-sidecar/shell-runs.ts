@@ -188,6 +188,10 @@ export class ShellRunner {
     return this.runs.has(runId);
   }
 
+  get activeCount(): number {
+    return this.runs.size;
+  }
+
   start(runId: string, command: string, cwd: string): { ok: true } | { ok: false; error: string } {
     if (this.runs.has(runId)) return { ok: false, error: "run id already in use" };
     const env = this.opts.env ?? process.env;

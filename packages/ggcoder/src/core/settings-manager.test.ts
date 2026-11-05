@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { SettingsManager } from "./settings-manager.js";
+import { readIdleSessionCleanupMinutes, SettingsManager } from "./settings-manager.js";
 import { verifyPlanDescriptorSha256 } from "./verify-plan-approval.js";
 
 const DESCRIPTOR =
@@ -106,5 +106,60 @@ describe("SettingsManager concurrency settings", () => {
     const invalid = await load();
     expect(invalid.get("concurrencyBudget")).toBe(0);
     expect(invalid.get("heavyCheckLimit")).toBe(1);
+  });
+});
+
+describe("SettingsManager idle session cleanup", () => {
+  it("defaults to 30 minutes, accepts 0 to turn it off and rejects invalid values", async () => {
+    expect((await load()).get("idleSessionCleanupMinutes")).toBe(30);
+
+    await fs.writeFile(file, JSON.stringify({ idleSessionCleanupMinutes: 0 }), "utf-8");
+    expect((await load()).get("idleSessionCleanupMinutes")).toBe(0);
+
+    await fs.writeFile(file, JSON.stringify({ idleSessionCleanupMinutes: 5 }), "utf-8");
+    expect((await load()).get("idleSessionCleanupMinutes")).toBe(5);
+
+    await fs.writeFile(file, JSON.stringify({ idleSessionCleanupMinutes: -1 }), "utf-8");
+    expect((await load()).get("idleSessionCleanupMinutes")).toBe(30);
+  });
+});
+
+describe("readIdleSessionCleanupMinutes", () => {
+  async function write(content: string): Promise<void> {
+    await fs.writeFile(file, content, "utf-8");
+  }
+
+  it("uses the default 30 when the file is missing", async () => {
+    expect(await readIdleSessionCleanupMinutes(file, 7)).toEqual({ ok: true, minutes: 30 });
+  });
+
+  it("honors 0 (cleanup off)", async () => {
+    await write(JSON.stringify({ idleSessionCleanupMinutes: 0 }));
+    expect(await readIdleSessionCleanupMinutes(file, 30)).toEqual({ ok: true, minutes: 0 });
+  });
+
+  it("uses the default 30 when the key is missing", async () => {
+    await write(JSON.stringify({ keepAwake: false }));
+    expect(await readIdleSessionCleanupMinutes(file, 7)).toEqual({ ok: true, minutes: 30 });
+  });
+
+  it("keeps the fallback on invalid JSON", async () => {
+    await write('{"idleSessionCleanupMinutes": 0');
+    const read = await readIdleSessionCleanupMinutes(file, 45);
+    expect(read.ok).toBe(false);
+    expect(read.minutes).toBe(45);
+  });
+
+  it("still returns the user's value when an unrelated key is invalid", async () => {
+    await write(JSON.stringify({ heavyCheckLimit: 99, idleSessionCleanupMinutes: 120 }));
+    expect((await load()).get("idleSessionCleanupMinutes")).toBe(30);
+    expect(await readIdleSessionCleanupMinutes(file, 30)).toEqual({ ok: true, minutes: 120 });
+  });
+
+  it("keeps the fallback when the idle value is out of range", async () => {
+    await write(JSON.stringify({ idleSessionCleanupMinutes: 1441 }));
+    const read = await readIdleSessionCleanupMinutes(file, 45);
+    expect(read.ok).toBe(false);
+    expect(read.minutes).toBe(45);
   });
 });

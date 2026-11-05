@@ -366,6 +366,26 @@ describe("AppSidecarSessionRouter HTTP isolation", () => {
     expect(second.dispose).toHaveBeenCalledOnce();
     expect([...router.values()]).toEqual([]);
   });
+
+  it("takes a session only when the check passes, and a later delete is a quiet no-op", async () => {
+    const router = new AppSidecarSessionRouter<FakeContext>();
+    const context = createFakeContext();
+    context.dispose = vi.fn(async () => {});
+    router.add("idle", context);
+
+    expect(router.takeIf("idle", () => false)).toBeUndefined();
+    expect(router.get("idle")).toBe(context);
+    expect(router.takeIf("missing", () => true)).toBeUndefined();
+
+    const taken = router.takeIf("idle", (candidate) => candidate === context);
+    expect(taken).toBe(context);
+    expect(router.get("idle")).toBeUndefined();
+    if (taken) await router.disposeTaken(taken);
+    expect(context.dispose).toHaveBeenCalledOnce();
+
+    await expect(router.deleteAndDispose("idle")).resolves.toBe(false);
+    expect(context.dispose).toHaveBeenCalledOnce();
+  });
 });
 
 describe("redactedSessionEventSseData", () => {

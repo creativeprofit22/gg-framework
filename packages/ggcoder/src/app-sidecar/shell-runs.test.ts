@@ -193,6 +193,28 @@ describe("ShellRunner", () => {
     expect(end.tail).toBe("out\nbad");
   }, 20_000);
 
+  it("counts live runs until they end", async () => {
+    const ended = new Promise<void>((resolve, reject) => {
+      const runner = new ShellRunner({
+        emit: () => {},
+        onEnd: () => {
+          try {
+            expect(runner.activeCount).toBe(0);
+            resolve();
+          } catch (error) {
+            reject(error);
+          }
+        },
+      });
+      expect(runner.activeCount).toBe(0);
+      const started = runner.start("r1", "sleep 30", process.cwd());
+      if (!started.ok) throw new Error(started.error);
+      expect(runner.activeCount).toBe(1);
+      runner.cancel("r1");
+    });
+    await ended;
+  }, 20_000);
+
   it("stops a command when asked", async () => {
     const { end } = await runOnce("sleep 30", { cancelAfterMs: 300 });
     expect(end.cancelled).toBe(true);

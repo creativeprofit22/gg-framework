@@ -1983,10 +1983,6 @@ select {
 .settings-card .modal-input {
   width: 100%;
 }
-/* The providers grid brings its own padding for its standalone screen. */
-.settings-card .login-grid {
-  padding: 0;
-}
 /* Shared Settings/Checklist page arrival. A light defocus, no movement, and
    a partially visible first frame avoid the full-page blank/reload flash. */
 @keyframes settings-page-dissolve {
@@ -1998,6 +1994,16 @@ select {
     opacity: 1;
     filter: none;
   }
+}
+/* A page that fills the window instead of scrolling (AI Providers): its own
+   regions scroll, and it keeps clear of the tab capsule itself. */
+.settings-page.is-fill {
+  height: 100%;
+  padding-bottom: 0;
+}
+.settings-panel.providers-page {
+  flex: 1 1 auto;
+  min-height: 0;
 }
 .settings-page.is-entering {
   animation: reveal-up var(--dur-row) var(--ease-out) both;
@@ -2207,113 +2213,19 @@ select {
   opacity: 0.55;
 }
 
-/* ── Login screen (provider logo grid + connection dots) ──
-   Tiles reuse the .btn-ghost recipe (glossy neutral gradient + inner top
-   highlight + drop shadow, brightness-on-hover) stretched onto a square card.
-   Responsive: 2 columns below 640px (window min width is 480), 4 above. */
+/* ── Login screen ──
+   The provider brain bay lives in ProvidersBay.css. On its own screen it
+   fills the space under the header; the logos keep this class so the light
+   theme's mono-mark rule (Deck.css) still applies. */
 .login-scroll {
   flex: 1 1 auto;
-  overflow-y: auto;
-}
-.login-grid {
-  /* Full-width with the same 12px padding as .picker-list (session list) so
-     page content edges align across screens. */
-  padding: var(--space-6);
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: var(--space-5);
-}
-@media (min-width: 640px) {
-  .login-grid {
-    grid-template-columns: repeat(4, 1fr);
-  }
-}
-.login-tile {
-  position: relative;
-  aspect-ratio: 1 / 1;
   display: flex;
   flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: var(--space-5);
-  background: var(--gloss-neutral);
-  border: 1px solid rgb(var(--ink-rgb) / 0.12);
-  border-radius: var(--radius-card);
-  box-shadow: var(--gloss-shadow-neutral);
-  font-family: var(--sans);
-  cursor: pointer;
-  transition:
-    filter var(--t-fast),
-    box-shadow var(--t-fast);
-}
-.login-tile:hover {
-  filter: brightness(1.18);
-}
-.login-tile:focus-visible {
-  outline: 2px solid var(--primary);
-  outline-offset: 2px;
-}
-.login-tile-logo {
-  width: 48px;
-  height: 48px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  min-height: 0;
+  padding: 0 var(--page-pad);
 }
 .login-logo {
-  max-width: 48px;
-  max-height: 48px;
-  width: auto;
-  height: auto;
   object-fit: contain;
-}
-.login-logo-fallback {
-  font-size: 30px;
-  font-weight: 600;
-  color: var(--text);
-}
-.login-tile-name {
-  font-size: var(--fs-base);
-  font-weight: 600;
-  color: var(--text);
-  letter-spacing: -0.01em;
-}
-.login-tile-methods {
-  display: flex;
-  gap: var(--space-2);
-  flex-wrap: wrap;
-  justify-content: center;
-}
-.login-conn-dot {
-  position: absolute;
-  top: 10px;
-  right: 10px;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--success);
-  box-shadow: 0 0 0 3px rgba(54, 196, 137, 0.18);
-}
-/* Narrow windows (480-640px): tighter padding, slightly smaller logo. */
-@media (max-width: 639px) {
-  .login-grid {
-    padding: var(--space-5);
-    gap: var(--space-4);
-  }
-  .login-tile {
-    gap: var(--space-4);
-  }
-  .login-tile-logo {
-    width: 40px;
-    height: 40px;
-  }
-  .login-logo {
-    max-width: 40px;
-    max-height: 40px;
-  }
-  .login-tile-name {
-    font-size: var(--fs-sm);
-  }
 }
 
 /* ── Provider login modal ── */
@@ -12194,6 +12106,9 @@ select {
   padding: var(--space-3) 0;
 }
 .img-card {
+  /* The caption row's height, shared with the save button that ends it. */
+  --img-cap-h: 28px;
+  position: relative;
   margin: 0;
   max-width: 320px;
   border: 1px solid var(--border);
@@ -12202,12 +12117,88 @@ select {
   background: var(--surface-1);
 }
 .img-card-clickable {
-  cursor: pointer;
   transition: border-color var(--t-fast);
 }
-.img-card-clickable:hover,
-.img-card-clickable:focus-visible {
+.img-card-clickable:hover {
   border-color: var(--border-strong);
+}
+/* The whole image and its caption open the file. */
+.img-open {
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: start;
+  cursor: pointer;
+}
+.img-open:focus {
+  outline: none;
+}
+.img-open:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: -2px;
+  border-radius: var(--radius-card);
+}
+/* Save: the end of the caption row, or a frosted chip on the image's corner
+   when there is no caption. */
+.img-save {
+  position: absolute;
+  inset-inline-end: 0;
+  bottom: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: var(--img-cap-h);
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition:
+    color var(--t-out),
+    background-color var(--t-out);
+}
+.img-save:hover {
+  color: var(--text);
+  background: rgb(var(--ink-rgb) / 0.06);
+  transition:
+    color var(--t-in),
+    background-color var(--t-in);
+}
+.img-save:active {
+  background: rgb(var(--ink-rgb) / 0.1);
+}
+.img-save:focus {
+  outline: none;
+}
+.img-save:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: -3px;
+  border-radius: var(--radius-button);
+}
+.img-save:disabled {
+  cursor: progress;
+  opacity: 0.55;
+}
+.img-card:not(.has-cap) .img-save {
+  inset-inline-end: var(--space-3);
+  bottom: var(--space-3);
+  width: 28px;
+  height: 28px;
+  border: 0.5px solid var(--border-strong);
+  border-radius: var(--radius-button);
+  background: color-mix(in srgb, var(--surface-3) 82%, transparent);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+  color: var(--text-secondary);
+}
+.img-card:not(.has-cap) .img-save:hover {
+  background: var(--surface-3);
+  color: var(--text);
 }
 .img-thumb {
   display: block;
@@ -12216,7 +12207,13 @@ select {
   object-fit: contain;
 }
 .img-cap {
-  padding: 5px 9px;
+  display: block;
+  box-sizing: border-box;
+  height: var(--img-cap-h);
+  /* One line, centred in the row by its line box (less the top border). */
+  line-height: calc(var(--img-cap-h) - 1px);
+  /* Room for the save button at the end of the row. */
+  padding: 0 34px 0 9px;
   font-family: var(--sans);
   font-size: var(--fs-xs);
   color: var(--text-muted);
@@ -12237,10 +12234,6 @@ select {
 .markdown .md-img .img-thumb {
   max-height: 480px;
 }
-.markdown .md-img .img-cap {
-  display: block;
-  line-height: 1.3;
-}
 .markdown .md-img-loading,
 .markdown .md-img-missing,
 .markdown .md-img-alt {
@@ -12249,18 +12242,124 @@ select {
 }
 
 /* ── Image generation placeholder (shimmering square while tool runs) ── */
-.img-gen-placeholder {
+/* generate_image in flight (image-gen/ImageGenCard.tsx): the same card as the
+   finished image, holding a square stage with a dot board that fills in as the
+   estimate grows, the status phrase above it and the estimate in a pill. */
+.img-gen-card {
+  width: min(100%, 320px);
+}
+.img-gen-stage {
+  position: relative;
+  aspect-ratio: 1 / 1;
   display: flex;
   flex-direction: column;
-  align-items: center;
-  gap: var(--space-5);
-  max-width: 240px;
+  padding: 44px var(--space-6) var(--space-6);
+  color: var(--text-secondary);
+  background: var(--surface-1);
 }
-.img-gen-label {
+.img-gen-board {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  border-radius: var(--radius-button);
+  background: var(--surface-2);
+}
+.img-gen-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+.img-gen-play {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  border-radius: inherit;
+  background: transparent;
+  cursor: pointer;
+}
+.img-gen-play:focus {
+  outline: none;
+}
+.img-gen-play:active {
+  background: rgb(var(--ink-rgb) / 0.03);
+}
+.img-gen-play:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+.img-gen-phrase {
+  position: absolute;
+  inset-inline: var(--space-8);
+  top: var(--space-8);
   font-family: var(--sans);
-  font-size: var(--fs-xs);
+  font-size: var(--fs-md);
+  line-height: 1.3;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: opacity var(--dur-dissolve) var(--ease-in-out);
+}
+.img-gen-phrase[data-changing] {
+  opacity: 0;
+}
+.img-gen-score {
+  position: absolute;
+  inset-inline-end: var(--space-8);
+  top: var(--space-8);
+  font-family: var(--sans);
+  font-size: var(--fs-md);
+  line-height: 1.3;
+  font-variant-numeric: tabular-nums;
   color: var(--text-muted);
+}
+/* The estimate: a frosted pill over the board's corner. */
+.img-gen-progress {
+  position: absolute;
+  inset-inline-end: var(--space-9);
+  bottom: var(--space-9);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 48px;
+  height: 24px;
+  padding: 0 var(--space-4);
+  border: 0.5px solid var(--border-strong);
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--surface-3) 82%, transparent);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+  box-shadow: var(--shadow-md);
+  font-family: var(--sans);
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  line-height: 1.3;
+  font-variant-numeric: tabular-nums;
+  color: var(--secondary);
+  pointer-events: none;
+}
+.img-gen-over {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-8);
+  font-family: var(--sans);
+  font-size: var(--fs-base);
+  line-height: 1.3;
   text-align: center;
+  color: var(--text);
+  pointer-events: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .img-gen-phrase {
+    transition: none;
+  }
 }
 
 /* ── Slash command palette (opens upward from the input) ── */

@@ -304,7 +304,7 @@ import {
   saveProjectModelPrefs,
   updateAppSettings,
 } from "./app-sidecar/app-settings.js";
-import { restoredWorkerRows } from "./app-sidecar/history-rows.js";
+import { restoredGifPreview, restoredWorkerRows } from "./app-sidecar/history-rows.js";
 import { createWorldLink } from "./app-sidecar/royale.js";
 import { readGitState, resolveGitCwd } from "./app-sidecar/git-target.js";
 import {
@@ -5538,7 +5538,13 @@ async function createSession(
               // Tool result messages: check for ImageContent blocks (screenshots,
               // generated images) and emit a toolImages entry.
               for (const tr of msg.content) {
+                const toolName = toolNameById.get(tr.toolCallId);
                 const toolImages = await restoreToolImages(tr);
+                // A generated GIF is stored as its first frame; replay it from its file.
+                for (const image of toolImages) {
+                  const animated = await restoredGifPreview(toolName, image.path);
+                  if (animated) image.src = animated;
+                }
                 const textContent =
                   typeof tr.content === "string"
                     ? tr.content
@@ -5551,11 +5557,16 @@ async function createSession(
                 // Only generate_image's own text is trusted (an MCP server could
                 // fake it); skip silently if a file was moved or deleted since.
                 const extraPaths =
-                  toolNameById.get(tr.toolCallId) === "generate_image"
+                  toolName === "generate_image"
                     ? extractToolImagePaths(textContent).slice(toolImages.length)
                     : [];
                 for (const extraPath of extraPaths) {
                   if (!path.isAbsolute(extraPath)) continue;
+                  const animated = await restoredGifPreview(toolName, extraPath);
+                  if (animated) {
+                    toolImages.push({ src: animated, path: extraPath });
+                    continue;
+                  }
                   const mediaType = IMAGE_MEDIA_TYPES[path.extname(extraPath).toLowerCase()];
                   if (!mediaType) continue;
                   const raw = await readFileBounded(extraPath).catch(() => null);

@@ -2,7 +2,7 @@
   "name": "gg-app",
   "private": true,
   "license": "AGPL-3.0-only",
-  "version": "0.102.1",
+  "version": "0.103.0",
   "description": "GG Coder desktop app: Tauri + React workspace for code, chat and motion agents",
   "type": "module",
   "scripts": {
@@ -68,7 +68,8 @@
     "rehype-highlight": "^7.0.0",
     "remark-gfm": "^4.0.0",
     "remend": "1.4.0",
-    "thinking-orbs": "0.3.1"
+    "thinking-orbs": "0.3.1",
+    "three": "0.186.1"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
@@ -77,6 +78,7 @@
     "@types/node": "^25.6.0",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.7",
+    "@types/three": "0.186.0",
     "@vitejs/plugin-react": "5.2.0",
     "esbuild": "0.28.2",
     "eslint": "^10.10.0",

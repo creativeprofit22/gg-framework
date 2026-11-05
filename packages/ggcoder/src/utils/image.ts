@@ -628,11 +628,48 @@ export async function downscaleForPreview(buffer: Buffer): Promise<Buffer> {
     const meta = await sharp(buffer).metadata();
     const width = meta.width ?? 0;
     if (width > 0 && width <= PREVIEW_MAX_WIDTH) return buffer;
-    return await sharp(buffer)
+    // Without `animated`, sharp decodes only the first frame and a GIF preview would freeze.
+    const animated = (meta.pages ?? 1) > 1;
+    return await sharp(buffer, { animated })
       .resize(PREVIEW_MAX_WIDTH, undefined, { fit: "inside", withoutEnlargement: true })
       .toBuffer();
   } catch {
     return buffer;
+  }
+}
+
+/** Largest animated preview sent to the chat; above it, a smaller or still copy. */
+export const MAX_ANIMATED_PREVIEW_BYTES = 2.5 * 1024 * 1024;
+const SMALL_PREVIEW_WIDTH = 320;
+
+/**
+ * The chat preview for an animated GIF: every frame at preview width while it
+ * stays under MAX_ANIMATED_PREVIEW_BYTES, then narrower, then the first frame
+ * as a PNG, so a long, wide GIF (or a batch of them) cannot swamp the event stream.
+ */
+export async function animatedPreview(
+  gif: Buffer,
+  maxBytes = MAX_ANIMATED_PREVIEW_BYTES,
+): Promise<{ buffer: Buffer; mediaType: "image/gif" | "image/png" }> {
+  const preview = await downscaleForPreview(gif);
+  if (preview.length <= maxBytes) {
+    return { buffer: preview, mediaType: "image/gif" };
+  }
+  try {
+    const sharp = await loadSharp();
+    const smaller = await sharp(gif, { animated: true })
+      .resize(SMALL_PREVIEW_WIDTH, undefined, { fit: "inside", withoutEnlargement: true })
+      .toBuffer();
+    if (smaller.length <= maxBytes) {
+      return { buffer: smaller, mediaType: "image/gif" };
+    }
+    const still = await sharp(gif)
+      .resize(PREVIEW_MAX_WIDTH, undefined, { fit: "inside", withoutEnlargement: true })
+      .png()
+      .toBuffer();
+    return { buffer: still, mediaType: "image/png" };
+  } catch {
+    return { buffer: preview, mediaType: "image/gif" };
   }
 }
 

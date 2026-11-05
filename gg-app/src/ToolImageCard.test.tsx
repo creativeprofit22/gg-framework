@@ -1,12 +1,13 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-const { openProjectPath, readChatImage } = vi.hoisted(() => ({
+const { openProjectPath, readChatImage, saveChatImage } = vi.hoisted(() => ({
   openProjectPath: vi.fn(),
   readChatImage: vi.fn(),
+  saveChatImage: vi.fn(),
 }));
-vi.mock("./agent", () => ({ openProjectPath, readChatImage }));
+vi.mock("./agent", () => ({ openProjectPath, readChatImage, saveChatImage }));
 
 import { ToolImageCard } from "./ToolImageCard";
 
@@ -50,6 +51,24 @@ describe("ToolImageCard", () => {
     expect(openProjectPath).toHaveBeenCalledWith("/shots/gone.png", "pane-a");
     fireEvent.keyDown(screen.getByRole("button"), { key: "Enter" });
     expect(openProjectPath).toHaveBeenCalledTimes(2);
+  });
+
+  it("opens and saves the original file through its own pane, as a literal path", async () => {
+    saveChatImage.mockResolvedValue(null);
+    const path = "/shots/issue #42.png";
+    render(<ToolImageCard image={{ src: PNG, path }} paneId="pane-a" />);
+    fireEvent.click(screen.getByRole("button", { name: "Open issue #42.png" }));
+    expect(openProjectPath).toHaveBeenCalledWith(path, "pane-a");
+    fireEvent.click(screen.getByRole("button", { name: "Save issue #42.png" }));
+    await waitFor(() =>
+      expect(saveChatImage).toHaveBeenCalledWith({
+        path,
+        src: PNG,
+        directory: null,
+        paneId: "pane-a",
+        kind: "path",
+      }),
+    );
   });
 
   it("shows 'Image unavailable' when the loaded data won't render", async () => {

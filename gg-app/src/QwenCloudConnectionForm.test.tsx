@@ -287,7 +287,12 @@ it("refreshes separately mounted hubs and forms after save and remove in another
     await screen.findByText(
       connected ? "Saved connection — not remotely verified" : "No saved connection",
     );
-    expect(within(hub.container).queryByLabelText("Connected") !== null).toBe(connected);
+    // Brain bay cards (upstream 0.102.2) mark a connected provider with `is-on`.
+    const card = within(hub.container).getByRole("button", { name: /^Qwen Cloud/ });
+    expect(card.classList.contains("is-on")).toBe(connected);
+    expect(card.getAttribute("aria-label")).toMatch(
+      connected ? /connected with API key$/ : /not connected$/,
+    );
     expect(screen.queryByRole("button", { name: "Remove connection" }) !== null).toBe(connected);
     expect(
       (

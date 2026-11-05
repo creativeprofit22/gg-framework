@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { StrictMode } from "react";
-import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import type { AuthProvider, SidecarEvent } from "./agent";
 import { authStatus } from "./agent";
 import { LoginScreen } from "./LoginScreen";
@@ -16,9 +16,26 @@ vi.mock("./agent", () => ({
   },
 }));
 
-vi.mock("./provider-logos", () => ({
-  providerLogo: () => null,
-  isMonochromeProviderLogo: () => false,
+vi.mock("./provider-logos", () => ({ providerLogo: () => null, providerLogoIsMono: () => false }));
+
+// The brain is three.js + WebGL, which jsdom lacks; record what the page asks of it instead.
+const bay = vi.hoisted(() => ({
+  mount: vi.fn(),
+  setConnected: vi.fn(),
+  setMotion: vi.fn(),
+  setHot: vi.fn(),
+  dispose: vi.fn(),
+}));
+vi.mock("./brain/brain-bay", () => ({
+  mountBrainBay: (opts: unknown) => {
+    bay.mount(opts);
+    return {
+      setConnected: bay.setConnected,
+      setMotion: bay.setMotion,
+      setHot: bay.setHot,
+      dispose: bay.dispose,
+    };
+  },
 }));
 
 // Observe the hub's modal metadata and callback without invoking native auth.
@@ -62,16 +79,16 @@ function qwenProviders(connected: boolean): AuthProvider[] {
   ];
 }
 
+// Brain bay cards (upstream 0.102.2) name their state in the label and mark it with `is-on`.
 function expectQwen(connected: boolean) {
   const tile = screen.getByRole("button", { name: /Qwen Cloud/ });
-  expect(within(tile).queryByLabelText("Connected") !== null).toBe(connected);
+  expect(tile.getAttribute("aria-label")).toBe(
+    `Qwen Cloud (Token Plan): ${connected ? "connected with API key" : "not connected"}`,
+  );
+  expect(tile.classList.contains("is-on")).toBe(connected);
   expect(screen.getByText(`${connected ? 2 : 1} connected`)).toBeTruthy();
-  expect(
-    within(screen.getByRole("button", { name: /Anthropic/ })).getByLabelText("Connected"),
-  ).toBeTruthy();
-  expect(
-    within(screen.getByRole("button", { name: /xAI/ })).queryByLabelText("Connected"),
-  ).toBeNull();
+  expect(screen.getByRole("button", { name: /^Anthropic/ }).classList.contains("is-on")).toBe(true);
+  expect(screen.getByRole("button", { name: /^xAI/ }).classList.contains("is-on")).toBe(false);
 }
 
 function expectActive(connected: boolean) {
@@ -98,6 +115,7 @@ async function emit(type: string, data: Record<string, unknown> = {}): Promise<v
 beforeEach(() => {
   listeners.clear();
   vi.mocked(authStatus).mockReset();
+  for (const fn of Object.values(bay)) fn.mockReset();
 });
 afterEach(cleanup);
 
@@ -281,5 +299,53 @@ describe("LoginScreen cross-window auth", () => {
     expect(screen.getByText("Local models")).toBeTruthy();
     expect(screen.getByTitle(/LM Studio.*OpenAI-compatible endpoint/)).toBeTruthy();
     expect(screen.getByTitle("Hugging Face: download models to Ollama")).toBeTruthy();
+  });
+});
+
+describe("LoginScreen brain bay", () => {
+  const list = (connected: string[]): AuthProvider[] =>
+    [
+      { value: "anthropic", label: "Anthropic", methods: ["oauth"] },
+      { value: "deepseek", label: "DeepSeek", methods: ["apikey"] },
+      { value: "openai", label: "OpenAI", methods: ["oauth"] },
+    ].map((p) => ({
+      ...p,
+      description: "",
+      connected: connected.includes(p.value),
+      connectedMethods: connected.includes(p.value) ? p.methods : [],
+    })) as AuthProvider[];
+
+  it("groups providers by country, with how many of each are connected", async () => {
+    vi.mocked(authStatus).mockResolvedValue(list(["openai"]));
+    await act(async () => {
+      render(<LoginScreen onClose={vi.fn()} />);
+    });
+    const us = screen.getByRole("region", { name: "United States" });
+    expect(us.textContent).toContain("1 of 2");
+    expect(screen.getByRole("region", { name: "China" }).textContent).toContain("DeepSeek");
+    expect(screen.getByRole("button", { name: "OpenAI: connected with OAuth" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Anthropic: not connected" })).toBeTruthy();
+  });
+
+  it("wires the brain to the providers and re-wires it when another window connects one", async () => {
+    vi.mocked(authStatus).mockResolvedValue(list(["openai"]));
+    await act(async () => {
+      render(<LoginScreen onClose={vi.fn()} />);
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(bay.mount).toHaveBeenCalledTimes(1);
+    expect(bay.mount.mock.calls[0]?.[0]).toMatchObject({
+      providers: ["anthropic", "deepseek", "openai"],
+    });
+    expect(bay.setConnected).toHaveBeenLastCalledWith(["openai"]);
+
+    vi.mocked(authStatus).mockResolvedValue(list(["openai", "deepseek"]));
+    await emit("auth_change", { provider: "deepseek" });
+
+    // A new connection re-wires the existing brain; it isn't rebuilt.
+    expect(bay.mount).toHaveBeenCalledTimes(1);
+    expect(bay.setConnected).toHaveBeenLastCalledWith(["deepseek", "openai"]);
   });
 });

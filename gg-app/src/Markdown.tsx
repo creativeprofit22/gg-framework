@@ -43,6 +43,7 @@ import {
 import { openProjectPath, openUrlStrict, readChatImage, sendPrompt } from "./agent";
 import { PRODUCT_DISPLAY_NAME } from "./brand";
 import { STEROIDS_COLLAPSIBLE_TABLE_MARKER } from "@kenkaiiii/gg-core/slash-command-contract";
+import { ImageCard } from "./ImageCard";
 import { codeLanguage, codeNodeText } from "./markdown-prompt";
 import { KenPromptActionContext } from "./ken-prompt-context";
 import { PaneIdContext } from "./pane-context";
@@ -321,22 +322,18 @@ function MarkdownImage({ src, alt }: { src?: string; alt?: string }): React.Reac
     if (local) void openProjectPath(local, paneId, "url");
   };
   return (
-    <span
-      className={`img-card md-img${local ? " img-card-clickable" : ""}`}
-      role={local ? "button" : undefined}
-      tabIndex={local ? 0 : undefined}
-      aria-label={local ? `Open ${alt || fileName(local)}` : undefined}
+    <ImageCard
+      inline
+      className="md-img"
+      src={url}
+      alt={alt ?? ""}
+      path={local}
+      pathKind="url"
+      caption={local ? alt || fileName(local) : undefined}
       title={local}
-      onClick={open}
-      onKeyDown={(e) => {
-        if (!local || (e.key !== "Enter" && e.key !== " ")) return;
-        e.preventDefault();
-        open();
-      }}
-    >
-      <img className="img-thumb" src={url} alt={alt ?? ""} onError={() => setBroken(url)} />
-      {local && <span className="img-cap">{alt || fileName(local)}</span>}
-    </span>
+      onOpen={local ? open : undefined}
+      onError={() => setBroken(url)}
+    />
   );
 }
 

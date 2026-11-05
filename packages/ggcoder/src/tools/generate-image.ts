@@ -9,6 +9,7 @@ import { resolvePath } from "./path-utils.js";
 import {
   IMAGE_MEDIA_TYPES,
   convertImageFormat,
+  animatedPreview,
   downscaleForPreview,
   imageDimensions,
   shrinkToFit,
@@ -47,9 +48,17 @@ const CODEX_IMAGES_BASE = "https://chatgpt.com/backend-api/codex/images";
 const RESPONSE_FORMAT = "png";
 /**
  * Codex's `IMAGE_MODEL`. Codex sends this fixed id on every request; the
- * backend picks the generator, so there is no model choice to offer.
+ * backend picks the generator, so there is no model choice to offer. Checked
+ * live 2026-11-05 after GPT Image 2.6 shipped: the backend ignores `model`
+ * (any id renders) and ignores the API-only `complexity`, `xhigh`/`max`
+ * quality and `svg` output, so 2.6 reaches ChatGPT logins without a change here.
  */
 const IMAGE_MODEL = "gpt-image-2";
+/** Codex's `GifOptions` bounds (codex-api `images.rs`, rust-v0.166.0). */
+const GIF_MIN_FRAMES = 2;
+const GIF_MAX_FRAMES = 16;
+const GIF_DEFAULT_FRAMES = 9;
+const GIF_DEFAULT_FRAME_MS = 200;
 /** Codex's `MAX_EDIT_IMAGES`: an edit takes one to five reference images. */
 const MAX_EDIT_IMAGES = 5;
 /**
@@ -168,7 +177,32 @@ const GenerateImageParams = z.object({
   output_format: z
     .enum(["png", "jpeg", "webp"])
     .optional()
-    .describe("Output file format (default png)"),
+    .describe("Output file format for a still image (default png). Leave unset with `gif`."),
+  gif: z
+    .object({
+      frame_count: z
+        .number()
+        .int()
+        .min(GIF_MIN_FRAMES)
+        .max(GIF_MAX_FRAMES)
+        .optional()
+        .describe(`Number of frames (${GIF_MIN_FRAMES}–${GIF_MAX_FRAMES}). Default 9.`),
+      frame_duration_ms: z
+        .number()
+        .int()
+        .min(20)
+        .max(2000)
+        .optional()
+        .describe("Milliseconds per frame (20–2000). Default 200."),
+    })
+    .optional()
+    .describe(
+      "Set to make a simple looping animated GIF instead of a still image; use {} for the " +
+        `defaults (9 frames, 200ms each). Only for simple animations of ${GIF_MIN_FRAMES}–` +
+        `${GIF_MAX_FRAMES} frames. Describe the motion and the loop in the prompt. To change ` +
+        "an existing GIF, pass a spritesheet of its frames (equal cells in a regular grid) " +
+        "as `image`, never the GIF itself.",
+    ),
   background: z
     .enum(["opaque", "transparent"])
     .optional()
@@ -181,9 +215,11 @@ const GenerateImageParams = z.object({
 
 type GenerateImageArgs = z.infer<typeof GenerateImageParams>;
 
-function defaultOutPath(cwd: string, format: string): string {
+type SavedFormat = "png" | "jpeg" | "webp" | "gif";
+
+function defaultOutPath(cwd: string, format: SavedFormat): string {
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-  const ext = format === "png" ? "png" : format === "jpeg" ? "jpg" : "webp";
+  const ext = format === "jpeg" ? "jpg" : format;
   return path.join(cwd, ".gg", "generated", `${stamp}.${ext}`);
 }
 
@@ -191,7 +227,18 @@ function defaultOutPath(cwd: string, format: string): string {
 function mediaTypeFor(format: string): string {
   if (format === "jpeg") return "image/jpeg";
   if (format === "webp") return "image/webp";
+  if (format === "gif") return "image/gif";
   return "image/png";
+}
+
+/** GIF87a / GIF89a magic: the backend's reply, not the request, decides the format. */
+function isGif(buffer: Buffer): boolean {
+  return buffer.subarray(0, 4).toString("latin1") === "GIF8";
+}
+
+/** Same path with another extension, for a still image returned to a GIF request. */
+function withExtension(filePath: string, ext: string): string {
+  return filePath.slice(0, filePath.length - path.extname(filePath).length) + ext;
 }
 
 export function createGenerateImageTool(
@@ -208,7 +255,8 @@ export function createGenerateImageTool(
       "requires OpenAI to be connected. Only use this tool when the user explicitly asks to " +
       "create, generate, or edit an image. Pass `image` (or up to five `images`) to edit " +
       "existing files, such as a previous result or a user attachment. Set `background` to " +
-      "'transparent' for cutouts and transparent artwork. Generation can take a minute or " +
+      "'transparent' for cutouts and transparent artwork. Set `gif` for a short looping " +
+      "animation. Generation can take a minute or " +
       "more. Use `out_path` to save to a specific location (defaults to .gg/generated/).",
     parameters: GenerateImageParams,
     async execute(args: GenerateImageArgs, context: ToolContext): Promise<StructuredToolResult> {
@@ -227,6 +275,11 @@ export function createGenerateImageTool(
       if (args.image && args.images) {
         return fail("Pass either `image` or `images`, not both. No request was sent.");
       }
+      if (args.gif && args.output_format) {
+        return fail(
+          "A GIF is always saved as .gif; leave `output_format` unset with `gif`. No request was sent.",
+        );
+      }
 
       // Resolve OpenAI credentials at execution time (lazy — token refresh
       // happens on use, not at registration).
@@ -243,7 +296,7 @@ export function createGenerateImageTool(
         );
       }
 
-      const outputFormat = args.output_format ?? "png";
+      const outputFormat: SavedFormat = args.gif ? "gif" : (args.output_format ?? "png");
       const mediaType = mediaTypeFor(outputFormat);
       const outPath = args.out_path
         ? resolvePath(cwd, args.out_path)
@@ -278,6 +331,14 @@ export function createGenerateImageTool(
           quality: args.quality ?? "auto",
           size: args.size ?? "auto",
         };
+        if (args.gif) {
+          // Codex flattens GifOptions beside `output_format` and omits unset frame controls.
+          request.output_format = "gif";
+          if (args.gif.frame_count !== undefined) request.frame_count = args.gif.frame_count;
+          if (args.gif.frame_duration_ms !== undefined) {
+            request.frame_duration_ms = args.gif.frame_duration_ms;
+          }
+        }
 
         const referencePaths = args.images ?? (args.image ? [args.image] : []);
         if (referencePaths.length > 0) {
@@ -314,15 +375,22 @@ export function createGenerateImageTool(
         // cancel) keeps the originals already paid for. Files are created
         // exclusively: an existing file, including an edit's input, is never
         // overwritten.
+        // Set once OpenAI refuses native GIF output: every GIF is then drawn as one
+        // sprite sheet and its frames stitched into a GIF locally.
+        let sheetGrid: SpriteGrid | undefined;
+        let stillInsteadOfGif = false;
+        const call = (body: Record<string, unknown>) =>
+          callImageEndpoint(endpoint, body, { token, accountId, turnId }, context.signal, retry);
         try {
           while (savedPaths.length < requestedCount) {
-            const generated = await callImageEndpoint(
-              endpoint,
-              request,
-              { token, accountId, turnId },
-              context.signal,
-              retry,
-            );
+            let generated: Awaited<ReturnType<typeof callImageEndpoint>>;
+            try {
+              generated = await call(sheetGrid ? spriteSheetRequest(request, sheetGrid) : request);
+            } catch (err) {
+              if (!args.gif || sheetGrid || !(err instanceof GifRefusedError)) throw err;
+              sheetGrid = spriteGrid(args.gif.frame_count ?? GIF_DEFAULT_FRAMES, args.size);
+              generated = await call(spriteSheetRequest(request, sheetGrid));
+            }
             if (generated.images.length === 0) {
               if (savedPaths.length === 0) {
                 return fail(
@@ -332,14 +400,25 @@ export function createGenerateImageTool(
               throw new Error("Image generation returned no results.");
             }
             for (const png of generated.images.slice(0, requestedCount - savedPaths.length)) {
-              // PNG output is saved byte for byte as OpenAI sent it (alpha and
-              // all); only another format is re-encoded. Never resized.
-              const buf =
-                outputFormat === RESPONSE_FORMAT
+              // PNG and GIF output are saved byte for byte as OpenAI sent them
+              // (alpha and frames and all); only another format is re-encoded. Never resized.
+              const buf = sheetGrid
+                ? // Not a usable grid: keep the still, saved and reported as a PNG.
+                  ((await gifFromSpriteSheet(
+                    png,
+                    sheetGrid,
+                    args.gif?.frame_duration_ms ?? GIF_DEFAULT_FRAME_MS,
+                  )) ?? png)
+                : outputFormat === RESPONSE_FORMAT || outputFormat === "gif"
                   ? png
                   : await convertImageFormat(png, outputFormat);
-              const savePath =
+              let savePath =
                 requestedCount === 1 ? outPath : insertIndex(outPath, savedPaths.length);
+              if (outputFormat === "gif" && !isGif(buf)) {
+                // A still came back for a GIF request: keep it, under its true extension.
+                stillInsteadOfGif = true;
+                savePath = withExtension(savePath, ".png");
+              }
               await mkdir(path.dirname(savePath), { recursive: true });
               context.signal.throwIfAborted();
               await writeFile(savePath, buf, { flag: "wx" });
@@ -368,14 +447,28 @@ export function createGenerateImageTool(
         if (!primary || !primaryPath) throw new Error("No saved image to preview.");
 
         // Shrink for the model (provider image limits) and a smaller copy for
-        // the inline terminal/webview preview.
-        const { buffer: shrunk, mediaType: detectedType } = await shrinkToFit(primary, mediaType);
-        const previewBuffer = await downscaleForPreview(shrunk);
+        // the inline terminal/webview preview. Like Codex, the model sees a GIF
+        // as its first frame, while the preview keeps the animation.
+        const { buffer: shrunk, mediaType: detectedType } = await shrinkToFit(
+          isGif(primary) ? await convertImageFormat(primary, "png") : primary,
+          mediaType,
+        );
+        const primaryStill = { buffer: await downscaleForPreview(shrunk), mediaType: detectedType };
+        const primaryPreview = isGif(primary) ? await animatedPreview(primary) : primaryStill;
 
         const imagePreviews = [
           {
-            base64: previewBuffer.toString("base64"),
-            mediaType: detectedType,
+            base64: primaryPreview.buffer.toString("base64"),
+            mediaType: primaryPreview.mediaType,
+            path: primaryPath,
+          },
+        ];
+        // Local Fork: session history keeps a GIF as its first-frame still (an
+        // animated preview can pass the restore cap); restore re-reads the file.
+        const storedPreviews = [
+          {
+            base64: primaryStill.buffer.toString("base64"),
+            mediaType: primaryStill.mediaType,
             path: primaryPath,
           },
         ];
@@ -385,13 +478,32 @@ export function createGenerateImageTool(
           const extraBuf = imageBuffers[i];
           const extraPath = savedPaths[i];
           if (!extraBuf || !extraPath) continue;
+          if (isGif(extraBuf)) {
+            const extraPreview = await animatedPreview(extraBuf);
+            imagePreviews.push({
+              base64: extraPreview.buffer.toString("base64"),
+              mediaType: extraPreview.mediaType,
+              path: extraPath,
+            });
+            const extraStill = await shrinkToFit(
+              await convertImageFormat(extraBuf, "png"),
+              mediaType,
+            );
+            storedPreviews.push({
+              base64: (await downscaleForPreview(extraStill.buffer)).toString("base64"),
+              mediaType: extraStill.mediaType,
+              path: extraPath,
+            });
+            continue;
+          }
           const extraShrunk = await shrinkToFit(extraBuf, mediaType);
-          const extraPreview = await downscaleForPreview(extraShrunk.buffer);
-          imagePreviews.push({
-            base64: extraPreview.toString("base64"),
+          const extraPreview = {
+            base64: (await downscaleForPreview(extraShrunk.buffer)).toString("base64"),
             mediaType: extraShrunk.mediaType,
             path: extraPath,
-          });
+          };
+          imagePreviews.push(extraPreview);
+          storedPreviews.push(extraPreview);
         }
 
         const summary =
@@ -399,13 +511,32 @@ export function createGenerateImageTool(
             ? `Generated image → ${primaryPath}`
             : `Generated ${savedPaths.length} images → ${savedPaths.join(", ")}`;
 
-        const sizeText = await measuredSizeReport();
+        const sheetFrame = sheetGrid && !stillInsteadOfGif ? await imageDimensions(primary) : null;
+        const sizeText =
+          sheetGrid && !stillInsteadOfGif
+            ? `Frame size: ${sheetFrame ? formatDimensions(sheetFrame) : "unknown"}. ` +
+              `Assembled locally from a ${sheetGrid.cols}x${sheetGrid.rows} sprite sheet of ` +
+              `${sheetGrid.frames} frames, because OpenAI's native GIF output is not enabled ` +
+              "for this ChatGPT login yet."
+            : await measuredSizeReport();
 
         // The summary stays the FIRST text block, on its own: restored history
         // reads the image paths from exactly that line (extractToolImagePaths).
         const allContent: StructuredToolResult["content"] = [
           { type: "text", text: failure ? completionReport() : summary },
           { type: "text", text: sizeText },
+          ...(stillInsteadOfGif
+            ? [
+                {
+                  type: "text" as const,
+                  text: sheetGrid
+                    ? "The frames OpenAI drew did not line up into an animation, so the " +
+                      "picture was saved as a still PNG. Tell the user, and offer to try again."
+                    : "OpenAI returned a still PNG instead of an animated GIF, saved with a " +
+                      ".png extension. Tell the user.",
+                },
+              ]
+            : []),
           {
             type: "image",
             mediaType: detectedType,
@@ -418,7 +549,7 @@ export function createGenerateImageTool(
           // Durable previews of every saved original, restored from session history.
           imageResult: {
             version: 1,
-            images: imagePreviews.map((preview) => ({
+            images: storedPreviews.map((preview) => ({
               type: "image",
               data: preview.base64,
               mediaType: preview.mediaType,
@@ -527,6 +658,109 @@ class ImageLimitError extends Error {
   ) {
     super(message);
   }
+}
+
+/** The backend turned down GIF output (HTTP 400 naming GIF), before generating anything. */
+class GifRefusedError extends Error {
+  constructor(readonly detail: string) {
+    super(`OpenAI Image API (400): ${detail}`);
+  }
+}
+
+/** Frames of a sprite sheet, laid out left to right, top to bottom. */
+export type SpriteGrid = {
+  frames: number;
+  cols: number;
+  rows: number;
+  /** Sheet size to ask for, so each cell keeps the requested frame shape. */
+  size: string;
+};
+
+const SHEET_LONG_EDGE = 1536;
+
+/** The most square grid that holds `frames` cells, sized for the requested frame shape. */
+export function spriteGrid(frames: number, frameSize: string | undefined): SpriteGrid {
+  const cols = Math.ceil(Math.sqrt(frames));
+  const rows = Math.ceil(frames / cols);
+  const match = frameSize ? /^(\d+)x(\d+)$/.exec(frameSize) : null;
+  const frameAspect = match ? Number(match[1]) / Number(match[2]) : 1;
+  // The backend caps the long:short ratio at 3:1.
+  const aspect = Math.min(3, Math.max(1 / 3, (cols * frameAspect) / rows));
+  const snap = (edge: number): number => Math.max(16, Math.round(edge / 16) * 16);
+  const width = aspect >= 1 ? SHEET_LONG_EDGE : snap(SHEET_LONG_EDGE * aspect);
+  const height = aspect >= 1 ? snap(SHEET_LONG_EDGE / aspect) : SHEET_LONG_EDGE;
+  return { frames, cols, rows, size: `${width}x${height}` };
+}
+
+/** The still request that asks for every frame of the animation on one sheet. */
+export function spriteSheetRequest(
+  request: Record<string, unknown>,
+  grid: SpriteGrid,
+): Record<string, unknown> {
+  const { output_format: _format, frame_count: _count, frame_duration_ms: _ms, ...still } = request;
+  const spare =
+    grid.cols * grid.rows > grid.frames
+      ? ` Fill only the first ${grid.frames} cells; leave the rest plain background.`
+      : "";
+  return {
+    ...still,
+    size: grid.size,
+    prompt:
+      `A sprite sheet for a looping animation: ${grid.frames} frames in a ${grid.cols}x` +
+      `${grid.rows} grid of equal cells, read left to right, top to bottom.${spare} No gaps, ` +
+      "borders, gutters, labels or numbers. Every cell shares the exact same background, " +
+      "framing and scale so the frames line up when played in order, and the last frame " +
+      `leads smoothly back into the first.\n\nAnimation: ${String(request.prompt)}`,
+  };
+}
+
+/** Cut a sprite sheet into its cells and play them as a looping GIF. */
+export async function gifFromSpriteSheet(
+  sheet: Buffer,
+  grid: SpriteGrid,
+  frameMs: number,
+): Promise<Buffer | null> {
+  const sharp = (await import("sharp")).default;
+  const { width = 0, height = 0 } = await sharp(sheet).metadata();
+  const asked = /^(\d+)x(\d+)$/.exec(grid.size);
+  // A sheet whose shape is far from the one asked for was not drawn on the grid.
+  if (asked) {
+    const askedAspect = Number(asked[1]) / Number(asked[2]);
+    const gotAspect = height > 0 ? width / height : 0;
+    if (Math.abs(Math.log(gotAspect / askedAspect)) > Math.log(1.25)) return null;
+  }
+  const cellW = Math.floor(width / grid.cols);
+  const cellH = Math.floor(height / grid.rows);
+  // Crop a hair off every edge: the model often draws faint lines between cells.
+  const inset = Math.max(2, Math.round(Math.min(cellW, cellH) * 0.012));
+  if (cellW <= inset * 2 || cellH <= inset * 2) {
+    throw new Error(`The sprite sheet (${width}x${height}) is too small to cut into frames.`);
+  }
+  const frames: Buffer[] = [];
+  for (let i = 0; i < grid.frames; i++) {
+    frames.push(
+      await sharp(sheet)
+        .extract({
+          left: (i % grid.cols) * cellW + inset,
+          top: Math.floor(i / grid.cols) * cellH + inset,
+          width: cellW - inset * 2,
+          height: cellH - inset * 2,
+        })
+        .png()
+        .toBuffer(),
+    );
+  }
+  // Identical cells mean one picture rather than frames of a motion: no animation.
+  const [first, ...rest] = await Promise.all(
+    frames.map((frame) =>
+      sharp(frame).resize(16, 16, { fit: "fill" }).greyscale().raw().toBuffer(),
+    ),
+  );
+  const moves = rest.some((cell) => cell.some((v, j) => Math.abs(v - (first![j] ?? 0)) > 24));
+  if (!moves) return null;
+  return sharp(frames, { join: { animated: true } })
+    .gif({ delay: Array<number>(grid.frames).fill(frameMs), loop: 0 })
+    .toBuffer();
 }
 
 /** What to tell the agent when the image quota is used up. */
@@ -656,6 +890,14 @@ function parseImageResponse(
     }
     if (response.status === 429 && errorType === "usage_limit_reached") {
       throw new ImageLimitError(detail, resetsAt);
+    }
+    // Only "GIF is not available here"; other 400s (bad input, policy) surface as they are.
+    if (
+      response.status === 400 &&
+      /\bgif\b/i.test(detail) &&
+      /\b(not|unsupported|unavailable|disabled)\b/i.test(detail)
+    ) {
+      throw new GifRefusedError(detail);
     }
     const tries = attempts > 1 ? ` after ${attempts} attempts` : "";
     throw new Error(`OpenAI Image API (${response.status})${tries}: ${detail}`);

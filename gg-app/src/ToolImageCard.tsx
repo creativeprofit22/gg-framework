@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { openProjectPath, readChatImage } from "./agent";
 import { basename } from "./tool-format";
+import { ImageCard } from "./ImageCard";
 import type { TranscriptImage } from "./AgentPane";
 
 interface Loaded {
@@ -43,6 +44,21 @@ export function ToolImageCard({
   const openImage = (): void => {
     if (path) void openProjectPath(path, paneId);
   };
+  if (status === null && url) {
+    return (
+      <ImageCard
+        src={url}
+        alt={path ?? "image"}
+        path={path}
+        paneId={paneId}
+        caption={path ? basename(path) : undefined}
+        title={path ? `Open ${path}` : undefined}
+        onOpen={path ? openImage : undefined}
+        onLoad={onLoad}
+        onError={() => setBroken(url)}
+      />
+    );
+  }
   return (
     <figure
       className={`img-card${path ? " img-card-clickable" : ""}`}
@@ -56,19 +72,9 @@ export function ToolImageCard({
         openImage();
       }}
     >
-      {status === null && url ? (
-        <img
-          className="img-thumb"
-          src={url}
-          alt={path ?? "image"}
-          onLoad={onLoad}
-          onError={() => setBroken(url)}
-        />
-      ) : (
-        <div className="img-cap" role="status">
-          {status}
-        </div>
-      )}
+      <div className="img-cap" role="status">
+        {status}
+      </div>
       {path && (
         <figcaption className="img-cap" title={path}>
           {basename(path)}

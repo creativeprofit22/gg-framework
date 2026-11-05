@@ -222,7 +222,8 @@ import { TrophyUnlock } from "./TrophyUnlock";
 import { SettingsScreen, type SettingsTabId } from "./SettingsScreen";
 import { KenPromptActionProvider, Markdown } from "./LazyMarkdown";
 import { PaneIdContext, PaneIdProvider } from "./pane-context";
-import { TranscriptSkeleton, Skeleton } from "./Skeleton";
+import { TranscriptSkeleton } from "./Skeleton";
+import { ImageGenCard } from "./image-gen/ImageGenCard";
 import { useAppUpdate } from "./update";
 import { formatBuildIdentity } from "./build-info";
 import {
@@ -473,7 +474,16 @@ export type Item =
   | { kind: "images"; id: number; images: TranscriptImage[]; caption?: string }
   // Image generation in progress — a shimmering square placeholder that gets
   // replaced by the final image when the tool result arrives.
-  | { kind: "generating_image"; id: number; prompt: string; toolCallId: string }
+  | {
+      kind: "generating_image";
+      id: number;
+      prompt: string;
+      toolCallId: string;
+      /** An animated GIF was asked for. */
+      gif: boolean;
+      /** Date.now() when the call started, for the progress estimate. */
+      startedAt: number;
+    }
   // Plan-mode entry banner (ASCII logo + optional reason).
   | { kind: "plan"; id: number; reason: string }
   // What the user did with a reviewed plan: an amber critter row.
@@ -6609,12 +6619,7 @@ const TranscriptRowBody = memo(function TranscriptRowBody({
     case "generating_image":
       return (
         <div className="img-grid" data-swap-row={item.id}>
-          <div className="img-gen-placeholder">
-            <Skeleton width={200} height={200} radius={12} />
-            <span className="img-gen-label">
-              {item.prompt.length > 60 ? item.prompt.slice(0, 57) + "\u2026" : item.prompt}
-            </span>
-          </div>
+          <ImageGenCard prompt={item.prompt} gif={item.gif} startedAt={item.startedAt} />
         </div>
       );
     case "plan":

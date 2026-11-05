@@ -22,6 +22,30 @@ export interface ChangelogEntry {
 /** Newest first. Prepended by the `/release` flow. */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.103.0",
+    date: "2026-11-05",
+    items: [
+      "Your agent can now make real animated `GIFs`. Just ask for a frog walking or a rocket blasting off and it draws every frame and stitches them into a looping GIF that plays right in your chat, even after you reopen it. It already knows it can make images and GIFs the moment your `OpenAI` account is connected, so no more hand-coded animations.",
+      "Waiting on an image is actually fun now. A glowing dot board fills in as your picture develops, with a live progress pill, and you can click it to play `Snake` while you wait.",
+      "Every image in your chat now has a little `download` button in its corner. Click it, pick any folder, and the full-size original is yours.",
+    ],
+  },
+  {
+    version: "0.102.3",
+    date: "2026-11-05",
+    items: [
+      "The `AI Providers` page is now a living brain. Every provider sits in its own bank grouped by country, and the moment you connect one a glowing nerve shoots out of its card and plugs straight into a `3D` brain that lights up as you wire in more. It looks great in a tiny window or full screen, and connecting your models has never felt this good.",
+    ],
+  },
+  {
+    version: "0.102.2",
+    date: "2026-11-05",
+    items: [
+      "Drop in a `PDF` or `EPUB` and GG Coder actually reads it now. I taught the agent to open books, papers and docs as plain text, raised the limit to `100 MB` per message, and if a file is ever too big you get a clear heads-up with your draft still waiting, instead of a message that silently goes nowhere.",
+      "Your attachments finally show up where you sent them. Every file and video now sits right inside your message with its name, stays there when you reopen the chat, and the paperclip button happily picks any file type, not just pictures and videos.",
+    ],
+  },
+  {
     version: "0.102.1",
     date: "2026-11-04",
     items: [

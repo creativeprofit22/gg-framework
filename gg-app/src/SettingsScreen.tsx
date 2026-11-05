@@ -125,7 +125,12 @@ export function SettingsScreen({
       >
         <SettingsReadyProvider hold={gate.hold}>
           <SettingsHeaderProvider slots={{ status: statusSlot, actions: actionsSlot }}>
-            <div className={`settings-page ${switched ? "is-switching" : "is-entering"}`}>
+            <div
+              className={`settings-page ${switched ? "is-switching" : "is-entering"}${
+                // The providers page fills the window: its brain sits in the middle.
+                tab === "providers" ? " is-fill" : ""
+              }`}
+            >
               {tab === "general" && (
                 <EmbeddedModal>
                   {/* Save folder confirms inline, as it does in the dialog. */}

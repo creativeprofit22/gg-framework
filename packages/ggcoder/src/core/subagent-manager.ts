@@ -580,6 +580,15 @@ export class SubAgentManager {
   ): Promise<SubAgentSnapshot> {
     this.assertAvailable();
     let worker = this.workers.get(agentId);
+    // A crashed or failed worker's process is gone; restart it from its child session.
+    if (
+      worker &&
+      this.isTerminal(worker.state) &&
+      (worker.process.exitCode !== null || !worker.process.stdin?.writable)
+    ) {
+      await this.close(worker, false, true);
+      worker = undefined;
+    }
     if (!worker) {
       const recovered = this.snapshots.get(agentId);
       if (!recovered) throw new Error(`Unknown agent: ${agentId}`);
@@ -1006,6 +1015,8 @@ export class SubAgentManager {
             ? "interrupted"
             : "failed";
       worker.output = boundSubAgentOutput(String(frame.output ?? worker.taskOutput));
+      // Only the capped copy is ever read; drop the full stream.
+      worker.taskOutput = "";
       worker.receipt = typeof frame.receipt === "string" ? frame.receipt : undefined;
       worker.acceptance = typeof frame.acceptance === "string" ? frame.acceptance : undefined;
       worker.error = frame.error ? String(frame.error) : undefined;
@@ -1224,6 +1235,7 @@ export class SubAgentManager {
     worker.state = "failed";
     worker.error = error instanceof Error ? error.message : String(error);
     worker.output = boundSubAgentOutput(worker.taskOutput);
+    worker.taskOutput = "";
     worker.updated_at = Date.now();
     for (const pending of worker.requests.values()) pending.reject(new Error(worker.error));
     worker.requests.clear();
@@ -1231,6 +1243,7 @@ export class SubAgentManager {
     for (const resolve of worker.turnResolvers) resolve();
     worker.turnResolvers.clear();
     if (kill) this.kill(worker);
+    this.scheduleIdleReap(worker);
   }
 
   private async close(

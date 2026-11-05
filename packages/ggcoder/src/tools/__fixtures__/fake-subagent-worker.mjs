@@ -73,6 +73,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
         usage: { inputTokens: 10, outputTokens: 2, cacheRead: 20, cacheWrite: 5 },
       },
     });
+    emit({ type: "event", event: "text_delta", payload: { text: `streamed:${frame.task}` } });
     // A timer only approximates "still running": process startup on a loaded
     // runner can outlast it. A "hold" turn runs until the test releases it.
     if (/hold/.test(frame.task)) {

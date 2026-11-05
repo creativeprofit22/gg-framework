@@ -1,3 +1,4 @@
+import type { ChildProcess } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -14,6 +15,7 @@ import { SubAgentStore, type PersistedSubAgentRecord } from "./subagent-store.js
 import { readTurnRecord, writeTurnRecord } from "./subagent-turn-record.js";
 import { AgentNotificationQueue } from "./agent-notifications.js";
 import { getSupportedThinkingLevels } from "./thinking-level.js";
+import { boundSubAgentOutput } from "../tools/subagent-shared.js";
 
 const workerEntry = fileURLToPath(
   new URL("../tools/__fixtures__/fake-subagent-worker.mjs", import.meta.url),
@@ -489,6 +491,80 @@ describe("SubAgentManager", () => {
     // Rendered after `output` in the wait_agent JSON the parent reads.
     const keys = Object.keys(agent);
     expect(keys.indexOf("receipt")).toBe(keys.indexOf("output") + 1);
+  });
+
+  it("drops a finished child's streamed text but keeps its output and receipt", async () => {
+    const instance = manager();
+    const child = await instance.spawn("released", "fast", "fake");
+    const agent = (await instance.wait([child.agent_id], "all", 1_000)).agents[0]!;
+    expect(agent).toMatchObject({
+      state: "completed",
+      output: "fast|context:1",
+      receipt: "Receipt (1 call): read a.ts",
+    });
+    const { workers } = instance as unknown as { workers: Map<string, { taskOutput: string }> };
+    expect(workers.get(child.agent_id)?.taskOutput).toBe("");
+  });
+
+  it("drops a crashed child's streamed text and reaps it after the idle timeout", async () => {
+    const idleTimeoutMs = 1_000;
+    const instance = manager({ idleTimeoutMs });
+    const child = await instance.spawn("crashed", "hold", "fake");
+    const { workers } = instance as unknown as {
+      workers: Map<string, { taskOutput: string; process: ChildProcess }>;
+    };
+    const worker = workers.get(child.agent_id)!;
+    await vi.waitFor(() => expect(worker.taskOutput).toBe("streamed:hold"), { timeout: 2_000 });
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const exited = new Promise((resolve) => worker.process.once("exit", resolve));
+      worker.process.kill();
+      await exited;
+      const agent = (await instance.wait([child.agent_id], "all", 1_000)).agents[0]!;
+      expect(agent.state).toBe("failed");
+      expect(agent.output).toBe(boundSubAgentOutput("streamed:hold"));
+      expect(worker.taskOutput).toBe("");
+
+      await vi.advanceTimersByTimeAsync(idleTimeoutMs + 500);
+      await vi.waitFor(() =>
+        expect(instance.list().find((item) => item.agent_id === child.agent_id)).toMatchObject({
+          state: "closed",
+          collected: true,
+        }),
+      );
+      expect(workers.has(child.agent_id)).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("restarts a crashed child from its session on follow-up before the idle reap", async () => {
+    const root = await tempDir();
+    const cwd = path.join(root, "project");
+    const sessionRootDir = path.join(root, "sessions");
+    await fs.mkdir(cwd, { recursive: true });
+    const instance = manager({
+      cwd,
+      sessionRootDir,
+      store: new SubAgentStore(path.join(root, "state")),
+    });
+    const child = await instance.spawn("crashed", "hold", "fake");
+    const { workers } = instance as unknown as {
+      workers: Map<string, { taskOutput: string; process: ChildProcess }>;
+    };
+    const worker = workers.get(child.agent_id)!;
+    await vi.waitFor(() => expect(worker.taskOutput).toBe("streamed:hold"), { timeout: 2_000 });
+    const exited = new Promise((resolve) => worker.process.once("exit", resolve));
+    worker.process.kill();
+    await exited;
+    const failed = (await instance.wait([child.agent_id], "all", 1_000)).agents[0]!;
+    expect(failed.state).toBe("failed");
+
+    await instance.followup(child.agent_id, "late");
+    const resumed = (await instance.wait([child.agent_id], "all", 1_000)).agents[0]!;
+    expect(resumed.state).toBe("completed");
+    expect(resumed.output).toContain("late");
+    expect(workers.get(child.agent_id)).not.toBe(worker);
   });
 
   it("waits for any, times out, steers, interrupts, and reuses context", async () => {

@@ -655,7 +655,7 @@ async function main() {
     );
 
     await writeFile(path.join(OUT_DIR, "geometry.json"), `${JSON.stringify(results, null, 2)}\n`);
-    console.log(`Roadmap Slice 4 evidence passed: ${OUT_DIR}`);
+    console.log(`Roadmap phase detail evidence passed: ${OUT_DIR}`);
     for (const result of results) {
       console.log(
         `${result.scenario}: phases=${result.phaseCount} document=${result.documentOverflow}px panel=${result.panelOverflow}px focus=${result.focusEvidence.focusVisible ? "visible" : "missing"}`,

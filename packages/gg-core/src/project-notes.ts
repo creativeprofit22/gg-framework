@@ -407,6 +407,21 @@ export interface NotesRoadmapPhaseBinding {
   timestamp: string;
 }
 
+export const NOTES_DEPENDENCY_OVERRIDE_ACTORS = ["user", "ken", "ken-autopilot"] as const;
+export const NOTES_DEPENDENCY_OVERRIDE_ORIGINS = ["app", "automatic-advancement"] as const;
+export const NOTES_DEPENDENCY_OVERRIDE_PREREQUISITES_MAX_ITEMS = 200;
+
+/** A start made while prerequisites were unfinished. Only user + app counts as an override. */
+export interface NotesRoadmapDependencyOverride {
+  type: "dependency-override";
+  id: string;
+  actor: (typeof NOTES_DEPENDENCY_OVERRIDE_ACTORS)[number];
+  origin: (typeof NOTES_DEPENDENCY_OVERRIDE_ORIGINS)[number];
+  session: NotesSessionLink;
+  unfinishedPrerequisiteIds: string[];
+  timestamp: string;
+}
+
 export interface NotesRoadmapImplementationRecovery {
   sourceCheckpointId: string;
   sourceRevision: number;
@@ -482,6 +497,7 @@ export type NotesRoadmapEvent =
   | NotesRoadmapOverrideReset
   | NotesRoadmapManualCompletionApproval
   | NotesRoadmapPhaseBinding
+  | NotesRoadmapDependencyOverride
   | NotesRoadmapImplementationCheckpoint
   | NotesRoadmapCompletionReview
   | NotesRoadmapPhaseAdvancementCheckpoint
@@ -974,6 +990,17 @@ const ROADMAP_PHASE_BINDING_KEYS = [
   "session",
   "timestamp",
 ];
+const ROADMAP_DEPENDENCY_OVERRIDE_KEYS = [
+  "type",
+  "id",
+  "actor",
+  "origin",
+  "session",
+  "unfinishedPrerequisiteIds",
+  "timestamp",
+];
+const DEPENDENCY_OVERRIDE_ACTORS: ReadonlySet<string> = new Set(NOTES_DEPENDENCY_OVERRIDE_ACTORS);
+const DEPENDENCY_OVERRIDE_ORIGINS: ReadonlySet<string> = new Set(NOTES_DEPENDENCY_OVERRIDE_ORIGINS);
 const LEGACY_ROADMAP_IMPLEMENTATION_CHECKPOINT_KEYS = [
   "type",
   "id",
@@ -2800,6 +2827,47 @@ function validateRoadmapEvents(
         (record.action === "rebind-current" && record.previousSession === null)
       ) {
         return validationError(`${eventPath}.previousSession`, "does not match the binding action");
+      }
+      continue;
+    }
+
+    if (record.type === "dependency-override") {
+      if (!isRecordWithKeys(record, ROADMAP_DEPENDENCY_OVERRIDE_KEYS)) {
+        return validationError(eventPath, "invalid dependency override");
+      }
+      if (typeof record.actor !== "string" || !DEPENDENCY_OVERRIDE_ACTORS.has(record.actor)) {
+        return validationError(`${eventPath}.actor`, "unknown dependency override actor");
+      }
+      if (typeof record.origin !== "string" || !DEPENDENCY_OVERRIDE_ORIGINS.has(record.origin)) {
+        return validationError(`${eventPath}.origin`, "unknown dependency override origin");
+      }
+      const sessionError = validateNotesSessionLink(record.session, `${eventPath}.session`);
+      if (sessionError || record.session === null) {
+        return sessionError ?? validationError(`${eventPath}.session`, "a session is required");
+      }
+      const prerequisiteIds = record.unfinishedPrerequisiteIds;
+      if (
+        !Array.isArray(prerequisiteIds) ||
+        prerequisiteIds.length === 0 ||
+        prerequisiteIds.length > NOTES_DEPENDENCY_OVERRIDE_PREREQUISITES_MAX_ITEMS
+      ) {
+        return validationError(
+          `${eventPath}.unfinishedPrerequisiteIds`,
+          "expected 1 to 200 phase IDs",
+        );
+      }
+      const seenPrerequisites = new Set<string>();
+      for (const [prerequisiteIndex, prerequisiteId] of prerequisiteIds.entries()) {
+        if (
+          !isBoundedNonEmptyString(prerequisiteId, 512) ||
+          seenPrerequisites.has(prerequisiteId)
+        ) {
+          return validationError(
+            `${eventPath}.unfinishedPrerequisiteIds[${prerequisiteIndex}]`,
+            "expected a unique non-empty phase ID",
+          );
+        }
+        seenPrerequisites.add(prerequisiteId);
       }
       continue;
     }

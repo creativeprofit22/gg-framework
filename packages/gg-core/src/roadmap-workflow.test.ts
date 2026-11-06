@@ -1039,3 +1039,168 @@ describe("Roadmap phase placement", () => {
     expect(isRoadmapPhaseDraftApprovalResult({ status: "moved", revision: 4 })).toBe(false);
   });
 });
+
+describe("Roadmap dependency links in the workflow protocol", () => {
+  const base = request().phases[0]!;
+
+  it("accepts existing-phase and same-draft links and checks their shape", () => {
+    const valid = validateRoadmapPhaseDraftRequest({
+      ...request(),
+      phases: [
+        { ...base, dependsOn: ["phase-a"] },
+        { ...base, title: "Second", dependsOnDraftPhases: [0] },
+      ],
+    });
+    expect(valid.ok).toBe(true);
+    if (!valid.ok) return;
+    expect(valid.value.phases[0]?.dependsOn).toEqual(["phase-a"]);
+    expect(valid.value.phases[1]?.dependsOnDraftPhases).toEqual([0]);
+    expect(validateRoadmapPhaseDraftRequest(request()).ok).toBe(true);
+
+    const bad = (phases: unknown[]) => {
+      const result = validateRoadmapPhaseDraftRequest({ ...request(), phases });
+      return result.ok ? null : result.error.path;
+    };
+    expect(bad([{ ...base, dependsOn: [] }])).toBe("phases[0].dependsOn");
+    expect(bad([{ ...base, dependsOn: ["a", "a"] }])).toBe("phases[0].dependsOn[1]");
+    expect(bad([{ ...base, dependsOnDraftPhases: [0] }])).toBe("phases[0].dependsOnDraftPhases");
+    expect(bad([base, { ...base, dependsOnDraftPhases: [1] }])).toBe(
+      "phases[1].dependsOnDraftPhases[0]",
+    );
+    expect(bad([base, { ...base, dependsOnDraftPhases: [2] }])).toBe(
+      "phases[1].dependsOnDraftPhases[0]",
+    );
+  });
+
+  it("requires dependency display data exactly when a create draft links an existing phase", () => {
+    const draft = {
+      id: "draft-1",
+      projectKey: "c:/work",
+      basedOnRevision: 7,
+      createdAt: "2026-08-05T12:00:00.000Z",
+      createdBySessionId: "session-1",
+      summary: request().summary,
+      references: [],
+      phases: [
+        { phaseId: "new-1", ...base, referenceIds: [] },
+        { phaseId: "new-2", ...base, referenceIds: [], dependsOn: ["new-1"] },
+      ],
+      status: "pending",
+    };
+    expect(isRoadmapPhaseDraft(draft)).toBe(true);
+    const linked = {
+      ...draft,
+      phases: [{ ...draft.phases[0], dependsOn: ["old-1"] }, draft.phases[1]],
+    };
+    expect(isRoadmapPhaseDraft(linked)).toBe(false);
+    const entries = [{ phaseId: "old-1", title: "Old", archived: true }];
+    expect(isRoadmapPhaseDraft({ ...linked, dependencyPhases: entries })).toBe(true);
+    expect(isRoadmapPhaseDraft({ ...draft, dependencyPhases: entries })).toBe(false);
+    expect(
+      isRoadmapPhaseDraft({ ...linked, dependencyPhases: [{ phaseId: "old-1", title: "Old" }] }),
+    ).toBe(false);
+    expect(
+      isRoadmapPhaseDraft({
+        ...draft,
+        phases: [{ ...draft.phases[0], dependsOn: ["new-1"] }, draft.phases[1]],
+      }),
+    ).toBe(false);
+  });
+
+  it("edits, clears and applies dependency links", () => {
+    const parsed = validateRoadmapPhaseEditRequest({
+      expectedRevision: 1,
+      summary: "Link",
+      phaseId: "phase-1",
+      dependsOn: [],
+    });
+    expect(parsed.ok && parsed.value.dependsOn).toEqual([]);
+    const self = validateRoadmapPhaseEditRequest({
+      expectedRevision: 1,
+      summary: "Link",
+      phaseId: "phase-1",
+      dependsOn: ["phase-1"],
+    });
+    expect(self.ok ? null : self.error.path).toBe("dependsOn[0]");
+
+    const phase = notesPhase({ dependsOn: ["phase-2"] });
+    expect(
+      buildRoadmapPhaseEditChanges(phase, {
+        expectedRevision: 1,
+        summary: "Link",
+        phaseId: "phase-1",
+        dependsOn: [],
+      }),
+    ).toEqual([{ field: "dependsOn", before: ["phase-2"], after: [] }]);
+    expect(
+      buildRoadmapPhaseEditChanges(notesPhase(), {
+        expectedRevision: 1,
+        summary: "Link",
+        phaseId: "phase-1",
+        dependsOn: [],
+      }),
+    ).toEqual([]);
+
+    const entries = [{ phaseId: "phase-2", title: "Other", archived: false }];
+    const clear = editDraft({
+      changes: [{ field: "dependsOn", before: ["phase-2"], after: [] }],
+      dependencyPhases: entries,
+    });
+    expect(isRoadmapPhaseDraft(clear)).toBe(true);
+    expect(isRoadmapPhaseDraft({ ...clear, dependencyPhases: undefined })).toBe(false);
+    expect(isRoadmapPhaseDraft({ ...editDraft(), dependencyPhases: entries })).toBe(false);
+    expect(
+      isRoadmapPhaseDraft(
+        editDraft({
+          changes: [{ field: "dependsOn", before: [], after: ["phase-1"] }],
+          dependencyPhases: entries,
+        }),
+      ),
+    ).toBe(false);
+
+    const other = notesPhase({ id: "phase-2", order: 1, title: "Other" });
+    const cleared = applyRoadmapPhaseEdit(
+      notesDocument([phase, other]),
+      clear,
+      "2026-08-05T13:00:00.000Z",
+    );
+    expect(cleared.status === "ok" && "dependsOn" in cleared.document.phases[0]!).toBe(false);
+    const added = applyRoadmapPhaseEdit(
+      notesDocument([notesPhase(), other]),
+      editDraft({
+        changes: [{ field: "dependsOn", before: [], after: ["phase-2"] }],
+        dependencyPhases: entries,
+      }),
+      "2026-08-05T13:00:00.000Z",
+    );
+    expect(added.status === "ok" && added.document.phases[0]?.dependsOn).toEqual(["phase-2"]);
+    const changed = applyRoadmapPhaseEdit(
+      notesDocument([notesPhase(), other]),
+      clear,
+      "2026-08-05T13:00:00.000Z",
+    );
+    expect(changed.status).toBe("phase-changed");
+  });
+
+  it("accepts inspection dependency fields only together", () => {
+    const outcome = inspectionWithVerification(null);
+    const phase = outcome.inspection.phases[0]!;
+    const withLinks = (extra: Record<string, unknown>) => ({
+      ...outcome,
+      inspection: { ...outcome.inspection, phases: [{ ...phase, ...extra }] },
+    });
+    expect(isRoadmapInspectionOutcome(outcome)).toBe(true);
+    expect(
+      isRoadmapInspectionOutcome(
+        withLinks({
+          dependsOn: ["phase-0"],
+          unfinishedPrerequisites: [{ id: "phase-0", title: "First", status: "review" }],
+        }),
+      ),
+    ).toBe(true);
+    expect(isRoadmapInspectionOutcome(withLinks({ dependsOn: ["phase-0"] }))).toBe(false);
+    expect(
+      isRoadmapInspectionOutcome(withLinks({ dependsOn: [], unfinishedPrerequisites: [] })),
+    ).toBe(false);
+  });
+});

@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
+  agentPhaseStartRefusal,
   applyNotesPhaseDeletion,
+  findCurrentDependencyOverride,
+  roadmapOrderDependencyWarnings,
+  validateRoadmapDraftDependencies,
+  validateRoadmapEditDependencies,
   hasRoadmapPhaseDependencyLinks,
   isPhaseDeletionOutcome,
   listUnfinishedPrerequisites,
@@ -239,5 +244,192 @@ describe("deletion and recovery with dependency links", () => {
     const conflict = phaseDeletionDependencyConflict(doc.phases, "a", "delete");
     expect(conflict!.message.length).toBeLessThanOrEqual(1024);
     expect(phaseDeletionDependencyConflict(doc.phases, "ghost", "delete")).toBeNull();
+  });
+});
+
+const S1 = { sessionId: "s-1", sessionPath: "/sessions/s-1.jsonl" };
+const S2 = { sessionId: "s-2", sessionPath: "/sessions/s-2.jsonl" };
+
+function addOverride(
+  target: NotesPhase,
+  patch: Partial<{
+    actor: "user" | "ken" | "ken-autopilot";
+    origin: "app" | "automatic-advancement";
+  }> = {},
+): void {
+  target.roadmapEvents.push({
+    type: "dependency-override",
+    id: `override-${target.roadmapEvents.length}`,
+    actor: "user",
+    origin: "app",
+    session: S1,
+    unfinishedPrerequisiteIds: [...(target.dependsOn ?? [])],
+    timestamp: now,
+    ...patch,
+  });
+}
+
+async function startedByUser(): Promise<NotesDocumentV3> {
+  const doc = await document();
+  phase(doc, "c").dependsOn = ["a", "b"];
+  phase(doc, "c").session = S1;
+  addOverride(phase(doc, "c"));
+  expect(validateNotesDocumentV3(doc).ok).toBe(true);
+  return doc;
+}
+
+describe("agent start gate", () => {
+  it("refuses unfinished prerequisites, naming them and pointing at the app", async () => {
+    const doc = await document();
+    phase(doc, "c").dependsOn = ["a", "b"];
+    const refusal = agentPhaseStartRefusal(doc.phases, "c", S1);
+    expect(refusal?.prerequisites).toEqual([
+      { id: "a", title: "Phase A", status: "not-started" },
+      { id: "b", title: "Phase B", status: "not-started" },
+    ]);
+    expect(refusal?.message).toBe(
+      `Can't start "Phase C" (c): these prerequisite phases aren't Done: "Phase A" (a), "Phase B" (b). The user can start it from the app.`,
+    );
+  });
+
+  it("allows phases without links, with finished prerequisites, or unknown ids", async () => {
+    const doc = await document();
+    expect(agentPhaseStartRefusal(doc.phases, "c", S1)).toBeNull();
+    phase(doc, "c").dependsOn = ["phase-migration-proof"];
+    expect(agentPhaseStartRefusal(doc.phases, "c", S1)).toBeNull();
+    expect(agentPhaseStartRefusal(doc.phases, "ghost", S1)).toBeNull();
+  });
+
+  it("allows the session the user started from the app", async () => {
+    const doc = await startedByUser();
+    expect(findCurrentDependencyOverride(phase(doc, "c"))).toMatchObject({ actor: "user" });
+    expect(agentPhaseStartRefusal(doc.phases, "c", S1)).toBeNull();
+  });
+
+  it("refuses a different session than the override and the phase", async () => {
+    const doc = await startedByUser();
+    expect(agentPhaseStartRefusal(doc.phases, "c", S2)).not.toBeNull();
+    phase(doc, "c").session = S2;
+    expect(agentPhaseStartRefusal(doc.phases, "c", S2)).not.toBeNull();
+    expect(agentPhaseStartRefusal(doc.phases, "c", S1)).not.toBeNull();
+  });
+
+  it("never counts Ken, Autopilot Ken or automatic advancement starts", async () => {
+    for (const patch of [
+      { actor: "ken" as const },
+      { actor: "ken-autopilot" as const },
+      { origin: "automatic-advancement" as const },
+    ]) {
+      const doc = await startedByUser();
+      addOverride(phase(doc, "c"), patch);
+      expect(validateNotesDocumentV3(doc).ok).toBe(true);
+      expect(findCurrentDependencyOverride(phase(doc, "c"))).toBeNull();
+      expect(agentPhaseStartRefusal(doc.phases, "c", S1)).not.toBeNull();
+    }
+  });
+
+  it("stops counting a start after a reopen", async () => {
+    const doc = await startedByUser();
+    phase(doc, "c").lifecycleEvents.push({
+      id: "reopen",
+      fromStatus: "done",
+      toStatus: "planning",
+      source: "user",
+      timestamp: "2026-11-06T12:05:00.000Z",
+      reason: "Reopened",
+      kind: "other",
+    });
+    expect(findCurrentDependencyOverride(phase(doc, "c"))).toBeNull();
+    expect(agentPhaseStartRefusal(doc.phases, "c", S1)).not.toBeNull();
+  });
+
+  it("stops counting a start after a rebind", async () => {
+    const doc = await startedByUser();
+    phase(doc, "c").roadmapEvents.push({
+      type: "phase-binding",
+      id: "rebind",
+      action: "rebind-current",
+      actor: "coding-session",
+      previousSession: S2,
+      session: S1,
+      timestamp: "2026-11-06T12:05:00.000Z",
+    });
+    expect(findCurrentDependencyOverride(phase(doc, "c"))).toBeNull();
+    expect(agentPhaseStartRefusal(doc.phases, "c", S1)).not.toBeNull();
+  });
+
+  it("stops counting a start after delete and recovery", async () => {
+    const doc = await startedByUser();
+    remove(doc, "c");
+    remove(doc, "c", "recover");
+    phase(doc, "c").session = S1;
+    expect(findCurrentDependencyOverride(phase(doc, "c"))).toBeNull();
+    expect(agentPhaseStartRefusal(doc.phases, "c", S1)).not.toBeNull();
+  });
+
+  it("keeps the refusal message bounded", async () => {
+    const doc = await document();
+    for (const candidate of doc.phases) candidate.title = "t".repeat(4000);
+    phase(doc, "c").dependsOn = ["phase-schema-contract", "phase-explicit-done", "a", "b"];
+    expect(agentPhaseStartRefusal(doc.phases, "c", S1)!.message.length).toBeLessThanOrEqual(1024);
+  });
+});
+
+describe("draft, edit and move dependency checks", () => {
+  it("accepts draft links to existing phases and to phases in the same draft", async () => {
+    const doc = await document();
+    expect(
+      validateRoadmapDraftDependencies(doc.phases, [
+        { id: "n1", title: "New 1", dependsOn: ["a"] },
+        { id: "n2", title: "New 2", dependsOn: ["n1", "b"] },
+        { id: "n3", title: "New 3" },
+      ]),
+    ).toBeNull();
+  });
+
+  it("rejects bad draft links with the same errors as saving", async () => {
+    const doc = await document();
+    const draft = [
+      { id: "n1", title: "New 1", dependsOn: ["n2"] },
+      { id: "n2", title: "New 2", dependsOn: ["n1"] },
+    ];
+    const error = validateRoadmapDraftDependencies(doc.phases, draft);
+    expect(error?.message).toMatch(/circular dependency chain: "New 1" \(n1\) → "New 2" \(n2\)/);
+    const saved = structuredClone(doc);
+    for (const [offset, entry] of draft.entries()) {
+      saved.phases.push({
+        ...structuredClone(phase(doc, "a")),
+        ...entry,
+        order: doc.phases.length + offset,
+      });
+    }
+    const result = validateNotesDocumentV3(saved);
+    expect(result.ok ? null : result.error).toEqual(error);
+    expect(
+      validateRoadmapDraftDependencies(doc.phases, [{ id: "n1", title: "N", dependsOn: ["ghost"] }])
+        ?.message,
+    ).toMatch(/missing phase ghost/);
+  });
+
+  it("validates, clears and rejects edited links", async () => {
+    const doc = await document();
+    phase(doc, "b").dependsOn = ["a"];
+    expect(validateRoadmapEditDependencies(doc.phases, "c", ["a", "b"])).toBeNull();
+    expect(validateRoadmapEditDependencies(doc.phases, "b", [])).toBeNull();
+    expect(validateRoadmapEditDependencies(doc.phases, "a", ["b"])?.message).toMatch(/circular/);
+    expect(validateRoadmapEditDependencies(doc.phases, "a", ["a"])?.message).toMatch(/itself/);
+  });
+
+  it("warns when a move puts a phase above a prerequisite or below a dependent", async () => {
+    const doc = await document();
+    phase(doc, "b").dependsOn = ["a"];
+    expect(roadmapOrderDependencyWarnings(doc.phases, ["a", "b", "c"], "b")).toEqual([]);
+    expect(roadmapOrderDependencyWarnings(doc.phases, ["b", "a", "c"], "b")).toEqual([
+      `"Phase B" (b) would sit above its prerequisite "Phase A" (a).`,
+    ]);
+    expect(roadmapOrderDependencyWarnings(doc.phases, ["b", "c", "a"], "a")).toEqual([
+      `"Phase A" (a) would sit below "Phase B" (b), which depends on it.`,
+    ]);
+    expect(roadmapOrderDependencyWarnings(doc.phases, ["a", "b"], "ghost")).toEqual([]);
   });
 });

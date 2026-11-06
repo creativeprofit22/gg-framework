@@ -33,6 +33,8 @@ export const ROADMAP_DRAFT_REFERENCES_MAX_ITEMS = 50;
 // One phase may cite every reference in its draft.
 export const ROADMAP_DRAFT_REFERENCE_KEYS_MAX_ITEMS = ROADMAP_DRAFT_REFERENCES_MAX_ITEMS;
 export const ROADMAP_DRAFT_FEEDBACK_MAX_LENGTH = 4_096;
+// Bounds one phase's links in proposals; link rules live in roadmap-phase-dependencies.
+export const ROADMAP_PHASE_DEPENDS_ON_MAX_ITEMS = 200;
 
 export interface RoadmapWorkflowValidationError {
   path: string;
@@ -76,6 +78,16 @@ export interface RoadmapInspectionPhase {
   hasUserStatusOverride: boolean;
   /** Full saved prompt; present only in a single-phase (`phase_id`) inspection. */
   sourcePrompt?: string;
+  /** Prerequisite phase IDs; omitted when the phase has no links. */
+  dependsOn?: string[];
+  /** Prerequisites not yet Done; present exactly when `dependsOn` is. */
+  unfinishedPrerequisites?: RoadmapInspectionPrerequisite[];
+}
+
+export interface RoadmapInspectionPrerequisite {
+  id: string;
+  title: string;
+  status: NotesPhaseStatus;
 }
 
 export interface RoadmapInspection {
@@ -102,6 +114,17 @@ export interface RoadmapProposedPhase {
   referenceKeys?: string[];
   /** Existing Roadmap phase this new phase goes directly before; absent appends. */
   insertBeforePhaseId?: string;
+  /** Existing phase IDs this phase depends on. */
+  dependsOn?: string[];
+  /** 0-based indexes of other phases in the same draft this phase depends on. */
+  dependsOnDraftPhases?: number[];
+}
+
+/** A linked phase as shown on an approval card; copied from Notes when proposed. */
+export interface RoadmapDependencyPhaseEntry {
+  phaseId: string;
+  title: string;
+  archived: boolean;
 }
 
 /** Bounds an approval card's order lists; Notes itself has no phase cap. */
@@ -144,9 +167,14 @@ export interface RoadmapPhaseDraftRequest {
   sourcesNotCited?: string;
 }
 
-export interface RoadmapDraftPhase extends Omit<RoadmapProposedPhase, "referenceKeys"> {
+export interface RoadmapDraftPhase extends Omit<
+  RoadmapProposedPhase,
+  "referenceKeys" | "dependsOnDraftPhases"
+> {
   phaseId: string;
   referenceIds: string[];
+  /** Resolved prerequisite IDs: existing phases or other phases of this draft. */
+  dependsOn?: string[];
 }
 
 /** A pending proposal to add new phases. The wire shape has no `kind` key (legacy-compatible). */
@@ -163,11 +191,19 @@ export interface RoadmapPhaseCreateDraft {
   sourcesNotCited: string | null;
   /** Present exactly when a phase sets `insertBeforePhaseId`; legacy drafts omit it. */
   orderPreview?: RoadmapPhaseOrderPreview;
+  /** Existing phases linked by `dependsOn`; present exactly when such a link exists. */
+  dependencyPhases?: RoadmapDependencyPhaseEntry[];
   status: "pending" | "stale";
 }
 
 /** Phase fields an edit proposal may change, in canonical order. */
-export const ROADMAP_PHASE_EDIT_FIELDS = ["title", "goal", "doneWhen", "sourcePrompt"] as const;
+export const ROADMAP_PHASE_EDIT_FIELDS = [
+  "title",
+  "goal",
+  "doneWhen",
+  "sourcePrompt",
+  "dependsOn",
+] as const;
 export type RoadmapPhaseEditField = (typeof ROADMAP_PHASE_EDIT_FIELDS)[number];
 /** Loose bounds for `before` values copied from Notes, which the UI may save outside draft limits. */
 export const ROADMAP_PHASE_EDIT_BEFORE_MAX_LENGTH = 65_536;
@@ -175,7 +211,9 @@ export const ROADMAP_PHASE_EDIT_BEFORE_DONE_WHEN_MAX_ITEMS = 200;
 
 export type RoadmapPhaseFieldChange =
   | { field: "title" | "goal" | "sourcePrompt"; before: string; after: string }
-  | { field: "doneWhen"; before: string[]; after: string[] };
+  | { field: "doneWhen"; before: string[]; after: string[] }
+  /** An empty `after` removes the links (stored as an omitted `dependsOn`). */
+  | { field: "dependsOn"; before: string[]; after: string[] };
 
 /** A pending proposal to change fields of one existing phase. */
 export interface RoadmapPhaseEditDraft {
@@ -191,8 +229,10 @@ export interface RoadmapPhaseEditDraft {
   phaseTitle: string;
   /** The target phase's `updatedAt` when proposed; any later phase change makes the edit stale. */
   basedOnUpdatedAt: string;
-  /** 1..4 changes with unique fields in canonical order. */
+  /** 1..5 changes with unique fields in canonical order. */
   changes: RoadmapPhaseFieldChange[];
+  /** Phases named by a `dependsOn` change; present exactly when that change lists any link. */
+  dependencyPhases?: RoadmapDependencyPhaseEntry[];
   status: "pending" | "stale";
 }
 
@@ -242,6 +282,8 @@ export interface RoadmapPhaseEditRequest {
   goal?: string;
   doneWhen?: string[];
   sourcePrompt?: string;
+  /** Full replacement list; empty removes all links. */
+  dependsOn?: string[];
 }
 
 export type RoadmapPhaseNotEditableReason = "missing" | "deleted" | "done" | "archived";
@@ -274,10 +316,15 @@ export type RoadmapPhaseDraftRejectionResult =
   | { status: "proposal-project-mismatch" };
 
 const PROPOSED_PHASE_BASE_KEYS = ["title", "goal", "doneWhen", "sourcePrompt"] as const;
-const PROPOSED_PHASE_OPTIONAL_KEYS = ["referenceKeys", "insertBeforePhaseId"] as const;
+const PROPOSED_PHASE_OPTIONAL_KEYS = [
+  "referenceKeys",
+  "insertBeforePhaseId",
+  "dependsOn",
+  "dependsOnDraftPhases",
+] as const;
 const PROPOSED_PHASE_KEYS = [...PROPOSED_PHASE_BASE_KEYS, ...PROPOSED_PHASE_OPTIONAL_KEYS] as const;
 const DRAFT_PHASE_BASE_KEYS = ["phaseId", ...PROPOSED_PHASE_BASE_KEYS] as const;
-const DRAFT_PHASE_OPTIONAL_KEYS = ["referenceIds", "insertBeforePhaseId"] as const;
+const DRAFT_PHASE_OPTIONAL_KEYS = ["referenceIds", "insertBeforePhaseId", "dependsOn"] as const;
 const DRAFT_PHASE_KEYS = [...DRAFT_PHASE_BASE_KEYS, ...DRAFT_PHASE_OPTIONAL_KEYS] as const;
 const DRAFT_REQUEST_BASE_KEYS = ["expectedRevision", "summary", "phases"] as const;
 const DRAFT_REQUEST_OPTIONAL_KEYS = ["proposedReferences", "sourcesNotCited"] as const;
@@ -293,13 +340,19 @@ const DRAFT_BASE_KEYS = [
   "phases",
   "status",
 ] as const;
-const DRAFT_OPTIONAL_KEYS = ["references", "sourcesNotCited", "orderPreview"] as const;
+const DRAFT_OPTIONAL_KEYS = [
+  "references",
+  "sourcesNotCited",
+  "orderPreview",
+  "dependencyPhases",
+] as const;
 const DRAFT_KEYS = [
   ...DRAFT_BASE_KEYS.slice(0, 6),
   "references",
   "phases",
   "sourcesNotCited",
   "orderPreview",
+  "dependencyPhases",
   "status",
 ] as const;
 const REFERENCE_PROJECTION_KEYS = [
@@ -323,6 +376,7 @@ const DRAFT_REFERENCE_PROPOSAL_KEYS = [
   ...REFERENCE_PROJECTION_KEYS.filter((key) => key !== "id"),
 ] as const;
 const EDIT_REQUEST_BASE_KEYS = ["expectedRevision", "summary", "phaseId"] as const;
+const EDIT_DRAFT_OPTIONAL_KEYS = ["dependencyPhases"] as const;
 const EDIT_DRAFT_KEYS = [
   "kind",
   "id",
@@ -358,6 +412,7 @@ const MOVE_DRAFT_KEYS = [
 ] as const;
 const ORDER_PREVIEW_KEYS = ["before", "after"] as const;
 const ORDER_ENTRY_KEYS = ["phaseId", "title"] as const;
+const DEPENDENCY_PHASE_ENTRY_KEYS = ["phaseId", "title", "archived"] as const;
 
 /** Normalizes wire text before length checks and persistence. */
 export function normalizeRoadmapWorkflowText(value: string): string {
@@ -404,7 +459,10 @@ export function validateRoadmapPhaseDraftRequest(
   const linkedReferenceKeys = new Set<string>();
   const phases: RoadmapProposedPhase[] = [];
   for (let index = 0; index < value.phases.length; index += 1) {
-    const phase = validateProposedPhase(value.phases[index], `phases[${index}]`, referenceKeys);
+    const phase = validateProposedPhase(value.phases[index], `phases[${index}]`, referenceKeys, {
+      index,
+      count: value.phases.length,
+    });
     if (!phase.ok) return phase;
     for (const referenceKey of phase.value.referenceKeys ?? [])
       linkedReferenceKeys.add(referenceKey);
@@ -509,14 +567,22 @@ export function validateRoadmapPhaseEditRequest(
     if (!sourcePrompt.ok) return sourcePrompt;
     request.sourcePrompt = sourcePrompt.value;
   }
+  if (value.dependsOn !== undefined) {
+    const dependsOn = validateDependsOnIds(value.dependsOn, "dependsOn", phaseId.value, true);
+    if (!dependsOn.ok) return dependsOn;
+    request.dependsOn = dependsOn.value;
+  }
   return { ok: true, value: request };
 }
 
 export function validateRoadmapPhaseEditDraft(
   value: unknown,
 ): RoadmapWorkflowValidationResult<RoadmapPhaseEditDraft> {
-  if (!isRecordWithExactKeys(value, EDIT_DRAFT_KEYS)) {
-    return invalid("$", `expected exactly: ${EDIT_DRAFT_KEYS.join(", ")}`);
+  if (!isRecordWithKeys(value, EDIT_DRAFT_KEYS, EDIT_DRAFT_OPTIONAL_KEYS)) {
+    return invalid(
+      "$",
+      `expected ${EDIT_DRAFT_KEYS.join(", ")} and optionally ${EDIT_DRAFT_OPTIONAL_KEYS.join(", ")}`,
+    );
   }
   if (value.kind !== "edit") return invalid("kind", 'expected "edit"');
   const id = boundedIdentifier(value.id, "id");
@@ -562,8 +628,21 @@ export function validateRoadmapPhaseEditDraft(
       return invalid(`changes[${index}].field`, "expected unique fields in canonical order");
     }
     previousFieldIndex = fieldIndex;
+    if (change.value.field === "dependsOn" && change.value.after.includes(phaseId.value)) {
+      return invalid(`changes[${index}].after`, "a phase cannot depend on itself");
+    }
     changes.push(change.value);
   }
+  const dependencyChange = changes.find((change) => change.field === "dependsOn");
+  const listsLinks =
+    dependencyChange !== undefined &&
+    dependencyChange.before.length + dependencyChange.after.length > 0;
+  const dependencyPhases = validateOptionalDependencyPhases(
+    value.dependencyPhases,
+    listsLinks,
+    "a dependsOn change lists links",
+  );
+  if (!dependencyPhases.ok) return dependencyPhases;
   return {
     ok: true,
     value: {
@@ -578,6 +657,7 @@ export function validateRoadmapPhaseEditDraft(
       phaseTitle: phaseTitle.value,
       basedOnUpdatedAt: value.basedOnUpdatedAt,
       changes,
+      ...(dependencyPhases.value ? { dependencyPhases: dependencyPhases.value } : {}),
       status: value.status,
     },
   };
@@ -601,6 +681,14 @@ export function buildRoadmapPhaseEditChanges(
 ): RoadmapPhaseFieldChange[] {
   const changes: RoadmapPhaseFieldChange[] = [];
   for (const field of ROADMAP_PHASE_EDIT_FIELDS) {
+    if (field === "dependsOn") {
+      const after = request.dependsOn;
+      const before = phase.dependsOn ?? [];
+      if (after !== undefined && !stringArraysEqual(before, after)) {
+        changes.push({ field, before: [...before], after: [...after] });
+      }
+      continue;
+    }
     if (field === "doneWhen") {
       const after = request.doneWhen;
       if (after !== undefined && !stringArraysEqual(phase.doneWhen, after)) {
@@ -636,7 +724,9 @@ export function applyRoadmapPhaseEdit(
     draft.changes.every((change) =>
       change.field === "doneWhen"
         ? stringArraysEqual(phase.doneWhen, change.before)
-        : phase[change.field] === change.before,
+        : change.field === "dependsOn"
+          ? stringArraysEqual(phase.dependsOn ?? [], change.before)
+          : phase[change.field] === change.before,
     );
   if (!unchanged) return { status: "phase-changed", phaseId: draft.phaseId };
 
@@ -644,7 +734,10 @@ export function applyRoadmapPhaseEdit(
   const nextPhase: NotesPhase = { ...phase, updatedAt };
   for (const change of draft.changes) {
     if (change.field === "doneWhen") nextPhase.doneWhen = [...change.after];
-    else nextPhase[change.field] = change.after;
+    else if (change.field === "dependsOn") {
+      if (change.after.length === 0) delete nextPhase.dependsOn;
+      else nextPhase.dependsOn = [...change.after];
+    } else nextPhase[change.field] = change.after;
   }
   const phases = [...document.phases];
   phases[index] = nextPhase;
@@ -1130,13 +1223,28 @@ export function validateRoadmapPhaseCreateDraft(
       `phases[${index}].insertBeforePhaseId`,
     );
     if (!insertBefore.ok) return insertBefore;
+    const dependsOn =
+      candidate.dependsOn === undefined
+        ? undefined
+        : validateDependsOnIds(candidate.dependsOn, `phases[${index}].dependsOn`, phaseId.value);
+    if (dependsOn && !dependsOn.ok) return dependsOn;
     phases.push({
       phaseId: phaseId.value,
       ...phase.value,
       referenceIds: linkedIds.value,
       ...(insertBefore.value === undefined ? {} : { insertBeforePhaseId: insertBefore.value }),
+      ...(dependsOn ? { dependsOn: dependsOn.value } : {}),
     });
   }
+  const linksExisting = phases.some((phase) =>
+    (phase.dependsOn ?? []).some((link) => !phaseIds.has(link)),
+  );
+  const dependencyPhases = validateOptionalDependencyPhases(
+    value.dependencyPhases,
+    linksExisting,
+    "a phase links to an existing phase",
+  );
+  if (!dependencyPhases.ok) return dependencyPhases;
   for (let index = 0; index < references.value.length; index += 1) {
     if (!linkedReferenceIds.has(references.value[index]!.id)) {
       return invalid(`references[${index}].id`, "reference must be linked to a phase");
@@ -1191,6 +1299,7 @@ export function validateRoadmapPhaseCreateDraft(
       phases,
       sourcesNotCited: sourcesNotCited ? sourcesNotCited.value : null,
       ...(orderPreview ? { orderPreview } : {}),
+      ...(dependencyPhases.value ? { dependencyPhases: dependencyPhases.value } : {}),
       status: value.status,
     },
   };
@@ -1484,6 +1593,7 @@ function validateProposedPhase(
   value: unknown,
   path: string,
   knownReferenceKeys: ReadonlySet<string>,
+  draft: { index: number; count: number },
 ): RoadmapWorkflowValidationResult<RoadmapProposedPhase> {
   if (!isRecordWithKeys(value, PROPOSED_PHASE_BASE_KEYS, PROPOSED_PHASE_OPTIONAL_KEYS)) {
     return invalid(path, `expected exactly: ${PROPOSED_PHASE_KEYS.join(", ")}`);
@@ -1501,14 +1611,124 @@ function validateProposedPhase(
     `${path}.insertBeforePhaseId`,
   );
   if (!insertBefore.ok) return insertBefore;
+  const dependsOn =
+    value.dependsOn === undefined
+      ? undefined
+      : validateDependsOnIds(value.dependsOn, `${path}.dependsOn`, null);
+  if (dependsOn && !dependsOn.ok) return dependsOn;
+  const draftLinks =
+    value.dependsOnDraftPhases === undefined
+      ? undefined
+      : validateDraftPhaseIndexes(
+          value.dependsOnDraftPhases,
+          `${path}.dependsOnDraftPhases`,
+          draft,
+        );
+  if (draftLinks && !draftLinks.ok) return draftLinks;
   return {
     ok: true,
     value: {
       ...phase.value,
       referenceKeys: referenceKeys.value,
       ...(insertBefore.value === undefined ? {} : { insertBeforePhaseId: insertBefore.value }),
+      ...(dependsOn ? { dependsOn: dependsOn.value } : {}),
+      ...(draftLinks ? { dependsOnDraftPhases: draftLinks.value } : {}),
     },
   };
+}
+
+/** Shape only (non-empty unless allowed, unique, bounded, not self); graph rules are shared. */
+function validateDependsOnIds(
+  value: unknown,
+  path: string,
+  selfId: string | null,
+  allowEmpty = false,
+): RoadmapWorkflowValidationResult<string[]> {
+  const min = allowEmpty ? 0 : 1;
+  if (
+    !Array.isArray(value) ||
+    value.length < min ||
+    value.length > ROADMAP_PHASE_DEPENDS_ON_MAX_ITEMS
+  ) {
+    return invalid(path, `expected ${min}..${ROADMAP_PHASE_DEPENDS_ON_MAX_ITEMS} phase IDs`);
+  }
+  const seen = new Set<string>();
+  for (let index = 0; index < value.length; index += 1) {
+    const itemPath = `${path}[${index}]`;
+    const id = boundedIdentifier(value[index], itemPath);
+    if (!id.ok) return id;
+    if (id.value !== value[index]) return invalid(itemPath, "expected an exact phase ID");
+    if (seen.has(id.value)) return invalid(itemPath, "expected a unique phase ID");
+    if (id.value === selfId) return invalid(itemPath, "a phase cannot depend on itself");
+    seen.add(id.value);
+  }
+  return { ok: true, value: [...seen] };
+}
+
+function validateDraftPhaseIndexes(
+  value: unknown,
+  path: string,
+  draft: { index: number; count: number },
+): RoadmapWorkflowValidationResult<number[]> {
+  if (!Array.isArray(value) || value.length < 1 || value.length >= draft.count) {
+    return invalid(path, `expected 1..${Math.max(draft.count - 1, 1)} other draft phase indexes`);
+  }
+  const seen = new Set<number>();
+  for (let index = 0; index < value.length; index += 1) {
+    const itemPath = `${path}[${index}]`;
+    const item: unknown = value[index];
+    if (!isNonNegativeInteger(item) || item >= draft.count) {
+      return invalid(itemPath, `expected a draft phase index from 0 to ${draft.count - 1}`);
+    }
+    if (item === draft.index) return invalid(itemPath, "a phase cannot depend on itself");
+    if (seen.has(item)) return invalid(itemPath, "expected a unique draft phase index");
+    seen.add(item);
+  }
+  return { ok: true, value: [...seen] };
+}
+
+/** Display entries, required exactly when `required`; absent keeps legacy draft shapes. */
+function validateOptionalDependencyPhases(
+  value: unknown,
+  required: boolean,
+  when: string,
+): RoadmapWorkflowValidationResult<RoadmapDependencyPhaseEntry[] | undefined> {
+  if (value === undefined && !required) return { ok: true, value: undefined };
+  if (value === undefined || !required) {
+    return invalid("dependencyPhases", `expected dependency phases exactly when ${when}`);
+  }
+  if (
+    !Array.isArray(value) ||
+    value.length < 1 ||
+    value.length > ROADMAP_PHASE_ORDER_PREVIEW_MAX_ITEMS
+  ) {
+    return invalid(
+      "dependencyPhases",
+      `expected 1..${ROADMAP_PHASE_ORDER_PREVIEW_MAX_ITEMS} phases`,
+    );
+  }
+  const seen = new Set<string>();
+  const entries: RoadmapDependencyPhaseEntry[] = [];
+  for (let index = 0; index < value.length; index += 1) {
+    const entry: unknown = value[index];
+    const entryPath = `dependencyPhases[${index}]`;
+    if (!isRecordWithExactKeys(entry, DEPENDENCY_PHASE_ENTRY_KEYS)) {
+      return invalid(entryPath, `expected exactly: ${DEPENDENCY_PHASE_ENTRY_KEYS.join(", ")}`);
+    }
+    const phaseId = boundedIdentifier(entry.phaseId, `${entryPath}.phaseId`);
+    if (!phaseId.ok) return phaseId;
+    if (seen.has(phaseId.value)) {
+      return invalid(`${entryPath}.phaseId`, "expected a unique phase ID");
+    }
+    seen.add(phaseId.value);
+    const title = looseBeforeString(entry.title, `${entryPath}.title`);
+    if (!title.ok) return title;
+    if (typeof entry.archived !== "boolean") {
+      return invalid(`${entryPath}.archived`, "expected a boolean");
+    }
+    entries.push({ phaseId: phaseId.value, title: title.value, archived: entry.archived });
+  }
+  return { ok: true, value: entries };
 }
 
 function validateProposedPhaseRecord(
@@ -1586,6 +1806,16 @@ function validateFieldChange(
     return invalid(path, `expected exactly: ${FIELD_CHANGE_KEYS.join(", ")}`);
   }
   const field = value.field;
+  if (field === "dependsOn") {
+    const before = looseBeforeList(value.before, `${path}.before`);
+    if (!before.ok) return before;
+    const after = validateDependsOnIds(value.after, `${path}.after`, null, true);
+    if (!after.ok) return after;
+    if (stringArraysEqual(before.value, after.value)) {
+      return invalid(`${path}.after`, "expected a value different from before");
+    }
+    return { ok: true, value: { field, before: before.value, after: after.value } };
+  }
   if (field === "doneWhen") {
     const before = looseBeforeList(value.before, `${path}.before`);
     if (!before.ok) return before;
@@ -1676,7 +1906,22 @@ function isRoadmapInspectionPhase(value: unknown): value is RoadmapInspectionPha
         "latestReview",
         "hasUserStatusOverride",
       ],
-      ["sourcePrompt"],
+      ["sourcePrompt", "dependsOn", "unfinishedPrerequisites"],
+    )
+  ) {
+    return false;
+  }
+  if (Object.hasOwn(value, "dependsOn") !== Object.hasOwn(value, "unfinishedPrerequisites")) {
+    return false;
+  }
+  if (
+    Object.hasOwn(value, "dependsOn") &&
+    !(
+      Array.isArray(value.dependsOn) &&
+      value.dependsOn.length > 0 &&
+      value.dependsOn.every(isNonEmptyString) &&
+      Array.isArray(value.unfinishedPrerequisites) &&
+      value.unfinishedPrerequisites.every(isInspectionPrerequisite)
     )
   ) {
     return false;
@@ -1697,6 +1942,15 @@ function isRoadmapInspectionPhase(value: unknown): value is RoadmapInspectionPha
     isInspectionVerification(value.latestVerification) &&
     isInspectionReview(value.latestReview) &&
     typeof value.hasUserStatusOverride === "boolean"
+  );
+}
+
+function isInspectionPrerequisite(value: unknown): boolean {
+  return (
+    isRecordWithExactKeys(value, ["id", "title", "status"]) &&
+    isNonEmptyString(value.id) &&
+    typeof value.title === "string" &&
+    isNotesPhaseStatus(value.status)
   );
 }
 

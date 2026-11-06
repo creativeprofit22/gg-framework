@@ -1447,3 +1447,50 @@ describe("durable phase execution contracts", () => {
     expect(validateNotesPhaseExecution(execution)).not.toBeNull();
   });
 });
+
+describe("dependency override roadmap events", () => {
+  const override = () => ({
+    type: "dependency-override" as const,
+    id: "override-1",
+    actor: "user" as const,
+    origin: "app" as const,
+    session: { sessionId: "s-1", sessionPath: "/sessions/s-1.jsonl" },
+    unfinishedPrerequisiteIds: ["phase-schema-contract"],
+    timestamp: NOW,
+  });
+
+  it("accepts a well-formed override and every stored actor and origin", async () => {
+    for (const [actor, origin] of [
+      ["user", "app"],
+      ["ken", "app"],
+      ["ken-autopilot", "automatic-advancement"],
+    ] as const) {
+      const document = await completionCompatibilityFixture();
+      document.phases[2]!.roadmapEvents.push({ ...override(), actor, origin });
+      expect(validateNotesDocumentV3(document)).toMatchObject({ ok: true });
+    }
+  });
+
+  it("rejects unknown keys, actors, origins, missing sessions and bad prerequisite lists", async () => {
+    const cases: [Record<string, unknown>, string][] = [
+      [{ extra: true }, "phases[2].roadmapEvents[0]"],
+      [{ actor: "gg-coder" }, "phases[2].roadmapEvents[0].actor"],
+      [{ origin: "agent" }, "phases[2].roadmapEvents[0].origin"],
+      [{ session: null }, "phases[2].roadmapEvents[0].session"],
+      [{ unfinishedPrerequisiteIds: [] }, "phases[2].roadmapEvents[0].unfinishedPrerequisiteIds"],
+      [
+        { unfinishedPrerequisiteIds: [""] },
+        "phases[2].roadmapEvents[0].unfinishedPrerequisiteIds[0]",
+      ],
+      [
+        { unfinishedPrerequisiteIds: ["a", "a"] },
+        "phases[2].roadmapEvents[0].unfinishedPrerequisiteIds[1]",
+      ],
+    ];
+    for (const [patch, path] of cases) {
+      const document = await completionCompatibilityFixture();
+      document.phases[2]!.roadmapEvents.push({ ...override(), ...patch } as never);
+      expectError(document, path);
+    }
+  });
+});

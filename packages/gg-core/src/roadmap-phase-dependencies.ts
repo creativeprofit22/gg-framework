@@ -1,5 +1,10 @@
 import { isNotesPhaseDeleted } from "./roadmap-phase-deletion.js";
-import type { NotesPhase, NotesValidationError } from "./project-notes.js";
+import type {
+  NotesPhase,
+  NotesRoadmapDependencyOverride,
+  NotesSessionLink,
+  NotesValidationError,
+} from "./project-notes.js";
 
 // Rules: docs/notes-roadmap-dependencies.md. This module is their only implementation.
 
@@ -159,6 +164,152 @@ export function phaseDeletionDependencyConflict(
   return {
     message: bounded(
       `Cannot recover ${describe(phase)} because it depends on deleted phases: ${describeList(deletedPrerequisites)}. Recover ${deletedPrerequisites.length === 1 ? "that phase" : "those phases"} first.`,
+    ),
+  };
+}
+
+type DraftDependencyPhase = Pick<NotesPhase, "id" | "title" | "dependsOn">;
+
+/** Validates the graph a draft would create once its phases are appended, with saving's errors. */
+export function validateRoadmapDraftDependencies(
+  currentPhases: readonly DependencyPhase[],
+  draftPhases: readonly DraftDependencyPhase[],
+): NotesValidationError | null {
+  return validateRoadmapPhaseDependencies([
+    ...currentPhases,
+    ...draftPhases.map((phase) => ({
+      id: phase.id,
+      title: phase.title,
+      status: "not-started" as const,
+      ...(phase.dependsOn === undefined ? {} : { dependsOn: phase.dependsOn }),
+    })),
+  ]);
+}
+
+/** Validates the graph after one phase's links change. An empty list means the links are removed. */
+export function validateRoadmapEditDependencies(
+  currentPhases: readonly DependencyPhase[],
+  phaseId: string,
+  dependsOn: readonly string[],
+): NotesValidationError | null {
+  return validateRoadmapPhaseDependencies(
+    currentPhases.map((phase) => {
+      if (phase.id !== phaseId) return phase;
+      const next: DependencyPhase = { ...phase, dependsOn: [...dependsOn] };
+      if (dependsOn.length === 0) delete next.dependsOn;
+      return next;
+    }),
+  );
+}
+
+/** Plain warnings when a reorder puts a phase above a prerequisite or below a dependent. */
+export function roadmapOrderDependencyWarnings(
+  phases: readonly DependencyPhase[],
+  orderAfter: readonly string[],
+  movedPhaseId: string,
+): string[] {
+  const position = new Map(orderAfter.map((id, index) => [id, index]));
+  const byId = new Map(phases.map((phase) => [phase.id, phase]));
+  const moved = byId.get(movedPhaseId);
+  const movedPosition = position.get(movedPhaseId);
+  if (moved === undefined || movedPosition === undefined) return [];
+  const warnings: string[] = [];
+  for (const link of moved.dependsOn ?? []) {
+    const prerequisite = byId.get(link);
+    const prerequisitePosition = position.get(link);
+    if (prerequisite === undefined || prerequisitePosition === undefined) continue;
+    if (prerequisitePosition > movedPosition) {
+      warnings.push(
+        bounded(`${describe(moved)} would sit above its prerequisite ${describe(prerequisite)}.`),
+      );
+    }
+  }
+  for (const dependent of phases) {
+    const dependentPosition = position.get(dependent.id);
+    if (
+      dependent.id === movedPhaseId ||
+      dependentPosition === undefined ||
+      dependent.dependsOn?.includes(movedPhaseId) !== true
+    ) {
+      continue;
+    }
+    if (dependentPosition < movedPosition) {
+      warnings.push(
+        bounded(`${describe(moved)} would sit below ${describe(dependent)}, which depends on it.`),
+      );
+    }
+  }
+  return warnings;
+}
+
+type OverridePhase = Pick<NotesPhase, "roadmapEvents" | "lifecycleEvents" | "deletion">;
+
+/** The latest dependency override, only while it is a user start from the app that is still current. */
+export function findCurrentDependencyOverride(
+  phase: OverridePhase,
+): NotesRoadmapDependencyOverride | null {
+  let index = -1;
+  for (let candidate = phase.roadmapEvents.length - 1; candidate >= 0; candidate -= 1) {
+    if (phase.roadmapEvents[candidate]!.type === "dependency-override") {
+      index = candidate;
+      break;
+    }
+  }
+  if (index < 0) return null;
+  const override = phase.roadmapEvents[index] as NotesRoadmapDependencyOverride;
+  if (override.actor !== "user" || override.origin !== "app") return null;
+  // A deletion retires earlier events; recovery counts as a reopen.
+  const retiredBoundary = Math.max(
+    0,
+    ...(phase.deletion?.events ?? []).flatMap((event) =>
+      event.action === "delete" ? [event.retired.roadmapEventCount] : [],
+    ),
+  );
+  if (index < retiredBoundary) return null;
+  const startedAt = Date.parse(override.timestamp);
+  const reopened = phase.lifecycleEvents.some(
+    (event) =>
+      (event.fromStatus === "done" || event.fromStatus === "cancelled") &&
+      Date.parse(event.timestamp) > startedAt,
+  );
+  if (reopened) return null;
+  const rebound = phase.roadmapEvents
+    .slice(index + 1)
+    .some((event) => event.type === "phase-binding");
+  return rebound ? null : override;
+}
+
+function sameSession(left: NotesSessionLink | null, right: NotesSessionLink | null): boolean {
+  if (left === null || right === null) return left === right;
+  return left.sessionId === right.sessionId && left.sessionPath === right.sessionPath;
+}
+
+export interface AgentPhaseStartRefusal {
+  prerequisites: { id: string; title: string; status: NotesPhase["status"] }[];
+  message: string;
+}
+
+/** Strict agent gate: unfinished prerequisites refuse unless the user's current app start covers this session. */
+export function agentPhaseStartRefusal(
+  phases: readonly (DependencyPhase & OverridePhase & Pick<NotesPhase, "session">)[],
+  phaseId: string,
+  session: NotesSessionLink,
+): AgentPhaseStartRefusal | null {
+  const unfinished = listUnfinishedPrerequisites(phases, phaseId);
+  if (unfinished === null || unfinished.length === 0) return null;
+  const phase = phases.find((candidate) => candidate.id === phaseId)!;
+  const override = findCurrentDependencyOverride(phase);
+  if (
+    override !== null &&
+    sameSession(override.session, phase.session) &&
+    sameSession(override.session, session)
+  ) {
+    return null;
+  }
+  return {
+    prerequisites: unfinished.map(({ id, title, status }) => ({ id, title, status })),
+    message: bounded(
+      `Can't start ${describe(phase)}: these prerequisite phases aren't Done: ${describeList(unfinished)}. The user can start it from the app.`,
     ),
   };
 }

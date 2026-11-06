@@ -255,10 +255,28 @@ function renderActivityItem(item: ActivityItem): ReactNode {
       </>
     );
   }
+  if (event.type === "dependency-override") {
+    const count = event.unfinishedPrerequisiteIds.length;
+    return (
+      <>
+        <strong>{dependencyOverrideActorLabel(event.actor)}</strong> {timestamp}
+        <p>
+          Started before{" "}
+          {count === 1 ? "1 prerequisite phase was" : `${count} prerequisite phases were`} Done.
+        </p>
+      </>
+    );
+  }
   return (
     <>
       <strong>User</strong> {timestamp}
       <p>Automatic {event.field} updates resumed.</p>
     </>
   );
+}
+
+function dependencyOverrideActorLabel(actor: "user" | "ken" | "ken-autopilot"): string {
+  if (actor === "ken") return "Ken";
+  if (actor === "ken-autopilot") return "Ken autopilot";
+  return "User";
 }

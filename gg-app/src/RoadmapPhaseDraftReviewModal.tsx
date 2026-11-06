@@ -2,6 +2,7 @@ import {
   ArrowSquareOutIcon,
   CheckIcon,
   FileTextIcon,
+  FlowArrowIcon,
   GitBranchIcon,
   ListChecksIcon,
   XIcon,
@@ -12,6 +13,7 @@ import {
   type RoadmapPhaseDraft,
 } from "@kenkaiiii/gg-core/roadmap-workflow";
 import { openReferenceUrl } from "./notes-open-source";
+import { RoadmapDependencyList } from "./RoadmapDependencyList";
 import { RoadmapPhaseEditReview } from "./RoadmapPhaseEditReview";
 import { RoadmapPhaseMoveReview } from "./RoadmapPhaseMoveReview";
 import { RoadmapPhaseOrderComparison } from "./RoadmapPhaseOrderComparison";
@@ -126,6 +128,20 @@ export function RoadmapPhaseDraftReviewModal({
                       <li key={criterion}>{criterion}</li>
                     ))}
                   </ul>
+                  {phase.dependsOn && phase.dependsOn.length > 0 && (
+                    <div className="roadmap-draft-dependencies">
+                      <div className="roadmap-draft-criteria-heading">
+                        <FlowArrowIcon size={14} aria-hidden="true" />
+                        Depends on
+                      </div>
+                      <RoadmapDependencyList
+                        phaseIds={phase.dependsOn}
+                        knownPhases={draft.dependencyPhases}
+                        draftPhases={draft.phases}
+                        label={`${phase.title} depends on`}
+                      />
+                    </div>
+                  )}
                   {referenceIdsForPhase(phase).length > 0 && (
                     <div className="roadmap-draft-references">
                       <div className="roadmap-draft-criteria-heading">

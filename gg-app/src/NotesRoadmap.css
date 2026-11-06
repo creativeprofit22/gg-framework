@@ -3354,6 +3354,19 @@ button.notes-btn-quiet.notes-btn-danger:is(:hover, :focus-visible):not(:disabled
 .roadmap-edit-criteria li > span:first-child {
   margin-right: var(--space-3);
 }
+/* Phase dependency lists in draft and edit cards reuse the criteria list. */
+.roadmap-draft-dependencies {
+  margin-top: var(--space-7);
+}
+.roadmap-draft-dependencies .roadmap-dependency-list {
+  margin-top: var(--space-4);
+}
+.roadmap-dependency-id {
+  margin-left: var(--space-3);
+  color: var(--text-muted);
+  font-family: var(--mono);
+  font-size: var(--fs-sm);
+}
 .roadmap-edit-tag {
   display: inline-block;
   padding: 0 var(--space-3);

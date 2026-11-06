@@ -372,3 +372,78 @@ describe("RoadmapPhaseDraftReviewModal phase moves and insertions", () => {
     expect(screen.queryByRole("region", { name: "Roadmap order" })).toBeNull();
   });
 });
+
+describe("RoadmapPhaseDraftReviewModal dependency links", () => {
+  it("lists a phase's prerequisites with New, archived and missing fallbacks", () => {
+    renderModal({
+      draft: {
+        ...draft,
+        phases: [
+          draft.phases[0]!,
+          {
+            ...draft.phases[1]!,
+            dependsOn: ["phase-1", "saved-a", "saved-b", "deadbeef-1234-5678"],
+          },
+        ],
+        dependencyPhases: [
+          { phaseId: "saved-a", title: "Store contract", archived: false },
+          { phaseId: "saved-b", title: "Old spike", archived: true },
+        ],
+      },
+    });
+
+    const list = screen.getByRole("list", { name: "Explicit review surface depends on" });
+    const items = within(list)
+      .getAllByRole("listitem")
+      .map((item) => item.textContent);
+    expect(items).toEqual([
+      "Atomic backend creationNew",
+      "Store contract",
+      "Old spike (archived)",
+      "Missing phasedeadbeef",
+    ]);
+    expect(screen.getAllByText("Depends on")).toHaveLength(1);
+  });
+
+  it("omits the dependency block for phases without links", () => {
+    renderModal();
+    expect(screen.queryByText("Depends on")).toBeNull();
+  });
+
+  it("shows dependency edits with titles, Added and Removed tags, and Empty when cleared", () => {
+    renderModal({
+      draft: {
+        ...editDraft,
+        changes: [
+          { field: "dependsOn" as const, before: ["saved-a", "saved-b"], after: ["saved-a", "x"] },
+        ],
+        dependencyPhases: [
+          { phaseId: "saved-a", title: "Store contract", archived: false },
+          { phaseId: "saved-b", title: "Old spike", archived: true },
+          { phaseId: "x", title: "New prerequisite", archived: false },
+        ],
+      },
+    });
+
+    expect(screen.getByRole("heading", { name: "Depends on" })).toBeTruthy();
+    expect(screen.getByText("Old spike (archived)").closest("li")?.textContent).toContain(
+      "Removed",
+    );
+    expect(screen.getByText("New prerequisite").closest("li")?.textContent).toContain("Added");
+    for (const kept of screen.getAllByText("Store contract")) {
+      const item = kept.closest("li");
+      expect(item?.textContent).not.toContain("Removed");
+      expect(item?.textContent).not.toContain("Added");
+    }
+    cleanup();
+
+    renderModal({
+      draft: {
+        ...editDraft,
+        changes: [{ field: "dependsOn" as const, before: ["gone-phase-id"], after: [] }],
+      },
+    });
+    expect(screen.getByText("Empty")).toBeTruthy();
+    expect(screen.getByText("Missing phase").closest("li")?.textContent).toContain("Removed");
+  });
+});

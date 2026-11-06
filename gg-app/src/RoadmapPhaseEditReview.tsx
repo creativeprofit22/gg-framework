@@ -1,5 +1,7 @@
 import { CheckIcon, PencilSimpleIcon, XIcon } from "./phosphor-icons";
+import { RoadmapDependencyList } from "./RoadmapDependencyList";
 import type {
+  RoadmapDependencyPhaseEntry,
   RoadmapPhaseEditDraft,
   RoadmapPhaseFieldChange,
 } from "@kenkaiiii/gg-core/roadmap-workflow";
@@ -18,6 +20,7 @@ const FIELD_LABELS: Record<RoadmapPhaseFieldChange["field"], string> = {
   goal: "Goal",
   doneWhen: "Done when",
   sourcePrompt: "Saved phase prompt",
+  dependsOn: "Depends on",
 };
 
 function EmptyValue() {
@@ -55,10 +58,24 @@ function CriteriaValue({
 function ChangeValues({
   change,
   side,
+  dependencyPhases,
 }: {
   change: RoadmapPhaseFieldChange;
   side: "before" | "after";
+  dependencyPhases: readonly RoadmapDependencyPhaseEntry[] | undefined;
 }) {
+  if (change.field === "dependsOn") {
+    const items = change[side];
+    if (items.length === 0) return <EmptyValue />;
+    return (
+      <RoadmapDependencyList
+        phaseIds={items}
+        knownPhases={dependencyPhases}
+        compareWith={side === "before" ? change.after : change.before}
+        changeTag={side === "before" ? "Removed" : "Added"}
+      />
+    );
+  }
   if (change.field === "doneWhen") {
     return side === "before" ? (
       <CriteriaValue items={change.before} other={change.after} tag="Removed" />
@@ -124,11 +141,19 @@ export function RoadmapPhaseEditReview({
                   <h4>{FIELD_LABELS[change.field]}</h4>
                   <div className="roadmap-edit-value is-before">
                     <span className="roadmap-edit-value-label">Before</span>
-                    <ChangeValues change={change} side="before" />
+                    <ChangeValues
+                      change={change}
+                      side="before"
+                      dependencyPhases={draft.dependencyPhases}
+                    />
                   </div>
                   <div className="roadmap-edit-value is-after">
                     <span className="roadmap-edit-value-label">After</span>
-                    <ChangeValues change={change} side="after" />
+                    <ChangeValues
+                      change={change}
+                      side="after"
+                      dependencyPhases={draft.dependencyPhases}
+                    />
                   </div>
                 </li>
               ))}

@@ -33,6 +33,7 @@ export { EyeIcon } from "@phosphor-icons/react/Eye";
 export { FileIcon } from "@phosphor-icons/react/File";
 export { FilePlusIcon } from "@phosphor-icons/react/FilePlus";
 export { FileTextIcon } from "@phosphor-icons/react/FileText";
+export { FlowArrowIcon } from "@phosphor-icons/react/FlowArrow";
 export { FilmStripIcon } from "@phosphor-icons/react/FilmStrip";
 export { FolderSimpleIcon } from "@phosphor-icons/react/FolderSimple";
 export { GearSixIcon } from "@phosphor-icons/react/GearSix";

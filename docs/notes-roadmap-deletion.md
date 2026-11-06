@@ -49,7 +49,7 @@ Existing completion, user-override and advancement authority rules remain in the
 ## Store compatibility and uncertainty (CODE + RUNTIME tests)
 
 - A phase stays in the contiguous Notes array with a stable ID. Optional, versioned deletion metadata holds the current deletion and an append-only delete/recover sequence. Runtime fields are retired into that record; the whole phase is not duplicated into a second store.
-- Public Notes remains version 3. The **storage envelope upgrades from v1 to v2 on the first deletion**. Both the prior-snapshot backup and new primary use v2. All later writes stay v2, including after recovery. Reads do not migrate files.
+- Public Notes remains version 3. The **storage envelope upgrades from v1 to v2 on the first deletion**. Both the prior-snapshot backup and new primary use v2. Later writes never downgrade, including after recovery; dependency links can move the store to v3 ([Roadmap phase dependencies](notes-roadmap-dependencies.md)). Reads do not migrate files.
 - An interruption after the upgraded backup but before the primary leaves an uncommitted old snapshot. New readers preserve that upgrade on later writes. A completed deletion has a v2 primary and backup; frozen old v1 readers refuse the newer envelope before trying a pre-deletion fallback.
 - Unknown newer primary **or backup** formats are protected from overwrite, even when the other file is readable. Existing documents without metadata remain accepted.
 - Exact replay returns historical completion plus the **current** snapshot, including when an old Delete is retried after Recover. Reusing an operation ID for different input fails. A new deletion needs a new confirmation and request identity.

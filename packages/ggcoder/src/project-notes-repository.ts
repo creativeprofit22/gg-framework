@@ -77,6 +77,10 @@ import {
   type ProjectNotesSnapshot,
   type ProjectNotesUnsupportedFormat,
 } from "@kenkaiiii/gg-core/project-notes";
+import {
+  hasRoadmapPhaseDependencyLinks,
+  phaseDeletionDependencyConflict,
+} from "@kenkaiiii/gg-core/roadmap-phase-dependencies";
 export * from "@kenkaiiii/gg-core/project-notes";
 import {
   applyRoadmapPhaseEdit,
@@ -104,7 +108,17 @@ export interface StoredProjectNotesV1 {
 export interface StoredProjectNotesV2 extends Omit<StoredProjectNotesV1, "storeVersion"> {
   storeVersion: 2;
 }
-export type StoredProjectNotes = StoredProjectNotesV1 | StoredProjectNotesV2;
+export interface StoredProjectNotesV3 extends Omit<StoredProjectNotesV1, "storeVersion"> {
+  storeVersion: 3;
+}
+export type StoredProjectNotes = StoredProjectNotesV1 | StoredProjectNotesV2 | StoredProjectNotesV3;
+type StoreVersion = StoredProjectNotes["storeVersion"];
+const LATEST_STORE_VERSION = 3;
+
+// Dependency links need v3; never downgrade an upgraded store.
+function requiredStoreVersion(current: StoreVersion, document: NotesDocumentV3): StoreVersion {
+  return hasRoadmapPhaseDependencyLinks(document.phases) ? 3 : current;
+}
 
 /** Required commit-time host policy; invoked with fresh Notes under the Notes lock.
  * The caller must already hold the compatible lease/session coordination locks.
@@ -1449,6 +1463,12 @@ export class ProjectNotesRepository {
         error: validationError("phases", "Migration cannot create deletion history"),
       };
     }
+    if (hasRoadmapPhaseDependencyLinks(validated.document.phases)) {
+      return {
+        status: "invalid",
+        error: validationError("phases", "Migration cannot create dependency links"),
+      };
+    }
     const projectKey = canonicalProjectKey(cwd);
     const paths = this.paths(cwd);
     await this.ensureDirectory(paths.directory);
@@ -1507,13 +1527,18 @@ export class ProjectNotesRepository {
       );
       if (transitionError) return { status: "invalid", error: transitionError };
 
+      const storeVersion = requiredStoreVersion(current.envelope.storeVersion, validated.document);
       const next: StoredProjectNotes = {
-        storeVersion: current.envelope.storeVersion,
+        storeVersion,
         projectKey,
         revision: expectedRevision + 1,
         document: validated.document,
       };
-      await this.atomicWrite(paths.backup, serializeEnvelope(current.envelope));
+      // First linked write upgrades BOTH backup and primary, like deletion.
+      await this.atomicWrite(
+        paths.backup,
+        serializeEnvelope({ ...current.envelope, storeVersion } as StoredProjectNotes),
+      );
       await this.atomicWrite(paths.primary, serializeEnvelope(next));
       return { status: "ok", snapshot: toSnapshot(next) };
     });
@@ -1601,6 +1626,17 @@ export class ProjectNotesRepository {
               message:
                 "Resolve execution recovery or pending completion before deleting this phase.",
             };
+          const dependencyConflict = phaseDeletionDependencyConflict(
+            current.document.phases,
+            phase.id,
+            request.action,
+          );
+          if (dependencyConflict)
+            return {
+              status: "refused",
+              reason: "dependency-links",
+              message: dependencyConflict.message,
+            };
           const refusal = await guard(snapshot, structuredClone(phase));
           if (refusal) return refusal;
           const document = structuredClone(current.document);
@@ -1608,7 +1644,10 @@ export class ProjectNotesRepository {
           document.updatedAt = timestamp;
           // First deletion upgrades BOTH backup and primary. Never downgrade after recovery.
           // A pre-primary interruption leaves a readable old snapshot, not a completed deletion.
-          const upgraded: StoredProjectNotesV2 = { ...current, storeVersion: 2 };
+          const upgraded = {
+            ...current,
+            storeVersion: current.storeVersion === 1 ? 2 : current.storeVersion,
+          } as StoredProjectNotes;
           const next = await this.commitDocument(paths, upgraded, document, {
             validationMode: "validated",
             context: "Phase deletion or recovery",
@@ -3471,13 +3510,17 @@ export class ProjectNotesRepository {
       }
       committedDocument = validation.document;
     }
+    const storeVersion = requiredStoreVersion(current.storeVersion, committedDocument);
     const next: StoredProjectNotes = {
-      storeVersion: current.storeVersion,
+      storeVersion,
       projectKey: current.projectKey,
       revision: current.revision + 1,
       document: committedDocument,
     };
-    await this.atomicWrite(paths.backup, serializeEnvelope(current));
+    await this.atomicWrite(
+      paths.backup,
+      serializeEnvelope({ ...current, storeVersion } as StoredProjectNotes),
+    );
     await this.atomicWrite(paths.primary, serializeEnvelope(next));
     return next;
   }
@@ -3541,12 +3584,11 @@ export class ProjectNotesRepository {
       let envelope = primary.envelope;
       const backup = await this.readCandidate(paths.backup, projectKey);
       if (backup.status === "unsupported") return unsupportedFormat("backup");
-      if (
-        envelope.storeVersion === 1 &&
-        backup.status === "valid" &&
-        backup.envelope.storeVersion === 2
-      ) {
-        envelope = { ...envelope, storeVersion: 2 };
+      if (backup.status === "valid" && backup.envelope.storeVersion > envelope.storeVersion) {
+        envelope = {
+          ...envelope,
+          storeVersion: backup.envelope.storeVersion,
+        } as StoredProjectNotes;
       }
       return {
         status: "ok",
@@ -3597,7 +3639,8 @@ export class ProjectNotesRepository {
           ? document.version
           : undefined;
       if (
-        (typeof envelope.storeVersion === "number" && envelope.storeVersion > 2) ||
+        (typeof envelope.storeVersion === "number" &&
+          envelope.storeVersion > LATEST_STORE_VERSION) ||
         (typeof documentVersion === "number" && documentVersion > 3)
       ) {
         return { status: "unsupported" };
@@ -3613,7 +3656,7 @@ export class ProjectNotesRepository {
         value !== null &&
         !Array.isArray(value) &&
         "storeVersion" in value &&
-        (value.storeVersion === 1 || value.storeVersion === 2) &&
+        (value.storeVersion === 1 || value.storeVersion === 2 || value.storeVersion === 3) &&
         "projectKey" in value &&
         typeof value.projectKey === "string" &&
         "revision" in value &&
@@ -3658,7 +3701,7 @@ function parseStoredEnvelope(
 ): { envelope: StoredProjectNotes; migratedFromV2: boolean } | null {
   if (
     !isRecordWithKeys(value, ENVELOPE_KEYS) ||
-    (value.storeVersion !== 1 && value.storeVersion !== 2) ||
+    (value.storeVersion !== 1 && value.storeVersion !== 2 && value.storeVersion !== 3) ||
     typeof value.projectKey !== "string" ||
     !Number.isInteger(value.revision) ||
     (value.revision as number) < 0
@@ -3669,7 +3712,8 @@ function parseStoredEnvelope(
   if (
     !document.ok ||
     (value.storeVersion === 1 &&
-      document.document.phases.some((phase) => phase.deletion !== undefined))
+      document.document.phases.some((phase) => phase.deletion !== undefined)) ||
+    (value.storeVersion !== 3 && hasRoadmapPhaseDependencyLinks(document.document.phases))
   )
     return null;
   return {

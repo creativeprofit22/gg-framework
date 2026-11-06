@@ -107,7 +107,7 @@ describe("copied Notes completion compatibility (real validators)", () => {
       primary.revision = 9;
       primary.document.currentFocus = "Newer content must survive";
       if (format === "document") primary.document.version = 4;
-      else if (format === "store") primary.storeVersion = 3;
+      else if (format === "store") primary.storeVersion = 4;
       else if (format === "metadata") primary.document.futureMetadata = { preserve: true };
       else if (format === "phase-metadata") primary.document.phases[0].futureMetadata = true;
       else primary.futureMetadata = true;
@@ -150,7 +150,7 @@ describe("copied Notes completion compatibility (real validators)", () => {
       const { cwd, repository, paths, document } = await copiedStore();
       const backup = JSON.parse(await fs.readFile(paths.backup, "utf8"));
       if (format === "document") backup.document.version = 4;
-      else if (format === "store") backup.storeVersion = 3;
+      else if (format === "store") backup.storeVersion = 4;
       else backup.document.futureMetadata = true;
       await fs.writeFile(paths.backup, JSON.stringify(backup));
       const before = await bytes(paths);

@@ -1,0 +1,12 @@
+{
+  "id": "serif-quote",
+  "name": "Pull quote",
+  "kind": "type",
+  "description": "A large pull quote that builds word by word, each word rising and sharpening from a soft blur, with a hanging accent quote mark, <em> words in the accent color and a mono attribution under a short rule. Editorial with a serif display look, clean with a grotesk. For testimonials, manifesto lines and founder quotes. Transparent.",
+  "tags": ["quote", "pull-quote", "testimonial", "editorial", "serif", "blur", "word-by-word", "attribution", "manifesto"],
+  "fonts": [],
+  "duration": 4,
+  "previewAt": 3.4,
+  "license": "original",
+  "previewLook": "soft-light-ad"
+}

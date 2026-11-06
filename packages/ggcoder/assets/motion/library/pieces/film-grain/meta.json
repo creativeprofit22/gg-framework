@@ -1,0 +1,12 @@
+{
+  "id": "film-grain",
+  "name": "Film grain",
+  "kind": "texture",
+  "description": "Transparent animated film grain at 24 fps with a faint exposure flicker, overlay-blended on top of any scene. Adds analog tooth and kills gradient banding on flat fields.",
+  "tags": ["grain", "noise", "film", "analog", "overlay", "texture", "flicker", "anti-banding", "transparent"],
+  "fonts": [],
+  "duration": 6,
+  "previewAt": 3,
+  "license": "original",
+  "previewLook": "duotone-broadcast"
+}

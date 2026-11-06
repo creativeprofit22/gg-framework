@@ -1,0 +1,85 @@
+<!doctype html>
+<!--
+  vignette: soft edge darkening (or lightening) as a transparent texture.
+  An elliptical falloff that leaves the center clean, with an optional slow
+  breathe. Mount on top of a scene for its whole length.
+  Params (CSS): --vg-intensity (0–1 edge strength), --vg-tone (edge color:
+  black darkens; set to white or var(--field) to lighten/haze),
+  --vg-size (clean center size, %), --vg-x / --vg-y (center).
+  Script: BREATHE (0 = static; fraction the intensity swells), PERIOD (s).
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+  </head>
+  <body>
+    <div
+      id="vignette-root"
+      data-composition-id="vignette"
+      data-start="0"
+      data-duration="6"
+      data-width="1920"
+      data-height="1080"
+    >
+      <style>
+        [data-composition-id="vignette"] {
+          --vg-intensity: 0.42;
+          --vg-tone: rgba(0, 0, 0, 1);
+          --vg-size: 52%;
+          --vg-x: 50%;
+          --vg-y: 48%;
+          position: absolute;
+          inset: 0;
+          overflow: hidden;
+          pointer-events: none;
+        }
+        [data-composition-id="vignette"] .vg-wrap {
+          position: absolute;
+          inset: 0;
+          opacity: var(--vg-intensity);
+        }
+        [data-composition-id="vignette"] .vg-layer {
+          position: absolute;
+          inset: -4%;
+          background: radial-gradient(
+            ellipse 78% 82% at var(--vg-x) var(--vg-y),
+            transparent var(--vg-size),
+            color-mix(in srgb, var(--vg-tone) 35%, transparent) calc(var(--vg-size) + 22%),
+            color-mix(in srgb, var(--vg-tone) 80%, transparent) 92%,
+            var(--vg-tone) 118%
+          );
+        }
+      </style>
+      <div class="vg-wrap"><div class="vg-layer" id="vg-layer"></div></div>
+    </div>
+    <script>
+      (function () {
+        const BREATHE = 0.12;
+        const PERIOD = 6;
+        const DURATION = 6;
+        const tl = gsap.timeline({ paused: true });
+        const layer = document.getElementById("vg-layer");
+        const state = { t: 0 };
+        tl.fromTo(
+          state,
+          { t: 0 },
+          {
+            t: DURATION,
+            duration: DURATION,
+            ease: "none",
+            onUpdate() {
+              // b: 0 → 1 → 0 over PERIOD; the edge swells in and tightens slightly.
+              const b = 0.5 * (1 - Math.cos((2 * Math.PI * state.t) / PERIOD));
+              layer.style.opacity = String(1 - BREATHE + BREATHE * b);
+              layer.style.transform = `scale(${1 - 0.25 * BREATHE * b})`;
+            },
+          },
+          0,
+        );
+        window.__timelines = window.__timelines || {};
+        window.__timelines["vignette"] = tl;
+      })();
+    </script>
+  </body>
+</html>

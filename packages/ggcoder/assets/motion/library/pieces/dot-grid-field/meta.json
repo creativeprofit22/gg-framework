@@ -1,0 +1,12 @@
+{
+  "id": "dot-grid-field",
+  "name": "Dot grid field",
+  "kind": "background",
+  "description": "The look's field color as a lit surface: a faint drifting dot grid with a soft top-left light falloff and a darker opposite corner.",
+  "tags": ["flat", "grid", "dots", "subtle", "editorial", "swiss", "two-color"],
+  "fonts": [],
+  "duration": 6,
+  "previewAt": 3,
+  "license": "original",
+  "previewLook": "duotone-broadcast"
+}

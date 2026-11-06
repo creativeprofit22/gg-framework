@@ -1,0 +1,61 @@
+<!doctype html>
+<!--
+  dot-grid-field: flat color field made to feel lit. A faint dot grid in
+  --line, a soft light falloff from the top-left and a darker bottom-right,
+  drifting very slowly so the frame never looks frozen.
+  Params: --dg-gap (grid spacing), --dg-dot (dot radius).
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+  </head>
+  <body>
+    <div
+      id="dot-grid-field-root"
+      data-composition-id="dot-grid-field"
+      data-start="0"
+      data-duration="6"
+      data-width="1920"
+      data-height="1080"
+    >
+      <style>
+        [data-composition-id="dot-grid-field"] {
+          --dg-gap: 48px;
+          --dg-dot: 1.5px;
+          position: absolute;
+          inset: 0;
+          overflow: hidden;
+          background: var(--field, #d9774f);
+        }
+        [data-composition-id="dot-grid-field"] .dg-dots {
+          position: absolute;
+          inset: -48px;
+          background-image: radial-gradient(
+            var(--line, rgba(0, 0, 0, 0.2)) var(--dg-dot),
+            transparent calc(var(--dg-dot) + 0.4px)
+          );
+          background-size: var(--dg-gap) var(--dg-gap);
+        }
+        [data-composition-id="dot-grid-field"] .dg-light {
+          position: absolute;
+          inset: -20%;
+          background:
+            radial-gradient(55% 50% at 26% 16%, rgba(255, 244, 232, 0.3), transparent 62%),
+            radial-gradient(70% 60% at 92% 108%, rgba(0, 0, 0, 0.14), transparent 60%);
+        }
+      </style>
+      <div class="dg-dots" id="dg-dots"></div>
+      <div class="dg-light" id="dg-light"></div>
+    </div>
+    <script>
+      (function () {
+        const tl = gsap.timeline({ paused: true });
+        tl.fromTo("#dg-dots", { x: 0, y: 0 }, { x: -24, y: -12, duration: 6, ease: "none" }, 0);
+        tl.fromTo("#dg-light", { x: -30, y: -10 }, { x: 40, y: 18, duration: 6, ease: "sine.inOut" }, 0);
+        window.__timelines = window.__timelines || {};
+        window.__timelines["dot-grid-field"] = tl;
+      })();
+    </script>
+  </body>
+</html>

@@ -1,0 +1,12 @@
+{
+  "id": "ease-curve",
+  "name": "Self-drawing curve",
+  "kind": "diagram",
+  "description": "A graph with a grid that draws its own curve, a dot riding the line and a live T/VALUE readout in mono. Change the function to show growth, latency drops or any before/after curve.",
+  "tags": ["graph", "chart", "curve", "draw-on", "readout", "technical", "explainer"],
+  "fonts": [],
+  "duration": 4,
+  "previewAt": 2.8,
+  "license": "original",
+  "previewLook": "duotone-broadcast"
+}

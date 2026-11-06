@@ -1,0 +1,10 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Fixture App",
+  "version": "1.0.0",
+  "identifier": "com.example.fixture",
+  "bundle": {
+    "resources": ["resources/data.txt"],
+    "externalBin": ["binaries/helper"]
+  }
+}

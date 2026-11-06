@@ -1,0 +1,123 @@
+/* Preserve rank families and existing motion, with deeper inks on pearl/light surfaces. */
+body:has(> #root[data-chat-preview="light"]) :is(.rank-name, .scorecard-rank) {
+  --rank-start: #50408d;
+  --rank-mid: #205e76;
+  --rank-end: #65447e;
+  color: var(--rank-start);
+}
+body:has(> #root[data-chat-preview="light"]) :is(.rank-name, .scorecard-rank).rank-fx-dim {
+  --rank-start: #625e6b;
+}
+body:has(> #root[data-chat-preview="light"]) :is(.rank-name, .scorecard-rank).rank-fx-plain {
+  --rank-start: #20202a;
+}
+body:has(> #root[data-chat-preview="light"]) :is(.rank-name, .scorecard-rank).rank-fx-blue {
+  --rank-start: #29568b;
+}
+body:has(> #root[data-chat-preview="light"]) :is(.rank-name, .scorecard-rank).rank-fx-green {
+  --rank-start: #28613f;
+}
+body:has(> #root[data-chat-preview="light"])
+  :is(.rank-name, .scorecard-rank):is(.rank-fx-gold, .rank-fx-gold-shimmer, .rank-fx-eternal) {
+  --rank-start: #72501b;
+  --rank-mid: #8a5b13;
+  --rank-end: #654413;
+}
+body:has(> #root[data-chat-preview="light"]) :is(.rank-name, .scorecard-rank).rank-fx-ember {
+  --rank-start: #8b471c;
+  --rank-mid: #825914;
+  --rank-end: #923b2a;
+}
+body:has(> #root[data-chat-preview="light"])
+  :is(.rank-name, .scorecard-rank):is(.rank-fx-nebula, .rank-fx-iridescent) {
+  --rank-start: #6c3d91;
+  --rank-mid: #205e76;
+  --rank-end: #8c3b68;
+}
+body:has(> #root[data-chat-preview="light"]) :is(.rank-name, .scorecard-rank).rank-fx-rift {
+  --rank-start: #176563;
+  --rank-mid: #54428f;
+  --rank-end: #36548b;
+}
+body:has(> #root[data-chat-preview="light"]) :is(.rank-name, .scorecard-rank).rank-fx-void {
+  --rank-start: #5e458c;
+}
+body:has(> #root[data-chat-preview="light"])
+  :is(.rank-name, .scorecard-rank):is(.rank-fx-aether, .rank-fx-radiant) {
+  --rank-start: #176563;
+  --rank-mid: #245a80;
+  --rank-end: #36548b;
+}
+body:has(> #root[data-chat-preview="light"]) :is(.rank-name, .scorecard-rank).rank-fx-prism {
+  --rank-start: #8c3b68;
+  --rank-mid: #765119;
+  --rank-end: #176563;
+}
+body:has(> #root[data-chat-preview="light"]) :is(.rank-name, .scorecard-rank).rank-fx-platinum {
+  --rank-start: #4a586e;
+  --rank-mid: #626079;
+  --rank-end: #354e64;
+}
+body:has(> #root[data-chat-preview="light"]) :is(.rank-name, .scorecard-rank).rank-fx-omega {
+  --rank-start: #94383c;
+  --rank-mid: #765119;
+  --rank-end: #8c3b68;
+}
+body:has(> #root[data-chat-preview="light"]) :is(.rank-name, .scorecard-rank).rank-fx-origin {
+  --rank-start: #63458a;
+  --rank-mid: #176563;
+  --rank-end: #765119;
+}
+body:has(> #root[data-chat-preview="light"])
+  :is(.rank-name, .scorecard-rank):is(
+    .rank-fx-gradient,
+    .rank-fx-gradient-glow,
+    .rank-fx-gold,
+    .rank-fx-ember,
+    .rank-fx-nebula,
+    .rank-fx-rift,
+    .rank-fx-prism,
+    .rank-fx-eternal,
+    .rank-fx-platinum,
+    .rank-fx-omega
+  ) {
+  color: transparent;
+  background-image: linear-gradient(90deg, var(--rank-start), var(--rank-mid), var(--rank-end));
+}
+body:has(> #root[data-chat-preview="light"])
+  :is(.rank-name, .scorecard-rank):is(
+    .rank-fx-gradient-glow,
+    .rank-fx-animated,
+    .rank-fx-gold-shimmer,
+    .rank-fx-iridescent,
+    .rank-fx-void,
+    .rank-fx-aether,
+    .rank-fx-radiant,
+    .rank-fx-origin
+  ) {
+  text-shadow: 0 0 10px color-mix(in srgb, var(--rank-start) 12%, transparent);
+}
+@media (prefers-reduced-motion: no-preference) {
+  body:has(> #root[data-chat-preview="light"])
+    :is(.rank-badge:not(.rank-badge-celebrate) .rank-name, .scorecard-rank):is(
+      .rank-fx-animated,
+      .rank-fx-gold-shimmer,
+      .rank-fx-iridescent,
+      .rank-fx-radiant,
+      .rank-fx-origin
+    ) {
+    animation-name: preview-rank-ink;
+  }
+}
+@keyframes preview-rank-ink {
+  0%,
+  100% {
+    color: var(--rank-start);
+  }
+  40% {
+    color: var(--rank-mid);
+  }
+  70% {
+    color: var(--rank-end);
+  }
+}

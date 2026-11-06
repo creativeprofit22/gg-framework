@@ -16,14 +16,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const require = createRequire(
-  join(
-    dirname(fileURLToPath(import.meta.url)),
-    "..",
-    "..",
-    "packages",
-    "ggcoder",
-    "package.json",
-  ),
+  join(dirname(fileURLToPath(import.meta.url)), "..", "..", "packages", "ggcoder", "package.json"),
 );
 const sharp = require("sharp");
 
@@ -82,7 +75,7 @@ async function main() {
   // upscaled 2× (blurry). Instead we keep the full 1320×800 render and tag it
   // 144 DPI (= 2×72): Finder reads the DPI, treats it as 660×400 points, fills
   // the window, and uses the extra pixels for crisp retina rendering. No
-  // downscale → the ASCII art stays sharp. Author coords in dmg.html are at
+  // downscale → the ASCII art stays sharp. Coords in build-pages.mjs are at
   // this 2× scale; icon centers 2×(360,340)/(960,340) → (180,170)/(480,170),
   // matching appPosition / applicationFolderPosition in tauri.conf.json.
   await sharp(join(here, "dmg-background.png"))

@@ -1,0 +1,12 @@
+{
+  "id": "slam-word",
+  "name": "Slam word",
+  "kind": "type",
+  "description": "One huge uppercase display word rises out of a mask and widens as it lands (variable width axis), then holds. Transparent, sits on any background.",
+  "tags": ["kinetic", "headline", "variable-font", "mask", "reveal", "bold"],
+  "fonts": [],
+  "duration": 3,
+  "previewAt": 1.6,
+  "license": "original",
+  "previewLook": "duotone-broadcast"
+}

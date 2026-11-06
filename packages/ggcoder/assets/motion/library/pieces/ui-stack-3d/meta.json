@@ -1,0 +1,12 @@
+{
+  "id": "ui-stack-3d",
+  "name": "Soft 3D window stack",
+  "kind": "3d",
+  "description": "Glossy illustrative product windows with real thickness fan out in soft 3D: an accent title bar, skeleton content, layered soft shadows, blurred back layers for depth of field, and an inner card that lifts toward the camera on the hero beat. Pure CSS 3D so text stays crisp.",
+  "tags": ["3d", "soft-3d", "windows", "stack", "depth", "ui", "saas", "ad", "illustrative", "premium", "css-3d"],
+  "fonts": [],
+  "duration": 5,
+  "previewAt": 3.2,
+  "license": "original",
+  "previewLook": "soft-light-ad"
+}

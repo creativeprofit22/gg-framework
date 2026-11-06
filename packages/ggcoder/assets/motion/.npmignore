@@ -1,0 +1,6 @@
+# Never publish local scratch or After Effects source files, including when
+# npm's files list explicitly includes assets/.
+**/__pycache__/
+**/*.pyc
+**/*.[aA][eE][pP]
+**/*.[aA][eE][pP][xX]

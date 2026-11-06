@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
+import { environmentSecrets, redactText, redactValue } from "@kenkaiiii/gg-ai";
 
 export type LogLevel = "INFO" | "ERROR" | "WARN" | "DEBUG";
 
@@ -10,15 +11,42 @@ export type LogLevel = "INFO" | "ERROR" | "WARN" | "DEBUG";
 // scrollback while bounding disk usage.
 const MAX_BYTES = 10 * 1024 * 1024; // 10 MB
 
+/**
+ * Rotate when fewer than this many bytes remain, instead of only at/over the cap.
+ *
+ * A process that hits the cap mid-run stops writing at whatever size it reached,
+ * which can be a hair UNDER MAX_BYTES. Rotating only at `size >= MAX_BYTES` then
+ * wedges the log permanently: every later launch reopens the same near-full file,
+ * has no room for a single line, and disables its own logging immediately — so the
+ * file can never grow enough to qualify for rotation. That silently cost the app
+ * sidecar ~2 weeks of diagnostics (the file sat 4 bytes short of the cap, gaining
+ * one newline per launch). Requiring real headroom guarantees forward progress.
+ */
+const MIN_HEADROOM_BYTES = 64 * 1024; // 64 KB
+
 let fd: number | null = null;
+let logPath: string | null = null;
+/** Current size of the open log file, including earlier launches' lines. Drives rotation. */
+let fileBytes = 0;
+/**
+ * Bytes THIS process has written. Drives the hard per-process cap. Kept apart
+ * from `fileBytes` because the file is shared across launches: a long-lived
+ * daemon that started next to a nearly full file used to inherit that size as
+ * its own budget, hit the cap within minutes, and log nothing for days.
+ */
+let processBytes = 0;
+/** Set when a mid-run rotation could not shrink the file; stop retrying it per line. */
+let rotationFailed = false;
+let capped = false;
 let sessionId = "";
 let appName = "app";
 let cleanups: (() => void)[] = [];
+let exactSecrets: string[] = [];
 
-function rotateIfNeeded(filePath: string): void {
+function rotateIfNeeded(filePath: string, force = false): void {
   try {
     const st = fs.statSync(filePath);
-    if (st.size < MAX_BYTES) return;
+    if (!force && st.size <= MAX_BYTES - MIN_HEADROOM_BYTES) return;
     const rotated = `${filePath}.1`;
     // Replace prior rotation (fs.renameSync overwrites on POSIX; on Windows it
     // fails if dest exists, so unlink first defensively).
@@ -34,6 +62,42 @@ function rotateIfNeeded(filePath: string): void {
 }
 
 /**
+ * The shared file filled up while this process still has write budget: move it
+ * to `.1` and continue in a fresh file. Returns false if logging had to stop.
+ */
+function rotateOpenLog(): boolean {
+  if (fd === null || logPath === null) return false;
+  const sizeBefore = fileBytes;
+  try {
+    fs.closeSync(fd);
+  } catch {
+    // Closing a descriptor we are about to replace; nothing to recover.
+  }
+  fd = null;
+  rotateIfNeeded(logPath, true);
+  try {
+    fd = fs.openSync(logPath, "a");
+    fileBytes = fs.fstatSync(fd).size;
+  } catch {
+    if (fd !== null) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        // Ignore cleanup failure
+      }
+    }
+    fd = null;
+    capped = true;
+    return false;
+  }
+  // Rename can fail (e.g. Windows sharing violations); the per-process cap still
+  // bounds writes, so keep logging into the same file instead of retrying a
+  // rename on every line.
+  if (fileBytes >= sizeBefore) rotationFailed = true;
+  return true;
+}
+
+/**
  * Open the debug log in append mode, tagging this process with a session id and
  * remembering `name` for the shutdown line. Idempotent — re-calling while open
  * is a no-op. Returns true only when it *newly* opened the file (so callers can
@@ -41,8 +105,9 @@ function rotateIfNeeded(filePath: string): void {
  * could not be opened.
  */
 export function openLog(filePath: string, name: string): boolean {
-  if (fd !== null) return false;
+  if (fd !== null || capped) return false;
   appName = name;
+  exactSecrets = environmentSecrets(process.env);
   try {
     fs.mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 });
   } catch {
@@ -53,12 +118,33 @@ export function openLog(filePath: string, name: string): boolean {
     fd = fs.openSync(filePath, "a");
   } catch {
     // Can't open log file — silently disable logging
+    fd = null;
+    fileBytes = 0;
     return false;
   }
+  try {
+    fileBytes = fs.fstatSync(fd).size;
+  } catch {
+    try {
+      fs.closeSync(fd);
+    } catch {
+      // Ignore cleanup failure
+    }
+    fd = null;
+    fileBytes = 0;
+    return false;
+  }
+  logPath = filePath;
+  processBytes = 0;
+  rotationFailed = false;
   sessionId = randomBytes(4).toString("hex");
   // Visible separator between sessions when back-reading the log.
   try {
-    fs.writeSync(fd, "\n");
+    if (fileBytes < MAX_BYTES) {
+      const written = fs.writeSync(fd, "\n");
+      fileBytes += written;
+      processBytes += written;
+    }
   } catch {
     // Write failed — proceed without the separator
   }
@@ -84,16 +170,49 @@ export function log(
 ): void {
   if (fd === null) return;
   const ts = new Date().toISOString();
-  let line = `[${ts}] [sid=${sessionId}] [${level}] [${category}] ${message}`;
+  const safeMessage = redactText(message, { secrets: exactSecrets });
+  let line = `[${ts}] [sid=${sessionId}] [${level}] [${category}] ${safeMessage}`;
   if (data) {
-    const pairs = Object.entries(data)
-      .map(([k, v]) => `${k}=${typeof v === "string" ? v : JSON.stringify(v)}`)
+    const safeData = redactValue(data, { secrets: exactSecrets });
+    const pairs = Object.entries(safeData)
+      .map(([k, v]) => {
+        if (typeof v === "string") return `${k}=${v}`;
+        if (typeof v === "bigint") return `${k}=${String(v)}`;
+        return `${k}=${JSON.stringify(v)}`;
+      })
       .join(" ");
     if (pairs) line += ` ${pairs}`;
   }
   line += "\n";
+
+  const lineBytes = Buffer.byteLength(line);
+  if (processBytes + lineBytes > MAX_BYTES) {
+    // A noisy production path must not turn one long-lived process into an
+    // unbounded SSD writer. Stop file logging for this process once IT has
+    // written MAX_BYTES; later launches get a fresh budget.
+    const capLine = `[${ts}] [sid=${sessionId}] [WARN] [logger] Log cap reached; file logging disabled until restart\n`;
+    try {
+      if (fileBytes + Buffer.byteLength(capLine) <= MAX_BYTES) {
+        fileBytes += fs.writeSync(fd, capLine);
+      }
+      fs.closeSync(fd);
+    } catch {
+      // Write/close failure still disables logging below.
+    }
+    fd = null;
+    capped = true;
+    return;
+  }
+
+  // The shared file is full but this process still has budget: rotate and
+  // keep logging rather than going dark for the rest of a long-lived run.
+  if (fileBytes + lineBytes > MAX_BYTES && !rotationFailed && !rotateOpenLog()) return;
+  if (fd === null) return;
+
   try {
-    fs.writeSync(fd, line);
+    const written = fs.writeSync(fd, line);
+    fileBytes += written;
+    processBytes += written;
   } catch {
     // Write failed — don't crash
   }
@@ -113,14 +232,21 @@ export function registerLogCleanup(fn: () => void): void {
  * any registered cleanups.
  */
 export function closeLogger(opts?: { shutdownLine?: boolean }): void {
-  if (fd === null) return;
-  if (opts?.shutdownLine !== false) log("INFO", "shutdown", `${appName} shutting down`);
-  try {
-    fs.closeSync(fd);
-  } catch {
-    // Ignore close errors
+  if (fd !== null) {
+    if (opts?.shutdownLine !== false) log("INFO", "shutdown", `${appName} shutting down`);
+    try {
+      if (fd !== null) fs.closeSync(fd);
+    } catch {
+      // Ignore close errors
+    }
   }
   fd = null;
+  logPath = null;
+  fileBytes = 0;
+  processBytes = 0;
+  rotationFailed = false;
+  capped = false;
+  exactSecrets = [];
   for (const unsub of cleanups) unsub();
   cleanups = [];
 }

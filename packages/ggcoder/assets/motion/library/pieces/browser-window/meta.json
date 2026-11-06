@@ -1,0 +1,12 @@
+{
+  "id": "browser-window",
+  "name": "Browser window",
+  "kind": "ui",
+  "description": "A clean browser window (window dots, back/forward, URL pill) springs in with a slight scale and tilt and settles, then a skeleton dashboard (sidebar, stat cards, bar chart) builds in. The content area is a slot: swap the skeleton for a real screenshot <img>.",
+  "tags": ["browser", "window", "screenshot", "saas", "dashboard", "product", "spring", "mockup"],
+  "fonts": [],
+  "duration": 4,
+  "previewAt": 2.6,
+  "license": "original",
+  "previewLook": "soft-light-ad"
+}

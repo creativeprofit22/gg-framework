@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="assets/fonts/fonts.css" />
+    <link rel="stylesheet" href="assets/looks/swiss-grid.css" />
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <style>
+      html,
+      body {
+        margin: 0;
+        width: 1920px;
+        height: 1080px;
+        overflow: hidden;
+      }
+      /* Grid: 12 columns, 96px margins, 24px gutters, 122px columns. Column n starts at 96 + 146 * (n - 1). */
+      #root {
+        position: relative;
+        width: 1920px;
+        height: 1080px;
+        background: var(--field);
+        overflow: hidden;
+        font-family: var(--text);
+        color: var(--ink);
+      }
+      .col {
+        position: absolute;
+        top: 0;
+        width: 122px;
+        height: 1080px;
+        border-left: 1px solid var(--line);
+        border-right: 1px solid var(--line);
+        box-sizing: border-box;
+        transform-origin: 50% 0;
+      }
+      .rule {
+        position: absolute;
+        left: 96px;
+        top: 96px;
+        width: 1728px;
+        height: 3px;
+        background: var(--ink);
+        transform-origin: 0 50%;
+      }
+      .head {
+        position: absolute;
+        top: 120px;
+        font-size: 24px;
+        line-height: 1.25;
+        font-weight: 500;
+        letter-spacing: -0.005em;
+      }
+      .head b {
+        font-weight: 700;
+      }
+      .head.m {
+        color: var(--muted);
+      }
+      .num {
+        position: absolute;
+        left: 72px;
+        bottom: 128px;
+        display: flex;
+        align-items: flex-start;
+        font-family: var(--display);
+        font-weight: var(--display-weight);
+        letter-spacing: var(--display-tracking);
+        font-size: 760px;
+        line-height: 0.74;
+        font-variant-numeric: tabular-nums;
+      }
+      .num .pct {
+        font-size: 250px;
+        line-height: 0.74;
+        color: var(--accent);
+        margin-left: 20px;
+        letter-spacing: -0.04em;
+      }
+      .block {
+        position: absolute;
+        left: 1264px;
+        top: 360px;
+        width: 560px;
+        height: 18px;
+        background: var(--accent);
+        transform-origin: 0 50%;
+      }
+      .copy {
+        position: absolute;
+        left: 1264px;
+        top: 406px;
+        width: 560px;
+        font-size: 62px;
+        line-height: 1.02;
+        font-weight: 700;
+        letter-spacing: -0.035em;
+      }
+      .copy span {
+        display: block;
+        overflow: hidden;
+      }
+      .copy span i {
+        display: block;
+        font-style: normal;
+      }
+      .bars {
+        position: absolute;
+        left: 1264px;
+        top: 758px;
+        width: 560px;
+      }
+      .row {
+        position: relative;
+        height: 45px;
+        border-top: 1px solid var(--line);
+        font-size: 22px;
+        font-weight: 500;
+        display: flex;
+        align-items: center;
+      }
+      .row .y {
+        width: 146px;
+        color: var(--muted);
+        font-variant-numeric: tabular-nums;
+      }
+      .row .b {
+        height: 18px;
+        background: var(--ink);
+        transform-origin: 0 50%;
+      }
+      .row .v {
+        margin-left: 12px;
+        font-weight: 700;
+        font-variant-numeric: tabular-nums;
+      }
+      .row.now .b {
+        background: var(--accent);
+      }
+      .row.now .y,
+      .row.now .v {
+        color: var(--accent);
+        font-weight: 700;
+      }
+    </style>
+  </head>
+  <body>
+    <div
+      id="root"
+      class="look-swiss-grid"
+      data-composition-id="main"
+      data-start="0"
+      data-duration="4"
+      data-width="1920"
+      data-height="1080"
+    >
+      <div id="grid"></div>
+      <div class="rule" id="rule"></div>
+      <!-- edit: header line, one item per column group -->
+      <div class="head" style="left: 96px"><b>Release cadence</b><br />State of Shipping 2026</div>
+      <div class="head m" style="left: 680px">Survey of 4,210<br />product teams</div>
+      <div class="head m" style="left: 1264px">Share shipping to<br />production weekly</div>
+      <div class="num" id="num"><span id="n">87</span><span class="pct">%</span></div>
+      <div class="block" id="block"></div>
+      <!-- edit: statement -->
+      <div class="copy" id="copy">
+        <span><i>of product teams</i></span>
+        <span><i>now ship to users</i></span>
+        <span><i>every single week.</i></span>
+      </div>
+      <div class="bars" id="bars">
+        <div class="row"><span class="y">2022</span><span class="b" style="width: 150px"></span><span class="v">36</span></div>
+        <div class="row"><span class="y">2023</span><span class="b" style="width: 200px"></span><span class="v">48</span></div>
+        <div class="row"><span class="y">2024</span><span class="b" style="width: 262px"></span><span class="v">63</span></div>
+        <div class="row"><span class="y">2025</span><span class="b" style="width: 308px"></span><span class="v">74</span></div>
+        <div class="row now"><span class="y">2026</span><span class="b" style="width: 362px"></span><span class="v">87</span></div>
+      </div>
+    </div>
+    <script>
+      const grid = document.getElementById("grid");
+      for (let i = 0; i < 12; i++) {
+        const c = document.createElement("div");
+        c.className = "col";
+        c.style.left = 96 + 146 * i + "px";
+        grid.appendChild(c);
+      }
+      const tl = gsap.timeline({ paused: true });
+      const count = { v: 0 };
+      const n = document.getElementById("n");
+
+      tl.from(".col", { scaleY: 0, duration: 0.9, ease: "power4.inOut", stagger: 0.04 }, 0)
+        .from("#rule", { scaleX: 0, duration: 0.8, ease: "power4.inOut" }, 0.2)
+        .from(".head", { opacity: 0, y: 12, duration: 0.5, ease: "power3.out", stagger: 0.08 }, 0.6)
+        .from("#num", { yPercent: 18, opacity: 0, duration: 0.9, ease: "power4.out" }, 0.55)
+        .fromTo(
+          count,
+          { v: 0 },
+          { v: 87, duration: 1.4, ease: "power4.out", onUpdate: () => (n.textContent = Math.round(count.v)) },
+          0.55,
+        )
+        .from("#block", { scaleX: 0, duration: 0.6, ease: "power4.inOut" }, 1.0)
+        .from("#copy i", { yPercent: 105, duration: 0.7, ease: "power4.out", stagger: 0.08 }, 1.15)
+        .from(".row", { opacity: 0, duration: 0.01, stagger: 0.1 }, 1.5)
+        .from(".row .b", { scaleX: 0, duration: 0.7, ease: "power4.inOut", stagger: 0.1 }, 1.5)
+        .from(".row .v", { opacity: 0, duration: 0.3, stagger: 0.1 }, 1.9)
+        .to({}, { duration: 0.1 }, 3.9);
+      window.__timelines = { main: tl };
+    </script>
+  </body>
+</html>

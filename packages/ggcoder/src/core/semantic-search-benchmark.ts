@@ -30,7 +30,7 @@
  *   npx tsx src/core/semantic-search-benchmark.ts
  *
  * Env overrides:
- *   GG_SS_PROVIDER / GG_SS_MODEL   (default openai / gpt-5.5)
+ *   GG_SS_PROVIDER / GG_SS_MODEL   (default openai / gpt-6.1-sol)
  *   GG_SS_TOPK                     (chunks/files delivered, default 3)
  */
 
@@ -77,7 +77,7 @@ const QUESTIONS: Question[] = [
   },
 ];
 
-// ── AST chunking + BM25 retrieval live in ./code-retrieval.ts (shared with code_search) ──
+// ── AST chunking + BM25 retrieval live in ./code-retrieval.ts  ──
 
 // ── Model call ──────────────────────────────────────────────
 
@@ -171,7 +171,7 @@ interface Row {
 
 async function main(): Promise<void> {
   const provider = process.env.GG_SS_PROVIDER ?? "openai";
-  const model = process.env.GG_SS_MODEL ?? "gpt-5.5";
+  const model = process.env.GG_SS_MODEL ?? "gpt-6.1-sol";
   const topK = Math.max(1, parseInt(process.env.GG_SS_TOPK ?? "3", 10));
 
   const auth = new AuthStorage();

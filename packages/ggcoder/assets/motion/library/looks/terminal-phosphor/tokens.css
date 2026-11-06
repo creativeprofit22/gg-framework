@@ -1,0 +1,16 @@
+/* Terminal Phosphor: a CRT in a dark room. Phosphor green, amber for alerts, dot-matrix readouts. */
+.look-terminal-phosphor {
+  --field: #050805;
+  --field-2: #0a110b;
+  --ink: #8dff9a;
+  --accent: #ffb338;
+  --muted: rgba(141, 255, 154, 0.56);
+  --line: rgba(141, 255, 154, 0.16);
+  --display: "Doto", monospace;
+  --display-weight: 900;
+  --display-stretch: 100%;
+  --display-tracking: -0.02em;
+  --text: "Martian Mono", monospace;
+  --mono: "Martian Mono", monospace;
+  --radius: 0px;
+}

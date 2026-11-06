@@ -1,14 +1,15 @@
 import { useState } from "react";
 import { theme } from "./theme";
 import { Modal } from "./Modal";
-import { createProject, selectProject } from "./agent";
+import { ModalDismissButton } from "./modal-embed";
+import { createProject } from "./agent";
 
 interface Props {
   /** Where new projects are created — shown so the user knows the destination. */
   projectsRoot: string;
   onClose: () => void;
-  /** Called after the project is created + this window re-pointed at it. */
-  onCreated: (cwd: string) => void;
+  /** Called after the project is created so its owner can bind it. */
+  onCreated: (cwd: string) => Promise<unknown>;
 }
 
 /** Normalize freeform input toward a valid folder name (lowercase, dashes). */
@@ -33,8 +34,7 @@ export function NewProjectModal({ projectsRoot, onClose, onCreated }: Props): Re
     setError(null);
     try {
       const cwd = await createProject(slug);
-      await selectProject(cwd);
-      onCreated(cwd);
+      await onCreated(cwd);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
       setBusy(false);
@@ -66,9 +66,7 @@ export function NewProjectModal({ projectsRoot, onClose, onCreated }: Props): Re
         </div>
       )}
       <div className="modal-actions">
-        <button className="modal-btn" onClick={onClose}>
-          Cancel
-        </button>
+        <ModalDismissButton onClick={onClose}>Cancel</ModalDismissButton>
         <button className="modal-btn primary" disabled={!canCreate} onClick={() => void create()}>
           {busy ? "Creating\u2026" : "Create"}
         </button>

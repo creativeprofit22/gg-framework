@@ -4,60 +4,426 @@
 //
 // Why external + copy (not a single SEA binary): ggcoder's runtime pulls in
 // native `sharp` and lazily imports optional natives (playwright, transformers,
-// unpdf, linkedom, ...). Those cannot be inlined by a bundler, so we mark them
-// `external` and copy the real packages (with their dependency trees) next to
-// the bundle. Each OS/arch bundle is built on its own CI runner, so the copied
-// `sharp` platform binary is always correct for the target.
+// unpdf, ...). Those cannot be inlined by a bundler, so we mark them `external`
+// and copy the real packages (with their dependency trees) next to the bundle.
+// Pure-JS linkedom is bundled to avoid flattening incompatible htmlparser2/entities
+// versions into that external node_modules tree. Each OS/arch bundle is built on
+// its own runner, so copied native binaries match the target.
 import { build } from "esbuild";
+import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
-import { cpSync, existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
-import { dirname, join } from "node:path";
+import {
+  cpSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+import { copyFile, readFile } from "node:fs/promises";
+import { dirname, join, posix, relative, resolve, sep, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(here, "..", "..");
-const sidecarEntry = join(
-  repoRoot,
-  "packages",
-  "ggcoder",
-  "dist",
-  "app-sidecar.js",
-);
+const sidecarEntry = join(repoRoot, "packages", "ggcoder", "dist", "app-sidecar.js");
 const outDir = join(here, "..", "src-tauri", "sidecar");
 const outFile = join(outDir, "app-sidecar.mjs");
 const nodeModulesOut = join(outDir, "node_modules");
+const bundledSkillsSource = join(repoRoot, "packages", "ggcoder", "assets", "skills");
+// Motion mode's runtime bundle (authored skills + launcher). Kept apart from
+// `skills/` so its skills never enter coder or chat discovery.
+const motionBundleSource = join(repoRoot, "packages", "ggcoder", "assets", "motion");
+// Outside sidecar/ so it is never shipped, inventoried or size-gated.
+const depsStampPath = join(here, "..", "src-tauri", "sidecar-deps.stamp.json");
+const stagedNodeDir = join(here, "..", "src-tauri", "binaries");
+const lockfilePath = join(repoRoot, "pnpm-lock.yaml");
+const scriptPath = fileURLToPath(import.meta.url);
+const DEPS_STAMP_SCHEMA = "gg-sidecar-deps/1";
+// Node reads these when resolving modules; the script reads no other env vars.
+const FINGERPRINT_ENV = [
+  "NODE_OPTIONS",
+  "NODE_PATH",
+  "NODE_PRESERVE_SYMLINKS",
+  "NODE_PRESERVE_SYMLINKS_MAIN",
+];
 
-// Packages that must NOT be inlined: native addons + lazily-loaded optional
-// heavy deps. They are copied verbatim with their dependency trees instead.
+// Packages that must NOT be inlined: native addons, lazily-loaded optional
+// heavy deps, and child-process entry points that esbuild cannot discover.
 const EXTERNAL = [
   "sharp",
   "playwright",
   "@huggingface/transformers",
   "unpdf",
-  "linkedom",
   "ogg-opus-decoder",
   "turndown",
   "turndown-plugin-gfm",
   "@mozilla/readability",
-  // Default MCP server: spawned as a stdio child, never imported, so esbuild
-  // won't bundle it. Copy it next to the sidecar so resolveStdioCommand can
-  // resolve its bin and rewrite `npx -y @kenkaiiii/kencode-search` to a direct
-  // `node dist/index.js` spawn. Without this the shipped app silently falls
-  // back to raw npx, paying a ~90 MB `npm exec` wrapper per MCP connection.
-  "@kenkaiiii/kencode-search",
+  // The Codex transport loads this package's zstd.wasm by path at runtime.
+  // Keep the package external so the WASM asset survives the sidecar bundle.
+  "@bokuweb/zstd-wasm",
+  // LSP servers run as child processes from their real package entry points.
+  // The server resolver also needs a physical tsserver.js path. Neither package
+  // is imported by the sidecar, so esbuild would otherwise omit both and every
+  // installed desktop build would silently lose TS/JS inline diagnostics.
+  "typescript-language-server",
+  "typescript",
+  // source_path spawns opensrc's CLI by physical path; it is never imported.
+  "opensrc",
+  // Motion mode runs the HyperFrames CLI through motion/bin/hyperframes.mjs,
+  // which resolves this package from the sidecar's node_modules at runtime.
+  "hyperframes",
+  // Bash launches SRT's physical CLI as a child process for per-session OS
+  // sandboxing; keep its platform binaries and CLI files on disk.
+  "@anthropic-ai/sandbox-runtime",
 ];
 
 // require resolver anchored at the ggcoder package, where these deps live.
-const ggcoderRequire = createRequire(
-  join(repoRoot, "packages", "ggcoder", "package.json"),
-);
+const ggcoderRequire = createRequire(join(repoRoot, "packages", "ggcoder", "package.json"));
 
 // Candidate node_modules roots to scan directly when `require.resolve` is
 // blocked by a package's `exports` map (which often hides ./package.json).
 const NM_ROOTS = [
   join(repoRoot, "packages", "ggcoder", "node_modules"),
+  join(repoRoot, "packages", "gg-ai", "node_modules"),
   join(repoRoot, "node_modules"),
 ];
+
+const MIB = 1024 * 1024;
+const CATEGORY_ORDER = [
+  "source-map",
+  "type-declaration",
+  "typescript-source",
+  "native-or-wasm",
+  "runtime-js",
+  "json-or-manifest",
+  "documentation",
+  "test-fixture-benchmark",
+  "license-notice",
+  "other",
+];
+const OPENSRC_BINARIES = new Set([
+  "opensrc-win32-x64.exe",
+  "opensrc-darwin-x64",
+  "opensrc-darwin-arm64",
+  "opensrc-linux-x64",
+  "opensrc-linux-musl-x64",
+  "opensrc-linux-arm64",
+  "opensrc-linux-musl-arm64",
+]);
+
+// Inventories describe the locked packages AFTER pruneSourceMaps. In particular,
+// decoder 1.7.5 / opus-ml 0.0.3 add .map siblings, not new runtime entry points.
+const PACKAGE_PAYLOAD_ALLOWLISTS = [
+  {
+    name: "onnxruntime-web",
+    version: "1.26.0-dev.20260416-b7804b056c",
+    requiredPaths: ["package.json", "types.d.ts", "dist/ort.node.min.js", "dist/ort.node.min.mjs"],
+    operations: [
+      {
+        path: ".",
+        expectedEntries: [
+          "README.md",
+          "__commit.txt",
+          "dist",
+          "docs",
+          "lib",
+          "package.json",
+          "types.d.ts",
+        ],
+        retainFiles: [
+          "package.json",
+          "types.d.ts",
+          "dist/ort.node.min.js",
+          "dist/ort.node.min.mjs",
+        ],
+      },
+    ],
+  },
+  {
+    name: "@huggingface/transformers",
+    version: "4.2.0",
+    // Node import still selects this self-contained ESM bundle and onnxruntime-node;
+    // 4.2.0 no longer publishes the browser JSEP WASM alongside its dist loader.
+    requiredPaths: ["package.json", "LICENSE", "dist/transformers.node.mjs"],
+    operations: [
+      {
+        path: "dist",
+        expectedEntries: [
+          "ort-wasm-simd-threaded.jsep.mjs",
+          "transformers.js",
+          "transformers.min.js",
+          "transformers.node.cjs",
+          "transformers.node.min.cjs",
+          "transformers.node.min.mjs",
+          "transformers.node.mjs",
+          "transformers.web.js",
+          "transformers.web.min.js",
+        ],
+        retainFiles: ["transformers.node.mjs"],
+      },
+    ],
+  },
+  {
+    name: "ogg-opus-decoder",
+    version: "1.7.5",
+    requiredPaths: ["package.json", "index.js", "types.d.ts"],
+    operations: [
+      {
+        path: "dist",
+        expectedEntries: ["ogg-opus-decoder.min.js", "ogg-opus-decoder.opus-ml.min.js"],
+        removeDirectory: true,
+      },
+    ],
+  },
+  {
+    name: "@wasm-audio-decoders/opus-ml",
+    version: "0.0.3",
+    requiredPaths: ["package.json", "index.js", "types.d.ts"],
+    operations: [
+      {
+        path: "dist",
+        expectedEntries: ["opus-ml-decoder.min.js"],
+        removeDirectory: true,
+      },
+    ],
+  },
+  {
+    name: "@mixmark-io/domino",
+    version: "2.2.0",
+    requiredPaths: ["package.json", "LICENSE"],
+    operations: [
+      {
+        path: "test",
+        expectedEntries: [
+          "domino.js",
+          "fixture",
+          "html5lib-tests.json",
+          "index.js",
+          "parsing.js",
+          "tools",
+          "w3c",
+          "web-platform-blocklist.json",
+          "web-platform-tests.js",
+          "xss.js",
+        ],
+        removeDirectory: true,
+      },
+      {
+        path: ".yarn",
+        expectedEntries: ["plugins", "versions"],
+        removeDirectory: true,
+      },
+    ],
+  },
+  {
+    name: "@anthropic-ai/sandbox-runtime",
+    version: "0.0.78",
+    requiredPaths: [
+      "package.json",
+      "LICENSE",
+      "dist/cli.js",
+      "vendor/java-proxy-agent/srt-proxy-agent.jar",
+    ],
+    operations: [
+      {
+        path: "vendor",
+        expectedFiles: [
+          "java-proxy-agent/build.ts",
+          "java-proxy-agent/srt-proxy-agent.jar",
+          "seccomp/arm64/apply-seccomp",
+          "seccomp/build.ts",
+          "seccomp/x64/apply-seccomp",
+          "srt-win/arm64/srt-win.exe",
+          "srt-win/build.ts",
+          "srt-win/x64/srt-win.exe",
+        ],
+        retainFiles: ({ platform, arch }) => {
+          const runtime = sandboxRuntimePath(platform, arch);
+          // The platform-independent JVM agent is resolved by sandbox-manager;
+          // keep it alongside the selected OS helper (also on hosts without one).
+          return ["java-proxy-agent/srt-proxy-agent.jar", ...(runtime ? [runtime] : [])];
+        },
+      },
+    ],
+  },
+];
+
+function portablePath(path) {
+  return path.split(sep).join("/");
+}
+
+/** Deterministically enumerate regular files without following symbolic links. */
+function walkFiles(root) {
+  const files = [];
+  const visit = (dir) => {
+    const names = readdirSync(dir).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+    for (const name of names) {
+      const path = join(dir, name);
+      const stat = lstatSync(path);
+      const rel = portablePath(relative(root, path));
+      if (stat.isSymbolicLink()) {
+        throw new Error(`unexpected symbolic link in staged sidecar: ${rel}`);
+      }
+      if (stat.isDirectory()) {
+        visit(path);
+      } else if (stat.isFile()) {
+        files.push({ path, relative: rel, bytes: stat.size });
+      } else {
+        throw new Error(`unexpected non-file entry in staged sidecar: ${rel}`);
+      }
+    }
+  };
+  visit(root);
+  return files;
+}
+
+function packageNameFor(path) {
+  const parts = path.split("/");
+  if (parts[0] === "node_modules" && parts[1]) {
+    return parts[1].startsWith("@") && parts[2] ? `${parts[1]}/${parts[2]}` : parts[1];
+  }
+  if (parts[0] === "skills") return "(skills)";
+  if (path === "app-sidecar.mjs") return "(bundle)";
+  return "(other)";
+}
+
+function categoryFor(path) {
+  const lower = path.toLowerCase();
+  const basename = lower.slice(lower.lastIndexOf("/") + 1);
+  const isLicense =
+    /^(?:licen[cs]es?|copy(?:right|ing)s?|notices?|third[-_ ]?party(?:[-_ ]?(?:notices?|notice[-_ ]?text))?)(?:\.|$)/.test(
+      basename,
+    );
+  if (path.endsWith(".map")) return "source-map";
+  if (/\.d\.(?:ts|mts|cts)$/.test(lower)) return "type-declaration";
+  if (/\.(?:ts|tsx|mts|cts)$/.test(lower)) return "typescript-source";
+  if (/\.(?:node|wasm|dll|exe|so|dylib)$/.test(lower)) return "native-or-wasm";
+  if (/\.(?:js|mjs|cjs|jsx)$/.test(lower)) return "runtime-js";
+  if (lower.endsWith(".json")) return "json-or-manifest";
+  if (
+    !isLicense &&
+    (/\.(?:md|markdown|mdown|mkd)$/.test(lower) ||
+      /^(?:readme|changelog|changes|history)(?:\.|$)/.test(basename))
+  ) {
+    return "documentation";
+  }
+  if (
+    /(?:^|\/)(?:__tests__|tests?|fixtures?|examples?|benchmarks?)(?:\/|$)/.test(lower) ||
+    /(?:^|[._-])(?:test|spec|fixture|example|benchmark)(?:[._-]|$)/.test(basename)
+  ) {
+    return "test-fixture-benchmark";
+  }
+  if (isLicense) return "license-notice";
+  return "other";
+}
+
+function emptySummary() {
+  return { bytes: 0, files: 0 };
+}
+
+function addToMap(map, key, file) {
+  const row = map.get(key) ?? emptySummary();
+  row.bytes += file.bytes;
+  row.files += 1;
+  map.set(key, row);
+}
+
+function inventoryFromFiles(files) {
+  const packages = new Map();
+  const categories = new Map(CATEGORY_ORDER.map((name) => [name, emptySummary()]));
+  let bytes = 0;
+  for (const file of files) {
+    bytes += file.bytes;
+    addToMap(packages, packageNameFor(file.relative), file);
+    addToMap(categories, categoryFor(file.relative), file);
+  }
+  return { bytes, files: files.length, packages, categories, entries: files };
+}
+
+export function inventory(root) {
+  return inventoryFromFiles(walkFiles(root));
+}
+
+function formatBytes(bytes) {
+  return `${(bytes / MIB).toFixed(2)} MiB`;
+}
+
+function sortedNames(maps) {
+  const names = new Set(maps.flatMap((map) => [...map.keys()]));
+  return [...names].sort((a, b) => {
+    const bytesA = maps[0].get(a)?.bytes ?? 0;
+    const bytesB = maps[0].get(b)?.bytes ?? 0;
+    return bytesB - bytesA || (a < b ? -1 : a > b ? 1 : 0);
+  });
+}
+
+function renderDimension(label, before, removed, after) {
+  console.log(`\nSidecar ${label} inventory`);
+  console.log("name | before bytes/files | removed bytes/files | after bytes/files");
+  for (const name of sortedNames([before, removed, after])) {
+    const b = before.get(name) ?? emptySummary();
+    const r = removed.get(name) ?? emptySummary();
+    const a = after.get(name) ?? emptySummary();
+    console.log(
+      `${name} | ${formatBytes(b.bytes)} / ${b.files} | ${formatBytes(r.bytes)} / ${r.files} | ${formatBytes(a.bytes)} / ${a.files}`,
+    );
+  }
+}
+
+function renderInventory(before, removed, after) {
+  console.log("\nSidecar total inventory");
+  console.log("stage | bytes | files");
+  for (const [name, value] of [
+    ["before", before],
+    ["removed", removed],
+    ["after", after],
+  ]) {
+    console.log(`${name} | ${formatBytes(value.bytes)} | ${value.files}`);
+  }
+  renderDimension("package", before.packages, removed.packages, after.packages);
+  renderDimension("category", before.categories, removed.categories, after.categories);
+}
+
+function jsonInventory(value) {
+  return sortedNames([value]).map((name) => {
+    const summary = value.get(name);
+    return { name, bytes: summary.bytes, files: summary.files };
+  });
+}
+
+export function inventoryJson(before, removed, after) {
+  const serialize = (value) => ({
+    bytes: value.bytes,
+    files: value.files,
+    packages: jsonInventory(value.packages),
+    categories: jsonInventory(value.categories),
+  });
+  return JSON.stringify({
+    platform: process.platform,
+    arch: process.arch,
+    before: serialize(before),
+    removed: serialize(removed),
+    after: serialize(after),
+  });
+}
+
+/** Nearest ancestor directory literally named `node_modules`, or null. */
+function enclosingNodeModules(start) {
+  let dir = start;
+  for (let i = 0; i < 8; i++) {
+    const parent = dirname(dir);
+    if (parent === dir) return null;
+    if (parent.endsWith(`${sep}node_modules`)) return parent;
+    dir = parent;
+  }
+  return null;
+}
 
 /** Walk up from a file to the nearest dir containing package.json. */
 function nearestPackageDir(start) {
@@ -79,27 +445,54 @@ function nearestPackageDir(start) {
  */
 function packageRoot(name, fromRequire, fromDir) {
   const segs = name.split("/");
+  // A resolved dir only counts as the package root when its package.json is the
+  // REAL manifest (name matches). Some packages' `exports` maps remap
+  // `<pkg>/package.json` to a nested stub — e.g. @modelcontextprotocol/sdk
+  // resolves it to `dist/cjs/package.json` ({"type":"commonjs"}). Copying that
+  // dir shipped a package with no dependencies field, so its dep tree
+  // (zod-to-json-schema, …) was never copied and a bundled stdio MCP server
+  // crashed at require time in the installed app.
+  const isRealRoot = (dir) => {
+    try {
+      return JSON.parse(readFileSync(join(dir, "package.json"), "utf8")).name === name;
+    } catch {
+      return false;
+    }
+  };
   // 1) Direct package.json resolution (works when exports allows it).
   try {
-    return dirname(fromRequire.resolve(`${name}/package.json`));
+    const dir = dirname(fromRequire.resolve(`${name}/package.json`));
+    if (isRealRoot(dir)) return dir;
   } catch {
     // ignore and fall through
   }
-  // 2) Resolve the package entry, then walk up to its package.json.
+  // 2) Resolve the package entry, then walk up to the real package root (the
+  //    nearest package.json can be a nested build stub — keep walking).
   try {
     const entry = fromRequire.resolve(name);
-    const root = nearestPackageDir(dirname(entry));
-    if (root) return root;
+    let dir = nearestPackageDir(dirname(entry));
+    while (dir) {
+      if (isRealRoot(dir)) return dir;
+      const parent = dirname(dir);
+      if (parent === dir) break;
+      dir = nearestPackageDir(parent);
+    }
   } catch {
     // ignore and fall through
   }
   // 3) Direct directory lookup in candidate node_modules. pnpm places a
   //    package's deps as siblings under the same .pnpm/<x>/node_modules dir,
-  //    so the requiring package's parent dir is a key candidate.
+  //    so the requiring package's enclosing node_modules is a key candidate.
   const candidates = [];
   if (fromDir) {
     candidates.push(join(fromDir, "node_modules")); // nested
-    candidates.push(dirname(fromDir)); // pnpm sibling (.../node_modules)
+    // The pnpm sibling root is the ENCLOSING `node_modules` dir, which is two
+    // levels up for a scoped package (.../node_modules/@scope/name) and one for
+    // an unscoped one. Using dirname() alone silently missed every scoped
+    // dependency of a scoped package — e.g. an MCP server's SDK, which then
+    // shipped without its dep tree and crashed the spawned MCP server.
+    const siblingRoot = enclosingNodeModules(fromDir);
+    if (siblingRoot) candidates.push(siblingRoot);
   }
   candidates.push(...NM_ROOTS);
   for (const nm of candidates) {
@@ -110,76 +503,1168 @@ function packageRoot(name, fromRequire, fromDir) {
 }
 
 /**
- * Copy a package and its (optional) dependency tree into the flat output
- * node_modules, dereferencing pnpm symlinks. First version of a name wins
- * (npm-style hoist); the smoke test validates the result loads.
+ * Sharp and esbuild publish every platform binary as an optional dependency.
+ * Windows x64 installers need only Sharp's host binary, and every target needs
+ * only esbuild's host binary (Motion's HyperFrames pulls in ~26 foreign ones,
+ * ~250 MiB). Unrelated packages retain npm's normal optional-dependency behavior.
  */
-function copyPackage(name, fromRequire, fromDir, copied) {
+export function selectedOptionalDependencies(
+  packageName,
+  optionalDependencies,
+  platform = process.platform,
+  arch = process.arch,
+) {
+  const names = Object.keys(optionalDependencies || {});
+  if (packageName === "esbuild") {
+    const host = `@esbuild/${platform}-${arch}`;
+    if (!names.includes(host)) {
+      throw new Error(`esbuild has no host binary package for ${platform}/${arch}`);
+    }
+    return [host];
+  }
+  if (packageName !== "sharp" || platform !== "win32") return names;
+  if (arch !== "x64") {
+    throw new Error(`sharp has no supported Windows host selection for ${platform}/${arch}`);
+  }
+  return names.filter((name) => name === "@img/colour" || name === "@img/sharp-win32-x64");
+}
+
+/**
+ * Resolve a package and its (optional) dependency tree into ordered copy jobs
+ * for the flat output node_modules. First version of a name wins (npm-style
+ * hoist); the smoke test validates the result loads. Nothing is written.
+ */
+function planPackageCopy(name, fromRequire, fromDir, copied, jobs, options) {
+  const { destination, platform, arch } = options;
   if (copied.has(name)) return;
-  const root = packageRoot(name, fromRequire, fromDir);
-  if (!root) {
+  const linkedRoot = packageRoot(name, fromRequire, fromDir);
+  if (!linkedRoot) {
     console.warn(`skip (not found): ${name}`);
     return;
   }
-  copied.add(name);
-  const dest = join(nodeModulesOut, ...name.split("/"));
-  mkdirSync(dirname(dest), { recursive: true });
-  cpSync(root, dest, { recursive: true, dereference: true });
-
+  // Resolve pnpm symlinks to the real .pnpm dir. Anchoring the child resolver
+  // at the SYMLINK path can't see the package's own deps (pnpm places them as
+  // siblings of the REAL location), which silently skipped every transitive
+  // dep of a package found via the symlink — a bundled MCP server once
+  // shipped without the MCP SDK's dependency tree and crashed on spawn.
+  const root = realpathSync(linkedRoot);
   const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
-  const deps = {
-    ...(pkg.dependencies || {}),
-    ...(pkg.optionalDependencies || {}),
-  };
+  const deps = [
+    ...Object.keys(pkg.dependencies || {}),
+    ...selectedOptionalDependencies(name, pkg.optionalDependencies, platform, arch),
+  ];
+
+  copied.add(name);
+  jobs.push({ name, source: root, dest: join(destination, ...name.split("/")) });
+
   const childRequire = createRequire(join(root, "package.json"));
-  for (const dep of Object.keys(deps)) {
-    copyPackage(dep, childRequire, root, copied);
+  for (const dep of deps) planPackageCopy(dep, childRequire, root, copied, jobs, options);
+}
+
+/**
+ * Copy a package and its (optional) dependency tree into the flat output
+ * node_modules, dereferencing pnpm symlinks, one tree at a time.
+ */
+export function copyPackage(
+  name,
+  fromRequire,
+  fromDir,
+  copied,
+  { destination = nodeModulesOut, platform = process.platform, arch = process.arch } = {},
+) {
+  const jobs = [];
+  planPackageCopy(name, fromRequire, fromDir, copied, jobs, { destination, platform, arch });
+  for (const { source, dest } of jobs) {
+    mkdirSync(dirname(dest), { recursive: true });
+    cpSync(source, dest, { recursive: true, dereference: true });
   }
 }
 
-async function main() {
-  if (!existsSync(sidecarEntry)) {
-    throw new Error(
-      `sidecar entry missing: ${sidecarEntry} (build @kenkaiiii/ggcoder first)`,
-    );
+/**
+ * List the directories and files `cpSync(source, dest, { recursive: true,
+ * dereference: true })` would create: symbolic links (and junctions) are
+ * followed and materialized as real entries. A link back into its own
+ * ancestry would recurse forever, so it fails the build instead.
+ */
+function dereferencedTree(source, dest, directories, files, ancestry = new Set()) {
+  const real = realpathSync(source);
+  if (ancestry.has(real)) throw new Error(`symbolic link cycle while copying ${source}`);
+  ancestry.add(real);
+  directories.push(dest);
+  for (const name of readdirSync(source).sort()) {
+    const from = join(source, name);
+    const to = join(dest, name);
+    const stat = statSync(from);
+    if (stat.isDirectory()) dereferencedTree(from, to, directories, files, ancestry);
+    else if (stat.isFile()) files.push({ from, to, bytes: stat.size });
+    else throw new Error(`unexpected non-file entry while copying: ${from}`);
   }
-  rmSync(outDir, { recursive: true, force: true });
-  mkdirSync(outDir, { recursive: true });
+  ancestry.delete(real);
+}
 
-  await build({
-    entryPoints: [sidecarEntry],
-    outfile: outFile,
-    bundle: true,
-    platform: "node",
-    format: "esm",
-    target: "node22",
-    external: EXTERNAL,
-    // ESM bundles that reference `require`/__dirname need a banner shim so the
-    // few CJS-interop call sites in dependencies keep working under Node ESM.
-    banner: {
-      js: [
-        "import { createRequire as __ggCreateRequire } from 'node:module';",
-        "import { fileURLToPath as __ggFileURLToPath } from 'node:url';",
-        "import { dirname as __ggDirname } from 'node:path';",
-        "const require = __ggCreateRequire(import.meta.url);",
-        "const __filename = __ggFileURLToPath(import.meta.url);",
-        "const __dirname = __ggDirname(__filename);",
-      ].join("\n"),
-    },
-    logLevel: "info",
+/**
+ * Resolve every package, directory and file the concurrent copy would create.
+ * Shared by the copy and the reuse fingerprint so both see the same plan.
+ */
+export function planDependencyCopy(
+  names,
+  fromRequire,
+  fromDir,
+  copied,
+  { destination = nodeModulesOut, platform = process.platform, arch = process.arch } = {},
+) {
+  const jobs = [];
+  for (const name of names) {
+    planPackageCopy(name, fromRequire, fromDir, copied, jobs, { destination, platform, arch });
+  }
+  const directories = [];
+  const files = [];
+  for (const { source, dest } of jobs) dereferencedTree(source, dest, directories, files);
+
+  // Distinct hoisted names never share a destination file; if one ever did,
+  // the copy order would decide the shipped bytes, so refuse instead.
+  const targets = new Set();
+  for (const { to } of files) {
+    if (targets.has(to)) throw new Error(`two packages would write the same file: ${to}`);
+    targets.add(to);
+  }
+  return { destination, jobs, directories: [...new Set(directories)].sort(), files };
+}
+
+/**
+ * Creating a file is dominated by per-file latency on Windows (~23 ms each
+ * under real-time scanning, measured), not bytes, so a small bounded pool
+ * overlaps that wait; 8 workers measured ~3x faster than sequential cpSync.
+ */
+export async function copyPlannedFiles(plan, { concurrency = 8 } = {}) {
+  const { jobs, directories, files } = plan;
+  for (const directory of directories) mkdirSync(directory, { recursive: true });
+
+  let next = 0;
+  let failed = false;
+  const worker = async () => {
+    while (!failed && next < files.length) {
+      const { from, to } = files[next++];
+      try {
+        await copyFile(from, to);
+      } catch (error) {
+        failed = true;
+        throw error;
+      }
+    }
+  };
+  const workers = Math.max(1, Math.min(concurrency, files.length));
+  const results = await Promise.allSettled(Array.from({ length: workers }, worker));
+  const rejection = results.find((result) => result.status === "rejected");
+  if (rejection) throw rejection.reason;
+  return { packages: jobs.length, files: files.length };
+}
+
+/**
+ * Same result as calling copyPackage for each name in order, but the files
+ * are copied concurrently.
+ */
+export async function copyPackagesConcurrently(
+  names,
+  fromRequire,
+  fromDir,
+  copied,
+  {
+    destination = nodeModulesOut,
+    platform = process.platform,
+    arch = process.arch,
+    concurrency = 8,
+  } = {},
+) {
+  const plan = planDependencyCopy(names, fromRequire, fromDir, copied, {
+    destination,
+    platform,
+    arch,
   });
+  return copyPlannedFiles(plan, { concurrency });
+}
 
-  const copied = new Set();
-  const ggcoderRoot = join(repoRoot, "packages", "ggcoder");
-  for (const name of EXTERNAL) {
-    copyPackage(name, ggcoderRequire, ggcoderRoot, copied);
+/**
+ * Native packages can publish binaries for every supported OS/architecture in
+ * one npm tarball. Keep only this build runner's payload: shipping dormant Intel
+ * Mach-O files makes an arm64 app look Intel-based to macOS inventory scanners
+ * and adds roughly 180 MB of unused files before compression.
+ */
+export function pruneForeignNativePayloads(
+  stagedOutDir,
+  { platform = process.platform, arch = process.arch } = {},
+) {
+  const packageRoot = join(stagedOutDir, "node_modules", "onnxruntime-node");
+  const manifest = JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf8"));
+  if (
+    manifest.name !== "onnxruntime-node" ||
+    manifest.version !== "1.24.3" ||
+    JSON.stringify(manifest.binary?.napi_versions) !== "[6]"
+  ) {
+    throw new Error("onnxruntime-node version or N-API layout changed: expected 1.24.3 / [6]");
   }
-  console.log(
-    `bundled sidecar → ${outFile}\ncopied ${copied.size} external packages → ${nodeModulesOut}`,
+  const bin = join(packageRoot, "bin");
+  if (JSON.stringify(readdirSync(bin).sort()) !== '["napi-v6"]') {
+    throw new Error("onnxruntime-node bin layout changed: expected only napi-v6");
+  }
+  const runtimes = join(bin, "napi-v6");
+  const selected = join(runtimes, platform, arch);
+  if (!existsSync(selected)) {
+    throw new Error(`onnxruntime-node has no native payload for ${platform}/${arch}`);
+  }
+
+  // Validate regular files (and reject links) before changing the candidate.
+  const nativeFiles = walkFiles(selected).map((file) => file.relative);
+  if (!nativeFiles.includes("onnxruntime_binding.node")) {
+    throw new Error("onnxruntime-node selected runtime is missing its native binding");
+  }
+  if (platform === "win32" && arch === "x64") {
+    const expected = [
+      "DirectML.dll",
+      "dxcompiler.dll",
+      "dxil.dll",
+      "onnxruntime.dll",
+      "onnxruntime_binding.node",
+    ].sort();
+    if (JSON.stringify(nativeFiles.sort()) !== JSON.stringify(expected)) {
+      throw new Error("onnxruntime-node Windows x64 payload layout changed");
+    }
+  }
+  const keep = join(stagedOutDir, `.gg-onnxruntime-${process.pid}`);
+  cpSync(selected, keep, { recursive: true });
+  rmSync(runtimes, { recursive: true, force: true });
+  mkdirSync(join(runtimes, platform), { recursive: true });
+  cpSync(keep, selected, { recursive: true });
+  rmSync(keep, { recursive: true, force: true });
+  console.log(`pruned onnxruntime-node payloads to ${platform}/${arch}`);
+}
+
+export function pruneSourceMaps(stagedOutDir) {
+  const removed = [];
+  for (const file of walkFiles(stagedOutDir)) {
+    if (file.relative.endsWith(".map")) {
+      removed.push(file);
+      rmSync(file.path);
+    }
+  }
+  return removed;
+}
+
+function selectOpenSrcBinary() {
+  if (process.platform === "win32" && process.arch === "x64") {
+    return "opensrc-win32-x64.exe";
+  }
+  if (process.platform === "darwin" && ["x64", "arm64"].includes(process.arch)) {
+    return `opensrc-darwin-${process.arch}`;
+  }
+  if (process.platform === "linux" && ["x64", "arm64"].includes(process.arch)) {
+    const report = process.report?.getReport?.();
+    const usesMusl = !report?.header?.glibcVersionRuntime;
+    return `opensrc-linux-${usesMusl ? "musl-" : ""}${process.arch}`;
+  }
+  throw new Error(
+    `opensrc has no supported binary mapping for ${process.platform}/${process.arch}`,
   );
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+function pruneForeignOpenSrcBinaries(stagedOutDir) {
+  const binDir = join(stagedOutDir, "node_modules", "opensrc", "bin");
+  const selectedName = selectOpenSrcBinary();
+  const selected = join(binDir, selectedName);
+  if (!existsSync(selected)) {
+    throw new Error(`opensrc expected host binary is missing: ${selectedName}`);
+  }
+
+  const knownFiles = walkFiles(binDir).filter((file) => OPENSRC_BINARIES.has(file.relative));
+  const removed = knownFiles
+    .filter((file) => file.relative !== selectedName)
+    .map((file) => ({
+      ...file,
+      relative: portablePath(relative(stagedOutDir, file.path)),
+    }));
+  const keep = join(binDir, `.gg-opensrc-${process.pid}`);
+  cpSync(selected, keep);
+  for (const file of knownFiles) rmSync(file.path);
+  cpSync(keep, selected);
+  rmSync(keep);
+
+  const retained = walkFiles(binDir).filter((file) => OPENSRC_BINARIES.has(file.relative));
+  if (retained.length !== 1 || retained[0].relative !== selectedName) {
+    throw new Error(
+      `opensrc pruning retained ${retained.map((file) => file.relative).join(", ") || "no native executable"}; expected only ${selectedName}`,
+    );
+  }
+  return { removed, selectedName };
+}
+
+function assertPrunedLayout(
+  stagedOutDir,
+  before,
+  removed,
+  after,
+  selectedOpenSrcBinary,
+  packagePrune,
+) {
+  const errors = [];
+  const fail = (message) => errors.push(message);
+  if (after.bytes !== before.bytes - removed.bytes) {
+    fail(
+      `byte arithmetic failed: after ${after.bytes} != before ${before.bytes} - removed ${removed.bytes}`,
+    );
+  }
+  if (after.files !== before.files - removed.files) {
+    fail(
+      `file arithmetic failed: after ${after.files} != before ${before.files} - removed ${removed.files}`,
+    );
+  }
+
+  const opensrcPrefix = "node_modules/opensrc/bin/";
+  for (const file of removed.entries) {
+    const allowedOpenSrc =
+      file.relative.startsWith(opensrcPrefix) &&
+      OPENSRC_BINARIES.has(file.relative.slice(opensrcPrefix.length));
+    const allowedPackagePrune = packagePrune.removedPaths.has(file.relative);
+    if (!file.relative.endsWith(".map") && !allowedOpenSrc && !allowedPackagePrune) {
+      fail(`unexpected removed path: ${file.relative}`);
+    }
+  }
+
+  const beforeMaps = before.categories.get("source-map") ?? emptySummary();
+  const removedMaps = removed.categories.get("source-map") ?? emptySummary();
+  const retainedMaps = after.categories.get("source-map") ?? emptySummary();
+  if (removedMaps.files !== beforeMaps.files) {
+    fail(`removed source-map file count failed: ${removedMaps.files} != ${beforeMaps.files}`);
+  }
+  if (removedMaps.bytes < 25 * MIB) {
+    fail(`removed source-map size threshold failed: ${formatBytes(removedMaps.bytes)} < 25.00 MiB`);
+  }
+  if (retainedMaps.files !== 0 || retainedMaps.bytes !== 0) {
+    fail(
+      `retained source-map gate failed: ${retainedMaps.files} files / ${formatBytes(retainedMaps.bytes)}`,
+    );
+  }
+
+  const opensrcNativeFiles = after.entries.filter((file) => {
+    if (!file.relative.startsWith(opensrcPrefix)) return false;
+    return OPENSRC_BINARIES.has(file.relative.slice(opensrcPrefix.length));
+  });
+  if (
+    opensrcNativeFiles.length !== 1 ||
+    opensrcNativeFiles[0].relative !== `${opensrcPrefix}${selectedOpenSrcBinary}`
+  ) {
+    fail(
+      `retained opensrc binary gate failed: expected ${selectedOpenSrcBinary}, found ${opensrcNativeFiles.map((file) => file.relative).join(", ") || "none"}`,
+    );
+  }
+
+  const requiredFiles = [
+    "app-sidecar.mjs",
+    "skills/compliance-guard/SKILL.md",
+    "node_modules/sharp/package.json",
+    ...(process.platform === "win32" && process.arch === "x64"
+      ? ["node_modules/@img/colour/package.json", "node_modules/@img/sharp-win32-x64/package.json"]
+      : []),
+    "node_modules/playwright/package.json",
+    "node_modules/@huggingface/transformers/LICENSE",
+    "node_modules/@huggingface/transformers/dist/transformers.node.mjs",
+    "node_modules/onnxruntime-web/dist/ort.node.min.js",
+    "node_modules/onnxruntime-web/dist/ort.node.min.mjs",
+    "node_modules/ogg-opus-decoder/index.js",
+    "node_modules/@wasm-audio-decoders/opus-ml/index.js",
+    "node_modules/@mixmark-io/domino/LICENSE",
+    "node_modules/@anthropic-ai/sandbox-runtime/LICENSE",
+    "node_modules/@anthropic-ai/sandbox-runtime/dist/cli.js",
+    ...(packagePrune.sandboxRuntime
+      ? [`node_modules/@anthropic-ai/sandbox-runtime/vendor/${packagePrune.sandboxRuntime}`]
+      : []),
+    "node_modules/unpdf/dist/index.mjs",
+    "node_modules/typescript/lib/tsserver.js",
+    "node_modules/typescript-language-server/lib/cli.mjs",
+    "node_modules/opensrc/bin/opensrc.js",
+    `node_modules/opensrc/bin/${selectedOpenSrcBinary}`,
+    `node_modules/onnxruntime-node/bin/napi-v6/${process.platform}/${process.arch}`,
+  ];
+  for (const path of requiredFiles) {
+    if (!existsSync(join(stagedOutDir, ...path.split("/"))))
+      fail(`required sidecar path missing: ${path}`);
+  }
+
+  if (process.platform === "win32" && process.arch === "x64") {
+    const retainedSharpPlatforms = after.entries
+      .map((file) => file.relative.match(/^node_modules\/@img\/(sharp-[^/]+)\//)?.[1])
+      .filter((name, index, names) => name && names.indexOf(name) === index);
+    const foreignSharpPlatforms = retainedSharpPlatforms.filter(
+      (name) => name !== "sharp-win32-x64",
+    );
+    if (foreignSharpPlatforms.length > 0) {
+      fail(`foreign Sharp payloads retained: ${foreignSharpPlatforms.join(", ")}`);
+    }
+  }
+
+  const releaseTarget =
+    (process.platform === "win32" && process.arch === "x64") || process.platform === "darwin";
+  if (releaseTarget && removed.bytes < 65 * MIB) {
+    fail(`minimum removed size gate failed: ${formatBytes(removed.bytes)} < 65.00 MiB`);
+  }
+  if (releaseTarget && after.bytes > before.bytes * 0.82) {
+    fail(
+      `relative size gate failed: ${formatBytes(after.bytes)} > 82% of ${formatBytes(before.bytes)}`,
+    );
+  }
+  if (releaseTarget && after.bytes > 285 * MIB) {
+    fail(`absolute size gate failed: ${formatBytes(after.bytes)} > 285.00 MiB`);
+  }
+  if (after.files > before.files - 900) {
+    fail(`file-count gate failed: ${after.files} > ${before.files - 900}`);
+  }
+
+  if (errors.length > 0) throw new Error(`sidecar pruning gates failed:\n- ${errors.join("\n- ")}`);
+}
+const mb = (bytes) => `${(bytes / 1048576).toFixed(1)} MB`;
+
+/** Recursive non-symlink walk; visit(absPath, dirent) gets files and dirs. */
+function walk(root, visit) {
+  const stack = [root];
+  while (stack.length) {
+    const dir = stack.pop();
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const p = join(dir, entry.name);
+      visit(p, entry);
+      if (entry.isDirectory()) stack.push(p);
+    }
+  }
+}
+
+/** Delete files matched by `dead(fileAbsPath)`; returns bytes freed. */
+function pruneFiles(dead) {
+  let freed = 0;
+  walk(nodeModulesOut, (p, entry) => {
+    if (entry.isFile() && dead(p)) {
+      freed += statSync(p).size;
+      rmSync(p);
+    }
+  });
+  return freed;
+}
+
+/**
+ * Source maps are dev-tooling payload: nothing in the packaged app loads them,
+ * and they were ~52 MB across the copied dependency tree.
+ */
+function stripSourceMaps() {
+  let count = 0;
+  walk(nodeModulesOut, (p, entry) => {
+    if (entry.isFile() && p.endsWith(".map")) count++;
+  });
+  const freed = pruneFiles((p) => p.endsWith(".map"));
+  console.log(`stripped ${count} source maps (${mb(freed)})`);
+}
+
+function sortedDirectoryEntries(directory) {
+  return readdirSync(directory).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+}
+
+function assertExpectedEntries(packageName, operationRoot, expectedEntries) {
+  const actualEntries = sortedDirectoryEntries(operationRoot);
+  const expected = [...expectedEntries].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  if (JSON.stringify(actualEntries) !== JSON.stringify(expected)) {
+    throw new Error(
+      `${packageName} layout changed at ${operationRoot}: expected [${expected.join(", ")}], found [${actualEntries.join(", ")}]`,
+    );
+  }
+}
+
+function removeEmptyDirectories(root, preserveRoot = true) {
+  for (const name of sortedDirectoryEntries(root)) {
+    const path = join(root, name);
+    if (!lstatSync(path).isDirectory()) continue;
+    removeEmptyDirectories(path, false);
+  }
+  if (!preserveRoot && readdirSync(root).length === 0) rmSync(root, { recursive: true });
+}
+
+function sandboxRuntimePath(platform, arch) {
+  if (platform === "darwin" && ["x64", "arm64"].includes(arch)) return null;
+  if (platform === "win32" && ["x64", "arm64"].includes(arch)) {
+    return `srt-win/${arch}/srt-win.exe`;
+  }
+  if (platform === "linux" && ["x64", "arm64"].includes(arch)) {
+    return `seccomp/${arch}/apply-seccomp`;
+  }
+  throw new Error(`sandbox-runtime has no supported host layout for ${platform}/${arch}`);
+}
+
+/**
+ * Prune only immutable, lockfile-pinned package layouts that are fully described
+ * above. Every rule is validated before any package payload is removed, so a
+ * dependency update or unexpected tarball layout aborts candidate promotion.
+ */
+export function pruneAllowlistedPackagePayloads(
+  stagedNodeModulesOut,
+  { platform = process.platform, arch = process.arch } = {},
+) {
+  const plans = PACKAGE_PAYLOAD_ALLOWLISTS.map((rule) => {
+    const packageRoot = join(stagedNodeModulesOut, ...rule.name.split("/"));
+    const manifestPath = join(packageRoot, "package.json");
+    if (!existsSync(manifestPath))
+      throw new Error(`required sidecar package missing: ${rule.name}`);
+
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+    if (manifest.name !== rule.name || manifest.version !== rule.version) {
+      throw new Error(
+        `${rule.name} version changed: expected ${rule.version}, found ${manifest.name ?? "unknown"}@${manifest.version ?? "unknown"}`,
+      );
+    }
+    for (const requiredPath of rule.requiredPaths) {
+      if (!existsSync(join(packageRoot, ...requiredPath.split("/")))) {
+        throw new Error(`${rule.name} required runtime path missing: ${requiredPath}`);
+      }
+    }
+
+    const operations = rule.operations.map((operation) => {
+      const operationRoot = resolve(packageRoot, operation.path);
+      if (!operationRoot.startsWith(`${packageRoot}${sep}`) && operationRoot !== packageRoot) {
+        throw new Error(`${rule.name} prune path escapes its package: ${operation.path}`);
+      }
+      if (!existsSync(operationRoot)) {
+        throw new Error(`${rule.name} expected prune path missing: ${operation.path}`);
+      }
+      if (operation.expectedEntries) {
+        assertExpectedEntries(rule.name, operationRoot, operation.expectedEntries);
+      }
+      const files = walkFiles(operationRoot);
+      if (operation.expectedFiles) {
+        const actualFiles = files.map((file) => file.relative);
+        const expectedFiles = [...operation.expectedFiles].sort((a, b) =>
+          a < b ? -1 : a > b ? 1 : 0,
+        );
+        if (JSON.stringify(actualFiles) !== JSON.stringify(expectedFiles)) {
+          throw new Error(
+            `${rule.name} layout changed at ${operation.path}: expected [${expectedFiles.join(", ")}], found [${actualFiles.join(", ")}]`,
+          );
+        }
+      }
+      const retainFiles =
+        typeof operation.retainFiles === "function"
+          ? operation.retainFiles({ platform, arch })
+          : operation.retainFiles;
+      for (const retained of retainFiles ?? []) {
+        if (!files.some((file) => file.relative === retained)) {
+          throw new Error(
+            `${rule.name} required retained path missing: ${operation.path}/${retained}`,
+          );
+        }
+      }
+      return { ...operation, operationRoot, files, retainFiles: retainFiles ?? [] };
+    });
+    return { ...rule, packageRoot, operations };
+  });
+
+  const removedPaths = new Set();
+  let removedBytes = 0;
+  for (const plan of plans) {
+    for (const operation of plan.operations) {
+      const retained = new Set(operation.retainFiles);
+      for (const file of operation.files) {
+        if (!operation.removeDirectory && retained.has(file.relative)) continue;
+        removedBytes += file.bytes;
+        removedPaths.add(
+          `node_modules/${plan.name}/${portablePath(relative(plan.packageRoot, file.path))}`,
+        );
+        rmSync(file.path);
+      }
+      if (operation.removeDirectory || retained.size === 0) {
+        rmSync(operation.operationRoot, { recursive: true, force: true });
+        if (existsSync(operation.operationRoot)) {
+          throw new Error(`${plan.name} forbidden payload survived: ${operation.path}`);
+        }
+      } else {
+        removeEmptyDirectories(operation.operationRoot);
+        const retainedAfter = walkFiles(operation.operationRoot).map((file) => file.relative);
+        const expectedAfter = [...retained].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+        if (JSON.stringify(retainedAfter) !== JSON.stringify(expectedAfter)) {
+          throw new Error(
+            `${plan.name} retained layout failed at ${operation.path}: expected [${expectedAfter.join(", ")}], found [${retainedAfter.join(", ")}]`,
+          );
+        }
+      }
+    }
+  }
+  console.log(
+    `pruned allowlisted package payloads (${removedPaths.size} files / ${mb(removedBytes)})`,
+  );
+  return { removedPaths, removedBytes, sandboxRuntime: sandboxRuntimePath(platform, arch) };
+}
+
+export function parseBundleArgs(argv) {
+  return { reuseDeps: argv.includes("--reuse-deps") };
+}
+
+function compareStrings(a, b) {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+/** Same order walkFiles produces: segment by segment, names sorted. */
+function compareWalkOrder(a, b) {
+  const left = a.split("/");
+  const right = b.split("/");
+  for (let i = 0; i < Math.min(left.length, right.length); i++) {
+    const order = compareStrings(left[i], right[i]);
+    if (order !== 0) return order;
+  }
+  return left.length - right.length;
+}
+
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    const keys = Object.keys(value).sort(compareStrings);
+    return `{${keys.map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value ?? null);
+}
+
+function sha256(data) {
+  return createHash("sha256").update(data).digest("hex");
+}
+
+/** Repo-relative `/` path when inside root; win32 paths compare case-insensitively. */
+export function toFingerprintPath(path, root, platform = process.platform) {
+  const paths = platform === "win32" ? win32 : posix;
+  const fold = (value) =>
+    platform === "win32" ? value.replace(/^[a-z]:/i, (drive) => drive.toLowerCase()) : value;
+  const absolute = fold(paths.resolve(path));
+  const rel = paths.relative(fold(paths.resolve(root)), absolute);
+  if (rel === "") return ".";
+  if (rel !== ".." && !rel.startsWith(`..${paths.sep}`) && !paths.isAbsolute(rel)) {
+    return rel.split(paths.sep).join("/");
+  }
+  return absolute.split(paths.sep).join("/");
+}
+
+export function dependencyPlanFingerprintInput(plan, root, platform = process.platform) {
+  const paths = platform === "win32" ? win32 : posix;
+  const fromDestination = (path) =>
+    paths.relative(plan.destination, path).split(paths.sep).join("/");
+  return {
+    packages: plan.jobs.map((job) => ({
+      name: job.name,
+      source: toFingerprintPath(job.source, root, platform),
+      dest: fromDestination(job.dest),
+    })),
+    directories: plan.directories.map(fromDestination).sort(compareStrings),
+    files: plan.files
+      .map((file) => ({ path: fromDestination(file.to), bytes: file.bytes }))
+      .sort((a, b) => compareStrings(a.path, b.path)),
+  };
+}
+
+function hostLibc(platform) {
+  if (platform !== "linux") return null;
+  return process.report?.getReport?.()?.header?.glibcVersionRuntime ? "glibc" : "musl";
+}
+
+export function collectDepsFingerprintInputs({
+  plan,
+  root = repoRoot,
+  lockfile = lockfilePath,
+  script = scriptPath,
+  binaries = stagedNodeDir,
+  platform = process.platform,
+  arch = process.arch,
+  libc = hostLibc(platform),
+  nodeVersion = process.version,
+  execArgv = process.execArgv,
+  env = process.env,
+}) {
+  const stagedNode = existsSync(binaries)
+    ? readdirSync(binaries)
+        .filter((name) => name.startsWith("ggnode-") && statSync(join(binaries, name)).isFile())
+        .sort(compareStrings)
+        .map((name) => ({ name, sha256: sha256(readFileSync(join(binaries, name))) }))
+    : [];
+  return {
+    schema: DEPS_STAMP_SCHEMA,
+    lockfile: sha256(readFileSync(lockfile)),
+    script: sha256(readFileSync(script)),
+    plan: dependencyPlanFingerprintInput(plan, root, platform),
+    stagedNode,
+    platform,
+    arch,
+    libc,
+    node: { version: nodeVersion, execArgv: [...execArgv] },
+    env: Object.fromEntries(FINGERPRINT_ENV.map((name) => [name, env[name] ?? null])),
+  };
+}
+
+export function depsFingerprint(inputs) {
+  return sha256(canonicalJson(inputs));
+}
+
+/** Every directory and file (size + SHA-256) under root; links are refused. */
+export async function nodeModulesManifest(root, { concurrency = 8 } = {}) {
+  const rootStat = lstatSync(root);
+  if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) {
+    throw new Error(`not a real directory: ${root}`);
+  }
+  const directories = [];
+  const files = [];
+  const visit = (dir) => {
+    for (const name of readdirSync(dir).sort(compareStrings)) {
+      const path = join(dir, name);
+      const stat = lstatSync(path);
+      const rel = portablePath(relative(root, path));
+      if (stat.isSymbolicLink()) throw new Error(`symbolic link in node_modules: ${rel}`);
+      if (stat.isDirectory()) {
+        directories.push(rel);
+        visit(path);
+      } else if (stat.isFile()) files.push({ path, relative: rel, bytes: stat.size, sha256: "" });
+      else throw new Error(`non-file entry in node_modules: ${rel}`);
+    }
+  };
+  visit(root);
+  let next = 0;
+  const worker = async () => {
+    while (next < files.length) {
+      const file = files[next++];
+      file.sha256 = sha256(await readFile(file.path));
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.max(1, Math.min(concurrency, files.length)) }, worker),
+  );
+  const entries = {
+    directories,
+    files: files.map((file) => ({ path: file.relative, bytes: file.bytes, sha256: file.sha256 })),
+  };
+  return { hash: sha256(canonicalJson(entries)), ...entries };
+}
+
+function stampChecksum({ schema, fingerprint, output, removedEntries, removedPaths }) {
+  return sha256(canonicalJson({ schema, fingerprint, output, removedEntries, removedPaths }));
+}
+
+const isSha256 = (value) => typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
+const isNodeModulesPath = (value) =>
+  typeof value === "string" &&
+  value.startsWith("node_modules/") &&
+  !value.split("/").some((part) => part === "" || part === "." || part === "..");
+
+export function readDepsStamp(path) {
+  let raw;
+  try {
+    raw = readFileSync(path, "utf8");
+  } catch (error) {
+    return {
+      ok: false,
+      reason: error?.code === "ENOENT" ? "no stamp" : `stamp unreadable (${error?.code})`,
+    };
+  }
+  let stamp;
+  try {
+    stamp = JSON.parse(raw);
+  } catch {
+    return { ok: false, reason: "stamp is not valid JSON" };
+  }
+  if (!stamp || typeof stamp !== "object" || Array.isArray(stamp)) {
+    return { ok: false, reason: "stamp is not an object" };
+  }
+  if (stamp.schema !== DEPS_STAMP_SCHEMA) return { ok: false, reason: "stamp schema differs" };
+  const valid =
+    isSha256(stamp.fingerprint) &&
+    isSha256(stamp.output) &&
+    isSha256(stamp.checksum) &&
+    Array.isArray(stamp.removedEntries) &&
+    stamp.removedEntries.every(
+      (entry) =>
+        entry &&
+        typeof entry === "object" &&
+        isNodeModulesPath(entry.relative) &&
+        Number.isSafeInteger(entry.bytes) &&
+        entry.bytes >= 0,
+    ) &&
+    Array.isArray(stamp.removedPaths) &&
+    stamp.removedPaths.every(isNodeModulesPath);
+  if (!valid) return { ok: false, reason: "stamp fields are malformed" };
+  if (stampChecksum(stamp) !== stamp.checksum) {
+    return { ok: false, reason: "stamp checksum mismatch" };
+  }
+  return { ok: true, stamp };
+}
+
+/** Reuse only when the stamp, the inputs and the live tree all agree; any doubt copies. */
+export async function decideDepsReuse({ stampPath, fingerprint, liveNodeModules }) {
+  try {
+    const read = readDepsStamp(stampPath);
+    if (!read.ok) return { reuse: false, reason: read.reason };
+    if (read.stamp.fingerprint !== fingerprint) return { reuse: false, reason: "inputs changed" };
+    if (!existsSync(liveNodeModules)) {
+      return { reuse: false, reason: "no previous node_modules" };
+    }
+    const manifest = await nodeModulesManifest(liveNodeModules);
+    if (manifest.hash !== read.stamp.output) {
+      return { reuse: false, reason: "previous node_modules changed since it was stamped" };
+    }
+    return { reuse: true, reason: "inputs and previous node_modules unchanged", stamp: read.stamp };
+  } catch (error) {
+    return { reuse: false, reason: `reuse check failed: ${error.message}` };
+  }
+}
+
+export function invalidateDepsStamp(path) {
+  rmSync(path, { force: true });
+}
+
+export function writeDepsStamp(path, { fingerprint, output, removedEntries, removedPaths }) {
+  const fields = {
+    schema: DEPS_STAMP_SCHEMA,
+    fingerprint,
+    output,
+    removedEntries: removedEntries
+      .map((entry) => ({ relative: entry.relative, bytes: entry.bytes }))
+      .sort((a, b) => compareStrings(a.relative, b.relative)),
+    removedPaths: [...removedPaths].sort(compareStrings),
+  };
+  const temporary = `${path}.${process.pid}.tmp`;
+  writeFileSync(temporary, `${JSON.stringify({ ...fields, checksum: stampChecksum(fields) })}\n`);
+  renameSync(temporary, path);
+}
+
+/** The trim result's node_modules part, as a stamp records it. */
+export function depsStampFields(staged) {
+  return {
+    removedEntries: staged.removed.entries.filter((file) =>
+      file.relative.startsWith("node_modules/"),
+    ),
+    removedPaths: [...staged.packagePrune.removedPaths],
+  };
+}
+
+/** Diff a trimmed candidate against its pre-trim inventory. */
+export function finishStage(stagedOutDir, before, copied, packagePrune, selectedOpenSrcBinary) {
+  const after = inventory(stagedOutDir);
+  const retainedPaths = new Set(after.entries.map((file) => file.relative));
+  const removed = inventoryFromFiles(
+    before.entries.filter((file) => !retainedPaths.has(file.relative)),
+  );
+  return { before, removed, after, copied, packagePrune, selectedOpenSrcBinary };
+}
+
+/**
+ * Fresh: run the full copy + trim. Reuse: move the verified previous trimmed
+ * node_modules into the candidate and rebuild the same inventory a fresh run
+ * reports from the stamp's recorded removals.
+ */
+export async function stageSidecarDependencies({
+  stagedOutDir,
+  plan,
+  freshStage,
+  reuse = null,
+  platform = process.platform,
+  arch = process.arch,
+  rename = renameSync,
+  onReuseMoved = () => {},
+}) {
+  if (!reuse) return freshStage(stagedOutDir, plan);
+  const startedAt = Date.now();
+  const stagedNodeModules = join(stagedOutDir, "node_modules");
+  if (existsSync(stagedNodeModules)) throw new Error("candidate already has node_modules");
+  // node_modules is not here yet, so this only trims skills/motion/bundle maps.
+  const freshRemoved = pruneSourceMaps(stagedOutDir);
+  rename(reuse.liveNodeModules, stagedNodeModules);
+  onReuseMoved();
+  const after = inventory(stagedOutDir);
+  const retainedPaths = new Set(after.entries.map((file) => file.relative));
+  const reusedRemoved = reuse.stamp.removedEntries.map((entry) => ({
+    path: join(stagedOutDir, ...entry.relative.split("/")),
+    relative: entry.relative,
+    bytes: entry.bytes,
+  }));
+  const removedEntries = [...reusedRemoved, ...freshRemoved];
+  for (const file of removedEntries) {
+    if (retainedPaths.has(file.relative)) {
+      throw new Error(`stamp lists a removed file that is still present: ${file.relative}`);
+    }
+  }
+  const byWalkOrder = (a, b) => compareWalkOrder(a.relative, b.relative);
+  const removed = inventoryFromFiles([...removedEntries].sort(byWalkOrder));
+  const before = inventoryFromFiles([...after.entries, ...removedEntries].sort(byWalkOrder));
+  const removedPaths = new Set(reuse.stamp.removedPaths);
+  const packagePrune = {
+    removedPaths,
+    removedBytes: reusedRemoved
+      .filter((file) => removedPaths.has(file.relative))
+      .reduce((sum, file) => sum + file.bytes, 0),
+    sandboxRuntime: sandboxRuntimePath(platform, arch),
+  };
+  console.log(
+    `reused ${plan.files.length} planned files from ${plan.jobs.length} packages in ${((Date.now() - startedAt) / 1000).toFixed(1)}s`,
+  );
+  return {
+    before,
+    removed,
+    after,
+    copied: new Set(plan.jobs.map((job) => job.name)),
+    packagePrune,
+    selectedOpenSrcBinary: selectOpenSrcBinary(),
+  };
+}
+
+export async function buildAndPromoteDirectory(
+  liveDirectory,
+  buildCandidate,
+  validateCandidate,
+  {
+    candidateDirectory = `${liveDirectory}.candidate`,
+    backupDirectory = `${liveDirectory}.previous`,
+    rename = renameSync,
+    remove = rmSync,
+    makeDirectory = mkdirSync,
+    beforeCandidateCleanup,
+  } = {},
+) {
+  if (existsSync(backupDirectory)) {
+    if (existsSync(liveDirectory)) remove(backupDirectory, { recursive: true, force: true });
+    else rename(backupDirectory, liveDirectory);
+  }
+  remove(candidateDirectory, { recursive: true, force: true });
+  makeDirectory(candidateDirectory, { recursive: true });
+
+  let result;
+  try {
+    result = await buildCandidate(candidateDirectory);
+    await validateCandidate(candidateDirectory, result);
+  } catch (error) {
+    if (beforeCandidateCleanup) {
+      try {
+        await beforeCandidateCleanup(candidateDirectory);
+      } catch (hookError) {
+        // Keep the candidate: it may hold the only copy of reused files.
+        throw new AggregateError([error, hookError], "sidecar candidate failed and restore failed");
+      }
+    }
+    try {
+      remove(candidateDirectory, { recursive: true, force: true });
+    } catch (cleanupError) {
+      throw new AggregateError(
+        [error, cleanupError],
+        "sidecar candidate failed and cleanup failed",
+      );
+    }
+    throw error;
+  }
+
+  let movedLive = false;
+  try {
+    if (existsSync(liveDirectory)) {
+      rename(liveDirectory, backupDirectory);
+      movedLive = true;
+    }
+    rename(candidateDirectory, liveDirectory);
+  } catch (error) {
+    try {
+      if (movedLive) rename(backupDirectory, liveDirectory);
+      if (beforeCandidateCleanup) await beforeCandidateCleanup(candidateDirectory);
+      remove(candidateDirectory, { recursive: true, force: true });
+    } catch (rollbackError) {
+      throw new AggregateError([error, rollbackError], "sidecar promotion and rollback failed");
+    }
+    throw error;
+  }
+
+  if (movedLive) {
+    try {
+      remove(backupDirectory, { recursive: true, force: true });
+    } catch (error) {
+      console.warn(`sidecar promoted; stale backup cleanup failed: ${error.message}`);
+    }
+  }
+  return result;
+}
+
+/** Decide, drop the old stamp, then stage; any doubt in the check copies fully. */
+export async function stageWithDepsReuse({
+  stagedOutDir,
+  plan,
+  freshStage,
+  stampPath = depsStampPath,
+  liveNodeModules = nodeModulesOut,
+  collectInputs = (planned) => collectDepsFingerprintInputs({ plan: planned }),
+  decide = decideDepsReuse,
+  reuseState = { moved: false },
+  platform,
+  arch,
+}) {
+  const checkStartedAt = Date.now();
+  let fingerprint = null;
+  let decision;
+  try {
+    fingerprint = depsFingerprint(collectInputs(plan));
+    decision = await decide({ stampPath, fingerprint, liveNodeModules });
+  } catch (error) {
+    decision = { reuse: false, reason: `reuse check failed: ${error.message}` };
+  }
+  console.log(
+    `sidecar deps: ${decision.reuse ? "reusing previous node_modules" : "full copy"} (${decision.reason}; checked in ${((Date.now() - checkStartedAt) / 1000).toFixed(1)}s)`,
+  );
+  // An interrupted run must leave no stamp behind.
+  invalidateDepsStamp(stampPath);
+  const staged = await stageSidecarDependencies({
+    stagedOutDir,
+    plan,
+    freshStage,
+    reuse: decision.reuse ? { liveNodeModules, stamp: decision.stamp } : null,
+    platform,
+    arch,
+    onReuseMoved: () => {
+      reuseState.moved = true;
+    },
+  });
+  return { ...staged, fingerprint, decision };
+}
+
+/** Put the reused tree back so a failed build leaves the live sidecar whole. */
+export function depsReuseRestoreHook({
+  reuseState,
+  liveNodeModules = nodeModulesOut,
+  rename = renameSync,
+}) {
+  return (candidate) => {
+    const moved = join(candidate, "node_modules");
+    if (reuseState.moved && existsSync(moved) && !existsSync(liveNodeModules)) {
+      rename(moved, liveNodeModules);
+      reuseState.moved = false;
+    }
+  };
+}
+
+/** Stamp the promoted tree; on any failure delete the stamp so the next run copies fully. */
+export async function recordDepsStamp(
+  result,
+  { stampPath = depsStampPath, liveNodeModules = nodeModulesOut, write = writeDepsStamp } = {},
+) {
+  if (!result.fingerprint) return false;
+  const startedAt = Date.now();
+  try {
+    const manifest = await nodeModulesManifest(liveNodeModules);
+    write(stampPath, {
+      fingerprint: result.fingerprint,
+      output: manifest.hash,
+      ...depsStampFields(result),
+    });
+    console.log(
+      `sidecar deps: stamp written (${manifest.files.length} files hashed in ${((Date.now() - startedAt) / 1000).toFixed(1)}s)`,
+    );
+    return true;
+  } catch (error) {
+    invalidateDepsStamp(stampPath);
+    console.warn(`sidecar deps: stamp not written (${error.message}); next run copies fully`);
+    return false;
+  }
+}
+
+async function main(argv) {
+  const { reuseDeps } = parseBundleArgs(argv);
+  if (!existsSync(sidecarEntry)) {
+    throw new Error(`sidecar entry missing: ${sidecarEntry} (build @kenkaiiii/ggcoder first)`);
+  }
+  if (!existsSync(bundledSkillsSource)) {
+    throw new Error(`bundled skills missing: ${bundledSkillsSource}`);
+  }
+  if (!existsSync(join(motionBundleSource, "plugin.json"))) {
+    throw new Error(`motion bundle missing: ${motionBundleSource}`);
+  }
+
+  const reuseState = { moved: false };
+  const result = await buildAndPromoteDirectory(
+    outDir,
+    async (stagedOutDir) => {
+      const stagedOutFile = join(stagedOutDir, "app-sidecar.mjs");
+      const stagedNodeModulesOut = join(stagedOutDir, "node_modules");
+      cpSync(bundledSkillsSource, join(stagedOutDir, "skills"), { recursive: true });
+      cpSync(motionBundleSource, join(stagedOutDir, "motion"), {
+        recursive: true,
+        filter: (source) => {
+          const parts = relative(motionBundleSource, source).split(sep);
+          // Scratch files and After Effects sources are never release assets.
+          return !(parts.includes("__pycache__") || /\.(?:aep|aepx|pyc)$/i.test(source));
+        },
+      });
+
+      await build({
+        entryPoints: [sidecarEntry],
+        outfile: stagedOutFile,
+        bundle: true,
+        // Trim formatting without changing identifiers or syntax.
+        minifyWhitespace: true,
+        platform: "node",
+        format: "esm",
+        target: "node22",
+        external: EXTERNAL,
+        // ESM bundles that reference `require`/__dirname need a banner shim so the
+        // few CJS-interop call sites in dependencies keep working under Node ESM.
+        banner: {
+          js: [
+            "import { createRequire as __ggCreateRequire } from 'node:module';",
+            "import { fileURLToPath as __ggFileURLToPath } from 'node:url';",
+            "import { dirname as __ggDirname } from 'node:path';",
+            "const require = __ggCreateRequire(import.meta.url);",
+            "const __filename = __ggFileURLToPath(import.meta.url);",
+            "const __dirname = __ggDirname(__filename);",
+          ].join("\n"),
+        },
+        logLevel: "info",
+      });
+
+      const copied = new Set();
+      const ggcoderRoot = join(repoRoot, "packages", "ggcoder");
+      const copyStartedAt = Date.now();
+      const plan = planDependencyCopy(EXTERNAL, ggcoderRequire, ggcoderRoot, copied, {
+        destination: stagedNodeModulesOut,
+      });
+      const freshStage = async (directory, planned) => {
+        const copiedFiles = await copyPlannedFiles(planned);
+        console.log(
+          `copied ${copiedFiles.files} files from ${copiedFiles.packages} packages in ${((Date.now() - copyStartedAt) / 1000).toFixed(1)}s`,
+        );
+        pruneForeignNativePayloads(directory);
+        const before = inventory(directory);
+        pruneSourceMaps(directory);
+        const packagePrune = pruneAllowlistedPackagePayloads(join(directory, "node_modules"));
+        const opensrc = pruneForeignOpenSrcBinaries(directory);
+        return finishStage(directory, before, copied, packagePrune, opensrc.selectedName);
+      };
+      if (!reuseDeps) return stageSidecarDependencies({ stagedOutDir, plan, freshStage });
+      return stageWithDepsReuse({ stagedOutDir, plan, freshStage, reuseState });
+    },
+    (stagedOutDir, staged) => {
+      renderInventory(staged.before, staged.removed, staged.after);
+      console.log(
+        `GG_SIDECAR_SIZE_JSON=${inventoryJson(staged.before, staged.removed, staged.after)}`,
+      );
+      assertPrunedLayout(
+        stagedOutDir,
+        staged.before,
+        staged.removed,
+        staged.after,
+        staged.selectedOpenSrcBinary,
+        staged.packagePrune,
+      );
+    },
+    reuseDeps ? { beforeCandidateCleanup: depsReuseRestoreHook({ reuseState }) } : {},
+  );
+  if (reuseDeps) await recordDepsStamp(result);
+
+  console.log(
+    `bundled sidecar → ${outFile}\ncopied ${result.copied.size} external packages → ${nodeModulesOut}`,
+  );
+}
+
+const invokedDirectly =
+  process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url));
+if (invokedDirectly) {
+  main(process.argv.slice(2)).catch((err) => {
+    console.error(err);
+    process.exit(1);
+  });
+}

@@ -1,0 +1,628 @@
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { Badge } from "./Badge";
+import { theme } from "./theme";
+import type { AskAnswerDelta, AskAnswers, AskOption, AskQuestion, AskUserPrompt } from "./ask-user";
+
+/**
+ * The in-thread question band (design-lab: ask-band-resolved.html).
+ *
+ * Sits inside the reply, full-bleed and tinted, so it scrolls with history and
+ * owns no app chrome. Every question looks the same: one stack of full-width
+ * option rows, whatever its kind. A yes/no confirm laid out as inline chips
+ * read as a different component from a choice laid out as rows, so the chip
+ * layout is gone — there is one shape, and two questions cannot disagree.
+ *
+ * Typing any character routes to the composer (that is the free-text path),
+ * and answering the last open question commits the band. A band of several
+ * questions also keeps one Send control: without it, a question the user
+ * meant to skip (an "optional" text prompt, a multi-select where none apply,
+ * ticks never confirmed) left the card with nothing that would send, and the
+ * user could only stop the run.
+ *
+ * Until then every pick stays on screen as a filled row, so an answer given
+ * early can still be changed while the rest are being decided.
+ */
+
+/**
+ * The pick that completes the band holds its fill for HOLD_MS, then the card
+ * dissolves out over EXIT_MS before the answer is sent (sending moves the
+ * answer to the end of the chat, so without the beat the chosen row was never
+ * seen filled: the card just vanished under the pointer). Equal to
+ * `--dur-ask-hold` / `--dur-strip-out` in App.css (the exit shares the composer
+ * strips' speed, so the chat column has one leaving speed);
+ * scripts/motion-tokens.test.mjs enforces it.
+ */
+const HOLD_MS = 160;
+const EXIT_MS = 220;
+/** A number key's press dip on its row. Equal to `--dur-press` in App.css. */
+const KEY_PRESS_MS = 100;
+
+const Check = (): React.ReactElement => (
+  <svg
+    className="ask-check"
+    width="13"
+    height="13"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="3"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    aria-hidden="true"
+  >
+    <polyline points="20 6 9 17 4 12" />
+  </svg>
+);
+
+const valueOf = (option: AskOption): string => option.value ?? option.label;
+
+/**
+ * Free text is offered everywhere except when the model opts out. A `text`
+ * question has its own field in the band; on any other question typing a
+ * character hands over to the composer.
+ */
+const allowsText = (q: AskQuestion): boolean => q.kind === "text" || q.allowOther !== false;
+
+/**
+ * An answered question, collapsed. Reuses the transcript's shimmer label (the
+ * same treatment as the "ideal?" hook) so a resolved ask reads as one of the
+ * app's own quiet status lines rather than a green form-validation tick.
+ *
+ * The shimmer marks the moment of answering: it sweeps a couple of times when
+ * the answer lands (`live`) and then rests. It used to loop forever, so every
+ * answered question in a long chat kept animating, and opening history
+ * replayed them all.
+ */
+function AnsweredLine({ text, live }: { text: string; live: boolean }): React.ReactElement {
+  return (
+    <div className="ask-answered" aria-live="polite">
+      <span className={`user-msg ask-answered-bubble${live ? " is-live" : ""}`}>
+        <span className="shimmer-text">{text}</span>
+      </span>
+    </div>
+  );
+}
+
+/**
+ * The keyboard hint under an open band, for the first unanswered question (the
+ * one the number keys and typing go to). Typing your own answer has no button
+ * of its own, so without this line nobody finds it.
+ */
+function keyHint(question: AskQuestion | undefined): string | null {
+  if (!question || question.kind === "text") return null;
+  const count = Math.min(question.options?.length ?? 0, 9);
+  const pick =
+    question.kind === "multi"
+      ? "Pick any that apply, then confirm"
+      : count > 1
+        ? `Press 1–${count} to choose`
+        : count === 1
+          ? "Press 1 to choose"
+          : null;
+  const type = allowsText(question) ? "start typing to answer in your own words" : null;
+  if (pick && type) return `${pick}, or ${type}.`;
+  if (pick) return `${pick}.`;
+  return type ? `${type.charAt(0).toUpperCase()}${type.slice(1)}.` : null;
+}
+
+/**
+ * A question's detail, exactly as the agent wrote it. Some details are the very
+ * thing being approved (a file-by-file write plan, a dirty-path list), so line
+ * breaks and indentation are kept and a long one scrolls inside a capped box
+ * instead of stretching the card past its options. Only an overflowing box
+ * becomes a labelled tab stop, so keyboard users can scroll it while short
+ * details add no extra stop.
+ */
+function AskDetail({ text, label }: { text: string; label: string }): React.ReactElement {
+  const ref = useRef<HTMLParagraphElement>(null);
+  const [scrollable, setScrollable] = useState(false);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const measure = (): void => setScrollable(el.scrollHeight > el.clientHeight + 1);
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [text]);
+  return (
+    <p
+      ref={ref}
+      className="ask-detail"
+      {...(scrollable ? { tabIndex: 0, role: "region", "aria-label": `Details: ${label}` } : {})}
+    >
+      {text}
+    </p>
+  );
+}
+
+/** One question: a heading and its stack of option rows. */
+function Question({
+  question,
+  index,
+  numbered,
+  answer,
+  draft,
+  onAnswer,
+  onDraft,
+  onTypeInstead,
+}: {
+  question: AskQuestion;
+  /** 1-based accelerator offset across the whole band (0 = not accelerated). */
+  index: number;
+  numbered: boolean;
+  answer: string | string[] | undefined;
+  /** A multi-select's picks not yet sent. Owned by the band, whose footer sends them. */
+  draft: string[] | undefined;
+  /** `undefined` clears a confirmed multi-select whose last tick was removed. */
+  onAnswer: (value: string | string[] | undefined) => void;
+  onDraft: (picks: string[]) => void;
+  onTypeInstead: () => void;
+}): React.ReactElement {
+  const options = question.options ?? [];
+  const multi = question.kind === "multi";
+
+  // A question that asks for information (a URL, a name) has nothing to click:
+  // it gets its own field right under the question, so the answer is typed
+  // where it's asked. It used to hand off to the chat composer, which in a
+  // card of several questions left the user looking for where to type.
+  const isText = question.kind === "text";
+  const saved = typeof answer === "string" ? answer : "";
+  // null until the user types, so a saved answer (from history, or given
+  // already) shows in the field without being copied into local state.
+  const [typedDraft, setTypedDraft] = useState<string | null>(null);
+  const shown = typedDraft ?? saved;
+  const submitTyped = (): void => {
+    const value = shown.trim();
+    if (value && value !== saved) onAnswer(value);
+  };
+
+  // A multi-select parks its picks in the band's drafts: "two of these three" is
+  // not an answer until the user says they are done, and nothing else in the
+  // band can tell a half-made selection from a finished one. Every other kind
+  // answers on the click itself, so its selection IS `answer`.
+  //
+  // `draft` starts undefined and only exists once the user touches a checkbox,
+  // so an already-answered multi (restored from history, or re-rendered while
+  // its neighbours are still open) shows the committed picks rather than an
+  // empty list.
+  const committed = Array.isArray(answer) ? answer : answer === undefined ? [] : [answer];
+  const picked = multi ? (draft ?? committed) : committed;
+  const isOn = (value: string): boolean => (multi ? picked.includes(value) : answer === value);
+  const toggle = (value: string): void => {
+    const next = picked.includes(value) ? picked.filter((v) => v !== value) : [...picked, value];
+    onDraft(next);
+    // Already confirmed once: keep the committed answer in step with what is on
+    // screen, or a later question's answer would commit the band with the stale
+    // selection while the rows show the new one.
+    if (answer !== undefined) onAnswer(next.length > 0 ? next : undefined);
+  };
+
+  // Every option is the app's standard pill: ghost by default, primary only
+  // when it is actually selected. The recommendation is marked with the shared
+  // .badge, so color stays a data signal instead of decoration.
+  const optionButton = (option: AskOption, position: number): React.ReactElement => {
+    const value = valueOf(option);
+    const on = isOn(value);
+    // One leading slot for every kind, so labels line up across a band: a
+    // keycap with the number key for a single choice, a checkbox for a multi.
+    const lead = multi ? (
+      <span className={`ask-box${on ? " is-on" : ""}`} aria-hidden="true">
+        {on && <Check />}
+      </span>
+    ) : position <= 9 ? (
+      <span className="ask-num" aria-hidden="true">
+        {position}
+      </span>
+    ) : (
+      <span className="ask-num ask-num-empty" aria-hidden="true" />
+    );
+    // Green: the recommendation is the one affirmative signal in the list, and
+    // a neutral pill was indistinguishable from the row's own raised fill. On a
+    // selected pill it switches to the fill's own ink — light green on the
+    // periwinkle fill measures ~1.3:1, which is not a readable badge.
+    const tag = option.recommended ? (
+      <Badge color={on ? theme.onPrimary : theme.success}>Recommended</Badge>
+    ) : null;
+    return (
+      <button
+        key={option.label}
+        type="button"
+        className={`btn btn-sm ${on ? "btn-primary" : "btn-ghost"}`}
+        aria-pressed={on}
+        {...(multi ? {} : { "data-ask-option": true })}
+        onClick={() => (multi ? toggle(value) : onAnswer(value))}
+      >
+        {lead}
+        {option.hint ? (
+          <span className="ask-row-main">
+            <span>{option.label}</span>
+            <span className="ask-row-hint">{option.hint}</span>
+          </span>
+        ) : (
+          <span>{option.label}</span>
+        )}
+        {tag}
+      </button>
+    );
+  };
+
+  // A typed answer matches no option, so it gets a row of its own rather than
+  // leaving the question looking untouched. Pressing it reopens the composer,
+  // which is also the only way back out of one.
+
+  const typed =
+    !isText &&
+    typeof answer === "string" &&
+    !options.some((option) => valueOf(option) === answer) ? (
+      <button
+        type="button"
+        className="btn btn-sm btn-primary"
+        aria-pressed="true"
+        onClick={onTypeInstead}
+      >
+        <span className="ask-num ask-num-empty" aria-hidden="true" />
+        <span>{answer}</span>
+      </button>
+    ) : null;
+
+  return (
+    <div
+      className="ask-subq"
+      data-ask-question={question.id}
+      // A multi-select with picks counts as answered for the keyboard: the
+      // number keys and the hint move on to the next question while its picks
+      // wait for the footer.
+      {...(answer !== undefined || (multi && picked.length > 0)
+        ? { "data-ask-answered": true }
+        : {})}
+    >
+      <p className="ask-subq-q">
+        {numbered && <span className="ask-subq-num">{index}</span>}
+        {question.question}
+      </p>
+      {question.detail && <AskDetail text={question.detail} label={question.question} />}
+      {/* `typed` is checked too: a `text` question carries no options at all, so
+          guarding on options alone left it showing nothing but its heading once
+          answered. */}
+      {(options.length > 0 || typed) && (
+        <div className="ask-options" role="group" aria-label={question.question}>
+          {options.map((option, i) => optionButton(option, i + 1))}
+          {typed}
+        </div>
+      )}
+      {isText && (
+        <form
+          className="ask-text"
+          onSubmit={(e) => {
+            e.preventDefault();
+            submitTyped();
+          }}
+        >
+          <input
+            className="modal-input ask-text-input"
+            aria-label={question.question}
+            placeholder="Type your answer"
+            value={shown}
+            autoComplete="off"
+            spellCheck={false}
+            onChange={(e) => setTypedDraft(e.target.value)}
+            // Typing here belongs to this field, not the band's number keys.
+            onKeyDown={(e) => e.stopPropagation()}
+          />
+          <button
+            type="submit"
+            className="btn btn-sm btn-primary"
+            disabled={!shown.trim() || shown.trim() === saved}
+          >
+            {saved && shown.trim() === saved ? "Answered" : "Answer"}
+          </button>
+        </form>
+      )}
+    </div>
+  );
+}
+
+export function AskBand({
+  prompt,
+  answers = {},
+  sent,
+  answeredLive,
+  cancelled,
+  deferred,
+  onAnswer,
+  onTypeInstead,
+}: {
+  prompt: AskUserPrompt;
+  /**
+   * Answers so far, owned by App. The band is deliberately controlled: a typed
+   * answer arrives from the composer, outside this component, so local state
+   * here would fork from the real one.
+   */
+  answers?: AskAnswers;
+  /** The answers have been sent to the blocked tool call — collapse the band. */
+  sent?: boolean;
+  /**
+   * Answered just now in this window. The answered band moves to the end of the
+   * chat as a new row, so it mounts already sent; this keeps its shimmer (the
+   * mark of the moment of answering) instead of treating it as restored.
+   */
+  answeredLive?: boolean;
+  /** The run ended without an answer — the question is dead, say so quietly. */
+  cancelled?: boolean;
+  /**
+   * The soft deadline passed and the agent continued on its best guess. The
+   * band stays fully answerable — a later answer is sent as a message.
+   */
+  deferred?: boolean;
+  /**
+   * Report answered questions. App merges, then settles once none are left —
+   * or at once when `sendNow` is set, leaving the rest unanswered.
+   */
+  onAnswer: (delta: AskAnswerDelta, sendNow?: boolean) => void;
+  /** The user wants to write their own answer: focus the composer, seeded. */
+  onTypeInstead: (questionId: string, seed?: string) => void;
+}): React.ReactElement {
+  const bandRef = useRef<HTMLDivElement | null>(null);
+  const questions = prompt.questions;
+  const done = sent === true;
+
+  // A narrower window can wrap the review and move its focused option below
+  // the transcript viewport. Preserve visibility, not a new focus or answer.
+  useEffect(() => {
+    if (done || cancelled) return;
+    const keepFocusedOptionVisible = (): void => {
+      const active = document.activeElement;
+      if (active instanceof HTMLElement && bandRef.current?.contains(active)) {
+        active.scrollIntoView({ block: "nearest", inline: "nearest" });
+      }
+    };
+    window.addEventListener("resize", keepFocusedOptionVisible);
+    return () => window.removeEventListener("resize", keepFocusedOptionVisible);
+  }, [done, cancelled]);
+
+  // Collapsing to the answered/cancelled line dissolves in, but only when it
+  // happens while the band is on screen; a restored, already-settled question
+  // lands as it is.
+  const [settledAtMount] = useState(done || Boolean(cancelled));
+  const settleClass = settledAtMount ? "" : " dissolve-in";
+
+  // Multi-select picks not yet sent, by question id. They live here, not in
+  // each question, because the one button that sends them sits at the foot of
+  // the whole band: it used to sit under the multi-select itself, so in a band
+  // of four the send was hiding under question two.
+  const [drafts, setDrafts] = useState<Record<string, string[]>>({});
+
+  // The answer that completes the band, held for the commit beat (see HOLD_MS).
+  // The ref owns the timer so the parent re-rendering mid-beat (streaming does)
+  // cannot restart it, and an unmount mid-beat still sends what was picked.
+  const [committing, setCommitting] = useState<AskAnswerDelta | null>(null);
+  const commitRef = useRef<{ delta: AskAnswerDelta; timer: ReturnType<typeof setTimeout> } | null>(
+    null,
+  );
+  const onAnswerRef = useRef(onAnswer);
+  useEffect(() => {
+    onAnswerRef.current = onAnswer;
+  });
+  useEffect(
+    () => () => {
+      const pending = commitRef.current;
+      if (!pending) return;
+      clearTimeout(pending.timer);
+      commitRef.current = null;
+      onAnswerRef.current(pending.delta);
+    },
+    [],
+  );
+
+  const report = (delta: AskAnswerDelta): void => {
+    if (commitRef.current) return;
+    const merged = { ...answers, ...delta };
+    const completes = questions.every((q) => merged[q.id] !== undefined);
+    // No animation engine (jsdom) means no exit to wait for. Reduced motion
+    // still gets the beat: its CSS swaps the dissolve for a plain fade.
+    const immediate = typeof Element.prototype.animate !== "function";
+    if (!completes || immediate) {
+      onAnswer(delta);
+      return;
+    }
+    const timer = setTimeout(() => {
+      commitRef.current = null;
+      onAnswerRef.current(delta);
+    }, HOLD_MS + EXIT_MS);
+    commitRef.current = { delta, timer };
+    setCommitting(delta);
+  };
+
+  // Number accelerators + type-to-open. Both are deliberately inert while the
+  // user is typing anywhere else (the composer is a focused textarea), so the
+  // band never steals a keystroke meant for the prompt box.
+  useEffect(() => {
+    if (done || cancelled) return;
+    const onKey = (e: KeyboardEvent): void => {
+      // Mid commit beat the answer is already decided; a second key must not
+      // change it or open the composer under a card that is leaving.
+      if (commitRef.current) return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      // The target is the document itself when nothing is focused, so this
+      // cannot assume an Element.
+      const target = e.target;
+      // The app keeps the composer focused, so an EMPTY composer still lets
+      // the number keys pick (live: "Press 1–2 to choose" never worked).
+      // Once anything is typed there, digits are part of the message.
+      const emptyComposer =
+        target instanceof HTMLTextAreaElement &&
+        target.hasAttribute("data-composer-input") &&
+        target.value === "";
+      if (
+        target instanceof Element &&
+        target.closest("input, textarea, [contenteditable='true']") &&
+        !(emptyComposer && /^[1-9]$/.test(e.key))
+      ) {
+        return;
+      }
+      const band = bandRef.current;
+      if (!band) return;
+      // The first still-UNANSWERED question owns the keyboard: in a form every
+      // question stays on screen after it is answered, so plain
+      // `[data-ask-question]` would keep aiming the number keys at the first
+      // one the user already settled.
+      const open = band.querySelector<HTMLElement>("[data-ask-question]:not([data-ask-answered])");
+      if (!open) return;
+      if (/^[1-9]$/.test(e.key)) {
+        const options = open.querySelectorAll<HTMLButtonElement>("[data-ask-option]");
+        const button = options[Number(e.key) - 1];
+        if (button) {
+          e.preventDefault();
+          // A scripted click never matches :active, so a number key would pick
+          // with no press at all; this gives its row the same dip a click has.
+          button.setAttribute("data-key-press", "");
+          setTimeout(() => button.removeAttribute("data-key-press"), KEY_PRESS_MS);
+          button.click();
+        }
+        return;
+      }
+      // Any printed character means they want to write their own answer: send
+      // them to the composer they already type in, carrying the keystroke,
+      // rather than opening a second input inside the transcript. With the
+      // "Something else" button gone this is the whole free-text path, so it has
+      // to honour the opt-out the button used to enforce.
+      if (e.key.length === 1 && e.key !== " ") {
+        const id = open.dataset.askQuestion;
+        const question = questions.find((q) => q.id === id);
+        if (id && question && allowsText(question)) {
+          e.preventDefault();
+          onTypeInstead(id, e.key);
+        }
+      }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [done, cancelled, onTypeInstead, questions]);
+
+  if (cancelled && !done) {
+    return (
+      <div className={`ask-band is-closed${settleClass}`} data-swap-row="">
+        <span className="ask-closed">
+          This question was cancelled, so it no longer needs an answer.
+        </span>
+      </div>
+    );
+  }
+
+  if (done) {
+    const text = questions
+      .map((q) => {
+        const value = answers[q.id];
+        // Labels are display-only; keep the original values for exact host approval.
+        const labelOf = (pick: string): string =>
+          q.options?.find((option) => valueOf(option) === pick)?.label ?? pick;
+        return Array.isArray(value)
+          ? value.map(labelOf).join(", ")
+          : value === undefined
+            ? undefined
+            : labelOf(value);
+      })
+      .filter(Boolean)
+      .join(" · ");
+    return (
+      <div className={`ask-band is-done${settleClass}`} data-swap-row="">
+        <AnsweredLine text={text} live={!settledAtMount || answeredLive === true} />
+      </div>
+    );
+  }
+
+  // Several questions are numbered so the accelerator keys have something to
+  // refer to; a lone question needs no "1.".
+  const numbered = questions.length > 1;
+  const shown: AskAnswerDelta = committing ? { ...answers, ...committing } : answers;
+  const picksOf = (q: AskQuestion): string[] => drafts[q.id] ?? [];
+  // What the band would send now: committed answers plus every multi-select
+  // that has picks.
+  const isSettled = (q: AskQuestion): boolean =>
+    shown[q.id] !== undefined || (q.kind === "multi" && picksOf(q).length > 0);
+  const hint = keyHint(questions.find((q) => !isSettled(q)));
+
+  // The footer holds the band's one send. A multi-select needs it because its
+  // selection cannot commit itself ("Tests and Build" and "Tests, so far" look
+  // identical). Fork: a band of several questions also gets it so the user can
+  // send what they have answered and skip the rest.
+  const multis = questions.filter((q) => q.kind === "multi");
+  const remaining = questions.filter((q) => !isSettled(q)).length;
+  const answeredCount = questions.length - remaining;
+  const sendPicks = (): void => {
+    if (commitRef.current) return;
+    const delta: AskAnswerDelta = {};
+    for (const q of multis) {
+      const picks = drafts[q.id];
+      if (picks && picks.length > 0) delta[q.id] = picks;
+    }
+    // Everything answered: the normal commit beat. Otherwise send now and let
+    // the unanswered questions go as skipped.
+    if (remaining === 0) report(delta);
+    else onAnswer(delta, true);
+  };
+  const lone = questions.length === 1 ? questions[0] : undefined;
+  const footLabel = lone
+    ? picksOf(lone).length === 0
+      ? "Choose at least one"
+      : `Confirm ${picksOf(lone).length} selected`
+    : "Send answers";
+
+  return (
+    <div
+      className={`ask-band${committing ? " is-committing" : ""}`}
+      inert={committing !== null}
+      data-swap-row=""
+      ref={bandRef}
+      role="group"
+      aria-label="GG Coder needs your answer"
+      data-ask-prompt={prompt.id}
+    >
+      {/* A status note about the run, set apart from the question below it. */}
+      {/* A human-driven run's question has no deadline: the agent never stops
+          waiting on its own, so the note would be false there. */}
+      {deferred && prompt.noDeadline !== true && (
+        <p className="ask-deferred-note" role="status">
+          The agent stopped waiting — your answer will still be sent
+        </p>
+      )}
+      {questions.map((q, i) => (
+        <Question
+          key={q.id}
+          question={q}
+          index={i + 1}
+          numbered={numbered}
+          answer={shown[q.id]}
+          draft={drafts[q.id]}
+          onAnswer={(value) => report({ [q.id]: value })}
+          onDraft={(picks) => setDrafts((current) => ({ ...current, [q.id]: picks }))}
+          onTypeInstead={() => onTypeInstead(q.id)}
+        />
+      ))}
+      {hint && <p className="ask-hint">{hint}</p>}
+      {(numbered || multis.length > 0) && (
+        // Fork: .ask-send lays the skipped-count note beside the button.
+        <div className={numbered ? "ask-foot ask-send" : "ask-foot"}>
+          <button
+            type="button"
+            className="btn btn-sm btn-primary"
+            data-ask-send=""
+            disabled={lone ? remaining > 0 : answeredCount === 0}
+            onClick={sendPicks}
+          >
+            {footLabel}
+          </button>
+          {numbered && (
+            <span className="ask-send-note" aria-live="polite">
+              {remaining === 0
+                ? "All questions answered"
+                : `${answeredCount} of ${questions.length} answered — the rest are sent as skipped`}
+            </span>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}

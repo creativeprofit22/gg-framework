@@ -1,0 +1,6 @@
+{
+  "id": "pricing-toggle", "name": "Pricing toggle", "kind": "ui",
+  "description": "An illustrative monthly-to-yearly plan switch with an animated rate and explicit billing terms. Replace sample prices before use.",
+  "tags": ["pricing", "product", "toggle"], "fonts": [], "duration": 5,
+  "previewAt": 3, "license": "original", "previewLook": "soft-light-ad"
+}

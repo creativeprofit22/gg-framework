@@ -3,16 +3,18 @@
  *
  * Every error users see should answer one question: "is this me or them?"
  * That answer drives whether they retry, switch model, log in, or report a
- * ggcoder bug. The `FormattedError` shape captures it in plain English:
+ * GG Coder bug. The `FormattedError` shape captures it in plain English:
  *
  *   ✗ OpenAI returned an error.
  *     An error occurred while processing your request...
- *     → This is an OpenAI issue, not ggcoder. Retry — if it persists, check status.openai.com.
+ *     → This is an OpenAI issue, not GG Coder. Retry — if it persists, check status.openai.com.
  *
- *   ✗ ggcoder hit an unexpected error.
+ *   ✗ GG Coder hit an unexpected error.
  *     Cannot read property 'foo' of undefined
- *     → This is a ggcoder bug — please report it.
+ *     → This is a GG Coder bug — please report it.
  */
+
+import { parseFastModeRejection } from "./fast-mode.js";
 
 export type ErrorSource = "provider" | "ggcoder" | "network" | "auth" | "capability";
 
@@ -94,6 +96,24 @@ export class VideoUnsupportedError extends GGAIError {
   }
 }
 
+/**
+ * Every automatic retry connected to the provider but the reply never finished:
+ * the provider went silent mid-response (or the full non-streamed reply never
+ * arrived in time). Distinct from "couldn't reach the provider" — the network
+ * worked, the response was too slow or too large to complete.
+ * `inToolCall` is set when the replies kept dying while the model was still
+ * writing a tool call's arguments, which is almost always one oversized write.
+ */
+export class ResponseStalledError extends GGAIError {
+  readonly inToolCall: boolean;
+
+  constructor(message: string, options: { inToolCall: boolean; hint?: string; cause?: unknown }) {
+    super(message, { source: "network", hint: options.hint, cause: options.cause });
+    this.name = "ResponseStalledError";
+    this.inToolCall = options.inToolCall;
+  }
+}
+
 export class ProviderError extends GGAIError {
   readonly provider: string;
   readonly statusCode?: number;
@@ -109,10 +129,12 @@ export class ProviderError extends GGAIError {
       hint?: string;
       cause?: unknown;
       resetsAt?: number;
+      /** `"auth"` for credential rejections (HTTP 401/403). Default `"provider"`. */
+      source?: "provider" | "auth";
     },
   ) {
     super(message, {
-      source: "provider",
+      source: options?.source ?? "provider",
       requestId: options?.requestId,
       hint: options?.hint,
       cause: options?.cause,
@@ -130,6 +152,7 @@ export class ProviderError extends GGAIError {
  */
 const PROVIDER_DISPLAY: Record<string, string> = {
   openai: "OpenAI",
+  azure: "Azure OpenAI",
   anthropic: "Anthropic",
   gemini: "Gemini",
   glm: "Z.AI (GLM)",
@@ -137,6 +160,8 @@ const PROVIDER_DISPLAY: Record<string, string> = {
   deepseek: "DeepSeek",
   openrouter: "OpenRouter",
   sakana: "Sakana",
+  xai: "xAI (Grok)",
+  huggingface: "Hugging Face",
   xiaomi: "Xiaomi (MiMo)",
   minimax: "MiniMax",
 };
@@ -145,6 +170,7 @@ const PROVIDER_DISPLAY: Record<string, string> = {
 const PROVIDER_STATUS_URL: Record<string, string> = {
   openai: "status.openai.com",
   anthropic: "status.anthropic.com",
+  xai: "status.x.ai",
 };
 
 function providerDisplayName(provider: string): string {
@@ -187,6 +213,9 @@ export function isHardBillingMessage(message: string): boolean {
     lower.includes("recharge") ||
     lower.includes("balance is too low") ||
     lower.includes("out of credits") ||
+    // Anthropic fast mode when usage credits can't pay (see fast-mode.ts).
+    lower.includes("usage credits are required") ||
+    lower.includes("fast mode unavailable") ||
     lower.includes("arrears") ||
     lower.includes("arrearage") ||
     lower.includes("token quota") ||
@@ -199,7 +228,7 @@ export function isHardBillingMessage(message: string): boolean {
 }
 
 /** Format a unix-seconds reset timestamp for display, e.g. "3:45 PM". */
-function formatResetTime(resetsAt: number): string {
+export function formatResetTime(resetsAt: number): string {
   const when = new Date(resetsAt * 1000);
   const sameDay = when.toDateString() === new Date().toDateString();
   return sameDay
@@ -249,6 +278,26 @@ export function isRawJsonErrorEcho(message: string): boolean {
   }
 }
 
+/**
+ * Detect a raw HTML document returned by a provider edge, proxy, or status page.
+ * SDKs preserve non-JSON response bodies in `err.message`, sometimes prefixed by
+ * the HTTP status. HTML is diagnostic transport debris, not a user-facing error.
+ */
+export function isRawHtmlErrorEcho(message: string): boolean {
+  const withoutStatus = message
+    .trimStart()
+    .replace(/^\d{3}\s+/, "")
+    .trimStart();
+  return /^<!doctype\s+html(?:\s|>)/i.test(withoutStatus) || /^<html(?:\s|>)/i.test(withoutStatus);
+}
+
+/** Clean fallback when an API endpoint returned an HTML page instead of API JSON. */
+export function providerHtmlErrorMessage(statusCode: number | undefined): string {
+  return statusCode
+    ? `The provider returned an HTML error page (HTTP ${statusCode}) instead of an API response.`
+    : "The provider returned an HTML error page instead of an API response.";
+}
+
 /** Clean fallback message when a provider's error body carried no usable text. */
 export function emptyProviderErrorMessage(statusCode: number | undefined): string {
   return statusCode
@@ -259,7 +308,7 @@ export function emptyProviderErrorMessage(statusCode: number | undefined): strin
 export function formatError(err: unknown): FormattedError {
   if (err instanceof ProviderError) {
     const name = providerDisplayName(err.provider);
-    const cleanMessage = cleanProviderMessage(err.message);
+    const cleanMessage = cleanProviderMessage(err.message, err.statusCode);
     if (isMythosAccessError(cleanMessage)) {
       return {
         headline: "Claude Mythos 5 is invitation-only.",
@@ -270,9 +319,26 @@ export function formatError(err: unknown): FormattedError {
         statusCode: err.statusCode,
         ...(err.requestId ? { requestId: err.requestId } : {}),
         guidance:
-          "Request access via your Anthropic account team (see platform.claude.com/docs/en/about-claude/models/overview), or switch to claude-fable-5 with /model — same underlying model, generally available.",
+          "Request access via your Anthropic account team (see platform.claude.com/docs/en/about-claude/models/overview), or switch to Claude Fable 5.1 via the model selector — same underlying model, generally available.",
       };
     }
+    // Fast mode rejections must never read as the plan's usage running out:
+    // they bill usage credits, which is real money the user controls.
+    const fastRejection =
+      err.provider === "anthropic" ? parseFastModeRejection(err.message) : undefined;
+    if (fastRejection) {
+      return {
+        headline: `${fastRejection.headline}.`,
+        source: "provider",
+        message: cleanMessage,
+        provider: err.provider,
+        statusCode: err.statusCode,
+        ...(err.requestId ? { requestId: err.requestId } : {}),
+        guidance: fastRejection.guidance,
+      };
+    }
+    const miniMax = err.provider === "minimax" ? formatMiniMaxError(err, cleanMessage) : undefined;
+    if (miniMax) return miniMax;
     if (isUsageLimitError(err)) {
       const resetClause = err.resetsAt ? ` It resets at ${formatResetTime(err.resetsAt)}.` : "";
       return {
@@ -286,6 +352,11 @@ export function formatError(err: unknown): FormattedError {
         guidance: "Try again once it's back. Your conversation is preserved.",
       };
     }
+    const baseGuidance = err.hint ?? providerGuidance(err.provider, cleanMessage, err.statusCode);
+    const retryGuidance =
+      err.resetsAt && err.resetsAt * 1000 > Date.now()
+        ? ` The provider says to retry after ${formatResetTime(err.resetsAt)}.`
+        : "";
     return {
       headline: `${name} returned an error.`,
       source: "provider",
@@ -293,10 +364,20 @@ export function formatError(err: unknown): FormattedError {
       provider: err.provider,
       statusCode: err.statusCode,
       requestId: err.requestId,
-      guidance: err.hint ?? providerGuidance(err.provider, cleanMessage, err.statusCode),
+      ...(err.resetsAt ? { resetsAt: err.resetsAt } : {}),
+      guidance: `${baseGuidance}${retryGuidance}`,
     };
   }
 
+  if (err instanceof ResponseStalledError) {
+    // Connected, but the reply never finished — not an unreachable provider.
+    return {
+      headline: "The response kept stalling before it finished.",
+      source: err.source,
+      message: err.message,
+      guidance: err.hint ?? "Retry once. If it keeps happening, choose another model.",
+    };
+  }
   if (err instanceof GGAIError) {
     return finaliseBySource(err.source, err.message, err.requestId, err.hint);
   }
@@ -321,7 +402,7 @@ function finaliseBySource(
         headline: "Network error — couldn't reach the provider.",
         source,
         message,
-        guidance: hint ?? "Check your internet connection. Not a ggcoder issue — retry shortly.",
+        guidance: hint ?? "Check your internet connection. Not a GG Coder issue — retry shortly.",
         ...(requestId ? { requestId } : {}),
       };
     case "auth":
@@ -329,7 +410,7 @@ function finaliseBySource(
         headline: "Authentication issue.",
         source,
         message,
-        guidance: hint ?? "Run `ggcoder login` to refresh your credentials.",
+        guidance: hint ?? "Re-authenticate to refresh your credentials.",
         ...(requestId ? { requestId } : {}),
       };
     case "provider":
@@ -348,16 +429,15 @@ function finaliseBySource(
         message: "",
         guidance:
           hint ??
-          "Only Kimi, Gemini, MiniMax, and MiMo-V2.5 can analyze video. Switch with /model.",
+          "Only Kimi, Gemini, MiniMax, and MiMo-V2.6 can analyze video. Switch to one of those via the model selector.",
         ...(requestId ? { requestId } : {}),
       };
     case "ggcoder":
       return {
-        headline: "ggcoder hit an unexpected error.",
+        headline: "GG Coder hit an unexpected error.",
         source,
         message,
-        guidance:
-          hint ?? "This looks like a ggcoder bug — please report it to the developer (see /help).",
+        guidance: hint ?? "This looks like a GG Coder bug — please report it to the developer.",
         ...(requestId ? { requestId } : {}),
       };
   }
@@ -384,8 +464,9 @@ export function formatErrorForDisplay(err: unknown): string {
  * so older ProviderError messages render cleanly under the new headline
  * system without doubling up.
  */
-function cleanProviderMessage(message: string): string {
-  return message.replace(/^\[[^\]]+\]\s*/, "").trim();
+function cleanProviderMessage(message: string, statusCode?: number): string {
+  const clean = message.replace(/^\[[^\]]+\]\s*/, "").trim();
+  return isRawHtmlErrorEcho(clean) ? providerHtmlErrorMessage(statusCode) : clean;
 }
 
 function inferSource(err: Error): ErrorSource {
@@ -413,10 +494,51 @@ function inferSource(err: Error): ErrorSource {
 }
 
 /**
+ * MiniMax's documented error codes (platform.minimax.io/docs/api-reference/errorcode)
+ * whose generic wording misleads: a plan key calling a model its plan doesn't
+ * cover answers "insufficient balance", which otherwise reads as a spent quota.
+ */
+function formatMiniMaxError(err: ProviderError, cleanMessage: string): FormattedError | undefined {
+  const code = /\((\d{4,5})\)/.exec(err.message)?.[1];
+  const base = {
+    source: "provider" as const,
+    message: cleanMessage,
+    provider: err.provider,
+    statusCode: err.statusCode,
+    ...(err.requestId ? { requestId: err.requestId } : {}),
+  };
+  if (code === "2049" || code === "1004") {
+    return {
+      ...base,
+      headline: "MiniMax didn't accept this API key.",
+      guidance:
+        "A MiniMax key only works in the region that issued it (Global: platform.minimax.io, Mainland China: platform.minimaxi.com). Connect MiniMax again with the key so GG Coder can detect its region, and check the key is active.",
+    };
+  }
+  if (code === "2061") {
+    return {
+      ...base,
+      headline: "Your MiniMax plan doesn't include this model.",
+      guidance:
+        "Switch to MiniMax M3.1 Flash in the model selector — it's the model M Plan and Token Plan cover. MiniMax M3 needs a pay-as-you-go key.",
+    };
+  }
+  if (code === "1008") {
+    return {
+      ...base,
+      headline: "MiniMax has no balance for this request.",
+      guidance:
+        "Check this key's plan is active, or its pay-as-you-go balance, at platform.minimax.io (platform.minimaxi.com for Mainland China keys). Plan keys only cover MiniMax M3.1 Flash. Not a GG Coder issue.",
+    };
+  }
+  return undefined;
+}
+
+/**
  * Build the action line for a provider error: tells the user whether to
  * retry, switch model, check billing, or whether it's serious enough to
  * report. Always frames the source plainly ("This is an OpenAI issue") so
- * the user knows to NOT report it to the ggcoder dev.
+ * the user knows to NOT report it to the GG Coder dev.
  */
 function providerGuidance(
   provider: string | undefined,
@@ -428,10 +550,23 @@ function providerGuidance(
   const lower = message.toLowerCase();
 
   if (statusCode === 401 || lower.includes("unauthorized") || lower.includes("invalid api key")) {
-    return `Authentication failed with ${name}. Run \`ggcoder login\` to refresh your credentials.`;
+    return `Authentication failed with ${name}. Re-authenticate to refresh your credentials.`;
+  }
+  if (
+    lower.includes("invalid json schema") ||
+    lower.includes("invalid schema for function") ||
+    lower.includes("invalid_function_parameters")
+  ) {
+    return `${name} rejected a schema sent by GG Coder or a connected tool. This is a schema compatibility problem. Retrying the same request will not fix it — report this error so the schema can be corrected.`;
+  }
+  // ChatGPT backend gates new models on the client version GG Coder advertises.
+  // The provider's own text says "upgrade the app or CLI", which reads as a
+  // user problem; it is really GG Coder that needs updating for this model.
+  if (lower.includes("requires a newer version")) {
+    return `${name} needs a newer GG Coder to serve this model. Update GG Coder to the latest version and retry, or switch to another ${name} model via the model selector.`;
   }
   if (lower.includes("overloaded") || lower.includes("engine_overloaded")) {
-    return `${name}'s servers are overloaded right now. Retry in a moment — not a ggcoder issue.`;
+    return `${name}'s servers are overloaded right now. Retry in a moment — not a GG Coder issue.`;
   }
   if (
     lower.includes("insufficient balance") ||
@@ -439,16 +574,22 @@ function providerGuidance(
     lower.includes("recharge") ||
     lower.includes("no resource package")
   ) {
-    return `Your ${name} account has a billing or quota issue — check your balance. Not a ggcoder issue.`;
+    return `Your ${name} account has a billing or quota issue — check your balance. Not a GG Coder issue.`;
   }
   if (statusCode === 429 || lower.includes("rate limit") || lower.includes("too many requests")) {
-    return `${name} rate limit hit. Wait a moment then retry — not a ggcoder issue.`;
+    return `${name} rate limit hit. Wait a moment then retry — not a GG Coder issue.`;
   }
   if (statusCode === 502 || lower.includes("bad gateway")) {
-    return `${name} returned a bad gateway. Retry — this is on their side, not ggcoder.`;
+    return `${name} returned a bad gateway. Retry — this is on their side, not GG Coder.`;
   }
   if (statusCode === 503 || lower.includes("service unavailable")) {
-    return `${name} is temporarily unavailable. Retry shortly — not a ggcoder issue.`;
+    return `${name} is temporarily unavailable. Retry shortly — not a GG Coder issue.`;
+  }
+  if (
+    statusCode === 507 ||
+    lower.includes("exceeded request buffer limit while retrying upstream")
+  ) {
+    return `${name}'s proxy could not retry this large request. GG Coder already retried automatically — compact the conversation, then retry.`;
   }
   if (
     statusCode === 500 ||
@@ -456,23 +597,47 @@ function providerGuidance(
     (lower.includes("500") && lower.includes("internal server error"))
   ) {
     return status
-      ? `This is an error from ${name}, not ggcoder. Retry — if it keeps happening, check ${status}.`
-      : `This is an error from ${name}, not ggcoder. Retry — if it keeps happening, try a different model with /model.`;
+      ? `This is an error from ${name}, not GG Coder. Retry — if it keeps happening, check ${status}.`
+      : `This is an error from ${name}, not GG Coder. Retry — if it keeps happening, try a different model via the model selector.`;
   }
   if (lower.includes("timeout") || lower.includes("timed out")) {
-    return `Request to ${name} timed out. Their servers may be slow — retry. Not a ggcoder issue.`;
+    return `Request to ${name} timed out. Their servers may be slow — retry. Not a GG Coder issue.`;
   }
   if (
     lower.includes("does not recognize the requested model") ||
     (lower.includes("model") &&
       (lower.includes("not exist") || lower.includes("not found") || lower.includes("no access")))
   ) {
-    return `${name} doesn't recognise this model on your account. Use /model to switch, or check your subscription tier.`;
+    return `${name} doesn't recognise this model on your account. Switch to a different model via the model selector, or check your subscription tier.`;
+  }
+  if (
+    provider === "anthropic" &&
+    lower.includes("input_schema") &&
+    lower.includes("does not support") &&
+    lower.includes("at the top level")
+  ) {
+    return "GG Coder sent a tool schema that Anthropic does not support. Retrying the same request will not help. Update GG Coder; if it persists, report this error as a tool compatibility bug.";
   }
   if (lower.includes("context_length_exceeded") || lower.includes("prompt is too long")) {
-    return `Context window for this ${name} model is full. Run /compact to shrink history, or start a new session.`;
+    return `Context window for this ${name} model is full. Compact the conversation to shrink history, or start a new session.`;
+  }
+  if (
+    lower.includes("many-image request") ||
+    (lower.includes("image dimensions") && lower.includes("max allowed size"))
+  ) {
+    return `An image in conversation history exceeds ${name}'s many-image limit. Restart GG Coder so restored images are resized, then retry; if it persists, start a new session.`;
+  }
+  // Anthropic HTTP 413: the request BODY (not the token count) exceeds the
+  // provider's max size. Retrying the same request fails identically — the fix
+  // is to shrink history, same as a context overflow.
+  if (
+    statusCode === 413 ||
+    lower.includes("request_too_large") ||
+    lower.includes("request exceeds the maximum size")
+  ) {
+    return `The request to ${name} is too large. Compact the conversation to shrink history, or start a new session.`;
   }
   return status
-    ? `This is an error from ${name}, not ggcoder. Retry — if it persists, check ${status}.`
-    : `This is an error from ${name}, not ggcoder. Retry — if it persists, try a different model with /model.`;
+    ? `This is an error from ${name}, not GG Coder. Retry — if it persists, check ${status}.`
+    : `This is an error from ${name}, not GG Coder. Retry — if it persists, try a different model via the model selector.`;
 }

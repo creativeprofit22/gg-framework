@@ -1,0 +1,131 @@
+<!doctype html>
+<!--
+  counter-number: a huge tabular-nums figure counting up to a target
+  (expo.out), with an optional prefix/suffix ("$", "%", "×") and a small
+  mono label under a hairline that draws across. Transparent background.
+  Params: TARGET, DECIMALS, SEPARATOR (thousands, "" for none), COUNT
+  (seconds), START; --cn-size (figure size), --cn-x / --cn-y (top-left),
+  --cn-w (rule / label width; defaults to the figure width).
+  Leave .cn-prefix / .cn-suffix empty to drop them.
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+  </head>
+  <body>
+    <div
+      id="counter-number-root"
+      data-composition-id="counter-number"
+      data-start="0"
+      data-duration="3.5"
+      data-width="1920"
+      data-height="1080"
+    >
+      <style>
+        [data-composition-id="counter-number"] {
+          --cn-size: 420px;
+          --cn-x: 150px;
+          --cn-y: 280px;
+          --cn-w: 100%;
+          position: absolute;
+          inset: 0;
+          color: var(--ink, #111);
+        }
+        [data-composition-id="counter-number"] .cn-block {
+          position: absolute;
+          left: var(--cn-x);
+          top: var(--cn-y);
+          min-width: 720px;
+        }
+        [data-composition-id="counter-number"] .cn-figure {
+          display: flex;
+          align-items: baseline;
+          font-family: var(--display, sans-serif);
+          font-weight: var(--display-weight, 800);
+          font-stretch: var(--display-stretch, 100%);
+          letter-spacing: var(--display-tracking, -0.03em);
+          font-size: var(--cn-size);
+          line-height: 0.9;
+          font-variant-numeric: tabular-nums lining-nums;
+          font-feature-settings: "tnum" 1, "lnum" 1;
+          white-space: nowrap;
+        }
+        [data-composition-id="counter-number"] .cn-prefix,
+        [data-composition-id="counter-number"] .cn-suffix {
+          font-size: 0.46em;
+          color: var(--accent, currentColor);
+        }
+        [data-composition-id="counter-number"] .cn-prefix {
+          margin-right: 0.06em;
+        }
+        [data-composition-id="counter-number"] .cn-suffix {
+          margin-left: 0.04em;
+        }
+        [data-composition-id="counter-number"] .cn-rule {
+          width: var(--cn-w);
+          height: 3px;
+          background: var(--ink, #111);
+          margin: 56px 0 26px;
+          transform-origin: left center;
+        }
+        [data-composition-id="counter-number"] .cn-label {
+          font-family: var(--mono, monospace);
+          font-size: 26px;
+          letter-spacing: 0.14em;
+          text-transform: uppercase;
+          color: var(--muted, rgba(0, 0, 0, 0.6));
+          width: var(--cn-w);
+          display: flex;
+          justify-content: space-between;
+          gap: 80px;
+        }
+      </style>
+      <div class="cn-block">
+        <div class="cn-figure">
+          <!-- edit: prefix (e.g. "$"), leave empty for none -->
+          <span class="cn-prefix"></span>
+          <span class="cn-value" id="cn-value">0</span>
+          <!-- edit: suffix (e.g. "%", "×", "M"), leave empty for none -->
+          <span class="cn-suffix">%</span>
+        </div>
+        <div class="cn-rule" id="cn-rule"></div>
+        <!-- edit: label left / right -->
+        <div class="cn-label" id="cn-label"><span>Faster renders</span><span>vs. last year</span></div>
+      </div>
+    </div>
+    <script>
+      (function () {
+        const TARGET = 340;
+        const DECIMALS = 0;
+        const SEPARATOR = ",";
+        const START = 0.25;
+        const COUNT = 1.9;
+        const value = document.getElementById("cn-value");
+        const state = { v: 0 };
+        function fmt(v) {
+          const [int, dec] = v.toFixed(DECIMALS).split(".");
+          const grouped = SEPARATOR ? int.replace(/\B(?=(\d{3})+(?!\d))/g, SEPARATOR) : int;
+          return dec ? grouped + "." + dec : grouped;
+        }
+        function draw() {
+          value.textContent = fmt(state.v);
+        }
+        const tl = gsap.timeline({ paused: true });
+        tl.fromTo(
+          '[data-composition-id="counter-number"] .cn-figure',
+          { opacity: 0, y: 60 },
+          { opacity: 1, y: 0, duration: 0.8, ease: "expo.out" },
+          START - 0.1,
+        );
+        tl.fromTo(state, { v: 0 }, { v: TARGET, duration: COUNT, ease: "expo.out", onUpdate: draw }, START);
+        tl.fromTo("#cn-rule", { scaleX: 0 }, { scaleX: 1, duration: 1.2, ease: "expo.inOut" }, START + 0.2);
+        tl.fromTo("#cn-label span", { opacity: 0, y: 16 }, { opacity: 1, y: 0, duration: 0.6, ease: "expo.out", stagger: 0.1 }, START + 0.8);
+        tl.to({}, { duration: Math.max(0, 3.5 - tl.duration()) });
+        draw();
+        window.__timelines = window.__timelines || {};
+        window.__timelines["counter-number"] = tl;
+      })();
+    </script>
+  </body>
+</html>

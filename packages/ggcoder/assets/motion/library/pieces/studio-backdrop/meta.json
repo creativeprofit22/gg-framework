@@ -1,0 +1,12 @@
+{
+  "id": "studio-backdrop",
+  "name": "Studio backdrop",
+  "kind": "background",
+  "description": "Seamless photo-studio cyclorama in the field color: back wall, a lit cove where wall curves into floor, a soft key-light pool that drifts slowly and a darker floor zone to stand a product or card on. Works on light and dark fields.",
+  "tags": ["studio", "cyclorama", "product", "soft", "light", "premium", "ad"],
+  "fonts": [],
+  "duration": 6,
+  "previewAt": 3,
+  "license": "original",
+  "previewLook": "soft-light-ad"
+}

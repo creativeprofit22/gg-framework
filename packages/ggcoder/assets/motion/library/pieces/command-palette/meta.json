@@ -1,0 +1,12 @@
+{
+  "id": "command-palette",
+  "name": "Command palette",
+  "kind": "ui",
+  "description": "A centered ⌘K command palette opens, a query types into the input with a blinking caret, non-matching results collapse away with matched letters highlighted, the selection steps to a result and it is pressed (Enter). Great for search, shortcuts and 'do anything fast' beats.",
+  "tags": ["command-palette", "search", "cmdk", "typing", "filter", "keyboard", "saas", "productivity"],
+  "fonts": [],
+  "duration": 5,
+  "previewAt": 3.6,
+  "license": "original",
+  "previewLook": "soft-light-ad"
+}

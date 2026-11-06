@@ -1,0 +1,262 @@
+<!doctype html>
+<!--
+  before-after-split: a comparison card. The "before" panel (noisy latency
+  chart, muted metric on the right) is on screen; a vertical divider with a
+  round handle wipes across revealing the "after" panel (calm accent chart,
+  accent metric on the left), overshoots, then settles at SPLIT so both
+  halves read. Each panel keeps its metric on its own side of the split.
+  Params (top of script):
+    BEFORE / AFTER  { tag, metric, value } and chart points SERIES_*
+    SPLIT           resting divider position 0..1; SWEEP overshoot position
+  Copy is also marked with edit comments in the markup.
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+  </head>
+  <body>
+    <div
+      id="before-after-split-root"
+      data-composition-id="before-after-split"
+      data-start="0"
+      data-duration="5"
+      data-width="1920"
+      data-height="1080"
+    >
+      <style>
+        [data-composition-id="before-after-split"] {
+          position: absolute;
+          inset: 0;
+          color: var(--ink, #111);
+          font-family: var(--text, sans-serif);
+        }
+        [data-composition-id="before-after-split"] .bas-card {
+          position: absolute;
+          left: 200px;
+          top: 170px;
+          width: 1520px;
+          height: 740px;
+          border-radius: var(--radius, 0px);
+          overflow: hidden;
+          box-shadow:
+            0 0 0 3px var(--ink, #111),
+            0 40px 80px -40px color-mix(in srgb, var(--ink, #111) 55%, transparent);
+        }
+        [data-composition-id="before-after-split"] .bas-panel {
+          position: absolute;
+          inset: 0;
+        }
+        [data-composition-id="before-after-split"] .bas-before {
+          background-color: color-mix(in srgb, var(--field, #fff) 90%, var(--ink, #111));
+          background-image: repeating-linear-gradient(
+            135deg,
+            var(--line, rgba(0, 0, 0, 0.15)) 0 2px,
+            transparent 2px 22px
+          );
+        }
+        [data-composition-id="before-after-split"] .bas-after {
+          background: color-mix(in srgb, var(--field, #fff) 84%, var(--accent, #111));
+          clip-path: inset(0 100% 0 0);
+        }
+        [data-composition-id="before-after-split"] svg {
+          position: absolute;
+          left: 0;
+          top: 0;
+        }
+        [data-composition-id="before-after-split"] .bas-grid line {
+          stroke: var(--line, rgba(0, 0, 0, 0.2));
+          stroke-width: 2;
+        }
+        [data-composition-id="before-after-split"] .bas-line-before {
+          fill: none;
+          stroke: var(--muted, rgba(0, 0, 0, 0.6));
+          stroke-width: 5;
+          stroke-linejoin: round;
+        }
+        [data-composition-id="before-after-split"] .bas-line-after {
+          fill: none;
+          stroke: var(--accent, #111);
+          stroke-width: 7;
+          stroke-linecap: round;
+          stroke-linejoin: round;
+        }
+        [data-composition-id="before-after-split"] .bas-area-after {
+          fill: var(--accent, #111);
+          opacity: 0.16;
+        }
+        [data-composition-id="before-after-split"] .bas-tag {
+          position: absolute;
+          top: 40px;
+          padding: 12px 20px 11px;
+          font-family: var(--mono, monospace);
+          font-size: 24px;
+          letter-spacing: 0.14em;
+          text-transform: uppercase;
+          border-radius: calc(var(--radius, 0px) * 0.6);
+        }
+        [data-composition-id="before-after-split"] .bas-before .bas-tag {
+          right: 40px;
+          color: var(--ink, #111);
+          box-shadow: inset 0 0 0 2px var(--ink, #111);
+          background: var(--field, #fff);
+        }
+        [data-composition-id="before-after-split"] .bas-after .bas-tag {
+          left: 40px;
+          color: var(--field, #fff);
+          background: var(--accent, #111);
+        }
+        [data-composition-id="before-after-split"] .bas-metric {
+          position: absolute;
+          top: 128px;
+          display: flex;
+          flex-direction: column;
+          gap: 8px;
+        }
+        [data-composition-id="before-after-split"] .bas-before .bas-metric {
+          right: 44px;
+          align-items: flex-end;
+        }
+        [data-composition-id="before-after-split"] .bas-after .bas-metric {
+          left: 44px;
+        }
+        [data-composition-id="before-after-split"] .bas-k {
+          font-family: var(--mono, monospace);
+          font-size: 22px;
+          letter-spacing: 0.1em;
+          text-transform: uppercase;
+          color: var(--muted, rgba(0, 0, 0, 0.6));
+        }
+        [data-composition-id="before-after-split"] .bas-v {
+          font-family: var(--display, sans-serif);
+          font-weight: var(--display-weight, 800);
+          font-stretch: var(--display-stretch, 100%);
+          letter-spacing: var(--display-tracking, -0.02em);
+          font-size: 150px;
+          line-height: 0.9;
+          font-variant-numeric: tabular-nums;
+        }
+        [data-composition-id="before-after-split"] .bas-before .bas-v {
+          color: var(--muted, rgba(0, 0, 0, 0.6));
+        }
+        [data-composition-id="before-after-split"] .bas-after .bas-v {
+          color: var(--accent, #111);
+        }
+        [data-composition-id="before-after-split"] .bas-divider {
+          position: absolute;
+          top: 0;
+          bottom: 0;
+          width: 0;
+        }
+        [data-composition-id="before-after-split"] .bas-divider::before {
+          content: "";
+          position: absolute;
+          left: -3px;
+          top: 0;
+          bottom: 0;
+          width: 6px;
+          background: var(--ink, #111);
+        }
+        [data-composition-id="before-after-split"] .bas-handle {
+          position: absolute;
+          left: -44px;
+          top: calc(50% - 44px);
+          width: 88px;
+          height: 88px;
+          border-radius: 50%;
+          background: var(--ink, #111);
+          color: var(--field, #fff);
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          box-shadow: 0 14px 30px -10px color-mix(in srgb, var(--ink, #111) 60%, transparent);
+        }
+        [data-composition-id="before-after-split"] .bas-handle svg {
+          position: static;
+          width: 48px;
+          height: 48px;
+          fill: none;
+          stroke: currentColor;
+          stroke-width: 4;
+          stroke-linecap: round;
+          stroke-linejoin: round;
+        }
+      </style>
+      <div class="bas-card" id="bas-card">
+        <div class="bas-panel bas-before">
+          <svg width="1520" height="740" viewBox="0 0 1520 740">
+            <g class="bas-grid" id="bas-grid-before"></g>
+            <path class="bas-line-before" id="bas-line-before" />
+          </svg>
+          <!-- edit: before tag + metric -->
+          <div class="bas-tag">Before</div>
+          <div class="bas-metric"><span class="bas-k">P95 latency</span><span class="bas-v">4.2s</span></div>
+        </div>
+        <div class="bas-panel bas-after" id="bas-after">
+          <svg width="1520" height="740" viewBox="0 0 1520 740">
+            <g class="bas-grid" id="bas-grid-after"></g>
+            <path class="bas-area-after" id="bas-area-after" />
+            <path class="bas-line-after" id="bas-line-after" />
+          </svg>
+          <!-- edit: after tag + metric -->
+          <div class="bas-tag">After</div>
+          <div class="bas-metric"><span class="bas-k">P95 latency</span><span class="bas-v">0.8s</span></div>
+        </div>
+        <div class="bas-divider" id="bas-divider">
+          <div class="bas-handle">
+            <svg viewBox="0 0 48 48"><path d="M18 14 8 24l10 10M30 14l10 10-10 10" /></svg>
+          </div>
+        </div>
+      </div>
+    </div>
+    <script>
+      (function () {
+        // Chart values 0..1 (1 = top of the chart band). Seeded noise for "before".
+        let seed = 7;
+        const rand = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
+        const N = 40;
+        const SERIES_BEFORE = Array.from({ length: N }, (_, i) => 0.55 + 0.12 * Math.sin(i * 0.9) + (rand() - 0.5) * 0.5);
+        const SERIES_AFTER = Array.from({ length: N }, (_, i) => 0.16 + 0.04 * Math.sin(i * 0.35));
+        const SPLIT = 0.5;
+        const SWEEP = 0.7; // Keep both metrics readable throughout the reveal.
+
+        const W = 1520;
+        const H = 740;
+        const TOP = 330; // chart band (below the metrics)
+        const BOT = 700;
+        const x = (i) => (i / (N - 1)) * W;
+        const y = (v) => BOT - Math.max(0, Math.min(1, v)) * (BOT - TOP);
+        const line = (s) => s.map((v, i) => `${i ? "L" : "M"}${x(i).toFixed(1)} ${y(v).toFixed(1)}`).join(" ");
+        document.getElementById("bas-line-before").setAttribute("d", line(SERIES_BEFORE));
+        document.getElementById("bas-line-after").setAttribute("d", line(SERIES_AFTER));
+        document.getElementById("bas-area-after").setAttribute("d", line(SERIES_AFTER) + ` L${W} ${H} L0 ${H} Z`);
+        for (const id of ["bas-grid-before", "bas-grid-after"]) {
+          const g = document.getElementById(id);
+          for (let k = 0; k < 4; k++) {
+            const yy = TOP + (k * (BOT - TOP)) / 3;
+            g.insertAdjacentHTML("beforeend", `<line x1="0" x2="${W}" y1="${yy}" y2="${yy}"/>`);
+          }
+        }
+
+        const after = document.getElementById("bas-after");
+        const divider = document.getElementById("bas-divider");
+        const s = { p: 0 };
+        function render() {
+          const px = s.p * W;
+          after.style.clipPath = `inset(0 ${(W - px).toFixed(1)}px 0 0)`;
+          divider.style.left = px.toFixed(1) + "px";
+        }
+
+        const tl = gsap.timeline({ paused: true });
+        tl.fromTo("#bas-card", { opacity: 0, y: 40 }, { opacity: 1, y: 0, duration: 0.6, ease: "power3.out" }, 0.1);
+        tl.fromTo("#bas-divider", { opacity: 0 }, { opacity: 1, duration: 0.25, ease: "none" }, 0.6);
+        tl.fromTo(s, { p: 0 }, { p: SWEEP, duration: 1.4, ease: "power3.inOut", onUpdate: render }, 0.7);
+        tl.to(s, { p: SPLIT, duration: 0.9, ease: "power3.inOut", onUpdate: render }, 2.35);
+        tl.to({}, { duration: 1.75 });
+        render();
+        window.__timelines = window.__timelines || {};
+        window.__timelines["before-after-split"] = tl;
+      })();
+    </script>
+  </body>
+</html>

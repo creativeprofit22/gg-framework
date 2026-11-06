@@ -1,0 +1,12 @@
+{
+  "id": "highlight-sweep",
+  "name": "Highlight sweep",
+  "kind": "type",
+  "description": "A two-line sentence rises in, then a marker-style accent bar sweeps left-to-right behind the key words while their color flips to the field color exactly under the sweep. Emphasises the one phrase that matters in a claim, tagline or explainer line. Supports one or two marks. Transparent.",
+  "tags": ["highlight", "marker", "emphasis", "sweep", "underline", "callout", "sentence", "tagline", "explainer", "wipe"],
+  "fonts": [],
+  "duration": 3.5,
+  "previewAt": 2.6,
+  "license": "original",
+  "previewLook": "duotone-broadcast"
+}

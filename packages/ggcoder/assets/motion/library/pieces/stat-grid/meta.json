@@ -1,0 +1,12 @@
+{
+  "id": "stat-grid",
+  "name": "Stat grid",
+  "kind": "data",
+  "description": "A row of 3–4 stat cards rising in with a stagger: mono label, a big tabular display number counting up to its value, and a small up/down delta chip with a comparison period. One featured card is filled with the accent. Edit the STATS array for KPIs, launch results or traction slides.",
+  "tags": ["stats", "kpi", "numbers", "count-up", "cards", "metrics", "dashboard", "traction", "launch"],
+  "fonts": [],
+  "duration": 4,
+  "previewAt": 2.6,
+  "license": "original",
+  "previewLook": "soft-light-ad"
+}

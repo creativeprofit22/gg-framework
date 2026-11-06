@@ -1,12 +1,17 @@
 import { useEffect, useState } from "react";
-import { openUrl } from "@tauri-apps/plugin-opener";
 import { theme } from "./theme";
 import { Modal } from "./Modal";
+import { ModalDismissButton } from "./modal-embed";
+import { Badge } from "./Badge";
+import { QwenCloudConnectionForm } from "./QwenCloudConnectionForm";
 import {
+  openUrl,
   authApiKey,
   authOAuthStart,
   authOAuthCode,
   authLogout,
+  authSetBaseUrl,
+  openRouterCatalog,
   subscribe,
   type AuthProvider,
   type AuthMethod,
@@ -17,11 +22,38 @@ function defaultVariantKey(provider: AuthProvider): string | undefined {
   return provider.apiKeyVariants?.[0]?.key;
 }
 
+/** "in 3h" / "in 12m" — how long OAuth stays sidelined, not an absolute stamp. */
+function untilLabel(epochMs: number): string {
+  const mins = Math.max(1, Math.round((epochMs - Date.now()) / 60_000));
+  if (mins < 60) return `${mins}m`;
+  return `${Math.round(mins / 60)}h`;
+}
+
+const LINK_STYLE: React.CSSProperties = {
+  color: theme.accent,
+  padding: 0,
+  font: "inherit",
+  border: "none",
+  background: "none",
+  cursor: "pointer",
+  textDecoration: "underline",
+};
+
+function hostOf(url: string): string {
+  try {
+    return new URL(url).host;
+  } catch {
+    return url;
+  }
+}
+
 interface Props {
   provider: AuthProvider;
   onClose: () => void;
   /** Called after a successful connect/disconnect so the list can refresh. */
   onChanged: () => void;
+  /** Hugging Face only: opens the search-and-pull modal for local models. */
+  onOpenHfPull?: () => void;
 }
 
 /**
@@ -30,7 +62,39 @@ interface Props {
  * or the interactive OAuth flow (opens the browser, collects a pasted code when
  * the provider needs one). Mirrors `ggcoder login`.
  */
-export function ProviderLoginModal({ provider, onClose, onChanged }: Props): React.ReactElement {
+export function ProviderLoginModal({
+  provider,
+  onClose,
+  onChanged,
+  onOpenHfPull,
+}: Props): React.ReactElement {
+  if (provider.value === "qwen-cloud") {
+    return (
+      <Modal
+        title="Connect Qwen Cloud (Token Plan)"
+        onClose={onClose}
+        className="qwen-connection-modal"
+      >
+        <QwenCloudConnectionForm onChanged={onChanged} />
+      </Modal>
+    );
+  }
+  return (
+    <GenericProviderLoginModal
+      provider={provider}
+      onClose={onClose}
+      onChanged={onChanged}
+      onOpenHfPull={onOpenHfPull}
+    />
+  );
+}
+
+function GenericProviderLoginModal({
+  provider,
+  onClose,
+  onChanged,
+  onOpenHfPull,
+}: Props): React.ReactElement {
   const single = provider.methods.length === 1 ? provider.methods[0] : null;
   const [method, setMethod] = useState<AuthMethod | null>(single);
   const [apiKey, setApiKey] = useState("");
@@ -43,6 +107,26 @@ export function ProviderLoginModal({ provider, onClose, onChanged }: Props): Rea
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [baseUrl, setBaseUrl] = useState(provider.currentBaseUrl ?? "");
+  // Only OpenRouter syncs a catalog today; `null` = not checked yet.
+  const syncsCatalog = provider.allowCustomBaseUrl === true && provider.value === "openrouter";
+  const [catalog, setCatalog] = useState<{ synced: boolean; count: number } | null>(null);
+  const [syncing, setSyncing] = useState(false);
+
+  useEffect(() => {
+    if (!syncsCatalog || !provider.connected) return;
+    let cancelled = false;
+    void openRouterCatalog("status")
+      .then((s) => {
+        if (!cancelled) setCatalog(s);
+      })
+      .catch(() => {
+        // The note simply stays hidden; Sync still works.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [syncsCatalog, provider.connected]);
 
   // Listen for OAuth progress events while this modal is open.
   useEffect(() => {
@@ -86,12 +170,59 @@ export function ProviderLoginModal({ provider, onClose, onChanged }: Props): Rea
     setBusy(true);
     setError(null);
     try {
-      await authApiKey(provider.value, apiKey.trim(), variantKey);
+      await authApiKey(
+        provider.value,
+        apiKey.trim(),
+        variantKey,
+        provider.allowCustomBaseUrl ? baseUrl.trim() : undefined,
+      );
       onChanged();
       onClose();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
       setBusy(false);
+    }
+  }
+
+  async function saveBaseUrl(): Promise<void> {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await authSetBaseUrl(provider.value, baseUrl);
+      // A synced list describes the old endpoint; fall back until re-synced.
+      if (catalog?.synced) setCatalog(await openRouterCatalog("reset"));
+      setStatus(
+        syncsCatalog
+          ? "Base URL saved. Sync models to list what this endpoint serves."
+          : "Base URL saved.",
+      );
+      onChanged();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function syncModels(reset = false): Promise<void> {
+    if (syncing) return;
+    setSyncing(true);
+    setError(null);
+    setStatus(null);
+    try {
+      const result = await openRouterCatalog(reset ? "reset" : "sync");
+      setCatalog(result);
+      setStatus(
+        reset
+          ? "Using the built-in model list."
+          : `Synced ${result.count} model${result.count === 1 ? "" : "s"} from ${hostOf(result.baseUrl)}` +
+              (result.skipped ? ` (${result.skipped} without tool calling left out).` : "."),
+      );
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSyncing(false);
     }
   }
 
@@ -119,11 +250,14 @@ export function ProviderLoginModal({ provider, onClose, onChanged }: Props): Rea
     }
   }
 
-  async function disconnect(): Promise<void> {
+  // `method` omitted disconnects the provider entirely; passing one drops just
+  // that credential, so a spent API key can go without signing out of the
+  // subscription (and vice versa).
+  async function disconnect(scope?: AuthMethod): Promise<void> {
     if (busy) return;
     setBusy(true);
     try {
-      await authLogout(provider.value);
+      await authLogout(provider.value, scope);
       onChanged();
       onClose();
     } catch (e) {
@@ -133,21 +267,83 @@ export function ProviderLoginModal({ provider, onClose, onChanged }: Props): Rea
   }
 
   const apiKeyLabel = provider.apiKeyLabel ?? provider.label;
+  const baseUrlChanged =
+    provider.allowCustomBaseUrl === true &&
+    baseUrl.trim().replace(/\/+$/, "") !== (provider.currentBaseUrl ?? "");
+  // A connected key can move to another endpoint without being pasted again.
+  const savesBaseUrlOnly = provider.connected && !apiKey.trim() && baseUrlChanged;
+  const connectedMethods = provider.connectedMethods ?? [];
+  const guidance = provider.methodGuidance ?? [];
 
   return (
     <Modal title={`Connect ${provider.label}`} onClose={onClose}>
       <div className="login-modal-desc">{provider.description}</div>
 
-      {/* Method picker — only when the provider supports both. */}
+      {/* Method picker — only when the provider supports both. Each option spells
+          out what it bills against and when to pick it, because the choice is not
+          cosmetic: subscription vs. metered credits. Both can be connected at
+          once, so each card also shows its own state and its own disconnect. */}
       {!single && !method && (
-        <div className="login-method-row">
-          <button className="modal-btn primary" onClick={() => setMethod("oauth")}>
-            Sign in with OAuth
-          </button>
-          <button className="modal-btn" onClick={() => setMethod("apikey")}>
-            Use API key
-          </button>
-        </div>
+        <>
+          {provider.oauthExhaustedUntil !== undefined && (
+            <div className="login-status" style={{ color: theme.warning, marginTop: 0 }}>
+              {`Subscription usage is out for ~${untilLabel(provider.oauthExhaustedUntil)} — requests are using the ${apiKeyLabel} API key until it resets.`}
+            </div>
+          )}
+          <div className="login-method-list">
+            {(guidance.length > 0
+              ? guidance
+              : provider.methods.map((m) => ({
+                  method: m,
+                  label: m === "oauth" ? "Sign in" : `${apiKeyLabel} API key`,
+                  billing: "",
+                  when: "",
+                  requires: undefined as string | undefined,
+                }))
+            ).map((g) => {
+              const isConnected = connectedMethods.includes(g.method);
+              const isActive = provider.activeMethod === g.method;
+              return (
+                <div key={g.method} className="login-method-card">
+                  <div className="login-method-card-head">
+                    <span className="login-method-card-title">{g.label}</span>
+                    {isConnected && (
+                      <Badge color={isActive ? theme.success : theme.textDim}>
+                        {isActive ? "In use" : "Standby"}
+                      </Badge>
+                    )}
+                  </div>
+                  {g.billing && <div className="login-method-card-line">{g.billing}</div>}
+                  {g.when && <div className="login-method-card-line">{g.when}</div>}
+                  {g.requires && (
+                    <div className="login-method-card-note">{`Needs: ${g.requires}`}</div>
+                  )}
+                  <div className="login-method-card-actions">
+                    <button
+                      className={"modal-btn" + (isConnected ? "" : " primary")}
+                      onClick={() => setMethod(g.method)}
+                    >
+                      {isConnected ? "Replace" : "Connect"}
+                    </button>
+                    {isConnected && (
+                      <button
+                        className="modal-btn"
+                        style={{ color: theme.error }}
+                        disabled={busy}
+                        onClick={() => void disconnect(g.method)}
+                      >
+                        Disconnect
+                      </button>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          {provider.priorityNote && (
+            <div className="login-method-note">{provider.priorityNote}</div>
+          )}
+        </>
       )}
 
       {/* API key entry. */}
@@ -186,6 +382,54 @@ export function ProviderLoginModal({ provider, onClose, onChanged }: Props): Rea
               if (e.key === "Enter") void submitApiKey();
             }}
           />
+          {provider.allowCustomBaseUrl && (
+            <>
+              <div className="modal-label" style={{ color: theme.textMuted }}>
+                API base URL (optional)
+              </div>
+              <input
+                className="modal-input"
+                style={{ color: theme.text, background: theme.inputBackground }}
+                value={baseUrl}
+                aria-label="API base URL"
+                inputMode="url"
+                placeholder={provider.defaultBaseUrl ?? "https://"}
+                onChange={(e) => setBaseUrl(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key !== "Enter") return;
+                  if (savesBaseUrlOnly) void saveBaseUrl();
+                  else void submitApiKey();
+                }}
+              />
+            </>
+          )}
+          {syncsCatalog && provider.connected && (
+            <div className="login-method-note">
+              {catalog?.synced
+                ? `Model list synced from the endpoint (${catalog.count}).`
+                : "Using the built-in model list."}{" "}
+              <button
+                className="link-btn"
+                style={LINK_STYLE}
+                disabled={syncing || busy}
+                onClick={() => void syncModels()}
+              >
+                {syncing ? "Syncing\u2026" : "Sync models"}
+              </button>
+              {catalog?.synced && !syncing && (
+                <>
+                  {" · "}
+                  <button
+                    className="link-btn"
+                    style={LINK_STYLE}
+                    onClick={() => void syncModels(true)}
+                  >
+                    Use built-in list
+                  </button>
+                </>
+              )}
+            </div>
+          )}
         </>
       )}
 
@@ -229,6 +473,18 @@ export function ProviderLoginModal({ provider, onClose, onChanged }: Props): Rea
         </div>
       )}
 
+      {/* Hugging Face is the one provider with a local twin: same Hub, run on
+          your machine via Ollama instead of the hosted router. Offer it here so
+          people who came looking for open weights find the download path. */}
+      {onOpenHfPull && (
+        <div className="login-method-note">
+          Want to run a model locally instead?{" "}
+          <button className="link-btn" style={LINK_STYLE} onClick={onOpenHfPull}>
+            Search Hugging Face and download with Ollama
+          </button>
+        </div>
+      )}
+
       <div className="modal-actions">
         {provider.connected && (
           <button
@@ -237,21 +493,40 @@ export function ProviderLoginModal({ provider, onClose, onChanged }: Props): Rea
             disabled={busy}
             onClick={() => void disconnect()}
           >
-            Disconnect
+            {/* Dual-auth providers get per-method disconnects in the picker cards;
+                this one is the blunt "remove everything" action, so say so when
+                there are two credentials to remove. */}
+            {connectedMethods.length > 1 ? "Disconnect both" : "Disconnect"}
           </button>
         )}
-        <button className="modal-btn" onClick={onClose}>
+        {/* Picking a method is not a one-way door — let the user back out to the
+            comparison instead of closing and reopening the modal. */}
+        {!single && method && !busy && !needCode && (
+          <button className="modal-btn" onClick={() => setMethod(null)}>
+            Back
+          </button>
+        )}
+        <ModalDismissButton onClick={onClose}>
           {needCode || busy ? "Cancel" : "Close"}
-        </button>
-        {method === "apikey" && (
-          <button
-            className="modal-btn primary"
-            disabled={!apiKey.trim() || busy}
-            onClick={() => void submitApiKey()}
-          >
-            {busy ? "Connecting…" : "Connect"}
-          </button>
-        )}
+        </ModalDismissButton>
+        {method === "apikey" &&
+          (savesBaseUrlOnly ? (
+            <button
+              className="modal-btn primary"
+              disabled={busy}
+              onClick={() => void saveBaseUrl()}
+            >
+              {busy ? "Saving…" : "Save base URL"}
+            </button>
+          ) : (
+            <button
+              className="modal-btn primary"
+              disabled={!apiKey.trim() || busy}
+              onClick={() => void submitApiKey()}
+            >
+              {busy ? "Connecting…" : "Connect"}
+            </button>
+          ))}
         {method === "oauth" && needCode && (
           <button
             className="modal-btn primary"

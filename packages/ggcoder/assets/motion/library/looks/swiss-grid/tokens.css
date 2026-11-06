@@ -1,0 +1,16 @@
+/* Swiss Grid: white field, black ink, one signal red, a strict 12-column grid. */
+.look-swiss-grid {
+  --field: #ffffff;
+  --field-2: #e8261c;
+  --ink: #0b0b0b;
+  --accent: #e8261c;
+  --muted: rgba(11, 11, 11, 0.58);
+  --line: rgba(11, 11, 11, 0.12);
+  --display: "Schibsted Grotesk", sans-serif;
+  --display-weight: 800;
+  --display-stretch: 100%;
+  --display-tracking: -0.055em;
+  --text: "Schibsted Grotesk", sans-serif;
+  --mono: "Martian Mono", monospace;
+  --radius: 0px;
+}

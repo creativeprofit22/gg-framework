@@ -1,0 +1,242 @@
+<!doctype html>
+<!--
+  cursor-click: a card with a primary button; a cursor glides in along a
+  curved (cubic bezier, eased) path, hovers, presses the button (button
+  scales to 0.96, a ripple ring expands) and the button morphs into a
+  success state with a drawn check. Transparent background.
+  Params: --cc-x / --cc-y (card center), START / CTRL1 / CTRL2 (path points,
+  relative to the button center), MOVE_AT / MOVE_DUR, CLICK_AT.
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+  </head>
+  <body>
+    <div
+      id="cursor-click-root"
+      data-composition-id="cursor-click"
+      data-start="0"
+      data-duration="4"
+      data-width="1920"
+      data-height="1080"
+    >
+      <style>
+        [data-composition-id="cursor-click"] {
+          --cc-x: 960px;
+          --cc-y: 540px;
+          --cc-w: 900px;
+          --cc-r: max(calc(var(--radius, 18px) * 1.4), 22px);
+          position: absolute;
+          inset: 0;
+          color: var(--ink, #111);
+          font-family: var(--text, sans-serif);
+        }
+        [data-composition-id="cursor-click"] .cc-card {
+          position: absolute;
+          left: calc(var(--cc-x) - var(--cc-w) / 2);
+          top: var(--cc-y);
+          width: var(--cc-w);
+          box-sizing: border-box;
+          transform: translateY(-50%);
+          padding: 60px 64px 64px;
+          border-radius: var(--cc-r);
+          background: #fff;
+          box-shadow:
+            0 0 0 1px color-mix(in srgb, var(--ink, #111) 7%, transparent),
+            0 1px 2px rgba(0, 0, 0, 0.06),
+            0 12px 32px rgba(0, 0, 0, 0.1),
+            0 40px 90px -24px color-mix(in srgb, var(--ink, #111) 24%, transparent);
+        }
+        [data-composition-id="cursor-click"] .cc-head {
+          display: flex;
+          align-items: center;
+          gap: 26px;
+        }
+        [data-composition-id="cursor-click"] .cc-logo {
+          width: 84px;
+          height: 84px;
+          border-radius: 22px;
+          background: var(--ink, #111);
+          color: #fff;
+          display: grid;
+          place-items: center;
+        }
+        [data-composition-id="cursor-click"] .cc-title {
+          font-family: var(--display, sans-serif);
+          font-weight: var(--display-weight, 600);
+          letter-spacing: var(--display-tracking, -0.02em);
+          font-size: 44px;
+        }
+        [data-composition-id="cursor-click"] .cc-sub {
+          font-size: 28px;
+          color: var(--muted, #888);
+          margin-top: 4px;
+        }
+        [data-composition-id="cursor-click"] .cc-lines {
+          margin: 44px 0 48px;
+          display: flex;
+          flex-direction: column;
+          gap: 18px;
+        }
+        [data-composition-id="cursor-click"] .cc-line {
+          display: flex;
+          align-items: center;
+          gap: 18px;
+          font-size: 29px;
+        }
+        [data-composition-id="cursor-click"] .cc-line svg {
+          flex: none;
+          color: var(--accent, #2f5bff);
+        }
+        [data-composition-id="cursor-click"] .cc-btn {
+          position: relative;
+          height: 104px;
+          border-radius: calc(var(--cc-r) * 0.75);
+          background: var(--accent, #2f5bff);
+          color: #fff;
+          font-size: 34px;
+          font-weight: 600;
+          letter-spacing: -0.005em;
+          display: grid;
+          place-items: center;
+          box-shadow:
+            inset 0 1px 0 rgba(255, 255, 255, 0.22),
+            0 1px 2px rgba(0, 0, 0, 0.08),
+            0 10px 24px color-mix(in srgb, var(--accent, #2f5bff) 32%, transparent);
+        }
+        [data-composition-id="cursor-click"] .cc-btn > span {
+          grid-area: 1 / 1;
+          display: flex;
+          align-items: center;
+          gap: 16px;
+        }
+        [data-composition-id="cursor-click"] .cc-hover {
+          position: absolute;
+          inset: 0;
+          border-radius: inherit;
+          background: rgba(255, 255, 255, 0.12);
+          opacity: 0;
+        }
+        [data-composition-id="cursor-click"] .cc-ring {
+          position: absolute;
+          left: 0;
+          top: 0;
+          width: 60px;
+          height: 60px;
+          margin: -30px 0 0 -30px;
+          border-radius: 50%;
+          border: 5px solid var(--accent, #2f5bff);
+          opacity: 0;
+          pointer-events: none;
+        }
+        [data-composition-id="cursor-click"] .cc-cursor {
+          position: absolute;
+          left: 0;
+          top: 0;
+          width: 56px;
+          height: 56px;
+          filter: drop-shadow(0 4px 8px rgba(0, 0, 0, 0.22));
+          transform-origin: 6px 4px;
+        }
+      </style>
+      <div class="cc-card" id="cc-card">
+        <div class="cc-head">
+          <div class="cc-logo">
+            <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2L4 14h7l-1 8 9-12h-7z" /></svg>
+          </div>
+          <div>
+            <!-- edit: title + subtitle -->
+            <div class="cc-title">Upgrade to Pro</div>
+            <div class="cc-sub">Everything your team needs to ship faster</div>
+          </div>
+        </div>
+        <div class="cc-lines">
+          <!-- edit: feature lines -->
+          <div class="cc-line"><svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5" /></svg>Unlimited projects and seats</div>
+          <div class="cc-line"><svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5" /></svg>Advanced analytics</div>
+          <div class="cc-line"><svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5" /></svg>Priority support</div>
+        </div>
+        <div class="cc-btn" id="cc-btn">
+          <div class="cc-hover" id="cc-hover"></div>
+          <!-- edit: button label + success label -->
+          <span id="cc-label">Start free trial</span>
+          <span id="cc-done">
+            <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"><path id="cc-check" d="M20 6L9 17l-5-5" /></svg>
+            You're all set
+          </span>
+        </div>
+      </div>
+      <div class="cc-ring" id="cc-ring"></div>
+      <svg class="cc-cursor" id="cc-cursor" viewBox="0 0 28 28">
+        <path d="M5 3.2v19.6c0 .8 1 1.2 1.5.6l4.6-5.1 3.4 7.6c.3.6 1 .9 1.6.6l2.3-1c.6-.3.9-1 .6-1.6l-3.4-7.5h6.8c.8 0 1.2-1 .6-1.6L6.5 2.6C6 2.1 5 2.4 5 3.2z" fill="var(--ink, #111)" stroke="#fff" stroke-width="1.6" stroke-linejoin="round" />
+      </svg>
+    </div>
+    <script>
+      (function () {
+        // Path points relative to the button center (px).
+        const START = [760, 420];
+        const CTRL1 = [620, -260];
+        const CTRL2 = [260, -160];
+        const MOVE_AT = 0.5;
+        const MOVE_DUR = 1.35;
+        const CLICK_AT = 2.05;
+
+        const root = document.querySelector('[data-composition-id="cursor-click"]');
+        const btn = root.querySelector("#cc-btn");
+        const cursor = root.querySelector("#cc-cursor");
+        const ring = root.querySelector("#cc-ring");
+        const check = root.querySelector("#cc-check");
+        const tl = gsap.timeline({ paused: true });
+
+        // Click point in root coordinates, from layout offsets (immune to any
+        // scale the host applies); the card is centered with translateY(-50%).
+        const card = root.querySelector("#cc-card");
+        const bx = card.offsetLeft + btn.offsetLeft + btn.offsetWidth / 2 + 210;
+        const by = card.offsetTop - card.offsetHeight / 2 + btn.offsetTop + btn.offsetHeight / 2;
+        const TIP = [6, 4]; // cursor hotspot inside its box
+
+        const bez = (t, a, c1, c2, d) => {
+          const u = 1 - t;
+          return u * u * u * a + 3 * u * u * t * c1 + 3 * u * t * t * c2 + t * t * t * d;
+        };
+        const place = (p) => {
+          const x = bez(p, START[0], CTRL1[0], CTRL2[0], 0) + bx - TIP[0];
+          const y = bez(p, START[1], CTRL1[1], CTRL2[1], 0) + by - TIP[1];
+          cursor.style.left = `${x}px`;
+          cursor.style.top = `${y}px`;
+        };
+        place(0);
+        gsap.set(ring, { left: bx, top: by });
+        gsap.set("#cc-done", { opacity: 0, y: 20 });
+        const len = check.getTotalLength();
+        gsap.set(check, { strokeDasharray: len, strokeDashoffset: len });
+
+        tl.fromTo(card, { opacity: 0, y: 40, scale: 0.97 }, { opacity: 1, y: 0, scale: 1, duration: 0.7, ease: "expo.out" }, 0);
+        tl.fromTo(cursor, { opacity: 0 }, { opacity: 1, duration: 0.25 }, MOVE_AT);
+        const path = { p: 0 };
+        tl.fromTo(path, { p: 0 }, { p: 1, duration: MOVE_DUR, ease: "power3.inOut", onUpdate: () => place(path.p) }, MOVE_AT);
+        tl.to("#cc-hover", { opacity: 1, duration: 0.2 }, MOVE_AT + MOVE_DUR - 0.2);
+
+        // Press.
+        tl.to(cursor, { scale: 0.86, duration: 0.1, ease: "power2.out" }, CLICK_AT);
+        tl.to(cursor, { scale: 1, duration: 0.3, ease: "back.out(3)" }, CLICK_AT + 0.12);
+        tl.to(btn, { scale: 0.96, duration: 0.1, ease: "power2.out" }, CLICK_AT);
+        tl.to(btn, { scale: 1, duration: 0.5, ease: "back.out(3)" }, CLICK_AT + 0.12);
+        tl.fromTo(ring, { opacity: 0.9, scale: 0.3 }, { opacity: 0, scale: 3.4, duration: 0.8, ease: "expo.out" }, CLICK_AT + 0.04);
+
+        // Success.
+        const OK = CLICK_AT + 0.25;
+        tl.to("#cc-label", { opacity: 0, y: -20, duration: 0.25, ease: "power2.in" }, OK);
+        tl.to("#cc-done", { opacity: 1, y: 0, duration: 0.45, ease: "back.out(2)" }, OK + 0.18);
+        tl.to(check, { strokeDashoffset: 0, duration: 0.45, ease: "power2.out" }, OK + 0.28);
+        tl.to(btn, { backgroundColor: "var(--ink, #111)", duration: 0.35, ease: "power2.out" }, OK);
+        tl.to(cursor, { x: 70, y: 60, opacity: 0, duration: 0.7, ease: "power2.in" }, CLICK_AT + 0.9);
+        tl.to({}, { duration: 4 - tl.duration() });
+
+        window.__timelines = window.__timelines || {};
+        window.__timelines["cursor-click"] = tl;
+      })();
+    </script>
+  </body>
+</html>

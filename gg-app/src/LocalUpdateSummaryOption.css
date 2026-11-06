@@ -1,0 +1,113 @@
+/* Local Fork-owned styles, loaded immediately after App.css (see AgentPane.tsx / main.tsx imports). */
+.local-update-summary-option {
+  display: flex;
+  gap: var(--space-5);
+  align-items: flex-start;
+  margin-top: var(--space-7);
+  cursor: pointer;
+}
+
+.local-update-summary-option input {
+  margin-top: 3px;
+  accent-color: var(--primary);
+}
+
+.local-update-summary-option span {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.local-update-summary-option strong {
+  color: var(--text);
+  font-size: var(--fs-base);
+}
+
+.local-update-summary-option small {
+  color: var(--text-secondary);
+  font-size: var(--fs-sm);
+  line-height: 1.45;
+}
+
+/* Home and What's new title: the fork's "Supah Coder" lettering (HomeTitle.tsx)
+   is 285×48 art px, wider than upstream's 201×39 "GG Coder", so it drops to 1×
+   sooner to stay inside narrow windows. */
+.home-title-art {
+  width: calc(285px * var(--title-scale));
+  height: calc(48px * var(--title-scale));
+}
+@media (max-width: 639px), (max-height: 420px) {
+  .home-title {
+    --title-scale: 1;
+  }
+}
+.wn-lounge .wn-lounge-title {
+  width: calc(285px * 2);
+  height: calc(48px * 2);
+}
+@media (max-width: 639px) {
+  .wn-lounge .wn-lounge-title {
+    width: 285px;
+    height: 48px;
+  }
+}
+
+/* What's new source tabs (WhatsNewWindow.tsx) on the lounge's board: the board
+   stacks the tablist over its scroller, and the tabs take the lounge's m5x7
+   lettering and gold accent instead of the app's sans pills. */
+.wn-lounge .wn-board {
+  flex-direction: column;
+}
+.wn-lounge .whatsnew-tabs {
+  margin: var(--wn-px) var(--wn-px) 0;
+  padding: 0 calc(var(--wn-px) * 7);
+  border-bottom: var(--wn-px) solid #4e343f;
+}
+.wn-lounge .whatsnew-tab {
+  min-height: calc(var(--wn-px) * 16);
+  padding: calc(var(--wn-px) * 2) calc(var(--wn-px) * 6);
+  border-bottom-width: var(--wn-px);
+  color: #c9a08c;
+  font-family: "m5x7", monospace;
+  font-size: calc(var(--wn-px) * 16);
+  font-weight: 400;
+  line-height: calc(var(--wn-px) * 12);
+}
+.wn-lounge .whatsnew-tab:hover,
+.wn-lounge .whatsnew-tab[aria-selected="true"] {
+  color: var(--wn-cream);
+  font-weight: 400;
+}
+.wn-lounge .whatsnew-tab[aria-selected="true"] {
+  border-bottom-color: var(--wn-gold);
+}
+.wn-lounge .whatsnew-tab:focus-visible {
+  outline: var(--wn-px) solid var(--wn-gold);
+}
+.wn-lounge .whatsnew-unread-dot {
+  width: calc(var(--wn-px) * 3);
+  height: calc(var(--wn-px) * 3);
+  border-radius: 0;
+}
+.wn-lounge .whatsnew-empty {
+  color: var(--wn-text);
+  font-size: inherit;
+  line-height: inherit;
+}
+@media (forced-colors: active) {
+  .wn-lounge .whatsnew-tab[aria-selected="true"] {
+    border-bottom-color: Highlight;
+  }
+}
+/* Narrow windows: the three source names don't fit the board at 2× m5x7, so
+   the tabs drop to the font's native 1× size (still whole art pixels). */
+@media (max-width: 479px) {
+  .wn-lounge .whatsnew-tabs {
+    padding: 0 calc(var(--wn-px) * 3);
+  }
+  .wn-lounge .whatsnew-tab {
+    padding-inline: calc(var(--wn-px) * 3);
+    font-size: calc(var(--wn-px) * 8);
+    line-height: calc(var(--wn-px) * 6);
+    white-space: nowrap;
+  }
+}

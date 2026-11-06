@@ -1,0 +1,16 @@
+/* Duotone Broadcast: one saturated field, one dark ink, broadcast framing. */
+.look-duotone-broadcast {
+  --field: #d9774f;
+  --field-2: #0f1e3d;
+  --ink: #0f1e3d;
+  --accent: #0f1e3d;
+  --muted: rgba(15, 30, 61, 0.9);
+  --line: rgba(15, 30, 61, 0.22);
+  --display: "Archivo", sans-serif;
+  --display-weight: 880;
+  --display-stretch: 88%;
+  --display-tracking: -0.035em;
+  --text: "Archivo", sans-serif;
+  --mono: "Martian Mono", monospace;
+  --radius: 0px;
+}

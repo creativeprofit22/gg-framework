@@ -1,0 +1,16 @@
+/* Dark Studio: near-black set, one key light, glass and brushed metal, one cool accent. */
+.look-dark-studio {
+  --field: #08090b;
+  --field-2: #121418;
+  --ink: #f3f5f8;
+  --accent: #7cc7ff;
+  --muted: rgba(243, 245, 248, 0.56);
+  --line: rgba(243, 245, 248, 0.1);
+  --display: "Mona Sans", sans-serif;
+  --display-weight: 620;
+  --display-stretch: 108%;
+  --display-tracking: -0.045em;
+  --text: "Mona Sans", sans-serif;
+  --mono: "Martian Mono", monospace;
+  --radius: 28px;
+}

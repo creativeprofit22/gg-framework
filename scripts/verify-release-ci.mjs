@@ -144,10 +144,7 @@ export async function verifyReleaseCi({
   let expectedRunCount;
   for (let page = 1; ; page += 1) {
     runsUrl.searchParams.set("page", String(page));
-    const response = requireObject(
-      await githubJson(runsUrl, token, fetchImpl),
-      "workflow-runs",
-    );
+    const response = requireObject(await githubJson(runsUrl, token, fetchImpl), "workflow-runs");
     if (!Number.isInteger(response.total_count) || !Array.isArray(response.workflow_runs)) {
       fail("GitHub workflow-runs response is missing workflow_runs or total_count");
     }

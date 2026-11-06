@@ -22,6 +22,8 @@ coverage/
 /.claude/
 .claude/*.lock
 CLAUDE.md
+# The root CLAUDE.md is tracked; nested copies stay local.
+!/CLAUDE.md
 
 # After Effects source projects never belong in the repo.
 *.[aA][eE][pP]
@@ -69,7 +71,10 @@ packages/ggcoder/ideal-sim/
 /bench/search-results/
 /benchmarks/
 /experiments/
-/scripts/
+# Repo scripts (audit, release CI gate) are tracked; other files here stay local.
+/scripts/*
+!/scripts/*.mjs
+/scripts/test_*.mjs
 packages/*/.bench-*.mjs
 
 # Temporary A/B sidecar builder; private harness and outputs live under /bench/.

@@ -1,4 +1,5 @@
 <!-- gg:init:start -->
+
 # gg-framework
 
 Provider-flexible AI-agent monorepo whose primary product is the `ggcoder` coding agent, with terminal and Tauri desktop surfaces.
@@ -35,6 +36,7 @@ Package layering is `gg-ai → gg-agent`/`gg-core → ggcoder`. Keep transports/
 - Distribution order is load-bearing: build `gg-ai → gg-agent → gg-core → ggcoder`, stage the target-platform Node runtime, bundle and smoke that exact sidecar, then package. On macOS, sign the staged Node binary and native addons before Tauri assembles/notarizes the app.
 - Multi-line CI/release steps must explicitly use Bash on Windows. PowerShell reports only the final command's status there, which previously hid intermediate package failures and allowed stale artifacts to ship.
 - A pushed desktop `vX.Y.Z` tag must point to an `origin/main` ancestor. The protected `desktop-production` preflight requires updater-signing and all macOS signing/notarization secrets before either Windows or Apple-silicon macOS builds; Linux and Intel macOS are intentionally not released.
+
 <!-- gg:init:end -->
 
 ## Polish

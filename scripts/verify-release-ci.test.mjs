@@ -79,20 +79,21 @@ test("ggcoder programmatic lint remains a non-mutating CI gate", () => {
 });
 
 test("command discovery and desktop refresh lint is a mandatory non-mutating CI gate", () => {
-  const packageJson = JSON.parse(
-    readFileSync(new URL("../package.json", import.meta.url), "utf8"),
-  );
+  const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
   const lintCommand = packageJson.scripts["lint:command-discovery"];
-  assert.equal(lintCommand, [
-    "eslint",
-    "packages/ggcoder/src/core/command-discovery.ts",
-    "packages/ggcoder/src/tools/command-information.ts",
-    "packages/gg-core/src/referenced-files.ts",
-    "gg-app/src/ReferencedFiles.tsx",
-    "gg-app/src/AgentPane.tsx",
-    "gg-app/src/agent.ts",
-    "gg-app/src/useAgentEvents.ts",
-  ].join(" "));
+  assert.equal(
+    lintCommand,
+    [
+      "eslint",
+      "packages/ggcoder/src/core/command-discovery.ts",
+      "packages/ggcoder/src/tools/command-information.ts",
+      "packages/gg-core/src/referenced-files.ts",
+      "gg-app/src/ReferencedFiles.tsx",
+      "gg-app/src/AgentPane.tsx",
+      "gg-app/src/agent.ts",
+      "gg-app/src/useAgentEvents.ts",
+    ].join(" "),
+  );
   assert.doesNotMatch(lintCommand, /--fix|--max-warnings/);
 
   const workflow = readFileSync(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8");
@@ -192,65 +193,209 @@ test("pane swaps are a serial blocking Windows native gate with sanitized failur
   const read = (path) => readFileSync(new URL(path, import.meta.url), "utf8");
   const workflow = read("../.github/workflows/ci.yml");
   const app = workflow.split("\n  app:")[1].split("\n  release-gate:")[0];
-  const smoke = app.match(/      - name: Pane swaps native smoke\r?\n[\s\S]*?(?=      - name:)/)?.[0];
+  const smoke = app.match(
+    /      - name: Pane swaps native smoke\r?\n[\s\S]*?(?=      - name:)/,
+  )?.[0];
   assert.ok(smoke);
-  for (const text of ["id: pane_swaps_smoke", "if: runner.os == 'Windows'", "shell: bash", "timeout-minutes: 15", "set -euo pipefail", 'mkdir -p "$TEMP" "$GG_PANE_SWAPS_EVIDENCE"', "node gg-app/scripts/pane-swaps-dev-smoke.mjs", "CARGO_NET_OFFLINE: 'true'", "COREPACK_ENABLE_NETWORK: '0'"]) assert.ok(smoke.includes(text), text);
-  for (const variable of ["TEMP", "TMP"]) assert.ok(smoke.includes(`${variable}: \${{ runner.temp }}/pane-swaps-dev-smoke`));
+  for (const text of [
+    "id: pane_swaps_smoke",
+    "if: runner.os == 'Windows'",
+    "shell: bash",
+    "timeout-minutes: 15",
+    "set -euo pipefail",
+    'mkdir -p "$TEMP" "$GG_PANE_SWAPS_EVIDENCE"',
+    "node gg-app/scripts/pane-swaps-dev-smoke.mjs",
+    "CARGO_NET_OFFLINE: 'true'",
+    "COREPACK_ENABLE_NETWORK: '0'",
+  ])
+    assert.ok(smoke.includes(text), text);
+  for (const variable of ["TEMP", "TMP"])
+    assert.ok(smoke.includes(`${variable}: \${{ runner.temp }}/pane-swaps-dev-smoke`));
   assert.ok(smoke.includes("GG_PANE_SWAPS_EVIDENCE: ${{ runner.temp }}/pane-swaps-evidence"));
   assert.doesNotMatch(smoke, /continue-on-error|\|\||--reuse|--visual|--preflight|&\s*$/m);
   assert.doesNotMatch(app, /continue-on-error/);
   assert.match(app, /timeout-minutes: 60/);
-  const ordered = ["uses: Swatinem/rust-cache@v2", "- name: Build framework packages", "- name: Rust unit tests", "- name: Cross-pane project isolation native smoke", "- name: Pane swaps native smoke", "- name: Upload failed pane swaps evidence", "- name: Programmatic execution native smoke"].map(text => app.indexOf(text));
-  assert.ok(ordered.every((position, index) => position >= 0 && (index === 0 || position > ordered[index - 1])));
-  const upload = app.match(/      - name: Upload failed pane swaps evidence\r?\n[\s\S]*?(?=      - name:)/)?.[0];
+  const ordered = [
+    "uses: Swatinem/rust-cache@v2",
+    "- name: Build framework packages",
+    "- name: Rust unit tests",
+    "- name: Cross-pane project isolation native smoke",
+    "- name: Pane swaps native smoke",
+    "- name: Upload failed pane swaps evidence",
+    "- name: Programmatic execution native smoke",
+  ].map((text) => app.indexOf(text));
+  assert.ok(
+    ordered.every(
+      (position, index) => position >= 0 && (index === 0 || position > ordered[index - 1]),
+    ),
+  );
+  const upload = app.match(
+    /      - name: Upload failed pane swaps evidence\r?\n[\s\S]*?(?=      - name:)/,
+  )?.[0];
   assert.ok(upload);
-  assert.match(upload, /if: failure\(\) && runner\.os == 'Windows' && steps\.pane_swaps_smoke\.outcome == 'failure'/);
+  assert.match(
+    upload,
+    /if: failure\(\) && runner\.os == 'Windows' && steps\.pane_swaps_smoke\.outcome == 'failure'/,
+  );
   assert.match(upload, /uses: actions\/upload-artifact@v7/);
   assert.match(upload, /if-no-files-found: error/);
   assert.match(upload, /retention-days: 7/);
-  assert.deepEqual(upload.split("\n").map(line => line.trim()).filter(line => line.startsWith("${{ runner.temp }}")), [
-    "result.json", "native-workspace.png", "native-failure.png", "native-center-1280.png", "native-center-390.png",
-  ].map(name => `\${{ runner.temp }}/pane-swaps-evidence/${name}`));
+  assert.deepEqual(
+    upload
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.startsWith("${{ runner.temp }}")),
+    [
+      "result.json",
+      "native-workspace.png",
+      "native-failure.png",
+      "native-center-1280.png",
+      "native-center-390.png",
+    ].map((name) => `\${{ runner.temp }}/pane-swaps-evidence/${name}`),
+  );
   const runner = read("../gg-app/scripts/pane-swaps-dev-smoke.mjs");
-  for (const text of ['runCrossPaneProjectIsolationSmoke({ identity: "com.ggcoder.local-fork", verifyWorkspace', 'onCleanup: (cleanup) => { evidence.cleanup = cleanup; }', 'assert.equal(evidence.cleanup.status, "passed")', 'process.exitCode = 1', 'evidence.status = "failed"', 'resolve(out, "result.json")', 'resolve(out, "native-failure.png")', 'process.env.GG_PANE_SWAPS_EVIDENCE', 'type: "mousePressed"', 'type: "mouseReleased"', '"Input.dispatchKeyEvent"', '["Enter", "Enter", 13]', '[" ", "Space", 32]', 'await key("Tab", "Tab", 9)', 'document.elementFromPoint(x, y)', 'same-center-direction focus', 'data-swap-keyboard-focus', 's.outlineWidth', 'width: 390, height: 844', 'width: 1280, height: 800', 'events.every(event => event.trusted)', 'entry.action === "session-created" || entry.action === "session-disposed"']) assert.ok(runner.includes(text), text);
-  assert.doesNotMatch(runner, /\.click\(|reuseDevServer: true|evidence\.error = error|console\.(?:error|log)\(error/);
+  for (const text of [
+    'runCrossPaneProjectIsolationSmoke({ identity: "com.ggcoder.local-fork", verifyWorkspace',
+    "onCleanup: (cleanup) => { evidence.cleanup = cleanup; }",
+    'assert.equal(evidence.cleanup.status, "passed")',
+    "process.exitCode = 1",
+    'evidence.status = "failed"',
+    'resolve(out, "result.json")',
+    'resolve(out, "native-failure.png")',
+    "process.env.GG_PANE_SWAPS_EVIDENCE",
+    'type: "mousePressed"',
+    'type: "mouseReleased"',
+    '"Input.dispatchKeyEvent"',
+    '["Enter", "Enter", 13]',
+    '[" ", "Space", 32]',
+    'await key("Tab", "Tab", 9)',
+    "document.elementFromPoint(x, y)",
+    "same-center-direction focus",
+    "data-swap-keyboard-focus",
+    "s.outlineWidth",
+    "width: 390, height: 844",
+    "width: 1280, height: 800",
+    "events.every(event => event.trusted)",
+    'entry.action === "session-created" || entry.action === "session-disposed"',
+  ])
+    assert.ok(runner.includes(text), text);
+  assert.doesNotMatch(
+    runner,
+    /\.click\(|reuseDevServer: true|evidence\.error = error|console\.(?:error|log)\(error/,
+  );
   const fixture = read("../gg-app/scripts/cross-pane-project-isolation-dev-smoke.mjs");
-  for (const text of ['await verifyWorkspace?.(', 'await terminateProcessTree(child.pid)', 'survivingProcessIds(processIdentities, await readProcessTable())', 'cleanup.status = "passed"', 'cleanup.status = "failed"', 'cleanup.survivors = survivors', 'onCleanup?.(cleanup)', 'if (failure) {', 'throw new Error(']) assert.ok(fixture.includes(text), text);
-  assert.ok(fixture.indexOf('onCleanup?.(cleanup)') > fixture.indexOf('await terminateProcessTree(child.pid)'));
+  for (const text of [
+    "await verifyWorkspace?.(",
+    "await terminateProcessTree(child.pid)",
+    "survivingProcessIds(processIdentities, await readProcessTable())",
+    'cleanup.status = "passed"',
+    'cleanup.status = "failed"',
+    "cleanup.survivors = survivors",
+    "onCleanup?.(cleanup)",
+    "if (failure) {",
+    "throw new Error(",
+  ])
+    assert.ok(fixture.includes(text), text);
+  assert.ok(
+    fixture.indexOf("onCleanup?.(cleanup)") >
+      fixture.indexOf("await terminateProcessTree(child.pid)"),
+  );
 });
 
 test("appearance is a serial blocking Windows native gate with allowlisted evidence", () => {
   const read = (path) => readFileSync(new URL(path, import.meta.url), "utf8");
   const workflow = read("../.github/workflows/ci.yml");
   const app = workflow.split("\n  app:")[1].split("\n  release-gate:")[0];
-  const smoke = app.match(/      - name: Appearance native smoke\r?\n[\s\S]*?(?=      - name:)/)?.[0];
+  const smoke = app.match(
+    /      - name: Appearance native smoke\r?\n[\s\S]*?(?=      - name:)/,
+  )?.[0];
   assert.ok(smoke);
-  for (const text of ["id: appearance_smoke", "if: runner.os == 'Windows'", "shell: bash", "timeout-minutes: 30", "set -euo pipefail", 'mkdir -p "$TEMP"', "pnpm --filter gg-app smoke:appearance", "CARGO_NET_OFFLINE: 'true'", "COREPACK_ENABLE_NETWORK: '0'", "UIMAXXXING_EYES_NO_INSTALL: '1'"]) assert.ok(smoke.includes(text), text);
-  for (const variable of ["TEMP", "TMP"]) assert.ok(smoke.includes(`${variable}: \${{ runner.temp }}/appearance-dev-smoke`));
+  for (const text of [
+    "id: appearance_smoke",
+    "if: runner.os == 'Windows'",
+    "shell: bash",
+    "timeout-minutes: 30",
+    "set -euo pipefail",
+    'mkdir -p "$TEMP"',
+    "pnpm --filter gg-app smoke:appearance",
+    "CARGO_NET_OFFLINE: 'true'",
+    "COREPACK_ENABLE_NETWORK: '0'",
+    "UIMAXXXING_EYES_NO_INSTALL: '1'",
+  ])
+    assert.ok(smoke.includes(text), text);
+  for (const variable of ["TEMP", "TMP"])
+    assert.ok(smoke.includes(`${variable}: \${{ runner.temp }}/appearance-dev-smoke`));
   assert.doesNotMatch(app, /continue-on-error/);
   assert.doesNotMatch(smoke, /\|\||&\s*$|GG_CHAT_DESIGN_PREVIEW|playwright install|pnpm install/m);
-  const ordered = ["uses: Swatinem/rust-cache@v2", "- name: Build framework packages", "- name: Install Playwright browser", "- name: Rust unit tests", "- name: Cross-pane project isolation native smoke", "- name: Pane swaps native smoke", "- name: Appearance native smoke", "- name: Upload failed appearance evidence", "- name: Programmatic execution native smoke"].map(text => app.indexOf(text));
-  assert.ok(ordered.every((position, index) => position >= 0 && (index === 0 || position > ordered[index - 1])));
-  const upload = app.match(/      - name: Upload failed appearance evidence\r?\n[\s\S]*?(?=      - name:)/)?.[0];
+  const ordered = [
+    "uses: Swatinem/rust-cache@v2",
+    "- name: Build framework packages",
+    "- name: Install Playwright browser",
+    "- name: Rust unit tests",
+    "- name: Cross-pane project isolation native smoke",
+    "- name: Pane swaps native smoke",
+    "- name: Appearance native smoke",
+    "- name: Upload failed appearance evidence",
+    "- name: Programmatic execution native smoke",
+  ].map((text) => app.indexOf(text));
+  assert.ok(
+    ordered.every(
+      (position, index) => position >= 0 && (index === 0 || position > ordered[index - 1]),
+    ),
+  );
+  const upload = app.match(
+    /      - name: Upload failed appearance evidence\r?\n[\s\S]*?(?=      - name:)/,
+  )?.[0];
   assert.ok(upload);
-  assert.match(upload, /if: failure\(\) && runner\.os == 'Windows' && steps\.appearance_smoke\.outcome == 'failure'/);
-  for (const text of ["uses: actions/upload-artifact@v7", "include-hidden-files: true", "if-no-files-found: error", "retention-days: 7"]) assert.ok(upload.includes(text), text);
-  assert.deepEqual(upload.match(/          path: \|\r?\n((?:            .+\r?\n)+)/)[1].trim().split(/\r?\n/).map(line => line.trim()), [
-    ".gg/eyes/out/appearance-native/fixture-*/result.json",
-    ".gg/eyes/out/appearance-native/fixture-*/*.png",
-  ]);
+  assert.match(
+    upload,
+    /if: failure\(\) && runner\.os == 'Windows' && steps\.appearance_smoke\.outcome == 'failure'/,
+  );
+  for (const text of [
+    "uses: actions/upload-artifact@v7",
+    "include-hidden-files: true",
+    "if-no-files-found: error",
+    "retention-days: 7",
+  ])
+    assert.ok(upload.includes(text), text);
+  assert.deepEqual(
+    upload
+      .match(/          path: \|\r?\n((?:            .+\r?\n)+)/)[1]
+      .trim()
+      .split(/\r?\n/)
+      .map((line) => line.trim()),
+    [
+      ".gg/eyes/out/appearance-native/fixture-*/result.json",
+      ".gg/eyes/out/appearance-native/fixture-*/*.png",
+    ],
+  );
   const pkg = JSON.parse(read("../gg-app/package.json"));
   assert.equal(pkg.scripts["smoke:appearance"], "node scripts/appearance-dev-smoke.mjs");
   const runner = read("../gg-app/scripts/appearance-dev-smoke.mjs");
-  for (const text of ['identity: "com.ggcoder.local-fork"', 'await ensureAppearanceDebugBuild(nativeEnv, config, scope)', 'onCleanup: result => { evidence.cleanup = result; }', 'evidence.cleanupError =', 'resolve(out, "result.json")', 'process.exitCode=1', "invoke('appearance_background_probe')", 'assertNativeBackground(']) assert.ok(runner.includes(text), text);
+  for (const text of [
+    'identity: "com.ggcoder.local-fork"',
+    "await ensureAppearanceDebugBuild(nativeEnv, config, scope)",
+    "onCleanup: result => { evidence.cleanup = result; }",
+    "evidence.cleanupError =",
+    'resolve(out, "result.json")',
+    "process.exitCode=1",
+    "invoke('appearance_background_probe')",
+    "assertNativeBackground(",
+  ])
+    assert.ok(runner.includes(text), text);
   const fixture = read("../gg-app/scripts/cross-pane-project-isolation-dev-smoke.mjs");
-  assert.ok(fixture.indexOf('if (beforeNativeStart) await beforeNativeStart(') < fixture.indexOf('{ timeoutMs: 300_000 }'));
+  assert.ok(
+    fixture.indexOf("if (beforeNativeStart) await beforeNativeStart(") <
+      fixture.indexOf("{ timeoutMs: 300_000 }"),
+  );
 });
 
 test("programmatic execution is a bounded blocking Windows app gate with failure evidence", () => {
   const workflow = readFileSync(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8");
   const appJob = workflow.split("\n  app:")[1].split("\n  release-gate:")[0];
-  const smoke = appJob.match(/      - name: Programmatic execution native smoke\r?\n[\s\S]*?(?=      - name:)/)?.[0];
+  const smoke = appJob.match(
+    /      - name: Programmatic execution native smoke\r?\n[\s\S]*?(?=      - name:)/,
+  )?.[0];
   assert.ok(smoke);
   assert.match(smoke, /id: programmatic_execution_smoke/);
   assert.match(smoke, /if: runner\.os == 'Windows'\r?\n/);
@@ -258,9 +403,15 @@ test("programmatic execution is a bounded blocking Windows app gate with failure
   assert.match(smoke, /timeout-minutes: 15/);
   assert.match(smoke, /set -euo pipefail/);
   assert.match(smoke, /mkdir -p "\$TEMP"/);
-  assert.match(smoke, /node gg-app\/scripts\/programmatic-execution-dev-smoke\.mjs --identity com\.ggcoder\.local-fork 2>&1 \| tee "\$TEMP\/console\.log"/);
+  assert.match(
+    smoke,
+    /node gg-app\/scripts\/programmatic-execution-dev-smoke\.mjs --identity com\.ggcoder\.local-fork 2>&1 \| tee "\$TEMP\/console\.log"/,
+  );
   assert.doesNotMatch(appJob, /continue-on-error/);
-  assert.doesNotMatch(smoke, /\|\| true|--visual|--preflight|--reuse-built-dev|--allow-normal-window/);
+  assert.doesNotMatch(
+    smoke,
+    /\|\| true|--visual|--preflight|--reuse-built-dev|--allow-normal-window/,
+  );
   for (const variable of ["TEMP", "TMP"]) {
     assert.ok(smoke.includes(`${variable}: \${{ runner.temp }}/programmatic-execution-dev-smoke`));
   }
@@ -280,45 +431,96 @@ test("programmatic execution is a bounded blocking Windows app gate with failure
     "- name: Upload failed programmatic execution evidence",
     "- name: Packaged app smoke",
   ].map((needle) => appJob.indexOf(needle));
-  assert.ok(ordered.every((position, index) => position >= 0 && (index === 0 || position > ordered[index - 1])));
+  assert.ok(
+    ordered.every(
+      (position, index) => position >= 0 && (index === 0 || position > ordered[index - 1]),
+    ),
+  );
   assert.match(appJob, /timeout-minutes: 60/);
   assert.match(appJob, /workspaces: gg-app\/src-tauri/);
-  const upload = appJob.match(/      - name: Upload failed programmatic execution evidence\r?\n[\s\S]*?(?=      - name:)/)?.[0];
+  const upload = appJob.match(
+    /      - name: Upload failed programmatic execution evidence\r?\n[\s\S]*?(?=      - name:)/,
+  )?.[0];
   assert.ok(upload);
-  assert.match(upload, /if: failure\(\) && runner\.os == 'Windows' && steps\.programmatic_execution_smoke\.outcome == 'failure'/);
+  assert.match(
+    upload,
+    /if: failure\(\) && runner\.os == 'Windows' && steps\.programmatic_execution_smoke\.outcome == 'failure'/,
+  );
   assert.match(upload, /uses: actions\/upload-artifact@v7/);
   assert.match(upload, /if-no-files-found: error/);
   assert.match(upload, /retention-days: 7/);
-  const evidencePaths = upload.split("\n").map((line) => line.trim()).filter((line) => line.startsWith("${{ runner.temp }}"));
+  const evidencePaths = upload
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith("${{ runner.temp }}"));
   const root = "${{ runner.temp }}/programmatic-execution-dev-smoke";
   assert.deepEqual(evidencePaths, [
     `${root}/console.log`,
-    ...["result.json", "failure.json", "cleanup.json", "developer.log", "native-minimized.json"].map((name) => `${root}/gg-programmatic-execution-*/audit/${name}`),
+    ...[
+      "result.json",
+      "failure.json",
+      "cleanup.json",
+      "developer.log",
+      "native-minimized.json",
+    ].map((name) => `${root}/gg-programmatic-execution-*/audit/${name}`),
   ]);
-  const fixture = readFileSync(new URL("../gg-app/scripts/programmatic-execution-dev-smoke.mjs", import.meta.url), "utf8");
+  const fixture = readFileSync(
+    new URL("../gg-app/scripts/programmatic-execution-dev-smoke.mjs", import.meta.url),
+    "utf8",
+  );
   assert.match(fixture, /mkdtempSync\(join\(tmpdir\(\), "gg-programmatic-execution-"\)\)/);
-  const lifecycle = readFileSync(new URL("../gg-app/scripts/programmatic-smoke-lifecycle.mjs", import.meta.url), "utf8");
+  const lifecycle = readFileSync(
+    new URL("../gg-app/scripts/programmatic-smoke-lifecycle.mjs", import.meta.url),
+    "utf8",
+  );
   assert.match(fixture, /const result = await runSmokeLifecycle\(\{\s*audit,\s*workflow,/);
-  assert.match(fixture, /beforeCleanup: async \(\) => \{ await observeMinimized\?\.\("before-cleanup"\); \}/);
-  assert.match(fixture, /if \(!visual && !discoveryOnly && !familyWorkflow && !areaSearch\) validateNativeSmokeEvidence\(paths.audit, result, \{ driftOnly, integratedRecovery, extendedWorkflow, allowNormalWindow \}\)/);
-  assert.match(fixture, /if \(!visual && \(discoveryOnly \|\| familyWorkflow \|\| areaSearch\)\) \{\s*const observations = JSON\.parse\(readFileSync\(join\(paths.audit, "native-minimized.json"\), "utf8"\)\);\s*assert\.ok\(observations.samples.length >= 3 && observations.samples.every\(\(sample\) => sample.verified && sample.minimized\)\);\s*result.minimized = true;/);
-  assert.match(fixture, /const extendedWorkflow = process\.argv\.includes\("--extended-workflow"\)/);
+  assert.match(
+    fixture,
+    /beforeCleanup: async \(\) => \{ await observeMinimized\?\.\("before-cleanup"\); \}/,
+  );
+  assert.match(
+    fixture,
+    /if \(!visual && !discoveryOnly && !familyWorkflow && !areaSearch\) validateNativeSmokeEvidence\(paths.audit, result, \{ driftOnly, integratedRecovery, extendedWorkflow, allowNormalWindow \}\)/,
+  );
+  assert.match(
+    fixture,
+    /if \(!visual && \(discoveryOnly \|\| familyWorkflow \|\| areaSearch\)\) \{\s*const observations = JSON\.parse\(readFileSync\(join\(paths.audit, "native-minimized.json"\), "utf8"\)\);\s*assert\.ok\(observations.samples.length >= 3 && observations.samples.every\(\(sample\) => sample.verified && sample.minimized\)\);\s*result.minimized = true;/,
+  );
+  assert.match(
+    fixture,
+    /const extendedWorkflow = process\.argv\.includes\("--extended-workflow"\)/,
+  );
   assert.match(fixture, /!extendedWorkflow \|\| \(!driftOnly && !integratedRecovery\)/);
   assert.match(fixture, /!extendedWorkflow \|\| !allowNormalWindow/);
-  assert.match(fixture, /requests\.length < \(familyWorkflow \? familyRequestCount : discoveryOnly \? discoveryRequestCount : extendedWorkflow \? extendedRequestCount : 3\)/);
+  assert.match(
+    fixture,
+    /requests\.length < \(familyWorkflow \? familyRequestCount : discoveryOnly \? discoveryRequestCount : extendedWorkflow \? extendedRequestCount : 3\)/,
+  );
   assert.match(fixture, /extendedWorkflowStep\(requests\.length, body\)/);
   assert.doesNotMatch(smoke, /--extended-workflow/);
   assert.match(lifecycle, /writeFileSync\(join\(audit, "failure.json"\)/);
   assert.match(fixture, /const visual = process\.argv\.includes\("--visual"\)/);
   assert.match(fixture, /GG_APP_DEV_SMOKE_WINDOW: visual \? "visible" : "minimized"/);
   assert.match(fixture, /assert\.deepEqual\(process\.argv\.slice\(2\),/);
-  assert.match(fixture, /if \(reuseBuiltDev\) \{\s*assert\.match\(process\.env\.GG_PROGRAMMATIC_BUILT_DEV_SHA256/);
-  assert.match(fixture, /assert\.equal\(createHash\("sha256"\)\.update\(readFileSync\(builtDev\)\)\.digest\("hex"\), process\.env\.GG_PROGRAMMATIC_BUILT_DEV_SHA256/);
-  assert.match(fixture, /const native = reuseBuiltDev\s*\? spawn\(builtDev, \[\],[^\n]+\s*: spawn\(process\.env\.ComSpec \?\? "cmd.exe", \["\/d", "\/s", "\/c", nativeCommand\]/);
+  assert.match(
+    fixture,
+    /if \(reuseBuiltDev\) \{\s*assert\.match\(process\.env\.GG_PROGRAMMATIC_BUILT_DEV_SHA256/,
+  );
+  assert.match(
+    fixture,
+    /assert\.equal\(createHash\("sha256"\)\.update\(readFileSync\(builtDev\)\)\.digest\("hex"\), process\.env\.GG_PROGRAMMATIC_BUILT_DEV_SHA256/,
+  );
+  assert.match(
+    fixture,
+    /const native = reuseBuiltDev\s*\? spawn\(builtDev, \[\],[^\n]+\s*: spawn\(process\.env\.ComSpec \?\? "cmd.exe", \["\/d", "\/s", "\/c", nativeCommand\]/,
+  );
   assert.match(fixture, /const nativeCommand = `pnpm exec tauri dev --config/);
   assert.match(fixture, /const sample = \{ boundary, timestamp:/);
   assert.match(lifecycle, /const expectedLabels = \["native-ready", "approved-scanned-selected"/);
-  assert.match(lifecycle, /observations\.samples\.map\(\(sample\) => sample\.boundary\), expectedLabels/);
+  assert.match(
+    lifecycle,
+    /observations\.samples\.map\(\(sample\) => sample\.boundary\), expectedLabels/,
+  );
   assert.match(fixture, /!integratedRecovery \|\| \(!driftOnly && !visual\)/);
   assert.match(fixture, /assert\.equal\(parentState\.provider, "azure"\)/);
   assert.match(fixture, /assert\.equal\(parentState\.model, "azure:fixture"\)/);
@@ -330,8 +532,16 @@ test("programmatic execution is a bounded blocking Windows app gate with failure
   assert.ok(fixture.includes("let assessmentMessageDelta = 0;"));
   assert.ok(fixture.includes("entry.messageDelta = after.messageCount - before.messageCount;"));
   assert.ok(fixture.includes("assessmentMessageDelta += entry.messageDelta;"));
-  assert.ok(fixture.includes('if (extendedWorkflow) assert.ok(finalParent.messageCount > parentState.messageCount, "Only explicit parent turns extend its transcript")'));
-  assert.ok(fixture.includes('else assert.equal(finalParent.messageCount, parentState.messageCount + assessmentMessageDelta, "Only explicit assessments may extend the parent transcript")'));
+  assert.ok(
+    fixture.includes(
+      'if (extendedWorkflow) assert.ok(finalParent.messageCount > parentState.messageCount, "Only explicit parent turns extend its transcript")',
+    ),
+  );
+  assert.ok(
+    fixture.includes(
+      'else assert.equal(finalParent.messageCount, parentState.messageCount + assessmentMessageDelta, "Only explicit assessments may extend the parent transcript")',
+    ),
+  );
   for (const field of ["provider", "model", "sessionId", "messageCount"]) {
     assert.ok(fixture.includes(`${field}: parentState.${field}`));
     assert.ok(fixture.includes(`${field}: finalParent.${field}`));
@@ -385,9 +595,7 @@ test("successful exact-SHA main push and required CI job allow release", async (
 
 test("more than 100 filtered runs are fully paginated", async () => {
   const requestedUrls = [];
-  const firstPage = Array.from({ length: 100 }, (_, index) =>
-    exactRun({ id: RUN_ID - index - 1 }),
-  );
+  const firstPage = Array.from({ length: 100 }, (_, index) => exactRun({ id: RUN_ID - index - 1 }));
   const responses = [
     { total_count: 101, workflow_runs: firstPage },
     { total_count: 101, workflow_runs: [exactRun()] },
@@ -430,8 +638,7 @@ test("newer failed or pending exact-SHA run on a later page stops release", asyn
         repository: "kenkaiiii/gg-framework",
         sha: SHA,
         token: "x",
-        fetchImpl: async () =>
-          new Response(JSON.stringify(responses.shift()), { status: 200 }),
+        fetchImpl: async () => new Response(JSON.stringify(responses.shift()), { status: 200 }),
       }),
       new RegExp(`${state.status}/${state.conclusion ?? "pending"}`),
     );
@@ -451,8 +658,7 @@ test("filtered-result cap or truncated pagination stops release", async () => {
         repository: "kenkaiiii/gg-framework",
         sha: SHA,
         token: "x",
-        fetchImpl: async () =>
-          new Response(JSON.stringify(responses.shift()), { status: 200 }),
+        fetchImpl: async () => new Response(JSON.stringify(responses.shift()), { status: 200 }),
       }),
       /(?:capped|truncated).*cannot prove the newest exact-SHA run/,
     );

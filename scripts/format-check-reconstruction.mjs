@@ -18,11 +18,9 @@ const tracked = execFileSync(
 )
   .split(/\r?\n/)
   .filter(shouldCheck);
-const dirty = execFileSync(
-  "git",
-  ["diff", "--name-only", "--diff-filter=ACMRT"],
-  { encoding: "utf8" },
-)
+const dirty = execFileSync("git", ["diff", "--name-only", "--diff-filter=ACMRT"], {
+  encoding: "utf8",
+})
   .split(/\r?\n/)
   .filter(shouldCheck);
 const files = [...new Set([...tracked, ...dirty, "scripts/format-check-reconstruction.mjs"])];

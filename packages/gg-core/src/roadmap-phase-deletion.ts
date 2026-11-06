@@ -64,7 +64,8 @@ export type PhaseDeletionRefusal =
   | "stale-generation"
   | "already-deleted"
   | "not-deleted"
-  | "operation-id-reused";
+  | "operation-id-reused"
+  | "dependency-links";
 
 export type PhaseDeletionOutcome =
   | {
@@ -138,6 +139,7 @@ const refusalReasons: readonly PhaseDeletionRefusal[] = [
   "already-deleted",
   "not-deleted",
   "operation-id-reused",
+  "dependency-links",
 ];
 
 export function isPhaseDeletionOutcome(value: unknown): value is PhaseDeletionOutcome {

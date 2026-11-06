@@ -17,6 +17,7 @@ export default defineConfig({
     "src/project-notes-diagnostics.ts",
     "src/phase-binding-protocol.ts",
     "src/phase-start-protocol.ts",
+    "src/roadmap-phase-dependencies.ts",
     "src/roadmap-workflow.ts",
     "src/slash-command-contract.ts",
     "src/progress-contract.ts",

@@ -478,6 +478,31 @@ describe("project Notes contract", () => {
     expect(migrateNotesDocumentV3PhaseShape(document)).toEqual({ ok: true, document });
   });
 
+  it("accepts optional dependsOn links and still rejects unknown phase fields", async () => {
+    const linked = await fixture();
+    linked.phases[0]!.dependsOn = ["phase-migration-proof"];
+    expect(validateNotesDocumentV3(linked)).toEqual({ ok: true, document: linked });
+    expect(migrateNotesDocumentV3PhaseShape(linked)).toEqual({ ok: true, document: linked });
+    expect(validateOldNotes(linked)).toMatchObject({ ok: false, error: { path: "phases[0]" } });
+
+    const unknown = (await fixture()) as unknown as { phases: Record<string, unknown>[] };
+    unknown.phases[0]!.blockedBy = ["phase-migration-proof"];
+    expectError(
+      unknown,
+      "phases[0]",
+      "expected legacy fields with optional execution, deletion and dependsOn",
+    );
+
+    const missing = await fixture();
+    missing.phases[1]!.dependsOn = ["phase-missing"];
+    expectError(missing, "phases[1].dependsOn[0]");
+
+    const cycle = await fixture();
+    cycle.phases[0]!.dependsOn = ["phase-migration-proof"];
+    cycle.phases[1]!.dependsOn = ["phase-schema-contract"];
+    expectError(cycle, "phases[1].dependsOn[0]");
+  });
+
   it("strictly binds pending automatic lifecycle provenance to an active status override", async () => {
     const withoutOverride = await fixture();
     withoutOverride.phases[0]!.overrides.status = null;

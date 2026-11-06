@@ -4,6 +4,8 @@ import {
   type NotesPhaseDeletion,
 } from "./roadmap-phase-deletion.js";
 export * from "./roadmap-phase-deletion.js";
+import { validateRoadmapPhaseDependencies } from "./roadmap-phase-dependencies.js";
+export * from "./roadmap-phase-dependencies.js";
 export * from "./roadmap-phase-status-override.js";
 
 export type NotesTaskStatus = "todo" | "done";
@@ -497,6 +499,8 @@ export interface NotesPhase {
   session: NotesSessionLink | null;
   /** Additive retained deletion history. Absence means never deleted. */
   deletion?: NotesPhaseDeletion;
+  /** Ids of phases that must be Done first. Absent means none; present is never empty. */
+  dependsOn?: string[];
   /** Additive v3 durable execution state. Absence means legacy session-owned execution. */
   execution?: NotesPhaseExecutionV1;
   reminder: NotesReminder | null;
@@ -816,6 +820,7 @@ const PHASE_KEYS = [
   "roadmapEvents",
 ];
 const LEGACY_PHASE_KEYS = PHASE_KEYS.filter((key) => key !== "execution");
+const OPTIONAL_PHASE_KEYS = ["execution", "deletion", "dependsOn"];
 const LEGACY_V3_PHASE_REQUIRED_KEYS = LEGACY_PHASE_KEYS.filter(
   (key) =>
     key !== "archivedAt" &&
@@ -1507,6 +1512,8 @@ export function validateNotesDocumentV3(value: unknown): NotesValidationResult {
     }
     occurrenceKeyPaths.set(reminder.occurrenceKey, `${reminderPath}.occurrenceKey`);
   }
+  const dependencyError = validateRoadmapPhaseDependencies(value.phases as NotesPhase[]);
+  if (dependencyError) return { ok: false, error: dependencyError };
 
   return { ok: true, document: value as unknown as NotesDocumentV3 };
 }
@@ -2092,15 +2099,10 @@ function validatePhase(
   knownPhaseIds: ReadonlySet<string>,
 ): NotesValidationError | null {
   const pathPrefix = `phases[${index}]`;
-  if (
-    !isRecordWithKeys(value, PHASE_KEYS) &&
-    !isRecordWithKeys(value, LEGACY_PHASE_KEYS) &&
-    !isRecordWithKeys(value, [...PHASE_KEYS, "deletion"]) &&
-    !isRecordWithKeys(value, [...LEGACY_PHASE_KEYS, "deletion"])
-  ) {
+  if (!isRecordWithRequiredAndOptionalKeys(value, LEGACY_PHASE_KEYS, OPTIONAL_PHASE_KEYS)) {
     return validationError(
       pathPrefix,
-      "expected legacy fields with optional execution and deletion",
+      "expected legacy fields with optional execution, deletion and dependsOn",
     );
   }
   if (!isNonEmptyString(value.id))
@@ -3315,6 +3317,19 @@ function isRecordWithKeys(
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
   const keys = Object.keys(value);
   return keys.length === expectedKeys.length && expectedKeys.every((key) => keys.includes(key));
+}
+
+function isRecordWithRequiredAndOptionalKeys(
+  value: unknown,
+  requiredKeys: readonly string[],
+  optionalKeys: readonly string[],
+): value is Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const keys = Object.keys(value);
+  return (
+    requiredKeys.every((key) => keys.includes(key)) &&
+    keys.every((key) => requiredKeys.includes(key) || optionalKeys.includes(key))
+  );
 }
 
 function isTimestamp(value: unknown): value is string {

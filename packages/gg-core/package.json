@@ -93,6 +93,11 @@
       "import": "./dist/plan-review.js",
       "require": "./dist/plan-review.cjs"
     },
+    "./roadmap-phase-dependencies": {
+      "types": "./dist/roadmap-phase-dependencies.d.ts",
+      "import": "./dist/roadmap-phase-dependencies.js",
+      "require": "./dist/roadmap-phase-dependencies.cjs"
+    },
     "./roadmap-workflow": {
       "types": "./dist/roadmap-workflow.d.ts",
       "import": "./dist/roadmap-workflow.js",

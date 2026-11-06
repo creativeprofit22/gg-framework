@@ -77,6 +77,7 @@ GG Coder is a desktop coding agent that gets more out of the AI subscription you
    cd gg-framework
    pnpm install
    pnpm build
+   pnpm --filter gg-app prebundle   # stage Node and bundle the sidecar the app runs
    pnpm --filter gg-app tauri dev
    ```
 
@@ -97,12 +98,13 @@ GG Coder is a desktop coding agent that gets more out of the AI subscription you
 
 Nothing needs an `.env` file: you sign in to providers inside the app. These environment variables are optional overrides:
 
-| Variable                                                                   | What it does                                                                           |
-| -------------------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
-| `GG_AGENT_DIR`                                                             | Absolute path for settings, sessions and logins. Defaults to `~/.gg`.                  |
-| `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_BASE_URL`, `AZURE_OPENAI_DEPLOYMENT` | Azure OpenAI connection. The base URL must be a full `https` Responses endpoint.       |
-| `AZURE_OPENAI_MODEL_ID`                                                    | Optional model name to show for the Azure deployment.                                  |
-| `GGCODER_GEMINI_OAUTH_CLIENT_ID`, `GGCODER_GEMINI_OAUTH_CLIENT_SECRET`     | Use your own Google Cloud OAuth client for Gemini sign-in instead of the built-in one. |
+| Variable                                                                   | What it does                                                                                                     |
+| -------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `GG_AGENT_DIR`                                                             | Absolute path for settings, sessions and logins. Defaults to `~/.gg`.                                            |
+| `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_BASE_URL`, `AZURE_OPENAI_DEPLOYMENT` | Azure OpenAI connection. The base URL must be a full `https` Responses endpoint.                                 |
+| `AZURE_OPENAI_MODEL_ID`                                                    | Optional model name to show for the Azure deployment.                                                            |
+| `GGCODER_GEMINI_OAUTH_CLIENT_ID`, `GGCODER_GEMINI_OAUTH_CLIENT_SECRET`     | Use your own Google Cloud OAuth client for Gemini sign-in instead of the built-in one.                           |
+| `QWEN_CLOUD_TOKEN_PLAN_KEY`                                                | Qwen Cloud Token Plan key (`sk-sp-…`) for the standalone CLI. The desktop app stores its key in the app instead. |
 
 ## This Local Fork
 

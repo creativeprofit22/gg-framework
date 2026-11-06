@@ -78,7 +78,9 @@ import {
   type ProjectNotesUnsupportedFormat,
 } from "@kenkaiiii/gg-core/project-notes";
 import {
+  findCurrentDependencyOverride,
   hasRoadmapPhaseDependencyLinks,
+  listUnfinishedPrerequisites,
   phaseDeletionDependencyConflict,
 } from "@kenkaiiii/gg-core/roadmap-phase-dependencies";
 export * from "@kenkaiiii/gg-core/project-notes";
@@ -1011,6 +1013,36 @@ function chronologicalRoadmapTimestamp(phase: NotesPhase, requested: string): st
   return new Date(Math.max(requestedTime, ...priorTimes)).toISOString();
 }
 
+/**
+ * Records a user start from the app over unfinished prerequisites, so the agent may attach.
+ * Returns the event timestamp, or null when nothing needed recording.
+ */
+function recordUserDependencyOverride(
+  document: NotesDocumentV3,
+  phaseIndex: number,
+  session: NotesSessionLink,
+  requested: string,
+  createId: () => string,
+): string | null {
+  const phase = document.phases[phaseIndex]!;
+  const unfinished = listUnfinishedPrerequisites(document.phases, phase.id) ?? [];
+  if (unfinished.length === 0) return null;
+  const existing = findCurrentDependencyOverride(phase);
+  if (existing && notesSessionLinksEqual(existing.session, session)) return null;
+  const timestamp = chronologicalRoadmapTimestamp(phase, requested);
+  phase.roadmapEvents.push({
+    type: "dependency-override",
+    id: createId(),
+    actor: "user",
+    origin: "app",
+    session: { ...session },
+    unfinishedPrerequisiteIds: unfinished.map((prerequisite) => prerequisite.id),
+    timestamp,
+  });
+  phase.updatedAt = timestamp;
+  return timestamp;
+}
+
 function normalizeRoadmapProposedReference(
   proposed: Omit<NotesReference, "id" | "capturedAt">,
 ): Omit<NotesReference, "id" | "capturedAt"> {
@@ -1783,6 +1815,7 @@ export class ProjectNotesRepository {
         pendingAutomaticLifecycleTransition: null,
         lifecycleEvents: [],
         roadmapEvents: [],
+        ...(phase.dependsOn ? { dependsOn: [...phase.dependsOn] } : {}),
       }));
       document.references.push(...newReferences);
       // Without insertBeforePhaseId every phase appends, exactly as before.
@@ -2783,10 +2816,22 @@ export class ProjectNotesRepository {
         this.createId,
       );
       if (transition !== "updated") boundPhase.updatedAt = lifecycleTimestamp;
-      document.updatedAt =
-        Date.parse(confirmationTimestamp) >= Date.parse(lifecycleTimestamp)
-          ? confirmationTimestamp
-          : lifecycleTimestamp;
+      const overrideTimestamp = recordUserDependencyOverride(
+        document,
+        nextPhaseIndex,
+        session,
+        lifecycleTimestamp,
+        this.createId,
+      );
+      document.updatedAt = [
+        confirmationTimestamp,
+        lifecycleTimestamp,
+        overrideTimestamp,
+      ].reduce<string>(
+        (latest, value) =>
+          value !== null && Date.parse(value) > Date.parse(latest) ? value : latest,
+        confirmationTimestamp,
+      );
       const next = await this.commitDocument(paths, current, document, {
         validationMode: "validated",
         context: "Phase advancement confirmation created invalid Notes",
@@ -2825,10 +2870,34 @@ export class ProjectNotesRepository {
       if (currentPhase.status === "done") return { status: "done-terminal" };
       const { references } = phaseLaunchContext(current.document, currentPhase);
       if (currentPhase.session && currentPhase.session.sessionPath !== null) {
+        const document = structuredClone(current.document);
+        const overrideTimestamp = recordUserDependencyOverride(
+          document,
+          phaseIndex,
+          currentPhase.session,
+          new Date().toISOString(),
+          this.createId,
+        );
+        if (overrideTimestamp === null) {
+          return {
+            status: "already-bound",
+            snapshot: toSnapshot(current),
+            phase: structuredClone(currentPhase),
+            references: structuredClone(references),
+            session: { ...currentPhase.session },
+          };
+        }
+        if (Date.parse(overrideTimestamp) > Date.parse(document.updatedAt)) {
+          document.updatedAt = overrideTimestamp;
+        }
+        const next = await this.commitDocument(paths, current, document, {
+          validationMode: "trusted",
+          context: "Phase launch dependency override commit",
+        });
         return {
           status: "already-bound",
-          snapshot: toSnapshot(current),
-          phase: structuredClone(currentPhase),
+          snapshot: toSnapshot(next),
+          phase: structuredClone(document.phases[phaseIndex]!),
           references: structuredClone(references),
           session: { ...currentPhase.session },
         };
@@ -2862,7 +2931,9 @@ export class ProjectNotesRepository {
         this.createId,
       );
       if (transition !== "updated") boundPhase.updatedAt = timestamp;
-      document.updatedAt = timestamp;
+      document.updatedAt =
+        recordUserDependencyOverride(document, phaseIndex, session, timestamp, this.createId) ??
+        timestamp;
       const next = await this.commitDocument(paths, current, document, {
         validationMode: "trusted",
         context: "Phase launch commit",
@@ -3432,6 +3503,10 @@ export class ProjectNotesRepository {
     const currentTarget = current.document.phases[targetIndex]!;
     if (currentTarget.id !== checkpoint.nextPhaseId) {
       return { status: "stale", reason: "target-mismatch" };
+    }
+    // Autopilot has nobody to ask: unfinished prerequisites leave the start to the user.
+    if ((listUnfinishedPrerequisites(current.document.phases, currentTarget.id) ?? []).length > 0) {
+      return { status: "stale", reason: "target-ineligible" };
     }
     if (
       sameSessionId.some(

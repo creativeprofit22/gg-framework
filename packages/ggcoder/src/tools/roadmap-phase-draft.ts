@@ -13,6 +13,7 @@ import {
   ROADMAP_DRAFT_REFERENCE_KEY_MAX_LENGTH,
   ROADMAP_DRAFT_REFERENCE_KEYS_MAX_ITEMS,
   ROADMAP_DRAFT_REFERENCES_MAX_ITEMS,
+  ROADMAP_PHASE_DEPENDS_ON_MAX_ITEMS,
   ROADMAP_PHASE_SOURCE_PROMPT_MAX_LENGTH,
   ROADMAP_PHASE_TITLE_MAX_LENGTH,
   ROADMAP_PROPOSED_PHASES_MAX_ITEMS,
@@ -95,6 +96,19 @@ const roadmapProposedPhaseInputSchema: JsonSchema = {
       maxLength: PHASE_ID_MAX_LENGTH,
       description:
         "Optional id of an existing Roadmap phase this new phase goes directly before. Omit to add it at the end.",
+    },
+    depends_on_phase_ids: {
+      type: "array",
+      items: { type: "string", minLength: 1, maxLength: PHASE_ID_MAX_LENGTH },
+      maxItems: ROADMAP_PHASE_DEPENDS_ON_MAX_ITEMS,
+      description: "Optional ids of existing phases that must be Done before this phase starts.",
+    },
+    depends_on_draft_phases: {
+      type: "array",
+      items: { type: "integer", minimum: 0 },
+      maxItems: ROADMAP_PROPOSED_PHASES_MAX_ITEMS,
+      description:
+        "Optional 0-based indexes of other phases in this same draft that must be Done before this phase starts.",
     },
   },
   required: ["title", "goal", "doneWhen", "sourcePrompt"],
@@ -226,6 +240,14 @@ const RoadmapProposedPhaseParams = z
     sourcePrompt: boundedText(ROADMAP_PHASE_SOURCE_PROMPT_MAX_LENGTH, "sourcePrompt"),
     reference_keys: z.array(referenceKey).max(ROADMAP_DRAFT_REFERENCE_KEYS_MAX_ITEMS).optional(),
     insert_before_phase_id: boundedText(PHASE_ID_MAX_LENGTH, "insert_before_phase_id").optional(),
+    depends_on_phase_ids: z
+      .array(boundedText(PHASE_ID_MAX_LENGTH, "depends_on_phase_ids item"))
+      .max(ROADMAP_PHASE_DEPENDS_ON_MAX_ITEMS)
+      .optional(),
+    depends_on_draft_phases: z
+      .array(z.number().int().nonnegative())
+      .max(ROADMAP_PROPOSED_PHASES_MAX_ITEMS)
+      .optional(),
   })
   .strict();
 
@@ -269,13 +291,25 @@ function toRoadmapPhaseDraftRequest(
   return {
     expectedRevision: input.expected_revision,
     summary: input.summary,
-    phases: input.phases.map(({ reference_keys, insert_before_phase_id, ...phase }) => ({
-      ...phase,
-      referenceKeys: reference_keys ?? [],
-      ...(insert_before_phase_id === undefined
-        ? {}
-        : { insertBeforePhaseId: insert_before_phase_id }),
-    })),
+    phases: input.phases.map(
+      ({
+        reference_keys,
+        insert_before_phase_id,
+        depends_on_phase_ids,
+        depends_on_draft_phases,
+        ...phase
+      }) => ({
+        ...phase,
+        referenceKeys: reference_keys ?? [],
+        ...(insert_before_phase_id === undefined
+          ? {}
+          : { insertBeforePhaseId: insert_before_phase_id }),
+        ...(depends_on_phase_ids === undefined ? {} : { dependsOn: depends_on_phase_ids }),
+        ...(depends_on_draft_phases === undefined
+          ? {}
+          : { dependsOnDraftPhases: depends_on_draft_phases }),
+      }),
+    ),
     proposedReferences: (input.proposed_references ?? []).map((reference) => ({
       referenceKey: reference.reference_key,
       provider: reference.provider,
@@ -324,6 +358,7 @@ export function createRoadmapPhaseDraftTool(
       "Draft bounded Roadmap phases for approval; never write Project Notes or files while drafting. " +
       'Call roadmap_inspect with scope "roadmap" immediately first and pass its revision as expected_revision. Draft only flat peer phases, never nested or parent/child phases. ' +
       "New phases are added at the end. When a phase must come before existing phases, set its insert_before_phase_id to that phase's id; phases sharing a target keep their draft order. Nothing can be inserted ahead of a Done phase. " +
+      "To make a phase wait for others, set depends_on_phase_ids (existing phase ids) and/or depends_on_draft_phases (0-based indexes of other phases in this draft); missing, deleted, self or circular links are rejected. " +
       "After submitting the draft, stop because it is pending user approval; do not implement it. " +
       "To revise your own pending proposal (for example after reviewer feedback), call this again with the corrected draft; it replaces that proposal in place, so never ask the user to reject it first. " +
       "Use roadmap_status for execution progress on approved phases. Ordinary coding requests need no Roadmap action. " +

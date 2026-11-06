@@ -187,3 +187,88 @@ describe("ProjectNotesRepository direct completion authority", () => {
     },
   );
 });
+
+describe("phase advancement into a phase with unfinished prerequisites", () => {
+  /** Phase 2 depends on phase 3, which is still in progress in another session. */
+  async function linkedProject(linked: boolean) {
+    const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "repository-advance-deps-"));
+    roots.push(agentDir);
+    const repository = new ProjectNotesRepository(agentDir);
+    const cwd = `/project/advance-deps-${linked}`;
+    const base = document("current");
+    base.phases.push({
+      ...structuredClone(base.phases[1]!),
+      id: "phase-3",
+      title: "Prerequisite",
+      order: 2,
+      status: "in-progress",
+      session: { sessionId: "prereq-session", sessionPath: "/sessions/prereq.jsonl" },
+    });
+    const migrated = await repository.migrate(cwd, base);
+    if (migrated.status !== "ok") throw Error(JSON.stringify(migrated));
+    if (!linked) return { repository, cwd, revision: migrated.snapshot.revision };
+    // Saves refuse topology edits under a pending checkpoint, so link the stored copy directly.
+    const paths = repository.paths(cwd);
+    for (const file of [paths.primary, paths.backup]) {
+      const envelope = JSON.parse(await fs.readFile(file, "utf8"));
+      envelope.storeVersion = 3;
+      envelope.document.phases.find((phase: { id: string }) => phase.id === "phase-2").dependsOn = [
+        "phase-3",
+      ];
+      await fs.writeFile(file, JSON.stringify(envelope));
+    }
+    const loaded = await repository.load(cwd);
+    if (loaded.status !== "ok") throw Error(JSON.stringify(loaded));
+    return { repository, cwd, revision: loaded.snapshot.revision };
+  }
+
+  it("refuses automatic advancement and writes nothing", async () => {
+    const { repository, cwd, revision } = await linkedProject(true);
+    const before = await repository.load(cwd);
+    await expect(
+      repository.confirmAutomaticPhaseAdvancement(cwd, {
+        checkpointId: "advancement-checkpoint",
+        expectedRevision: revision,
+        destinationSession: session,
+        timestamp: NOW,
+      }),
+    ).resolves.toEqual({ status: "stale", reason: "target-ineligible" });
+    expect(await repository.load(cwd)).toEqual(before);
+  });
+
+  it("still advances automatically when the next phase has no links", async () => {
+    const { repository, cwd, revision } = await linkedProject(false);
+    await expect(
+      repository.confirmAutomaticPhaseAdvancement(cwd, {
+        checkpointId: "advancement-checkpoint",
+        expectedRevision: revision,
+        destinationSession: session,
+        timestamp: NOW,
+      }),
+    ).resolves.toMatchObject({ status: "accepted", phase: { id: "phase-2" } });
+  });
+
+  it("records a user/app override when the user confirms the start", async () => {
+    const { repository, cwd } = await linkedProject(true);
+    const next = { sessionId: "next-session", sessionPath: "/sessions/next.jsonl" };
+    const result = await repository.confirmPhaseAdvancement(
+      cwd,
+      {
+        checkpointId: "advancement-checkpoint",
+        nextPhaseId: "phase-2",
+        action: "start-next-phase",
+        operationId: "advance-linked",
+      },
+      async () => next,
+    );
+    expect(result).toMatchObject({ status: "accepted", phase: { id: "phase-2" } });
+    const loaded = await repository.load(cwd);
+    if (loaded.status !== "ok") throw Error(loaded.status);
+    const phase2 = loaded.snapshot.document.phases.find((phase) => phase.id === "phase-2")!;
+    expect(
+      phase2.roadmapEvents.filter((event) => event.type === "dependency-override"),
+    ).toMatchObject([
+      { actor: "user", origin: "app", session: next, unfinishedPrerequisiteIds: ["phase-3"] },
+    ]);
+  });
+});

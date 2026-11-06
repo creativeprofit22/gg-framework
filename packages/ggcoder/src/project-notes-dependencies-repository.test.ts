@@ -16,6 +16,7 @@ import {
   type RoadmapPhaseMoveDraft,
 } from "@kenkaiiii/gg-core/roadmap-workflow";
 import { ProjectNotesRepository } from "./project-notes-repository.js";
+import { AppSidecarRoadmapDraftCoordinator } from "./app-sidecar-roadmap-drafts.js";
 
 const { completionCompatibilityFixture } = (await import(
   new URL(
@@ -436,5 +437,148 @@ describe("phase dependency links in the Notes store", () => {
     expect(movedB.title).toBe("Phase B renamed");
     expect(movedB.dependsOn).toEqual(["phase-a"]);
     expect(await storeVersions(f.paths)).toEqual([3, 3]);
+  });
+});
+
+describe("agent dependency links through approvals and app starts", () => {
+  function draftRequest(revision: number) {
+    const phase = (title: string) => ({
+      title,
+      goal: `${title} goal`,
+      doneWhen: [`${title} done`],
+      sourcePrompt: `${title} prompt`,
+      referenceKeys: [],
+    });
+    return {
+      expectedRevision: revision,
+      summary: "Add two linked phases",
+      phases: [
+        { ...phase("New D"), dependsOn: ["phase-a"] },
+        { ...phase("New E"), dependsOnDraftPhases: [0] },
+      ],
+    };
+  }
+
+  it("stores approved links, including same-draft links, and upgrades the store to v3", async () => {
+    const f = await setup();
+    const drafts = new AppSidecarRoadmapDraftCoordinator();
+    const created = drafts.create({
+      cwd: f.cwd,
+      sessionId: "session-draft",
+      request: draftRequest(f.snapshot.revision),
+      currentPhases: f.snapshot.document.phases,
+    });
+    if (created.status !== "drafted") throw Error(JSON.stringify(created));
+    expect(created.draft.dependencyPhases).toEqual([
+      { phaseId: "phase-a", title: "Phase A", archived: false },
+    ]);
+    const [d, e] = created.draft.phases;
+    expect(d!.dependsOn).toEqual(["phase-a"]);
+    expect(e!.dependsOn).toEqual([d!.phaseId]);
+    const approved = await f.repository.createApprovedPhases(f.cwd, created.draft);
+    expect(approved).toMatchObject({ status: "created" });
+    const saved = await loadOk(f.repository, f.cwd);
+    const byId = (id: string) => saved.document.phases.find((phase) => phase.id === id)!;
+    expect(byId(d!.phaseId).dependsOn).toEqual(["phase-a"]);
+    expect(byId(e!.phaseId).dependsOn).toEqual([d!.phaseId]);
+    expect(await storeVersions(f.paths)).toEqual([3, 3]);
+  });
+
+  it("refuses an approved draft that links a phase missing from Notes", async () => {
+    const f = await setup();
+    const drafts = new AppSidecarRoadmapDraftCoordinator();
+    const created = drafts.create({
+      cwd: f.cwd,
+      sessionId: "session-draft",
+      request: { ...draftRequest(f.snapshot.revision), phases: [draftRequest(0).phases[0]!] },
+      currentPhases: f.snapshot.document.phases,
+    });
+    if (created.status !== "drafted") throw Error(JSON.stringify(created));
+    const stale = structuredClone(created.draft);
+    stale.phases[0]!.dependsOn = ["phase-ghost"];
+    stale.dependencyPhases = [{ phaseId: "phase-ghost", title: "Ghost", archived: false }];
+    const outcome = await f.repository.createApprovedPhases(f.cwd, stale);
+    expect(outcome).toMatchObject({ status: "invalid-proposal" });
+    expect((outcome as { message: string }).message).toContain("depends on missing phase");
+  });
+
+  it("applies and clears dependsOn through approved edits", async () => {
+    const f = await setup();
+    const drafts = new AppSidecarRoadmapDraftCoordinator();
+    const phaseC = f.snapshot.document.phases.find((phase) => phase.id === "phase-c")!;
+    const set = drafts.createEdit({
+      cwd: f.cwd,
+      sessionId: "session-draft",
+      request: {
+        expectedRevision: f.snapshot.revision,
+        summary: "C waits for A and B",
+        phaseId: "phase-c",
+        dependsOn: ["phase-a", "phase-b"],
+      },
+      phase: phaseC,
+      currentPhases: f.snapshot.document.phases,
+    });
+    if (set.status !== "drafted") throw Error(JSON.stringify(set));
+    expect(await f.repository.applyApprovedPhaseEdit(f.cwd, set.draft, now)).toMatchObject({
+      status: "edited",
+    });
+    const linked = await loadOk(f.repository, f.cwd);
+    const linkedC = linked.document.phases.find((phase) => phase.id === "phase-c")!;
+    expect(linkedC.dependsOn).toEqual(["phase-a", "phase-b"]);
+    const clear = drafts.createEdit({
+      cwd: f.cwd,
+      sessionId: "session-draft",
+      request: {
+        expectedRevision: linked.revision,
+        summary: "C no longer waits",
+        phaseId: "phase-c",
+        dependsOn: [],
+      },
+      phase: linkedC,
+      currentPhases: linked.document.phases,
+    });
+    if (clear.status !== "drafted") throw Error(JSON.stringify(clear));
+    expect(await f.repository.applyApprovedPhaseEdit(f.cwd, clear.draft, now)).toMatchObject({
+      status: "edited",
+    });
+    const cleared = await loadOk(f.repository, f.cwd);
+    expect(cleared.document.phases.find((phase) => phase.id === "phase-c")).not.toHaveProperty(
+      "dependsOn",
+    );
+  });
+
+  it("records one user/app override per start session, only over unfinished prerequisites", async () => {
+    const f = await setup();
+    await saveLinks(f.repository, f.cwd, f.snapshot, { "phase-c": ["phase-a"] });
+    const session = { sessionId: "user-start", sessionPath: "/s/user.jsonl" };
+    const overrides = async (phaseId: string) =>
+      (await loadOk(f.repository, f.cwd)).document.phases
+        .find((phase) => phase.id === phaseId)!
+        .roadmapEvents.filter((event) => event.type === "dependency-override");
+
+    expect(await f.repository.launchPhase(f.cwd, "phase-b", async () => session)).toMatchObject({
+      status: "accepted",
+    });
+    expect(await overrides("phase-b")).toEqual([]);
+
+    expect(
+      await f.repository.launchPhase(f.cwd, "phase-c", async () => ({
+        sessionId: "c-start",
+        sessionPath: "/s/c.jsonl",
+      })),
+    ).toMatchObject({ status: "accepted" });
+    const first = await overrides("phase-c");
+    expect(first).toMatchObject([
+      {
+        actor: "user",
+        origin: "app",
+        session: { sessionId: "c-start", sessionPath: "/s/c.jsonl" },
+        unfinishedPrerequisiteIds: ["phase-a"],
+      },
+    ]);
+    expect(await f.repository.launchPhase(f.cwd, "phase-c", async () => session)).toMatchObject({
+      status: "already-bound",
+    });
+    expect(await overrides("phase-c")).toEqual(first);
   });
 });

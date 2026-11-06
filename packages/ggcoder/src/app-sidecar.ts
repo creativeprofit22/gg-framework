@@ -454,6 +454,10 @@ import {
 import type { AppSidecarRoadmapDraftCoordinator } from "./app-sidecar-roadmap-drafts.js";
 import { AppSidecarRoadmapDraftToolHost } from "./app-sidecar-roadmap-draft-tool-host.js";
 import {
+  checkAgentPhaseStart,
+  isAgentPhaseAttachAction,
+} from "./app-sidecar-agent-phase-start-gate.js";
+import {
   commitChatResearchTransition,
   resolveChatResearchCommandRoute,
 } from "./app-sidecar-chat-research-handoff.js";
@@ -1941,6 +1945,8 @@ async function createSession(
     projectAutopilot,
     captureWorkspaceSnapshot: durableRoadmapExecution ? captureVerificationWorkspace : undefined,
     mutateWithLeaseFence: (operation) => phaseBinding.withLeaseFence(session, operation),
+    checkAgentPhaseStart: (phaseId, link) =>
+      checkAgentPhaseStart(notesRepository, cwd, phaseId, link, "status"),
     mutateStatusWithLeaseFence: (phaseId, operation) =>
       phaseBinding.withStatusLease(session, phaseId, operation),
     broadcastNotesSnapshot,
@@ -2006,6 +2012,17 @@ async function createSession(
                 },
                 activePhaseContext: created.getActivePhaseContext(),
               });
+            }
+            if (isAgentPhaseAttachAction(input.action)) {
+              const state = created.getState();
+              const refusal = await checkAgentPhaseStart(
+                notesRepository,
+                cwd,
+                input.phaseId,
+                { sessionId: state.sessionId, sessionPath: state.sessionPath },
+                "attach",
+              );
+              if (refusal) return refusal;
             }
             return input.version === 2
               ? phaseBinding.lease(input, created)

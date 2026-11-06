@@ -135,3 +135,23 @@ describe("createRoadmapPhaseEditTool", () => {
     expect(description).toContain("pending user approval");
   });
 });
+
+describe("roadmap_phase_edit dependency links", () => {
+  it("maps depends_on, including [] to remove all links", async () => {
+    const edit = pendingEdit();
+    const tool = createRoadmapPhaseEditTool(edit);
+    for (const links of [[" phase-a "], []]) {
+      const { goal: _goal, ...rest } = input;
+      await tool.execute(tool.parameters.parse({ ...rest, depends_on: links }), {} as never);
+    }
+    expect(edit.mock.calls.map((call) => call[0].dependsOn)).toEqual([["phase-a"], []]);
+  });
+
+  it("rejects a self link and duplicates, and documents clearing", () => {
+    expect(() => RoadmapPhaseEditParams.parse({ ...input, depends_on: ["phase-1"] })).toThrow();
+    expect(() => RoadmapPhaseEditParams.parse({ ...input, depends_on: ["a", "a"] })).toThrow();
+    const tool = createRoadmapPhaseEditTool(pendingEdit());
+    expect(tool.rawInputSchema).toMatchObject({ properties: { depends_on: { type: "array" } } });
+    expect(tool.description).toContain("depends_on: [] removes all dependency links");
+  });
+});

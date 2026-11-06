@@ -75,7 +75,7 @@ function toRoadmapPhaseMoveRequest(
 
 export type RoadmapPhaseMoveToolResult =
   | ProjectNotesUnsupportedFormat
-  | { status: "drafted"; draft: RoadmapPhaseMoveDraft }
+  | { status: "drafted"; draft: RoadmapPhaseMoveDraft; dependencyWarnings?: string[] }
   | { status: "proposal-pending"; draftId: string }
   | { status: "inspection-required"; message: string }
   | {
@@ -102,6 +102,7 @@ export function createRoadmapPhaseMoveTool(
       'Call roadmap_inspect with scope "roadmap" immediately first and pass its revision as expected_revision. ' +
       "Set phase_id and exactly one of before_phase_id or after_phase_id. Done, archived, and deleted phases cannot be moved, and nothing can be moved ahead of a Done phase. " +
       "To change the order of phases, use this tool; never delete and redraft a phase. " +
+      "If the move puts a phase above one of its prerequisites (or below a phase that depends on it), the result lists dependencyWarnings; the move is still drafted, so tell the user. " +
       "Nothing is saved until the user approves. After submitting, stop because the move is pending user approval. " +
       "To revise your own pending proposal (for example after reviewer feedback), call this again; it replaces that proposal in place, so never ask the user to reject it first.",
     parameters: RoadmapPhaseMoveParams,

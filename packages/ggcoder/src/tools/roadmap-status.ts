@@ -369,7 +369,8 @@ export type RoadmapStatusToolResult =
         | "stale-session"
         | "phase-lease-lost"
         | "invalid-reference"
-        | "verification-incomplete";
+        | "verification-incomplete"
+        | "prerequisites-unfinished";
       phaseId: string;
       revision?: number;
       owner?: { operationId: string; kind: string } | null;

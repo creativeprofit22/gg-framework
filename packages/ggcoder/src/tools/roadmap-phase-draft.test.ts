@@ -379,3 +379,52 @@ describe("createRoadmapPhaseDraftTool", () => {
     expect(description).toContain('Call roadmap_inspect with scope "roadmap" immediately first');
   });
 });
+
+describe("roadmap_phase_draft dependency links", () => {
+  it("maps existing-phase and same-draft links to the shared request", async () => {
+    const draft = vi.fn(async (_request: RoadmapPhaseDraftRequest) => ({
+      status: "proposal-pending" as const,
+      draftId: "proposal-1",
+    }));
+    const tool = createRoadmapPhaseDraftTool(draft);
+    const parsed = tool.parameters.parse({
+      ...input,
+      phases: [
+        { ...phase, depends_on_phase_ids: [" phase-a "] },
+        { ...phase, title: "Phase two", depends_on_draft_phases: [0] },
+      ],
+    });
+    await tool.execute(parsed, {} as never);
+    const phases = draft.mock.calls[0]![0].phases;
+    expect(phases[0]).toMatchObject({ dependsOn: ["phase-a"] });
+    expect(phases[0]).not.toHaveProperty("dependsOnDraftPhases");
+    expect(phases[1]).toMatchObject({ dependsOnDraftPhases: [0] });
+    expect(phases[1]).not.toHaveProperty("dependsOn");
+  });
+
+  it("rejects self, out-of-range and duplicate links before drafting", () => {
+    for (const links of [
+      [{ depends_on_draft_phases: [0] }, {}],
+      [{ depends_on_draft_phases: [5] }, {}],
+      [{ depends_on_phase_ids: ["a", "a"] }, {}],
+      [{ depends_on_draft_phases: [-1] }, {}],
+    ]) {
+      expect(() =>
+        RoadmapPhaseDraftParams.parse({
+          ...input,
+          phases: links.map((extra, index) => ({ ...phase, title: `P${index}`, ...extra })),
+        }),
+      ).toThrow();
+    }
+  });
+
+  it("documents both link fields in the schema and description", () => {
+    const tool = createRoadmapPhaseDraftTool(vi.fn());
+    const items = (
+      tool.rawInputSchema as { properties: { phases: { items: { properties: object } } } }
+    ).properties.phases.items.properties;
+    expect(items).toHaveProperty("depends_on_phase_ids");
+    expect(items).toHaveProperty("depends_on_draft_phases");
+    expect(tool.description).toContain("depends_on_draft_phases");
+  });
+});

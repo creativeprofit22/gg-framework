@@ -30,13 +30,19 @@ import {
   type RoadmapPhaseNotEditableReason,
   type RoadmapPhaseOrderPreview,
   type RoadmapPhaseOrderRefusal,
+  type RoadmapDependencyPhaseEntry,
 } from "@kenkaiiii/gg-core/roadmap-workflow";
+import {
+  roadmapOrderDependencyWarnings,
+  validateRoadmapDraftDependencies,
+  validateRoadmapEditDependencies,
+} from "@kenkaiiii/gg-core/roadmap-phase-dependencies";
 
 export interface RoadmapPhaseDraftCreateRequest {
   cwd: string;
   sessionId: string;
   request: RoadmapPhaseDraftRequest;
-  /** Phases at the inspected revision; required when a proposed phase sets `insertBeforePhaseId`. */
+  /** Phases at the inspected revision; required for `insertBeforePhaseId` or links to existing phases. */
   currentPhases?: readonly NotesPhase[];
 }
 
@@ -49,7 +55,7 @@ export interface RoadmapPhaseMoveDraftCreateRequest {
 }
 
 export type RoadmapPhaseMoveDraftCreateResult =
-  | { status: "drafted"; draft: RoadmapPhaseMoveDraft }
+  | { status: "drafted"; draft: RoadmapPhaseMoveDraft; dependencyWarnings?: string[] }
   | Exclude<RoadmapPhaseDraftCreateResult, { status: "drafted" }>
   | { status: "order-refused"; refusal: RoadmapPhaseOrderRefusal };
 
@@ -64,6 +70,8 @@ export interface RoadmapPhaseEditDraftCreateRequest {
   request: RoadmapPhaseEditRequest;
   /** The target phase as read from the inspected Notes revision. */
   phase: NotesPhase;
+  /** Phases at the inspected revision; required when the edit changes `dependsOn`. */
+  currentPhases?: readonly NotesPhase[];
 }
 
 export type RoadmapPhaseEditDraftCreateResult =
@@ -139,11 +147,46 @@ export class AppSidecarRoadmapDraftCoordinator {
         return { id: referenceId, ...reference };
       },
     );
-    const phases = validated.value.phases.map(({ referenceKeys, ...phase }) => ({
-      phaseId: this.createId(),
-      ...phase,
-      referenceIds: (referenceKeys ?? []).map((key) => referenceIdsByKey.get(key)!),
-    }));
+    const phaseIds = validated.value.phases.map(() => this.createId());
+    const phases = validated.value.phases.map(
+      ({ referenceKeys, dependsOn, dependsOnDraftPhases, ...phase }, index) => {
+        // Same-draft links resolve to the generated IDs; shape checks already ran.
+        const links = [
+          ...(dependsOn ?? []),
+          ...(dependsOnDraftPhases ?? []).map((draftIndex) => phaseIds[draftIndex]!),
+        ];
+        return {
+          phaseId: phaseIds[index]!,
+          ...phase,
+          referenceIds: (referenceKeys ?? []).map((key) => referenceIdsByKey.get(key)!),
+          ...(links.length > 0 ? { dependsOn: links } : {}),
+        };
+      },
+    );
+    const linked = phases.some((phase) => phase.dependsOn !== undefined);
+    let dependencyPhases: RoadmapDependencyPhaseEntry[] | undefined;
+    if (linked) {
+      const currentPhases = input.currentPhases ?? [];
+      const error = validateRoadmapDraftDependencies(
+        currentPhases,
+        phases.map((phase) => ({
+          id: phase.phaseId,
+          title: phase.title,
+          ...(phase.dependsOn ? { dependsOn: phase.dependsOn } : {}),
+        })),
+      );
+      if (error) {
+        return {
+          status: "invalid-proposal",
+          path: draftDependencyPath(error.path, currentPhases.length),
+          message: error.message,
+        };
+      }
+      const existing = phases.flatMap((phase) =>
+        (phase.dependsOn ?? []).filter((link) => !phaseIds.includes(link)),
+      );
+      if (existing.length > 0) dependencyPhases = dependencyPhaseEntries(currentPhases, existing);
+    }
     let orderPreview: RoadmapPhaseOrderPreview | undefined;
     if (phases.some((phase) => phase.insertBeforePhaseId !== undefined)) {
       const currentPhases = input.currentPhases;
@@ -179,11 +222,12 @@ export class AppSidecarRoadmapDraftCoordinator {
       phases,
       sourcesNotCited: validated.value.sourcesNotCited ?? null,
       ...(orderPreview ? { orderPreview } : {}),
+      ...(dependencyPhases ? { dependencyPhases } : {}),
       status: "pending",
     };
     // Legacy appends skip re-validation so their stored shape stays exactly as before.
     let draft = candidate;
-    if (orderPreview) {
+    if (orderPreview || linked) {
       const checked = validateRoadmapPhaseCreateDraft(candidate);
       if (!checked.ok) {
         return {
@@ -253,7 +297,16 @@ export class AppSidecarRoadmapDraftCoordinator {
       };
     }
     this.store(projectKey, checked.value);
-    return { status: "drafted", draft: cloneMoveDraft(checked.value) };
+    const dependencyWarnings = roadmapOrderDependencyWarnings(
+      input.currentPhases,
+      after.map((entry) => entry.phaseId),
+      request.phaseId,
+    );
+    return {
+      status: "drafted",
+      draft: cloneMoveDraft(checked.value),
+      ...(dependencyWarnings.length > 0 ? { dependencyWarnings } : {}),
+    };
   }
 
   /** Proposes changed fields of one existing phase; shares the one-pending-per-project slot. */
@@ -283,6 +336,29 @@ export class AppSidecarRoadmapDraftCoordinator {
     }
     const changes = buildRoadmapPhaseEditChanges(input.phase, request);
     if (changes.length === 0) return { status: "no-changes", phaseId: request.phaseId };
+    const dependencyChange = changes.find((change) => change.field === "dependsOn");
+    let dependencyPhases: RoadmapDependencyPhaseEntry[] | undefined;
+    if (dependencyChange) {
+      if (!input.currentPhases) {
+        return {
+          status: "invalid-proposal",
+          path: "dependsOn",
+          message: "expected the inspected Roadmap to check dependency links",
+        };
+      }
+      const error = validateRoadmapEditDependencies(
+        input.currentPhases,
+        request.phaseId,
+        dependencyChange.after,
+      );
+      if (error) {
+        return { status: "invalid-proposal", path: error.path, message: error.message };
+      }
+      const listed = [...dependencyChange.before, ...dependencyChange.after];
+      if (listed.length > 0) {
+        dependencyPhases = dependencyPhaseEntries(input.currentPhases, listed);
+      }
+    }
 
     const candidate: RoadmapPhaseEditDraft = {
       kind: "edit",
@@ -296,6 +372,7 @@ export class AppSidecarRoadmapDraftCoordinator {
       phaseTitle: input.phase.title,
       basedOnUpdatedAt: input.phase.updatedAt,
       changes,
+      ...(dependencyPhases ? { dependencyPhases } : {}),
       status: "pending",
     };
     const checked = validateRoadmapPhaseEditDraft(candidate);
@@ -508,11 +585,36 @@ function cloneEditDraft(draft: RoadmapPhaseEditDraft): RoadmapPhaseEditDraft {
   return {
     ...draft,
     changes: draft.changes.map((change) =>
-      change.field === "doneWhen"
+      change.field === "doneWhen" || change.field === "dependsOn"
         ? { ...change, before: [...change.before], after: [...change.after] }
         : { ...change },
     ),
+    ...(draft.dependencyPhases
+      ? { dependencyPhases: draft.dependencyPhases.map((entry) => ({ ...entry })) }
+      : {}),
   };
+}
+
+/** Display entries copied from Notes, one per linked phase found, in first-listed order. */
+function dependencyPhaseEntries(
+  phases: readonly NotesPhase[],
+  links: readonly string[],
+): RoadmapDependencyPhaseEntry[] | undefined {
+  const entries = [...new Set(links)].flatMap((link) => {
+    const phase = phases.find((candidate) => candidate.id === link);
+    return phase
+      ? [{ phaseId: phase.id, title: phase.title, archived: phase.archivedAt !== null }]
+      : [];
+  });
+  return entries.length > 0 ? entries : undefined;
+}
+
+/** Points a draft-phase error at the agent's own phases[] index; existing-phase paths stay as saved. */
+function draftDependencyPath(path: string, currentCount: number): string {
+  const match = /^phases\[(\d+)\](.*)$/.exec(path);
+  if (!match) return path;
+  const index = Number(match[1]);
+  return index < currentCount ? path : `phases[${index - currentCount}]${match[2]}`;
 }
 
 function cloneCreateDraft(draft: RoadmapPhaseCreateDraft): RoadmapPhaseCreateDraft {
@@ -526,7 +628,11 @@ function cloneCreateDraft(draft: RoadmapPhaseCreateDraft): RoadmapPhaseCreateDra
       ...phase,
       doneWhen: [...phase.doneWhen],
       referenceIds: [...phase.referenceIds],
+      ...(phase.dependsOn ? { dependsOn: [...phase.dependsOn] } : {}),
     })),
     ...(draft.orderPreview ? { orderPreview: cloneOrderPreview(draft.orderPreview) } : {}),
+    ...(draft.dependencyPhases
+      ? { dependencyPhases: draft.dependencyPhases.map((entry) => ({ ...entry })) }
+      : {}),
   };
 }

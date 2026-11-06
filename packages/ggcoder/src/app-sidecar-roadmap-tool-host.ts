@@ -56,6 +56,11 @@ export interface AppSidecarRoadmapToolHostDependencies {
   mutateWithLeaseFence?<T>(
     operation: () => Promise<T>,
   ): Promise<{ status: "executed"; value: T } | { status: "phase-lease-lost" | "corrupt" }>;
+  /** Strict agent start gate for `in-progress`; null allows the update. */
+  checkAgentPhaseStart?(
+    phaseId: string,
+    session: { sessionId: string; sessionPath: string | null },
+  ): Promise<{ message: string } | null>;
   mutateStatusWithLeaseFence?<T>(
     phaseId: string,
     operation: () => Promise<T>,
@@ -196,6 +201,24 @@ export class AppSidecarRoadmapToolHost {
     try {
       const { sessionId, sessionPath } = getOwningSession().getState();
       const expectedRevision = input.expected_revision;
+      if (input.transition === "in-progress" && this.dependencies.checkAgentPhaseStart) {
+        const refusal = await this.dependencies.checkAgentPhaseStart(input.phase_id, {
+          sessionId,
+          sessionPath,
+        });
+        if (refusal) {
+          this.dependencies.onNonCommit?.({
+            result: "prerequisites-unfinished",
+            phaseId: input.phase_id,
+            updateId: input.update_id,
+          });
+          return {
+            result: "prerequisites-unfinished",
+            phaseId: input.phase_id,
+            message: refusal.message,
+          };
+        }
+      }
       const mutate = this.dependencies.mutateStatusWithLeaseFence;
       if (!mutate) throw new Error("Roadmap status requires authenticated mutation fencing.");
       const statusMutation = await mutate(input.phase_id, () =>

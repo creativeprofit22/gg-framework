@@ -89,7 +89,18 @@ export const RoadmapBindParams = z.discriminatedUnion("action", [
 
 type RoadmapBindInput = z.infer<typeof RoadmapBindParams>;
 export type RoadmapBindToolResult =
-  ProjectNotesStorageDiagnostics | PhaseBindingOutcome | PhaseLeaseOutcome;
+  | ProjectNotesStorageDiagnostics
+  | PhaseBindingOutcome
+  | PhaseLeaseOutcome
+  | RoadmapBindPrerequisitesUnfinished;
+
+/** Agent-only refusal: the phase's prerequisites aren't Done and no current user start covers it. */
+export interface RoadmapBindPrerequisitesUnfinished {
+  status: "prerequisites-unfinished";
+  phaseId: string;
+  prerequisites: { id: string; title: string; status: string }[];
+  message: string;
+}
 
 const phaseLeaseProperties = {
   phase_id: { type: "string", maxLength: 256 },
@@ -204,7 +215,8 @@ export function createRoadmapBindTool(
   return {
     name: "roadmap_bind",
     description:
-      "Inspect Roadmap binding state; keep V1 session binding compatibility; or acquire, renew, release, and safely take over V2 phase leases for this authenticated session.",
+      "Inspect Roadmap binding state; keep V1 session binding compatibility; or acquire, renew, release, and safely take over V2 phase leases for this authenticated session. " +
+      "Binding, acquiring or taking over a phase whose prerequisites aren't Done returns prerequisites-unfinished unless the user already started it from the app; tell the user which phases are unfinished and that they can start it from the app.",
     parameters: RoadmapBindParams,
     rawInputSchema,
     executionMode: "sequential",

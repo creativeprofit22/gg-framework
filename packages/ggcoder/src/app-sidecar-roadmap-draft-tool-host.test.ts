@@ -979,3 +979,159 @@ describe("roadmap_phase_move proposals and insert_before_phase_id drafts", () =>
     expect(APP_SIDECAR_ROADMAP_PHASE_SYSTEM_PROMPT).toContain("roadmap_phase_move");
   });
 });
+
+describe("phase dependency links in the agent's Roadmap tools", () => {
+  const notStarted = (id: string, overrides: Partial<NotesPhase> = {}): NotesPhase =>
+    phase({
+      id,
+      title: `Phase ${id}`,
+      status: "not-started",
+      session: null,
+      overrides: { status: null, referenceIds: null },
+      roadmapEvents: [],
+      ...overrides,
+    });
+  const roadmap = (extra: Record<string, Partial<NotesPhase>> = {}) =>
+    loaded(
+      4,
+      ["a", "b", "c"].map((id, order) => notStarted(id, { order, ...extra[id] })),
+    );
+  const nextPhase = request.phases[0]!;
+
+  it("shows dependsOn and unfinished prerequisites only for linked phases", async () => {
+    const { value } = host(async () =>
+      roadmap({
+        a: { status: "done", completedAt: timestamp },
+        c: { dependsOn: ["a", "b"] },
+      }),
+    );
+    const outcome = await value.inspect();
+    if (outcome.status !== "ok") throw new Error("expected an inspection");
+    expect(isRoadmapInspectionOutcome(outcome)).toBe(true);
+    const [a, b, c] = outcome.inspection.phases;
+    expect(a).not.toHaveProperty("dependsOn");
+    expect(b).not.toHaveProperty("unfinishedPrerequisites");
+    expect(c).toMatchObject({
+      dependsOn: ["a", "b"],
+      unfinishedPrerequisites: [{ id: "b", title: "Phase b", status: "not-started" }],
+    });
+  });
+
+  it("drafts links to existing phases and to other phases in the same draft", async () => {
+    const { value } = host(async () => roadmap({ b: { archivedAt: timestamp } }));
+    await value.inspect();
+    const result = await value.draft({
+      ...request,
+      phases: [
+        { ...nextPhase, dependsOn: ["a", "b"] },
+        { ...nextPhase, title: "Later phase", dependsOnDraftPhases: [0] },
+      ],
+    });
+    if (result.status !== "drafted" || !isRoadmapPhaseCreateDraft(result.draft)) {
+      throw new Error(JSON.stringify(result));
+    }
+    const [first, second] = result.draft.phases;
+    expect(first!.dependsOn).toEqual(["a", "b"]);
+    expect(second!.dependsOn).toEqual([first!.phaseId]);
+    expect(second).not.toHaveProperty("dependsOnDraftPhases");
+    expect(result.draft.dependencyPhases).toEqual([
+      { phaseId: "a", title: "Phase a", archived: false },
+      { phaseId: "b", title: "Phase b", archived: true },
+    ]);
+  });
+
+  it("rejects bad draft links with the same errors as saving", async () => {
+    const cases: [RoadmapPhaseDraftRequest["phases"], string, string][] = [
+      [[{ ...nextPhase, dependsOn: ["ghost"] }], "phases[0].dependsOn[0]", "missing phase ghost"],
+      [
+        [
+          { ...nextPhase, dependsOnDraftPhases: [1] },
+          { ...nextPhase, title: "Later phase", dependsOnDraftPhases: [0] },
+        ],
+        "phases[",
+        "circular",
+      ],
+      [[{ ...nextPhase, dependsOnDraftPhases: [0] }], "phases[0].dependsOnDraftPhases", ""],
+    ];
+    for (const [phases, pathPrefix, message] of cases) {
+      const { value, drafts } = host(async () =>
+        roadmap({ b: { deletion: { version: 1, currentDeletionId: "d", events: [] } } }),
+      );
+      await value.inspect();
+      const result = await value.draft({ ...request, phases });
+      expect(result).toMatchObject({ status: "invalid-proposal" });
+      const { path, message: actual } = result as { path: string; message: string };
+      expect(path.startsWith(pathPrefix)).toBe(true);
+      expect(actual).toContain(message);
+      expect(drafts.pending("/work/app")).toBeNull();
+    }
+    const { value } = host(async () =>
+      roadmap({ b: { deletion: { version: 1, currentDeletionId: "d", events: [] } } }),
+    );
+    await value.inspect();
+    await expect(
+      value.draft({ ...request, phases: [{ ...nextPhase, dependsOn: ["b"] }] }),
+    ).resolves.toMatchObject({
+      status: "invalid-proposal",
+      path: "phases[0].dependsOn[0]",
+      message: expect.stringContaining("depends on deleted phase"),
+    });
+  });
+
+  it("drafts, rejects and clears dependency edits", async () => {
+    const { value } = host(async () => roadmap({ c: { dependsOn: ["a"] } }));
+    await value.inspect();
+    const edit = (dependsOn: string[], phaseId = "c"): RoadmapPhaseEditRequest => ({
+      expectedRevision: 4,
+      summary: "Change links",
+      phaseId,
+      dependsOn,
+    });
+    await expect(value.proposeEdit(edit(["a", "b"]))).resolves.toMatchObject({
+      status: "drafted",
+      draft: {
+        changes: [{ field: "dependsOn", before: ["a"], after: ["a", "b"] }],
+        dependencyPhases: [
+          { phaseId: "a", title: "Phase a", archived: false },
+          { phaseId: "b", title: "Phase b", archived: false },
+        ],
+      },
+    });
+    await expect(value.proposeEdit(edit(["c"], "a"))).resolves.toMatchObject({
+      status: "invalid-proposal",
+      message: expect.stringContaining("circular"),
+    });
+    await expect(value.proposeEdit(edit(["ghost"]))).resolves.toMatchObject({
+      status: "invalid-proposal",
+      message: expect.stringContaining("missing phase ghost"),
+    });
+    await expect(value.proposeEdit(edit([]))).resolves.toMatchObject({
+      status: "drafted",
+      draft: { changes: [{ field: "dependsOn", before: ["a"], after: [] }] },
+    });
+  });
+
+  it("warns when a move puts a phase above its prerequisite, and still drafts it", async () => {
+    const { value, drafts } = host(async () => roadmap({ c: { dependsOn: ["b"] } }));
+    await value.inspect();
+    const result = await value.proposeMove({
+      expectedRevision: 4,
+      summary: "Do C first",
+      phaseId: "c",
+      beforePhaseId: "a",
+    });
+    expect(result).toMatchObject({ status: "drafted", dependencyWarnings: [expect.any(String)] });
+    expect((result as { dependencyWarnings: string[] }).dependencyWarnings[0]).toContain("Phase b");
+    expect(drafts.pending("/work/app")).toMatchObject({ kind: "move" });
+  });
+
+  it("tells both prompts how to set links and about the start refusal", () => {
+    for (const prompt of [
+      APP_SIDECAR_ROADMAP_DRAFT_SYSTEM_PROMPT,
+      APP_SIDECAR_ROADMAP_PHASE_SYSTEM_PROMPT,
+    ]) {
+      expect(prompt).toContain("depends_on");
+      expect(prompt).toContain("start it from the app");
+    }
+  });
+});

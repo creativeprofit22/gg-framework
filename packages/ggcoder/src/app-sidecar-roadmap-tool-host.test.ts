@@ -282,3 +282,64 @@ describe("AppSidecarRoadmapToolHost", () => {
     }
   });
 });
+
+describe("roadmap_status start gate", () => {
+  function statusInput(transition: "in-progress" | "blocked") {
+    return RoadmapStatusParams.parse({
+      update_id: `start-${transition}`,
+      phase_id: "phase-1",
+      expected_revision: 4,
+      transition,
+      progress: "Starting work",
+      ...(transition === "blocked"
+        ? { blocker: "Waiting on access", required_external_action: "Grant access" }
+        : {}),
+    });
+  }
+
+  it("refuses an in-progress start with unfinished prerequisites and records nothing", async () => {
+    const recordRoadmapStatusUpdate = vi.fn();
+    const checkAgentPhaseStart = vi.fn(async () => ({
+      message: 'Can\'t start "Phase" (phase-1): … The user can start it from the app.',
+    }));
+    const host = new AppSidecarRoadmapToolHost({
+      cwd: "/project",
+      repository: { recordRoadmapStatusUpdate },
+      reconciliations: new AppSidecarRoadmapReconciliationCoordinator(),
+      projectAutopilot: { isEnabled: () => false },
+      broadcastNotesSnapshot: vi.fn(),
+      checkAgentPhaseStart,
+    });
+    const tool = host.createSessionTools("coding", owningSession)[0]!;
+    expect(JSON.parse(String(await tool.execute(statusInput("in-progress"), {} as never)))).toEqual(
+      {
+        result: "prerequisites-unfinished",
+        phaseId: "phase-1",
+        message: 'Can\'t start "Phase" (phase-1): … The user can start it from the app.',
+      },
+    );
+    expect(checkAgentPhaseStart).toHaveBeenCalledWith("phase-1", sessionLink);
+    expect(recordRoadmapStatusUpdate).not.toHaveBeenCalled();
+  });
+
+  it("does not gate other transitions", async () => {
+    const checkAgentPhaseStart = vi.fn(async () => ({ message: "refused" }));
+    const host = new AppSidecarRoadmapToolHost({
+      cwd: "/project",
+      repository: {
+        recordRoadmapStatusUpdate: vi.fn(async () => ({ status: "phase-not-found" as const })),
+      },
+      reconciliations: new AppSidecarRoadmapReconciliationCoordinator(),
+      projectAutopilot: { isEnabled: () => false },
+      broadcastNotesSnapshot: vi.fn(),
+      checkAgentPhaseStart,
+      mutateStatusWithLeaseFence: async (_phaseId, operation) => ({
+        status: "executed",
+        value: await operation(),
+      }),
+    });
+    const tool = host.createSessionTools("coding", owningSession)[0]!;
+    await tool.execute(statusInput("blocked"), {} as never);
+    expect(checkAgentPhaseStart).not.toHaveBeenCalled();
+  });
+});

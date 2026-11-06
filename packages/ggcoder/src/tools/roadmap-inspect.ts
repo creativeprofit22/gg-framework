@@ -53,6 +53,7 @@ export function createRoadmapInspectTool(
       "Verification evidence and provenance describe historical reports, not proof of current criteria or authorization for automatic Done. " +
       "Assess the matching verification progress separately from latestProgress; legacy summaries may lack evidence and provenance. " +
       "Pass phase_id to read one phase's full sourcePrompt before editing it with roadmap_phase_edit. " +
+      "Phases with dependency links show dependsOn (prerequisite phase ids) and unfinishedPrerequisites (those not yet Done). " +
       "This read-only tool returns only the bounded Roadmap projection, never the full Notes document.",
     parameters: RoadmapInspectParams,
     rawInputSchema: roadmapInspectInputSchema,

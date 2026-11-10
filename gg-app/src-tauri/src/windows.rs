@@ -752,6 +752,34 @@ pub(crate) fn broadcast_window_order(app: &tauri::AppHandle) {
 mod tests {
     use super::*;
 
+    // Local Fork: every window label the app creates must match a capability
+    // glob, or that window gets no IPC (copy windows once could not listen).
+    #[test]
+    fn every_app_window_label_has_a_capability() {
+        let capability: serde_json::Value =
+            serde_json::from_str(include_str!("../capabilities/default.json")).unwrap();
+        let globs: Vec<&str> = capability["windows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_str().unwrap())
+            .collect();
+        let matches = |label: &str| {
+            globs.iter().any(|glob| match glob.strip_suffix('*') {
+                Some(prefix) => label.starts_with(prefix),
+                None => *glob == label,
+            })
+        };
+        for label in [
+            "main".to_string(),
+            "project-1".to_string(),
+            WHATSNEW_LABEL.to_string(),
+            crate::commands::agent::copy_window_label("3f9c2a"),
+        ] {
+            assert!(matches(&label), "no capability covers window {label}");
+        }
+    }
+
     #[test]
     fn transient_windows_are_not_workspace_windows() {
         assert!(is_workspace_window("main"));

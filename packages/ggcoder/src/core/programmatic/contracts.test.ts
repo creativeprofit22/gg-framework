@@ -1936,193 +1936,199 @@ describe("Phase 1 structural bloat audit", () => {
     ]);
   });
 
-  it("resolves consumers, checks canonical schema types, and reports lookalikes for manual comparison", () => {
-    const config = ts.readConfigFile(
-      path.join(root, "packages/ggcoder/tsconfig.json"),
-      ts.sys.readFile,
-    );
-    expect(config.error).toBeUndefined();
-    const parsed = ts.parseJsonConfigFileContent(
-      config.config,
-      ts.sys,
-      path.join(root, "packages/ggcoder"),
-    );
-    expect(parsed.errors).toEqual([]);
-    const options = { ...parsed.options, noEmit: true };
-    const resolutionCache = ts.createModuleResolutionCache(
-      root,
-      (name) => (ts.sys.useCaseSensitiveFileNames ? name : name.toLowerCase()),
-      options,
-    );
-    const sourceNames = git([
-      "ls-files",
-      "--cached",
-      "--others",
-      "--exclude-standard",
-      "-z",
-      "--",
-      "packages",
-      "gg-app/src",
-    ])
-      .split("\0")
-      .filter((name) => /\/src\/.*\.(?:ts|tsx)$/.test(name) && !name.includes("/node_modules/"));
-    expect(variants(sourceNames)).toEqual([]);
-    const absoluteSubject = path.resolve(root, subject);
-    const consumers = [...new Set(sourceNames)].filter((name) => {
-      if (name === subject) return false;
-      return ts.preProcessFile(read(name)).importedFiles.some(({ fileName }) => {
-        const resolved = ts.resolveModuleName(
-          fileName,
-          path.resolve(root, name),
-          options,
-          ts.sys,
-          resolutionCache,
-        ).resolvedModule;
-        return resolved && path.resolve(resolved.resolvedFileName) === absoluteSubject;
-      });
-    });
-    const program = ts.createProgram(
-      [absoluteSubject, ...consumers.map((name) => path.resolve(root, name))],
-      options,
-    );
-    const source = program.getSourceFile(absoluteSubject)!;
-    const checker = program.getTypeChecker();
-    // Only contract semantics and consumer syntax are in scope, not consumer dependency typechecking.
-    const diagnostics = [
-      ...program.getOptionsDiagnostics(),
-      ...program.getGlobalDiagnostics(),
-      ...program.getSemanticDiagnostics(source),
-      ...[subject, ...consumers].flatMap((name) =>
-        program.getSyntacticDiagnostics(program.getSourceFile(path.resolve(root, name))!),
-      ),
-    ];
-    expect(
-      diagnostics.map((item) => ts.flattenDiagnosticMessageText(item.messageText, "\n")),
-    ).toEqual([]);
-    expect(surfaceIssues(source)).toEqual([]);
-    const exports = checker.getExportsOfModule(checker.getSymbolAtLocation(source)!);
-    const canonicalNames = new Set(exports.map((symbol) => symbol.name));
-    for (const node of source.statements.filter(ts.isTypeAliasDeclaration)) {
-      const schema = inferredSchema(node);
-      expect(
-        source.statements.some(
-          (statement) =>
-            ts.isVariableStatement(statement) &&
-            statement.declarationList.declarations.some(
-              (declaration) => declaration.name.getText(source) === schema,
-            ),
-        ),
-        node.name.text,
-      ).toBe(true);
-    }
-    const used = new Set<string>();
-    const fixtureUses = new Set<string>();
-    const lookalikes: string[] = [];
-    for (const name of consumers) {
-      // Inspect current fixtures with symbol identity; audit-only references do not count.
-      const consumer = program.getSourceFile(path.resolve(root, name))!;
-      const destination = /\.(?:test|spec)\.tsx?$/.test(name) ? fixtureUses : used;
-      for (const node of consumer.statements) {
-        if (
-          (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) &&
-          node.moduleSpecifier &&
-          ts.isStringLiteral(node.moduleSpecifier)
-        ) {
+  it(
+    "resolves consumers, checks canonical schema types, and reports lookalikes for manual comparison",
+    { tags: ["alone"], timeout: 60_000 },
+    () => {
+      const config = ts.readConfigFile(
+        path.join(root, "packages/ggcoder/tsconfig.json"),
+        ts.sys.readFile,
+      );
+      expect(config.error).toBeUndefined();
+      const parsed = ts.parseJsonConfigFileContent(
+        config.config,
+        ts.sys,
+        path.join(root, "packages/ggcoder"),
+      );
+      expect(parsed.errors).toEqual([]);
+      const options = { ...parsed.options, noEmit: true };
+      const resolutionCache = ts.createModuleResolutionCache(
+        root,
+        (name) => (ts.sys.useCaseSensitiveFileNames ? name : name.toLowerCase()),
+        options,
+      );
+      const sourceNames = git([
+        "ls-files",
+        "--cached",
+        "--others",
+        "--exclude-standard",
+        "-z",
+        "--",
+        "packages",
+        "gg-app/src",
+      ])
+        .split("\0")
+        .filter((name) => /\/src\/.*\.(?:ts|tsx)$/.test(name) && !name.includes("/node_modules/"));
+      expect(variants(sourceNames)).toEqual([]);
+      const absoluteSubject = path.resolve(root, subject);
+      const consumers = [...new Set(sourceNames)].filter((name) => {
+        if (name === subject) return false;
+        return ts.preProcessFile(read(name)).importedFiles.some(({ fileName }) => {
           const resolved = ts.resolveModuleName(
-            node.moduleSpecifier.text,
+            fileName,
             path.resolve(root, name),
             options,
             ts.sys,
             resolutionCache,
           ).resolvedModule;
-          if (!resolved || path.resolve(resolved.resolvedFileName) !== absoluteSubject) continue;
-          const bindings = ts.isImportDeclaration(node)
-            ? node.importClause?.namedBindings
-            : node.exportClause;
-          // Fail closed on a new barrel/namespace shape until its actual uses are reviewed.
-          expect(
-            bindings && (ts.isNamedImports(bindings) || ts.isNamedExports(bindings)),
-            name,
-          ).toBe(true);
-          if (bindings && (ts.isNamedImports(bindings) || ts.isNamedExports(bindings))) {
-            for (const binding of bindings.elements) {
-              const exportedName = (binding.propertyName ?? binding.name).text;
-              expect(canonicalNames.has(exportedName), `${name}: ${exportedName}`).toBe(true);
-              const symbol = checker.getSymbolAtLocation(binding.name);
-              expect(symbol, `${name}: ${exportedName}`).toBeDefined();
-              if (symbol && symbol.flags & ts.SymbolFlags.Alias)
-                expect(exports).toContain(checker.getAliasedSymbol(symbol));
-              if (
-                ts.isExportDeclaration(node) ||
-                referencedOutsideAudit(consumer, binding.name, checker)
-              )
-                destination.add(exportedName);
+          return resolved && path.resolve(resolved.resolvedFileName) === absoluteSubject;
+        });
+      });
+      const program = ts.createProgram(
+        [absoluteSubject, ...consumers.map((name) => path.resolve(root, name))],
+        options,
+      );
+      const source = program.getSourceFile(absoluteSubject)!;
+      const checker = program.getTypeChecker();
+      // Only contract semantics and consumer syntax are in scope, not consumer dependency typechecking.
+      const diagnostics = [
+        ...program.getOptionsDiagnostics(),
+        ...program.getGlobalDiagnostics(),
+        ...program.getSemanticDiagnostics(source),
+        ...[subject, ...consumers].flatMap((name) =>
+          program.getSyntacticDiagnostics(program.getSourceFile(path.resolve(root, name))!),
+        ),
+      ];
+      expect(
+        diagnostics.map((item) => ts.flattenDiagnosticMessageText(item.messageText, "\n")),
+      ).toEqual([]);
+      expect(surfaceIssues(source)).toEqual([]);
+      const exports = checker.getExportsOfModule(checker.getSymbolAtLocation(source)!);
+      const canonicalNames = new Set(exports.map((symbol) => symbol.name));
+      for (const node of source.statements.filter(ts.isTypeAliasDeclaration)) {
+        const schema = inferredSchema(node);
+        expect(
+          source.statements.some(
+            (statement) =>
+              ts.isVariableStatement(statement) &&
+              statement.declarationList.declarations.some(
+                (declaration) => declaration.name.getText(source) === schema,
+              ),
+          ),
+          node.name.text,
+        ).toBe(true);
+      }
+      const used = new Set<string>();
+      const fixtureUses = new Set<string>();
+      const lookalikes: string[] = [];
+      for (const name of consumers) {
+        // Inspect current fixtures with symbol identity; audit-only references do not count.
+        const consumer = program.getSourceFile(path.resolve(root, name))!;
+        const destination = /\.(?:test|spec)\.tsx?$/.test(name) ? fixtureUses : used;
+        for (const node of consumer.statements) {
+          if (
+            (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) &&
+            node.moduleSpecifier &&
+            ts.isStringLiteral(node.moduleSpecifier)
+          ) {
+            const resolved = ts.resolveModuleName(
+              node.moduleSpecifier.text,
+              path.resolve(root, name),
+              options,
+              ts.sys,
+              resolutionCache,
+            ).resolvedModule;
+            if (!resolved || path.resolve(resolved.resolvedFileName) !== absoluteSubject) continue;
+            const bindings = ts.isImportDeclaration(node)
+              ? node.importClause?.namedBindings
+              : node.exportClause;
+            // Fail closed on a new barrel/namespace shape until its actual uses are reviewed.
+            expect(
+              bindings && (ts.isNamedImports(bindings) || ts.isNamedExports(bindings)),
+              name,
+            ).toBe(true);
+            if (bindings && (ts.isNamedImports(bindings) || ts.isNamedExports(bindings))) {
+              for (const binding of bindings.elements) {
+                const exportedName = (binding.propertyName ?? binding.name).text;
+                expect(canonicalNames.has(exportedName), `${name}: ${exportedName}`).toBe(true);
+                const symbol = checker.getSymbolAtLocation(binding.name);
+                expect(symbol, `${name}: ${exportedName}`).toBeDefined();
+                if (symbol && symbol.flags & ts.SymbolFlags.Alias)
+                  expect(exports).toContain(checker.getAliasedSymbol(symbol));
+                if (
+                  ts.isExportDeclaration(node) ||
+                  referencedOutsideAudit(consumer, binding.name, checker)
+                )
+                  destination.add(exportedName);
+              }
             }
           }
         }
-      }
-      expect(duplicateDeclarations(consumer, canonicalNames), name).toEqual([]);
-      if (destination === used) {
-        for (const node of consumer.statements) {
-          if (ts.isInterfaceDeclaration(node) || ts.isTypeAliasDeclaration(node))
-            lookalikes.push(
-              `${name}:${consumer.getLineAndCharacterOfPosition(node.getStart()).line + 1} ${node.getText(consumer)}`,
-            );
+        expect(duplicateDeclarations(consumer, canonicalNames), name).toEqual([]);
+        if (destination === used) {
+          for (const node of consumer.statements) {
+            if (ts.isInterfaceDeclaration(node) || ts.isTypeAliasDeclaration(node))
+              lookalikes.push(
+                `${name}:${consumer.getLineAndCharacterOfPosition(node.getStart()).line + 1} ${node.getText(consumer)}`,
+              );
+          }
         }
       }
-    }
-    // Exact public-schema requirements justify fixture-only surfaces, not speculative type aliases.
-    const requiredFixtures = {
-      ProgrammaticApprovalContext: "host-only pending decision, not model data",
-      isProgrammaticReviewCurrent: "pure content/settings and purpose freshness check",
-      programmaticAssessmentInputV1Schema: "optional non-authorizing focus",
-      programmaticAssessmentResultV1Schema: "bounded advice and explicit coverage",
-      programmaticWorkflowV2Schema: "required needs-first workflow and repeatability contract",
-      programmaticRecommendationV2Schema: "six advisory decisions with bounded alternatives",
-      FAMILY_GENERATOR_MEMBER_BOUNDS: "generator member limits pinned to the family detector",
-      programmaticRecommendationV1Schema: "advisory choices separate from discovery",
-      programmaticCommandReferenceV1Schema: "source-aware advisory identity",
-      programmaticCommandSnapshotV1Schema: "body/helper content identity",
-      programmaticCommandAvailabilityV1Schema: "availability without permission",
-      programmaticMissingCapabilityV1Schema: "prompt/script/app requirements",
-      programmaticCreationProposalV1Schema: "project-only exact content and prior versions",
-      programmaticVerificationV1Schema: "content-specific deterministic evidence categories",
-      programmaticExecutionSettingsV1Schema: "bounded host policy settings",
-      programmaticExecutionReviewV1Schema: "separate execution review snapshot",
-      repositoryRelativePathSchema: "normalized inventory/evidence/route path boundary",
-      scannerProfileV1Schema: "versioned scanner ID and specialist allowlist",
-      inventoryEntryV1Schema: "inventory path and content fingerprint",
-      evidenceLocationV1Schema: "bounded located evidence",
-      evidenceItemV1Schema: "evidence basis, severity and bounded message",
-      evidenceV1Schema: "versioned bounded evidence collection",
-      opportunityIdentityV1Schema: "stable opportunity identity",
-      routableOpportunityRouteV1Schema: "later discovery routable branch",
-      opportunityRouteV1Schema: "later discovery routable/unroutable union",
-      opportunityLifecycleV1Schema: "versioned lifecycle state",
-      programmaticLifecycleRecordV1Schema: "later lifecycle identity consistency",
-      opportunityTransitionV1Schema: "allowed lifecycle transitions",
-      routeEnvelopeV1Schema: "versioned bounded specialist route envelope",
-      executionResultV1Schema: "versioned execution outcome and evidence",
-    };
-    expect(
-      unused([...canonicalNames], used, fixtureUses, new Set(Object.keys(requiredFixtures))),
-    ).toEqual([]);
-    console.info(
-      "Fixture-only contract requirements:",
-      Object.entries(requiredFixtures).filter(([name]) => !used.has(name)),
-    );
-    // These bounded syntax/usage checks do not prove semantic uniqueness or overall design quality.
-    console.info("Consumer declarations requiring manual semantic comparison:", lookalikes);
-    const manifest = JSON.parse(read("packages/ggcoder/package.json")) as {
-      exports: Record<string, unknown>;
-    };
-    expect(Object.keys(manifest.exports).some((name) => name.includes("programmatic"))).toBe(false);
-    expect(
-      ts
-        .preProcessFile(read("packages/ggcoder/src/index.ts"))
-        .importedFiles.filter(({ fileName }) => fileName.includes("programmatic")),
-    ).toEqual([]);
-  }, 60_000);
+      // Exact public-schema requirements justify fixture-only surfaces, not speculative type aliases.
+      const requiredFixtures = {
+        ProgrammaticApprovalContext: "host-only pending decision, not model data",
+        isProgrammaticReviewCurrent: "pure content/settings and purpose freshness check",
+        programmaticAssessmentInputV1Schema: "optional non-authorizing focus",
+        programmaticAssessmentResultV1Schema: "bounded advice and explicit coverage",
+        programmaticWorkflowV2Schema: "required needs-first workflow and repeatability contract",
+        programmaticRecommendationV2Schema: "six advisory decisions with bounded alternatives",
+        FAMILY_GENERATOR_MEMBER_BOUNDS: "generator member limits pinned to the family detector",
+        programmaticRecommendationV1Schema: "advisory choices separate from discovery",
+        programmaticCommandReferenceV1Schema: "source-aware advisory identity",
+        programmaticCommandSnapshotV1Schema: "body/helper content identity",
+        programmaticCommandAvailabilityV1Schema: "availability without permission",
+        programmaticMissingCapabilityV1Schema: "prompt/script/app requirements",
+        programmaticCreationProposalV1Schema: "project-only exact content and prior versions",
+        programmaticVerificationV1Schema: "content-specific deterministic evidence categories",
+        programmaticExecutionSettingsV1Schema: "bounded host policy settings",
+        programmaticExecutionReviewV1Schema: "separate execution review snapshot",
+        repositoryRelativePathSchema: "normalized inventory/evidence/route path boundary",
+        scannerProfileV1Schema: "versioned scanner ID and specialist allowlist",
+        inventoryEntryV1Schema: "inventory path and content fingerprint",
+        evidenceLocationV1Schema: "bounded located evidence",
+        evidenceItemV1Schema: "evidence basis, severity and bounded message",
+        evidenceV1Schema: "versioned bounded evidence collection",
+        opportunityIdentityV1Schema: "stable opportunity identity",
+        routableOpportunityRouteV1Schema: "later discovery routable branch",
+        opportunityRouteV1Schema: "later discovery routable/unroutable union",
+        opportunityLifecycleV1Schema: "versioned lifecycle state",
+        programmaticLifecycleRecordV1Schema: "later lifecycle identity consistency",
+        opportunityTransitionV1Schema: "allowed lifecycle transitions",
+        routeEnvelopeV1Schema: "versioned bounded specialist route envelope",
+        executionResultV1Schema: "versioned execution outcome and evidence",
+      };
+      expect(
+        unused([...canonicalNames], used, fixtureUses, new Set(Object.keys(requiredFixtures))),
+      ).toEqual([]);
+      console.info(
+        "Fixture-only contract requirements:",
+        Object.entries(requiredFixtures).filter(([name]) => !used.has(name)),
+      );
+      // These bounded syntax/usage checks do not prove semantic uniqueness or overall design quality.
+      console.info("Consumer declarations requiring manual semantic comparison:", lookalikes);
+      const manifest = JSON.parse(read("packages/ggcoder/package.json")) as {
+        exports: Record<string, unknown>;
+      };
+      expect(Object.keys(manifest.exports).some((name) => name.includes("programmatic"))).toBe(
+        false,
+      );
+      expect(
+        ts
+          .preProcessFile(read("packages/ggcoder/src/index.ts"))
+          .importedFiles.filter(({ fileName }) => fileName.includes("programmatic")),
+      ).toEqual([]);
+    },
+  );
 
   it("counts real fixture references, not unused imports, shadowed names, or audit self-references", () => {
     const fileName = path.resolve(root, "consumer.test.ts");

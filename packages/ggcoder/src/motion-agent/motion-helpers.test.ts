@@ -712,15 +712,20 @@ describe("hyperframes launcher", () => {
     expect(result.stderr).toContain("bundled with GG Motion");
   });
 
-  it("runs the pinned CLI version the skills were bundled for", async () => {
-    const bundle = await findMotionBundle();
-    if (!bundle) throw new Error("motion bundle missing");
+  // A cold start of the bundled CLI took 9-15 s on a loaded Windows machine.
+  it(
+    "runs the pinned CLI version the skills were bundled for",
+    { tags: ["alone"], timeout: 60_000 },
+    async () => {
+      const bundle = await findMotionBundle();
+      if (!bundle) throw new Error("motion bundle missing");
 
-    const result = await runHelper("hyperframes.mjs", ["--version"]);
+      const result = await runHelper("hyperframes.mjs", ["--version"]);
 
-    expect(result.code).toBe(0);
-    expect(result.stdout.trim()).toBe(bundle.version);
-  });
+      expect(result.code).toBe(0);
+      expect(result.stdout.trim()).toBe(bundle.version);
+    },
+  );
 
   it("keeps the privacy opt-outs in the launcher source", async () => {
     const source = await fs.readFile(await binPath("hyperframes.mjs"), "utf8");

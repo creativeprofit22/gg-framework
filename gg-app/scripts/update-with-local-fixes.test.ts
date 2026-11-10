@@ -604,43 +604,47 @@ describe("local-fixes updater", () => {
     30_000,
   );
 
-  it("stores meaningful decisions only after real workspace checks pass", () => {
-    const fixture = createUpdateFixture(false, true, true);
-    const result = runUpdater(
-      fixture.repo,
-      ["--no-install", "--no-build", "--check"],
-      checkedEnvironment(fixture),
-    );
+  it(
+    "stores meaningful decisions only after real workspace checks pass",
+    { tags: ["alone"], timeout: 30_000 },
+    () => {
+      const fixture = createUpdateFixture(false, true, true);
+      const result = runUpdater(
+        fixture.repo,
+        ["--no-install", "--no-build", "--check"],
+        checkedEnvironment(fixture),
+      );
 
-    expect(result.status, result.stderr).toBe(0);
-    const backupRoot = join(fixture.repo, ".gg", "local-fixes", "backups");
-    const syncDir = join(backupRoot, readdirSync(backupRoot)[0]);
-    const manifest = JSON.parse(readFileSync(join(syncDir, "manifest.json"), "utf8"));
-    const decisions = JSON.parse(readFileSync(join(syncDir, "decisions.json"), "utf8"));
-    expect(manifest).toMatchObject({ verified: true, phase: "verified", checks: "passed" });
-    expect(decisions.verification.checks).toBe("passed");
-    expect(
-      readFileSync(join(fixture.repo, ".gg/checks-run.log"), "utf8").trim().split("\n"),
-    ).toHaveLength(7);
-    expect(result.stdout).toContain("11 passed");
-    expect(result.stdout).toContain("test integrated_source ... ok");
-    expect(manifest).not.toHaveProperty("mergeCreated");
-    expect(manifest).not.toHaveProperty("decisionsPath");
-    expect(decisions.decisions).toEqual([
-      expect.objectContaining({ area: "shared", outcome: "combined" }),
-    ]);
-    expect(decisions.verification.workflowVerified).toBe(true);
-    expect(decisions).toMatchObject({
-      schemaVersion: 3,
-      summary: {
-        text: "Your protected update is ready. It blended your work with upstream in one area, keeping changes from both sides.",
-        source: "fallback",
-        generatedAt: manifest.timestamp,
-      },
-    });
-    expect(existsSync(join(syncDir, "decision-summary-context.json"))).toBe(false);
-    expect(JSON.stringify(decisions)).not.toContain("rationale");
-  }, 30_000);
+      expect(result.status, result.stderr).toBe(0);
+      const backupRoot = join(fixture.repo, ".gg", "local-fixes", "backups");
+      const syncDir = join(backupRoot, readdirSync(backupRoot)[0]);
+      const manifest = JSON.parse(readFileSync(join(syncDir, "manifest.json"), "utf8"));
+      const decisions = JSON.parse(readFileSync(join(syncDir, "decisions.json"), "utf8"));
+      expect(manifest).toMatchObject({ verified: true, phase: "verified", checks: "passed" });
+      expect(decisions.verification.checks).toBe("passed");
+      expect(
+        readFileSync(join(fixture.repo, ".gg/checks-run.log"), "utf8").trim().split("\n"),
+      ).toHaveLength(7);
+      expect(result.stdout).toContain("11 passed");
+      expect(result.stdout).toContain("test integrated_source ... ok");
+      expect(manifest).not.toHaveProperty("mergeCreated");
+      expect(manifest).not.toHaveProperty("decisionsPath");
+      expect(decisions.decisions).toEqual([
+        expect.objectContaining({ area: "shared", outcome: "combined" }),
+      ]);
+      expect(decisions.verification.workflowVerified).toBe(true);
+      expect(decisions).toMatchObject({
+        schemaVersion: 3,
+        summary: {
+          text: "Your protected update is ready. It blended your work with upstream in one area, keeping changes from both sides.",
+          source: "fallback",
+          generatedAt: manifest.timestamp,
+        },
+      });
+      expect(existsSync(join(syncDir, "decision-summary-context.json"))).toBe(false);
+      expect(JSON.stringify(decisions)).not.toContain("rationale");
+    },
+  );
 
   it("writes correlated summary context only after an opted-in verified overlap", () => {
     const fixture = createUpdateFixture(false, true, true);

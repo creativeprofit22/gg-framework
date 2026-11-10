@@ -204,7 +204,7 @@ d("PersistentShell", () => {
     expect(after.output).toBe("kept\n");
   });
 
-  it("does not leak error listeners across many runs", async () => {
+  it("does not leak error listeners across many runs", { tags: ["alone"] }, async () => {
     const sh = make();
     for (let i = 0; i < 15; i++) {
       await sh.run("true", 10_000, signal());

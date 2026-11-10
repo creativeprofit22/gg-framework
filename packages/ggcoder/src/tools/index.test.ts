@@ -22,14 +22,18 @@ const results: CreateToolsResult[] = [];
 const dirs: string[] = [];
 
 afterEach(async () => {
-  for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  // Wait for spawned processes to exit before deleting their working
+  // directories: a live child keeps the directory open on Windows (EBUSY).
   await Promise.all(
     results.splice(0).map(async ({ processManager, lspManager, subAgentManager }) => {
       await subAgentManager?.shutdownAll();
       await lspManager?.shutdownAll();
-      processManager.shutdownAll();
+      await processManager.shutdownAllAndWait();
     }),
   );
+  for (const dir of dirs.splice(0)) {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
 });
 
 describe("createTools LSP policy", () => {

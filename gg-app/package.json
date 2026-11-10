@@ -31,10 +31,10 @@
     "bump": "node scripts/bump-version.mjs",
     "evidence:workspace-shell": "node scripts/workspace-shell-evidence.mjs",
     "nav": "node scripts/dev-nav.mjs",
-    "test": "pnpm test:parallel && pnpm test:updater-serial && pnpm test:installer-serial && pnpm test:launcher-serial && pnpm test:workspace-narrow && pnpm test:review-dock && pnpm test:workspace-shell-evidence && pnpm test:whats-new-loading",
+    "test": "pnpm test:parallel && pnpm test:heavy-serial && pnpm test:updater-serial && pnpm test:installer-serial && pnpm test:launcher-serial && pnpm test:workspace-narrow && pnpm test:review-dock && pnpm test:workspace-shell-evidence && pnpm test:whats-new-loading && pnpm test:alone",
     "test:parallel": "vitest run --project ui --project node",
-    "test:updater-serial": "vitest run scripts/update-with-local-fixes.test.ts --no-file-parallelism",
-    "test:installer-serial": "vitest run scripts/install-local-patched.test.mjs --no-file-parallelism",
+    "test:updater-serial": "vitest run scripts/update-with-local-fixes.test.ts --no-file-parallelism --tags-filter=!alone",
+    "test:installer-serial": "vitest run scripts/install-local-patched.test.mjs --no-file-parallelism --tags-filter=!alone",
     "test:launcher-serial": "vitest run scripts/launch-local-patched.test.mjs --no-file-parallelism",
     "test:workspace-narrow": "node scripts/workspace-narrow-regression.mjs",
     "test:review-dock": "node scripts/review-dock-visibility-regression.mjs",
@@ -47,7 +47,9 @@
     "smoke:packaged": "node scripts/smoke-packaged-windows.mjs",
     "smoke:installed-local-fork": "node scripts/smoke-built-local-fork.mjs",
     "smoke:packaged:linux": "node scripts/smoke-packaged-linux.mjs",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "test:heavy-serial": "vitest run --project heavy --no-file-parallelism",
+    "test:alone": "vitest run --project serial scripts/install-local-patched.test.mjs scripts/update-with-local-fixes.test.ts --tags-filter=alone --no-file-parallelism"
   },
   "dependencies": {
     "@kenkaiiii/error-mom": "^0.3.3",

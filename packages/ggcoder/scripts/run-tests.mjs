@@ -6,7 +6,9 @@ if (!packageManagerCli) {
 }
 
 const testScripts =
-  process.platform === "win32" ? ["test:parallel", "test:windows-serial"] : ["vitest"];
+  process.platform === "win32"
+    ? ["test:parallel", "test:windows-serial", "test:daemon-serial", "test:alone"]
+    : ["vitest"];
 
 for (const testScript of testScripts) {
   const args = testScript === "vitest" ? ["exec", "vitest", "run"] : ["run", testScript];

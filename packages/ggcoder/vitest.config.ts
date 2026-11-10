@@ -24,5 +24,16 @@ export default defineConfig({
     // them headroom; a genuinely hung test still fails, just later.
     testTimeout: 20_000,
     hookTimeout: 20_000,
+    // Tests tagged "alone" are skipped by test:windows-serial and run by
+    // test:alone with nothing else active (cold CLI start under load).
+    // Process-kill timing still races a busy Windows host, so these retry; a
+    // check that always fails still fails.
+    tags: [
+      {
+        name: "alone",
+        description: "Timing-sensitive; run by itself via test:alone.",
+        retry: 2,
+      },
+    ],
   },
 });

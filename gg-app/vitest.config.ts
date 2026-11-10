@@ -18,6 +18,17 @@ const SERIAL_TEST_FILES = [
   "scripts/update-with-local-fixes.test.ts",
   "scripts/workspace-shell-evidence.test.mjs",
 ];
+// Real-daemon and bundling files that time out when run beside the rest of
+// the suite on a loaded machine; `test:heavy-serial` runs them one at a time.
+const HEAVY_TEST_FILES = [
+  "scripts/bundle-sidecar.test.mjs",
+  "scripts/roadmap-reliability-dev-smoke.test.mjs",
+  "src/AgentPane.continuation.test.tsx",
+  "src/AgentPane.lifecycle.test.tsx",
+  "src/AgentPane.sessions.test.tsx",
+  "src/AgentPane.shell.test.tsx",
+  "src/AgentPane.test.tsx",
+];
 // Pure jsdom files that fail only inside a vm context: ReadableStream is
 // missing there, `location` can't be stubbed, and a mocked-module error
 // reaches AboutPage's console.warn assertion. They keep the normal pool.
@@ -57,6 +68,9 @@ export default defineConfig({
     // stylesheet guards (css-loops.test.ts) read sheets as `?raw` text, so let
     // just those through; component CSS stays empty, as jsdom tests expect.
     css: { include: [/\.css\?raw$/] },
+    // Tests tagged "alone" are skipped by their file's serial script and run
+    // by `test:alone` with nothing else active (tight timing deadlines).
+    tags: [{ name: "alone", description: "Timing-sensitive; run by itself via test:alone." }],
     projects: [
       {
         extends: true,
@@ -75,12 +89,16 @@ export default defineConfig({
             "scripts/**/*.test.mjs",
             "scripts/**/*.test.ts",
           ],
-          exclude: [...defaultExclude, ...uiTestFiles, ...SERIAL_TEST_FILES],
+          exclude: [...defaultExclude, ...uiTestFiles, ...SERIAL_TEST_FILES, ...HEAVY_TEST_FILES],
         },
       },
       {
         extends: true,
         test: { name: "serial", include: SERIAL_TEST_FILES },
+      },
+      {
+        extends: true,
+        test: { name: "heavy", include: HEAVY_TEST_FILES },
       },
     ],
   },

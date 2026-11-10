@@ -1,5 +1,10 @@
 import { isPhaseLease, type PhaseLeaseV1 } from "./phase-binding-protocol.js";
-import { isNotesSessionLink } from "./project-notes.js";
+import {
+  isNotesPhaseStatus,
+  isNotesSessionLink,
+  NOTES_DEPENDENCY_OVERRIDE_PREREQUISITES_MAX_ITEMS,
+} from "./project-notes.js";
+import type { PhaseStartPrerequisite } from "./roadmap-phase-dependencies.js";
 
 export const PHASE_START_STATUSES = ["accepted", "already-bound", "failed"] as const;
 
@@ -19,6 +24,7 @@ export const PHASE_START_FAILURE_CODES = [
   "phase-archived",
   "phase-inactive",
   "advancement-confirmation-required",
+  "prerequisites-confirmation-required",
   "phase-lease-held",
   "phase-lease-lost",
   "lease-owner-unreachable",
@@ -63,11 +69,14 @@ export type PhaseStartResult =
       code: PhaseStartFailureCode;
       operationId: string | null;
       message: string;
+      /** Present only with `prerequisites-confirmation-required`. */
+      prerequisites?: PhaseStartPrerequisite[];
     };
 
 export type LegacyPhaseStartFailureCode = Exclude<
   PhaseStartFailureCode,
   | "advancement-confirmation-required"
+  | "prerequisites-confirmation-required"
   | "phase-lease-held"
   | "phase-lease-lost"
   | "lease-owner-unreachable"
@@ -95,8 +104,9 @@ export function toLegacyPhaseStartResult(result: PhaseStartResult): LegacyPhaseS
     }
     return result as LegacyPhaseStartResult;
   }
+  const { prerequisites: _prerequisites, ...failure } = result;
   return {
-    ...result,
+    ...failure,
     code: result.code === "advancement-confirmation-required" ? "phase-inactive" : "launch-failed",
   };
 }
@@ -104,6 +114,7 @@ export function toLegacyPhaseStartResult(result: PhaseStartResult): LegacyPhaseS
 const PHASE_START_FAILURE_CODE_SET: ReadonlySet<string> = new Set(PHASE_START_FAILURE_CODES);
 const V2_PHASE_START_FAILURE_CODE_SET: ReadonlySet<string> = new Set([
   "advancement-confirmation-required",
+  "prerequisites-confirmation-required",
   "phase-lease-held",
   "phase-lease-lost",
   "lease-owner-unreachable",
@@ -148,12 +159,35 @@ export function isPhaseStartResult(value: unknown): value is PhaseStartResult {
         (isPhaseLease(value.lease) && isPhaseStartReconciliationOutcome(value.reconciliation)))
     );
   }
+  const confirmation = value.code === "prerequisites-confirmation-required";
   return (
     value.status === "failed" &&
-    hasExactKeys(value, ["status", "code", "operationId", "message"]) &&
+    hasExactKeys(
+      value,
+      confirmation
+        ? ["status", "code", "operationId", "message", "prerequisites"]
+        : ["status", "code", "operationId", "message"],
+    ) &&
     isPhaseStartFailureCode(value.code) &&
     (value.operationId === null || isNonEmptyString(value.operationId)) &&
-    isNonEmptyString(value.message)
+    isNonEmptyString(value.message) &&
+    (!confirmation || isPhaseStartPrerequisiteList(value.prerequisites))
+  );
+}
+
+function isPhaseStartPrerequisiteList(value: unknown): value is PhaseStartPrerequisite[] {
+  return (
+    Array.isArray(value) &&
+    value.length > 0 &&
+    value.length <= NOTES_DEPENDENCY_OVERRIDE_PREREQUISITES_MAX_ITEMS &&
+    value.every(
+      (entry) =>
+        isRecord(entry) &&
+        hasExactKeys(entry, ["id", "title", "status"]) &&
+        isNonEmptyString(entry.id) &&
+        typeof entry.title === "string" &&
+        isNotesPhaseStatus(entry.status),
+    )
   );
 }
 

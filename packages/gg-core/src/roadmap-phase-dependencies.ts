@@ -313,3 +313,36 @@ export function agentPhaseStartRefusal(
     ),
   };
 }
+
+export interface PhaseStartPrerequisite {
+  id: string;
+  title: string;
+  status: NotesPhase["status"];
+}
+
+/** Manual start soft gate: null unless unfinished prerequisites are neither confirmed exactly nor covered by this run. */
+export function phaseStartPrerequisiteConfirmation(
+  phases: readonly (DependencyPhase & OverridePhase)[],
+  phaseId: string,
+  confirmedIds: readonly string[],
+): { prerequisites: PhaseStartPrerequisite[] } | null {
+  const unfinished = listUnfinishedPrerequisites(phases, phaseId);
+  if (unfinished === null || unfinished.length === 0) return null;
+  const unfinishedIds = new Set(unfinished.map((prerequisite) => prerequisite.id));
+  const confirmed = new Set(confirmedIds);
+  if (
+    confirmed.size === unfinishedIds.size &&
+    [...confirmed].every((id) => unfinishedIds.has(id))
+  ) {
+    return null;
+  }
+  const phase = phases.find((candidate) => candidate.id === phaseId)!;
+  const override = findCurrentDependencyOverride(phase);
+  if (
+    override !== null &&
+    [...unfinishedIds].every((id) => override.unfinishedPrerequisiteIds.includes(id))
+  ) {
+    return null;
+  }
+  return { prerequisites: unfinished.map(({ id, title, status }) => ({ id, title, status })) };
+}

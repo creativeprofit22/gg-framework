@@ -9,6 +9,7 @@ import {
   hasRoadmapPhaseDependencyLinks,
   isPhaseDeletionOutcome,
   listUnfinishedPrerequisites,
+  phaseStartPrerequisiteConfirmation,
   notesPhaseDeletionGeneration,
   phaseDeletionDependencyConflict,
   validateNotesDocumentV3,
@@ -431,5 +432,83 @@ describe("draft, edit and move dependency checks", () => {
       `"Phase A" (a) would sit below "Phase B" (b), which depends on it.`,
     ]);
     expect(roadmapOrderDependencyWarnings(doc.phases, ["a", "b"], "ghost")).toEqual([]);
+  });
+});
+
+describe("manual start confirmation", () => {
+  const ids = (result: ReturnType<typeof phaseStartPrerequisiteConfirmation>) =>
+    result?.prerequisites.map((prerequisite) => prerequisite.id) ?? null;
+
+  it("needs nothing without links, with finished prerequisites, or for unknown ids", async () => {
+    const doc = await document();
+    expect(phaseStartPrerequisiteConfirmation(doc.phases, "c", [])).toBeNull();
+    phase(doc, "c").dependsOn = ["phase-migration-proof"];
+    expect(phaseStartPrerequisiteConfirmation(doc.phases, "c", [])).toBeNull();
+    expect(phaseStartPrerequisiteConfirmation(doc.phases, "ghost", [])).toBeNull();
+  });
+
+  it("asks for unconfirmed prerequisites, naming each with its status", async () => {
+    const doc = await document();
+    phase(doc, "c").dependsOn = ["a", "phase-schema-contract"];
+    phase(doc, "a").status = "in-progress";
+    expect(phaseStartPrerequisiteConfirmation(doc.phases, "c", [])?.prerequisites).toEqual([
+      { id: "a", title: "Phase A", status: "in-progress" },
+      {
+        id: "phase-schema-contract",
+        title: phase(doc, "phase-schema-contract").title,
+        status: phase(doc, "phase-schema-contract").status,
+      },
+    ]);
+  });
+
+  it("accepts only the exact current unfinished set", async () => {
+    const doc = await document();
+    phase(doc, "c").dependsOn = ["a", "b"];
+    expect(phaseStartPrerequisiteConfirmation(doc.phases, "c", ["b", "a"])).toBeNull();
+    expect(ids(phaseStartPrerequisiteConfirmation(doc.phases, "c", ["a"]))).toEqual(["a", "b"]);
+    expect(ids(phaseStartPrerequisiteConfirmation(doc.phases, "c", ["a", "b", "x"]))).toEqual([
+      "a",
+      "b",
+    ]);
+  });
+
+  it("asks again when the set changed after the user confirmed, even if it shrank", async () => {
+    const doc = await document();
+    phase(doc, "c").dependsOn = ["a", "b"];
+    phase(doc, "a").status = "done";
+    expect(ids(phaseStartPrerequisiteConfirmation(doc.phases, "c", ["a", "b"]))).toEqual(["b"]);
+    phase(doc, "a").status = "not-started";
+    phase(doc, "c").dependsOn = ["a", "b", "phase-schema-contract"];
+    expect(ids(phaseStartPrerequisiteConfirmation(doc.phases, "c", ["a", "b"]))).toEqual([
+      "a",
+      "b",
+      "phase-schema-contract",
+    ]);
+  });
+
+  it("does not ask again while this run's override covers every unfinished prerequisite", async () => {
+    const doc = await startedByUser();
+    expect(phaseStartPrerequisiteConfirmation(doc.phases, "c", [])).toBeNull();
+    phase(doc, "a").status = "done";
+    expect(phaseStartPrerequisiteConfirmation(doc.phases, "c", [])).toBeNull();
+    phase(doc, "c").dependsOn = ["a", "b", "phase-schema-contract"];
+    expect(ids(phaseStartPrerequisiteConfirmation(doc.phases, "c", []))).toEqual([
+      "b",
+      "phase-schema-contract",
+    ]);
+  });
+
+  it("asks again once the run's override is retired", async () => {
+    const doc = await startedByUser();
+    phase(doc, "c").roadmapEvents.push({
+      type: "phase-binding",
+      id: "rebind",
+      action: "rebind-current",
+      actor: "coding-session",
+      previousSession: S2,
+      session: S1,
+      timestamp: "2026-11-06T12:05:00.000Z",
+    });
+    expect(ids(phaseStartPrerequisiteConfirmation(doc.phases, "c", []))).toEqual(["a", "b"]);
   });
 });

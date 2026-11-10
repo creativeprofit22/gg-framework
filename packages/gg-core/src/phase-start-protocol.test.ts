@@ -125,4 +125,55 @@ describe("phase-start protocol", () => {
     } satisfies PhaseStartResult;
     expect(toLegacyPhaseStartResult(result)).toMatchObject({ code: "launch-failed" });
   });
+
+  describe("prerequisite confirmation", () => {
+    const confirmation = {
+      status: "failed",
+      code: "prerequisites-confirmation-required",
+      operationId: "operation-1",
+      message: "Some prerequisite phases aren't Done. Confirm to start anyway.",
+      prerequisites: [{ id: "phase-a", title: "Phase A", status: "in-progress" }],
+    } satisfies PhaseStartResult;
+
+    it("accepts the failure with the unfinished prerequisites", () => {
+      expect(isPhaseStartResult(confirmation)).toBe(true);
+    });
+
+    it.each([
+      ["missing list", { ...confirmation, prerequisites: undefined }],
+      ["empty list", { ...confirmation, prerequisites: [] }],
+      ["bad status", { ...confirmation, prerequisites: [{ id: "a", title: "A", status: "x" }] }],
+      ["empty id", { ...confirmation, prerequisites: [{ id: "", title: "A", status: "done" }] }],
+      [
+        "extra key",
+        {
+          ...confirmation,
+          prerequisites: [{ id: "a", title: "A", status: "done", session: "secret" }],
+        },
+      ],
+      [
+        "too many",
+        {
+          ...confirmation,
+          prerequisites: Array.from({ length: 201 }, (_, index) => ({
+            id: `p-${index}`,
+            title: "P",
+            status: "not-started",
+          })),
+        },
+      ],
+      ["list on another code", { ...confirmation, code: "launch-failed" }],
+    ])("rejects a malformed confirmation: %s", (_label, value) => {
+      expect(isPhaseStartResult(value)).toBe(false);
+    });
+
+    it("downgrades to a plain launch failure for legacy clients", () => {
+      expect(toLegacyPhaseStartResult(confirmation)).toEqual({
+        status: "failed",
+        code: "launch-failed",
+        operationId: "operation-1",
+        message: confirmation.message,
+      });
+    });
+  });
 });

@@ -11,6 +11,9 @@ import type {
   ProjectNotesStorageDiagnostics,
 } from "../notes-types";
 import { useNotesPhaseDetail } from "./NotesPhaseDetailState";
+import { NotesPhaseDependencies } from "./NotesPhaseDependencies";
+import { NotesPhaseDependencyEditor } from "./NotesPhaseDependencyEditor";
+import { NotesPhaseWaitingOn } from "./NotesPhaseWaitingOn";
 import {
   activeRoadmapBlocker,
   formatDate,
@@ -24,9 +27,11 @@ import {
 export function NotesPhaseOverviewView(): ReactElement {
   const {
     phase,
+    phases,
     currentTime,
     editing,
     phaseDraft,
+    dependencyError,
     controlsDisabled,
     effectiveActionLabel,
     latestReport,
@@ -90,6 +95,14 @@ export function NotesPhaseOverviewView(): ReactElement {
             onChange={(event) => updatePhaseDraft({ doneWhen: event.target.value })}
           />
         </div>
+        <NotesPhaseDependencyEditor
+          phases={phases}
+          phaseId={phase.id}
+          dependsOn={phaseDraft.dependsOn}
+          error={dependencyError}
+          disabled={controlsDisabled}
+          onChange={(dependsOn) => updatePhaseDraft({ dependsOn })}
+        />
         {phaseDraft.conflict && (
           <p className="notes-phase-action-error" role="alert">
             This phase changed in another window. Reload the latest values before saving.
@@ -98,7 +111,12 @@ export function NotesPhaseOverviewView(): ReactElement {
         <div className="notes-phase-form-actions">
           <button
             type="submit"
-            disabled={!phaseDraft.title.trim() || controlsDisabled || phaseDraft.conflict}
+            disabled={
+              !phaseDraft.title.trim() ||
+              controlsDisabled ||
+              phaseDraft.conflict ||
+              dependencyError !== null
+            }
           >
             Save changes
           </button>
@@ -124,6 +142,7 @@ export function NotesPhaseOverviewView(): ReactElement {
         latestReport={latestReport}
         pendingProposalCount={pendingProposals.length}
       />
+      <NotesPhaseWaitingOn phases={phases} phase={phase} />
       {activeBlocker && (
         <section
           className="notes-phase-blocker-alert"
@@ -176,6 +195,7 @@ export function NotesPhaseOverviewView(): ReactElement {
             <p>No completion criteria added.</p>
           )}
         </div>
+        <NotesPhaseDependencies phases={phases} phase={phase} />
       </div>
 
       {phase.sourcePrompt.trim().length > 0 && (

@@ -63,6 +63,12 @@ export type {
   PhaseStartSession,
   PhaseStartStatus,
 } from "@kenkaiiii/gg-core/phase-start-protocol";
+export type { PhaseStartPrerequisite } from "@kenkaiiii/gg-core/roadmap-phase-dependencies";
+
+/** Unfinished prerequisites the user chose to start past; the daemon re-checks them. */
+export interface PhaseStartOptions {
+  confirmedPrerequisiteIds: readonly string[];
+}
 
 const PHASE_RUN_CANCELLATION_FAILURE_CODES = [
   "notes-unavailable",

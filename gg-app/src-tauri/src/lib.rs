@@ -213,7 +213,6 @@ pub fn run() {
             commands::notes::agent_notes_diagnostics,
             commands::notes::agent_notes_phase_binding,
             commands::notes::agent_phase_start,
-            commands::notes::agent_phase_advancement_start,
             commands::notes::agent_phase_cancel,
             commands::notes::agent_roadmap_phase_draft_get,
             commands::notes::agent_roadmap_phase_draft_approve,

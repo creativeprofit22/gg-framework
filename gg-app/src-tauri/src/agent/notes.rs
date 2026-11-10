@@ -18,7 +18,7 @@ pub async fn agent_notes_phase_deletion(
 }
 
 /// Native-only pane/session routing for a user's manual Done/Reopen. The daemon owns
-/// eligibility (live runs, protected advancement, agent completion) and persistence.
+/// eligibility (live runs, agent completion) and persistence.
 #[tauri::command]
 pub async fn agent_notes_phase_status(
     webview: WebviewWindow,

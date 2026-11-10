@@ -332,18 +332,19 @@ describe("durable phase deletion repository", () => {
     expect(await readFiles(paths)).toEqual(before);
   });
 
-  it("preserves all unresolved advancement checkpoints, including unrelated phase decisions", async () => {
+  it("deletes a phase while an old advancement checkpoint is pending and keeps the checkpoint", async () => {
     const { cwd, repository, paths } = await setup();
     const document = encodeCompatibleDone(await completionCompatibilityFixture());
-    document.phases[0]!.roadmapEvents.push({
-      type: "phase-advancement-checkpoint",
+    const checkpoint = {
+      type: "phase-advancement-checkpoint" as const,
       id: "pending-next",
       completionReviewId: "review-schema-contract",
       completedPhaseId: document.phases[0]!.id,
       nextPhaseId: document.phases[2]!.id,
-      reviewer: "ken-autopilot",
+      reviewer: "ken-autopilot" as const,
       timestamp: now,
-    });
+    };
+    document.phases[0]!.roadmapEvents.push(checkpoint);
     // Isolated fixture, not an authorized operation: seed the real persisted historical shape.
     const envelope = {
       storeVersion: 1,
@@ -353,12 +354,31 @@ describe("durable phase deletion repository", () => {
     };
     await fs.writeFile(paths.primary, JSON.stringify(envelope));
     await fs.writeFile(paths.backup, JSON.stringify(envelope));
-    const before = await readFiles(paths);
-    expect(await repository.mutatePhaseDeletion(cwd, request(envelope), allow, now)).toMatchObject({
-      status: "refused",
-      reason: "protected-advancement",
-    });
-    expect(await readFiles(paths)).toEqual(before);
+    // The checkpoint's source has its own pending completion, so delete an unrelated phase.
+    const unrelated = document.phases[1]!;
+    const generation = notesPhaseDeletionGeneration(unrelated);
+    expect(
+      await repository.mutatePhaseDeletion(
+        cwd,
+        {
+          ...request(envelope),
+          operationId: `operation-${generation}`,
+          phaseId: unrelated.id,
+          expectedGeneration: generation,
+        },
+        allow,
+        now,
+      ),
+    ).toMatchObject({ status: "committed" });
+    const loaded = await repository.load(cwd);
+    if (loaded.status !== "ok") throw new Error(loaded.status);
+    const phases = loaded.snapshot.document.phases;
+    expect(phases.find((phase) => phase.id === unrelated.id)!.deletion?.currentDeletionId).toEqual(
+      expect.any(String),
+    );
+    const source = phases.find((phase) => phase.id === document.phases[0]!.id)!;
+    expect(source.roadmapEvents).toEqual(document.phases[0]!.roadmapEvents);
+    expect(source.roadmapEvents).toContainEqual(checkpoint);
   });
 
   it.each([

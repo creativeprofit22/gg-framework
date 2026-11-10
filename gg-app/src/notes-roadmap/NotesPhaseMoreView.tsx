@@ -300,7 +300,6 @@ export function NotesPhaseMoreControls(): ReactElement {
     canCancelRun,
     canMarkDone,
     canReopen,
-    reopenStatus,
     markPhaseDone,
     reopenPhase,
     onChangePhaseStatus,
@@ -308,7 +307,6 @@ export function NotesPhaseMoreControls(): ReactElement {
     moveRefusal,
     onArchivePhase,
     onDeletePhase,
-    isTopologyMutationBlocked,
     resumeAutomaticStatus,
     runCancellation,
     onGetStorageDiagnostics,
@@ -371,90 +369,32 @@ export function NotesPhaseMoreControls(): ReactElement {
             {canPauseAutomation && (
               <button
                 type="button"
-                disabled={
-                  controlsDisabled ||
-                  isTopologyMutationBlocked({ type: "pause-status", phaseId: phase.id })
-                }
-                title={
-                  isTopologyMutationBlocked({ type: "pause-status", phaseId: phase.id })
-                    ? "Confirm or recover the pending Roadmap advancement before pausing this phase."
-                    : undefined
-                }
+                disabled={controlsDisabled}
                 onClick={() => onChangePhaseStatus(phase.status)}
               >
                 Pause automation
               </button>
             )}
             {phase.overrides.status && (
-              <button
-                type="button"
-                disabled={
-                  controlsDisabled ||
-                  isTopologyMutationBlocked({ type: "resume-status", phaseId: phase.id })
-                }
-                title={
-                  isTopologyMutationBlocked({ type: "resume-status", phaseId: phase.id })
-                    ? "Resuming this phase would replace the target protected by a pending phase advancement."
-                    : undefined
-                }
-                onClick={resumeAutomaticStatus}
-              >
+              <button type="button" disabled={controlsDisabled} onClick={resumeAutomaticStatus}>
                 {pendingRoadmapAction === "resume-status" ? "Resuming…" : "Resume automation"}
               </button>
             )}
             {canMarkDone && (
               <button
                 type="button"
-                disabled={
-                  controlsDisabled ||
-                  canCancelRun ||
-                  isTopologyMutationBlocked({
-                    type: "set-status",
-                    phaseId: phase.id,
-                    status: "done",
-                  })
-                }
+                disabled={controlsDisabled || canCancelRun}
                 aria-describedby={
                   canCancelRun ? `notes-phase-mark-done-help-${phase.id}` : undefined
                 }
-                title={
-                  canCancelRun
-                    ? "Cancel the run before marking this phase done."
-                    : isTopologyMutationBlocked({
-                          type: "set-status",
-                          phaseId: phase.id,
-                          status: "done",
-                        })
-                      ? "Confirm or recover the pending Roadmap advancement before marking this phase done."
-                      : undefined
-                }
+                title={canCancelRun ? "Cancel the run before marking this phase done." : undefined}
                 onClick={markPhaseDone}
               >
                 {pendingRoadmapAction === "mark-done" ? "Marking…" : "Mark done"}
               </button>
             )}
             {canReopen && (
-              <button
-                type="button"
-                disabled={
-                  controlsDisabled ||
-                  isTopologyMutationBlocked({
-                    type: "set-status",
-                    phaseId: phase.id,
-                    status: reopenStatus,
-                  })
-                }
-                title={
-                  isTopologyMutationBlocked({
-                    type: "set-status",
-                    phaseId: phase.id,
-                    status: reopenStatus,
-                  })
-                    ? "Reopening this phase would replace the target protected by a pending phase advancement."
-                    : undefined
-                }
-                onClick={reopenPhase}
-              >
+              <button type="button" disabled={controlsDisabled} onClick={reopenPhase}>
                 {pendingRoadmapAction === "reopen" ? "Reopening…" : "Reopen"}
               </button>
             )}
@@ -472,18 +412,8 @@ export function NotesPhaseMoreControls(): ReactElement {
         <div className="notes-phase-secondary-actions">
           <button
             type="button"
-            disabled={
-              controlsDisabled ||
-              position === 0 ||
-              moveRefusal("up") !== null ||
-              isTopologyMutationBlocked({ type: "move", phaseId: phase.id, direction: "up" })
-            }
-            title={
-              moveRefusal("up") ??
-              (isTopologyMutationBlocked({ type: "move", phaseId: phase.id, direction: "up" })
-                ? "This move would change the target protected by a pending phase advancement."
-                : undefined)
-            }
+            disabled={controlsDisabled || position === 0 || moveRefusal("up") !== null}
+            title={moveRefusal("up") ?? undefined}
             onClick={() => onMovePhase(phase.id, "up")}
           >
             Move up
@@ -491,33 +421,14 @@ export function NotesPhaseMoreControls(): ReactElement {
           <button
             type="button"
             disabled={
-              controlsDisabled ||
-              position === phaseCount - 1 ||
-              moveRefusal("down") !== null ||
-              isTopologyMutationBlocked({ type: "move", phaseId: phase.id, direction: "down" })
+              controlsDisabled || position === phaseCount - 1 || moveRefusal("down") !== null
             }
-            title={
-              moveRefusal("down") ??
-              (isTopologyMutationBlocked({ type: "move", phaseId: phase.id, direction: "down" })
-                ? "This move would change the target protected by a pending phase advancement."
-                : undefined)
-            }
+            title={moveRefusal("down") ?? undefined}
             onClick={() => onMovePhase(phase.id, "down")}
           >
             Move down
           </button>
-          <button
-            type="button"
-            disabled={
-              controlsDisabled || isTopologyMutationBlocked({ type: "archive", phaseId: phase.id })
-            }
-            title={
-              isTopologyMutationBlocked({ type: "archive", phaseId: phase.id })
-                ? "Confirm the pending Roadmap advancement before archiving this phase."
-                : undefined
-            }
-            onClick={onArchivePhase}
-          >
+          <button type="button" disabled={controlsDisabled} onClick={onArchivePhase}>
             Archive phase
           </button>
           {onDeletePhase && (

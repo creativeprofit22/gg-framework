@@ -129,139 +129,76 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => fs.rm(root, { recursive: true, force: true })));
 });
 
-describe("ProjectNotesRepository direct completion authority", () => {
-  it("retains explicit advancement for an intact persisted direct-completion chain", async () => {
-    const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "repository-direct-authority-"));
-    roots.push(agentDir);
-    const repository = new ProjectNotesRepository(agentDir);
-    const cwd = "/project/current";
-    await repository.migrate(cwd, document("current"));
+async function project(name: string, linked = false) {
+  const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "repository-old-advancement-"));
+  roots.push(agentDir);
+  const repository = new ProjectNotesRepository(agentDir);
+  const cwd = `/project/${name}`;
+  const base = document("current");
+  /** Phase 3 is still in progress in another session. */
+  base.phases.push({
+    ...structuredClone(base.phases[1]!),
+    id: "phase-3",
+    title: "Prerequisite",
+    order: 2,
+    status: "in-progress",
+    session: { sessionId: "prereq-session", sessionPath: "/sessions/prereq.jsonl" },
+  });
+  const migrated = await repository.migrate(cwd, base);
+  if (migrated.status !== "ok") throw Error(JSON.stringify(migrated));
+  if (!linked) return { repository, cwd, revision: migrated.snapshot.revision };
+  // Migration cannot create dependency links, so link the stored copy directly.
+  const paths = repository.paths(cwd);
+  for (const file of [paths.primary, paths.backup]) {
+    const envelope = JSON.parse(await fs.readFile(file, "utf8"));
+    envelope.storeVersion = 3;
+    envelope.document.phases.find((phase: { id: string }) => phase.id === "phase-2").dependsOn = [
+      "phase-3",
+    ];
+    await fs.writeFile(file, JSON.stringify(envelope));
+  }
+  const loaded = await repository.load(cwd);
+  if (loaded.status !== "ok") throw Error(JSON.stringify(loaded));
+  return { repository, cwd, revision: loaded.snapshot.revision };
+}
+
+function sourceEvents(document: NotesDocumentV3) {
+  return document.phases.find((phase) => phase.id === "phase-1")!.roadmapEvents;
+}
+
+describe("old phase advancement checkpoints are ignored", () => {
+  it("starts the old target normally and keeps the checkpoint", async () => {
+    const { repository, cwd } = await project("normal-start");
+    const before = await repository.load(cwd);
+    if (before.status !== "ok") throw Error(before.status);
     const createBinding = vi.fn(async () => ({
       sessionId: "next-session",
       sessionPath: "/sessions/next.jsonl",
     }));
-    const result = await repository.confirmPhaseAdvancement(
-      cwd,
-      {
-        checkpointId: "advancement-checkpoint",
-        nextPhaseId: "phase-2",
-        action: "start-next-phase",
-        operationId: "advance-current",
-      },
-      createBinding,
-    );
-    expect(result).toMatchObject({
+    await expect(repository.launchPhase(cwd, "phase-2", createBinding)).resolves.toMatchObject({
       status: "accepted",
       phase: { id: "phase-2", status: "planning" },
     });
     expect(createBinding).toHaveBeenCalledOnce();
+    const after = await repository.load(cwd);
+    if (after.status !== "ok") throw Error(after.status);
+    expect(sourceEvents(after.snapshot.document)).toEqual(sourceEvents(before.snapshot.document));
   });
-  it.each(["mutated-fixture", "later-untyped-status"] as const)(
-    "does not authorize completion or advancement for %s evidence",
-    async (kind) => {
-      const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "repository-direct-authority-"));
-      roots.push(agentDir);
-      const repository = new ProjectNotesRepository(agentDir);
-      const cwd = `/project/${kind}`;
-      await repository.migrate(cwd, document(kind));
-      const before = await repository.load(cwd);
-      const createBinding = vi.fn(async () => ({
-        sessionId: "next-session",
-        sessionPath: "/sessions/next.jsonl",
-      }));
 
-      await expect(
-        repository.confirmPhaseAdvancement(
-          cwd,
-          {
-            checkpointId: "advancement-checkpoint",
-            nextPhaseId: "phase-2",
-            action: "start-next-phase",
-            operationId: `advance-${kind}`,
-          },
-          createBinding,
-        ),
-      ).resolves.toEqual({ status: "stale", reason: "completion-not-authoritative" });
-      expect(createBinding).not.toHaveBeenCalled();
-      expect(await repository.load(cwd)).toEqual(before);
-    },
-  );
-});
-
-describe("phase advancement into a phase with unfinished prerequisites", () => {
-  /** Phase 2 depends on phase 3, which is still in progress in another session. */
-  async function linkedProject(linked: boolean) {
-    const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "repository-advance-deps-"));
-    roots.push(agentDir);
-    const repository = new ProjectNotesRepository(agentDir);
-    const cwd = `/project/advance-deps-${linked}`;
-    const base = document("current");
-    base.phases.push({
-      ...structuredClone(base.phases[1]!),
-      id: "phase-3",
-      title: "Prerequisite",
-      order: 2,
-      status: "in-progress",
-      session: { sessionId: "prereq-session", sessionPath: "/sessions/prereq.jsonl" },
+  it("still asks about unfinished prerequisites and records the user/app override", async () => {
+    const { repository, cwd } = await project("linked", true);
+    const next = { sessionId: "next-session", sessionPath: "/sessions/next.jsonl" };
+    const createBinding = vi.fn(async () => next);
+    await expect(repository.launchPhase(cwd, "phase-2", createBinding)).resolves.toMatchObject({
+      status: "prerequisites-confirmation-required",
+      prerequisites: [{ id: "phase-3" }],
     });
-    const migrated = await repository.migrate(cwd, base);
-    if (migrated.status !== "ok") throw Error(JSON.stringify(migrated));
-    if (!linked) return { repository, cwd, revision: migrated.snapshot.revision };
-    // Saves refuse topology edits under a pending checkpoint, so link the stored copy directly.
-    const paths = repository.paths(cwd);
-    for (const file of [paths.primary, paths.backup]) {
-      const envelope = JSON.parse(await fs.readFile(file, "utf8"));
-      envelope.storeVersion = 3;
-      envelope.document.phases.find((phase: { id: string }) => phase.id === "phase-2").dependsOn = [
-        "phase-3",
-      ];
-      await fs.writeFile(file, JSON.stringify(envelope));
-    }
-    const loaded = await repository.load(cwd);
-    if (loaded.status !== "ok") throw Error(JSON.stringify(loaded));
-    return { repository, cwd, revision: loaded.snapshot.revision };
-  }
-
-  it("refuses automatic advancement and writes nothing", async () => {
-    const { repository, cwd, revision } = await linkedProject(true);
-    const before = await repository.load(cwd);
+    expect(createBinding).not.toHaveBeenCalled();
     await expect(
-      repository.confirmAutomaticPhaseAdvancement(cwd, {
-        checkpointId: "advancement-checkpoint",
-        expectedRevision: revision,
-        destinationSession: session,
-        timestamp: NOW,
-      }),
-    ).resolves.toEqual({ status: "stale", reason: "target-ineligible" });
-    expect(await repository.load(cwd)).toEqual(before);
-  });
-
-  it("still advances automatically when the next phase has no links", async () => {
-    const { repository, cwd, revision } = await linkedProject(false);
-    await expect(
-      repository.confirmAutomaticPhaseAdvancement(cwd, {
-        checkpointId: "advancement-checkpoint",
-        expectedRevision: revision,
-        destinationSession: session,
-        timestamp: NOW,
+      repository.launchPhase(cwd, "phase-2", createBinding, {
+        confirmedPrerequisiteIds: ["phase-3"],
       }),
     ).resolves.toMatchObject({ status: "accepted", phase: { id: "phase-2" } });
-  });
-
-  it("records a user/app override when the user confirms the start", async () => {
-    const { repository, cwd } = await linkedProject(true);
-    const next = { sessionId: "next-session", sessionPath: "/sessions/next.jsonl" };
-    const result = await repository.confirmPhaseAdvancement(
-      cwd,
-      {
-        checkpointId: "advancement-checkpoint",
-        nextPhaseId: "phase-2",
-        action: "start-next-phase",
-        operationId: "advance-linked",
-      },
-      async () => next,
-    );
-    expect(result).toMatchObject({ status: "accepted", phase: { id: "phase-2" } });
     const loaded = await repository.load(cwd);
     if (loaded.status !== "ok") throw Error(loaded.status);
     const phase2 = loaded.snapshot.document.phases.find((phase) => phase.id === "phase-2")!;
@@ -271,4 +208,25 @@ describe("phase advancement into a phase with unfinished prerequisites", () => {
       { actor: "user", origin: "app", session: next, unfinishedPrerequisiteIds: ["phase-3"] },
     ]);
   });
+
+  it.each(["reorder", "archive"] as const)(
+    "accepts a generic save that changes the old target (%s)",
+    async (change) => {
+      const { repository, cwd, revision } = await project(`save-${change}`);
+      const loaded = await repository.load(cwd);
+      if (loaded.status !== "ok") throw Error(loaded.status);
+      const next = structuredClone(loaded.snapshot.document);
+      const target = next.phases.find((phase) => phase.id === "phase-2")!;
+      if (change === "reorder") {
+        const other = next.phases.find((phase) => phase.id === "phase-3")!;
+        [target.order, other.order] = [other.order, target.order];
+      } else {
+        target.archivedAt = NOW;
+      }
+      await expect(repository.save(cwd, revision, next)).resolves.toMatchObject({ status: "ok" });
+      const saved = await repository.load(cwd);
+      if (saved.status !== "ok") throw Error(saved.status);
+      expect(sourceEvents(saved.snapshot.document)).toEqual(sourceEvents(next));
+    },
+  );
 });

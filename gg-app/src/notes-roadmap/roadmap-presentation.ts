@@ -1,11 +1,3 @@
-import {
-  classifyRoadmapAutoStartEligibility,
-  isNotesPhaseAdvancementSourceCurrent,
-} from "@kenkaiiii/gg-core/project-notes";
-import {
-  planRoadmapPhaseMove,
-  type RoadmapPhasePlacement,
-} from "@kenkaiiii/gg-core/roadmap-workflow";
 import { MENTOR_DISPLAY_NAME, PRODUCT_DISPLAY_NAME } from "../brand";
 import { notesPhaseStatusLabel } from "../notes-lifecycle-presentation";
 import type {
@@ -17,7 +9,6 @@ import type {
   NotesReferenceOperationResult,
   NotesRoadmapActor,
   NotesRoadmapMutationResult,
-  NotesRoadmapPhaseAdvancementCheckpoint,
   NotesRoadmapReferenceProposal,
   NotesRoadmapReviewer,
   NotesRoadmapStatusUpdate,
@@ -52,21 +43,6 @@ const VERIFICATION_LABELS = {
   "exception-requested": "Exception requested",
 } as const satisfies Record<NotesVerificationStatus, string>;
 
-export interface RoadmapAdvancement {
-  checkpoint: NotesRoadmapPhaseAdvancementCheckpoint;
-  completedPhase: NotesPhase;
-  nextPhase: NotesPhase;
-  currentEligiblePhase: NotesPhase | null;
-  ready: boolean;
-  recoveryReason: string | null;
-}
-
-export type RoadmapTopologyMutation =
-  | { type: "move"; phaseId: string; direction: "up" | "down" }
-  | { type: "reorder"; phaseId: string; placement: RoadmapPhasePlacement }
-  | { type: "archive" | "restore" | "pause-status" | "resume-status"; phaseId: string }
-  | { type: "set-status"; phaseId: string; status: NotesPhaseStatus };
-
 /** A Done the user chose by hand, not one an agent reported with evidence. */
 export function isManuallyDone(phase: Pick<NotesPhase, "status" | "overrides">): boolean {
   return phase.status === "done" && phase.overrides.status?.value === "done";
@@ -84,138 +60,6 @@ export function statusBeforeManualDone(
       : "not-started";
   }
   return "not-started";
-}
-
-export function selectRoadmapAdvancement(phases: readonly NotesPhase[]): RoadmapAdvancement | null {
-  const orderedPhases = phases
-    .map((phase, documentIndex) => ({ phase, documentIndex }))
-    .sort(
-      (left, right) =>
-        left.phase.order - right.phase.order || left.documentIndex - right.documentIndex,
-    );
-  const checkpoints = orderedPhases.flatMap(({ phase }, roadmapIndex) =>
-    phase.roadmapEvents.flatMap((event, eventIndex) =>
-      event.type === "phase-advancement-checkpoint" &&
-      !phase.roadmapEvents.some(
-        (candidate) =>
-          candidate.type === "phase-advancement-confirmation" &&
-          candidate.checkpointId === event.id,
-      )
-        ? [{ phase, checkpoint: event, roadmapIndex, eventIndex }]
-        : [],
-    ),
-  );
-  const latest = checkpoints.sort((left, right) => {
-    const timestampOrder =
-      Date.parse(right.checkpoint.timestamp) - Date.parse(left.checkpoint.timestamp);
-    return (
-      timestampOrder || right.roadmapIndex - left.roadmapIndex || right.eventIndex - left.eventIndex
-    );
-  })[0];
-  if (!latest) return null;
-  if (
-    latest.phase.id !== latest.checkpoint.completedPhaseId ||
-    latest.phase.archivedAt !== null ||
-    latest.phase.status !== "done" ||
-    latest.phase.overrides.status !== null
-  ) {
-    return null;
-  }
-  const checkpoint = latest.checkpoint;
-  const authority = "completionReviewId" in checkpoint ? "reviewed" : "recorded";
-  if (!isNotesPhaseAdvancementSourceCurrent(latest.phase, checkpoint)) return null;
-  const nextPhase = phases.find((phase) => phase.id === latest.checkpoint.nextPhaseId);
-  if (!nextPhase) return null;
-  const eligibility = classifyRoadmapAutoStartEligibility(phases, latest.phase.id);
-  const currentEligiblePhase = eligibility.kind === "unique" ? eligibility.phase : null;
-  const ready = eligibility.kind === "unique" && eligibility.phase.id === nextPhase.id;
-  let recoveryReason: string | null = null;
-  if (!ready) {
-    recoveryReason =
-      eligibility.kind === "none"
-        ? `${nextPhase.title} is no longer an unbound automatic candidate. Restore it to Not started or Planning with automatic status and no linked session.`
-        : eligibility.kind === "ambiguous"
-          ? `${eligibility.phases.length} unbound automatic phases are eligible. Leave only ${nextPhase.title} eligible before starting the ${authority} target.`
-          : `The only eligible phase is ${eligibility.phase.title}, but the checkpoint targets ${nextPhase.title}. Restore the ${authority} candidate set before starting.`;
-  }
-  return {
-    checkpoint: latest.checkpoint,
-    completedPhase: latest.phase,
-    nextPhase,
-    currentEligiblePhase,
-    ready,
-    recoveryReason,
-  };
-}
-
-export function isRoadmapPhaseStartProtected(
-  phases: readonly NotesPhase[],
-  phaseId: string,
-): boolean {
-  const advancement = selectRoadmapAdvancement(phases);
-  if (!advancement) return false;
-  const eligibility = classifyRoadmapAutoStartEligibility(phases, advancement.completedPhase.id);
-  return eligibility.kind === "unique"
-    ? eligibility.phase.id === phaseId
-    : eligibility.kind === "ambiguous" && eligibility.phases.some((phase) => phase.id === phaseId);
-}
-
-export function isRoadmapTopologyMutationBlocked(
-  phases: readonly NotesPhase[],
-  mutation: RoadmapTopologyMutation,
-): boolean {
-  const current = selectRoadmapAdvancement(phases);
-  if (!current) return false;
-  const nextPhases = applyRoadmapTopologyMutation(phases, mutation);
-  if (!nextPhases) return false;
-  const next = selectRoadmapAdvancement(nextPhases);
-  if (next?.checkpoint.id !== current.checkpoint.id) return true;
-  return current.ready && !next.ready;
-}
-
-function applyRoadmapTopologyMutation(
-  phases: readonly NotesPhase[],
-  mutation: RoadmapTopologyMutation,
-): NotesPhase[] | null {
-  const next = phases.map((phase) => ({ ...phase }));
-  const phaseIndex = next.findIndex((phase) => phase.id === mutation.phaseId);
-  if (phaseIndex < 0) return null;
-  const phase = next[phaseIndex]!;
-  if (mutation.type === "archive") phase.archivedAt = phase.archivedAt ?? new Date(0).toISOString();
-  if (mutation.type === "restore") phase.archivedAt = null;
-  if (mutation.type === "pause-status") {
-    phase.overrides = {
-      ...phase.overrides,
-      status: { value: phase.status, source: "user", updatedAt: new Date(0).toISOString() },
-    };
-  }
-  if (mutation.type === "resume-status") {
-    phase.overrides = { ...phase.overrides, status: null };
-  }
-  if (mutation.type === "set-status") {
-    phase.status = mutation.status;
-    phase.overrides = {
-      ...phase.overrides,
-      status: { value: mutation.status, source: "user", updatedAt: new Date(0).toISOString() },
-    };
-  }
-  if (mutation.type === "reorder") {
-    const planned = planRoadmapPhaseMove(next, mutation.phaseId, mutation.placement);
-    return planned.ok ? planned.phases : null;
-  }
-  if (mutation.type === "move") {
-    const visible = next.filter((candidate) => candidate.archivedAt === null);
-    const sourceIndex = visible.findIndex((candidate) => candidate.id === mutation.phaseId);
-    const targetIndex = sourceIndex + (mutation.direction === "up" ? -1 : 1);
-    if (sourceIndex < 0 || targetIndex < 0 || targetIndex >= visible.length) return null;
-    [visible[sourceIndex], visible[targetIndex]] = [visible[targetIndex]!, visible[sourceIndex]!];
-    let visibleIndex = 0;
-    const reordered = next.map((candidate) =>
-      candidate.archivedAt === null ? visible[visibleIndex++]! : candidate,
-    );
-    return reordered.map((candidate, order) => ({ ...candidate, order }));
-  }
-  return next;
 }
 
 const IMPLEMENTATION_OUTCOME_LABELS = {

@@ -10,7 +10,6 @@ import { NotesDeletedPhases } from "./notes-roadmap/NotesDeletedPhases";
 import { NotesCurrentFocus } from "./NotesCurrentFocus";
 import { NotesHandoff } from "./NotesHandoff";
 import { NotesReferences } from "./NotesReferences";
-import type { SlashCommand } from "./agent";
 import { NotesRoadmap, NotesRoadmapArchive } from "./NotesRoadmap";
 import { NotesTaskList } from "./NotesTaskList";
 import type { NotesReferenceInput } from "./notes-reference";
@@ -34,6 +33,7 @@ import type {
   ProjectNotesStorageDiagnostics,
   PhaseRunCancellationResult,
   NotesTask,
+  PhaseStartOptions,
   PhaseStartResult,
 } from "./notes-types";
 
@@ -128,16 +128,13 @@ interface Props {
     expectedOccurrenceKey: string,
   ): Promise<NotesReminderMutationResult>;
   openSource?: OpenReferenceUrl;
-  onStartPhase(phaseId: string): Promise<PhaseStartResult>;
+  onStartPhase(phaseId: string, options?: PhaseStartOptions): Promise<PhaseStartResult>;
   onGetStorageDiagnostics(): Promise<ProjectNotesStorageDiagnostics>;
   onRebindPhase(request: PhaseBindingRequest): Promise<PhaseBindingOutcome>;
   onMutatePhaseLease(request: PhaseLeaseRequestV2): Promise<PhaseLeaseOutcome>;
   onReconcilePhaseExecution(
     request: PhaseExecutionReconciliationRequestV3,
   ): Promise<PhaseExecutionReconciliationOutcome>;
-  onStartNextPhase(checkpointId: string, nextPhaseId: string): Promise<PhaseStartResult>;
-  commands: SlashCommand[];
-  onRunCommand(invocation: string): void;
   onCancelPhase(phaseId: string): Promise<PhaseRunCancellationResult>;
   onResumePhase(phaseId: string, link: NotesSessionLink): Promise<void>;
   phaseStartUnavailableReason: string | null;
@@ -224,9 +221,6 @@ export function NotesModalContent({
   onRebindPhase,
   onMutatePhaseLease,
   onReconcilePhaseExecution,
-  onStartNextPhase,
-  commands,
-  onRunCommand,
   onCancelPhase,
   onResumePhase,
   phaseStartUnavailableReason,
@@ -437,9 +431,6 @@ export function NotesModalContent({
                 onRebindPhase={onRebindPhase}
                 onMutatePhaseLease={onMutatePhaseLease}
                 onReconcilePhaseExecution={onReconcilePhaseExecution}
-                onStartNextPhase={onStartNextPhase}
-                commands={commands}
-                onRunCommand={onRunCommand}
                 onCancelPhase={onCancelPhase}
                 onResumePhase={onResumePhase}
                 startUnavailableReason={phaseStartUnavailableReason}

@@ -201,48 +201,6 @@
   padding: var(--space-6) var(--space-7);
   border-bottom: 1px solid var(--border);
 }
-.notes-roadmap-next-phase {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-9);
-  padding: var(--space-7);
-  border-bottom: 1px solid color-mix(in srgb, var(--success) 32%, var(--border));
-  background: color-mix(in srgb, var(--success) 8%, var(--surface-2));
-}
-.notes-roadmap-next-phase > div {
-  min-width: 0;
-}
-.notes-roadmap-next-phase h3 {
-  margin: var(--space-1) 0 0;
-  color: var(--text);
-  font-size: var(--fs-md);
-  line-height: var(--line-height-md);
-}
-.notes-roadmap-next-phase p {
-  margin: var(--space-2) 0 0;
-  color: var(--text-secondary);
-  font-size: var(--fs-base);
-  line-height: var(--line-height-sm);
-  overflow-wrap: anywhere;
-}
-.notes-roadmap-next-phase .notes-roadmap-next-phase-kicker {
-  margin: 0;
-  color: var(--success);
-  font-size: var(--fs-sm);
-  line-height: var(--line-height-xs);
-  font-weight: var(--font-weight-strong);
-}
-.notes-roadmap-next-phase .notes-roadmap-next-phase-status {
-  color: var(--text);
-}
-.notes-roadmap-next-phase .notes-roadmap-primary {
-  min-width: max-content;
-}
-.notes-roadmap-next-phase .notes-roadmap-primary:disabled {
-  cursor: default;
-  opacity: 0.45;
-}
 .notes-roadmap-toolbar h2 {
   margin-bottom: var(--space-1);
 }
@@ -259,12 +217,12 @@
 .notes-roadmap-new,
 .notes-roadmap-primary,
 .notes-roadmap-card-action,
-.notes-roadmap-next-phase-commands button,
 .notes-phase-detail-heading button,
 .notes-phase-form-actions button,
 .notes-phase-lifecycle-actions button,
 .notes-phase-secondary-actions button,
 .notes-phase-blocker-resolve,
+.notes-phase-dependency-editor button,
 .notes-phase-archive button,
 .notes-roadmap-proposal-actions button,
 .notes-phase-references-heading > button,
@@ -292,12 +250,12 @@
 .notes-roadmap-new:hover:not(:disabled),
 .notes-roadmap-primary:hover:not(:disabled),
 .notes-roadmap-card-action:hover:not(:disabled),
-.notes-roadmap-next-phase-commands button:hover:not(:disabled),
 .notes-phase-detail-heading button:hover:not(:disabled),
 .notes-phase-form-actions button:hover:not(:disabled),
 .notes-phase-lifecycle-actions button:hover:not(:disabled),
 .notes-phase-secondary-actions button:hover:not(:disabled),
 .notes-phase-blocker-resolve:hover:not(:disabled),
+.notes-phase-dependency-editor button:hover:not(:disabled),
 .notes-phase-archive button:hover:not(:disabled),
 .notes-roadmap-proposal-actions button:hover:not(:disabled),
 .notes-phase-references-heading > button:hover:not(:disabled),
@@ -316,12 +274,12 @@
 .notes-roadmap-new:disabled,
 .notes-roadmap-primary:disabled,
 .notes-roadmap-card-action:disabled,
-.notes-roadmap-next-phase-commands button:disabled,
 .notes-phase-detail-heading button:disabled,
 .notes-phase-form-actions button:disabled,
 .notes-phase-lifecycle-actions button:disabled,
 .notes-phase-secondary-actions button:disabled,
 .notes-phase-blocker-resolve:disabled,
+.notes-phase-dependency-editor button:disabled,
 .notes-phase-archive button:disabled,
 .notes-roadmap-proposal-actions button:disabled,
 .notes-phase-references-heading > button:disabled,
@@ -341,12 +299,12 @@
 .notes-roadmap-new,
 .notes-roadmap-primary,
 .notes-roadmap-card-action,
-.notes-roadmap-next-phase-commands button,
 .notes-phase-detail-heading button,
 .notes-phase-form-actions button,
 .notes-phase-lifecycle-actions button,
 .notes-phase-secondary-actions button,
 .notes-phase-blocker-resolve,
+.notes-phase-dependency-editor button,
 .notes-phase-archive button,
 .notes-roadmap-proposal-actions button,
 .notes-phase-references-heading > button,
@@ -3240,12 +3198,12 @@ button.notes-btn-quiet.notes-btn-danger:is(:hover, :focus-visible):not(:disabled
   .notes-roadmap-primary,
   .notes-phase-detail-actions .notes-roadmap-primary,
   .notes-roadmap-card-action,
-  .notes-roadmap-next-phase-commands button,
   .notes-phase-detail-heading button,
   .notes-phase-form-actions button,
   .notes-phase-lifecycle-actions button,
   .notes-phase-secondary-actions button,
   .notes-phase-blocker-resolve,
+  .notes-phase-dependency-editor button,
   .notes-phase-archive button,
   .notes-roadmap-proposal-actions button,
   .notes-phase-references-heading > button,
@@ -3421,4 +3379,153 @@ button.notes-btn-quiet.notes-btn-danger:is(:hover, :focus-visible):not(:disabled
 }
 .roadmap-order-list li.is-changed > span:first-child {
   font-weight: 600;
+}
+
+/* ── Phase dependencies: Waiting on, Depends on list, edit control, start soft gate ──
+   Buttons join the shared Notes groups above; these rules own spacing only. */
+.notes-phase-waiting-on {
+  margin: var(--space-4) 0 0;
+  color: var(--text-muted);
+  font-size: var(--fs-base);
+  line-height: var(--line-height-sm);
+  overflow-wrap: anywhere;
+}
+.notes-phase-detail .notes-phase-waiting-on {
+  margin: 0;
+  padding: 0 var(--space-7);
+}
+.notes-phase-dependencies {
+  grid-column: 1 / -1;
+}
+.notes-phase-content .notes-phase-dependencies ul {
+  display: grid;
+  gap: var(--space-3);
+  padding: 0;
+  list-style: none;
+}
+.notes-phase-dependencies li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3) var(--space-5);
+}
+.notes-phase-dependency-title {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.notes-phase-dependency-editor {
+  display: grid;
+  gap: var(--space-4);
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.notes-phase-dependency-editor legend {
+  margin-bottom: 7px;
+  padding: 0;
+  color: var(--text-secondary);
+  font-size: var(--fs-sm);
+  line-height: var(--line-height-xs);
+  font-weight: var(--font-weight-strong);
+}
+.notes-phase-dependency-editor ul {
+  display: grid;
+  gap: var(--space-3);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.notes-phase-dependency-editor li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3) var(--space-5);
+  color: var(--text);
+  font-size: var(--fs-base);
+  line-height: var(--line-height-sm);
+}
+.notes-phase-dependency-editor li > span {
+  flex: 1 1 160px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.notes-phase-dependency-empty {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: var(--fs-base);
+  line-height: var(--line-height-sm);
+}
+.notes-phase-dependency-add {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-4);
+}
+.notes-phase-dependency-add label {
+  flex: 1 1 100%;
+  color: var(--text-secondary);
+  font-size: var(--fs-sm);
+  line-height: var(--line-height-xs);
+}
+.notes-phase-dependency-add select {
+  box-sizing: border-box;
+  flex: 1 1 200px;
+  min-width: 0;
+  min-height: 36px;
+  padding: 0 var(--space-5);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-button);
+  background: var(--surface-2);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: var(--fs-base);
+}
+.notes-start-prerequisites-dialog {
+  max-width: 540px;
+  max-height: calc(100dvh - 32px);
+  overflow: auto;
+}
+.notes-start-prerequisites-dialog .modal-title {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.notes-start-prerequisites-body {
+  padding: 0 var(--space-10) var(--space-10);
+  color: var(--text-secondary);
+  font-size: var(--fs-md);
+  line-height: var(--line-height-md);
+}
+.notes-start-prerequisites-body p,
+.notes-start-prerequisites-body li {
+  overflow-wrap: anywhere;
+}
+.notes-start-prerequisites-body ul {
+  display: grid;
+  gap: var(--space-3);
+  margin: 0 0 var(--space-6);
+  padding-inline-start: var(--space-9);
+  color: var(--text);
+}
+.notes-start-prerequisites-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--space-4);
+}
+.notes-start-prerequisites-dialog button:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+@media (pointer: coarse) {
+  .notes-phase-dependency-add select {
+    min-height: 44px;
+  }
+}
+@media (forced-colors: active) {
+  .notes-start-prerequisites-dialog button:focus-visible {
+    outline-color: Highlight;
+  }
 }

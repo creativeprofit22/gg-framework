@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
   applyNotesPhaseDeletion,
-  classifyRoadmapAutoStartEligibility,
   isNotesPhaseDeleted,
   isPhaseDeletionOutcome,
   isPhaseDeletionRequest,
@@ -101,7 +100,6 @@ describe("phase deletion contract", () => {
       expect(current.reminder).toBeNull();
       expect(current.roadmapEvents).toEqual(phase.roadmapEvents);
       expect(current.lifecycleEvents).toEqual(phase.lifecycleEvents);
-      expect(classifyRoadmapAutoStartEligibility([current], "other")).toEqual({ kind: "none" });
       current = applyNotesPhaseDeletion(current, request(current, "recover"), now);
       doc.phases[index] = current;
       expect(validateNotesDocumentV3(doc)).toEqual({ ok: true, document: doc });

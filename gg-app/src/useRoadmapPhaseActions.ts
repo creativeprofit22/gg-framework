@@ -1,6 +1,6 @@
 import { useCallback, type RefObject } from "react";
 import type { AgentState, PaneAgentClient } from "./agent";
-import type { NotesSessionLink, PhaseStartResult } from "./notes-types";
+import type { NotesSessionLink, PhaseStartOptions, PhaseStartResult } from "./notes-types";
 import { resolveRoadmapPhaseResumeFromNotes } from "./roadmap-phase-resume";
 
 interface RoadmapPhaseActionsDeps {
@@ -31,7 +31,7 @@ export function useRoadmapPhaseActions({
   onProjectChosen,
 }: RoadmapPhaseActionsDeps) {
   const startRoadmapPhase = useCallback(
-    async (phaseId: string): Promise<PhaseStartResult> => {
+    async (phaseId: string, options?: PhaseStartOptions): Promise<PhaseStartResult> => {
       if (state?.mode !== "code") {
         return {
           status: "failed",
@@ -48,7 +48,7 @@ export function useRoadmapPhaseActions({
           message: "Wait for the current run or Autopilot review to finish.",
         };
       }
-      return client.startPhase(phaseId);
+      return options ? client.startPhase(phaseId, options) : client.startPhase(phaseId);
     },
     // blockUnconfirmedSession is []-memoized in AgentPane, so listing it keeps the identity unchanged.
     [autopilotReviewing, blockUnconfirmedSession, client, newSessionBusy, running, state?.mode],

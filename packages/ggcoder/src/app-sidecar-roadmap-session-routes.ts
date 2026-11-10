@@ -2,12 +2,8 @@ import type http from "node:http";
 import type { AgentSession } from "./core/agent-session.js";
 import { captureSidecarError } from "./core/sidecar-error-reporter.js";
 import { json, readBody } from "./app-sidecar/http.js";
-import { AppSidecarJsonBodyError, hasDaemonAuth, readJsonBody } from "./app-sidecar-http-json.js";
+import { AppSidecarJsonBodyError, readJsonBody } from "./app-sidecar-http-json.js";
 import type { AppSidecarNotesHandler } from "./app-sidecar-notes.js";
-import {
-  parsePhaseAdvancementStartBody,
-  parsePhaseAdvancementStartRoute,
-} from "./app-sidecar-phase-advancement-route.js";
 import type { AppSidecarPhaseBindingService } from "./app-sidecar-phase-binding.js";
 import {
   isPhaseBindingRoute,
@@ -15,7 +11,7 @@ import {
   phaseBindingHttpStatus,
 } from "./app-sidecar-phase-binding-route.js";
 import type { PhaseStartResponseBody } from "./app-sidecar-phase-launch.js";
-import { handlePhaseStartRoute } from "./app-sidecar-phase-route.js";
+import { handlePhaseStartRoute, parsePhaseStartBody } from "./app-sidecar-phase-route.js";
 import type { AppSidecarReminderHandler } from "./app-sidecar-reminders.js";
 import {
   type AppSidecarRoadmapDraftDecisionService,
@@ -35,7 +31,6 @@ interface AppSidecarRoadmapSessionRoutesDeps {
   logicalSessionId: string;
   host: string;
   mode: string;
-  nativeAuthorityToken: string;
   getSession: () => AgentSession;
   phaseBinding: AppSidecarPhaseBindingService;
   notes: AppSidecarNotesHandler;
@@ -44,11 +39,7 @@ interface AppSidecarRoadmapSessionRoutesDeps {
   startRoadmapPhase: (
     phaseId: string,
     respond: (status: number, body: PhaseStartResponseBody) => void,
-    advancementConfirmation?: {
-      checkpointId: string;
-      nextPhaseId: string;
-      action: "start-next-phase";
-    },
+    confirmedPrerequisiteIds?: readonly string[],
   ) => Promise<void>;
 }
 
@@ -60,7 +51,7 @@ interface AppSidecarRoadmapSessionRoutes {
     url: string,
     method: string,
   ): boolean;
-  /** Start-next-phase confirmation and `POST /phases/:id/start`. */
+  /** `POST /phases/:id/start`. */
   handlePhaseStartRoutes(
     req: http.IncomingMessage,
     res: http.ServerResponse,
@@ -77,7 +68,6 @@ export function createAppSidecarRoadmapSessionRoutes(
     logicalSessionId,
     host,
     mode,
-    nativeAuthorityToken,
     getSession,
     phaseBinding,
     notes,
@@ -194,39 +184,6 @@ export function createAppSidecarRoadmapSessionRoutes(
     url: string,
     method: string,
   ): boolean {
-    const advancementRoute = parsePhaseAdvancementStartRoute(method, url);
-    if (advancementRoute) {
-      if (!hasDaemonAuth(req, nativeAuthorityToken)) {
-        req.resume();
-        json(res, 401, { error: "native human authority required" });
-        return true;
-      }
-      void (async () => {
-        try {
-          const body = parsePhaseAdvancementStartBody(await readJsonBody(req, 8_192));
-          if (!body) {
-            json(res, 400, { error: "invalid Start next phase confirmation" });
-            return;
-          }
-          await startRoadmapPhase(
-            body.nextPhaseId,
-            (status, responseBody) => json(res, status, responseBody),
-            { checkpointId: advancementRoute.checkpointId, ...body },
-          );
-        } catch (error) {
-          if (error instanceof AppSidecarJsonBodyError) {
-            json(res, error.kind === "too-large" ? 413 : 400, {
-              error: `JSON request body ${error.kind}`,
-            });
-            return;
-          }
-          captureSidecarError(error, "app-sidecar.phase.advancement-confirmation");
-          json(res, 500, { error: "Start next phase failed" });
-        }
-      })();
-      return true;
-    }
-
     if (
       handlePhaseStartRoute({
         method,
@@ -234,7 +191,37 @@ export function createAppSidecarRoadmapSessionRoutes(
         host,
         respond: (status, body) => json(res, status, body),
         start: (phaseId) => {
-          void startRoadmapPhase(phaseId, (status, body) => json(res, status, body));
+          void (async () => {
+            let body: ReturnType<typeof parsePhaseStartBody> = null;
+            try {
+              body = parsePhaseStartBody(await readJsonBody(req, 64 * 1024));
+            } catch (error) {
+              if (!(error instanceof AppSidecarJsonBodyError)) throw error;
+            }
+            if (!body) {
+              json(res, 400, {
+                status: "failed",
+                code: "launch-failed",
+                operationId: null,
+                message: "The phase start request was invalid.",
+              } satisfies PhaseStartResponseBody);
+              return;
+            }
+            await startRoadmapPhase(
+              phaseId,
+              (status, responseBody) => json(res, status, responseBody),
+              body.confirmedPrerequisiteIds,
+            );
+          })().catch((error: unknown) => {
+            captureSidecarError(error, "app-sidecar.phase.start");
+            if (res.headersSent) return;
+            json(res, 500, {
+              status: "failed",
+              code: "launch-failed",
+              operationId: null,
+              message: "Phase launch failed. Retry Start phase.",
+            } satisfies PhaseStartResponseBody);
+          });
         },
       })
     ) {

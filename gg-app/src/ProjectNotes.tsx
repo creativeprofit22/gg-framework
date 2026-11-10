@@ -1,5 +1,4 @@
 import { canonicalProjectKey, isNotesPhasePresent } from "@kenkaiiii/gg-core/project-notes";
-import type { SlashCommand } from "./agent";
 import { forwardRef, useEffect, useId, useImperativeHandle, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { DatabaseIcon, HardDrivesIcon, WarningCircleIcon, WarningIcon } from "./phosphor-icons";
@@ -32,6 +31,7 @@ import type {
   NotesReminderMutationResult,
   PhaseRunCancellationResult,
   NotesSessionLink,
+  PhaseStartOptions,
   PhaseStartResult,
 } from "./notes-types";
 import { isRoadmapReminderDueEvent } from "./notes-types";
@@ -41,10 +41,7 @@ interface Props {
   cwd: string | null;
   client: NotesClient;
   openSource?: OpenReferenceUrl;
-  onStartPhase?(phaseId: string): Promise<PhaseStartResult>;
-  onStartNextPhase?(checkpointId: string, nextPhaseId: string): Promise<PhaseStartResult>;
-  commands?: SlashCommand[];
-  onRunCommand?(invocation: string): void;
+  onStartPhase?(phaseId: string, options?: PhaseStartOptions): Promise<PhaseStartResult>;
   onCancelPhase?(phaseId: string): Promise<PhaseRunCancellationResult>;
   onResumePhase?(phaseId: string, link: NotesSessionLink): Promise<void>;
   phaseStartUnavailableReason?: string | null;
@@ -74,11 +71,6 @@ export const ProjectNotes = forwardRef<ProjectNotesPromptActions, Props>(functio
     onStartPhase = async () => {
       throw new Error("Phase actions are unavailable in this view.");
     },
-    onStartNextPhase = async () => {
-      throw new Error("Next phase confirmation is unavailable in this view.");
-    },
-    commands = [],
-    onRunCommand = () => undefined,
     onCancelPhase = async () => {
       throw new Error("Phase actions are unavailable in this view.");
     },
@@ -459,9 +451,6 @@ export const ProjectNotes = forwardRef<ProjectNotesPromptActions, Props>(functio
             onRebindPhase={(request) => client.bindRoadmapPhase(request)}
             onMutatePhaseLease={(request) => client.mutateRoadmapPhaseLease(request)}
             onReconcilePhaseExecution={(request) => client.reconcileRoadmapPhaseExecution(request)}
-            onStartNextPhase={onStartNextPhase}
-            commands={commands}
-            onRunCommand={onRunCommand}
             onCancelPhase={onCancelPhase}
             onResumePhase={onResumePhase}
             phaseStartUnavailableReason={phaseStartUnavailableReason}

@@ -3889,11 +3889,7 @@ async function createSession(
   async function startRoadmapPhase(
     phaseId: string,
     respond: (status: number, body: PhaseStartResponseBody) => void,
-    advancementConfirmation?: {
-      checkpointId: string;
-      nextPhaseId: string;
-      action: "start-next-phase";
-    },
+    confirmedPrerequisiteIds?: readonly string[],
   ): Promise<void> {
     const gateConflict = planGateConflict();
     if (gateConflict) {
@@ -3920,7 +3916,7 @@ async function createSession(
     try {
       await launchBoundPhase({
         phaseId,
-        advancementConfirmation,
+        confirmedPrerequisiteIds,
         mode,
         busyState: sessionBusyState(),
         mutations: sessionMutations,
@@ -4911,7 +4907,6 @@ async function createSession(
     logicalSessionId: opts.id,
     host,
     mode,
-    nativeAuthorityToken,
     getSession: () => session,
     phaseBinding,
     notes,

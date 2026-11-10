@@ -5225,19 +5225,6 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
                     cwd={state?.cwd ?? null}
                     client={client}
                     onStartPhase={startRoadmapPhase}
-                    onStartNextPhase={async (checkpointId, nextPhaseId) => {
-                      if (blockUnconfirmedSession()) {
-                        return {
-                          status: "failed",
-                          code: "session-busy",
-                          operationId: null,
-                          message: AMBIGUOUS_NEW_SESSION_MESSAGE,
-                        };
-                      }
-                      return client.startNextPhase(checkpointId, nextPhaseId);
-                    }}
-                    commands={commands}
-                    onRunCommand={(invocation) => submitText(invocation)}
                     onCancelPhase={(phaseId) => client.cancelPhaseRun(phaseId)}
                     onResumePhase={resumeRoadmapPhase}
                     phaseStartUnavailableReason={

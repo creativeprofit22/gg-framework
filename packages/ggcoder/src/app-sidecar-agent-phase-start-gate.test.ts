@@ -58,7 +58,9 @@ async function setup() {
 }
 
 async function userStart(repository: ProjectNotesRepository, cwd: string) {
-  const launched = await repository.launchPhase(cwd, "phase-c", async () => USER_SESSION);
+  const launched = await repository.launchPhase(cwd, "phase-c", async () => USER_SESSION, {
+    confirmedPrerequisiteIds: ["phase-a"],
+  });
   if (launched.status !== "accepted") throw Error(JSON.stringify(launched));
   return launched.snapshot;
 }

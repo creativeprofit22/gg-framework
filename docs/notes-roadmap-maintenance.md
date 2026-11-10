@@ -157,12 +157,12 @@ The approved journey is `Notes → Roadmap tab → phase list → phase detail �
 
 ### Ownership
 
-| Concern                                                                                       | Owner                                                                                              |
-| --------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| Selected phase, captured return scroll offset, focus intent, missing-selection reconciliation | `gg-app/src/notes-roadmap/useRoadmapPhaseNavigation.ts`                                            |
-| Card/list presentation                                                                        | `gg-app/src/NotesRoadmap.tsx`                                                                      |
-| Detail presentation and per-phase view/edit drafts                                            | `notes-roadmap/NotesPhaseDetail.tsx` + `NotesPhaseDetailState.tsx`                                 |
-| Mutations, lease/binding, completion authority                                                | `useProjectNotes`, `notes-roadmap/roadmap-command-actions.ts`, `notes-roadmap/usePhaseDeletion.ts` |
+| Concern                                                                                       | Owner                                                              |
+| --------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| Selected phase, captured return scroll offset, focus intent, missing-selection reconciliation | `gg-app/src/notes-roadmap/useRoadmapPhaseNavigation.ts`            |
+| Card/list presentation                                                                        | `gg-app/src/NotesRoadmap.tsx`                                      |
+| Detail presentation and per-phase view/edit drafts                                            | `notes-roadmap/NotesPhaseDetail.tsx` + `NotesPhaseDetailState.tsx` |
+| Mutations, lease/binding, completion authority                                                | `useProjectNotes`, `notes-roadmap/usePhaseDeletion.ts`             |
 
 Reminder navigation joins the same journey: the alert's **Open phase** sets the
 target phase id plus a monotonic request token in `gg-app/src/ProjectNotes.tsx`.

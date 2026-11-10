@@ -44,7 +44,6 @@ export function fakePaneClient(
     migrateNotes: vi.fn(),
     saveNotes: vi.fn(),
     startPhase: vi.fn(),
-    startNextPhase: vi.fn(),
     cancelPhaseRun: vi.fn(),
     getRoadmapPhaseDraft: vi.fn(async () => null),
     approveRoadmapPhaseDraft: vi.fn(),

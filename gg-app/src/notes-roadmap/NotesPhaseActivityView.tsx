@@ -78,19 +78,18 @@ export function NotesPhaseActivityView(): ReactElement {
 }
 
 export function NotesPhaseActivityHistory(): ReactElement {
-  const { phase } = useNotesPhaseDetail();
+  const { phase, phases } = useNotesPhaseDetail();
+  const history = activityHistory(phase);
   return (
     <details className="notes-roadmap-history">
-      <summary>
-        Activity history ({phase.lifecycleEvents.length + phase.roadmapEvents.length})
-      </summary>
-      {phase.lifecycleEvents.length + phase.roadmapEvents.length === 0 ? (
+      <summary>Activity history ({history.length})</summary>
+      {history.length === 0 ? (
         <p>No activity recorded.</p>
       ) : (
         <ol>
-          {activityHistory(phase).map((item) => (
+          {history.map((item) => (
             <li key /* Stable activity identity. */={`${item.kind}-${item.event.id}`}>
-              {renderActivityItem(item)}
+              {renderActivityItem(item, phases)}
             </li>
           ))}
         </ol>
@@ -99,18 +98,32 @@ export function NotesPhaseActivityHistory(): ReactElement {
   );
 }
 
+// Old next-phase advancement records still load but are never shown.
+type VisibleRoadmapEvent = Exclude<
+  NotesRoadmapEvent,
+  { type: "phase-advancement-checkpoint" | "phase-advancement-confirmation" }
+>;
+
 type ActivityItem =
   | { kind: "lifecycle"; event: NotesPhase["lifecycleEvents"][number] }
-  | { kind: "roadmap"; event: NotesRoadmapEvent };
+  | { kind: "roadmap"; event: VisibleRoadmapEvent };
+
+function isVisibleRoadmapEvent(event: NotesRoadmapEvent): event is VisibleRoadmapEvent {
+  return (
+    event.type !== "phase-advancement-checkpoint" && event.type !== "phase-advancement-confirmation"
+  );
+}
 
 function activityHistory(phase: NotesPhase): ActivityItem[] {
   return [
     ...phase.lifecycleEvents.map((event): ActivityItem => ({ kind: "lifecycle", event })),
-    ...phase.roadmapEvents.map((event): ActivityItem => ({ kind: "roadmap", event })),
+    ...phase.roadmapEvents
+      .filter(isVisibleRoadmapEvent)
+      .map((event): ActivityItem => ({ kind: "roadmap", event })),
   ].sort((left, right) => Date.parse(right.event.timestamp) - Date.parse(left.event.timestamp));
 }
 
-function renderActivityItem(item: ActivityItem): ReactNode {
+function renderActivityItem(item: ActivityItem, phases: readonly NotesPhase[]): ReactNode {
   const timestamp = (
     <time dateTime={item.event.timestamp}>{formatDateTime(item.event.timestamp)}</time>
   );
@@ -207,26 +220,6 @@ function renderActivityItem(item: ActivityItem): ReactNode {
       </>
     );
   }
-  if (event.type === "phase-advancement-checkpoint") {
-    return (
-      <>
-        <strong>
-          {"reviewer" in event ? roadmapReviewerLabel(event.reviewer) : "Completion settlement"}
-        </strong>{" "}
-        {timestamp}
-        <p>Next phase advancement was authorized by durable completion evidence.</p>
-      </>
-    );
-  }
-  if (event.type === "phase-advancement-confirmation") {
-    const automatic = event.actor === "system";
-    return (
-      <>
-        <strong>{automatic ? "System" : "User"}</strong> {timestamp}
-        <p>{automatic ? "Next phase bound automatically." : "Start next phase confirmed."}</p>
-      </>
-    );
-  }
   if (event.type === "reference-decision") {
     return (
       <>
@@ -256,13 +249,16 @@ function renderActivityItem(item: ActivityItem): ReactNode {
     );
   }
   if (event.type === "dependency-override") {
-    const count = event.unfinishedPrerequisiteIds.length;
+    const titles = event.unfinishedPrerequisiteIds.map(
+      (id) => phases.find((candidate) => candidate.id === id)?.title ?? "Missing phase",
+    );
     return (
       <>
         <strong>{dependencyOverrideActorLabel(event.actor)}</strong> {timestamp}
         <p>
-          Started before{" "}
-          {count === 1 ? "1 prerequisite phase was" : `${count} prerequisite phases were`} Done.
+          {titles.length === 1
+            ? `Started before this prerequisite was Done: ${titles[0]}.`
+            : `Started before these prerequisites were Done: ${titles.join(", ")}.`}
         </p>
       </>
     );

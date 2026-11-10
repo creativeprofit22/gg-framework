@@ -19,10 +19,11 @@ import {
 } from "./notes-status";
 import { NotesCompletedGroup } from "./NotesCompletedGroup";
 import { NotesPhaseStatusBadge, NotesSavedPromptIndicator } from "./NotesStatusBadge";
-import type { SlashCommand } from "./agent";
 import { NotesPhaseDetail } from "./notes-roadmap/NotesPhaseDetail";
+import { NotesPhaseWaitingOn } from "./notes-roadmap/NotesPhaseWaitingOn";
+import { NotesStartPrerequisitesDialog } from "./notes-roadmap/NotesStartPrerequisitesDialog";
+import { useStartPrerequisiteGate } from "./notes-roadmap/useStartPrerequisiteGate";
 import { useRoadmapPhaseNavigation } from "./notes-roadmap/useRoadmapPhaseNavigation";
-import { resolveRoadmapCommandActions } from "./notes-roadmap/roadmap-command-actions";
 import type { NotesPhaseDetailProps } from "./notes-roadmap/NotesPhaseDetailState";
 import {
   lines,
@@ -31,9 +32,6 @@ import {
   referenceLinkAnnouncement,
   reminderRowLabel,
   roadmapMutationMessage,
-  selectRoadmapAdvancement,
-  isRoadmapPhaseStartProtected,
-  isRoadmapTopologyMutationBlocked,
   visibleRoadmapAttentionReason,
 } from "./notes-roadmap/roadmap-presentation";
 import type { NotesPhaseInput } from "./useProjectNotes";
@@ -52,6 +50,7 @@ import type {
   PhaseExecutionReconciliationRequestV3,
   PhaseLeaseOutcome,
   PhaseLeaseRequestV2,
+  PhaseStartOptions,
   PhaseStartResult,
   ProjectNotesStorageDiagnostics,
 } from "./notes-types";
@@ -115,16 +114,13 @@ interface RoadmapProps {
     phaseId: string,
     expectedOccurrenceKey: string,
   ): Promise<NotesReminderMutationResult>;
-  onStartPhase(phaseId: string): Promise<PhaseStartResult>;
+  onStartPhase(phaseId: string, options?: PhaseStartOptions): Promise<PhaseStartResult>;
   onGetStorageDiagnostics?(): Promise<ProjectNotesStorageDiagnostics>;
   onRebindPhase?(request: PhaseBindingRequest): Promise<PhaseBindingOutcome>;
   onMutatePhaseLease?(request: PhaseLeaseRequestV2): Promise<PhaseLeaseOutcome>;
   onReconcilePhaseExecution?(
     request: PhaseExecutionReconciliationRequestV3,
   ): Promise<PhaseExecutionReconciliationOutcome>;
-  onStartNextPhase(checkpointId: string, nextPhaseId: string): Promise<PhaseStartResult>;
-  commands: SlashCommand[];
-  onRunCommand(invocation: string): void;
   onCancelPhase(phaseId: string): Promise<PhaseRunCancellationResult>;
   onResumePhase(phaseId: string, link: NotesSessionLink): Promise<void>;
   startUnavailableReason: string | null;
@@ -188,9 +184,6 @@ export function NotesRoadmap({
   onRebindPhase = async () => ({ status: "missing" }),
   onMutatePhaseLease = async () => ({ status: "missing" }),
   onReconcilePhaseExecution = async () => ({ status: "missing" }),
-  onStartNextPhase,
-  commands,
-  onRunCommand,
   onCancelPhase,
   onResumePhase,
   startUnavailableReason,
@@ -213,6 +206,7 @@ export function NotesRoadmap({
   const [doneWhen, setDoneWhen] = useState("");
   const [announcement, setAnnouncement] = useState("");
   const [pendingPhaseId, setPendingPhaseId] = useState<string | null>(null);
+  const startGate = useStartPrerequisiteGate(phases, onStartPhase, expectedProjectKey);
   const titleInputRef = useRef<HTMLInputElement>(null);
   const navigation = useRoadmapPhaseNavigation({
     phases: visiblePhases,
@@ -233,9 +227,6 @@ export function NotesRoadmap({
     togglePhase,
     clearSelection,
   } = navigation;
-  const advancement = useMemo(() => selectRoadmapAdvancement(phases), [phases]);
-  const commandActions = useMemo(() => resolveRoadmapCommandActions(commands), [commands]);
-  const [nextPhaseStatus, setNextPhaseStatus] = useState("");
   const [dragPhaseId, setDragPhaseId] = useState<string | null>(null);
   const [dropTarget, setDropTarget] = useState<RoadmapPhasePlacement | null>(null);
   const reorderHandles = useRef(new Map<string, HTMLButtonElement>());
@@ -262,10 +253,7 @@ export function NotesRoadmap({
   /** Null when allowed; otherwise why this placement is refused. */
   const reorderRefusal = (phaseId: string, placement: RoadmapPhasePlacement): string | null => {
     const planned = planRoadmapPhaseMove(phases, phaseId, placement);
-    if (!planned.ok) return describeReorderRefusal(planned.refusal);
-    return isRoadmapTopologyMutationBlocked(phases, { type: "reorder", phaseId, placement })
-      ? "This move would change the target protected by a pending phase advancement."
-      : null;
+    return planned.ok ? null : describeReorderRefusal(planned.refusal);
   };
 
   /** Null when Move up/down is allowed; otherwise why. Neighbours come from the phase's group. */
@@ -347,17 +335,16 @@ export function NotesRoadmap({
     if (pendingPhaseId !== null || actionDisabled) {
       return;
     }
-    if (
-      (action === "Start" || action === "Recover") &&
-      (startUnavailableReason !== null || isRoadmapPhaseStartProtected(phases, phase.id))
-    ) {
+    if ((action === "Start" || action === "Recover") && startUnavailableReason !== null) {
       return;
     }
 
     setPendingPhaseId(phase.id);
     try {
       if (action === "Start") {
-        const result = await onStartPhase(phase.id);
+        const result = await startGate.start(phase.id);
+        // Null: the user cancelled the prerequisite confirmation.
+        if (result === null) return;
         if (result.status === "accepted") {
           setAnnouncement(`Started phase: ${phase.title}`);
           onActionSuccess();
@@ -394,41 +381,6 @@ export function NotesRoadmap({
     }
   };
 
-  const startNextPhase = async (): Promise<void> => {
-    if (
-      !advancement ||
-      !advancement.ready ||
-      pendingPhaseId !== null ||
-      actionDisabled ||
-      startUnavailableReason !== null
-    ) {
-      return;
-    }
-    const nextPhase = advancement.nextPhase;
-    setPendingPhaseId(nextPhase.id);
-    setNextPhaseStatus("Starting the next phase…");
-    try {
-      const result = await onStartNextPhase(advancement.checkpoint.id, nextPhase.id);
-      if (result.status === "accepted") {
-        setNextPhaseStatus("Next phase started. Opening its planning session.");
-        setAnnouncement(`Started next phase: ${nextPhase.title}`);
-        onActionSuccess();
-        return;
-      }
-      setNextPhaseStatus(
-        result.status === "already-bound"
-          ? "The next phase already started in another window."
-          : result.message,
-      );
-    } catch (error) {
-      setNextPhaseStatus(
-        error instanceof Error ? error.message : "The next phase could not be started. Try again.",
-      );
-    } finally {
-      setPendingPhaseId(null);
-    }
-  };
-
   // Position, Move and archive-focus neighbours stay within the selected phase's own group.
   const selectedGroup =
     selectedPhase && isCompletedNotesPhase(selectedPhase)
@@ -438,6 +390,7 @@ export function NotesRoadmap({
   const selectedPhaseDetailProps: NotesPhaseDetailProps | null = selectedPhase
     ? {
         phase: selectedPhase,
+        phases,
         currentTime,
         expectedRevision,
         expectedProjectKey,
@@ -446,7 +399,6 @@ export function NotesRoadmap({
         openSource,
         position: selectedGroup.findIndex((phase) => phase.id === selectedPhase.id),
         phaseCount: selectedGroup.length,
-        primaryEmphasis: !advancement,
         onClose: closeDetail,
         onEditPhase: (id, input) => {
           onEditPhase(id, input);
@@ -480,7 +432,6 @@ export function NotesRoadmap({
           }
           return result;
         },
-        isTopologyMutationBlocked: (mutation) => isRoadmapTopologyMutationBlocked(phases, mutation),
         // A deliberate delete leaves the list the way Archive does: selection is cleared
         // here, so the missing-selection recovery line stays for genuine disappearances.
         // Focus is left to the deletion controller, which picks a surviving phase title.
@@ -539,15 +490,13 @@ export function NotesRoadmap({
         onScheduleReminder,
         onSnoozeReminder,
         onDismissReminder,
-        onStartPhase,
+        onStartPhase: startGate.start,
         onGetStorageDiagnostics,
         onRebindPhase,
         onMutatePhaseLease,
         onReconcilePhaseExecution,
         onResumePhase,
-        startUnavailableReason: isRoadmapPhaseStartProtected(phases, selectedPhase.id)
-          ? "Use Start next phase to confirm the pending Roadmap advancement."
-          : startUnavailableReason,
+        startUnavailableReason,
         actionDisabled,
         onPendingChange: (pending) => setPendingPhaseId(pending ? selectedPhase.id : null),
         onActionSuccess,
@@ -661,6 +610,7 @@ export function NotesRoadmap({
               <strong>Needs attention:</strong> {attentionReason}
             </p>
           )}
+          <NotesPhaseWaitingOn phases={phases} phase={phase} />
 
           <div className="notes-roadmap-card-footer">
             <div className="notes-roadmap-meta">
@@ -678,9 +628,7 @@ export function NotesRoadmap({
                 disabled={
                   pendingPhaseId !== null ||
                   actionDisabled ||
-                  ((action === "Start" || action === "Recover") &&
-                    (startUnavailableReason !== null ||
-                      isRoadmapPhaseStartProtected(phases, phase.id)))
+                  ((action === "Start" || action === "Recover") && startUnavailableReason !== null)
                 }
                 onClick={() => void runCardAction(phase)}
               >
@@ -777,62 +725,6 @@ export function NotesRoadmap({
         </div>
       </form>
 
-      {advancement && (
-        <section className="notes-roadmap-next-phase" aria-labelledby="notes-next-phase-title">
-          <div>
-            <p className="notes-roadmap-next-phase-kicker">
-              {advancement.ready ? "Phase complete" : "Roadmap target needs recovery"}
-            </p>
-            <h3 id="notes-next-phase-title">
-              {advancement.ready
-                ? `Ready for ${advancement.nextPhase.title}`
-                : `Resolve target for ${advancement.nextPhase.title}`}
-            </h3>
-            <p>
-              {advancement.recoveryReason ??
-                `${advancement.completedPhase.title} is Done. Start the next Roadmap phase when you’re ready.`}
-            </p>
-            {nextPhaseStatus && (
-              <p className="notes-roadmap-next-phase-status" role="status">
-                {nextPhaseStatus}
-              </p>
-            )}
-          </div>
-          <button
-            type="button"
-            className="notes-roadmap-primary notes-btn-primary"
-            disabled={
-              !advancement.ready ||
-              pendingPhaseId !== null ||
-              actionDisabled ||
-              startUnavailableReason !== null
-            }
-            title={advancement.recoveryReason ?? startUnavailableReason ?? undefined}
-            onClick={() => void startNextPhase()}
-          >
-            {pendingPhaseId === advancement.nextPhase.id
-              ? "Starting next phase…"
-              : "Start next phase"}
-          </button>
-          {commandActions.length > 0 && (
-            <div className="notes-roadmap-next-phase-commands" aria-label="Review commands">
-              {commandActions.map((action) => (
-                <button
-                  key={action.canonicalName}
-                  type="button"
-                  disabled={
-                    pendingPhaseId !== null || actionDisabled || startUnavailableReason !== null
-                  }
-                  onClick={() => onRunCommand(action.invocation)}
-                >
-                  {action.label}
-                </button>
-              ))}
-            </div>
-          )}
-        </section>
-      )}
-
       <div className={`notes-roadmap-workspace${selectedPhaseDetailProps ? " has-detail" : ""}`}>
         {visiblePhases.length === 0 ? (
           <div className="notes-roadmap-empty">
@@ -884,6 +776,11 @@ export function NotesRoadmap({
       <div className="notes-status" role="status" aria-live="polite" aria-atomic="true">
         {announcement}
       </div>
+      <NotesStartPrerequisitesDialog
+        request={startGate.request}
+        onCancel={startGate.cancel}
+        onConfirm={startGate.confirm}
+      />
     </div>
   );
 }
@@ -918,18 +815,6 @@ export function NotesRoadmapArchive({
                   type="button"
                   data-phase-focus={phase.id}
                   aria-label={`Restore phase: ${phase.title}`}
-                  disabled={isRoadmapTopologyMutationBlocked(phases, {
-                    type: "restore",
-                    phaseId: phase.id,
-                  })}
-                  title={
-                    isRoadmapTopologyMutationBlocked(phases, {
-                      type: "restore",
-                      phaseId: phase.id,
-                    })
-                      ? "Restoring this phase would replace the target protected by a pending phase advancement."
-                      : undefined
-                  }
                   onClick={() => {
                     onRestorePhase(phase.id);
                     setAnnouncement(`Restored phase: ${phase.title}`);

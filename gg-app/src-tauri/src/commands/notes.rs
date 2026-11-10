@@ -756,18 +756,20 @@ pub(crate) fn phase_start_path(phase_id: &str) -> String {
     format!("/phases/{}/start", encode_path_segment(phase_id))
 }
 
-pub(crate) fn phase_advancement_start_path(checkpoint_id: &str) -> String {
-    format!(
-        "/notes/roadmap/advancement/{}/start",
-        encode_path_segment(checkpoint_id)
-    )
-}
+const PHASE_START_CONFIRMED_IDS_MAX_ITEMS: usize = 200;
+const PHASE_START_CONFIRMED_ID_MAX_CHARS: usize = 512;
 
-pub(crate) fn phase_advancement_start_body(next_phase_id: &str) -> serde_json::Value {
-    serde_json::json!({
-        "action": "start-next-phase",
-        "nextPhaseId": next_phase_id,
-    })
+pub(crate) fn phase_start_body(
+    confirmed_prerequisite_ids: &[String],
+) -> Result<serde_json::Value, String> {
+    if confirmed_prerequisite_ids.len() > PHASE_START_CONFIRMED_IDS_MAX_ITEMS
+        || confirmed_prerequisite_ids
+            .iter()
+            .any(|id| id.is_empty() || id.chars().count() > PHASE_START_CONFIRMED_ID_MAX_CHARS)
+    {
+        return Err("The phase start request was invalid.".to_string());
+    }
+    Ok(serde_json::json!({ "confirmedPrerequisiteIds": confirmed_prerequisite_ids }))
 }
 
 pub(crate) fn phase_cancel_path(phase_id: &str) -> String {
@@ -1670,7 +1672,9 @@ pub(crate) async fn agent_phase_start(
     pane_id: String,
     client: tauri::State<'_, reqwest::Client>,
     phase_id: String,
+    confirmed_prerequisite_ids: Option<Vec<String>>,
 ) -> Result<serde_json::Value, String> {
+    let body = phase_start_body(&confirmed_prerequisite_ids.unwrap_or_default())?;
     let port = port_for(&webview).ok_or("daemon not ready")?;
     let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
     let response = client
@@ -1680,6 +1684,7 @@ pub(crate) async fn agent_phase_start(
             phase_start_path(&phase_id)
         ))
         .header("x-gg-session", &gg_sid)
+        .json(&body)
         .send()
         .await
         .map_err(|error| error.to_string())?;
@@ -1689,40 +1694,6 @@ pub(crate) async fn agent_phase_start(
     #[cfg(feature = "native-smoke")]
     audit_native_phase_start(&pane_id, &phase_id, status, &result);
     result
-}
-
-/// Proxy: consume a durable human-confirmed Roadmap advancement checkpoint.
-#[tauri::command]
-pub(crate) async fn agent_phase_advancement_start(
-    webview: WebviewWindow,
-    pane_id: String,
-    client: tauri::State<'_, reqwest::Client>,
-    daemon: tauri::State<'_, Daemon>,
-    checkpoint_id: String,
-    next_phase_id: String,
-) -> Result<serde_json::Value, String> {
-    let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
-    let auth_token = daemon
-        .auth_token
-        .lock_or_recover()
-        .clone()
-        .ok_or("agent daemon authentication is not ready")?;
-    let response = client
-        .post(format!(
-            "{}{}",
-            sidecar_base(port),
-            phase_advancement_start_path(&checkpoint_id)
-        ))
-        .header("x-gg-session", &gg_sid)
-        .header("x-gg-daemon-token", auth_token)
-        .json(&phase_advancement_start_body(&next_phase_id))
-        .send()
-        .await
-        .map_err(|error| error.to_string())?;
-    let status = response.status();
-    let body = response.text().await.unwrap_or_default();
-    normalize_phase_start_response(status, &body)
 }
 
 /// Proxy: resolve a Roadmap phase's bound live session, stop its operation, then update Notes.
@@ -2257,17 +2228,6 @@ mod tests {
             phase_cancel_path("phase/21 review"),
             "/phases/phase%2F21%20review/cancel"
         );
-        assert_eq!(
-            phase_advancement_start_path("checkpoint/opaque?two"),
-            "/notes/roadmap/advancement/checkpoint%2Fopaque%3Ftwo/start"
-        );
-        assert_eq!(
-            phase_advancement_start_body("phase/next"),
-            serde_json::json!({
-                "action": "start-next-phase",
-                "nextPhaseId": "phase/next",
-            })
-        );
         for (status, body) in [
             (
                 reqwest::StatusCode::ACCEPTED,
@@ -2284,6 +2244,32 @@ mod tests {
                 Some("accepted" | "failed")
             ));
         }
+    }
+
+    #[test]
+    fn phase_start_proxy_forwards_confirmed_prerequisites() {
+        assert_eq!(
+            phase_start_body(&[]).unwrap(),
+            serde_json::json!({ "confirmedPrerequisiteIds": [] })
+        );
+        assert_eq!(
+            phase_start_body(&["phase-a".to_string(), "phase/b".to_string()]).unwrap(),
+            serde_json::json!({ "confirmedPrerequisiteIds": ["phase-a", "phase/b"] })
+        );
+        let body = phase_start_body(&["phase-a".to_string()]).unwrap();
+        assert!(body.get("x-gg-session").is_none() && body.get("x-gg-token").is_none());
+        assert!(phase_start_body(&[String::new()]).is_err());
+        assert!(phase_start_body(&["x".repeat(513)]).is_err());
+        assert!(phase_start_body(&["x".repeat(512)]).is_ok());
+        assert!(phase_start_body(&vec!["id".to_string(); 201]).is_err());
+        assert!(phase_start_body(&vec!["id".to_string(); 200]).is_ok());
+
+        let parsed = normalize_phase_start_response(
+            reqwest::StatusCode::CONFLICT,
+            r#"{"status":"failed","code":"prerequisites-confirmation-required","operationId":"op-2","message":"Confirm","prerequisites":[{"id":"phase-a","title":"A","status":"in-progress"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(parsed["prerequisites"][0]["id"].as_str(), Some("phase-a"));
     }
 
     #[test]

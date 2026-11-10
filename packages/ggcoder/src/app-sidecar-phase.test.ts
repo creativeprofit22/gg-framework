@@ -333,17 +333,13 @@ class ProductionPhaseFixture {
 
   async start(
     phaseId = "phase-21",
-    advancementConfirmation?: {
-      checkpointId: string;
-      nextPhaseId: string;
-      action: "start-next-phase";
-    },
+    confirmedPrerequisiteIds?: readonly string[],
   ): Promise<ResponseRecord> {
     let responseRecord: ResponseRecord | undefined;
     const repository = this.phaseRepository();
     await launchBoundPhase({
       phaseId,
-      advancementConfirmation,
+      confirmedPrerequisiteIds,
       mode: this.options.mode ?? "code",
       busyState: this.options.busyState ?? {
         running: false,
@@ -434,23 +430,22 @@ class ProductionPhaseFixture {
 
   private phaseRepository(): PhaseLaunchRepository {
     return {
-      launchPhase: async (cwd, phaseId, createBinding) => {
+      launchPhase: async (cwd, phaseId, createBinding, options) => {
         this.events.push("bind-started");
-        const outcome = await this.repository.launchPhase(cwd, phaseId, async (frozen) => {
-          const binding = await createBinding(frozen);
-          await this.options.pauseBinding?.promise;
-          if (this.failBindingCount > 0) {
-            this.failBindingCount -= 1;
-            throw new Error("bind persistence failed");
-          }
-          return binding;
-        });
-        this.events.push("bind-committed");
-        return outcome;
-      },
-      confirmPhaseAdvancement: async (cwd, request, createBinding) => {
-        this.events.push("bind-started");
-        const outcome = await this.repository.confirmPhaseAdvancement(cwd, request, createBinding);
+        const outcome = await this.repository.launchPhase(
+          cwd,
+          phaseId,
+          async (frozen) => {
+            const binding = await createBinding(frozen);
+            await this.options.pauseBinding?.promise;
+            if (this.failBindingCount > 0) {
+              this.failBindingCount -= 1;
+              throw new Error("bind persistence failed");
+            }
+            return binding;
+          },
+          options,
+        );
         this.events.push("bind-committed");
         return outcome;
       },
@@ -867,7 +862,7 @@ describe("production launchBoundPhase orchestration", () => {
     });
   });
 
-  it("requires next-phase confirmation and acquires its planning lease before running", async () => {
+  it("starts a phase normally and keeps an old next-phase checkpoint unchanged", async () => {
     const { repository, cwd } = await setup(false);
     const input = document();
     const source = structuredClone(input.phases[0]!);
@@ -916,33 +911,23 @@ describe("production launchBoundPhase orchestration", () => {
     ];
     input.phases.unshift(source);
     expect(await repository.migrate(cwd, input)).toMatchObject({ status: "ok" });
+    const storedEvents = structuredClone(source.roadmapEvents);
     const fixture = new ProductionPhaseFixture(repository, cwd);
-    const invalid = await fixture.start("phase-21", {
-      checkpointId: "wrong",
-      nextPhaseId: "phase-21",
-      action: "start-next-phase",
-    });
-    expect(invalid.status).not.toBe(202);
-    expect(fixture.createCalls).toBe(0);
-    const accepted = await fixture.start("phase-21", {
-      checkpointId: "advance",
-      nextPhaseId: "phase-21",
-      action: "start-next-phase",
-    });
+    const accepted = await fixture.start("phase-21");
     expect(accepted.status).toBe(202);
     await fixture.promptSettled;
     expect(fixture.currentSession.promptCalls).toBe(1);
+    expect(fixture.createCalls).toBe(1);
     expect(await fixture.binding.withLeaseFence(fixture.currentSession, async () => true)).toEqual({
       status: "executed",
       value: true,
     });
-    const repeated = await fixture.start("phase-21", {
-      checkpointId: "advance",
-      nextPhaseId: "phase-21",
-      action: "start-next-phase",
-    });
-    expect(repeated.status).not.toBe(202);
-    expect(fixture.createCalls).toBe(1);
+    const reloaded = await repository.load(cwd);
+    if (reloaded.status !== "ok") throw new Error(reloaded.status);
+    const storedSource = reloaded.snapshot.document.phases.find(
+      (phase) => phase.id === "previous-phase",
+    );
+    expect(storedSource?.roadmapEvents).toEqual(storedEvents);
   });
 
   it("uses the production bind → fan-out → replacement → reset → Plan Mode → response → prompt order", async () => {
@@ -1778,6 +1763,56 @@ describe("production launchBoundPhase orchestration", () => {
     expect(snapshots).toHaveLength(1);
     if (loaded.status !== "ok") throw new Error("Expected pending approval Notes");
     expect(snapshots[0]).toEqual(loaded.snapshot);
+  });
+
+  it("asks for prerequisite confirmation before creating a session, then starts once confirmed", async () => {
+    const { repository, cwd } = await setup(false);
+    const input = document();
+    const prerequisite = structuredClone(input.phases[0]!);
+    prerequisite.id = "phase-20";
+    prerequisite.title = "Schema contract";
+    prerequisite.order = input.phases.length;
+    prerequisite.status = "in-progress";
+    prerequisite.session = null;
+    prerequisite.lifecycleEvents = [];
+    prerequisite.roadmapEvents = [];
+    input.phases.push(prerequisite);
+    await repository.migrate(cwd, input);
+    await updatePhase(repository, cwd, (notes) => {
+      notes.phases.find((phase) => phase.id === "phase-21")!.dependsOn = ["phase-20"];
+    });
+    const before = await repository.load(cwd);
+    if (before.status !== "ok") throw new Error("Expected linked Notes");
+    const fixture = new ProductionPhaseFixture(repository, cwd);
+
+    await expect(fixture.start()).resolves.toEqual({
+      status: 409,
+      body: {
+        status: "failed",
+        code: "prerequisites-confirmation-required",
+        operationId: "operation-1",
+        message: "Some prerequisite phases aren't Done. Confirm to start anyway.",
+        prerequisites: [{ id: "phase-20", title: "Schema contract", status: "in-progress" }],
+      },
+    });
+    expect(fixture.createCalls).toBe(0);
+    expect(fixture.events).not.toContain("prompt-started");
+    await expect(repository.load(cwd)).resolves.toMatchObject({
+      snapshot: { revision: before.snapshot.revision },
+    });
+
+    await expect(fixture.start("phase-21", ["phase-20"])).resolves.toMatchObject({
+      status: 202,
+      body: { status: "accepted" },
+    });
+    const after = await repository.load(cwd);
+    if (after.status !== "ok") throw new Error("Expected started Notes");
+    expect(
+      after.snapshot.document.phases
+        .find((phase) => phase.id === "phase-21")!
+        .roadmapEvents.filter((event) => event.type === "dependency-override"),
+    ).toMatchObject([{ actor: "user", origin: "app", unfinishedPrerequisiteIds: ["phase-20"] }]);
+    await fixture.dispose();
   });
 
   it("disposes a retained candidate when retry discovers a phase archive", async () => {

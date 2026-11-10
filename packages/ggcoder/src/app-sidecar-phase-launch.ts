@@ -15,8 +15,6 @@ import {
 import type {
   FrozenPhaseLaunchContext,
   NotesSessionLink,
-  ProjectNotesPhaseAdvancementStartOutcome,
-  ProjectNotesPhaseAdvancementStartRequest,
   ProjectNotesPhaseLaunchOutcome,
   ProjectNotesPhaseLifecycleOutcome,
   ProjectNotesSnapshot,
@@ -52,15 +50,8 @@ export interface PhaseLaunchRepository {
       sessionId: string;
       sessionPath: string | null;
     }>,
+    options?: { confirmedPrerequisiteIds?: readonly string[] },
   ): Promise<ProjectNotesPhaseLaunchOutcome>;
-  confirmPhaseAdvancement(
-    cwd: string,
-    request: ProjectNotesPhaseAdvancementStartRequest,
-    createBinding: (context: FrozenPhaseLaunchContext) => Promise<{
-      sessionId: string;
-      sessionPath: string | null;
-    }>,
-  ): Promise<ProjectNotesPhaseAdvancementStartOutcome>;
   recordPhaseLaunchAttention(
     cwd: string,
     phaseId: string,
@@ -73,11 +64,8 @@ export type PhaseStartResponseBody = PhaseStartResult;
 
 export interface LaunchBoundPhaseDependencies<TSession extends BoundPhaseSession> {
   phaseId: string;
-  advancementConfirmation?: {
-    checkpointId: string;
-    nextPhaseId: string;
-    action: "start-next-phase";
-  };
+  /** Unfinished prerequisites the user confirmed in the app's Start dialog. */
+  confirmedPrerequisiteIds?: readonly string[];
   mode: "code" | "chat" | "motion";
   busyState: AppSidecarSessionBusyState;
   mutations: AppSidecarSessionMutationCoordinator;
@@ -179,29 +167,12 @@ export async function launchBoundPhase<TSession extends BoundPhaseSession>(
       attentionExpectedSession = frozen.phase.session ? { ...frozen.phase.session } : null;
       return createOrReuseCandidate(dependencies, frozen);
     };
-    const outcome = dependencies.advancementConfirmation
-      ? await dependencies.repository.confirmPhaseAdvancement(
-          dependencies.cwd,
-          {
-            ...dependencies.advancementConfirmation,
-            operationId: mutation.operationId,
-          },
-          createBinding,
-        )
-      : await dependencies.repository.launchPhase(dependencies.cwd, phaseId, createBinding);
-    if (outcome.status === "invalid-confirmation" || outcome.status === "stale") {
-      await dependencies.candidates.disposeCandidate(phaseId);
-      dependencies.respond(outcome.status === "invalid-confirmation" ? 400 : 409, {
-        status: "failed",
-        code: "launch-failed",
-        operationId: mutation.operationId,
-        message:
-          outcome.status === "invalid-confirmation"
-            ? "The Start next phase confirmation was invalid."
-            : "This Roadmap checkpoint is stale. Reopen Roadmap and review the latest state.",
-      } satisfies PhaseStartResponseBody);
-      return;
-    }
+    const outcome = await dependencies.repository.launchPhase(
+      dependencies.cwd,
+      phaseId,
+      createBinding,
+      { confirmedPrerequisiteIds: dependencies.confirmedPrerequisiteIds ?? [] },
+    );
     if ("session" in outcome) attentionExpectedSession = outcome.session;
 
     if (outcome.status === "phase-not-found" || outcome.status === "phase-archived") {
@@ -217,13 +188,14 @@ export async function launchBoundPhase<TSession extends BoundPhaseSession>(
       } satisfies PhaseStartResponseBody);
       return;
     }
-    if (outcome.status === "advancement-confirmation-required") {
+    if (outcome.status === "prerequisites-confirmation-required") {
       await dependencies.candidates.disposeCandidate(phaseId);
       dependencies.respond(409, {
         status: "failed",
-        code: "advancement-confirmation-required",
+        code: "prerequisites-confirmation-required",
         operationId: mutation.operationId,
-        message: "Use Start next phase to confirm this Roadmap checkpoint.",
+        message: "Some prerequisite phases aren't Done. Confirm to start anyway.",
+        prerequisites: outcome.prerequisites,
       } satisfies PhaseStartResponseBody);
       return;
     }

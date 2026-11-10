@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   canonicalProjectKey,
   notesPhaseDeletionGeneration,
@@ -562,10 +562,12 @@ describe("agent dependency links through approvals and app starts", () => {
     expect(await overrides("phase-b")).toEqual([]);
 
     expect(
-      await f.repository.launchPhase(f.cwd, "phase-c", async () => ({
-        sessionId: "c-start",
-        sessionPath: "/s/c.jsonl",
-      })),
+      await f.repository.launchPhase(
+        f.cwd,
+        "phase-c",
+        async () => ({ sessionId: "c-start", sessionPath: "/s/c.jsonl" }),
+        { confirmedPrerequisiteIds: ["phase-a"] },
+      ),
     ).toMatchObject({ status: "accepted" });
     const first = await overrides("phase-c");
     expect(first).toMatchObject([
@@ -580,5 +582,97 @@ describe("agent dependency links through approvals and app starts", () => {
       status: "already-bound",
     });
     expect(await overrides("phase-c")).toEqual(first);
+  });
+
+  it("asks before a manual start over unfinished prerequisites without binding or writing", async () => {
+    const f = await setup();
+    const linked = await saveLinks(f.repository, f.cwd, f.snapshot, { "phase-c": ["phase-a"] });
+    const createBinding = vi.fn(async () => ({ sessionId: "c", sessionPath: "/s/c.jsonl" }));
+    for (const confirmedPrerequisiteIds of [undefined, [], ["phase-b"], ["phase-a", "phase-b"]]) {
+      expect(
+        await f.repository.launchPhase(f.cwd, "phase-c", createBinding, {
+          confirmedPrerequisiteIds,
+        }),
+      ).toEqual({
+        status: "prerequisites-confirmation-required",
+        prerequisites: [{ id: "phase-a", title: "Phase A", status: "not-started" }],
+      });
+    }
+    expect(await f.repository.launchPhase(f.cwd, "phase-c", createBinding)).toMatchObject({
+      status: "prerequisites-confirmation-required",
+    });
+    expect(createBinding).not.toHaveBeenCalled();
+    expect((await loadOk(f.repository, f.cwd)).revision).toBe(linked.revision);
+  });
+
+  it("asks again when the unfinished set changed after the user confirmed", async () => {
+    const f = await setup();
+    const linked = await saveLinks(f.repository, f.cwd, f.snapshot, {
+      "phase-c": ["phase-a", "phase-b"],
+    });
+    const changed = structuredClone(linked.document);
+    changed.phases.find((phase) => phase.id === "phase-c")!.dependsOn = ["phase-b"];
+    expect((await f.repository.save(f.cwd, linked.revision, changed)).status).toBe("ok");
+    const createBinding = vi.fn(async () => ({ sessionId: "c", sessionPath: "/s/c.jsonl" }));
+    expect(
+      await f.repository.launchPhase(f.cwd, "phase-c", createBinding, {
+        confirmedPrerequisiteIds: ["phase-a", "phase-b"],
+      }),
+    ).toMatchObject({
+      status: "prerequisites-confirmation-required",
+      prerequisites: [{ id: "phase-b" }],
+    });
+    expect(createBinding).not.toHaveBeenCalled();
+    expect(
+      await f.repository.launchPhase(f.cwd, "phase-c", createBinding, {
+        confirmedPrerequisiteIds: ["phase-b"],
+      }),
+    ).toMatchObject({ status: "accepted" });
+    const phaseC = (await loadOk(f.repository, f.cwd)).document.phases.find(
+      (phase) => phase.id === "phase-c",
+    )!;
+    const [override] = phaseC.roadmapEvents.filter((event) => event.type === "dependency-override");
+    expect(override).toMatchObject({
+      actor: "user",
+      origin: "app",
+      session: { sessionId: "c", sessionPath: "/s/c.jsonl" },
+      unfinishedPrerequisiteIds: ["phase-b"],
+    });
+    expect(Number.isNaN(Date.parse((override as { timestamp: string }).timestamp))).toBe(false);
+  });
+
+  it("records the grown set when the user confirms again on an already-bound run", async () => {
+    const f = await setup();
+    const session = { sessionId: "c", sessionPath: "/s/c.jsonl" };
+    const linked = await saveLinks(f.repository, f.cwd, f.snapshot, { "phase-c": ["phase-a"] });
+    expect(
+      await f.repository.launchPhase(f.cwd, "phase-c", async () => session, {
+        confirmedPrerequisiteIds: ["phase-a"],
+      }),
+    ).toMatchObject({ status: "accepted" });
+    const started = await loadOk(f.repository, f.cwd);
+    const grown = structuredClone(started.document);
+    grown.phases.find((phase) => phase.id === "phase-c")!.dependsOn = ["phase-a", "phase-b"];
+    expect((await f.repository.save(f.cwd, started.revision, grown)).status).toBe("ok");
+    expect(await f.repository.launchPhase(f.cwd, "phase-c", async () => session)).toMatchObject({
+      status: "prerequisites-confirmation-required",
+      prerequisites: [{ id: "phase-a" }, { id: "phase-b" }],
+    });
+    expect(
+      await f.repository.launchPhase(f.cwd, "phase-c", async () => session, {
+        confirmedPrerequisiteIds: ["phase-a", "phase-b"],
+      }),
+    ).toMatchObject({ status: "already-bound" });
+    expect(await f.repository.launchPhase(f.cwd, "phase-c", async () => session)).toMatchObject({
+      status: "already-bound",
+    });
+    expect(linked.revision).toBeLessThan(started.revision);
+    const overrides = (await loadOk(f.repository, f.cwd)).document.phases
+      .find((phase) => phase.id === "phase-c")!
+      .roadmapEvents.filter((event) => event.type === "dependency-override");
+    expect(overrides.map((event) => event.unfinishedPrerequisiteIds)).toEqual([
+      ["phase-a"],
+      ["phase-a", "phase-b"],
+    ]);
   });
 });

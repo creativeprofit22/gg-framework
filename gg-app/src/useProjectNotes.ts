@@ -77,6 +77,8 @@ export interface NotesPhaseInput {
   title: string;
   goal: string;
   doneWhen: string[];
+  /** Edit only: the full prerequisite list; empty removes the links, absent leaves them. */
+  dependsOn?: string[];
 }
 
 export interface UseProjectNotesResult {
@@ -1079,14 +1081,22 @@ export function useProjectNotes(
         evaluate: documentMutation((current) =>
           updatePhase(current, id, now, (phase) => {
             if (phase.archivedAt !== null) return null;
+            const dependsOn = input.dependsOn;
             if (
               phase.title === title &&
               phase.goal === goal &&
-              arraysEqual(phase.doneWhen, doneWhen)
+              arraysEqual(phase.doneWhen, doneWhen) &&
+              (dependsOn === undefined || arraysEqual(phase.dependsOn ?? [], dependsOn))
             ) {
               return null;
             }
-            return { ...phase, title, goal, doneWhen, updatedAt: now };
+            const next = { ...phase, title, goal, doneWhen, updatedAt: now };
+            if (dependsOn === undefined) return next;
+            if (dependsOn.length === 0) {
+              delete next.dependsOn;
+              return next;
+            }
+            return { ...next, dependsOn: [...dependsOn] };
           }),
         ),
       });

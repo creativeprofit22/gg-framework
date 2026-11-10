@@ -11,7 +11,6 @@ import {
   canonicalProjectKey,
   canonicalReferenceIdentity,
   classifyLegacyNotesLifecycleEvent,
-  classifyRoadmapAutoStartEligibility,
   isNotesCompletionGateOutcome,
   isNotesCompletionUnmetGateCode,
   isNotesDocumentV2,
@@ -33,7 +32,6 @@ import {
   NOTES_REFERENCE_URL_MAX_LENGTH,
   NOTES_REMINDER_NOTE_MAX_LENGTH,
   isNotesDirectCompletionAuthority,
-  isNotesPhaseAdvancementSourceCurrent,
   validateNotesCompletionReviewFields,
   validateNotesDocumentV3,
   validateNotesImplementationCheckpointFields,
@@ -274,34 +272,6 @@ describe("project Notes contract", () => {
     const invalid = structuredClone(next);
     Object.assign(invalid.phases[2]!.roadmapEvents.at(-1)!, { statusOutcome: "applied" });
     expect(validateOldNotes(invalid)).toMatchObject({ ok: false });
-  });
-  it("classifies automatic Roadmap candidates by exact full-set eligibility", async () => {
-    const document = await fixture();
-    const template = document.phases[0]!;
-    const candidate = (id: string, order: number): NotesPhase => ({
-      ...template,
-      id,
-      order,
-      status: "not-started",
-      archivedAt: null,
-      session: null,
-      overrides: { ...template.overrides, status: null },
-    });
-    const target = candidate("target", -1);
-    const bound = candidate("bound", 2);
-    bound.session = { sessionId: "bound", sessionPath: "/bound" };
-    const overridden = candidate("overridden", 3);
-    overridden.overrides.status = { value: "not-started", source: "user", updatedAt: NOW };
-
-    expect(
-      classifyRoadmapAutoStartEligibility(
-        [target, candidate("source", 0), bound, overridden],
-        "source",
-      ),
-    ).toMatchObject({ kind: "unique", phase: { id: "target" } });
-    expect(
-      classifyRoadmapAutoStartEligibility([target, candidate("other", 99)], "source"),
-    ).toMatchObject({ kind: "ambiguous", phases: [{ id: "target" }, { id: "other" }] });
   });
   it.each([
     ["pending", "planning"],
@@ -1047,20 +1017,6 @@ describe("project Notes contract", () => {
       "phases[0].roadmapEvents[2]",
       "Done requires accepted review evidence, a successful complete implementation checkpoint, passed verification or an accepted verification exception, evidence matching the current phase session, and no unmet gates",
     );
-  });
-
-  it("uses current status, not legacy certification, for explicit next-phase selection", async () => {
-    const { phase, checkpoint } = await directCompletionFixture();
-    phase.roadmapEvents = [];
-    phase.status = "done";
-    phase.overrides.status = null;
-    phase.completedAt = checkpoint.timestamp;
-    expect(isNotesPhaseAdvancementSourceCurrent(phase, checkpoint)).toBe(true);
-    phase.completedAt = "2099-01-01T00:00:00.000Z";
-    expect(isNotesPhaseAdvancementSourceCurrent(phase, checkpoint)).toBe(false);
-    phase.completedAt = checkpoint.timestamp;
-    phase.status = "in-progress";
-    expect(isNotesPhaseAdvancementSourceCurrent(phase, checkpoint)).toBe(false);
   });
 
   // Persisted legacy evidence chains remain strictly validated for old-reader compatibility.

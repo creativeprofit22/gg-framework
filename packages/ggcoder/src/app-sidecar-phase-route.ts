@@ -8,6 +8,29 @@ export interface PhaseStartRouteDependencies {
   start(phaseId: string): void;
 }
 
+export interface PhaseStartBody {
+  confirmedPrerequisiteIds: string[];
+}
+
+const CONFIRMED_PREREQUISITES_MAX_ITEMS = 200;
+const PHASE_ID_MAX_LENGTH = 512;
+
+/** Accepts exactly `{ confirmedPrerequisiteIds: string[] }`; anything else is invalid. */
+export function parsePhaseStartBody(body: unknown): PhaseStartBody | null {
+  if (typeof body !== "object" || body === null || Array.isArray(body)) return null;
+  const keys = Object.keys(body);
+  if (keys.length !== 1 || keys[0] !== "confirmedPrerequisiteIds") return null;
+  const ids = (body as { confirmedPrerequisiteIds: unknown }).confirmedPrerequisiteIds;
+  if (
+    !Array.isArray(ids) ||
+    ids.length > CONFIRMED_PREREQUISITES_MAX_ITEMS ||
+    !ids.every((id) => typeof id === "string" && id.length > 0 && id.length <= PHASE_ID_MAX_LENGTH)
+  ) {
+    return null;
+  }
+  return { confirmedPrerequisiteIds: [...(ids as string[])] };
+}
+
 /** Handles only POST /phases/:phaseId/start and leaves every other route untouched. */
 export function handlePhaseStartRoute(dependencies: PhaseStartRouteDependencies): boolean {
   const pathname = new URL(dependencies.url, `http://${dependencies.host}`).pathname;

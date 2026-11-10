@@ -2442,7 +2442,7 @@ describe("ProjectNotes", () => {
     ).toBe(false);
   });
 
-  it("offers direct next-phase evidence and reviewer-neutral recovery copy", async () => {
+  it("ignores an old pending next-phase checkpoint and keeps normal Start and Restore", async () => {
     const cwd = "/work/manual-next-phase";
     const client = new FakeProjectNotesClient(cwd);
     const document = notes("manual next phase");
@@ -2479,67 +2479,32 @@ describe("ProjectNotes", () => {
     next.order = 3;
     document.phases = [completed, archived, alreadyDone, next];
     client.seed(cwd, document);
-    const onStartNextPhase = vi.fn(async () => ({
+    const onStartPhase = vi.fn(async () => ({
       status: "accepted" as const,
       operationId: "operation-next",
       session: { sessionId: "session-next", sessionPath: "/sessions/next.jsonl" },
       packageTokenCount: 42,
     }));
-    const onRunCommand = vi.fn();
-    render(
-      <ProjectNotes
-        cwd={cwd}
-        client={client}
-        onStartNextPhase={onStartNextPhase}
-        commands={[
-          {
-            name: "Diff",
-            aliases: ["compare"],
-            description: "Compare",
-            input: { text: "optional", references: "optional", attachments: "optional" },
-            source: "custom",
-          },
-          {
-            name: "trace",
-            aliases: [],
-            description: "Trace",
-            input: { text: "optional", references: "optional", attachments: "optional" },
-            source: "custom",
-          },
-        ]}
-        onRunCommand={onRunCommand}
-      />,
-    );
+    render(<ProjectNotes cwd={cwd} client={client} onStartPhase={onStartPhase} />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
     await selectNotesTab("Roadmap");
 
-    const advancement = screen.getByRole("region", { name: "Ready for Ship the integration" });
-    expect(advancement.textContent).toContain("Completed foundation is Done");
-    expect(onStartNextPhase).not.toHaveBeenCalled();
-    expect(screen.getByRole("button", { name: "Run /compare" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Run /trace" })).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "Run /parity" })).toBeNull();
+    expect(screen.queryByRole("region", { name: /Ready for|Resolve target for/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Start next phase" })).toBeNull();
     await selectNotesTab("Archive");
     const restore = screen.getByRole("button", { name: "Restore phase: Phase archived" });
-    expect((restore as HTMLButtonElement).disabled).toBe(true);
-    expect(restore.title).toBe(
-      "Restoring this phase would replace the target protected by a pending phase advancement.",
-    );
+    expect((restore as HTMLButtonElement).disabled).toBe(false);
     await selectNotesTab("Roadmap");
-    fireEvent.click(screen.getByRole("button", { name: "Run /compare" }));
-    expect(onRunCommand).toHaveBeenCalledExactlyOnceWith("/Diff");
-    const startNext = screen.getByRole("button", { name: "Start next phase" });
-    // The next-phase card owns the view's one Primary.
-    expect(globalThis.document.querySelectorAll(".notes-btn-primary")).toHaveLength(1);
-    expect(startNext.classList.contains("notes-btn-primary")).toBe(true);
-
-    fireEvent.click(startNext);
-    expect(onStartNextPhase).toHaveBeenCalledExactlyOnceWith("checkpoint-next", "next");
-    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    const start = screen.getByRole("button", { name: "Start phase: Ship the integration" });
+    expect((start as HTMLButtonElement).disabled).toBe(false);
+    await act(async () => {
+      fireEvent.click(start);
+    });
+    await waitFor(() => expect(onStartPhase).toHaveBeenCalledExactlyOnceWith("next"));
   });
 
-  it("labels automatic phase binding as a system activity", async () => {
+  it("hides old advancement records from Activity history", async () => {
     const cwd = "/work/automatic-next-phase";
     const client = new FakeProjectNotesClient(cwd);
     const document = notes("automatic next phase");
@@ -2579,78 +2544,16 @@ describe("ProjectNotes", () => {
     expandCompletedPhases();
     fireEvent.click(screen.getByRole("button", { name: "Review phase: Completed foundation" }));
     selectPhaseView("Activity");
-    const activity = screen.getByText("Next phase bound automatically.").closest("li");
-    expect(activity?.textContent).toContain("System");
-    expect(activity?.textContent).not.toContain("Start next phase confirmed.");
-  });
-
-  it("recovers a stale target without overridden candidates shadowing it", async () => {
-    const cwd = "/work/stale-next-phase";
-    const client = new FakeProjectNotesClient(cwd);
-    const document = notes("stale next phase");
-    const completed = phase("completed", "done");
-    completed.title = "Completed foundation";
-    const review = completionReview({ reviewer: "ken" });
-    completed.roadmapEvents = [
-      review,
-      {
-        type: "phase-advancement-checkpoint",
-        id: "checkpoint-stale",
-        completionReviewId: review.id,
-        completedPhaseId: completed.id,
-        nextPhaseId: "reviewed-target",
-        reviewer: "ken",
-        timestamp: NOW,
-      },
-    ];
-    const reviewedTarget = phase("reviewed-target", "not-started");
-    reviewedTarget.title = "Reviewed target";
-    reviewedTarget.order = 1;
-    reviewedTarget.archivedAt = NOW;
-    const fallback = phase("fallback", "not-started");
-    fallback.title = "Fallback successor";
-    fallback.order = 2;
-    fallback.overrides.status = { value: "not-started", source: "user", updatedAt: NOW };
-    document.phases = [completed, reviewedTarget, fallback];
-    client.seed(cwd, document);
-    const onStartPhase = vi.fn();
-    const onStartNextPhase = vi.fn(async () => ({
-      status: "accepted" as const,
-      operationId: "operation-recovered",
-      session: { sessionId: "session-recovered", sessionPath: "/sessions/recovered.jsonl" },
-      packageTokenCount: 42,
-    }));
-    render(
-      <ProjectNotes
-        cwd={cwd}
-        client={client}
-        onStartPhase={onStartPhase}
-        onStartNextPhase={onStartNextPhase}
-      />,
+    const history = screen.getByText(/Activity history/).closest("details")!;
+    expect(history.querySelector("summary")?.textContent).toBe(
+      `Activity history (${completed.lifecycleEvents.length + 1})`,
     );
-
-    fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
-    await selectNotesTab("Roadmap");
-    const recovery = screen.getByRole("region", { name: "Resolve target for Reviewed target" });
-    expect(recovery.textContent).toContain(
-      "Reviewed target is no longer an unbound automatic candidate.",
+    expect(history.querySelectorAll(":scope > ol > li")).toHaveLength(
+      completed.lifecycleEvents.length + 1,
     );
-    expect(
-      (screen.getByRole("button", { name: "Start next phase" }) as HTMLButtonElement).disabled,
-    ).toBe(true);
-
-    await selectNotesTab("Archive");
-    const restore = screen.getByRole("button", { name: "Restore phase: Reviewed target" });
-    expect((restore as HTMLButtonElement).disabled).toBe(false);
-    await act(async () => {
-      fireEvent.click(restore);
-    });
-    await selectNotesTab("Roadmap");
-    await screen.findByRole("region", { name: "Ready for Reviewed target" });
-    await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "Start next phase" }));
-    });
-    expect(onStartNextPhase).toHaveBeenCalledExactlyOnceWith("checkpoint-stale", "reviewed-target");
+    expect(history.textContent).not.toContain("Next phase bound automatically.");
+    expect(history.textContent).not.toContain("Start next phase confirmed.");
+    expect(history.textContent).not.toContain("Next phase advancement was authorized");
   });
 
   it("does not infer next-phase authority from an Autopilot completion review alone", async () => {

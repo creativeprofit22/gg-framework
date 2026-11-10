@@ -1,8 +1,4 @@
-import {
-  isNotesPhasePresent,
-  validateNotesPhaseDeletion,
-  type NotesPhaseDeletion,
-} from "./roadmap-phase-deletion.js";
+import { validateNotesPhaseDeletion, type NotesPhaseDeletion } from "./roadmap-phase-deletion.js";
 export * from "./roadmap-phase-deletion.js";
 import { validateRoadmapPhaseDependencies } from "./roadmap-phase-dependencies.js";
 export * from "./roadmap-phase-dependencies.js";
@@ -531,58 +527,12 @@ export interface NotesPhase {
   roadmapEvents: NotesRoadmapEvent[];
 }
 
-export type NotesRoadmapAutoStartEligibility =
-  | { kind: "none" }
-  | { kind: "unique"; phase: NotesPhase }
-  | { kind: "ambiguous"; phases: NotesPhase[] };
-
-/** Classifies the full, order-independent set of phases eligible for automatic binding. */
-export function classifyRoadmapAutoStartEligibility(
-  phases: readonly NotesPhase[],
-  completedPhaseId: string,
-): NotesRoadmapAutoStartEligibility {
-  const candidates = phases.filter(
-    (phase) =>
-      isNotesPhasePresent(phase) &&
-      phase.id !== completedPhaseId &&
-      phase.archivedAt === null &&
-      (phase.status === "not-started" || phase.status === "planning") &&
-      phase.overrides.status === null &&
-      phase.session === null,
-  );
-  if (candidates.length === 0) return { kind: "none" };
-  if (candidates.length === 1) return { kind: "unique", phase: candidates[0]! };
-  return { kind: "ambiguous", phases: candidates };
-}
-
 export function notesSessionLinksEqual(
   left: NotesSessionLink | null,
   right: NotesSessionLink | null,
 ): boolean {
   if (left === null || right === null) return left === right;
   return left.sessionId === right.sessionId && left.sessionPath === right.sessionPath;
-}
-
-/** Runtime eligibility for an explicitly selected next-phase operation, not test certification. */
-export function isNotesPhaseAdvancementSourceCurrent(
-  phase: NotesPhase,
-  checkpoint: NotesRoadmapPhaseAdvancementCheckpoint,
-): boolean {
-  return (
-    isNotesPhasePresent(phase) &&
-    !phase.deletion?.events.some(
-      (event) =>
-        event.action === "delete" &&
-        phase.roadmapEvents.findIndex((candidate) => candidate.id === checkpoint.id) <
-          event.retired.roadmapEventCount,
-    ) &&
-    phase.id === checkpoint.completedPhaseId &&
-    phase.status === "done" &&
-    phase.archivedAt === null &&
-    phase.overrides.status === null &&
-    phase.completedAt !== null &&
-    Date.parse(phase.completedAt) <= Date.parse(checkpoint.timestamp)
-  );
 }
 
 /** Legacy evidence-chain validation for persisted records only; never authorize new Done calls with it. */

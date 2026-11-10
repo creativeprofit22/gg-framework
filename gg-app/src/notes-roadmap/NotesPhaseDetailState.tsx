@@ -1,4 +1,5 @@
 import { notesAutomaticStatusAfterOverrideReset } from "@kenkaiiii/gg-core/project-notes";
+import { validateRoadmapEditDependencies } from "@kenkaiiii/gg-core/roadmap-phase-dependencies";
 import {
   createContext,
   useContext,
@@ -51,12 +52,13 @@ import {
   statusBeforeManualDone,
   unresolvedRoadmapProposals,
   type PhasePrimaryAction,
-  type RoadmapTopologyMutation,
 } from "./roadmap-presentation";
 import { notesPhaseStatusLabel } from "../notes-lifecycle-presentation";
 
 export interface NotesPhaseDetailProps {
   phase: NotesPhase;
+  /** Every stored phase, for dependency display and edit validation. */
+  phases: NotesPhase[];
   currentTime: Date;
   expectedRevision: number | null;
   expectedProjectKey: string | null;
@@ -74,7 +76,6 @@ export interface NotesPhaseDetailProps {
   onSetPhaseStatusOverride(status: NotesPhaseStatus): Promise<NotesRoadmapMutationResult>;
   onArchivePhase(): void;
   onDeletePhase?(): void;
-  isTopologyMutationBlocked(mutation: RoadmapTopologyMutation): boolean;
   onCancelPhase(): Promise<PhaseRunCancellationResult>;
   onLinkReference(referenceId: string): void;
   onUnlinkReference(referenceId: string): void;
@@ -106,7 +107,8 @@ export interface NotesPhaseDetailProps {
     phaseId: string,
     expectedOccurrenceKey: string,
   ): Promise<NotesReminderMutationResult>;
-  onStartPhase(phaseId: string): Promise<PhaseStartResult>;
+  /** Resolves null when the user cancels the prerequisite confirmation. */
+  onStartPhase(phaseId: string): Promise<PhaseStartResult | null>;
   onGetStorageDiagnostics(): Promise<ProjectNotesStorageDiagnostics>;
   onRebindPhase(request: PhaseBindingRequest): Promise<PhaseBindingOutcome>;
   onMutatePhaseLease(request: PhaseLeaseRequestV2): Promise<PhaseLeaseOutcome>;
@@ -119,9 +121,6 @@ export interface NotesPhaseDetailProps {
   onPendingChange(pending: boolean): void;
   onActionSuccess(): void;
   onReconciliationSuccess(): void;
-  /** Whether the heading action is the view's Primary button. Defaults to true;
-   *  false while another surface (the next-phase card) owns the one Primary. */
-  primaryEmphasis?: boolean;
 }
 
 export interface PhaseEditDraft {
@@ -129,9 +128,11 @@ export interface PhaseEditDraft {
   baseTitle: string;
   baseGoal: string;
   baseDoneWhen: string;
+  baseDependsOn: string[];
   title: string;
   goal: string;
   doneWhen: string;
+  dependsOn: string[];
   conflict: boolean;
 }
 
@@ -146,7 +147,6 @@ export interface ReminderDraft {
 }
 
 interface NotesPhaseDetailContextValue extends NotesPhaseDetailProps {
-  primaryEmphasis: boolean;
   editing: boolean;
   activeView: PhaseView;
   setActiveView(view: PhaseView): void;
@@ -154,6 +154,8 @@ interface NotesPhaseDetailContextValue extends NotesPhaseDetailProps {
   reminderDraft: ReminderDraft;
   reminderPresets: ReminderPresetTimes;
   customReminderError: string;
+  /** Shared dependency validation message for the drafted links; blocks Save. */
+  dependencyError: string | null;
   pending: boolean;
   pendingRoadmapAction: string | null;
   openingSourceKey: string | null;
@@ -183,7 +185,9 @@ interface NotesPhaseDetailContextValue extends NotesPhaseDetailProps {
   cancelEdit(): void;
   saveEdit(): void;
   reloadPhaseDraft(): void;
-  updatePhaseDraft(changes: Partial<Pick<PhaseEditDraft, "title" | "goal" | "doneWhen">>): void;
+  updatePhaseDraft(
+    changes: Partial<Pick<PhaseEditDraft, "title" | "goal" | "doneWhen" | "dependsOn">>,
+  ): void;
   updateReminderDraft(changes: Partial<Pick<ReminderDraft, "note" | "customValue">>): void;
   clearCustomReminderError(): void;
   reloadReminderDraft(): void;
@@ -214,6 +218,7 @@ export function NotesPhaseDetailProvider({
 }: NotesPhaseDetailProps & { children: ReactNode }): ReactNode {
   const {
     phase,
+    phases,
     currentTime,
     openSource,
     onEditPhase,
@@ -253,6 +258,14 @@ export function NotesPhaseDetailProvider({
     reminderDraft,
     phase,
     reminderFallbackValue,
+  );
+  const dependencyError = useMemo(
+    () =>
+      editing && !sameIds(effectivePhaseDraft.dependsOn, effectivePhaseDraft.baseDependsOn)
+        ? (validateRoadmapEditDependencies(phases, phase.id, effectivePhaseDraft.dependsOn)
+            ?.message ?? null)
+        : null,
+    [editing, effectivePhaseDraft.baseDependsOn, effectivePhaseDraft.dependsOn, phase.id, phases],
   );
   const primaryActionRef = useRef<HTMLButtonElement>(null);
   const authoritativeSession = phase.execution?.lastSession ?? phase.session;
@@ -323,6 +336,10 @@ export function NotesPhaseDetailProvider({
     try {
       if (effectiveAction === "Start") {
         const result = await onStartPhase(phase.id);
+        if (result === null) {
+          setActionStatus("");
+          return;
+        }
         if (result.status === "accepted") {
           setActionStatus("Phase started. Opening its planning session.");
           onActionSuccess();
@@ -515,18 +532,21 @@ export function NotesPhaseDetailProvider({
   const cancelEdit = (): void => setEditing(false);
 
   const saveEdit = (): void => {
-    if (!effectivePhaseDraft.title.trim() || effectivePhaseDraft.conflict) return;
+    if (!effectivePhaseDraft.title.trim() || effectivePhaseDraft.conflict || dependencyError) {
+      return;
+    }
+    const linksChanged = !sameIds(effectivePhaseDraft.dependsOn, effectivePhaseDraft.baseDependsOn);
     onEditPhase(phase.id, {
       title: effectivePhaseDraft.title,
       goal: effectivePhaseDraft.goal,
       doneWhen: lines(effectivePhaseDraft.doneWhen),
+      ...(linksChanged ? { dependsOn: effectivePhaseDraft.dependsOn } : {}),
     });
     setEditing(false);
   };
 
   const value: NotesPhaseDetailContextValue = {
     ...props,
-    primaryEmphasis: props.primaryEmphasis ?? true,
     editing,
     activeView,
     setActiveView,
@@ -534,6 +554,7 @@ export function NotesPhaseDetailProvider({
     reminderDraft: effectiveReminderDraft,
     reminderPresets,
     customReminderError,
+    dependencyError,
     pending,
     pendingRoadmapAction,
     openingSourceKey,
@@ -636,16 +657,23 @@ export function useNotesPhaseDetail(): NotesPhaseDetailContextValue {
   return context;
 }
 
+function sameIds(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((id, index) => id === right[index]);
+}
+
 function createPhaseEditDraft(phase: NotesPhase): PhaseEditDraft {
   const doneWhen = phase.doneWhen.join("\n");
+  const dependsOn = [...(phase.dependsOn ?? [])];
   return {
     baseUpdatedAt: phase.updatedAt,
     baseTitle: phase.title,
     baseGoal: phase.goal,
     baseDoneWhen: doneWhen,
+    baseDependsOn: dependsOn,
     title: phase.title,
     goal: phase.goal,
     doneWhen,
+    dependsOn,
     conflict: false,
   };
 }
@@ -657,11 +685,13 @@ function reconcilePhaseEditDraft(
 ): PhaseEditDraft {
   if (!editing) return createPhaseEditDraft(phase);
   const authoritativeDoneWhen = phase.doneWhen.join("\n");
+  const authoritativeDependsOn = phase.dependsOn ?? [];
   if (
     current.baseUpdatedAt === phase.updatedAt &&
     current.baseTitle === phase.title &&
     current.baseGoal === phase.goal &&
-    current.baseDoneWhen === authoritativeDoneWhen
+    current.baseDoneWhen === authoritativeDoneWhen &&
+    sameIds(current.baseDependsOn, authoritativeDependsOn)
   ) {
     return current;
   }
@@ -669,22 +699,28 @@ function reconcilePhaseEditDraft(
   const titleDirty = current.title !== current.baseTitle;
   const goalDirty = current.goal !== current.baseGoal;
   const doneWhenDirty = current.doneWhen !== current.baseDoneWhen;
+  const dependsOnDirty = !sameIds(current.dependsOn, current.baseDependsOn);
   const conflict =
     current.conflict ||
     (titleDirty && current.baseTitle !== phase.title && current.title !== phase.title) ||
     (goalDirty && current.baseGoal !== phase.goal && current.goal !== phase.goal) ||
     (doneWhenDirty &&
       current.baseDoneWhen !== authoritativeDoneWhen &&
-      current.doneWhen !== authoritativeDoneWhen);
+      current.doneWhen !== authoritativeDoneWhen) ||
+    (dependsOnDirty &&
+      !sameIds(current.baseDependsOn, authoritativeDependsOn) &&
+      !sameIds(current.dependsOn, authoritativeDependsOn));
 
   return {
     baseUpdatedAt: phase.updatedAt,
     baseTitle: phase.title,
     baseGoal: phase.goal,
     baseDoneWhen: authoritativeDoneWhen,
+    baseDependsOn: [...authoritativeDependsOn],
     title: titleDirty ? current.title : phase.title,
     goal: goalDirty ? current.goal : phase.goal,
     doneWhen: doneWhenDirty ? current.doneWhen : authoritativeDoneWhen,
+    dependsOn: dependsOnDirty ? current.dependsOn : [...authoritativeDependsOn],
     conflict,
   };
 }

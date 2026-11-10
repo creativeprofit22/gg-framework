@@ -94,6 +94,7 @@ import {
   isReminderReserveOutcome,
   type NotesClient,
   type PhaseRunCancellationResult,
+  type PhaseStartOptions,
   type PhaseStartResult,
 } from "./notes-types";
 export { isPhaseLaunchErrorEvent } from "./notes-types";
@@ -3257,8 +3258,7 @@ export interface PaneAgentClient extends NotesClient {
   selectWorkspace(target: PaneSessionTarget, expectedGeneration: number): Promise<number>;
   subscribe(onEvent: (event: SidecarEvent) => void): () => void;
   getState(): Promise<AgentState>;
-  startPhase(phaseId: string): Promise<PhaseStartResult>;
-  startNextPhase(checkpointId: string, nextPhaseId: string): Promise<PhaseStartResult>;
+  startPhase(phaseId: string, options?: PhaseStartOptions): Promise<PhaseStartResult>;
   cancelPhaseRun(phaseId: string): Promise<PhaseRunCancellationResult>;
   getRoadmapPhaseDraft(): Promise<RoadmapPhaseDraft | null>;
   approveRoadmapPhaseDraft(draftId: string): Promise<RoadmapPhaseDraftApprovalResult>;
@@ -3606,17 +3606,12 @@ export function createPaneAgentClient(paneId: string): PaneAgentClient {
       }
       return outcome;
     },
-    async startPhase(phaseId) {
-      const outcome = await call<unknown>("agent_phase_start", { phaseId });
-      if (!isPhaseStartResult(outcome)) throw new Error("invalid phase start response");
-      return outcome;
-    },
-    async startNextPhase(checkpointId, nextPhaseId) {
-      const outcome = await call<unknown>("agent_phase_advancement_start", {
-        checkpointId,
-        nextPhaseId,
+    async startPhase(phaseId, options) {
+      const outcome = await call<unknown>("agent_phase_start", {
+        phaseId,
+        confirmedPrerequisiteIds: options?.confirmedPrerequisiteIds ?? [],
       });
-      if (!isPhaseStartResult(outcome)) throw new Error("invalid next phase start response");
+      if (!isPhaseStartResult(outcome)) throw new Error("invalid phase start response");
       return outcome;
     },
     async cancelPhaseRun(phaseId) {

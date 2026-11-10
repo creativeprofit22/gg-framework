@@ -4766,3 +4766,168 @@ function failingRenameFileSystem(destinationToFail: string): {
   };
   return result;
 }
+
+describe("ProjectNotesRepository old phase advancement records", () => {
+  const LATER = "2026-07-26T09:00:00.000Z";
+  const directSession = { sessionId: "direct-source", sessionPath: "/sessions/direct.jsonl" };
+
+  async function oldAdvancementNotes(): Promise<NotesDocumentV3> {
+    const document = (await canonicalNotesFixture()) as NotesDocumentV3;
+    const reviewed = document.phases[0]!;
+    reviewed.roadmapEvents.push(
+      {
+        type: "phase-advancement-checkpoint",
+        id: "legacy-checkpoint",
+        completionReviewId: "review-schema-contract",
+        completedPhaseId: reviewed.id,
+        nextPhaseId: "phase-later",
+        reviewer: "ken-autopilot",
+        timestamp: NOW,
+      },
+      {
+        type: "phase-advancement-confirmation",
+        id: "legacy-confirmation",
+        checkpointId: "legacy-checkpoint",
+        nextPhaseId: "phase-later",
+        actor: "user",
+        operationId: "legacy-start",
+        timestamp: NOW,
+      },
+    );
+    const blank = {
+      ...structuredClone(document.phases[1]!),
+      status: "not-started" as const,
+      session: null,
+      reminder: null,
+      attentionReason: null,
+      completedAt: null,
+      archivedAt: null,
+      overrides: { status: null, referenceIds: null },
+      pendingAutomaticLifecycleTransition: null,
+      lifecycleEvents: [],
+      roadmapEvents: [],
+    };
+    document.phases.push(
+      {
+        ...structuredClone(blank),
+        id: "phase-direct-source",
+        title: "Direct source",
+        order: 2,
+        status: "done",
+        session: directSession,
+        completedAt: NOW,
+        roadmapEvents: [
+          {
+            type: "status-update",
+            id: "direct-verified",
+            actor: "gg-coder",
+            transition: "done",
+            progress: "Verified",
+            blocker: null,
+            requiredExternalAction: null,
+            evidence: ["tests passed"],
+            verification: "passed",
+            verificationReason: null,
+            verificationSession: directSession,
+            statusOutcome: "completion-pending",
+            proposedReferences: [],
+            timestamp: NOW,
+          },
+          {
+            type: "implementation-checkpoint",
+            id: "direct-implemented",
+            session: directSession,
+            planStepTotal: 1,
+            completedPlanSteps: [1],
+            runOutcome: "succeeded",
+            verificationStatusUpdateId: "direct-verified",
+            timestamp: NOW,
+          },
+          {
+            type: "phase-advancement-checkpoint",
+            id: "direct-checkpoint",
+            implementationCheckpointId: "direct-implemented",
+            verificationStatusUpdateId: "direct-verified",
+            completedPhaseId: "phase-direct-source",
+            nextPhaseId: "phase-later",
+            timestamp: NOW,
+          },
+        ],
+      },
+      { ...structuredClone(blank), id: "phase-later", title: "Later phase", order: 3 },
+    );
+    expect(validateNotesDocumentV3(document)).toMatchObject({ ok: true });
+    return document;
+  }
+
+  async function seeded(name: string) {
+    const agentDir = await tempAgentDir();
+    const cwd = path.join(agentDir, name);
+    const repository = new ProjectNotesRepository(agentDir);
+    const document = await oldAdvancementNotes();
+    const migrated = await repository.migrate(cwd, document);
+    if (migrated.status !== "ok") throw new Error(JSON.stringify(migrated));
+    return { cwd, repository, document, revision: migrated.snapshot.revision };
+  }
+
+  const eventsById = (document: NotesDocumentV3) =>
+    Object.fromEntries(document.phases.map((phase) => [phase.id, phase.roadmapEvents]));
+
+  it("loads, saves and reloads old checkpoints and confirmations unchanged", async () => {
+    const { cwd, repository, document, revision } = await seeded("old-advancement-round-trip");
+    const loaded = await repository.load(cwd);
+    if (loaded.status !== "ok") throw new Error(loaded.status);
+    expect(eventsById(loaded.snapshot.document)).toEqual(eventsById(document));
+    const saved = await repository.save(cwd, revision, structuredClone(loaded.snapshot.document));
+    expect(saved).toMatchObject({ status: "ok" });
+    const reloaded = await repository.load(cwd);
+    if (reloaded.status !== "ok") throw new Error(reloaded.status);
+    expect(eventsById(reloaded.snapshot.document)).toEqual(eventsById(document));
+  });
+
+  it("deletes the phase holding an old direct checkpoint and keeps valid Notes", async () => {
+    const { cwd, repository, document, revision } = await seeded("old-advancement-delete");
+    const source = document.phases.find((phase) => phase.id === "phase-direct-source")!;
+    await expect(
+      repository.mutatePhaseDeletion(
+        cwd,
+        {
+          version: 1,
+          action: "delete",
+          operationId: "delete-direct-source",
+          phaseId: source.id,
+          expectedProjectKey: canonicalProjectKey(cwd),
+          expectedRevision: revision,
+          expectedGeneration: 0,
+        },
+        async () => null,
+        LATER,
+      ),
+    ).resolves.toMatchObject({ status: "committed" });
+    const loaded = await repository.load(cwd);
+    if (loaded.status !== "ok") throw new Error(loaded.status);
+    expect(validateNotesDocumentV3(loaded.snapshot.document)).toMatchObject({ ok: true });
+    const stored = loaded.snapshot.document.phases.find((phase) => phase.id === source.id)!;
+    expect(stored.deletion?.currentDeletionId).toEqual(expect.any(String));
+    expect(stored.roadmapEvents).toEqual(source.roadmapEvents);
+  });
+
+  it("marks a later phase Done by hand and reopens it with valid Notes", async () => {
+    const { cwd, repository, document } = await seeded("old-advancement-reopen");
+    for (const status of ["done", "in-progress"] as const) {
+      await expect(
+        repository.recordUserPhaseStatusOverride(cwd, {
+          version: 1,
+          phaseId: "phase-later",
+          status,
+          expectedRevision: null,
+          timestamp: status === "done" ? LATER : "2026-07-26T10:00:00.000Z",
+        }),
+      ).resolves.toMatchObject({ status: "committed", resultingStatus: status });
+    }
+    const loaded = await repository.load(cwd);
+    if (loaded.status !== "ok") throw new Error(loaded.status);
+    expect(validateNotesDocumentV3(loaded.snapshot.document)).toMatchObject({ ok: true });
+    expect(eventsById(loaded.snapshot.document)).toEqual(eventsById(document));
+  });
+});

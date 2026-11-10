@@ -22,9 +22,6 @@ import {
   canonicalProjectKey,
   canonicalReferenceIdentity,
   classifyLegacyNotesLifecycleEvent,
-  classifyRoadmapAutoStartEligibility,
-  isNotesPhaseAdvancementSourceCurrent,
-  isNotesDirectCompletionAuthority,
   isNotesLifecycleEventSource,
   isNotesPhaseStatus,
   isNotesReminderDeliveryChannel,
@@ -53,8 +50,6 @@ import {
   type NotesRoadmapActor,
   type NotesRoadmapBlockerResolution,
   type NotesRoadmapImplementationCheckpoint,
-  type NotesRoadmapPhaseAdvancementCheckpoint,
-  type NotesRoadmapPhaseAdvancementConfirmation,
   type NotesRoadmapPhaseBinding,
   type NotesRoadmapReferencePolicyOutcome,
   type NotesRoadmapReferenceProposal,
@@ -82,6 +77,8 @@ import {
   hasRoadmapPhaseDependencyLinks,
   listUnfinishedPrerequisites,
   phaseDeletionDependencyConflict,
+  phaseStartPrerequisiteConfirmation,
+  type PhaseStartPrerequisite,
 } from "@kenkaiiii/gg-core/roadmap-phase-dependencies";
 export * from "@kenkaiiii/gg-core/project-notes";
 import {
@@ -179,7 +176,7 @@ export type ProjectNotesPhaseLaunchOutcome =
   | { status: "phase-not-found" }
   | { status: "phase-archived" }
   | { status: "done-terminal" }
-  | { status: "advancement-confirmation-required"; checkpointId: string }
+  | { status: "prerequisites-confirmation-required"; prerequisites: PhaseStartPrerequisite[] }
   | { status: "missing" }
   | ProjectNotesUnsupportedFormat
   | (ProjectNotesCorruption & { status: "corrupt" });
@@ -194,58 +191,6 @@ export interface ProjectNotesPhaseBindingRequest {
   destinationSession: NotesSessionLink;
   timestamp: string;
 }
-
-export interface ProjectNotesPhaseAdvancementStartRequest {
-  checkpointId: string;
-  nextPhaseId: string;
-  action: "start-next-phase";
-  operationId: string;
-}
-
-export type ProjectNotesPhaseAdvancementStartOutcome =
-  | Extract<ProjectNotesPhaseLaunchOutcome, { status: "accepted" | "already-bound" }>
-  | {
-      status: "stale";
-      reason:
-        | "checkpoint-not-found"
-        | "checkpoint-confirmed"
-        | "completion-not-authoritative"
-        | "target-mismatch"
-        | "target-ineligible";
-    }
-  | { status: "invalid-confirmation" }
-  | { status: "missing" }
-  | ProjectNotesUnsupportedFormat
-  | (ProjectNotesCorruption & { status: "corrupt" });
-
-export interface ProjectNotesAutomaticPhaseAdvancementRequest {
-  checkpointId: string;
-  expectedRevision: number;
-  destinationSession: NotesSessionLink;
-  timestamp: string;
-}
-
-export type ProjectNotesAutomaticPhaseAdvancementOutcome =
-  | (Extract<ProjectNotesPhaseLaunchOutcome, { status: "accepted" | "already-bound" }> & {
-      operationId: string;
-    })
-  | {
-      status: "stale";
-      reason:
-        | "checkpoint-not-found"
-        | "checkpoint-confirmed"
-        | "manual-confirmation-required"
-        | "completion-not-authoritative"
-        | "target-mismatch"
-        | "target-ineligible"
-        | "stale-revision"
-        | "session-mismatch"
-        | "session-in-use";
-    }
-  | { status: "invalid-confirmation" }
-  | { status: "missing" }
-  | ProjectNotesUnsupportedFormat
-  | (ProjectNotesCorruption & { status: "corrupt" });
 
 export type ProjectNotesPhaseLinkOutcome =
   | { status: "ok"; snapshot: ProjectNotesSnapshot; phase: NotesPhase }
@@ -1028,7 +973,13 @@ function recordUserDependencyOverride(
   const unfinished = listUnfinishedPrerequisites(document.phases, phase.id) ?? [];
   if (unfinished.length === 0) return null;
   const existing = findCurrentDependencyOverride(phase);
-  if (existing && notesSessionLinksEqual(existing.session, session)) return null;
+  if (
+    existing &&
+    notesSessionLinksEqual(existing.session, session) &&
+    unfinished.every((prerequisite) => existing.unfinishedPrerequisiteIds.includes(prerequisite.id))
+  ) {
+    return null;
+  }
   const timestamp = chronologicalRoadmapTimestamp(phase, requested);
   phase.roadmapEvents.push({
     type: "dependency-override",
@@ -1193,102 +1144,6 @@ function validateImplementationCheckpointRequest(
   return validateSession(request.expectedSession, "expectedSession")?.message ?? null;
 }
 
-function orderedRoadmapPhaseIndexes(document: NotesDocumentV3): number[] {
-  return document.phases
-    .map((phase, documentIndex) => ({ phase, documentIndex }))
-    .sort(
-      (left, right) =>
-        left.phase.order - right.phase.order || left.documentIndex - right.documentIndex,
-    )
-    .map(({ documentIndex }) => documentIndex);
-}
-
-function isAdvancementCheckpointConfirmed(phase: NotesPhase, checkpointId: string): boolean {
-  return phase.roadmapEvents.some(
-    (event) =>
-      event.type === "phase-advancement-confirmation" && event.checkpointId === checkpointId,
-  );
-}
-
-interface PendingAdvancementAuthority {
-  source: NotesPhase;
-  checkpoint: NotesRoadmapPhaseAdvancementCheckpoint;
-}
-
-function pendingAdvancementAuthorities(document: NotesDocumentV3): PendingAdvancementAuthority[] {
-  const authorities: PendingAdvancementAuthority[] = [];
-  for (const source of document.phases) {
-    for (const event of source.roadmapEvents) {
-      if (
-        event.type === "phase-advancement-checkpoint" &&
-        !isAdvancementCheckpointConfirmed(source, event.id)
-      ) {
-        authorities.push({ source, checkpoint: event });
-      }
-    }
-  }
-  return authorities;
-}
-
-function pendingAdvancementCheckpointForSuccessor(
-  document: NotesDocumentV3,
-  phaseId: string,
-): NotesRoadmapPhaseAdvancementCheckpoint | null {
-  const orderedIndexes = orderedRoadmapPhaseIndexes(document);
-  const candidateOrderIndex = orderedIndexes.findIndex(
-    (documentIndex) => document.phases[documentIndex]!.id === phaseId,
-  );
-  if (candidateOrderIndex < 0) return null;
-  for (const authority of pendingAdvancementAuthorities(document)) {
-    const sourceOrderIndex = orderedIndexes.findIndex(
-      (documentIndex) => document.phases[documentIndex]!.id === authority.source.id,
-    );
-    if (sourceOrderIndex >= 0 && candidateOrderIndex > sourceOrderIndex) {
-      return authority.checkpoint;
-    }
-  }
-  return null;
-}
-
-function isCompletionCheckpointAuthoritative(
-  source: NotesPhase,
-  checkpoint: NotesRoadmapPhaseAdvancementCheckpoint,
-): boolean {
-  // Legacy persisted direct checkpoints must retain their evidence-chain integrity.
-  // This does not authorize new Done calls or impose transcript certification on runs.
-  return (
-    isNotesPhaseAdvancementSourceCurrent(source, checkpoint) &&
-    (!("implementationCheckpointId" in checkpoint) ||
-      isNotesDirectCompletionAuthority(source, checkpoint))
-  );
-}
-
-function selectNextEligibleRoadmapPhaseIndexForCheckpoint(
-  document: NotesDocumentV3,
-  checkpoint: NotesRoadmapPhaseAdvancementCheckpoint,
-): number | null {
-  const source = document.phases.find((phase) => phase.id === checkpoint.completedPhaseId);
-  if (!source || !isCompletionCheckpointAuthoritative(source, checkpoint)) return null;
-  const eligibility = classifyRoadmapAutoStartEligibility(
-    document.phases,
-    checkpoint.completedPhaseId,
-  );
-  return eligibility.kind === "unique"
-    ? document.phases.findIndex((phase) => phase.id === eligibility.phase.id)
-    : null;
-}
-
-function selectedAdvancementTargetId(
-  document: NotesDocumentV3,
-  authority: PendingAdvancementAuthority,
-): string | null {
-  const targetIndex = selectNextEligibleRoadmapPhaseIndexForCheckpoint(
-    document,
-    authority.checkpoint,
-  );
-  return targetIndex === null ? null : document.phases[targetIndex]!.id;
-}
-
 /** Generic saves cannot remove phase identities or manufacture deletion authority. */
 function validateGenericSaveDeletionAuthority(
   previous: NotesDocumentV3,
@@ -1334,29 +1189,6 @@ function validateGenericSaveDeletionAuthority(
   return null;
 }
 
-function validateGenericSaveAdvancementAuthority(
-  previous: NotesDocumentV3,
-  next: NotesDocumentV3,
-): NotesValidationError | null {
-  for (const authority of pendingAdvancementAuthorities(previous)) {
-    const previousTargetId = selectedAdvancementTargetId(previous, authority);
-    const nextSource = next.phases.find((phase) => phase.id === authority.source.id);
-    if (!nextSource) continue;
-    const nextAuthority = { source: nextSource, checkpoint: authority.checkpoint };
-    const nextTargetId = selectedAdvancementTargetId(next, nextAuthority);
-    const expectedTargetId = authority.checkpoint.nextPhaseId;
-    const preservesCurrentTarget = nextTargetId === previousTargetId;
-    const recoversCheckpointTarget = nextTargetId === expectedTargetId;
-    if (!preservesCurrentTarget && !recoversCheckpointTarget) {
-      return validationError(
-        "phases",
-        `Roadmap topology is protected by pending advancement checkpoint ${authority.checkpoint.id}; keep ${expectedTargetId} as the first eligible successor or restore it before changing the target`,
-      );
-    }
-  }
-  return null;
-}
-
 /** Authority checks shared by generic UI saves and approved phase edits, in fixed order. */
 function validateGenericSaveTransition(
   previous: NotesDocumentV3,
@@ -1370,8 +1202,7 @@ function validateGenericSaveTransition(
     validateGenericSaveEventSuffixes(previous, next) ??
     validateGenericSaveCompletionAuthority(previous, next) ??
     validateGenericSavePendingLifecycleAuthority(previous, next) ??
-    validateGenericSaveReminderAuthority(previous, next) ??
-    validateGenericSaveAdvancementAuthority(previous, next)
+    validateGenericSaveReminderAuthority(previous, next)
   );
 }
 
@@ -1638,14 +1469,6 @@ export class ProjectNotesRepository {
               status: "refused",
               reason: request.action === "delete" ? "already-deleted" : "not-deleted",
               message: "The phase is no longer in the state you confirmed.",
-            };
-          // User-approved replacement for the absent snapshot-based topology guard.
-          if (pendingAdvancementAuthorities(current.document).length > 0)
-            return {
-              status: "refused",
-              reason: "protected-advancement",
-              message:
-                "Resolve the pending next-phase decision before deleting or recovering a phase.",
             };
           if (
             phase.execution?.state === "needs-reconciliation" ||
@@ -2683,191 +2506,31 @@ export class ProjectNotesRepository {
     });
   }
 
-  async confirmAutomaticPhaseAdvancement(
-    cwd: string,
-    request: ProjectNotesAutomaticPhaseAdvancementRequest,
-  ): Promise<ProjectNotesAutomaticPhaseAdvancementOutcome> {
-    if (
-      !request.checkpointId.trim() ||
-      !Number.isSafeInteger(request.expectedRevision) ||
-      request.expectedRevision < 0 ||
-      !request.destinationSession.sessionId.trim() ||
-      request.destinationSession.sessionPath === null ||
-      !request.destinationSession.sessionPath.trim() ||
-      !Number.isFinite(Date.parse(request.timestamp))
-    ) {
-      return { status: "invalid-confirmation" };
-    }
-    return this.withLockedCurrent(cwd, (paths, current) =>
-      this.confirmAutomaticPhaseAdvancementLocked(paths, current, request),
-    );
-  }
-
-  async confirmPhaseAdvancement(
-    cwd: string,
-    request: ProjectNotesPhaseAdvancementStartRequest,
-    createBinding: (context: FrozenPhaseLaunchContext) => Promise<NotesSessionLink>,
-  ): Promise<ProjectNotesPhaseAdvancementStartOutcome> {
-    if (
-      request.action !== "start-next-phase" ||
-      !request.checkpointId.trim() ||
-      !request.nextPhaseId.trim() ||
-      !request.operationId.trim()
-    ) {
-      return { status: "invalid-confirmation" };
-    }
-    return this.withLockedCurrent(cwd, async (paths, current) => {
-      let sourcePhaseIndex = -1;
-      let checkpoint: NotesRoadmapPhaseAdvancementCheckpoint | undefined;
-      for (let index = 0; index < current.document.phases.length; index += 1) {
-        const candidate = current.document.phases[index]!.roadmapEvents.find(
-          (event): event is NotesRoadmapPhaseAdvancementCheckpoint =>
-            event.type === "phase-advancement-checkpoint" && event.id === request.checkpointId,
-        );
-        if (candidate) {
-          sourcePhaseIndex = index;
-          checkpoint = candidate;
-          break;
-        }
-      }
-      if (!checkpoint || sourcePhaseIndex < 0) {
-        return { status: "stale", reason: "checkpoint-not-found" };
-      }
-      if (checkpoint.nextPhaseId !== request.nextPhaseId) {
-        return { status: "stale", reason: "target-mismatch" };
-      }
-      const sourcePhase = current.document.phases[sourcePhaseIndex]!;
-      const existingConfirmation = sourcePhase.roadmapEvents.find(
-        (event): event is NotesRoadmapPhaseAdvancementConfirmation =>
-          event.type === "phase-advancement-confirmation" && event.checkpointId === checkpoint.id,
-      );
-      const targetPhase = current.document.phases.find(
-        (phase) => phase.id === checkpoint.nextPhaseId,
-      );
-      if (existingConfirmation) {
-        if (targetPhase && targetPhase.session && targetPhase.session.sessionPath !== null) {
-          const { references } = phaseLaunchContext(current.document, targetPhase);
-          return {
-            status: "already-bound",
-            snapshot: toSnapshot(current),
-            phase: structuredClone(targetPhase),
-            references: structuredClone(references),
-            session: { ...targetPhase.session },
-          };
-        }
-        return { status: "stale", reason: "checkpoint-confirmed" };
-      }
-      const nextPhaseIndex = selectNextEligibleRoadmapPhaseIndexForCheckpoint(
-        current.document,
-        checkpoint,
-      );
-      if (nextPhaseIndex === null) {
-        return {
-          status: "stale",
-          reason: isCompletionCheckpointAuthoritative(sourcePhase, checkpoint)
-            ? "target-ineligible"
-            : "completion-not-authoritative",
-        };
-      }
-      const currentTarget = current.document.phases[nextPhaseIndex]!;
-      if (currentTarget.id !== checkpoint.nextPhaseId) {
-        return { status: "stale", reason: "target-mismatch" };
-      }
-      const { references } = phaseLaunchContext(current.document, currentTarget);
-      const frozen: FrozenPhaseLaunchContext = {
-        projectKey: current.projectKey,
-        phase: structuredClone(currentTarget),
-        references: structuredClone(references),
-      };
-      const session = await createBinding(frozen);
-      if (
-        !session.sessionId.trim() ||
-        (session.sessionPath !== null && !session.sessionPath.trim())
-      ) {
-        throw new Error("Phase binding callback returned an invalid session link.");
-      }
-
-      const document = structuredClone(current.document);
-      const source = document.phases[sourcePhaseIndex]!;
-      const boundPhase = document.phases[nextPhaseIndex]!;
-      const requestedTimestamp = new Date().toISOString();
-      const confirmationTimestamp = chronologicalRoadmapTimestamp(source, requestedTimestamp);
-      source.roadmapEvents.push({
-        type: "phase-advancement-confirmation",
-        id: this.createId(),
-        checkpointId: checkpoint.id,
-        nextPhaseId: checkpoint.nextPhaseId,
-        actor: "user",
-        operationId: request.operationId,
-        timestamp: confirmationTimestamp,
-      });
-      source.updatedAt = confirmationTimestamp;
-      boundPhase.session = { ...session };
-      const lifecycleTimestamp = chronologicalLifecycleTimestamp(boundPhase, requestedTimestamp);
-      const transition = applyPhaseLifecycleTransition(
-        boundPhase,
-        {
-          status: "planning",
-          source: "user",
-          reason: "Next phase started after explicit human confirmation",
-          timestamp: lifecycleTimestamp,
-          kind: "other",
-        },
-        this.createId,
-      );
-      if (transition !== "updated") boundPhase.updatedAt = lifecycleTimestamp;
-      const overrideTimestamp = recordUserDependencyOverride(
-        document,
-        nextPhaseIndex,
-        session,
-        lifecycleTimestamp,
-        this.createId,
-      );
-      document.updatedAt = [
-        confirmationTimestamp,
-        lifecycleTimestamp,
-        overrideTimestamp,
-      ].reduce<string>(
-        (latest, value) =>
-          value !== null && Date.parse(value) > Date.parse(latest) ? value : latest,
-        confirmationTimestamp,
-      );
-      const next = await this.commitDocument(paths, current, document, {
-        validationMode: "validated",
-        context: "Phase advancement confirmation created invalid Notes",
-      });
-      return {
-        status: "accepted",
-        snapshot: toSnapshot(next),
-        phase: structuredClone(boundPhase),
-        references: structuredClone(references),
-        session: { ...session },
-      };
-    });
-  }
-
   async launchPhase(
     cwd: string,
     phaseId: string,
     createBinding: (context: FrozenPhaseLaunchContext) => Promise<NotesSessionLink>,
+    options: { confirmedPrerequisiteIds?: readonly string[] } = {},
   ): Promise<ProjectNotesPhaseLaunchOutcome> {
     return this.withLockedCurrent(cwd, async (paths, current) => {
       const phaseIndex = current.document.phases.findIndex((phase) => phase.id === phaseId);
       if (phaseIndex < 0) return { status: "phase-not-found" };
       const currentPhase = current.document.phases[phaseIndex]!;
       if (isNotesPhaseDeleted(currentPhase)) return { status: "phase-not-found" };
-      const pendingAdvancement = pendingAdvancementCheckpointForSuccessor(
-        current.document,
-        phaseId,
-      );
-      if (pendingAdvancement) {
-        return {
-          status: "advancement-confirmation-required",
-          checkpointId: pendingAdvancement.id,
-        };
-      }
       if (currentPhase.archivedAt !== null) return { status: "phase-archived" };
       if (currentPhase.status === "done") return { status: "done-terminal" };
+      // Re-checked inside the lock so a confirmation made against older Notes asks again.
+      const confirmation = phaseStartPrerequisiteConfirmation(
+        current.document.phases,
+        phaseId,
+        options.confirmedPrerequisiteIds ?? [],
+      );
+      if (confirmation) {
+        return {
+          status: "prerequisites-confirmation-required",
+          prerequisites: confirmation.prerequisites,
+        };
+      }
       const { references } = phaseLaunchContext(current.document, currentPhase);
       if (currentPhase.session && currentPhase.session.sessionPath !== null) {
         const document = structuredClone(current.document);
@@ -3244,14 +2907,6 @@ export class ProjectNotesRepository {
           kind: "other",
         });
         document.updatedAt = timestamp;
-        if (validateGenericSaveAdvancementAuthority(current.document, document) !== null) {
-          return {
-            status: "refused",
-            reason: "protected-advancement",
-            message:
-              "A pending phase advancement depends on this phase. Finish or resolve it first.",
-          };
-        }
         const next = await this.commitDocument(paths, current, document, {
           validationMode: "validated",
           context: "User phase status override commit",
@@ -3404,153 +3059,6 @@ export class ProjectNotesRepository {
       });
       return { status: "ok", snapshot: toSnapshot(next), phase: structuredClone(phase) };
     });
-  }
-
-  private async confirmAutomaticPhaseAdvancementLocked(
-    paths: ProjectNotesPaths,
-    current: StoredProjectNotes,
-    request: ProjectNotesAutomaticPhaseAdvancementRequest,
-  ): Promise<ProjectNotesAutomaticPhaseAdvancementOutcome> {
-    const operationId = `automatic-phase-advancement:${request.checkpointId}`;
-    const sourcePhaseIndex = current.document.phases.findIndex((phase) =>
-      phase.roadmapEvents.some(
-        (event) =>
-          event.type === "phase-advancement-checkpoint" && event.id === request.checkpointId,
-      ),
-    );
-    if (sourcePhaseIndex < 0) return { status: "stale", reason: "checkpoint-not-found" };
-    const sourcePhase = current.document.phases[sourcePhaseIndex]!;
-    const checkpoint = sourcePhase.roadmapEvents.find(
-      (event): event is NotesRoadmapPhaseAdvancementCheckpoint =>
-        event.type === "phase-advancement-checkpoint" && event.id === request.checkpointId,
-    )!;
-    if ("completionReviewId" in checkpoint && checkpoint.reviewer !== "ken-autopilot") {
-      return { status: "stale", reason: "manual-confirmation-required" };
-    }
-    if (!isCompletionCheckpointAuthoritative(sourcePhase, checkpoint)) {
-      return { status: "stale", reason: "completion-not-authoritative" };
-    }
-    if (!notesSessionLinksEqual(sourcePhase.session, request.destinationSession)) {
-      return { status: "stale", reason: "session-mismatch" };
-    }
-
-    const sameSessionId = current.document.phases.filter(
-      (phase) => phase.session?.sessionId === request.destinationSession.sessionId,
-    );
-    if (
-      sameSessionId.some(
-        (phase) => phase.session?.sessionPath !== request.destinationSession.sessionPath,
-      )
-    ) {
-      return { status: "stale", reason: "session-mismatch" };
-    }
-    const existingConfirmation = sourcePhase.roadmapEvents.find(
-      (event): event is NotesRoadmapPhaseAdvancementConfirmation =>
-        event.type === "phase-advancement-confirmation" && event.checkpointId === checkpoint.id,
-    );
-    const targetPhase = current.document.phases.find(
-      (phase) => phase.id === checkpoint.nextPhaseId,
-    );
-    if (existingConfirmation) {
-      const eligible = current.document.phases.filter(
-        (phase) =>
-          phase.id !== sourcePhase.id &&
-          !isNotesPhaseDeleted(phase) &&
-          phase.archivedAt === null &&
-          (phase.status === "not-started" || phase.status === "planning") &&
-          phase.overrides.status === null &&
-          (phase.session === null ||
-            (phase.id === checkpoint.nextPhaseId &&
-              notesSessionLinksEqual(phase.session, request.destinationSession))),
-      );
-      const activeLinks = sameSessionId.filter(
-        (phase) =>
-          !isNotesPhaseDeleted(phase) &&
-          phase.archivedAt === null &&
-          phase.status !== "done" &&
-          phase.status !== "cancelled",
-      );
-      if (
-        existingConfirmation.actor !== "system" ||
-        existingConfirmation.operationId !== operationId ||
-        !targetPhase ||
-        !notesSessionLinksEqual(targetPhase.session, request.destinationSession) ||
-        eligible.length !== 1 ||
-        eligible[0]!.id !== targetPhase.id ||
-        activeLinks.length !== 1 ||
-        activeLinks[0]!.id !== targetPhase.id
-      ) {
-        return { status: "stale", reason: "checkpoint-confirmed" };
-      }
-      const { references } = phaseLaunchContext(current.document, targetPhase);
-      return {
-        status: "already-bound",
-        operationId,
-        snapshot: toSnapshot(current),
-        phase: structuredClone(targetPhase),
-        references: structuredClone(references),
-        session: { ...request.destinationSession },
-      };
-    }
-    if (current.revision !== request.expectedRevision) {
-      return { status: "stale", reason: "stale-revision" };
-    }
-    const targetIndex = selectNextEligibleRoadmapPhaseIndexForCheckpoint(
-      current.document,
-      checkpoint,
-    );
-    if (targetIndex === null) return { status: "stale", reason: "target-ineligible" };
-    const currentTarget = current.document.phases[targetIndex]!;
-    if (currentTarget.id !== checkpoint.nextPhaseId) {
-      return { status: "stale", reason: "target-mismatch" };
-    }
-    // Autopilot has nobody to ask: unfinished prerequisites leave the start to the user.
-    if ((listUnfinishedPrerequisites(current.document.phases, currentTarget.id) ?? []).length > 0) {
-      return { status: "stale", reason: "target-ineligible" };
-    }
-    if (
-      sameSessionId.some(
-        (phase) =>
-          phase.id !== sourcePhase.id &&
-          !isNotesPhaseDeleted(phase) &&
-          phase.archivedAt === null &&
-          phase.status !== "done" &&
-          phase.status !== "cancelled",
-      )
-    ) {
-      return { status: "stale", reason: "session-in-use" };
-    }
-
-    const document = structuredClone(current.document);
-    const source = document.phases[sourcePhaseIndex]!;
-    const boundPhase = document.phases[targetIndex]!;
-    const timestamp = chronologicalRoadmapTimestamp(source, request.timestamp);
-    source.roadmapEvents.push({
-      type: "phase-advancement-confirmation",
-      id: this.createId(),
-      checkpointId: checkpoint.id,
-      nextPhaseId: checkpoint.nextPhaseId,
-      actor: "system",
-      operationId,
-      timestamp,
-    });
-    source.updatedAt = timestamp;
-    boundPhase.session = { ...request.destinationSession };
-    boundPhase.updatedAt = timestamp;
-    document.updatedAt = timestamp;
-    const next = await this.commitDocument(paths, current, document, {
-      validationMode: "validated",
-      context: "Automatic phase advancement created invalid Notes",
-    });
-    const { references } = phaseLaunchContext(document, boundPhase);
-    return {
-      status: "accepted",
-      operationId,
-      snapshot: toSnapshot(next),
-      phase: structuredClone(boundPhase),
-      references: structuredClone(references),
-      session: { ...request.destinationSession },
-    };
   }
 
   private async withLockedCurrent<T>(

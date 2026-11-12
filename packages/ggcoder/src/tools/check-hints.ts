@@ -81,7 +81,7 @@ export function overloadHint(output: string, budgetSummary?: string): string {
   return (
     "[Many tests failed only by timing out; the machine may have been overloaded. " +
     "Run fewer checks at once or see the machine-profile defaults in docs/harness-checks.md " +
-    "before raising timeouts." +
+    "before raising timeouts. Rerun only the failing test file once, not the full suite." +
     (budgetSummary
       ? ` Concurrency budget here: ${budgetSummary}; see ` +
         "docs/harness-checks.md#machine-profile-defaults (setting `concurrencyBudget`)."

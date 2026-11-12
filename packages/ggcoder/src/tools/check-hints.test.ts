@@ -61,6 +61,7 @@ describe("overloadHint", () => {
     const hint = overloadHint(vitestTimeouts);
     expect(hint).toContain("the machine may have been overloaded");
     expect(hint).toContain("machine-profile defaults in docs/harness-checks.md");
+    expect(hint).toContain("Rerun only the failing test file once, not the full suite.");
     expect(hint.endsWith("]\n")).toBe(true);
   });
 

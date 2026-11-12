@@ -53,7 +53,9 @@ pnpm monorepo for GG Coder: a multi-provider coding agent shipped as the `ggcode
 
 - Per commit / while working: run `pnpm --filter gg-app check`, `lint`, `format:check`, plus only the tests covering the files changed. Run each standalone and unpiped (no `| tail`, `| head`, `| grep`; piped output can look idle and get killed). Don't re-run a check that already passed unless a file changed since.
 - Change only inside one `packages/<name>`: run `pnpm --filter @kenkaiiii/<name> check`, `pnpm exec eslint <changed files>`, `pnpm exec prettier --check <changed files>`, and `pnpm --filter @kenkaiiii/<name> exec vitest run <test files>` for `src/**` tests. `scripts/*.test.mjs` files are node:test, not vitest: run `node --test <file>` or the matching root `pnpm test:<name>` script. Skip root `lint`/`check`.
-- Full `pnpm test` only before a release, a distributable Local Fork rebuild, or an upstream sync, OR when the change touches cross-area code: gg-core contracts, Rust/Tauri, the daemon, auth, build/packaging/sidecar scripts.
+- Cross-area changes (gg-core contracts, Rust/Tauri, the daemon, auth, build/packaging/sidecar scripts) run the affected packages' `test` scripts; gg-core contract changes also run the ggcoder and gg-app tests.
+- Full `pnpm test` only before a release, a distributable Local Fork rebuild, or an upstream sync. Run full `pnpm test` at most once per change.
+- After a timeout-only or timing failure, rerun just that one file once; never rerun the full suite to confirm it. Local vitest runs don't retry `alone` tests (ggcoder's `alone` tests retry twice on CI via `scripts/test-support/retry-policy.mjs`; gg-app's never retry).
 - When skipping the full run, say so in the report and name the scoped tests that were run instead.
 - Test runs get their own temp folder (`ggt-*`, via `scripts/test-support/run-temp.mjs` in every vitest `globalSetup` and `with-run-temp.mjs` for root `node --test` scripts), so `os.tmpdir()` in tests is not the system temp. `node scripts/test-support/clean-legacy-temp.mjs` only lists leftovers; `--apply` deletes and needs the user's approval.
 

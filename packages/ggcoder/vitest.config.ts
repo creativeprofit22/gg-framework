@@ -1,4 +1,5 @@
 import { defineConfig } from "vitest/config";
+import { isCi, LOCAL_FLAKY_NAMES, retryCount } from "../../scripts/test-support/retry-policy.mjs";
 
 export default defineConfig({
   test: {
@@ -25,14 +26,20 @@ export default defineConfig({
     hookTimeout: 20_000,
     // Tests tagged "alone" are skipped by test:windows-serial and run by
     // test:alone with nothing else active (cold CLI start under load).
-    // Process-kill timing still races a busy Windows host, so these retry; a
-    // check that always fails still fails.
+    // Only CI retries them (process-kill timing races a busy runner); locally a
+    // failure runs once so it reproduces. The config process sees the real CI.
     tags: [
       {
         name: "alone",
         description: "Timing-sensitive; run by itself via test:alone.",
-        retry: 2,
+        retry: retryCount({ ci: isCi(process.env), name: "alone", flakyNames: LOCAL_FLAKY_NAMES }),
       },
+      // "alone" is already defined above; a duplicate tag definition would clash.
+      ...LOCAL_FLAKY_NAMES.filter((name) => name !== "alone").map((name) => ({
+        name,
+        description: "Known flaky; retries once locally.",
+        retry: retryCount({ ci: isCi(process.env), name, flakyNames: LOCAL_FLAKY_NAMES }),
+      })),
     ],
   },
 });

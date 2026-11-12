@@ -99,7 +99,14 @@ export default defineConfig({
       },
       {
         extends: true,
-        test: { name: "heavy", include: HEAVY_TEST_FILES },
+        // Phase-1 baseline: slowest default-limit heavy test took 5.15 s (one
+        // failure at 5.6 s), so allow ~3x that; hooks get 3x the default.
+        test: {
+          name: "heavy",
+          include: HEAVY_TEST_FILES,
+          testTimeout: 15_000,
+          hookTimeout: 30_000,
+        },
       },
     ],
   },

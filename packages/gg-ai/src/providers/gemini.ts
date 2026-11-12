@@ -15,7 +15,9 @@ import { downgradeUnsupportedImages, downgradeUnsupportedVideos } from "./transf
 import { resolveToolSchema } from "../utils/zod-to-json-schema.js";
 import { isJsonObject } from "../utils/json.js";
 import { readSseStream } from "../utils/sse.js";
+import { providerFetch } from "../utils/provider-fetch.js";
 import { getEnvironment } from "../utils/env.js";
+import { mergeProviderOptions } from "../utils/provider-options.js";
 
 const DEFAULT_CODE_ASSIST_BASE_URL = "https://cloudcode-pa.googleapis.com";
 const CODE_ASSIST_API_VERSION = "v1internal";
@@ -24,15 +26,25 @@ const GEMINI_CLI_API_CLIENT = "gemini-cli/0.0.0";
 const CODE_ASSIST_NON_STREAMING_RETRIES = 3;
 const CODE_ASSIST_NON_STREAMING_RETRY_DELAY_MS = 1_000;
 const SYNTHETIC_THOUGHT_SIGNATURE = "skip_thought_signature_validator";
+// Mirrors VALID_GEMINI_MODELS in the official gemini-cli
+// (packages/core/src/config/models.ts). Preview flash-lite went GA and was
+// renamed to `gemini-3.1-flash-lite`; `gemini-3.5-flash` (and its backend alias
+// `gemini-3-flash`) are now served over Code Assist. `gemini-3.7-flash` stays
+// accepted for old sessions only: Google deprecated it on 2026-10-08 and
+// routes it to 3.8 Flash, so it is no longer in the model registry.
 const CODE_ASSIST_SUPPORTED_MODELS = new Set([
   "gemini-3-pro-preview",
   "gemini-3.1-pro-preview",
   "gemini-3.1-pro-preview-customtools",
   "gemini-3-flash-preview",
-  "gemini-3.1-flash-lite-preview",
+  "gemini-3.5-flash",
+  "gemini-3-flash",
+  "gemini-3.1-flash-lite",
+  "gemini-3.7-flash",
+  "gemini-3.8-flash",
+  "gemini-3.5-flash-lite",
   "gemini-2.5-pro",
   "gemini-2.5-flash",
-  "gemini-2.5-flash-lite",
   "gemma-4-31b-it",
   "gemma-4-26b-a4b-it",
 ]);
@@ -68,10 +80,7 @@ interface GeminiFunctionResponsePart {
 }
 
 type GeminiPart =
-  | GeminiTextPart
-  | GeminiInlineDataPart
-  | GeminiFunctionCallPart
-  | GeminiFunctionResponsePart;
+  GeminiTextPart | GeminiInlineDataPart | GeminiFunctionCallPart | GeminiFunctionResponsePart;
 
 interface GeminiContent {
   role?: "user" | "model";
@@ -122,7 +131,19 @@ interface GeminiCodeAssistRequest {
 interface GeminiRequestPlan {
   url: URL;
   headers: Record<string, string>;
-  body: GeminiCodeAssistRequest;
+  /** Code Assist wraps the request in an envelope; the public API takes it bare. */
+  body: GeminiCodeAssistRequest | GeminiGenerateContentRequest;
+  /** Which backend this plan targets — error wording differs between them. */
+  route: "code-assist" | "api-key";
+}
+
+/**
+ * A Gemini API key (Google AI Studio) is stored with the public Gemini API as
+ * its base URL; the Code Assist OAuth login has none. Route on that, so the
+ * credential decides the backend, not a flag threaded through every caller.
+ */
+function isGeminiApiKeyRoute(options: StreamOptions): boolean {
+  return options.baseUrl?.includes("generativelanguage.googleapis.com") === true;
 }
 
 interface GeminiCandidate {
@@ -163,6 +184,97 @@ function getCodeAssistEndpoint(method: string): URL {
 function formatUnsupportedModelMessage(model: string): string {
   return `Gemini OAuth is configured to use the Gemini Code Assist subscription endpoint only. That endpoint does not currently expose model "${model}".`;
 }
+
+// Models that exist in the Code Assist catalog but are gated per-account by
+// Google (Code Assist Standard/Enterprise + admin/preview enablement). A 404 on
+// these is an entitlement problem, not a wrong model string — free/personal
+// OAuth accounts routinely can't call them. Explain that instead of echoing the
+// bare "Requested entity was not found" body, which reads like an app bug.
+// New public GA ids are opt-in; their Code Assist availability is unverified.
+const ACCOUNT_GATED_MODELS = new Set([
+  "gemini-3-flash",
+  "gemini-3.5-flash",
+  "gemini-3.1-pro-preview",
+  "gemini-3.1-pro-preview-customtools",
+  "gemini-3.7-flash",
+  "gemini-3.8-flash",
+  "gemini-3.5-flash-lite",
+]);
+
+// The user-facing account-gated message is split so the error UI (gg-app + TUI)
+// can render it as `message` (what happened — an entitlement gap, not a bug)
+// plus `hint` (the actionable next step, shown on the dedicated guidance line).
+function accountGatedMessage(model: string): string {
+  if (model === "gemini-3.8-flash" || model === "gemini-3.5-flash-lite") {
+    return (
+      `${model} is not available through Code Assist for this account. ` +
+      "Public Gemini API availability does not guarantee Code Assist OAuth access."
+    );
+  }
+  return (
+    `Your Google account isn't entitled to "${model}" over Gemini Code Assist OAuth, ` +
+    `so the API reports it as not found. This is an account-access limit, not a ggcoder bug.`
+  );
+}
+
+function accountGatedHint(model: string): string {
+  if (model === "gemini-3.8-flash" || model === "gemini-3.5-flash-lite") {
+    return "Use /model to select Gemini 3.1 Flash Lite, or retry once Google enables this model through Code Assist for your account.";
+  }
+  return (
+    `Newer Gemini models (3.5 Flash, 3.1 Pro Preview) are available only to Code Assist ` +
+    `Standard/Enterprise accounts with preview/GA access enabled by a cloud admin. Try Gemini 3.1 ` +
+    `Flash Lite with /model, or sign in with a Code Assist Standard/Enterprise account that has ` +
+    `preview access.`
+  );
+}
+
+/**
+ * Google stopped serving Code Assist to personal accounts (Google AI Pro/Ultra,
+ * the free "Code Assist for individuals" tier) on 2026-06-18. Those accounts now
+ * get 403 PERMISSION_DENIED with reason SUBSCRIPTION_REQUIRED on EVERY model,
+ * so no model switch helps — only a Code Assist Standard/Enterprise licence
+ * does. Detected by the structured reason, not the message wording.
+ */
+export function isCodeAssistLicenseRequired(status: number, body: string): boolean {
+  if (status !== 403) return false;
+  try {
+    const parsed: unknown = JSON.parse(body);
+    const details =
+      typeof parsed === "object" && parsed !== null && "error" in parsed
+        ? (parsed as { error?: { details?: unknown } }).error?.details
+        : undefined;
+    return (
+      Array.isArray(details) &&
+      details.some(
+        (detail: unknown) =>
+          typeof detail === "object" &&
+          detail !== null &&
+          (detail as { reason?: unknown }).reason === "SUBSCRIPTION_REQUIRED",
+      )
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Google rejects a bad AI Studio key with 400 INVALID_ARGUMENT and reason
+ * API_KEY_INVALID (verified live, 2026-10-16). Detected by the structured reason.
+ */
+function isInvalidGeminiApiKey(status: number, body: string): boolean {
+  if (status !== 400 && status !== 401 && status !== 403) return false;
+  return /"reason"\s*:\s*"API_KEY_INVALID"/.test(body) || /API key not valid/i.test(body);
+}
+
+const INVALID_API_KEY_MESSAGE = "Google rejected the Gemini API key: it is not valid.";
+const INVALID_API_KEY_HINT =
+  "Create a key at aistudio.google.com/apikey and add it again under Gemini in Providers (or `ggcoder login`).";
+
+const LICENSE_REQUIRED_MESSAGE =
+  "This Google account has no Gemini Code Assist licence. Google stopped serving Gemini through Code Assist to personal accounts (Google AI Pro/Ultra and the free individual tier) on June 18, 2026, so every Gemini model is refused, not just this one.";
+const LICENSE_REQUIRED_HINT =
+  "Sign in to Gemini with a Google account that has a Gemini Code Assist Standard or Enterprise licence, or pick a model from another provider with /model.";
 
 function formatErrorMessage(status: number, body: string, model: string): string {
   if (status === 404 && !CODE_ASSIST_SUPPORTED_MODELS.has(model)) {
@@ -343,6 +455,21 @@ function stripUnsupportedSchemaFields(value: unknown): void {
 
   delete value.$schema;
   delete value.additionalProperties;
+  // Gemini's schema subset has inclusive minimum/maximum only; an exclusive
+  // bound (zod .positive()/.lt()) 400s the whole request. Integers keep the
+  // exact bound (n+1 / n-1); numbers widen to inclusive, and the tool's own
+  // zod schema still rejects the boundary value at execution.
+  for (const [key, target, step] of [
+    ["exclusiveMinimum", "minimum", 1],
+    ["exclusiveMaximum", "maximum", -1],
+  ] as const) {
+    const bound = value[key];
+    if (bound === undefined) continue;
+    delete value[key];
+    if (typeof bound === "number" && value[target] === undefined) {
+      value[target] = value.type === "integer" ? bound + step : bound;
+    }
+  }
 
   for (const item of Object.values(value)) {
     if (isJsonObject(item) || Array.isArray(item)) {
@@ -377,6 +504,7 @@ function toGemini3ThinkingLevel(
     case "high":
     case "xhigh":
     case "max":
+    case "ultra":
       return "HIGH";
   }
 }
@@ -390,6 +518,7 @@ function toThinkingBudget(level: NonNullable<StreamOptions["thinking"]>): number
     case "high":
     case "xhigh":
     case "max":
+    case "ultra":
       return 8_192;
   }
 }
@@ -451,13 +580,46 @@ function buildCodeAssistRequest(
   };
 }
 
+/**
+ * `gemini-3-flash` is Code Assist's wire name for Gemini 3.5 Flash; the public
+ * API calls it `gemini-3.5-flash` (gemini-cli getBackendModelMappings only
+ * applies the 3-flash alias on the Code Assist backend).
+ */
+const API_KEY_MODEL_IDS: Readonly<Record<string, string>> = {
+  "gemini-3-flash": "gemini-3.5-flash",
+};
+
+function buildApiKeyRequestPlan(options: StreamOptions, method: string): GeminiRequestPlan {
+  // The public API rejects fields it does not know; `session_id` is a Code
+  // Assist field (its cache affinity), so drop it here.
+  const { session_id: _sessionId, ...request } = mergeProviderOptions(
+    buildGenerateRequest(options),
+    options.providerOptions,
+  );
+  const base = (options.baseUrl ?? "").replace(/\/+$/, "");
+  return {
+    url: new URL(
+      `${base}/models/${encodeURIComponent(API_KEY_MODEL_IDS[options.model] ?? options.model)}:${method}`,
+    ),
+    headers: {
+      "Content-Type": "application/json",
+      "x-goog-api-key": options.apiKey ?? "",
+    },
+    body: request,
+    route: "api-key",
+  };
+}
+
 function buildRequestPlan(options: StreamOptions, method: string): GeminiRequestPlan {
+  if (isGeminiApiKeyRoute(options)) return buildApiKeyRequestPlan(options, method);
   if (!CODE_ASSIST_SUPPORTED_MODELS.has(options.model)) {
     throw new ProviderError("gemini", formatUnsupportedModelMessage(options.model));
   }
 
   const projectId = getGoogleProject(options);
-  const request = buildGenerateRequest(options);
+  // Provider-specific fields go on the generateContent request (inside the
+  // Code Assist envelope) and only fill fields gg-ai left unset.
+  const request = mergeProviderOptions(buildGenerateRequest(options), options.providerOptions);
 
   return {
     url: getCodeAssistEndpoint(method),
@@ -468,6 +630,7 @@ function buildRequestPlan(options: StreamOptions, method: string): GeminiRequest
       "X-Goog-Api-Client": GEMINI_CLI_API_CLIENT,
     },
     body: buildCodeAssistRequest(options, request, projectId),
+    route: "code-assist",
   };
 }
 
@@ -559,7 +722,10 @@ async function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 
 async function fetchCodeAssist(plan: GeminiRequestPlan, options: StreamOptions): Promise<Response> {
   try {
-    const response = await fetch(plan.url, {
+    // An injected fetch (tests, custom runtimes) still wins; the default is
+    // upstream's providerFetch, which lifts undici's 300s header/body caps.
+    const fetchImpl = options.fetch ?? providerFetch;
+    const response = await fetchImpl(plan.url, {
       method: "POST",
       headers: plan.headers,
       body: JSON.stringify(plan.body),
@@ -569,7 +735,20 @@ async function fetchCodeAssist(plan: GeminiRequestPlan, options: StreamOptions):
     if (!response.ok) {
       const text = await response.text().catch(() => "");
       const quota = parseGeminiQuota(response.status, text);
-      let message = formatErrorMessage(response.status, text, options.model);
+      // Licence and account-gating are Code Assist conditions; on the public
+      // API a 403/404 means a bad key or an unknown model, said by Google itself.
+      const codeAssist = plan.route === "code-assist";
+      const accountGated =
+        codeAssist && response.status === 404 && ACCOUNT_GATED_MODELS.has(options.model);
+      const licenseRequired = codeAssist && isCodeAssistLicenseRequired(response.status, text);
+      const invalidKey = !codeAssist && isInvalidGeminiApiKey(response.status, text);
+      let message = invalidKey
+        ? INVALID_API_KEY_MESSAGE
+        : licenseRequired
+          ? LICENSE_REQUIRED_MESSAGE
+          : accountGated
+            ? accountGatedMessage(options.model)
+            : formatErrorMessage(response.status, text, options.model);
       let resetsAt: number | undefined;
       if (quota?.exhausted) {
         // Stamp the canonical phrase the agent loop matches on so this hard
@@ -581,6 +760,13 @@ async function fetchCodeAssist(plan: GeminiRequestPlan, options: StreamOptions):
       throw new ProviderError("gemini", message, {
         statusCode: response.status,
         ...(resetsAt !== undefined ? { resetsAt } : {}),
+        ...(invalidKey
+          ? { hint: INVALID_API_KEY_HINT, source: "auth" as const }
+          : licenseRequired
+            ? { hint: LICENSE_REQUIRED_HINT, source: "auth" as const }
+            : accountGated
+              ? { hint: accountGatedHint(options.model) }
+              : {}),
       });
     }
 
@@ -643,7 +829,8 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
   let thinkingAccum = "";
   let stopReason: StreamResponse["stopReason"] = "end_turn";
   let inputTokens = 0;
-  let outputTokens = 0;
+  let candidateTokens = 0;
+  let reasoningTokens = 0;
   let cacheRead = 0;
   let toolIndex = 0;
 
@@ -651,7 +838,8 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
     const usage = usageFromResponse(chunk);
     if (usage) {
       inputTokens = usage.promptTokenCount ?? inputTokens;
-      outputTokens = usage.candidatesTokenCount ?? outputTokens;
+      candidateTokens = usage.candidatesTokenCount ?? candidateTokens;
+      reasoningTokens = usage.thoughtsTokenCount ?? reasoningTokens;
       cacheRead = usage.cachedContentTokenCount ?? cacheRead;
     }
 
@@ -715,6 +903,9 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
   if (pendingToolCalls.length > 0) stopReason = "tool_use";
 
   const adjustedInputTokens = Math.max(0, inputTokens - cacheRead);
+  // Gemini reports thoughts separately from candidate output, but both are billed
+  // output. Keep the subset for diagnostics while making outputTokens the cost-safe total.
+  const outputTokens = candidateTokens + reasoningTokens;
   const streamResponse: StreamResponse = {
     message: {
       role: "assistant",
@@ -724,6 +915,7 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
     usage: {
       inputTokens: adjustedInputTokens,
       outputTokens,
+      ...(reasoningTokens > 0 ? { reasoningTokens } : {}),
       ...(cacheRead > 0 ? { cacheRead } : {}),
     },
   };

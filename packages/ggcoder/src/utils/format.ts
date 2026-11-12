@@ -1,5 +1,5 @@
 import chalk from "chalk";
-import { formatUserError } from "./error-handler.js";
+import { editTargetLabel } from "../tools/edit-targets.js";
 
 /**
  * Format tool call start for display.
@@ -35,13 +35,6 @@ export function formatUsage(inputTokens: number, outputTokens: number): string {
 }
 
 /**
- * Format an error for display.
- */
-export function formatError(error: Error): string {
-  return formatUserError(error);
-}
-
-/**
  * Format the welcome banner.
  */
 export function formatWelcome(model: string, provider: string, cwd: string): string {
@@ -66,9 +59,12 @@ function formatArgs(name: string, args: Record<string, unknown>): string {
       const short = cmd.length > 80 ? cmd.slice(0, 77) + "..." : cmd;
       return ` ${chalk.dim(short)}`;
     }
+    case "edit": {
+      const label = editTargetLabel(args);
+      return label ? ` ${chalk.dim(label)}` : "";
+    }
     case "read":
     case "write":
-    case "edit":
       return args.file_path ? ` ${chalk.dim(String(args.file_path))}` : "";
     case "find":
       return ` ${chalk.dim(String(args.pattern ?? ""))}`;

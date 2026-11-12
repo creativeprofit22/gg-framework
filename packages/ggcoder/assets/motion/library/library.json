@@ -1,0 +1,1616 @@
+{
+  "kinds": [
+    "background",
+    "type",
+    "diagram",
+    "data",
+    "ui",
+    "3d",
+    "frame",
+    "transition",
+    "texture"
+  ],
+  "looks": [
+    {
+      "id": "acid-poster",
+      "name": "Acid Poster",
+      "description": "A fly-posted gig poster that won't sit still: acid lime and black only, Anybody slammed between 50% and 150% width, type set edge to edge, black bands with running tickers and hard inverting cuts on every beat. Loud, brutal, fast.",
+      "tags": [
+        "bold",
+        "kinetic-type",
+        "poster",
+        "brutalist",
+        "lime",
+        "two-color",
+        "hype",
+        "variable-font"
+      ],
+      "fonts": [
+        "Anybody",
+        "Martian Mono"
+      ],
+      "bestFor": [
+        "hype teasers",
+        "drops and launches",
+        "music and events",
+        "countdowns",
+        "social cutdowns",
+        "sports"
+      ],
+      "pieces": [],
+      "samplePieces": []
+    },
+    {
+      "id": "blueprint",
+      "name": "Blueprint",
+      "description": "An engineering drawing that builds itself: a deep cobalt field with a faint drafting grid, white line drawings that draw on stroke by stroke, dimension lines and leader callouts, a title block in the corner. Wide Hubot Sans headlines, Martian Mono for the annotation only. One signal yellow marks the single measurement that matters.",
+      "tags": [
+        "blueprint",
+        "technical",
+        "line-drawing",
+        "engineering",
+        "cobalt",
+        "diagram",
+        "explainer",
+        "annotation"
+      ],
+      "fonts": [
+        "Hubot Sans",
+        "Martian Mono"
+      ],
+      "bestFor": [
+        "engineering explainers",
+        "hardware and product teardowns",
+        "how-it-works videos",
+        "infrastructure diagrams",
+        "patents and R&D stories"
+      ],
+      "pieces": [
+        "blueprint-grid",
+        "flow-nodes",
+        "stack-layers",
+        "chapter-card"
+      ],
+      "samplePieces": []
+    },
+    {
+      "id": "dark-studio",
+      "name": "Dark Studio",
+      "description": "A near-black set lit by one soft key light from above. Product UI sits on a glass slab with a brushed-metal rim and a floor reflection; one cool ice-blue accent marks the single thing that matters. Wide, calm Mona Sans headlines. The Apple / Linear dark keynote launch.",
+      "tags": [
+        "dark",
+        "product",
+        "launch",
+        "keynote",
+        "glass",
+        "cinematic",
+        "premium",
+        "ui"
+      ],
+      "fonts": [
+        "Mona Sans",
+        "Martian Mono"
+      ],
+      "bestFor": [
+        "product launches",
+        "SaaS feature reveals",
+        "app UI walkthroughs",
+        "keynote openers",
+        "developer platforms"
+      ],
+      "pieces": [],
+      "samplePieces": []
+    },
+    {
+      "id": "data-desk",
+      "name": "Data desk",
+      "description": "Sage paper, forest ink and an editorial chart hierarchy. One large finding leads; axes, units and source notes make the evidence legible.",
+      "tags": [
+        "data",
+        "report",
+        "sage",
+        "chart",
+        "analysis"
+      ],
+      "fonts": [
+        "Schibsted Grotesk",
+        "Martian Mono"
+      ],
+      "bestFor": [
+        "research summaries",
+        "quarterly reports",
+        "data explainers"
+      ],
+      "pieces": [
+        "sparkline-draw",
+        "comparison-bars",
+        "donut-fill",
+        "stat-grid",
+        "counter-number"
+      ],
+      "samplePieces": []
+    },
+    {
+      "id": "duotone-broadcast",
+      "name": "Duotone Broadcast",
+      "description": "One saturated color field and one dark ink. A huge condensed word, tiny mono labels in the corners, crop marks and a faint dot grid, like a broadcast graphics package. Scenes change by flipping the whole field color.",
+      "tags": [
+        "two-color",
+        "bold",
+        "editorial",
+        "kinetic-type",
+        "showreel",
+        "flat",
+        "swiss"
+      ],
+      "fonts": [
+        "Archivo",
+        "Martian Mono"
+      ],
+      "bestFor": [
+        "showreels",
+        "dev tools",
+        "explainers",
+        "launch teasers",
+        "concept videos"
+      ],
+      "pieces": [
+        "broadcast-frame",
+        "dot-grid-field",
+        "slam-word",
+        "ease-curve"
+      ],
+      "samplePieces": [
+        "dot-grid-field",
+        "slam-word",
+        "ease-curve",
+        "broadcast-frame"
+      ]
+    },
+    {
+      "id": "editorial-ink",
+      "name": "Editorial Ink",
+      "description": "A documentary title sequence printed in ink: deep bottle-green (or oxblood) field with film grain and a vignette, bone-colored type, soft and slightly wonky Fraunces for titles and Newsreader italic for the human voice. One lamplight ochre accent. Slow, patient, respectful motion.",
+      "tags": [
+        "editorial",
+        "documentary",
+        "serif",
+        "dark",
+        "warm",
+        "grain",
+        "storytelling",
+        "quiet"
+      ],
+      "fonts": [
+        "Fraunces",
+        "Newsreader",
+        "Martian Mono"
+      ],
+      "bestFor": [
+        "documentaries",
+        "human stories",
+        "brand films",
+        "founder stories",
+        "nonprofits",
+        "long-form journalism"
+      ],
+      "pieces": [],
+      "samplePieces": []
+    },
+    {
+      "id": "mono-luxe",
+      "name": "Mono luxe",
+      "description": "Stone and charcoal, high-contrast serif type and a sculptural product silhouette. Slow reveals and ample empty space give a single object the whole stage.",
+      "tags": [
+        "monochrome",
+        "serif",
+        "luxury",
+        "sculptural",
+        "restrained"
+      ],
+      "fonts": [
+        "Gloock",
+        "Mona Sans",
+        "Martian Mono"
+      ],
+      "bestFor": [
+        "design objects",
+        "craft stories",
+        "premium product films"
+      ],
+      "pieces": [
+        "serif-quote",
+        "vignette",
+        "clay-drop-3d",
+        "iris-circle",
+        "end-card"
+      ],
+      "samplePieces": []
+    },
+    {
+      "id": "soft-light-ad",
+      "name": "Soft Light Ad",
+      "description": "Airy cool-white field with a deep blue light pool at one edge, one brand blue accent, soft clay 3D objects and illustrative UI cards stacked in depth with soft shadows, lowercase sentence captions typed on with one accent word. Smooth, continuous, calm: a premium product ad.",
+      "tags": [
+        "light",
+        "airy",
+        "soft-3d",
+        "clay",
+        "ad",
+        "premium",
+        "consumer",
+        "saas",
+        "calm"
+      ],
+      "fonts": [
+        "Host Grotesk",
+        "Martian Mono"
+      ],
+      "bestFor": [
+        "product ads",
+        "saas launches",
+        "consumer apps",
+        "feature teasers",
+        "social ads"
+      ],
+      "pieces": [
+        "soft-light-field",
+        "typewriter-caption",
+        "ui-stack-3d",
+        "clay-drop-3d"
+      ],
+      "samplePieces": [
+        "soft-light-field",
+        "ui-stack-3d",
+        "typewriter-caption"
+      ]
+    },
+    {
+      "id": "sunlit-consumer",
+      "name": "Sunlit consumer",
+      "description": "Warm paper, chestnut ink and low afternoon shadows. Expressive serif copy sits beside a tangible product moment rather than a wall of floating cards.",
+      "tags": [
+        "warm",
+        "consumer",
+        "serif",
+        "daylight",
+        "product"
+      ],
+      "fonts": [
+        "Fraunces",
+        "Host Grotesk",
+        "Martian Mono"
+      ],
+      "bestFor": [
+        "consumer app launches",
+        "everyday products",
+        "calm brand stories"
+      ],
+      "pieces": [
+        "phone-frame",
+        "serif-quote",
+        "light-leak-soft",
+        "end-card"
+      ],
+      "samplePieces": []
+    },
+    {
+      "id": "swiss-grid",
+      "name": "Swiss Grid",
+      "description": "International Typographic Style in motion: a white field, black ink and one signal red on a strict, visible 12-column grid. Huge numbers set in heavy Schibsted Grotesk, flush-left ragged-right text, everything snapping to column edges with mechanical, precise moves.",
+      "tags": [
+        "swiss",
+        "grid",
+        "minimal",
+        "typographic",
+        "white",
+        "red",
+        "data",
+        "editorial"
+      ],
+      "fonts": [
+        "Schibsted Grotesk",
+        "Martian Mono"
+      ],
+      "bestFor": [
+        "annual reports",
+        "statistics",
+        "design-led brands",
+        "explainers with numbers",
+        "architecture and agencies"
+      ],
+      "pieces": [],
+      "samplePieces": []
+    },
+    {
+      "id": "terminal-phosphor",
+      "name": "Terminal Phosphor",
+      "description": "A phosphor CRT in a dark room: near-black glass, green phosphor type with a soft bloom, fine scanlines and a curved-glass vignette. Commands type out character by character in Martian Mono; results land as huge Doto dot-matrix readouts. Amber is reserved for the one alert or win.",
+      "tags": [
+        "terminal",
+        "cli",
+        "developer",
+        "retro",
+        "dot-matrix",
+        "mono",
+        "dark",
+        "green"
+      ],
+      "fonts": [
+        "Doto",
+        "Martian Mono"
+      ],
+      "bestFor": [
+        "developer tools",
+        "CLI launches",
+        "benchmarks",
+        "infrastructure",
+        "hacker aesthetics",
+        "changelogs"
+      ],
+      "pieces": [],
+      "samplePieces": []
+    }
+  ],
+  "pieces": [
+    {
+      "id": "animated-beam",
+      "name": "Animated beam",
+      "kind": "diagram",
+      "description": "Icon nodes on the left send curved gradient beams into a central accent hub, which beams out to nodes on the right. Nodes pop in, faint base paths draw on, then light sweeps along each connection on a staggered expo-out loop. Use for integrations, 'connects everything', data flowing through a product. Edit INPUTS / OUTPUTS / HUB.",
+      "tags": [
+        "beam",
+        "integrations",
+        "hub",
+        "connections",
+        "flow",
+        "icons",
+        "gradient",
+        "launch",
+        "magic-ui"
+      ],
+      "fonts": [],
+      "duration": 6,
+      "license": "MIT",
+      "source": {
+        "url": "https://github.com/magicuidesign/magicui/blob/main/apps/www/registry/magicui/animated-beam.tsx",
+        "author": "Magic UI"
+      },
+      "previewLook": "soft-light-ad"
+    },
+    {
+      "id": "animated-list",
+      "name": "Animated list",
+      "kind": "ui",
+      "description": "Notification cards arrive one by one at the top of a list: each springs in from scale 0 (anchored at its top edge) and pushes the older cards down with the same spring; the list fades out at the bottom. Activity feeds, 'things keep happening' beats. Converted from Magic UI's Animated List.",
+      "tags": [
+        "list",
+        "feed",
+        "notifications",
+        "activity",
+        "spring",
+        "stack",
+        "saas",
+        "magic-ui"
+      ],
+      "fonts": [],
+      "duration": 6,
+      "license": "MIT",
+      "source": {
+        "url": "https://github.com/magicuidesign/magicui/blob/main/apps/www/registry/magicui/animated-list.tsx",
+        "author": "Magic UI"
+      },
+      "previewLook": "soft-light-ad"
+    },
+    {
+      "id": "before-after-split",
+      "name": "Before / after split",
+      "kind": "diagram",
+      "description": "A comparison card: a vertical divider with a round handle wipes across a noisy, muted 'before' panel to reveal a calm accent 'after' panel, overshoots, then settles at the middle so both metrics read (before on the right, after on the left). Edit the tags, metric names and values in the markup and the chart series in the script.",
+      "tags": [
+        "before-after",
+        "comparison",
+        "split",
+        "wipe",
+        "slider",
+        "improvement",
+        "metric",
+        "launch",
+        "explainer"
+      ],
+      "fonts": [],
+      "duration": 5,
+      "license": "original",
+      "previewLook": "soft-light-ad"
+    },
+    {
+      "id": "blueprint-grid",
+      "name": "Blueprint grid",
+      "kind": "background",
+      "description": "A technical drawing surface: a minor/major grid draws itself outward from the center, then edge rulers with ticks, tiny mono coordinates, a center crosshair and one dimension callout settle in. Engineering, spec and how-it-works backdrops.",
+      "tags": [
+        "grid",
+        "blueprint",
+        "technical",
+        "drawing",
+        "rulers",
+        "coordinates",
+        "crosshair",
+        "engineering",
+        "draw-on",
+        "mono"
+      ],
+      "fonts": [],
+      "duration": 5,
+      "license": "original",
+      "previewLook": "soft-light-ad"
+    },
+    {
+      "id": "broadcast-frame",
+      "name": "Broadcast frame",
+      "kind": "frame",
+      "description": "Transparent overlay: four uppercase mono corner labels, edge crop marks, a drawn underline and a running timecode. Stays on for the whole video; relabel it per scene.",
+      "tags": [
+        "overlay",
+        "labels",
+        "timecode",
+        "hud",
+        "editorial",
+        "broadcast",
+        "mono"
+      ],
+      "fonts": [],
+      "duration": 4,
+      "license": "original",
+      "previewLook": "duotone-broadcast"
+    },
+    {
+      "id": "browser-window",
+      "name": "Browser window",
+      "kind": "ui",
+      "description": "A clean browser window (window dots, back/forward, URL pill) springs in with a slight scale and tilt and settles, then a skeleton dashboard (sidebar, stat cards, bar chart) builds in. The content area is a slot: swap the skeleton for a real screenshot <img>.",
+      "tags": [
+        "browser",
+        "window",
+        "screenshot",
+        "saas",
+        "dashboard",
+        "product",
+        "spring",
+        "mockup"
+      ],
+      "fonts": [],
+      "duration": 4,
+      "license": "original",
+      "previewLook": "soft-light-ad"
+    },
+    {
+      "id": "camera-rig",
+      "name": "Camera rig",
+      "kind": "frame",
+      "description": "An operated camera over one world layer, built on the move kit: starts wide, whips to a card with a little overshoot, floats by hand, whips on and holds dead still for a rest, pushes in as a stamp lands with one shake on contact, then glides back out, over a parallax backdrop that slides slower than the cards. Replace the cards with your scenes and edit the camera keys.",
+      "tags": [
+        "camera",
+        "whip",
+        "handheld",
+        "shake",
+        "push-in",
+        "zoom",
+        "rest",
+        "parallax",
+        "continuous",
+        "kit"
+      ],
+      "fonts": [],
+      "duration": 8,
+      "license": "original",
+      "requires": [
+        "kit"
+      ],
+      "previewLook": "swiss-grid"
+    },
+    {
+      "id": "chain-knock",
+      "name": "Chain knock",
+      "kind": "diagram",
+      "description": "A ball hops in from the left, hits the first of five process blocks and knocks the whole row like dominoes; the last block stamps a result. Edit the step labels, the result word and the hop timing.",
+      "tags": [
+        "chain-reaction",
+        "process",
+        "steps",
+        "cause-and-effect",
+        "hop",
+        "stamp",
+        "continuous",
+        "kit"
+      ],
+      "fonts": [],
+      "duration": 5,
+      "license": "original",
+      "requires": [
+        "kit"
+      ],
+      "previewLook": "swiss-grid"
+    },
+    {
+      "id": "chapter-card",
+      "name": "Chapter card",
+      "kind": "frame",
+      "description": "A chapter marker, a drawn rule and a two-line headline with generous editorial space.",
+      "tags": [
+        "chapter",
+        "title",
+        "editorial"
+      ],
+      "fonts": [],
+      "duration": 4,
+      "license": "original",
+      "previewLook": "duotone-broadcast"
+    },
+    {
+      "id": "chat-thread",
+      "name": "Chat thread",
+      "kind": "ui",
+      "description": "A chat window where messages pop in one after another (sender bubbles in accent, replies in white), each reply preceded by a bouncing three-dot typing indicator. Good for AI assistants, support and messaging features.",
+      "tags": [
+        "chat",
+        "messages",
+        "assistant",
+        "ai",
+        "typing",
+        "bubbles",
+        "conversation",
+        "saas"
+      ],
+      "fonts": [],
+      "duration": 6,
+      "license": "original",
+      "previewLook": "soft-light-ad"
+    },
+    {
+      "id": "clay-drop-3d",
+      "name": "Clay drop",
+      "kind": "3d",
+      "description": "A soft clay-like object in the accent color drops into a still milky water plane, sends out ripples and settles with a gentle bob. Hazy sky, blurred mountains, soft shadows and depth of field: stylized premium 3D, not photoreal. Opens or punctuates a calm product ad.",
+      "tags": [
+        "3d",
+        "soft-3d",
+        "clay",
+        "water",
+        "ripples",
+        "drop",
+        "haze",
+        "premium",
+        "ad",
+        "hero",
+        "three"
+      ],
+      "fonts": [],
+      "requires": [
+        "three"
+      ],
+      "duration": 5,
+      "license": "original",
+      "previewLook": "soft-light-ad"
+    },
+    {
+      "id": "color-flip-field",
+      "name": "Color flip field",
+      "kind": "background",
+      "description": "Duotone scene change: the --field background is swept by a slanted --field-2 panel on a beat (fast expo wipe), holds, then wipes off the far side. Fully flipped at 1.55s, back to --field at 3.15s.",
+      "tags": [
+        "flat",
+        "duotone",
+        "wipe",
+        "scene-change",
+        "beat",
+        "two-color",
+        "broadcast"
+      ],
+      "fonts": [],
+      "duration": 4,
+      "license": "original",
+      "previewLook": "duotone-broadcast"
+    },
+    {
+      "id": "color-wipe",
+      "name": "Color wipe",
+      "kind": "transition",
+      "description": "A narrow accent leads a solid field across the cut, then clears the incoming scene.",
+      "tags": [
+        "cut",
+        "wipe",
+        "duotone"
+      ],
+      "fonts": [],
+      "duration": 2,
+      "license": "original",
+      "previewLook": "duotone-broadcast"
+    },
+    {
+      "id": "command-palette",
+      "name": "Command palette",
+      "kind": "ui",
+      "description": "A centered ⌘K command palette opens, a query types into the input with a blinking caret, non-matching results collapse away with matched letters highlighted, the selection steps to a result and it is pressed (Enter). Great for search, shortcuts and 'do anything fast' beats.",
+      "tags": [
+        "command-palette",
+        "search",
+        "cmdk",
+        "typing",
+        "filter",
+        "keyboard",
+        "saas",
+        "productivity"
+      ],
+      "fonts": [],
+      "duration": 5,
+      "license": "original",
+      "previewLook": "soft-light-ad"
+    },
+    {
+      "id": "comparison-bars",
+      "name": "Comparison bars",
+      "kind": "data",
+      "description": "3–5 horizontal bars grow to their values with a stagger, each number counting up at the bar's tip; display labels sit left of a baseline. The winner bar is filled with the accent and tagged. Edit BARS, WINNER, UNIT and the title for benchmarks, pricing or 'us vs them' slides.",
+      "tags": [
+        "bar-chart",
+        "comparison",
+        "benchmark",
+        "bars",
+        "count-up",
+        "winner",
+        "data",
+        "vs",
+        "explainer"
+      ],
+      "fonts": [],
+      "duration": 4,
+      "license": "original",
+      "previewLook": "soft-light-ad"
+    },
+    {
+      "id": "counter-number",
+      "name": "Counter number",
+      "kind": "type",
+      "description": "A huge tabular-nums figure counts up to a target with expo.out, optional prefix/suffix ($, %, ×, M) in the accent color, a hairline that draws across and a small mono label under it. For stats, KPIs, metrics and 'by the numbers' beats. Transparent.",
+      "tags": [
+        "number",
+        "counter",
+        "count-up",
+        "stat",
+        "metric",
+        "kpi",
+        "data",
+        "percentage",
+        "tabular-nums",
+        "big-number"
+      ],
+      "fonts": [],
+      "duration": 3.5,
+      "license": "original",
+      "previewLook": "duotone-broadcast"
+    },
+    {
+      "id": "cursor-click",
+      "name": "Cursor click",
+      "kind": "ui",
+      "description": "An upgrade card with a primary button; a cursor glides in along an eased bezier curve, presses the button (0.96 squash plus an expanding ripple ring) and the button turns into a success state with a drawn check. The 'one click and it's done' beat.",
+      "tags": [
+        "cursor",
+        "click",
+        "button",
+        "cta",
+        "success",
+        "ripple",
+        "interaction",
+        "saas"
+      ],
+      "fonts": [],
+      "duration": 4,
+      "license": "original",
+      "previewLook": "soft-light-ad"
+    },
+    {
+      "id": "dock-magnify",
+      "name": "Dock magnify",
+      "kind": "ui",
+      "description": "A glassy macOS-style dock: a cursor glides along it and every icon's size is computed from its distance to the cursor each frame (smooth magnification wave), then it clicks one app, which bounces and gets a running dot. Converted from Magic UI's Dock.",
+      "tags": [
+        "dock",
+        "macos",
+        "magnify",
+        "cursor",
+        "apps",
+        "icons",
+        "hover",
+        "saas",
+        "magic-ui"
+      ],
+      "fonts": [],
+      "duration": 5,
+      "license": "MIT",
+      "source": {
+        "url": "https://github.com/magicuidesign/magicui/blob/main/apps/www/registry/magicui/dock.tsx",
+        "author": "Magic UI"
+      },
+      "previewLook": "soft-light-ad"
+    },
+    {
+      "id": "donut-fill",
+      "name": "Donut fill",
+      "kind": "data",
+      "description": "A ring fills clockwise to a percentage via stroke-dashoffset inside a quiet tick dial while the display number counts up in the center; a mono caption lands beneath. Edit VALUE and the caption for adoption rates, completion or share-of stats.",
+      "tags": [
+        "donut",
+        "ring",
+        "percentage",
+        "progress",
+        "count-up",
+        "gauge",
+        "data",
+        "stat",
+        "explainer"
+      ],
+      "fonts": [],
+      "duration": 4,
+      "license": "original",
+      "previewLook": "duotone-broadcast"
+    },
+    {
+      "id": "dot-grid-field",
+      "name": "Dot grid field",
+      "kind": "background",
+      "description": "The look's field color as a lit surface: a faint drifting dot grid with a soft top-left light falloff and a darker opposite corner.",
+      "tags": [
+        "flat",
+        "grid",
+        "dots",
+        "subtle",
+        "editorial",
+        "swiss",
+        "two-color"
+      ],
+      "fonts": [],
+      "duration": 6,
+      "license": "original",
+      "previewLook": "duotone-broadcast"
+    },
+    {
+      "id": "ease-curve",
+      "name": "Self-drawing curve",
+      "kind": "diagram",
+      "description": "A graph with a grid that draws its own curve, a dot riding the line and a live T/VALUE readout in mono. Change the function to show growth, latency drops or any before/after curve.",
+      "tags": [
+        "graph",
+        "chart",
+        "curve",
+        "draw-on",
+        "readout",
+        "technical",
+        "explainer"
+      ],
+      "fonts": [],
+      "duration": 4,
+      "license": "original",
+      "previewLook": "duotone-broadcast"
+    },
+    {
+      "id": "end-card",
+      "name": "End card",
+      "kind": "frame",
+      "description": "A centered closing statement, one next action and a quiet destination with a long readable hold.",
+      "tags": [
+        "closing",
+        "cta",
+        "sign-off"
+      ],
+      "fonts": [],
+      "duration": 5,
+      "license": "original",
+      "previewLook": "duotone-broadcast"
+    },
+    {
+      "id": "film-grain",
+      "name": "Film grain",
+      "kind": "texture",
+      "description": "Transparent animated film grain at 24 fps with a faint exposure flicker, overlay-blended on top of any scene. Adds analog tooth and kills gradient banding on flat fields.",
+      "tags": [
+        "grain",
+        "noise",
+        "film",
+        "analog",
+        "overlay",
+        "texture",
+        "flicker",
+        "anti-banding",
+        "transparent"
+      ],
+      "fonts": [],
+      "duration": 6,
+      "license": "original",
+      "previewLook": "duotone-broadcast"
+    },
+    {
+      "id": "flickering-grid",
+      "name": "Flickering grid",
+      "kind": "background",
+      "description": "A fine field of small accent-colored squares whose opacities flicker quietly at random, masked soft toward the edges. Data, signal and AI/tech backdrops with a living, digital texture. Converted from Magic UI's Flickering Grid.",
+      "tags": [
+        "grid",
+        "squares",
+        "flicker",
+        "pixels",
+        "digital",
+        "data",
+        "signal",
+        "tech",
+        "ai",
+        "subtle",
+        "magic-ui"
+      ],
+      "fonts": [],
+      "duration": 6,
+      "license": "MIT",
+      "source": {
+        "url": "https://github.com/magicuidesign/magicui/blob/main/apps/www/registry/magicui/flickering-grid.tsx",
+        "author": "Magic UI"
+      },
+      "previewLook": "soft-light-ad"
+    },
+    {
+      "id": "flow-nodes",
+      "name": "Flow nodes",
+      "kind": "diagram",
+      "description": "A row of 3–5 labeled stage boxes (index, display label, mono sub-label). Each box lands, the arrow to the next draws on, then a pulse dot keeps travelling along every connection; the final stage is filled with the accent as the outcome. Edit the NODES array for any pipeline, process or request path.",
+      "tags": [
+        "flow",
+        "pipeline",
+        "process",
+        "arrows",
+        "draw-on",
+        "pulse",
+        "boxes",
+        "explainer",
+        "technical"
+      ],
+      "fonts": [],
+      "duration": 5,
+      "license": "original",
+      "previewLook": "duotone-broadcast"
+    },
+    {
+      "id": "gather-to-logo",
+      "name": "Gather to logo",
+      "kind": "transition",
+      "description": "Feature chips pop in scattered around the frame, then travel on arcs into the centre, and the moment the last one lands a logo mark and wordmark stamp in as the end card. Edit the chip words, their positions, the mark letter and the wordmark.",
+      "tags": [
+        "logo",
+        "end-card",
+        "gather",
+        "converge",
+        "outro",
+        "continuous",
+        "kit"
+      ],
+      "fonts": [],
+      "duration": 5,
+      "license": "original",
+      "requires": [
+        "kit"
+      ],
+      "previewLook": "sunlit-consumer"
+    },
+    {
+      "id": "highlight-sweep",
+      "name": "Highlight sweep",
+      "kind": "type",
+      "description": "A two-line sentence rises in, then a marker-style accent bar sweeps left-to-right behind the key words while their color flips to the field color exactly under the sweep. Emphasises the one phrase that matters in a claim, tagline or explainer line. Supports one or two marks. Transparent.",
+      "tags": [
+        "highlight",
+        "marker",
+        "emphasis",
+        "sweep",
+        "underline",
+        "callout",
+        "sentence",
+        "tagline",
+        "explainer",
+        "wipe"
+      ],
+      "fonts": [],
+      "duration": 3.5,
+      "license": "original",
+      "previewLook": "duotone-broadcast"
+    },
+    {
+      "id": "iris-circle",
+      "name": "Iris circle",
+      "kind": "transition",
+      "description": "A circular mask grows to cover a cut, holds, then contracts to reveal the next scene.",
+      "tags": [
+        "iris",
+        "mask",
+        "reveal"
+      ],
+      "fonts": [],
+      "duration": 2.4,
+      "license": "original",
+      "previewLook": "duotone-broadcast"
+    },
+    {
+      "id": "kinetic-letters",
+      "name": "Kinetic letters",
+      "kind": "type",
+      "description": "A big uppercase word whose letters drop in one by one from above with a springy back.out overshoot and a slight tilt that settles to zero, finishing with a tiny collective squash. Playful, energetic headline or brand-name reveal. Deterministic splitter, no randomness. Transparent.",
+      "tags": [
+        "kinetic",
+        "letters",
+        "per-letter",
+        "bounce",
+        "spring",
+        "drop",
+        "playful",
+        "headline",
+        "brand-name",
+        "split-text"
+      ],
+      "fonts": [],
+      "duration": 3,
+      "license": "original",
+      "previewLook": "duotone-broadcast"
+    },
+    {
+      "id": "light-leak-soft",
+      "name": "Soft light leak",
+      "kind": "texture",
+      "description": "Transparent soft light leak: a warm bloom and a hot core, tinted from the look, swell and drift along one edge, then fade (screen blend). A gentle transition accent or warm lift over a hold.",
+      "tags": [
+        "light-leak",
+        "glow",
+        "bloom",
+        "flare",
+        "film",
+        "warm",
+        "overlay",
+        "texture",
+        "transition",
+        "transparent"
+      ],
+      "fonts": [],
+      "duration": 5,
+      "license": "original",
+      "previewLook": "duotone-broadcast"
+    },
+    {
+      "id": "line-stack-reveal",
+      "name": "Line stack reveal",
+      "kind": "type",
+      "description": "A 2–4 line headline where each line rises out of its own mask with a tight 0.08s expo.out stagger, a small mono eyebrow above, last line optionally in the accent color. The workhorse title-card / statement reveal. Transparent, sits on any background.",
+      "tags": [
+        "headline",
+        "title",
+        "mask",
+        "reveal",
+        "stagger",
+        "lines",
+        "statement",
+        "multi-line",
+        "kinetic"
+      ],
+      "fonts": [],
+      "duration": 3,
+      "license": "original",
+      "previewLook": "soft-light-ad"
+    },
+    {
+      "id": "lower-third",
+      "name": "Lower third",
+      "kind": "frame",
+      "description": "A left-aligned speaker caption with a ruled edge and a masked entrance and exit.",
+      "tags": [
+        "speaker",
+        "caption",
+        "interview"
+      ],
+      "fonts": [],
+      "duration": 5,
+      "license": "original",
+      "previewLook": "duotone-broadcast"
+    },
+    {
+      "id": "marquee-strip",
+      "name": "Marquee strip",
+      "kind": "type",
+      "description": "Two tilted bands of repeated uppercase text scrolling at constant speed in opposite directions: a solid ink band with field-colored type and an outlined band between hairlines. Position is a pure function of time (x = -speed*t mod set width), so it seeks exactly and loops forever. For energy beats, brand lists, feature tags, section breaks. Transparent.",
+      "tags": [
+        "marquee",
+        "ticker",
+        "scrolling",
+        "loop",
+        "band",
+        "tape",
+        "banner",
+        "outline",
+        "tags",
+        "energy"
+      ],
+      "fonts": [],
+      "duration": 5,
+      "license": "original",
+      "previewLook": "duotone-broadcast"
+    },
+    {
+      "id": "mesh-gradient",
+      "name": "Mesh gradient",
+      "kind": "background",
+      "description": "A slow, restrained mesh gradient in the look's own colors: soft pools of the alternate field and accent drift over the main field with a gentle light lift, finished with fine grain so it never bands. Premium brand, title and outro backdrops.",
+      "tags": [
+        "gradient",
+        "mesh",
+        "blobs",
+        "soft",
+        "drift",
+        "ambient",
+        "grain",
+        "premium",
+        "brand",
+        "backdrop"
+      ],
+      "fonts": [],
+      "duration": 8,
+      "license": "original",
+      "previewLook": "soft-light-ad"
+    },
+    {
+      "id": "morph-carry",
+      "name": "Morph carry",
+      "kind": "transition",
+      "description": "A cursor presses a pill button and the button's own box springs open into the full frame, its label leaving as the next scene's headline rises inside it. Edit the button label, the hint line and the next scene's kicker and headline.",
+      "tags": [
+        "handoff",
+        "continuous",
+        "kit",
+        "morph",
+        "cursor",
+        "button",
+        "box-to-frame"
+      ],
+      "fonts": [],
+      "duration": 5,
+      "license": "original",
+      "requires": [
+        "kit"
+      ],
+      "previewLook": "soft-light-ad"
+    },
+    {
+      "id": "one-shape-journey",
+      "name": "One shape journey",
+      "kind": "diagram",
+      "description": "One shape never leaves: a dot pops in, stretches into a progress bar that fills, morphs into a button, then into an app-icon block as the product name rises beside it, with quick label swaps inside. Edit the progress label, button text, icon letter, name and tagline.",
+      "tags": [
+        "morph",
+        "continuous",
+        "kit",
+        "progress",
+        "button",
+        "app-icon",
+        "logo",
+        "end-card",
+        "handoff"
+      ],
+      "fonts": [],
+      "duration": 6,
+      "license": "original",
+      "requires": [
+        "kit"
+      ],
+      "previewLook": "dark-studio"
+    },
+    {
+      "id": "open-from-subject",
+      "name": "Open from subject",
+      "kind": "transition",
+      "description": "A round mark with a label pops in and holds, then the next stage opens as a growing circle from the mark's centre onto a --field-2 scene where a headline rises. Edit the mark glyph, its label, and the stage's kicker and headline.",
+      "tags": [
+        "handoff",
+        "continuous",
+        "kit",
+        "iris",
+        "circle",
+        "reveal",
+        "logo"
+      ],
+      "fonts": [],
+      "duration": 4,
+      "license": "original",
+      "requires": [
+        "kit"
+      ],
+      "previewLook": "duotone-broadcast"
+    },
+    {
+      "id": "orbiting-circles",
+      "name": "Orbiting circles",
+      "kind": "diagram",
+      "description": "Icon chips orbit a central accent badge on two rings, the outer ring counter-rotating. Rings draw on, chips pop in with a stagger, then everything keeps turning at a calm, seek-safe pace. Use for ecosystems, integrations, 'everything around one core'. Edit ORBITS (radius, period, direction, icons) and CENTER.",
+      "tags": [
+        "orbit",
+        "ecosystem",
+        "integrations",
+        "icons",
+        "rings",
+        "hub",
+        "loop",
+        "launch",
+        "magic-ui"
+      ],
+      "fonts": [],
+      "duration": 6,
+      "license": "MIT",
+      "source": {
+        "url": "https://github.com/magicuidesign/magicui/blob/main/apps/www/registry/magicui/orbiting-circles.tsx",
+        "author": "Magic UI"
+      },
+      "previewLook": "soft-light-ad"
+    },
+    {
+      "id": "phone-frame",
+      "name": "Phone frame",
+      "kind": "ui",
+      "description": "A pure-CSS phone (rounded body, dynamic island, side buttons, edge highlight and a sweeping glass glare) rises in with a gentle 3D tilt and settles upright, then a default finance-app screen builds in. The screen is a slot: swap in a real app screenshot <img>.",
+      "tags": [
+        "phone",
+        "mobile",
+        "device",
+        "mockup",
+        "app",
+        "3d-tilt",
+        "screenshot",
+        "ios"
+      ],
+      "fonts": [],
+      "duration": 4,
+      "license": "original",
+      "previewLook": "soft-light-ad"
+    },
+    {
+      "id": "pricing-toggle",
+      "name": "Pricing toggle",
+      "kind": "ui",
+      "description": "An illustrative monthly-to-yearly plan switch with an animated rate and explicit billing terms. Replace sample prices before use.",
+      "tags": [
+        "pricing",
+        "product",
+        "toggle"
+      ],
+      "fonts": [],
+      "duration": 5,
+      "license": "original",
+      "previewLook": "soft-light-ad"
+    },
+    {
+      "id": "request-to-result",
+      "name": "Request to result",
+      "kind": "ui",
+      "description": "A request types into a prompt box, a cursor presses Send, and the same box grows into the result card as rows land one by one with drawn checks; one element carries the scene, no crossfade. Edit the request text, the result header and the rows.",
+      "tags": [
+        "prompt",
+        "cursor",
+        "typing",
+        "morph",
+        "result",
+        "checklist",
+        "ai",
+        "continuous",
+        "kit"
+      ],
+      "fonts": [],
+      "duration": 7,
+      "license": "original",
+      "requires": [
+        "kit"
+      ],
+      "previewLook": "soft-light-ad"
+    },
+    {
+      "id": "retro-grid",
+      "name": "Retro grid",
+      "kind": "background",
+      "description": "A perspective grid floor scrolling steadily toward the viewer and fading into a hazy horizon. Synthwave-adjacent depth kept restrained in the look's line color; a backdrop for launches, titles and tech intros. Converted from Magic UI's Retro Grid.",
+      "tags": [
+        "grid",
+        "perspective",
+        "floor",
+        "retro",
+        "synthwave",
+        "horizon",
+        "scrolling",
+        "depth",
+        "tech",
+        "magic-ui"
+      ],
+      "fonts": [],
+      "duration": 6,
+      "license": "MIT",
+      "source": {
+        "url": "https://github.com/magicuidesign/magicui/blob/main/apps/www/registry/magicui/retro-grid.tsx",
+        "author": "Magic UI"
+      },
+      "previewLook": "duotone-broadcast"
+    },
+    {
+      "id": "scale-dive",
+      "name": "Scale dive",
+      "kind": "transition",
+      "description": "A powers-of-ten camera dive on one world layer: a wide dashboard, into one card, into the number inside it, which fills the frame and rests as the payoff. Edit the dashboard copy, the target card and the number; nested levels are authored large and scaled down so text stays crisp at every zoom.",
+      "tags": [
+        "zoom",
+        "dive",
+        "camera",
+        "dashboard",
+        "number",
+        "payoff",
+        "continuous",
+        "kit"
+      ],
+      "fonts": [],
+      "duration": 6,
+      "license": "original",
+      "requires": [
+        "kit"
+      ],
+      "previewLook": "soft-light-ad"
+    },
+    {
+      "id": "scale-through-word",
+      "name": "Scale through word",
+      "kind": "type",
+      "description": "A big uppercase word rises in, then the camera dives through one of its letters: the word scales ~1 to 48x around the letter's counter, which floods with --field-2 until it fills the frame and becomes the next scene's background. A type-driven scene transition; cut to a --field-2 scene right after.",
+      "tags": [
+        "zoom",
+        "scale",
+        "transition",
+        "zoom-through",
+        "counter",
+        "handoff",
+        "field-cut",
+        "dive",
+        "kinetic",
+        "headline"
+      ],
+      "fonts": [],
+      "duration": 3,
+      "license": "original",
+      "previewLook": "soft-light-ad"
+    },
+    {
+      "id": "screen-replica-steps",
+      "name": "Screen replica steps",
+      "kind": "ui",
+      "description": "A real app screen rebuilt at its screenshot size and walked through step by step: a cursor opens a dropdown, picks an option and saves, every state scripted by a pure setState(t), with one camera close-up per step that follows the cursor and widens at the end. Replace the replica elements with your screenshot's measured layout and edit the copy.",
+      "tags": [
+        "replica",
+        "walkthrough",
+        "cursor",
+        "zoom",
+        "camera",
+        "screenshot",
+        "settings",
+        "continuous",
+        "kit"
+      ],
+      "fonts": [],
+      "duration": 8,
+      "license": "original",
+      "requires": [
+        "kit"
+      ],
+      "previewLook": "soft-light-ad"
+    },
+    {
+      "id": "serif-quote",
+      "name": "Pull quote",
+      "kind": "type",
+      "description": "A large pull quote that builds word by word, each word rising and sharpening from a soft blur, with a hanging accent quote mark, <em> words in the accent color and a mono attribution under a short rule. Editorial with a serif display look, clean with a grotesk. For testimonials, manifesto lines and founder quotes. Transparent.",
+      "tags": [
+        "quote",
+        "pull-quote",
+        "testimonial",
+        "editorial",
+        "serif",
+        "blur",
+        "word-by-word",
+        "attribution",
+        "manifesto"
+      ],
+      "fonts": [],
+      "duration": 4,
+      "license": "original",
+      "previewLook": "soft-light-ad"
+    },
+    {
+      "id": "slam-word",
+      "name": "Slam word",
+      "kind": "type",
+      "description": "One huge uppercase display word rises out of a mask and widens as it lands (variable width axis), then holds. Transparent, sits on any background.",
+      "tags": [
+        "kinetic",
+        "headline",
+        "variable-font",
+        "mask",
+        "reveal",
+        "bold"
+      ],
+      "fonts": [],
+      "duration": 3,
+      "license": "original",
+      "previewLook": "duotone-broadcast"
+    },
+    {
+      "id": "soft-light-field",
+      "name": "Soft light field",
+      "kind": "background",
+      "description": "Airy cool-white field with a deep colored light pool rolling in from one edge around a soft white hotspot, drifting slowly. The backdrop of calm premium product ads.",
+      "tags": [
+        "light",
+        "airy",
+        "vignette",
+        "light-pool",
+        "soft",
+        "premium",
+        "ad",
+        "backdrop"
+      ],
+      "fonts": [],
+      "duration": 6,
+      "license": "original",
+      "previewLook": "soft-light-ad"
+    },
+    {
+      "id": "sparkline-draw",
+      "name": "Sparkline draw",
+      "kind": "data",
+      "description": "A line chart that draws itself left to right over a soft accent area fill, a head dot riding the leading edge, then the last value is flagged with a ringed dot and a display label. Mono y-axis ticks and x labels on hairline gridlines. Edit DATA, X_LABELS, Y_MAX and FMT for growth, usage or revenue curves.",
+      "tags": [
+        "chart",
+        "line-chart",
+        "sparkline",
+        "growth",
+        "draw-on",
+        "area",
+        "data",
+        "traction",
+        "explainer"
+      ],
+      "fonts": [],
+      "duration": 5,
+      "license": "original",
+      "previewLook": "duotone-broadcast"
+    },
+    {
+      "id": "stack-layers",
+      "name": "Stack layers",
+      "kind": "diagram",
+      "description": "An isometric architecture stack: 3–4 slabs drop in and stack bottom-up, each with a flat leader-line label (mono index, display name, mono detail). Then an accent highlight climbs the stack layer by layer. Edit LAYERS (bottom to top) for platforms, tech stacks or tiered offerings.",
+      "tags": [
+        "architecture",
+        "stack",
+        "layers",
+        "isometric",
+        "3d",
+        "platform",
+        "tech-stack",
+        "explainer",
+        "technical"
+      ],
+      "fonts": [],
+      "duration": 6,
+      "license": "original",
+      "previewLook": "soft-light-ad"
+    },
+    {
+      "id": "stat-grid",
+      "name": "Stat grid",
+      "kind": "data",
+      "description": "A row of 3–4 stat cards rising in with a stagger: mono label, a big tabular display number counting up to its value, and a small up/down delta chip with a comparison period. One featured card is filled with the accent. Edit the STATS array for KPIs, launch results or traction slides.",
+      "tags": [
+        "stats",
+        "kpi",
+        "numbers",
+        "count-up",
+        "cards",
+        "metrics",
+        "dashboard",
+        "traction",
+        "launch"
+      ],
+      "fonts": [],
+      "duration": 4,
+      "license": "original",
+      "previewLook": "soft-light-ad"
+    },
+    {
+      "id": "studio-backdrop",
+      "name": "Studio backdrop",
+      "kind": "background",
+      "description": "Seamless photo-studio cyclorama in the field color: back wall, a lit cove where wall curves into floor, a soft key-light pool that drifts slowly and a darker floor zone to stand a product or card on. Works on light and dark fields.",
+      "tags": [
+        "studio",
+        "cyclorama",
+        "product",
+        "soft",
+        "light",
+        "premium",
+        "ad"
+      ],
+      "fonts": [],
+      "duration": 6,
+      "license": "original",
+      "previewLook": "soft-light-ad"
+    },
+    {
+      "id": "tile-flip",
+      "name": "Tile flip",
+      "kind": "transition",
+      "description": "A diagonal wave of perspective tiles closes over a cut and folds away in the same order.",
+      "tags": [
+        "tiles",
+        "perspective",
+        "cascade"
+      ],
+      "fonts": [],
+      "duration": 3,
+      "license": "original",
+      "previewLook": "duotone-broadcast"
+    },
+    {
+      "id": "timeline-track",
+      "name": "Timeline track",
+      "kind": "diagram",
+      "description": "A horizontal timeline whose track fills left to right behind an accent playhead; milestones pop in (dot, mono date above, display label below) as the playhead reaches them, the last one highlighted as 'now'. A mono readout tracks progress. Edit MILESTONES for roadmaps, company history or release trains.",
+      "tags": [
+        "timeline",
+        "roadmap",
+        "history",
+        "milestones",
+        "playhead",
+        "dates",
+        "draw-on",
+        "explainer"
+      ],
+      "fonts": [],
+      "duration": 5,
+      "license": "original",
+      "previewLook": "duotone-broadcast"
+    },
+    {
+      "id": "toast-stack",
+      "name": "Toast stack",
+      "kind": "ui",
+      "description": "Three iOS-style notifications drop in from the top one after another; each lands in front with a soft spring while the earlier ones slide back into a stack (smaller, dimmer, peeking out below). Frosted white cards with app icon, title and body line.",
+      "tags": [
+        "notification",
+        "toast",
+        "ios",
+        "alerts",
+        "stack",
+        "depth",
+        "saas",
+        "app"
+      ],
+      "fonts": [],
+      "duration": 5,
+      "license": "original",
+      "previewLook": "soft-light-ad"
+    },
+    {
+      "id": "typewriter-caption",
+      "name": "Typewriter caption",
+      "kind": "type",
+      "description": "A lowercase sentence typed on character by character with one accent-colored word and a thin caret that blinks once the line is complete. Centred on its final width so it never shifts. Calm product-ad captions.",
+      "tags": [
+        "caption",
+        "typewriter",
+        "typing",
+        "sentence",
+        "accent-word",
+        "ad",
+        "calm",
+        "lowercase"
+      ],
+      "fonts": [],
+      "duration": 4,
+      "license": "original",
+      "previewLook": "soft-light-ad"
+    },
+    {
+      "id": "ui-stack-3d",
+      "name": "Soft 3D window stack",
+      "kind": "3d",
+      "description": "Glossy illustrative product windows with real thickness fan out in soft 3D: an accent title bar, skeleton content, layered soft shadows, blurred back layers for depth of field, and an inner card that lifts toward the camera on the hero beat. Pure CSS 3D so text stays crisp.",
+      "tags": [
+        "3d",
+        "soft-3d",
+        "windows",
+        "stack",
+        "depth",
+        "ui",
+        "saas",
+        "ad",
+        "illustrative",
+        "premium",
+        "css-3d"
+      ],
+      "fonts": [],
+      "duration": 5,
+      "license": "original",
+      "previewLook": "soft-light-ad"
+    },
+    {
+      "id": "vignette",
+      "name": "Vignette",
+      "kind": "texture",
+      "description": "Transparent soft elliptical edge falloff that darkens (or, retinted, lightens) the corners and keeps the center clean, with an optional slow breathe. Focuses the eye and gives flat fields a lens feel.",
+      "tags": [
+        "vignette",
+        "edges",
+        "falloff",
+        "lens",
+        "focus",
+        "overlay",
+        "texture",
+        "cinematic",
+        "transparent"
+      ],
+      "fonts": [],
+      "duration": 6,
+      "license": "original",
+      "previewLook": "duotone-broadcast"
+    },
+    {
+      "id": "word-swap",
+      "name": "Word swap",
+      "kind": "type",
+      "description": "A centered one-line sentence with a slot word that rolls vertically like a slot machine through 3–4 alternatives and lands on the final one; the slot width eases to fit each word so the line re-balances. Great for 'We make it faster / simpler / yours' value props. Transparent.",
+      "tags": [
+        "rotate",
+        "slot-machine",
+        "word-roll",
+        "carousel",
+        "value-prop",
+        "tagline",
+        "kinetic",
+        "swap",
+        "cycling-word"
+      ],
+      "fonts": [],
+      "duration": 4,
+      "license": "original",
+      "previewLook": "soft-light-ad"
+    },
+    {
+      "id": "zoom-into-card",
+      "name": "Zoom into card",
+      "kind": "transition",
+      "description": "Six cards pop in, one is picked and the camera pushes straight through it until its fill becomes the next scene, where a title drops in. Edit the card names, TARGET, and the next scene's kicker and title.",
+      "tags": [
+        "handoff",
+        "continuous",
+        "kit",
+        "zoom",
+        "dive",
+        "camera",
+        "cards",
+        "grid"
+      ],
+      "fonts": [],
+      "duration": 5,
+      "license": "original",
+      "requires": [
+        "kit"
+      ],
+      "previewLook": "swiss-grid"
+    }
+  ]
+}

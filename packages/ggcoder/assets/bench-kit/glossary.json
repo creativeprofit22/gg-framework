@@ -1,0 +1,229 @@
+{
+  "schema": 1,
+  "terms": {
+    "a/a check": {
+      "aliases": ["aa", "a/a", "same-vs-same", "noise check"],
+      "plain": "The same candidate is run against itself. Any difference it shows is pure noise, so it tells us how big a difference has to be before it means anything.",
+      "example": "If engine A against engine A looks 3% different, a 2% gap between two engines tells us nothing."
+    },
+    "benchmark study": {
+      "aliases": ["study"],
+      "plain": "One written-down question, the candidates that answer it, the frozen inputs, the checks and measurements, and the rule that decides the answer.",
+      "example": "Which of three video engines should the editor use?"
+    },
+    "bonferroni correction": {
+      "aliases": ["bonferroni", "adjusted level", "multiple comparisons"],
+      "plain": "When several candidates are each compared with the reference, one of them can look better by luck. The kit widens each range to keep the overall chance of a false win at the stated level.",
+      "example": "Two comparisons at 95% overall means each range is drawn at 97.5%."
+    },
+    "bootstrap": {
+      "aliases": ["resampling", "resamples", "hierarchical bootstrap", "paired bootstrap"],
+      "plain": "A way to estimate uncertainty by re-drawing the measured samples thousands of times and seeing how much the answer moves. Items are re-drawn first, then repeats inside each item, so one odd input cannot dominate.",
+      "example": "10,000 resamples give the range in which the true speed-up most likely lies."
+    },
+    "canary file": {
+      "aliases": ["canary", "canaries"],
+      "plain": "A file the agent has no reason to touch. If it changes, the agent did something it was not asked to do.",
+      "example": "config/keep.json must stay byte-for-byte the same."
+    },
+    "candidate": {
+      "aliases": ["candidates", "option", "alternative"],
+      "plain": "One of the things being compared: a code approach, library, engine, tool, service or agent setup.",
+      "example": "Engine B is a candidate."
+    },
+    "clustered standard error": {
+      "aliases": ["clustered se", "clustered stderr"],
+      "plain": "A measure of uncertainty that treats repeated runs of the same input as related rather than independent, so it does not overstate how sure we are.",
+      "example": "Ten runs of one clip count closer to one clip than to ten."
+    },
+    "coefficient of variation": {
+      "aliases": ["cv", "spread"],
+      "plain": "How much measurements jump around compared with their average. Under 5% is steady; above 10% means the machine or the workload is noisy.",
+      "example": "A CV of 2% on export time means the numbers are steady."
+    },
+    "confidence interval": {
+      "aliases": ["ci", "interval", "range", "uncertainty range"],
+      "plain": "The range in which the true value most likely lies, given the measurements. A wide range means we are unsure; a range that includes 'no difference' means we cannot claim one.",
+      "example": "1.3x to 1.6x faster (95% confidence) means a speed-up of at least 1.3x is very likely."
+    },
+    "decision rule": {
+      "aliases": ["rule", "keep rule", "pre-registered rule"],
+      "plain": "The bar a candidate must clear, written down before any measuring, so the result cannot be bent to fit a favourite.",
+      "example": "Switch only if export is at least 1.3x faster and the whole range stays above 1x."
+    },
+    "errored sample": {
+      "aliases": ["errored", "error", "errors", "error rate"],
+      "plain": "A run that crashed, timed out or could not be checked. It is counted against the candidate and never quietly re-run or treated as zero.",
+      "example": "2 of 30 export runs errored; that 7% is reported."
+    },
+    "estimated cost": {
+      "aliases": ["cost estimate"],
+      "plain": "Tokens used multiplied by a price you supplied in .gg/bench.config.json, with the date that price was checked. The kit never guesses a price.",
+      "example": "1,000 input tokens at $3 per million is $0.003."
+    },
+    "f2p/p2p": {
+      "aliases": ["f2p", "p2p", "fail-to-pass", "pass-to-pass"],
+      "plain": "For coding tasks: fail-to-pass tests must start failing and end passing (the fix works); pass-to-pass tests must keep passing (nothing else broke). A task counts as solved only if both hold.",
+      "example": "The agent fixed the bug but broke two other tests, so the task is not solved."
+    },
+    "gate": {
+      "aliases": ["gates", "check", "pass/fail check"],
+      "plain": "A yes/no check a candidate must pass before its numbers count. A candidate that fails a gate is ruled out no matter how fast it is.",
+      "example": "An engine that cannot seek to the exact frame is ruled out."
+    },
+    "gated-out": {
+      "aliases": ["gated out", "ruled out"],
+      "plain": "The candidate failed at least one gate, so it is out of the running and its speed is not compared.",
+      "example": "Engine C is gated out: its licence does not allow commercial use."
+    },
+    "geometric mean": {
+      "aliases": ["geomean"],
+      "plain": "An average for ratios. It treats 2x faster and 2x slower as cancelling out, which an ordinary average does not.",
+      "example": "Speed-ups of 2x and 0.5x average to 1x."
+    },
+    "hidden tests": {
+      "aliases": ["oracle", "hidden checks"],
+      "plain": "Checks the agent never sees. They are run on a copy of its work afterwards to decide whether it really solved the task.",
+      "example": "The agent fixes add(); the hidden tests then check add(2, -3) is -1."
+    },
+    "inconclusive": {
+      "aliases": ["undecided"],
+      "plain": "The data cannot settle the question yet: the range is too wide, too many runs errored, a check could not run, or the noise check failed. It is not a loss for anyone.",
+      "example": "Add repeats or quiet the machine, then run again."
+    },
+    "mad z-score": {
+      "aliases": ["mad", "median absolute deviation", "modified z-score"],
+      "plain": "A way to flag a measurement as unusually far from the rest, using the median so one wild value cannot hide others.",
+      "example": "One export took 9 s when the others took 4 s; it is flagged, not deleted."
+    },
+    "median": {
+      "aliases": ["p50", "typical value"],
+      "plain": "The middle measurement: half the runs were faster, half slower. Less thrown off by one odd run than the average.",
+      "example": "A median export of 4.1 s."
+    },
+    "no-win": {
+      "aliases": ["no win", "keep reference"],
+      "plain": "No candidate cleared the rule, so the current choice (the reference) stays.",
+      "example": "Engine B was a little faster but not by the 1.3x the rule asked for."
+    },
+    "noise floor": {
+      "aliases": ["noise", "noise threshold"],
+      "plain": "The smallest difference that is bigger than run-to-run jitter. Differences inside it are treated as no difference.",
+      "example": "With a 2% noise floor, a 1% gap is noise."
+    },
+    "outlier": {
+      "aliases": ["outliers", "tukey fences", "tukey"],
+      "plain": "A measurement far from the others, often caused by something else on the machine. Outliers are labelled so you can see them; they are never silently removed.",
+      "example": "Two of 30 runs were mild outliers."
+    },
+    "p95": {
+      "aliases": ["95th percentile", "tail latency", "p90", "p99"],
+      "plain": "95% of runs were at or below this value; only the slowest 5% were worse. It shows the bad-but-common case that an average hides.",
+      "example": "Seek p95 of 40 ms means 1 seek in 20 took longer than 40 ms."
+    },
+    "pass@k": {
+      "aliases": ["pass at k"],
+      "plain": "The chance that at least one of k tries succeeds, estimated from all the tries that were made.",
+      "example": "pass@3 of 60% means three attempts solve the task 60% of the time."
+    },
+    "peak memory (sampled)": {
+      "aliases": ["peak memory", "sampled", "memory"],
+      "plain": "The highest memory use seen while the candidate ran. It is read every few milliseconds, so a very short spike between readings can be missed.",
+      "example": "Peak memory 412 MB (sampled every 50 ms)."
+    },
+    "protocol": {
+      "aliases": ["frozen protocol", "protocol version", "freeze"],
+      "plain": "A fingerprint of the study, inputs and kit taken before the first run. Changing anything afterwards makes a new version, and results from different versions are never mixed.",
+      "example": "Protocol v2 started when a clip was added."
+    },
+    "provenance": {
+      "aliases": ["commit", "dirty tree"],
+      "plain": "Exactly which version of each candidate was measured, so the result can be reproduced or questioned later.",
+      "example": "Engine B at commit 1a2b3c4, no uncommitted changes."
+    },
+    "rank probability": {
+      "aliases": ["ranked best", "chance of being best"],
+      "plain": "How often a candidate came out best when the measurements were re-drawn many times. It is a ranking, not a verdict.",
+      "example": "Engine B was fastest in 87% of resamples."
+    },
+    "ratio": {
+      "aliases": ["speed-up", "x faster", "times faster"],
+      "plain": "How many times better one candidate is than the reference. Above 1 is better, below 1 is worse, exactly 1 is the same.",
+      "example": "A ratio of 1.5 on export time means 1.5x faster."
+    },
+    "record-only gate": {
+      "aliases": ["record severity"],
+      "plain": "A check that is run and kept as a number, but never rules a candidate out. Used when the check result is the thing being measured.",
+      "example": "Whether an agent resolved each task is recorded, then compared as a resolve rate."
+    },
+    "reference": {
+      "aliases": ["baseline", "current choice"],
+      "plain": "The candidate everything else is compared against, usually what you use today. It stays unless another candidate clears the rule.",
+      "example": "Engine A is the reference."
+    },
+    "reported cost": {
+      "plain": "What the agent tool itself said a run cost. Kept separate from estimated cost.",
+      "example": "Claude Code prints total_cost_usd at the end of a run."
+    },
+    "resolved": {
+      "aliases": ["resolve rate"],
+      "plain": "A task counts as resolved only if every test that should start passing now passes and every test that already passed still does.",
+      "example": "Fixing the bug but breaking another test is not resolved."
+    },
+    "seed": {
+      "aliases": ["random seed"],
+      "plain": "A fixed number that makes every random choice (run order, resampling) repeatable, so the same data always gives the same answer.",
+      "example": "Seed 20261020."
+    },
+    "spend cap": {
+      "aliases": ["budget cap", "cap"],
+      "plain": "The most money (and optionally tokens) a person approved for one run. Paid candidates never run without one, and the whole run must fit it at its worst case before it starts.",
+      "example": "With a $5 cap and a $0.25 worst case per sample, at most 20 paid samples can run."
+    },
+    "terminal event": {
+      "aliases": ["final event"],
+      "plain": "The last message an agent tool prints to say how the run ended (finished, failed, out of turns). Only this decides the outcome; text the agent wrote along the way never does.",
+      "example": "A run with no final event is counted as errored, not finished."
+    },
+    "tie": {
+      "aliases": ["draw"],
+      "plain": "The candidates are within the noise of each other on the deciding measurement. A tie is not a win: you choose using the tie-break you wrote down, or keep the reference.",
+      "example": "Engines A and B export equally fast; choose by licence fit."
+    },
+    "verdict": {
+      "aliases": ["result", "outcome"],
+      "plain": "The study's answer: WIN, TIE, NO-WIN or INCONCLUSIVE, plus GATED-OUT for any candidate ruled out by a gate.",
+      "example": "WIN: engine B."
+    },
+    "vmaf": {
+      "aliases": ["video quality"],
+      "plain": "Netflix's video-quality score from 0 to 100, comparing an output with the original. Around 93 or more usually looks the same to viewers.",
+      "example": "A VMAF gate of 95 rules out engines that visibly degrade the export."
+    },
+    "warm-up": {
+      "aliases": ["warmup", "warm up"],
+      "plain": "Runs done first and thrown away, so caches and just-in-time compilers settle before measuring starts.",
+      "example": "One warm-up round per candidate."
+    },
+    "wilson interval": {
+      "aliases": ["wilson", "success rate range"],
+      "plain": "A range for a success rate (like 8 of 10 tasks solved) that stays sensible with small counts or rates near 0% or 100%.",
+      "example": "8 of 10 solved is somewhere between 49% and 94%."
+    },
+    "win": {
+      "aliases": ["winner"],
+      "plain": "A candidate cleared the rule you wrote down before the run, against the reference, beyond the noise.",
+      "example": "WIN: engine B exports at least 1.3x faster."
+    },
+    "workload": {
+      "aliases": ["inputs", "items", "frozen workload"],
+      "plain": "The fixed set of inputs every candidate runs on. It is hashed so nobody can change it mid-study.",
+      "example": "Three clips and one timeline."
+    },
+    "worst-case reservation": {
+      "aliases": ["reservation"],
+      "plain": "Before each paid sample starts, its worst possible cost is set aside from the cap. It is released down to the real cost only when that cost is reported or estimated; unknown usage is never refunded.",
+      "example": "A sample that crashes keeps its full $0.25 reservation."
+    }
+  }
+}

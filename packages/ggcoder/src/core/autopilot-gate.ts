@@ -5,7 +5,7 @@
  * Autopilot must NOT review every turn. The concrete leak cases this gate
  * closes (each has a matching unit test in autopilot-gate.test.ts):
  *
- * - Workflow slash commands (`/compare`, `/bullet-proof`, `/expand`, custom
+ * - Workflow slash commands (`/compare`, `/expand`, custom
  *   `.gg/commands/*.md`) end with reports or A/B/C choices that are reserved
  *   for the USER. Ken reviewing them reads "findings" as "something real is
  *   wrong" and injects fix prompts the user never approved.
@@ -18,7 +18,7 @@
  * - A turn whose ONLY tool calls were mechanical usage — a bash command that
  *   starts a background process (dev server, watcher), is read-only, or is a
  *   plain `git add`/`commit`/`push` workflow; a dedicated read-only tool
- *   (read/grep/find/ls/web_fetch/web_search/source_path/code_search/
+ *   (read/grep/find/ls/web_fetch/web_search/source_path/
  *   task_output/screenshot/skill); or NO tool calls at all (a plain-text
  *   answer with nothing built) — was always going to come back as Ken's
  *   IGNORE verdict (see the autopilot system prompt's "mechanical operation"
@@ -30,6 +30,7 @@
  * sidecar (which runs `main()` at import time).
  */
 import { isReadOnlyCommand } from "../tools/read-only-bash.js";
+import { matchPromptCommand, LEGACY_COMMAND_ARGS_SEPARATOR } from "./prompt-command-expansion.js";
 
 /** A workflow (prompt-template) command: built-in PROMPT_COMMANDS or a custom
  *  `.gg/commands/*.md` entry. `prompt` is the full template body the command
@@ -40,10 +41,8 @@ export interface WorkflowCommandSpec {
   prompt: string;
 }
 
-/** The exact separator AgentSession.prompt() inserts between a command's
- *  template and the user's extra args (see agent-session.ts prompt expansion).
- *  Must stay byte-identical or expanded-command detection silently breaks. */
-export const USER_INSTRUCTIONS_HEADER = "\n\n## User Instructions\n\n";
+/** Retained for legacy transcript expansion compatibility. */
+export const USER_INSTRUCTIONS_HEADER = LEGACY_COMMAND_ARGS_SEPARATOR;
 
 /** Extract the `/name` token from raw input, or null when it isn't a slash
  *  invocation. */
@@ -83,16 +82,7 @@ export function matchExpandedCommand(
   text: string,
   commands: readonly WorkflowCommandSpec[],
 ): { command: WorkflowCommandSpec; args: string | null } | null {
-  for (const command of commands) {
-    if (!command.prompt) continue;
-    if (text === command.prompt) return { command, args: null };
-    const prefix = command.prompt + USER_INSTRUCTIONS_HEADER;
-    if (text.startsWith(prefix)) {
-      const args = text.slice(prefix.length).trim();
-      return { command, args: args.length > 0 ? args : null };
-    }
-  }
-  return null;
+  return matchPromptCommand(text, commands);
 }
 
 /** Count assistant messages — the "did this run produce reviewable work"
@@ -112,8 +102,7 @@ export function extractTurnToolCalls(
   messages: ReadonlyArray<{
     role: string;
     content:
-      | string
-      | ReadonlyArray<{ type: string; name?: string; args?: Record<string, unknown> }>;
+      string | ReadonlyArray<{ type: string; name?: string; args?: Record<string, unknown> }>;
   }>,
   startIndex: number,
 ): TurnToolCall[] {
@@ -152,15 +141,14 @@ export interface AutopilotGateInput {
   workflowCommand: boolean;
   /** Assistant messages ADDED by this turn (after minus before). */
   assistantMessagesAdded: number;
-  /** True when every tool call this turn was mechanical bash usage (see
+  /** True when every tool call this turn was mechanical (see
    *  isMechanicalOnlyTurn) — nothing for Ken to review. Optional so existing
    *  callers/tests that don't set it default to false (reviewable). */
   mechanicalOnly?: boolean;
 }
 
 export type AutopilotGateDecision =
-  | { start: true; kind: "work" | "plan" }
-  | { start: false; reason: AutopilotSkipReason };
+  { start: true; kind: "work" | "plan" } | { start: false; reason: AutopilotSkipReason };
 
 /**
  * Decide whether the autopilot cycle may start for a just-finished turn.
@@ -194,15 +182,17 @@ export interface TurnToolCall {
 }
 
 /** Dedicated tools that can never touch the repo/filesystem in a way worth
- *  reviewing: pure lookups (read/grep/find/ls/source_path/code_search),
+ *  reviewing: pure lookups (read/grep/find/ls/source_path),
  *  network research (web_fetch/web_search), reading a background process's
  *  output (task_output), a UI screenshot, or loading a skill definition. Any
  *  call to one of these is mechanical regardless of its arguments — unlike
  *  bash, which needs isMechanicalBashCall to tell a read-only invocation from
  *  a mutating one. Deliberately excludes generate_image (produces a real
  *  artifact), subagent (can do anything internally), tasks/task_send/
- *  task_stop (mutate task/process state), and enter_plan/exit_plan (mode
- *  transitions already handled by the separate plan-mode gate check). */
+ *  task_stop (mutate task/process state; they stay reviewable), and
+ *  enter_plan/exit_plan (mode transitions already handled by the separate
+ *  plan-mode gate check). Roadmap bookkeeping tools are handled separately by
+ *  BOOKKEEPING_TOOL_NAMES. */
 const READ_ONLY_TOOL_NAMES: ReadonlySet<string> = new Set([
   "read",
   "grep",
@@ -211,10 +201,27 @@ const READ_ONLY_TOOL_NAMES: ReadonlySet<string> = new Set([
   "web_fetch",
   "web_search",
   "source_path",
-  "code_search",
   "task_output",
   "screenshot",
   "skill",
+]);
+
+/** Local Fork: Project Notes Roadmap bookkeeping. These change status records,
+ *  not code, and enforce their own revision, lease, evidence and approval
+ *  checks, so a turn that only updates a phase gets no Ken review (and no
+ *  pre-review check demand). `tasks` is deliberately excluded (as upstream):
+ *  desktop task runs ask the agent to call `tasks done`, and that agent-marked
+ *  completion must stay provisional until Ken reviews the turn against the
+ *  task prompt — otherwise a run that did nothing but mark itself done would
+ *  settle as done unreviewed. task_send/task_stop stay reviewable too. */
+const BOOKKEEPING_TOOL_NAMES: ReadonlySet<string> = new Set([
+  "roadmap_bind",
+  "roadmap_checkpoint",
+  "roadmap_inspect",
+  "roadmap_phase_draft",
+  "roadmap_phase_edit",
+  "roadmap_phase_move",
+  "roadmap_status",
 ]);
 
 /** Leading git subcommands that are a plain add/commit/push workflow —
@@ -249,10 +256,12 @@ function isMechanicalBashCall(args: Record<string, unknown> | undefined): boolea
  * True when the turn has nothing for Ken to review: either it made NO tool
  * calls at all (a plain-text answer — "a plain question that got answered
  * with no code touched" is IGNORE per the autopilot contract), or EVERY tool
- * call was mechanical (a dedicated read-only tool, or bash usage that starts
- * a background process / is read-only / is a plain git commit-push chain).
- * ANY non-mechanical call (edit, write, subagent, generate_image, or bash
- * outside these safe shapes) makes the whole turn reviewable — conservative
+ * call was mechanical (a dedicated read-only tool in READ_ONLY_TOOL_NAMES, a
+ * Roadmap bookkeeping tool in BOOKKEEPING_TOOL_NAMES, or bash usage that
+ * starts a background process / is read-only / is a plain git commit-push
+ * chain). ANY non-mechanical call (edit, write, subagent, generate_image,
+ * tasks/task_send/task_stop, or bash outside these safe shapes) makes the
+ * whole turn reviewable — conservative
  * default: keep reviewing whenever it's unclear.
  */
 export function isMechanicalOnlyTurn(toolCalls: readonly TurnToolCall[]): boolean {
@@ -260,6 +269,7 @@ export function isMechanicalOnlyTurn(toolCalls: readonly TurnToolCall[]): boolea
   return toolCalls.every(
     (call) =>
       READ_ONLY_TOOL_NAMES.has(call.name) ||
+      BOOKKEEPING_TOOL_NAMES.has(call.name) ||
       (call.name === "bash" && isMechanicalBashCall(call.args)),
   );
 }

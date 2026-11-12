@@ -7,21 +7,50 @@ import { theme } from "./theme";
 const MAX_DETAIL = 44;
 
 export type ToolTone =
-  | "read"
-  | "search"
-  | "write"
-  | "run"
-  | "web"
-  | "agent"
-  | "state"
-  | "source"
-  | "default";
+  "read" | "search" | "write" | "run" | "web" | "agent" | "state" | "source" | "default";
 
 export interface ToolLinePart {
   text: string;
   bold?: boolean;
   tone?: ToolTone;
   dim?: boolean;
+  /** A safety block: shown in the warning colour, not as a plain failure. */
+  warn?: boolean;
+}
+
+/** Plain words for each safety-block rule (packages/ggcoder core guards). */
+const SAFETY_RULES: Record<string, string> = {
+  "malicious-package": "known malware",
+  "known-vulnerability": "serious known flaw",
+  "release-age": "too new to trust yet",
+  typosquat: "lookalike name",
+  "provenance-downgrade": "unsigned release",
+  "secret-exfil": "would send secrets",
+  "secret-literal-exfil": "would send a key",
+  "exfil-host": "data-collection site",
+  "dns-exfil": "would leak data",
+  "ai-cli-bypass": "AI tool, safety off",
+  "auto-run-config": "turns on auto-run",
+  "gg-auth-write": "your login file",
+  "pipe-to-shell": "runs downloaded code",
+  "reverse-shell": "remote control",
+  "lookalike-host": "lookalike address",
+  "terminal-tricks": "hidden characters",
+  "installed-malware": "infected package",
+};
+
+/** Plain words for a safety rule (shared by the step line and the chat row). */
+export function safetyRuleReason(rule: string): string {
+  return SAFETY_RULES[rule] ?? "safety rule";
+}
+
+const SAFETY_BLOCK =
+  /^(?:Error: )?Blocked (?:install|by (?:shell|action) safety check) \(([a-z-]+)\)/;
+
+/** The plain reason for a guard's block ("known malware"), else null. */
+export function safetyBlockSummary(result: string | undefined): string | null {
+  const rule = SAFETY_BLOCK.exec(result ?? "")?.[1];
+  return rule ? safetyRuleReason(rule) : null;
 }
 
 interface VerbPair {
@@ -44,14 +73,11 @@ const VERBS: Record<string, VerbPair> = {
   source_path: { running: "Resolving", done: "Resolved" },
   tasks: { running: "Updating tasks", done: "Updated tasks" },
   screenshot: { running: "Capturing", done: "Captured" },
+  debug: { running: "Debugging", done: "Debugged" },
+  dev_app: { running: "Driving app", done: "Drove app" },
   enter_plan: { running: "Entering plan", done: "Entered plan" },
   exit_plan: { running: "Submitting plan", done: "Submitted plan" },
-  "mcp__kencode-search__searchCode": { running: "Searching code", done: "Searched code" },
-  "mcp__kencode-search__referenceSources": {
-    running: "Finding references",
-    done: "Found references",
-  },
-  "mcp__kencode-search__discoverRepos": { running: "Discovering repos", done: "Discovered repos" },
+  steroids: { running: "Reading real code", done: "Read real code" },
 };
 
 function humanizeName(name: string): VerbPair {
@@ -65,18 +91,19 @@ function humanizeName(name: string): VerbPair {
 
 export function getToolTone(name: string): ToolTone {
   if (["read", "ls"].includes(name)) return "read";
-  if (["grep", "find", "mcp__kencode-search__searchCode"].includes(name)) return "search";
-  if (["write", "edit"].includes(name)) return "write";
-  if (["bash", "task_output", "task_stop"].includes(name)) return "run";
   if (
     [
-      "web_fetch",
-      "web_search",
-      "mcp__kencode-search__referenceSources",
+      "grep",
+      "find",
+      "steroids",
+      "mcp__kencode-search__searchCode",
       "mcp__kencode-search__discoverRepos",
     ].includes(name)
   )
-    return "web";
+    return "search";
+  if (["write", "edit"].includes(name)) return "write";
+  if (["bash", "task_output", "task_stop", "debug"].includes(name)) return "run";
+  if (["web_fetch", "web_search"].includes(name)) return "web";
   if (["subagent", "skill"].includes(name)) return "agent";
   if (["tasks"].includes(name)) return "state";
   if (["source_path"].includes(name)) return "source";
@@ -112,8 +139,14 @@ function shorten(value: string, max = MAX_DETAIL): string {
   return value.length > max ? `${value.slice(0, max - 1)}…` : value;
 }
 
-function basename(p: string): string {
-  const parts = p.split("/").filter(Boolean);
+/**
+ * Last path segment, for BOTH separators. The webview has no `node:path`, and
+ * splitting on "/" alone left every Windows path (`C:\repo\src\a.ts`) as one
+ * segment — so tool rows showed the whole absolute path instead of the file
+ * name.
+ */
+export function basename(p: string): string {
+  const parts = p.split(/[\\/]/).filter(Boolean);
   return parts[parts.length - 1] ?? p;
 }
 
@@ -135,9 +168,20 @@ function plural(n: number, one: string, many = `${one}s`): string {
 
 function toolDetail(name: string, args: Record<string, unknown>): { text: string; quote: boolean } {
   switch (name) {
+    case "edit": {
+      // A multi-file edit carries `files: [{ file_path, edits }]` instead of `file_path`.
+      const paths = [
+        args.file_path,
+        ...(Array.isArray(args.files)
+          ? args.files.map((f) => (f as { file_path?: unknown } | null)?.file_path)
+          : []),
+      ].filter((p): p is string => typeof p === "string" && p.length > 0);
+      const first = paths[0] ?? "";
+      const more = paths.length > 1 ? ` +${paths.length - 1} more` : "";
+      return { text: `${basename(first)}${more}`, quote: false };
+    }
     case "read":
     case "write":
-    case "edit":
       return { text: basename(String(args.file_path ?? "")), quote: false };
     case "ls":
       return { text: shorten(String(args.path ?? ".")), quote: false };
@@ -150,13 +194,31 @@ function toolDetail(name: string, args: Record<string, unknown>): { text: string
       return { text: hostOf(String(args.url ?? "")), quote: false };
     case "web_search":
     case "mcp__kencode-search__searchCode":
+    case "mcp__kencode-search__discoverRepos":
       return { text: shorten(String(args.query ?? "")), quote: true };
+    case "steroids":
+      return {
+        text: shorten(
+          Array.isArray(args.repos)
+            ? args.repos.map(String).join(", ")
+            : String(args.pattern ?? args.symbol ?? args.query ?? args.path ?? args.repo ?? ""),
+        ),
+        quote: true,
+      };
     case "subagent":
       return { text: shorten(String(args.agent ?? "")), quote: false };
     case "skill":
       return { text: shorten(String(args.skill ?? "")), quote: false };
     case "source_path":
       return { text: shorten(String(args.package ?? "")), quote: false };
+    case "debug": {
+      // "launch src/app.js", "evaluate user.id", "step_over".
+      const target = args.program ?? args.expression ?? args.breakpoint_id ?? args.file;
+      return {
+        text: shorten(`${String(args.action ?? "")}${target ? ` ${String(target)}` : ""}`),
+        quote: false,
+      };
+    }
     default:
       return { text: "", quote: false };
   }
@@ -186,13 +248,26 @@ function inlineSummary(name: string, result: string, details: unknown): string {
       return added > 0 || removed > 0 ? `+${added} \u2212${removed}` : "";
     }
     case "bash": {
+      // Structured daemon diagnostics say what happened even when the text has
+      // no "Exit code:" line (a handed-off command is still running).
+      const diag = (
+        details as
+          { bashDiagnostics?: { reason?: unknown; backgroundTaskId?: unknown } } | undefined
+      )?.bashDiagnostics;
+      if (diag?.reason === "backgrounded") {
+        const id = typeof diag.backgroundTaskId === "string" ? diag.backgroundTaskId : "";
+        return id ? `moved to background ${shorten(id, 16)}` : "moved to background";
+      }
+      if (diag?.reason === "inactive") return "stopped: no output";
       const exit = result.match(/Exit code: (\S+)/)?.[1];
       return exit ? `exit ${exit}` : "";
     }
     case "grep": {
+      // Match rows in either layout: grouped `line:text` under a path heading,
+      // or flat `path:line:text` (sessions saved before grep grouped by file).
       const matches = result
         .split("\n")
-        .filter((line) => line.length > 0 && !/^\d+ match|^\[Truncated/.test(line)).length;
+        .filter((line) => /^\d+:/.test(line) || /^.+?:\d+:/.test(line)).length;
       return matches > 0 ? `${matches} ${plural(matches, "match", "matches")}` : "";
     }
     case "find": {
@@ -211,13 +286,39 @@ function inlineSummary(name: string, result: string, details: unknown): string {
 export function buildToolLineParts(
   name: string,
   args: Record<string, unknown>,
-  input: { done: boolean; isError?: boolean; result?: string; details?: unknown },
+  input: {
+    done: boolean;
+    isError?: boolean;
+    result?: string;
+    details?: unknown;
+    /** Presentation-only label; behavior still dispatches on `name`. */
+    displayName?: string;
+  },
 ): ToolLinePart[] {
-  const verbs = VERBS[name] ?? humanizeName(name);
+  const indexing =
+    name === "steroids" &&
+    (args.action === "add" || (args.action === "discover" && args.add === true));
+  const verbs = input.displayName
+    ? { running: input.displayName, done: input.displayName }
+    : indexing
+      ? { running: "Indexing repos", done: "Indexed repos" }
+      : (VERBS[name] ?? humanizeName(name));
   const tone = getToolTone(name);
   const verb = input.done ? verbs.done : verbs.running;
   const { text: detail, quote } = toolDetail(name, args);
 
+  // Guards return their block as the tool's text (isError stays false), so the
+  // result's own "Blocked … (rule)" prefix is what marks it.
+  const blocked = input.done ? safetyBlockSummary(input.result) : null;
+  if (blocked) {
+    // The reason leads and the command trails, so a narrow line cuts the
+    // command, never the reason. A blocked call never ran: no "Ran".
+    return [
+      { text: "Blocked for safety", bold: true, warn: true },
+      { text: ` \u00b7 ${blocked}`, warn: true },
+      ...(detail ? [{ text: ` \u00b7 ${quote ? `"${detail}"` : detail}`, dim: true }] : []),
+    ];
+  }
   const parts: ToolLinePart[] = [{ text: verb, bold: true, tone }];
   if (detail) {
     parts.push({ text: ` ${quote ? `"${detail}"` : detail}` });

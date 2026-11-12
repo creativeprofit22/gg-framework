@@ -1,3 +1,4 @@
+import { withoutQwenRuntimeSecret } from "../tools/safe-env.js";
 import { execFile } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -7,7 +8,7 @@ import type { Provider } from "@kenkaiiii/gg-ai";
 
 // Resolve the package version by walking up from this module to the nearest
 // package.json. A bare `require("../../package.json")` breaks when this module
-// is re-bundled into a sibling package (e.g. gg-boss), where the relative path
+// is re-bundled into a sibling package, where the relative path
 // no longer points at ggcoder's manifest — so it crashes the CLI. Walking up
 // from import.meta.url always finds a valid manifest and never throws.
 function resolveCliVersion(): string {
@@ -130,7 +131,9 @@ export function displayName(provider: Provider): string {
   if (provider === "minimax") return "MiniMax";
   if (provider === "deepseek") return "DeepSeek";
   if (provider === "openrouter") return "OpenRouter";
+  if (provider === "huggingface") return "Hugging Face";
   if (provider === "sakana") return "Sakana (Fugu)";
+  if (provider === "xai") return "xAI (Grok)";
   return "OpenAI";
 }
 
@@ -138,7 +141,7 @@ export function openBrowser(url: string): void {
   const cmd =
     process.platform === "darwin" ? "open" : process.platform === "win32" ? "start" : "xdg-open";
 
-  execFile(cmd, [url], () => {
+  execFile(cmd, [url], { env: withoutQwenRuntimeSecret() }, () => {
     // Ignore errors — user can copy URL manually
   });
 }

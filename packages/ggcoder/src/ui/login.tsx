@@ -1,6 +1,7 @@
 import chalk from "chalk";
 import type { Provider } from "@kenkaiiii/gg-ai";
 import { renderLogoBlock } from "../cli/shared.js";
+import { AUTH_PROVIDERS } from "../core/auth-providers.js";
 
 // Defaults — ggcoder branding. ggeditor passes its own palette.
 const DEFAULT_GRADIENT = [
@@ -28,26 +29,12 @@ let _gradient: string[] = DEFAULT_GRADIENT;
 let _primary = DEFAULT_PRIMARY;
 let _accent = DEFAULT_ACCENT;
 
-const PROVIDERS: { label: string; value: Provider; description: string }[] = [
-  {
-    label: "Anthropic",
-    value: "anthropic",
-    description: "Claude Opus 4.8, Fable 5, Sonnet 5, Haiku 4.5",
-  },
-  { label: "OpenAI", value: "openai", description: "GPT-5.5, GPT-5.5 Pro, GPT-5.4, GPT-5.3 Codex" },
-  { label: "Gemini", value: "gemini", description: "Gemini 3.1 Flash Lite Preview" },
-  { label: "Moonshot", value: "moonshot", description: "Kimi K2.7 · OAuth or API key" },
-  { label: "Z.AI (GLM)", value: "glm", description: "GLM-5.1, GLM-4.7, GLM-4.7 Flash" },
-  { label: "MiniMax", value: "minimax", description: "MiniMax M3" },
-  {
-    label: "Xiaomi (MiMo)",
-    value: "xiaomi",
-    description: "MiMo-V2.5-Pro, MiMo-V2.5-Pro-UltraSpeed, MiMo-V2.5 · Token Plan or API Credits",
-  },
-  { label: "DeepSeek", value: "deepseek", description: "DeepSeek V4 Pro, V4 Flash" },
-  { label: "OpenRouter", value: "openrouter", description: "Qwen3.6-Plus, multi-provider gateway" },
-  { label: "Sakana (Fugu)", value: "sakana", description: "Fugu, Fugu Ultra" },
-];
+// Rows come straight from AUTH_PROVIDERS so the login screen can never list a
+// model the registry no longer serves — that table is the single source of
+// truth for provider label, model line-up and auth methods.
+const PROVIDERS: { label: string; value: Provider; description: string }[] = AUTH_PROVIDERS.map(
+  (p) => ({ label: p.label, value: p.value as Provider, description: p.description }),
+);
 
 function renderScreen(selectedIndex: number): string {
   const lines: string[] = [];

@@ -1,0 +1,15 @@
+.look-data-desk {
+  --field: #e8ede8;
+  --field-2: #183e35;
+  --ink: #182d27;
+  --accent: #25634d;
+  --muted: #526359;
+  --line: #b4c3b8;
+  --display: "Schibsted Grotesk", sans-serif;
+  --display-weight: 650;
+  --display-stretch: 100%;
+  --display-tracking: -0.04em;
+  --text: "Schibsted Grotesk", sans-serif;
+  --mono: "Martian Mono", monospace;
+  --radius: 0px;
+}

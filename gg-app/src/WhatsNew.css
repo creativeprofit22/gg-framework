@@ -1,0 +1,301 @@
+/* ── What's new window (WhatsNewLounge.tsx) ──
+   GG Royale's look at 2 screen px per art px over the home screen's evening
+   clearing: the gold title, the notes on a dark board like the game's Daily
+   screen, and a plate button on the grass. m5x7 for text, Alagard for titles. Every motion
+   is an entrance that ends at rest (`both` fill), so with reduced motion,
+   where it all switches off, every word is still there. */
+
+.whatsnew-window {
+  /* One art pixel, in screen px. */
+  --wn-px: 2px;
+  --wn-ink: #1e0c1f;
+  --wn-cream: #f6d0a8;
+  --wn-text: #e6dcd0;
+  --wn-gold: #f5bd63;
+  /* The clearing's sky overhead, behind its canvas while it paints. */
+  background: #18132e;
+  color: var(--wn-text);
+  font-family: "m5x7", monospace;
+  font-size: calc(var(--wn-px) * 16);
+  line-height: calc(var(--wn-px) * 12);
+  -webkit-font-smoothing: none;
+  font-smooth: never;
+}
+.whatsnew-window :focus-visible {
+  outline: var(--wn-px) solid var(--wn-gold);
+  outline-offset: var(--wn-px);
+}
+
+.wn-lounge {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+.wn-backdrop {
+  position: absolute;
+  top: 0;
+  left: 0;
+  image-rendering: pixelated;
+  pointer-events: none;
+}
+
+/* ── Header: the title art and the version ── */
+.wn-lounge-head {
+  position: relative;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: calc(var(--wn-px) * 11) 0 calc(var(--wn-px) * 5);
+}
+.wn-lounge-title {
+  display: block;
+  width: calc(201px * 2);
+  height: calc(39px * 2);
+  image-rendering: pixelated;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+.wn-lounge-version {
+  margin: calc(var(--wn-px) * 1) 0 0;
+  color: var(--wn-cream);
+  text-shadow: 0 var(--wn-px) 0 var(--wn-ink);
+}
+
+/* ── The board (the Daily's panel) ── */
+.wn-board {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  margin: 0 calc(var(--wn-px) * 15) calc(var(--wn-px) * 15);
+  background: #251c22;
+  border-radius: calc(var(--wn-px) * 3);
+  box-shadow:
+    0 0 0 var(--wn-px) var(--wn-ink),
+    inset 0 0 0 var(--wn-px) #4e343f,
+    0 calc(var(--wn-px) * 3) 0 var(--wn-px) var(--wn-ink);
+}
+.wn-board-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  margin: var(--wn-px);
+  padding: calc(var(--wn-px) * 7) calc(var(--wn-px) * 9) calc(var(--wn-px) * 9);
+}
+.wn-board-scroll::-webkit-scrollbar {
+  width: calc(var(--wn-px) * 5);
+}
+.wn-board-scroll::-webkit-scrollbar-track {
+  background: #1a0e14;
+}
+.wn-board-scroll::-webkit-scrollbar-thumb {
+  background: #8a6a2a;
+  border: var(--wn-px) solid #1a0e14;
+  border-radius: 0;
+}
+.wn-board-title,
+.wn-history-title {
+  margin: 0 0 calc(var(--wn-px) * 5);
+  font-family: "Alagard", serif;
+  font-size: calc(var(--wn-px) * 16);
+  font-weight: normal;
+  line-height: calc(var(--wn-px) * 16);
+  color: var(--wn-cream);
+  text-shadow: 0 var(--wn-px) 0 var(--wn-ink);
+}
+
+/* ── Rows (the Daily's job rows) ── */
+.wn-rows,
+.wn-history-list {
+  display: flex;
+  flex-direction: column;
+  gap: calc(var(--wn-px) * 3);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.wn-row,
+.wn-history-item {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  column-gap: calc(var(--wn-px) * 5);
+  padding: calc(var(--wn-px) * 3) calc(var(--wn-px) * 5) calc(var(--wn-px) * 5);
+  background: #2e2029;
+  border-radius: var(--radius-sm);
+  box-shadow: inset 0 calc(var(--wn-px) * -1) 0 #221820;
+}
+.wn-history-item {
+  display: block;
+  background: #2a1d25;
+}
+.wn-tag {
+  align-self: start;
+  min-width: calc(var(--wn-px) * 11);
+  margin-top: calc(var(--wn-px) * 1);
+  padding: 0 calc(var(--wn-px) * 3);
+  background: var(--wn-gold);
+  color: var(--wn-ink);
+  text-align: center;
+  border-radius: var(--wn-px);
+  box-shadow: 0 0 0 var(--wn-px) var(--wn-ink);
+}
+.wn-row-copy {
+  min-width: 0;
+}
+/* The headline in gold, a step apart from its paragraph, so each note reads
+   as a title and its story (like the Daily's job names over their rows). */
+.wn-headline {
+  margin: 0;
+  font: inherit;
+  color: var(--wn-gold);
+}
+.wn-body {
+  margin: calc(3 * var(--wn-px)) 0 0;
+  color: var(--wn-text);
+}
+.whatsnew-highlight {
+  font-weight: normal;
+  color: var(--wn-gold);
+}
+
+/* ── Earlier releases: same board, quieter ── */
+.wn-history {
+  margin-top: calc(var(--wn-px) * 13);
+}
+.wn-history-release + .wn-history-release {
+  margin-top: calc(var(--wn-px) * 9);
+}
+.wn-history-version {
+  display: flex;
+  align-items: baseline;
+  gap: calc(var(--wn-px) * 5);
+  margin: 0 0 calc(var(--wn-px) * 3);
+  font: inherit;
+  color: #c9a08c;
+}
+.wn-history-version time {
+  color: #a8808c;
+}
+.wn-history-item .wn-headline {
+  color: #e6c8a8;
+}
+.wn-history-item .wn-body {
+  color: #cfc2b6;
+}
+
+/* ── Footer: the plate on the grass ── */
+.wn-lounge-foot {
+  position: relative;
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  /* Exactly the patch of grass (GROUND_FROM_BOTTOM art px), so the whole
+     plate and socket sit on it. */
+  height: calc(var(--wn-px) * 58);
+  padding-top: calc(var(--wn-px) * 5);
+}
+.wn-lounge-foot .plate-button {
+  --plate-scale: 1.5;
+}
+
+/* ── Close key ── */
+.wn-close {
+  position: absolute;
+  top: calc(var(--wn-px) * 7);
+  right: calc(var(--wn-px) * 7);
+  z-index: var(--z-float);
+  display: grid;
+  place-items: center;
+  width: calc(var(--wn-px) * 13);
+  height: calc(var(--wn-px) * 13);
+  /* The bottom pixel row is the key's shade: centre the x on the face above it. */
+  padding: 0 0 var(--wn-px);
+  border: 0;
+  border-radius: var(--wn-px);
+  background: #3e2832;
+  color: var(--wn-cream);
+  font: inherit;
+  line-height: 1;
+  cursor: pointer;
+  box-shadow:
+    0 0 0 var(--wn-px) var(--wn-ink),
+    inset 0 calc(var(--wn-px) * -1) 0 #2a1a22,
+    0 var(--wn-px) 0 var(--wn-px) var(--wn-ink);
+}
+/* The x: five art pixels square, the two diagonals, in cream. */
+.wn-close-x {
+  width: calc(var(--wn-px) * 5);
+  height: calc(var(--wn-px) * 5);
+  background: currentColor;
+  clip-path: polygon(
+    0 0,
+    20% 0,
+    50% 30%,
+    80% 0,
+    100% 0,
+    100% 20%,
+    70% 50%,
+    100% 80%,
+    100% 100%,
+    80% 100%,
+    50% 70%,
+    20% 100%,
+    0 100%,
+    0 80%,
+    30% 50%,
+    0 20%
+  );
+}
+.wn-close:hover {
+  background: #4e343f;
+}
+.wn-close:active {
+  translate: 0 var(--wn-px);
+}
+
+/* ── Opening and closing ── */
+.whatsnew-window[data-phase="hidden"] {
+  opacity: 0;
+}
+.whatsnew-window[data-phase="open"] {
+  animation: wn-window-in 280ms var(--ease-out) both;
+}
+.whatsnew-window[data-phase="closing"] {
+  animation: wn-window-out 160ms var(--ease-in) both;
+}
+@keyframes wn-window-in {
+  from {
+    opacity: 0;
+  }
+}
+@keyframes wn-window-out {
+  to {
+    opacity: 0;
+  }
+}
+
+/* Hype: rows rise in, one after another, in stepped art pixels. */
+.whatsnew-window[data-mode="hype"][data-phase="open"] .wn-row-in {
+  animation: wn-row-rise 320ms steps(4, end) both;
+  animation-delay: calc(200ms + var(--i, 0) * 110ms);
+}
+@keyframes wn-row-rise {
+  from {
+    opacity: 0;
+    translate: 0 calc(var(--wn-px) * 8);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .whatsnew-window,
+  .whatsnew-window *,
+  .whatsnew-window *::before,
+  .whatsnew-window *::after {
+    animation: none !important;
+    transition: none !important;
+  }
+}

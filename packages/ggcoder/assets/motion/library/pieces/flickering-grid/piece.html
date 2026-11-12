@@ -1,0 +1,112 @@
+<!doctype html>
+<!--
+  flickering-grid: a field of small squares whose opacities flicker, softly
+  masked toward the edges. Converted from Magic UI's "Flickering Grid" (MIT,
+  see LICENSE): upstream re-rolls squares with Math.random on every
+  requestAnimationFrame; here each square's opacity is a seeded hash of
+  (cell index, its current flicker slot), where the slot is
+  floor(t * RATE_i + PHASE_i) and RATE_i/PHASE_i are hashed per cell, so
+  any frame is a pure function of timeline time. Squares use --accent on
+  --field.
+  Params (top of script): SQUARE (px, upstream 4), GAP (px, upstream 6),
+  FLICKER_CHANCE (average changes per square per second, upstream 0.3),
+  MAX_OPACITY (upstream 0.3), CONTRAST (opacity skew; 1 = upstream uniform), SEED. CSS: --fg-mask (mask; "none" for a
+  uniform grid).
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+  </head>
+  <body>
+    <div
+      id="flickering-grid-root"
+      data-composition-id="flickering-grid"
+      data-start="0"
+      data-duration="6"
+      data-width="1920"
+      data-height="1080"
+    >
+      <style>
+        [data-composition-id="flickering-grid"] {
+          --fg-mask: radial-gradient(62% 72% at 50% 50%, #000 20%, transparent 100%);
+          position: absolute;
+          inset: 0;
+          overflow: hidden;
+          background: var(--field, #eef1f7);
+        }
+        [data-composition-id="flickering-grid"] canvas {
+          position: absolute;
+          left: 0;
+          top: 0;
+          width: 1920px;
+          height: 1080px;
+          -webkit-mask-image: var(--fg-mask);
+          mask-image: var(--fg-mask);
+        }
+        [data-composition-id="flickering-grid"] .fg-probe {
+          color: var(--accent, #2f5bff);
+        }
+      </style>
+      <canvas id="fg-canvas" width="1920" height="1080"></canvas>
+      <i class="fg-probe" id="fg-probe"></i>
+    </div>
+    <script>
+      (function () {
+        const SQUARE = 6;
+        const GAP = 8;
+        const FLICKER_CHANCE = 0.9;
+        const MAX_OPACITY = 0.55;
+        const CONTRAST = 2.2; // >1 keeps most squares faint so the bright ones flicker out
+        const SEED = 11;
+        const DURATION = 6;
+        const W = 1920;
+        const H = 1080;
+
+        const COLOR = getComputedStyle(document.getElementById("fg-probe")).color;
+        const canvas = document.getElementById("fg-canvas");
+        const ctx = canvas.getContext("2d");
+        const STEP = SQUARE + GAP;
+        const cols = Math.ceil(W / STEP);
+        const rows = Math.ceil(H / STEP);
+        const n = cols * rows;
+
+        function hash(a, b) {
+          let h = Math.imul(a ^ SEED, 374761393) + Math.imul(b, 668265263);
+          h = Math.imul(h ^ (h >>> 13), 1274126177);
+          return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+        }
+        // Per-cell rate (0.5x–1.5x the average) and phase, fixed at build time.
+        const rate = new Float32Array(n);
+        const phase = new Float32Array(n);
+        for (let i = 0; i < n; i++) {
+          rate[i] = FLICKER_CHANCE * (0.5 + hash(i, 1));
+          phase[i] = hash(i, 2) * 10;
+        }
+
+        const state = { t: 0 };
+        function draw() {
+          ctx.clearRect(0, 0, W, H);
+          ctx.fillStyle = COLOR;
+          for (let c = 0; c < cols; c++) {
+            for (let r = 0; r < rows; r++) {
+              const i = c * rows + r;
+              const slot = Math.floor(state.t * rate[i] + phase[i]);
+              const o = Math.pow(hash(i, slot + 1000), CONTRAST) * MAX_OPACITY;
+              if (o < 0.01) continue;
+              ctx.globalAlpha = o;
+              ctx.fillRect(c * STEP, r * STEP, SQUARE, SQUARE);
+            }
+          }
+          ctx.globalAlpha = 1;
+        }
+
+        const tl = gsap.timeline({ paused: true });
+        tl.fromTo(state, { t: 0 }, { t: DURATION, duration: DURATION, ease: "none", onUpdate: draw }, 0);
+        draw();
+        window.__timelines = window.__timelines || {};
+        window.__timelines["flickering-grid"] = tl;
+      })();
+    </script>
+  </body>
+</html>

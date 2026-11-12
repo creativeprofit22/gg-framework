@@ -1,0 +1,338 @@
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+import { chatAgentSessionsDir } from "./chat-agents/index.js";
+import {
+  listSidecarSessions,
+  normalizeSessionTitle,
+  renameSidecarSession,
+} from "./app-sidecar-sessions.js";
+import { motionSessionsDir } from "./motion-agent/motion-agent.js";
+import { encodeCwd } from "./core/encode-cwd.js";
+import { archiveColdSession, archiveSessionPath } from "./core/session-storage.js";
+import { importForeignSession } from "./core/foreign-session-import.js";
+import { SessionManager } from "./core/session-manager.js";
+
+/**
+ * Write a Claude Code transcript into a fixture `~/.claude/projects` dir.
+ * Claude's directory encoding is ambiguous, so the cwd it records inside the
+ * records — not the folder name — is what discovery matches on.
+ */
+async function writeClaudeTranscript(
+  homeDir: string,
+  cwd: string,
+  sessionId: string,
+  prompt: string,
+): Promise<string> {
+  // The folder name is deliberately only *shaped* like Claude's encoding: since
+  // discovery reads the cwd out of the records, the exact name is irrelevant to
+  // what these tests assert. It does have to be a VALID single directory name on
+  // the host though — collapsing only "/" left Windows paths as `-C:\Users\...`,
+  // whose drive colon and backslashes made `mkdir` fail with ENOENT. Fold both
+  // separators and the drive colon into dashes so the fixture is portable.
+  const encoded = `-${cwd.replace(/[\\/:]/g, "-")}`;
+  const projectDir = path.join(homeDir, ".claude", "projects", encoded);
+  await fs.mkdir(projectDir, { recursive: true });
+  const file = path.join(projectDir, `${sessionId}.jsonl`);
+  const stamp = new Date().toISOString();
+  const records = [
+    {
+      parentUuid: null,
+      isSidechain: false,
+      type: "user",
+      uuid: "u1",
+      timestamp: stamp,
+      cwd,
+      message: { role: "user", content: prompt },
+    },
+    {
+      parentUuid: "u1",
+      isSidechain: false,
+      type: "assistant",
+      uuid: "a1",
+      timestamp: stamp,
+      cwd,
+      message: { role: "assistant", content: [{ type: "text", text: "On it." }] },
+    },
+  ];
+  await fs.writeFile(file, records.map((record) => JSON.stringify(record)).join("\n") + "\n");
+  return file;
+}
+
+async function writeSessions(
+  sessionsRoot: string,
+  cwd: string,
+  prefix: string,
+  count: number,
+): Promise<void> {
+  const projectSessionsDir = path.join(sessionsRoot, encodeCwd(cwd));
+  await fs.mkdir(projectSessionsDir, { recursive: true });
+
+  for (let index = 0; index < count; index++) {
+    const timestamp = new Date(Date.now() + index * 1_000).toISOString();
+    const file = path.join(projectSessionsDir, `${prefix}-${index}.jsonl`);
+    const records = [
+      {
+        type: "session",
+        version: 2,
+        id: `${prefix}-${index}`,
+        conversationId: `${prefix}-${index}`,
+        timestamp,
+        cwd,
+        provider: "anthropic",
+        model: "claude-sonnet-5",
+      },
+      {
+        type: "message",
+        id: `${prefix}-message-${index}`,
+        timestamp,
+        message: { role: "user", content: `Session ${index}` },
+      },
+    ];
+    await fs.writeFile(file, records.map((record) => JSON.stringify(record)).join("\n") + "\n");
+    const modified = new Date(timestamp);
+    await fs.utimes(file, modified, modified);
+  }
+}
+
+describe("gg-app sidecar session listings", () => {
+  let tmp: string;
+  let cwd: string;
+  let coderSessionsDir: string;
+
+  beforeEach(async () => {
+    tmp = await fs.mkdtemp(path.join(os.tmpdir(), "gg-sidecar-sessions-"));
+    cwd = path.join(tmp, "project");
+    coderSessionsDir = path.join(tmp, "sessions");
+    await fs.mkdir(cwd, { recursive: true });
+  });
+
+  afterEach(async () => {
+    await fs.rm(tmp, { recursive: true, force: true });
+  });
+
+  it("returns up to 100 coding sessions and up to 30 chat sessions", async () => {
+    await writeSessions(coderSessionsDir, cwd, "coding", 101);
+    await writeSessions(chatAgentSessionsDir(coderSessionsDir, "general"), cwd, "chat", 31);
+
+    const codingSessions = await listSidecarSessions(cwd, null, coderSessionsDir);
+    const chatSessions = await listSidecarSessions(cwd, "all", coderSessionsDir);
+
+    expect(codingSessions).toHaveLength(100);
+    expect(codingSessions[0]?.id).toBe("coding-100");
+    expect(codingSessions.at(-1)?.id).toBe("coding-1");
+    expect(codingSessions.some((session) => session.id === "coding-95")).toBe(true);
+    expect(chatSessions).toHaveLength(30);
+    expect(chatSessions[0]).toMatchObject({ id: "chat-30", chatAgent: "general" });
+    expect(chatSessions.at(-1)).toMatchObject({ id: "chat-1", chatAgent: "general" });
+  });
+
+  it("surfaces a Claude Code session for the project and opens it as a resumable GG Coder session", async () => {
+    const home = path.join(tmp, "home");
+    const transcript = await writeClaudeTranscript(
+      home,
+      cwd,
+      "cc-session-1",
+      "Add a retry to the fetch helper.",
+    );
+
+    // 1. It shows up in the session list, tagged with where it came from.
+    const sessions = await listSidecarSessions(cwd, null, coderSessionsDir, { homeDir: home });
+    const foreign = sessions.find((session) => session.source === "claude-code");
+    expect(foreign).toBeDefined();
+    expect(foreign?.path).toBe(transcript);
+    expect(foreign?.preview).toBe("Add a retry to the fetch helper.");
+    expect(foreign?.messageCount).toBe(2);
+
+    // 2. Clicking it (import-then-open) yields a real, loadable GG Coder session.
+    const sessionManager = new SessionManager(coderSessionsDir);
+    const imported = await importForeignSession({
+      filePath: foreign!.path,
+      sessionManager,
+      provider: "anthropic",
+      model: "claude-sonnet-5",
+      cwd,
+    });
+    const loaded = await sessionManager.load(imported.sessionPath);
+    expect(loaded).not.toBeNull();
+    expect(loaded!.header.cwd).toBe(cwd);
+    expect(
+      sessionManager.getMessages(loaded!.entries, loaded!.header.leafId).map((m) => m.role),
+    ).toEqual(["user", "assistant"]);
+
+    // 3. It now also appears as a NATIVE row, so the next open skips the import.
+    const after = await listSidecarSessions(cwd, null, coderSessionsDir, { homeDir: home });
+    const native = after.find((session) => session.path === imported.sessionPath);
+    expect(native).toBeDefined();
+    expect(native?.source).toBeUndefined();
+  });
+
+  it("keeps native sessions listed ahead of foreign ones", async () => {
+    const home = path.join(tmp, "home");
+    await writeClaudeTranscript(home, cwd, "cc-session-2", "Foreign prompt.");
+    await writeSessions(coderSessionsDir, cwd, "coding", 2);
+
+    const sessions = await listSidecarSessions(cwd, null, coderSessionsDir, { homeDir: home });
+    const firstForeignIndex = sessions.findIndex((session) => session.source === "claude-code");
+    const lastNativeIndex = sessions.map((session) => session.source).lastIndexOf(undefined);
+    expect(firstForeignIndex).toBeGreaterThan(-1);
+    expect(firstForeignIndex).toBeGreaterThan(lastNativeIndex);
+  });
+
+  it("ignores a Claude Code session recorded against a different project", async () => {
+    const home = path.join(tmp, "home");
+    const otherCwd = path.join(tmp, "other-project");
+    await fs.mkdir(otherCwd, { recursive: true });
+    await writeClaudeTranscript(home, otherCwd, "cc-elsewhere", "Not this project.");
+
+    const sessions = await listSidecarSessions(cwd, null, coderSessionsDir, { homeDir: home });
+    expect(sessions.some((session) => session.source === "claude-code")).toBe(false);
+  });
+
+  it("lists only Motion's own sessions for the motion query", async () => {
+    await writeSessions(coderSessionsDir, cwd, "coding", 2);
+    await writeSessions(chatAgentSessionsDir(coderSessionsDir, "general"), cwd, "chat", 2);
+    await writeSessions(motionSessionsDir(coderSessionsDir), cwd, "motion", 3);
+
+    const motionSessions = await listSidecarSessions(cwd, "motion", coderSessionsDir);
+    const chatSessions = await listSidecarSessions(cwd, "all", coderSessionsDir);
+
+    expect(motionSessions.map((session) => session.id)).toEqual([
+      "motion-2",
+      "motion-1",
+      "motion-0",
+    ]);
+    expect(chatSessions.some((session) => session.id.startsWith("motion"))).toBe(false);
+  });
+
+  it("does not mix foreign sessions into a chat-agent listing", async () => {
+    const home = path.join(tmp, "home");
+    await writeClaudeTranscript(home, cwd, "cc-session-3", "Foreign prompt.");
+
+    const chatSessions = await listSidecarSessions(cwd, "general", coderSessionsDir, {
+      homeDir: home,
+    });
+    expect(chatSessions.some((session) => session.source === "claude-code")).toBe(false);
+  });
+
+  describe("renaming", () => {
+    const saveWith =
+      (manager: SessionManager) =>
+      (target: string, title: string): Promise<void> =>
+        manager.appendLabel(target, title);
+
+    it("names an idle session without moving it in the list or changing its history", async () => {
+      await writeSessions(coderSessionsDir, cwd, "coding", 2);
+      const before = await listSidecarSessions(cwd, null, coderSessionsDir);
+      const older = before[1];
+      expect(older?.id).toBe("coding-0");
+      const mtimeBefore = (await fs.stat(older!.path)).mtimeMs;
+      const manager = new SessionManager(coderSessionsDir);
+
+      const result = await renameSidecarSession({
+        cwd,
+        requestedAgent: null,
+        sessionPath: older!.path,
+        title: "  Fix\nthe   login bug ",
+        coderSessionsDir,
+        renameLive: async () => false,
+        saveLabel: saveWith(manager),
+      });
+
+      expect(result).toEqual({ ok: true, title: "Fix the login bug" });
+      const after = await listSidecarSessions(cwd, null, coderSessionsDir);
+      expect(after.map((session) => session.id)).toEqual(["coding-1", "coding-0"]);
+      expect(after[1]).toMatchObject({ preview: "Fix the login bug", messageCount: 1 });
+      expect((await fs.stat(older!.path)).mtimeMs).toBe(mtimeBefore);
+      const loaded = await manager.load(older!.path);
+      expect(manager.getMessages(loaded!.entries, loaded!.header.leafId)).toHaveLength(1);
+    });
+
+    it("lets an open pane save the name instead of writing the file twice", async () => {
+      await writeSessions(coderSessionsDir, cwd, "coding", 1);
+      const [row] = await listSidecarSessions(cwd, null, coderSessionsDir);
+      const renameLive = vi.fn(async () => true);
+      const saveLabel = vi.fn(async () => {});
+
+      const result = await renameSidecarSession({
+        cwd,
+        requestedAgent: null,
+        sessionPath: row!.path,
+        title: "Release prep",
+        coderSessionsDir,
+        renameLive,
+        saveLabel,
+      });
+
+      expect(result.ok).toBe(true);
+      expect(renameLive).toHaveBeenCalledWith(row!.path, "Release prep");
+      expect(saveLabel).not.toHaveBeenCalled();
+    });
+
+    it("refuses paths that are not native rows of this project's list", async () => {
+      const home = path.join(tmp, "home");
+      const transcript = await writeClaudeTranscript(home, cwd, "cc-rename", "Foreign prompt.");
+      const otherCwd = path.join(tmp, "other-project");
+      await writeSessions(coderSessionsDir, otherCwd, "other", 1);
+      const otherPath = path.join(coderSessionsDir, encodeCwd(otherCwd), "other-0.jsonl");
+      const otherBytes = await fs.readFile(otherPath, "utf-8");
+      const saveLabel = vi.fn(async () => {});
+
+      for (const sessionPath of [transcript, otherPath, path.join(tmp, "anything.jsonl")]) {
+        const result = await renameSidecarSession({
+          cwd,
+          requestedAgent: null,
+          sessionPath,
+          title: "Nope",
+          coderSessionsDir,
+          options: { homeDir: home },
+          renameLive: async () => false,
+          saveLabel,
+        });
+        expect(result).toMatchObject({ ok: false, status: 404 });
+      }
+      expect(saveLabel).not.toHaveBeenCalled();
+      expect(await fs.readFile(otherPath, "utf-8")).toBe(otherBytes);
+    });
+
+    it("rejects empty and over-long names before touching the file", async () => {
+      await writeSessions(coderSessionsDir, cwd, "coding", 1);
+      const [row] = await listSidecarSessions(cwd, null, coderSessionsDir);
+      const saveLabel = vi.fn(async () => {});
+
+      for (const title of ["   ", "x".repeat(81), 42]) {
+        const result = await renameSidecarSession({
+          cwd,
+          requestedAgent: null,
+          sessionPath: row!.path,
+          title,
+          coderSessionsDir,
+          renameLive: async () => false,
+          saveLabel,
+        });
+        expect(result).toMatchObject({ ok: false, status: 400 });
+      }
+      expect(saveLabel).not.toHaveBeenCalled();
+      expect(normalizeSessionTitle("a\u0000b\tc")).toBe("a b c");
+      expect(normalizeSessionTitle("x".repeat(80))).toHaveLength(80);
+    });
+  });
+
+  it("lists archived coding and chat sessions once despite their redirect counterparts", async () => {
+    const chatRoot = chatAgentSessionsDir(coderSessionsDir, "general");
+    await writeSessions(coderSessionsDir, cwd, "coding-archive", 1);
+    await writeSessions(chatRoot, cwd, "chat-archive", 1);
+    const codingPlain = path.join(coderSessionsDir, encodeCwd(cwd), "coding-archive-0.jsonl");
+    const chatPlain = path.join(chatRoot, encodeCwd(cwd), "chat-archive-0.jsonl");
+    await Promise.all([archiveColdSession(codingPlain), archiveColdSession(chatPlain)]);
+
+    const codingSessions = await listSidecarSessions(cwd, null, coderSessionsDir);
+    const chatSessions = await listSidecarSessions(cwd, "general", coderSessionsDir);
+    expect(codingSessions).toHaveLength(1);
+    expect(codingSessions[0]?.path).toBe(archiveSessionPath(codingPlain));
+    expect(chatSessions).toHaveLength(1);
+    expect(chatSessions[0]?.path).toBe(archiveSessionPath(chatPlain));
+  });
+});

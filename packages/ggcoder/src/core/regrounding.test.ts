@@ -1,5 +1,35 @@
 import { describe, expect, it } from "vitest";
-import { buildRegroundingMessage, shouldReground } from "./regrounding.js";
+import {
+  buildRegroundingMessage,
+  requestTextForRegrounding,
+  shouldReground,
+} from "./regrounding.js";
+
+describe("requestTextForRegrounding", () => {
+  it("keeps plain string requests verbatim", () => {
+    expect(requestTextForRegrounding({ role: "user", content: "Fix the login bug" })).toBe(
+      "Fix the login bug",
+    );
+  });
+
+  it("keeps the text of attachment messages and notes media by kind only", () => {
+    const text = requestTextForRegrounding({
+      role: "user",
+      content: [
+        { type: "text", text: "Match this mockup" },
+        { type: "image", mediaType: "image/png", data: "AAAA" },
+        { type: "text", text: "but keep the header" },
+        { type: "image", mediaType: "image/png", data: "BBBB" },
+      ],
+    });
+    expect(text).toBe("Match this mockup\nbut keep the header\n\n[Attached: 2 images]");
+    expect(text).not.toContain("AAAA");
+  });
+
+  it("returns empty for a missing message", () => {
+    expect(requestTextForRegrounding(undefined)).toBe("");
+  });
+});
 
 describe("shouldReground", () => {
   it("fires once after a compaction occurs", () => {

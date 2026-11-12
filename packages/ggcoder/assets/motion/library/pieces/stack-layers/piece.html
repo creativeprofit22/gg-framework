@@ -1,0 +1,239 @@
+<!doctype html>
+<!--
+  stack-layers: an architecture stack. 3–4 isometric slabs drop in and stack
+  bottom-up (CSS 3D, orthographic), each with a flat, legible label and a
+  leader line on the right. Then an accent highlight climbs the stack one
+  layer at a time, lighting the slab and its label.
+  Params (top of script):
+    LAYERS  [{ name, sub }] — 3 or 4, listed BOTTOM to TOP (edit here)
+    GAP     vertical spacing between slabs (px of depth)
+    SIZE    slab edge length (px); TILT view angle (deg)
+  CSS: --sl-x / --sl-y (centre of the stack), --sl-label-x (label column).
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+  </head>
+  <body>
+    <div
+      id="stack-layers-root"
+      data-composition-id="stack-layers"
+      data-start="0"
+      data-duration="6"
+      data-width="1920"
+      data-height="1080"
+    >
+      <style>
+        [data-composition-id="stack-layers"] {
+          --sl-x: 700px;
+          --sl-y: 560px;
+          --sl-label-x: 1140px;
+          position: absolute;
+          inset: 0;
+          color: var(--ink, #111);
+          font-family: var(--text, sans-serif);
+        }
+        [data-composition-id="stack-layers"] .sl-stage {
+          position: absolute;
+          left: var(--sl-x);
+          top: var(--sl-y);
+          width: 0;
+          height: 0;
+          transform-style: preserve-3d;
+        }
+        [data-composition-id="stack-layers"] .sl-slab {
+          position: absolute;
+          left: 0;
+          top: 0;
+          transform-style: preserve-3d;
+        }
+        [data-composition-id="stack-layers"] .sl-face {
+          position: absolute;
+          box-sizing: border-box;
+          border-radius: calc(var(--radius, 0px) * 1.2);
+        }
+        [data-composition-id="stack-layers"] .sl-side {
+          background: var(--ink, #111);
+        }
+        [data-composition-id="stack-layers"] .sl-top {
+          background: color-mix(in srgb, var(--field, #fff) 88%, var(--ink, #111));
+          border: 3px solid var(--ink, #111);
+        }
+        [data-composition-id="stack-layers"] .sl-glow {
+          background: var(--accent, #111);
+          border: 3px solid var(--accent, #111);
+          opacity: 0;
+        }
+        [data-composition-id="stack-layers"] .sl-grid {
+          position: absolute;
+          inset: 28px;
+          border-radius: inherit;
+          background-image:
+            linear-gradient(var(--line, rgba(0, 0, 0, 0.2)) 2px, transparent 2px),
+            linear-gradient(90deg, var(--line, rgba(0, 0, 0, 0.2)) 2px, transparent 2px);
+          background-size: 58px 58px;
+          opacity: 0.9;
+        }
+        [data-composition-id="stack-layers"] .sl-label {
+          position: absolute;
+          left: var(--sl-label-x);
+          transform: translateY(-50%);
+          display: grid;
+          grid-template-columns: 64px auto;
+          column-gap: 18px;
+          align-items: baseline;
+          white-space: nowrap;
+        }
+        [data-composition-id="stack-layers"] .sl-idx {
+          font-family: var(--mono, monospace);
+          font-size: 24px;
+          letter-spacing: 0.06em;
+          font-variant-numeric: tabular-nums;
+          color: var(--muted, rgba(0, 0, 0, 0.6));
+        }
+        [data-composition-id="stack-layers"] .sl-name {
+          font-family: var(--display, sans-serif);
+          font-weight: var(--display-weight, 800);
+          font-stretch: var(--display-stretch, 100%);
+          letter-spacing: var(--display-tracking, -0.02em);
+          font-size: 50px;
+          line-height: 1;
+        }
+        [data-composition-id="stack-layers"] .sl-sub {
+          grid-column: 2;
+          margin-top: 10px;
+          font-family: var(--mono, monospace);
+          font-size: 22px;
+          letter-spacing: 0.08em;
+          text-transform: uppercase;
+          color: var(--muted, rgba(0, 0, 0, 0.6));
+        }
+        [data-composition-id="stack-layers"] .sl-leader {
+          position: absolute;
+          height: 3px;
+          margin-top: -1.5px;
+          background: var(--ink, #111);
+          transform-origin: 0 50%;
+        }
+        [data-composition-id="stack-layers"] .sl-leader::after {
+          content: "";
+          position: absolute;
+          left: -7px;
+          top: -5.5px;
+          width: 14px;
+          height: 14px;
+          border-radius: 50%;
+          background: inherit;
+        }
+      </style>
+      <div class="sl-stage" id="sl-stage"></div>
+      <div id="sl-labels"></div>
+    </div>
+    <script>
+      (function () {
+        // edit: layers, BOTTOM to TOP (3 or 4)
+        const LAYERS = [
+          { name: "Infrastructure", sub: "GPUs · 12 regions" },
+          { name: "Data", sub: "Postgres · vector store" },
+          { name: "Services", sub: "auth · billing · search" },
+          { name: "Interface", sub: "web · mobile · API" },
+        ];
+        const SIZE = 440;
+        const GAP = 130;
+        const TILT = 58;
+        const THICK = 22;
+        const DROP = 0.42; // seconds between slabs landing
+
+        const root = document.querySelector('[data-composition-id="stack-layers"]');
+        const cs = getComputedStyle(root);
+        const CX = parseFloat(cs.getPropertyValue("--sl-x")) || 700;
+        const CY = parseFloat(cs.getPropertyValue("--sl-y")) || 560;
+        const LX = parseFloat(cs.getPropertyValue("--sl-label-x")) || 1140;
+        const stage = document.getElementById("sl-stage");
+        const labelsEl = document.getElementById("sl-labels");
+        stage.style.transform = `rotateX(${TILT}deg) rotateZ(-45deg)`;
+
+        const n = LAYERS.length;
+        const sinT = Math.sin((TILT * Math.PI) / 180);
+        const half = SIZE / Math.SQRT2; // diamond half-width on screen
+        // Centre the stack's screen footprint on CY.
+        const z0 = -((n - 1) * GAP) / 2;
+
+        function face(cls, z) {
+          const f = document.createElement("div");
+          f.className = "sl-face " + cls;
+          f.style.width = SIZE + "px";
+          f.style.height = SIZE + "px";
+          f.style.left = -SIZE / 2 + "px";
+          f.style.top = -SIZE / 2 + "px";
+          f.style.transform = `translateZ(${z}px)`;
+          return f;
+        }
+
+        const layers = LAYERS.map((d, i) => {
+          const slab = document.createElement("div");
+          slab.className = "sl-slab";
+          // Thickness: a stack of ink copies below the top face.
+          for (let k = THICK; k > 0; k -= 2) slab.appendChild(face("sl-side", -k));
+          const top = face("sl-top", 0);
+          const grid = document.createElement("div");
+          grid.className = "sl-grid";
+          top.appendChild(grid);
+          slab.appendChild(top);
+          const glow = face("sl-glow", 0.5);
+          slab.appendChild(glow);
+          stage.appendChild(slab);
+
+          const z = z0 + i * GAP;
+          const y = CY - z * sinT; // screen y of the slab's right corner
+          const leader = document.createElement("div");
+          leader.className = "sl-leader";
+          leader.style.left = CX + half + 26 + "px";
+          leader.style.top = y + "px";
+          leader.style.width = LX - (CX + half + 26) - 28 + "px";
+          const label = document.createElement("div");
+          label.className = "sl-label";
+          label.style.top = y + 14 + "px";
+          label.innerHTML = '<span class="sl-idx"></span><span class="sl-name"></span><span class="sl-sub"></span>';
+          label.querySelector(".sl-idx").textContent = "L" + (i + 1);
+          label.querySelector(".sl-name").textContent = d.name;
+          label.querySelector(".sl-sub").textContent = d.sub;
+          labelsEl.append(leader, label);
+          return { slab, glow, leader, label, name: label.querySelector(".sl-name"), idx: label.querySelector(".sl-idx"), z };
+        });
+
+        const hl = { h: -1 };
+        function highlight() {
+          layers.forEach((l, i) => {
+            const k = Math.max(0, 1 - Math.abs(hl.h - i));
+            l.glow.style.opacity = k.toFixed(3);
+            const pct = Math.round(k * 100);
+            l.name.style.color = `color-mix(in srgb, var(--accent, #111) ${pct}%, var(--ink, #111))`;
+            l.idx.style.color = `color-mix(in srgb, var(--accent, #111) ${pct}%, var(--muted, #666))`;
+            l.leader.style.background = `color-mix(in srgb, var(--accent, #111) ${pct}%, var(--ink, #111))`;
+          });
+        }
+
+        const tl = gsap.timeline({ paused: true });
+        layers.forEach((l, i) => {
+          const at = 0.2 + i * DROP;
+          tl.fromTo(l.slab, { z: l.z + 360, opacity: 0 }, { z: l.z, opacity: 1, duration: 0.75, ease: "expo.out" }, at);
+          tl.fromTo(l.leader, { scaleX: 0 }, { scaleX: 1, duration: 0.5, ease: "power3.out" }, at + 0.3);
+          tl.fromTo(l.label, { opacity: 0, x: -24 }, { opacity: 1, x: 0, duration: 0.5, ease: "power3.out" }, at + 0.4);
+        });
+        // Highlight climbs the stack: rest on each layer, then step up.
+        let t = 0.2 + n * DROP + 0.5;
+        tl.fromTo(hl, { h: -1 }, { h: 0, duration: 0.4, ease: "power2.out", onUpdate: highlight }, t);
+        for (let i = 1; i < n; i++) {
+          t += 0.75;
+          tl.to(hl, { h: i, duration: 0.45, ease: "power2.inOut", onUpdate: highlight }, t);
+        }
+        tl.to({}, { duration: Math.max(0.1, 6 - tl.duration()) });
+        highlight();
+        window.__timelines = window.__timelines || {};
+        window.__timelines["stack-layers"] = tl;
+      })();
+    </script>
+  </body>
+</html>

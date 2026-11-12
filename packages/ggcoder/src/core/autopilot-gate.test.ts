@@ -11,10 +11,14 @@ import {
   type TurnToolCall,
 } from "./autopilot-gate.js";
 import { PROMPT_COMMANDS } from "./prompt-commands.js";
+import { expandPromptCommand } from "./prompt-command-expansion.js";
 
+// Synthetic: no shipped prompt command has an alias, so alias matching needs a
+// fixture to exercise it. Real commands are covered by the PROMPT_COMMANDS
+// loops below.
 const COMMANDS: WorkflowCommandSpec[] = [
   { name: "compare", aliases: [], prompt: "Compare the code you just created…" },
-  { name: "bullet-proof", aliases: ["bp"], prompt: "Audit the project…" },
+  { name: "audit-fixture", aliases: ["af"], prompt: "Audit the project…" },
 ];
 
 describe("isWorkflowCommandText", () => {
@@ -27,9 +31,9 @@ describe("isWorkflowCommandText", () => {
   });
 
   it("matches aliases and is case-insensitive", () => {
-    expect(isWorkflowCommandText("/bp", COMMANDS)).toBe(true);
+    expect(isWorkflowCommandText("/af", COMMANDS)).toBe(true);
     expect(isWorkflowCommandText("/COMPARE", COMMANDS)).toBe(true);
-    expect(isWorkflowCommandText("/Bullet-Proof", COMMANDS)).toBe(true);
+    expect(isWorkflowCommandText("/Audit-Fixture", COMMANDS)).toBe(true);
   });
 
   it("tolerates leading whitespace (matches trim semantics of the prompt path)", () => {
@@ -60,6 +64,11 @@ describe("isWorkflowCommandText", () => {
 });
 
 describe("matchExpandedCommand", () => {
+  it("recognizes the current expansion without treating guidance as user arguments", () => {
+    const command = { name: "custom", prompt: "Review [$ARGUMENTS]." };
+    const text = expandPromptCommand(command.prompt, "login only");
+    expect(matchExpandedCommand(text, [command])).toEqual({ command, args: "login only" });
+  });
   it("matches an exact template body", () => {
     const m = matchExpandedCommand("Compare the code you just created…", COMMANDS);
     expect(m?.command.name).toBe("compare");
@@ -69,13 +78,12 @@ describe("matchExpandedCommand", () => {
   it("matches template + user-instructions suffix and extracts the args", () => {
     const text = `Audit the project…${USER_INSTRUCTIONS_HEADER}only the auth module`;
     const m = matchExpandedCommand(text, COMMANDS);
-    expect(m?.command.name).toBe("bullet-proof");
+    expect(m?.command.name).toBe("audit-fixture");
     expect(m?.args).toBe("only the auth module");
   });
 
-  it("uses the exact separator AgentSession.prompt() inserts", () => {
-    // Lockstep guard: if agent-session.ts ever changes its expansion format,
-    // this literal must change with it or digest labeling silently breaks.
+  it("retains the legacy separator for older saved sessions", () => {
+    // Old sessions must remain recognizable after the prompt format changes.
     expect(USER_INSTRUCTIONS_HEADER).toBe("\n\n## User Instructions\n\n");
   });
 
@@ -257,10 +265,9 @@ describe("isMechanicalOnlyTurn", () => {
       { name: "web_fetch", args: { url: "https://example.com" } },
       { name: "web_search", args: { query: "x" } },
       { name: "source_path", args: { package: "zod" } },
-      { name: "code_search", args: { query: "x" } },
       { name: "task_output", args: { id: "abc" } },
       { name: "screenshot", args: { url: "http://localhost:3000" } },
-      { name: "skill", args: { skill: "find-skills" } },
+      { name: "skill", args: { skill: "example-skill" } },
     ];
     expect(isMechanicalOnlyTurn(calls)).toBe(true);
   });
@@ -282,9 +289,35 @@ describe("isMechanicalOnlyTurn", () => {
 
   it("is NOT mechanical for tools that mutate task/process state or produce artifacts", () => {
     expect(isMechanicalOnlyTurn([{ name: "generate_image", args: {} }])).toBe(false);
-    expect(isMechanicalOnlyTurn([{ name: "tasks", args: {} }])).toBe(false);
     expect(isMechanicalOnlyTurn([{ name: "task_send", args: {} }])).toBe(false);
     expect(isMechanicalOnlyTurn([{ name: "task_stop", args: {} }])).toBe(false);
+  });
+
+  it("treats a roadmap-bookkeeping-only turn as mechanical", () => {
+    expect(
+      isMechanicalOnlyTurn([
+        { name: "roadmap_inspect", args: {} },
+        { name: "roadmap_status", args: { transition: "done" } },
+      ]),
+    ).toBe(true);
+    // Roadmap bookkeeping alongside a code edit still gets reviewed.
+    expect(
+      isMechanicalOnlyTurn([
+        { name: "edit", args: {} },
+        { name: "roadmap_status", args: { transition: "done" } },
+      ]),
+    ).toBe(false);
+  });
+
+  it("keeps a tasks mark-done turn reviewable (task runs must not self-certify)", () => {
+    expect(isMechanicalOnlyTurn([{ name: "tasks", args: { action: "done" } }])).toBe(false);
+    // A task run that only reads files and marks itself done still gets Ken.
+    expect(
+      isMechanicalOnlyTurn([
+        { name: "read", args: { file_path: "a.ts" } },
+        { name: "tasks", args: { action: "done", id: "t1" } },
+      ]),
+    ).toBe(false);
   });
 
   it("treats a background bash start (dev server / watcher) as mechanical", () => {

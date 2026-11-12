@@ -1,0 +1,15 @@
+.look-mono-luxe {
+  --field: #e8e5de;
+  --field-2: #282725;
+  --ink: #282725;
+  --accent: #282725;
+  --muted: #65635e;
+  --line: #b5b1a8;
+  --display: "Gloock", serif;
+  --display-weight: 400;
+  --display-stretch: 100%;
+  --display-tracking: -0.045em;
+  --text: "Mona Sans", sans-serif;
+  --mono: "Martian Mono", monospace;
+  --radius: 0px;
+}

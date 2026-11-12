@@ -1,4 +1,5 @@
 import chalk from "chalk";
+import { STEROIDS_COLLAPSIBLE_TABLE_MARKER } from "@kenkaiiii/gg-core";
 import { common, createLowlight } from "lowlight";
 import type { Element, ElementContent, Root, RootContent, Text as HastText } from "hast";
 import stripAnsi from "strip-ansi";
@@ -110,12 +111,14 @@ export function wrapAnsiMarkdownLine(text: string, width: number): string[] {
   return wrapAnsi(text || " ", Math.max(1, width), { hard: true, wordWrap: true }).split("\n");
 }
 
+/** `plainColor` colours text no token claimed; undefined leaves it to the caller. */
 function renderHastToAnsi(
   node: Root | Element | HastText | RootContent,
   theme: Theme,
   inheritedColor: string | undefined,
+  plainColor: string | undefined,
 ): string {
-  if (node.type === "text") return colorize(node.value, inheritedColor ?? theme.text);
+  if (node.type === "text") return colorize(node.value, inheritedColor ?? plainColor);
   if (node.type === "element") {
     const nodeClasses = (node.properties?.className as string[] | undefined) ?? [];
     const elementColorClass = nodeClasses.find((className) => getHighlightColor(className, theme));
@@ -123,12 +126,12 @@ function renderHastToAnsi(
       ? getHighlightColor(elementColorClass, theme)
       : inheritedColor;
     return node.children
-      .map((child: ElementContent) => renderHastToAnsi(child, theme, colorToPassDown))
+      .map((child: ElementContent) => renderHastToAnsi(child, theme, colorToPassDown, plainColor))
       .join("");
   }
   if (node.type === "root") {
     return node.children
-      .map((child: RootContent) => renderHastToAnsi(child, theme, inheritedColor))
+      .map((child: RootContent) => renderHastToAnsi(child, theme, inheritedColor, plainColor))
       .join("");
   }
   return "";
@@ -173,10 +176,28 @@ function highlightLineToAnsi(line: string, language: string | null, theme: Theme
       !language || !lowlight.registered(language)
         ? lowlight.highlightAuto(strippedLine)
         : lowlight.highlight(language, strippedLine);
-    const rendered = renderHastToAnsi(tree, theme, undefined);
+    const rendered = renderHastToAnsi(tree, theme, undefined, theme.text);
     return rendered.length > 0 ? rendered : strippedLine;
   } catch {
     return stripAnsi(line);
+  }
+}
+
+/**
+ * Highlight code in a known language with the theme's syntax colours. Text no
+ * token claims keeps the caller's colour (e.g. a diff line's foreground).
+ * Returns the code unchanged for an unknown or missing language; never guesses.
+ */
+export function highlightCodeToAnsi(
+  code: string,
+  language: string | undefined,
+  theme: Theme,
+): string {
+  if (!language || !lowlight.registered(language)) return code;
+  try {
+    return renderHastToAnsi(lowlight.highlight(language, code), theme, undefined, undefined);
+  } catch {
+    return code;
   }
 }
 
@@ -371,6 +392,13 @@ export function renderMarkdownToAnsiLines({
     const hrMatch = line.match(hrRegex);
     const tableRowMatch = line.match(tableRowRegex);
     const tableSeparatorMatch = line.match(tableSeparatorRegex);
+
+    // The desktop app collapses the /steroids table after this marker; the
+    // terminal has no such affordance, so the exact marker line is dropped.
+    if (line.trim() === STEROIDS_COLLAPSIBLE_TABLE_MARKER) {
+      if (inTable) flushTable();
+      return;
+    }
 
     if (codeFenceMatch) {
       inCodeBlock = true;

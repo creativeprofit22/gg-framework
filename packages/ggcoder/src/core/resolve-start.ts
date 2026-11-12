@@ -36,9 +36,18 @@ export async function resolveStartOrFallback(
   preferred: Provider,
   savedModel: string | undefined,
 ): Promise<ResolvedStartResult> {
+  // Token Plan is explicit opt-in: never enter or leave it via startup fallback.
+  if (preferred === "qwen-cloud") {
+    const saved = savedModel ? getModel(savedModel) : undefined;
+    return {
+      provider: preferred,
+      model: saved?.provider === preferred ? saved.id : getDefaultModel(preferred).id,
+      loggedIn: await auth.hasProviderAuth(preferred),
+    };
+  }
   const loggedIn: Provider[] = [];
   for (const p of allProviders) {
-    if (await auth.hasProviderAuth(p)) loggedIn.push(p);
+    if (p !== "qwen-cloud" && (await auth.hasProviderAuth(p))) loggedIn.push(p);
   }
 
   if (loggedIn.length === 0) {

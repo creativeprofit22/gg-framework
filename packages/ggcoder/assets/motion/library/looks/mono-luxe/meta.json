@@ -1,0 +1,9 @@
+{
+  "id": "mono-luxe", "name": "Mono luxe",
+  "description": "Stone and charcoal, high-contrast serif type and a sculptural product silhouette. Slow reveals and ample empty space give a single object the whole stage.",
+  "tags": ["monochrome", "serif", "luxury", "sculptural", "restrained"],
+  "fonts": ["Gloock", "Mona Sans", "Martian Mono"],
+  "bestFor": ["design objects", "craft stories", "premium product films"],
+  "pieces": ["serif-quote", "vignette", "clay-drop-3d", "iris-circle", "end-card"],
+  "samplePieces": [], "previewAt": 3.5
+}

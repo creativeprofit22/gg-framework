@@ -610,5 +610,7 @@ describe("edit tool matcher robustness benchmark", () => {
     for (const r of rejectRows) {
       expect(`${r.name}:${r.correct}`).toBe(`${r.name}:true`);
     }
-  });
+    // 150+ scenarios through the full matcher; the 5s default is not enough
+    // headroom on a loaded CI runner.
+  }, 60_000);
 });

@@ -1,0 +1,21 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "GG Coder Local Fork",
+  "identifier": "com.ggcoder.local-fork",
+  "mainBinaryName": "gg-coder-local-fork",
+  "bundle": {
+    "createUpdaterArtifacts": false,
+    "windows": {
+      "nsis": {
+        "installerHooks": "windows/nsis-hooks.nsh",
+        "installMode": "currentUser",
+        "compression": "zlib"
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": []
+    }
+  }
+}

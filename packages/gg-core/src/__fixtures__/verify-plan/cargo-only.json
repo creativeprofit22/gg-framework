@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "mode": "full",
+  "gates": [
+    {
+      "id": "cargo-test",
+      "argv": ["cargo", "test"],
+      "covers": ["src/**/*.rs"]
+    }
+  ]
+}

@@ -6,9 +6,14 @@
  * first non-empty line carries the keyword; anything after is the payload.
  *
  *   PROMPT
- *   <runnable GG Coder prompt body, 1-3 lines>
+ *   <runnable GG Coder prompt body: a few lines, or a short bullet list>
  *
  *   ALL_CLEAR
+ *   ACCEPT_VERIFICATION_EXCEPTION {"id":"<current exception ID>"}  // optional
+ *
+ *   ALL_CLEAR CORPUS_UNVERIFIED
+ *   (approval whose real-world cross-check was impossible; the flag rides on
+ *   the verdict line so it can't be lost the way a separate JSON reply was)
  *
  *   IGNORE
  *
@@ -35,13 +40,19 @@
 
 export type AutopilotVerdict =
   | { kind: "prompt"; body: string }
-  | { kind: "all_clear" }
+  | {
+      kind: "all_clear";
+      acceptedVerificationExceptionId?: string;
+      evidenceLimitation?: "corpus_unverified";
+    }
   | { kind: "ignore" }
   | { kind: "human"; reason: string };
 
 /** Cap on the raw-reply text we echo back as a HUMAN reason when Ken's output
  *  is unrecognized — keeps a garbage/huge reply from bloating the transcript. */
 const RAW_REASON_CAP = 500;
+
+export const CORPUS_UNVERIFIED_REASON = "Not cross-checked against real-world implementations.";
 
 const DEFAULT_HUMAN_REASON = "Ken flagged this for a human but gave no reason.";
 
@@ -74,22 +85,66 @@ function normalizeKeywordLine(line: string): string {
     .replace(/\s+/g, "_");
 }
 
+const EXCEPTION_ACCEPTANCE_PREFIX = "ACCEPT_VERIFICATION_EXCEPTION ";
+
+/** Parse the one optional ALL_CLEAR payload. The JSON object keeps arbitrary
+ *  persisted IDs unambiguous and rejects prose or partial acknowledgements. */
+function parseVerificationExceptionAcceptance(payload: string): string | undefined {
+  const lines = payload
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (lines.length !== 1 || !lines[0]!.startsWith(EXCEPTION_ACCEPTANCE_PREFIX)) {
+    return undefined;
+  }
+  try {
+    const value: unknown = JSON.parse(lines[0]!.slice(EXCEPTION_ACCEPTANCE_PREFIX.length));
+    if (
+      typeof value !== "object" ||
+      value === null ||
+      Array.isArray(value) ||
+      Object.keys(value).length !== 1 ||
+      !("id" in value) ||
+      typeof value.id !== "string" ||
+      value.id.length === 0
+    ) {
+      return undefined;
+    }
+    return value.id;
+  } catch {
+    return undefined;
+  }
+}
+
+/** The flagged approval, e.g. `ALL_CLEAR CORPUS_UNVERIFIED` or
+ *  `all clear: corpus_unverified`, after {@link normalizeKeywordLine}. */
+const FLAGGED_ALL_CLEAR_RE = /^ALL_CLEAR[_:,-]*CORPUS_UNVERIFIED$/;
+
+/** The flag anywhere in an approval reply: on the verdict line, or drifted
+ *  below it (the benchmarked failure). Keeping a warning is always safe. */
+const CORPUS_FLAG_RE = /corpus_unverified/i;
+
 /**
  * Fallback for when Ken ignores the "keyword-first, nothing before it"
  * instruction and buries a bare ALL_CLEAR/IGNORE/SKIP line after a recap or
  * explanation (a real drift pattern models fall into despite the system
- * prompt). Only matches a line that is EXACTLY one of these bare keywords.
- * PROMPT/HUMAN carry payloads and get their own dedicated recovery passes in
- * parseAutopilotVerdict. Returns the LAST such line (the verdict
- * conventionally lands at the end of the drift), or null if none/ambiguous
- * multiple different keywords are present.
+ * prompt). Only matches a line that is EXACTLY one of these bare keywords (or
+ * the flagged approval). PROMPT/HUMAN carry payloads and get their own
+ * dedicated recovery passes in parseAutopilotVerdict. Returns the LAST such
+ * line so ALL_CLEAR's optional acceptance payload and corpus flag can be
+ * re-parsed from the exact verdict boundary, or null if none is present.
  */
-function findTrailingBareVerdict(lines: string[]): "all_clear" | "ignore" | null {
-  let found: "all_clear" | "ignore" | null = null;
-  for (const line of lines) {
-    const normalized = normalizeKeywordLine(line);
-    if (normalized === "ALL_CLEAR") found = "all_clear";
-    else if (normalized === "IGNORE" || normalized === "SKIP") found = "ignore";
+function findTrailingBareVerdict(
+  lines: string[],
+): { kind: "all_clear" | "ignore"; index: number } | null {
+  let found: { kind: "all_clear" | "ignore"; index: number } | null = null;
+  for (let index = 0; index < lines.length; index += 1) {
+    const normalized = normalizeKeywordLine(lines[index]!);
+    if (normalized === "ALL_CLEAR" || FLAGGED_ALL_CLEAR_RE.test(normalized)) {
+      found = { kind: "all_clear", index };
+    } else if (normalized === "IGNORE" || normalized === "SKIP") {
+      found = { kind: "ignore", index };
+    }
   }
   return found;
 }
@@ -101,6 +156,31 @@ export function parseAutopilotVerdict(reply: string): AutopilotVerdict {
   const raw = (reply ?? "").trim();
   if (!raw) {
     return { kind: "human", reason: DEFAULT_HUMAN_REASON };
+  }
+
+  // Only this explicit evidence limitation can accompany a structured approval.
+  // No free-text warning or failed-check exception can become an all-clear.
+  const structured = stripPromptFence(raw);
+  if (structured.startsWith("{") || structured.startsWith("[") || /^```json(?:\s|$)/i.test(raw)) {
+    try {
+      if (structured.length > 1024) throw new Error("oversized verdict");
+      const value: unknown = JSON.parse(structured);
+      if (
+        value !== null &&
+        typeof value === "object" &&
+        !Array.isArray(value) &&
+        Object.keys(value).length === 2 &&
+        "verdict" in value &&
+        value.verdict === "ALL_CLEAR" &&
+        "evidenceLimitation" in value &&
+        value.evidenceLimitation === "corpus_unverified"
+      ) {
+        return { kind: "all_clear", evidenceLimitation: "corpus_unverified" };
+      }
+    } catch {
+      // Malformed structured output must not fall through to keyword recovery.
+    }
+    return { kind: "human", reason: "Ken's structured verdict was invalid; review it manually." };
   }
 
   const lines = raw.split("\n");
@@ -124,7 +204,18 @@ export function parseAutopilotVerdict(reply: string): AutopilotVerdict {
     .trim();
 
   if (collapsed === "ALL_CLEAR" || collapsed.startsWith("ALL_CLEAR")) {
-    return { kind: "all_clear" };
+    const acceptedVerificationExceptionId = parseVerificationExceptionAcceptance(rest);
+    // The flag rides on the verdict line; a drifted flag below a bare approval
+    // is kept too (keeping a warning is always safe). A valid acceptance payload
+    // is the only permitted body, so its JSON is never scanned for the flag.
+    const corpusUnverified =
+      CORPUS_FLAG_RE.test(keywordLine) ||
+      (acceptedVerificationExceptionId === undefined && CORPUS_FLAG_RE.test(rest));
+    return {
+      kind: "all_clear",
+      ...(acceptedVerificationExceptionId ? { acceptedVerificationExceptionId } : {}),
+      ...(corpusUnverified ? { evidenceLimitation: "corpus_unverified" as const } : {}),
+    };
   }
 
   // IGNORE / SKIP: the turn wasn't real work — nothing to say, nothing to show.
@@ -165,8 +256,10 @@ export function parseAutopilotVerdict(reply: string): AutopilotVerdict {
   // shape that used to leak raw commentary + "ALL_CLEAR" into a HUMAN bubble
   // instead of rendering the normal all-clear/ignore marker.
   const trailing = findTrailingBareVerdict(lines);
-  if (trailing === "all_clear") return { kind: "all_clear" };
-  if (trailing === "ignore") return { kind: "ignore" };
+  if (trailing?.kind === "all_clear") {
+    return parseAutopilotVerdict(lines.slice(trailing.index).join("\n"));
+  }
+  if (trailing?.kind === "ignore") return { kind: "ignore" };
 
   // A buried bare HUMAN line (Ken wrote his reasoning first, THEN the verdict).
   // Take the lines after the LAST exact-"HUMAN" line as the reason and drop the

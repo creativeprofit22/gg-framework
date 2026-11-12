@@ -1,0 +1,139 @@
+<!doctype html>
+<!--
+  retro-grid: a perspective grid plane scrolling toward the viewer, fading
+  out at the horizon. Converted from Magic UI's "Retro Grid" (MIT, see
+  LICENSE): the upstream WebGL shader / CSS-keyframe fallback runs on the
+  wall clock; here the plane is projected analytically on a 2D canvas and
+  the scroll offset is a pure function of timeline time (offset = t * SPEED),
+  redrawn from a tween's onUpdate. Lines use --line (strengthened by
+  OPACITY), the plane sits on --field.
+  Params (top of script): CELL (grid cell, plane units), SPEED (plane units
+  per second toward the camera), HORIZON (px from top), CAM_HEIGHT, FOCAL
+  (camera), FAR (depth where lines have faded out), OPACITY (line strength,
+  upstream default 0.5 → here a multiplier on --line's alpha).
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+  </head>
+  <body>
+    <div
+      id="retro-grid-root"
+      data-composition-id="retro-grid"
+      data-start="0"
+      data-duration="6"
+      data-width="1920"
+      data-height="1080"
+    >
+      <style>
+        [data-composition-id="retro-grid"] {
+          position: absolute;
+          inset: 0;
+          overflow: hidden;
+          background: var(--field, #eef1f7);
+        }
+        [data-composition-id="retro-grid"] canvas {
+          position: absolute;
+          left: 0;
+          top: 0;
+          width: 1920px;
+          height: 1080px;
+        }
+        [data-composition-id="retro-grid"] .rg-probe {
+          color: var(--line, rgba(0, 0, 0, 0.2));
+        }
+        /* Horizon haze: the field color softens the far plane. */
+        [data-composition-id="retro-grid"] .rg-haze {
+          position: absolute;
+          inset: 0;
+          background: linear-gradient(
+            180deg,
+            var(--field, #eef1f7) 0%,
+            var(--field, #eef1f7) 38%,
+            transparent 62%
+          );
+        }
+      </style>
+      <canvas id="rg-canvas" width="1920" height="1080"></canvas>
+      <div class="rg-haze"></div>
+      <i class="rg-probe" id="rg-probe"></i>
+    </div>
+    <script>
+      (function () {
+        const CELL = 60;
+        const SPEED = 40;
+        const HORIZON = 380;
+        const CAM_HEIGHT = 150;
+        const FOCAL = 1100;
+        const FAR = 5200;
+        const OPACITY = 2.4;
+        const DURATION = 6;
+        const W = 1920;
+        const H = 1080;
+        const CX = W / 2;
+
+        const probe = getComputedStyle(document.getElementById("rg-probe")).color;
+        const parts = probe.match(/[\d.]+/g).map(Number);
+        const RGB = parts.slice(0, 3).join(",");
+        const BASE_A = Math.min(1, (parts[3] ?? 1) * OPACITY);
+
+        const canvas = document.getElementById("rg-canvas");
+        const ctx = canvas.getContext("2d");
+        const NEAR = (FOCAL * CAM_HEIGHT) / (H - HORIZON);
+        const sy = (z) => HORIZON + (FOCAL * CAM_HEIGHT) / z;
+        const sx = (x, z) => CX + (FOCAL * x) / z;
+        // Depth fade: full strength near, gone by FAR.
+        const fade = (z) => {
+          const v = Math.max(0, Math.min(1, (z - NEAR) / (FAR - NEAR)));
+          return Math.pow(1 - v, 1.6);
+        };
+
+        const state = { t: 0 };
+        function draw() {
+          ctx.clearRect(0, 0, W, H);
+          const offset = (state.t * SPEED) % CELL;
+          // Horizontal lines: plane rows moving toward the camera.
+          for (let z = NEAR - offset + CELL; z < FAR; z += CELL) {
+            const a = BASE_A * fade(z);
+            if (a < 0.003) continue;
+            const y = sy(z);
+            ctx.strokeStyle = `rgba(${RGB},${a})`;
+            ctx.lineWidth = Math.max(0.75, (1.6 * NEAR) / z);
+            ctx.beginPath();
+            ctx.moveTo(0, y);
+            ctx.lineTo(W, y);
+            ctx.stroke();
+          }
+          // Vertical lines: converge on the vanishing point, drawn as
+          // segments so each part fades with its own depth.
+          const xMax = (CX * FAR) / FOCAL;
+          const STEPS = 24;
+          for (let x = -Math.ceil(xMax / CELL) * CELL; x <= xMax; x += CELL) {
+            for (let i = 0; i < STEPS; i++) {
+              const z0 = NEAR * Math.pow(FAR / NEAR, i / STEPS);
+              const z1 = NEAR * Math.pow(FAR / NEAR, (i + 1) / STEPS);
+              const a = BASE_A * fade((z0 + z1) / 2);
+              if (a < 0.003) continue;
+              const x0 = sx(x, z0);
+              const x1 = sx(x, z1);
+              if ((x0 < -50 && x1 < -50) || (x0 > W + 50 && x1 > W + 50)) continue;
+              ctx.strokeStyle = `rgba(${RGB},${a})`;
+              ctx.lineWidth = Math.max(0.75, (1.6 * NEAR) / z0);
+              ctx.beginPath();
+              ctx.moveTo(x0, sy(z0));
+              ctx.lineTo(x1, sy(z1));
+              ctx.stroke();
+            }
+          }
+        }
+
+        const tl = gsap.timeline({ paused: true });
+        tl.fromTo(state, { t: 0 }, { t: DURATION, duration: DURATION, ease: "none", onUpdate: draw }, 0);
+        draw();
+        window.__timelines = window.__timelines || {};
+        window.__timelines["retro-grid"] = tl;
+      })();
+    </script>
+  </body>
+</html>

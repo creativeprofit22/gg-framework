@@ -1,0 +1,12 @@
+{
+  "id": "word-swap",
+  "name": "Word swap",
+  "kind": "type",
+  "description": "A centered one-line sentence with a slot word that rolls vertically like a slot machine through 3–4 alternatives and lands on the final one; the slot width eases to fit each word so the line re-balances. Great for 'We make it faster / simpler / yours' value props. Transparent.",
+  "tags": ["rotate", "slot-machine", "word-roll", "carousel", "value-prop", "tagline", "kinetic", "swap", "cycling-word"],
+  "fonts": [],
+  "duration": 4,
+  "previewAt": 1.6,
+  "license": "original",
+  "previewLook": "soft-light-ad"
+}

@@ -1,4 +1,5 @@
 import readline from "node:readline/promises";
+import chalk from "chalk";
 import { stdin, stdout } from "node:process";
 import { agentLoop, type AgentEvent } from "@kenkaiiii/gg-agent";
 import type { Message } from "@kenkaiiii/gg-ai";
@@ -16,23 +17,25 @@ import {
   formatToolCallStart,
   formatToolCallEnd,
   formatUsage,
-  formatError,
   formatWelcome,
 } from "./utils/format.js";
+import { formatUserError } from "./utils/error-handler.js";
 import { AuthStorage } from "./core/auth-storage.js";
 import { kimiCodingHeaders, isKimiCodingEndpoint } from "./core/oauth/kimi.js";
-import { ensureAppDirs } from "./config.js";
-import { discoverSkills } from "./core/skills.js";
+import { ensureAppDirs, foregroundLimitSettingsFrom, loadSavedSettings } from "./config.js";
+import { blockedSkillNotice, discoverSkillsWithBlocked } from "./core/skills.js";
 import path from "node:path";
 import fs from "node:fs/promises";
 import { shouldCompact, compact } from "./core/compaction/compactor.js";
-import { getContextWindow } from "./core/model-registry.js";
+import { getAuthStorageKeys, getContextWindow } from "./core/model-registry.js";
+import { resolveCompactionPolicy } from "./core/compaction/policy.js";
 
 export async function runInteractive(config: CliConfig): Promise<void> {
   const { provider, model, cwd } = config;
 
   // Load auth & ensure dirs
   const paths = await ensureAppDirs();
+  const savedSettings = loadSavedSettings(paths.settingsFile);
 
   // Ensure project-local .gg directories exist
   const localGGDir = path.join(cwd, ".gg");
@@ -44,16 +47,24 @@ export async function runInteractive(config: CliConfig): Promise<void> {
   await authStorage.load();
 
   // Discover skills and create tools before building the prompt so tool names are accurate.
-  const skills = await discoverSkills({
+  const { skills, blocked: blockedSkills } = await discoverSkillsWithBlocked({
     globalSkillsDir: paths.skillsDir,
     projectDir: cwd,
   });
-  const { tools, processManager, lspManager } = await createTools(cwd, {
-    skills,
-    provider,
-    model,
-    authStorage,
-  });
+  // Same startup-warning line as an expired login: plain, never a prompt.
+  for (const blocked of blockedSkills)
+    console.warn(chalk.yellow(`⚠ ${blockedSkillNotice(blocked)}`));
+  const { tools, processManager, lspManager, debugManager, devAppManager } = await createTools(
+    cwd,
+    {
+      skills,
+      blockedSkills,
+      provider,
+      model,
+      authStorage,
+      getForegroundLimitSettings: () => foregroundLimitSettingsFrom(savedSettings),
+    },
+  );
   const systemPrompt =
     config.systemPrompt ??
     (await buildSystemPrompt(
@@ -68,6 +79,8 @@ export async function runInteractive(config: CliConfig): Promise<void> {
   process.on("exit", () => {
     processManager.shutdownAll();
     lspManager?.shutdownAll();
+    debugManager?.shutdown();
+    devAppManager?.shutdownNow();
   });
 
   // Initialize messages and session
@@ -106,9 +119,22 @@ export async function runInteractive(config: CliConfig): Promise<void> {
   // Auto-compact on load if the restored session exceeds the context window.
   // Without this, huge sessions (1M+ tokens) get loaded into memory and OOM.
   if (messages.length > 1) {
-    const creds = await authStorage.resolveCredentials(provider);
+    const creds = await authStorage.resolveCredentials(provider, {
+      storageKeys: getAuthStorageKeys(provider, model),
+    });
     const contextWindow = getContextWindow(model, { provider, accountId: creds.accountId });
-    if (shouldCompact(messages, contextWindow, 0.8)) {
+    const policy = resolveCompactionPolicy({
+      provider,
+      model,
+      contextWindow,
+      threshold: savedSettings.compactThreshold,
+      compactAtTokens: savedSettings.compactAtTokens,
+      accountId: creds.accountId,
+    });
+    if (
+      savedSettings.autoCompact &&
+      shouldCompact(messages, contextWindow, policy.threshold, undefined, policy.targetTokens)
+    ) {
       stdout.write("Compacting restored session...\n");
       const compactionAbort = new AbortController();
       const onSigint = () => compactionAbort.abort();
@@ -122,6 +148,7 @@ export async function runInteractive(config: CliConfig): Promise<void> {
           projectId: creds.projectId,
           baseUrl: config.baseUrl ?? creds.baseUrl,
           contextWindow,
+          targetTokens: policy.targetTokens,
           signal: compactionAbort.signal,
         });
         messages.length = 0;
@@ -155,7 +182,11 @@ export async function runInteractive(config: CliConfig): Promise<void> {
     if (!input) continue;
 
     // Push user message
-    const userMessage: Message = { role: "user", content: input };
+    const userMessage: Message = {
+      role: "user",
+      content: input,
+      provenance: { source: "human", kind: "prompt", visibility: "transcript" },
+    };
     messages.push(userMessage);
     await persistMessage(session, userMessage);
 
@@ -184,7 +215,11 @@ export async function runInteractive(config: CliConfig): Promise<void> {
     try {
       stdout.write("\n");
 
-      const creds = await authStorage.resolveCredentials(provider);
+      // The model's credential order (Gemini: API key, then Google sign-in;
+      // MiMo: Token Plan, then API Credits) — same as AgentSession.
+      const creds = await authStorage.resolveCredentials(provider, {
+        storageKeys: getAuthStorageKeys(provider, model),
+      });
       const generator = agentLoop(messages, {
         provider,
         model,
@@ -212,7 +247,7 @@ export async function runInteractive(config: CliConfig): Promise<void> {
         stdout.write("\n\nInterrupted.\n");
       } else {
         stdout.write(
-          "\n" + formatError(err instanceof Error ? err : new Error(String(err))) + "\n",
+          "\n" + formatUserError(err instanceof Error ? err : new Error(String(err))) + "\n",
         );
       }
     } finally {
@@ -264,7 +299,7 @@ function renderEvent(event: AgentEvent): void {
       break;
 
     case "error":
-      stdout.write(formatError(event.error) + "\n");
+      stdout.write(formatUserError(event.error) + "\n");
       break;
   }
 }

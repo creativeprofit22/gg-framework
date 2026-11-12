@@ -1,9 +1,6 @@
 import fs from "node:fs/promises";
 import { getAppPaths } from "@kenkaiiii/gg-core";
-import type {
-  OAuthClientInformationFull,
-  OAuthTokens,
-} from "@modelcontextprotocol/sdk/shared/auth.js";
+import type { OAuthClientInformationFull, OAuthTokens } from "@modelcontextprotocol/client";
 import { log } from "../logger.js";
 
 /**

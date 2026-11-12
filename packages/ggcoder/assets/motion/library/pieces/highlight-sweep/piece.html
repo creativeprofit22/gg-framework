@@ -1,0 +1,132 @@
+<!doctype html>
+<!--
+  highlight-sweep: a two-line sentence rises in, then a marker-style
+  --accent bar sweeps left-to-right behind the key words; the words flip to
+  --field exactly where the bar has passed (a clipped duplicate rides the
+  sweep). Mark one or two phrases with .hs-mark (each must sit on one line);
+  they sweep in order. Transparent background.
+  Params: --hs-size (font size), --hs-x / --hs-y (top-left), SWEEP_AT,
+  SWEEP (seconds per mark), GAP (between marks), EASE.
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+  </head>
+  <body>
+    <div
+      id="highlight-sweep-root"
+      data-composition-id="highlight-sweep"
+      data-start="0"
+      data-duration="3.5"
+      data-width="1920"
+      data-height="1080"
+    >
+      <style>
+        [data-composition-id="highlight-sweep"] {
+          --hs-size: 150px;
+          --hs-x: 150px;
+          --hs-y: 372px;
+          position: absolute;
+          inset: 0;
+          color: var(--ink, #111);
+        }
+        [data-composition-id="highlight-sweep"] .hs-text {
+          position: absolute;
+          left: var(--hs-x);
+          top: var(--hs-y);
+          font-family: var(--display, sans-serif);
+          font-weight: var(--display-weight, 800);
+          font-stretch: var(--display-stretch, 100%);
+          letter-spacing: var(--display-tracking, -0.03em);
+          font-size: var(--hs-size);
+          line-height: 1.12;
+          word-spacing: 0.08em;
+          white-space: nowrap;
+        }
+        [data-composition-id="highlight-sweep"] .hs-mask {
+          display: block;
+          overflow: hidden;
+          padding: 0.04em 0.12em;
+          margin: -0.04em -0.12em 0;
+        }
+        [data-composition-id="highlight-sweep"] .hs-line {
+          display: inline-block;
+        }
+        [data-composition-id="highlight-sweep"] .hs-mark {
+          position: relative;
+          display: inline-block;
+          padding: 0 0.1em;
+          margin: 0 -0.1em;
+        }
+        [data-composition-id="highlight-sweep"] .hs-bar {
+          position: absolute;
+          left: 0;
+          right: 0;
+        }
+        [data-composition-id="highlight-sweep"] .hs-bar {
+          top: 0.16em;
+          bottom: -0.06em;
+          background: var(--accent, #111);
+          border-radius: calc(var(--radius, 0px) * 0.4);
+          transform-origin: left center;
+          transform: scaleX(0);
+        }
+        [data-composition-id="highlight-sweep"] .hs-base {
+          position: relative;
+          /* One text layer; the ink changes exactly where the highlight passes. */
+          color: transparent;
+          background: linear-gradient(to right, var(--field, #fff) 0 var(--hs-fill, 0%), var(--ink, #111) var(--hs-fill, 0%) 100%);
+          background-clip: text;
+          -webkit-background-clip: text;
+        }
+      </style>
+      <div class="hs-text">
+        <!-- edit: the sentence, one .hs-mask per line; wrap highlighted words in .hs-mark -->
+        <span class="hs-mask"><span class="hs-line">Ship the video</span></span>
+        <span class="hs-mask"><span class="hs-line"><span class="hs-mark">before the meeting</span> ends.</span></span>
+      </div>
+    </div>
+    <script>
+      (function () {
+        const SWEEP_AT = 1.05;
+        const SWEEP = 0.75;
+        const GAP = 0.25;
+        const EASE = "power3.inOut";
+        const root = document.querySelector('[data-composition-id="highlight-sweep"]');
+        // Build a highlight and one text layer with a timeline-driven ink boundary.
+        const marks = Array.from(root.querySelectorAll(".hs-mark")).map((mark) => {
+          const label = mark.textContent;
+          mark.textContent = "";
+          const bar = document.createElement("span");
+          bar.className = "hs-bar";
+          const base = document.createElement("span");
+          base.className = "hs-base";
+          base.textContent = label;
+          mark.append(bar, base);
+          return { bar, base, p: 0 };
+        });
+        function draw() {
+          marks.forEach((m) => {
+            m.bar.style.transform = `scaleX(${m.p.toFixed(4)})`;
+            m.base.style.setProperty('--hs-fill', `${(m.p * 100).toFixed(2)}%`);
+          });
+        }
+        const tl = gsap.timeline({ paused: true });
+        tl.fromTo(
+          root.querySelectorAll(".hs-line"),
+          { yPercent: 110 },
+          { yPercent: 0, duration: 1, ease: "expo.out", stagger: 0.08 },
+          0.15,
+        );
+        marks.forEach((m, i) => {
+          tl.fromTo(m, { p: 0 }, { p: 1, duration: SWEEP, ease: EASE, onUpdate: draw }, SWEEP_AT + i * (SWEEP + GAP));
+        });
+        tl.to({}, { duration: Math.max(0, 3.5 - tl.duration()) });
+        draw();
+        window.__timelines = window.__timelines || {};
+        window.__timelines["highlight-sweep"] = tl;
+      })();
+    </script>
+  </body>
+</html>

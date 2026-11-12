@@ -1,0 +1,12 @@
+{
+  "id": "phone-frame",
+  "name": "Phone frame",
+  "kind": "ui",
+  "description": "A pure-CSS phone (rounded body, dynamic island, side buttons, edge highlight and a sweeping glass glare) rises in with a gentle 3D tilt and settles upright, then a default finance-app screen builds in. The screen is a slot: swap in a real app screenshot <img>.",
+  "tags": ["phone", "mobile", "device", "mockup", "app", "3d-tilt", "screenshot", "ios"],
+  "fonts": [],
+  "duration": 4,
+  "previewAt": 3,
+  "license": "original",
+  "previewLook": "soft-light-ad"
+}

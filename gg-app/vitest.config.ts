@@ -56,6 +56,7 @@ export default defineConfig({
   define: whatsNewHeadDefines,
   test: {
     globals: true,
+    globalSetup: ["../scripts/test-support/run-temp.mjs"],
     // Windows fork fan-out repeatedly exceeded worker startup limits in the
     // full suite, so use threads. One worker made the suite ~4x slower; four
     // keeps the real-sidecar fixtures within their startup budget.

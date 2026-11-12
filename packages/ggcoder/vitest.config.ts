@@ -1,10 +1,9 @@
-import os from "node:os";
-import path from "node:path";
 import { defineConfig } from "vitest/config";
 
 export default defineConfig({
   test: {
     include: ["src/**/*.test.ts", "src/**/*.test.tsx"],
+    globalSetup: ["../../scripts/test-support/run-temp.mjs"],
     // Cap Windows process-fixture contention while preserving parallel coverage.
     maxWorkers: process.platform === "win32" ? 4 : undefined,
     // Ink suppresses incremental frame writes when `is-in-ci` detects CI
@@ -13,10 +12,10 @@ export default defineConfig({
     env: {
       CI: "false",
       CONTINUOUS_INTEGRATION: "false",
-      // Edit-regression telemetry from fake test edits must never land in the
-      // user's real ~/.gg/edit-quality.jsonl.
-      GG_EDIT_TELEMETRY_PATH: path.join(os.tmpdir(), "gg-vitest-edit-quality.jsonl"),
     },
+    // Keeps fake test edits out of the user's real ~/.gg/edit-quality.jsonl.
+    // Set in the worker, where os.tmpdir() is already this run's folder.
+    setupFiles: ["./src/test-support/edit-telemetry-setup.ts"],
     // The session/compaction suites persist real sessions and checkpoints to a
     // temp project on disk. Those filesystem round-trips are several times
     // slower on the Windows runner, where cases that finish in ~1s locally have

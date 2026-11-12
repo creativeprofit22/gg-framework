@@ -74,6 +74,7 @@ packages/ggcoder/ideal-sim/
 # Repo scripts (audit, release CI gate) are tracked; other files here stay local.
 /scripts/*
 !/scripts/*.mjs
+!/scripts/test-support/
 /scripts/test_*.mjs
 packages/*/.bench-*.mjs
 

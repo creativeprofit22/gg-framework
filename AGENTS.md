@@ -55,6 +55,7 @@ pnpm monorepo for GG Coder: a multi-provider coding agent shipped as the `ggcode
 - Change only inside one `packages/<name>`: run `pnpm --filter @kenkaiiii/<name> check`, `pnpm exec eslint <changed files>`, `pnpm exec prettier --check <changed files>`, and `pnpm --filter @kenkaiiii/<name> exec vitest run <test files>` for `src/**` tests. `scripts/*.test.mjs` files are node:test, not vitest: run `node --test <file>` or the matching root `pnpm test:<name>` script. Skip root `lint`/`check`.
 - Full `pnpm test` only before a release, a distributable Local Fork rebuild, or an upstream sync, OR when the change touches cross-area code: gg-core contracts, Rust/Tauri, the daemon, auth, build/packaging/sidecar scripts.
 - When skipping the full run, say so in the report and name the scoped tests that were run instead.
+- Test runs get their own temp folder (`ggt-*`, via `scripts/test-support/run-temp.mjs` in every vitest `globalSetup` and `with-run-temp.mjs` for root `node --test` scripts), so `os.tmpdir()` in tests is not the system temp. `node scripts/test-support/clean-legacy-temp.mjs` only lists leftovers; `--apply` deletes and needs the user's approval.
 
 ## Verification status handoff
 

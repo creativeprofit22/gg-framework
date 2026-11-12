@@ -56,6 +56,12 @@ jobs:
         shell: bash
         run: node --test packages/ggcoder/scripts/*.test.mjs
 
+      # Every vitest config loads scripts/test-support/run-temp.mjs as
+      # globalSetup; run its own node:test suite so regressions fail here.
+      - name: Test-run temp folder tests
+        shell: bash
+        run: pnpm test:run-temp
+
       - name: Lint ggcoder programmatic sources
         shell: bash
         run: pnpm --filter @kenkaiiii/ggcoder lint:programmatic

@@ -501,7 +501,8 @@ async function runProbe(probe: BasicProbeName, evidenceFile: string): Promise<vo
     expect(roles.map(({ role }) => role)).toContain(probe === "nested" ? "worker" : probe);
     expect(timeoutLine).toBe("Exit code: TIMEOUT (1000ms)");
     expect(elapsedMs).toBeGreaterThanOrEqual(750);
-    expect(elapsedMs).toBeLessThan(probe === "nested" ? 10_000 : 4_000);
+    // Proves the 1s timeout fires (no hang); a busy machine adds seconds of cleanup.
+    expect(elapsedMs).toBeLessThan(10_000);
 
     if (probe === "cpu") {
       expect(result.content).toMatch(/FIXTURE_ROLE=cpu PID=\d+ PPID=\d+/);

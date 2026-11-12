@@ -13,7 +13,7 @@ import {
 } from "node:fs";
 import { copyFile, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
@@ -45,6 +45,7 @@ import {
   toFingerprintPath,
   writeDepsStamp,
 } from "./bundle-sidecar.mjs";
+import { loadInstalledLayoutListing } from "./installed-layout-listing.mjs";
 
 const sharpOptionalDependencies = {
   "@img/colour": "1.1.0",
@@ -426,40 +427,50 @@ async function createInstalledPruneFixture() {
     ["@mixmark-io/domino", "turndown"],
     ["@anthropic-ai/sandbox-runtime"],
   ];
+  const cacheDir = fileURLToPath(
+    new URL("../node_modules/.cache/installed-layout-listing", import.meta.url),
+  );
+  mkdirSync(cacheDir, { recursive: true });
+  const listing = loadInstalledLayoutListing({
+    packages: packages.map(([name, parent]) => ({
+      name,
+      root: installedPackageRoot(
+        name,
+        parent ? join(installedPackageRoot(parent, manifest), "package.json") : manifest,
+      ),
+    })),
+    lockfile: fileURLToPath(new URL("../../pnpm-lock.yaml", import.meta.url)),
+    // Kept across runs (the key tracks versions + lockfile); copies below stay
+    // per test because pruning mutates them.
+    cacheDir,
+  });
   const copiedFiles = [];
   const writes = [];
-  for (const [name, parent] of packages) {
-    const source = installedPackageRoot(
-      name,
-      parent ? join(installedPackageRoot(parent, manifest), "package.json") : manifest,
-    );
+  for (const { name, root: source, entries } of listing.packages) {
     const destination = join(nodeModules, ...name.split("/"));
-    const visit = (relativePath = "") => {
-      mkdirSync(join(destination, relativePath), { recursive: true });
-      for (const entry of readdirSync(join(source, relativePath), { withFileTypes: true })) {
-        // Production removes source maps before applying immutable inventories.
-        if (entry.name.endsWith(".map")) continue;
-        const path = join(relativePath, entry.name);
-        if (entry.isDirectory()) visit(path);
-        else {
-          expect(entry.isFile()).toBe(true);
-          const from = join(source, path);
-          const to = join(destination, path);
-          // Preserve the complete real layout without copying hundreds of MB of
-          // discarded WASM/native bundles. Copy manifests, licenses and entry JS.
-          if (
-            (!relativePath && /^(package\.json|LICENSE|NOTICE|index\.js)$/.test(entry.name)) ||
-            (relativePath === "dist" &&
-              /^(ort\.node\.min\.(js|mjs)|transformers\.node\.mjs|cli\.js)$/.test(entry.name)) ||
-            path === join("vendor", "java-proxy-agent", "srt-proxy-agent.jar")
-          ) {
-            writes.push(() => copyFile(from, to));
-            copiedFiles.push({ from, to });
-          } else writes.push(() => writeFile(to, ""));
-        }
+    mkdirSync(destination, { recursive: true });
+    for (const { path, isDirectory, isFile } of entries) {
+      if (isDirectory) {
+        mkdirSync(join(destination, path), { recursive: true });
+        continue;
       }
-    };
-    visit();
+      expect(isFile).toBe(true);
+      const relativePath = dirname(path) === "." ? "" : dirname(path);
+      const fileName = basename(path);
+      const from = join(source, path);
+      const to = join(destination, path);
+      // Preserve the complete real layout without copying hundreds of MB of
+      // discarded WASM/native bundles. Copy manifests, licenses and entry JS.
+      if (
+        (!relativePath && /^(package\.json|LICENSE|NOTICE|index\.js)$/.test(fileName)) ||
+        (relativePath === "dist" &&
+          /^(ort\.node\.min\.(js|mjs)|transformers\.node\.mjs|cli\.js)$/.test(fileName)) ||
+        path === join("vendor", "java-proxy-agent", "srt-proxy-agent.jar")
+      ) {
+        writes.push(() => copyFile(from, to));
+        copiedFiles.push({ from, to });
+      } else writes.push(() => writeFile(to, ""));
+    }
   }
   // Keep the complete installed layout and real retained bytes, but avoid
   // serializing 1,000+ independent disk writes on Windows. Settle each bounded

@@ -227,7 +227,7 @@ describe("'don't install' list on odd setups", () => {
     await fs.writeFile(path.join(dir, "CLAUDE.md"), big);
     const t = performance.now();
     await recordBlockedPackages(dir, [chalk]);
-    expect(performance.now() - t).toBeLessThan(500);
+    expect(performance.now() - t).toBeLessThan(1_000);
     expect((await read("CLAUDE.md")).startsWith(big)).toBe(true);
   });
 

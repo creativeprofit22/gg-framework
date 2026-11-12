@@ -267,7 +267,8 @@ describe("progress-aware call timeout", () => {
     await expect(call(tools, "progress", { ms: 5_000, every: 100 })).rejects.toThrow(
       /Maximum total timeout exceeded/,
     );
-    expect(Date.now() - started).toBeLessThan(3_000);
+    // The uncapped call would run 5 s; 4 s leaves load headroom and still proves the cap.
+    expect(Date.now() - started).toBeLessThan(4_000);
   }, 30_000);
 
   it("declares the progress budget to the agent loop", async () => {

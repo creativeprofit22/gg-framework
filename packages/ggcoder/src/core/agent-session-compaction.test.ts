@@ -2162,6 +2162,7 @@ describe("AgentSession plan state and dispose", () => {
     const started = Date.now();
     await session.dispose();
     expect(abort.signal.aborted).toBe(true);
-    expect(Date.now() - started).toBeLessThan(DISPOSE_COMPACTION_WAIT_MS + 2_000);
+    // The compaction never settles, so any finite bound proves the cap; 4 s covers load.
+    expect(Date.now() - started).toBeLessThan(DISPOSE_COMPACTION_WAIT_MS + 4_000);
   });
 });

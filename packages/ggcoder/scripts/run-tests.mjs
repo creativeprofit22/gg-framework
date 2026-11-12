@@ -1,25 +1,19 @@
-import { spawnSync } from "node:child_process";
+import { runStages, spawnPackageStage } from "../../../scripts/test-support/run-stages.mjs";
 
 const packageManagerCli = process.env.npm_execpath;
 if (!packageManagerCli) {
   throw new Error("run-tests.mjs must be started from a package-manager script");
 }
 
-const testScripts =
+const stages =
   process.platform === "win32"
-    ? ["test:parallel", "test:windows-serial", "test:daemon-serial", "test:alone"]
-    : ["vitest"];
+    ? ["run test:parallel", "run test:windows-serial", "run test:daemon-serial", "run test:alone"]
+    : ["exec vitest run"];
 
-for (const testScript of testScripts) {
-  const args = testScript === "vitest" ? ["exec", "vitest", "run"] : ["run", testScript];
-  const result = spawnSync(process.execPath, [packageManagerCli, ...args], {
-    stdio: "inherit",
-  });
-
-  if (result.error) {
-    throw result.error;
-  }
-  if (result.status !== 0) {
-    process.exit(result.status ?? 1);
-  }
+// Every step runs even after a failure, so one run reports all broken steps.
+const { failed } = runStages(stages, (stage) => spawnPackageStage(packageManagerCli, stage));
+if (failed.length > 0) {
+  console.error(`\nFailed test steps (${failed.length}/${stages.length}):`);
+  for (const stage of failed) console.error(`  - ${stage}`);
+  process.exit(1);
 }

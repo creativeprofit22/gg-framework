@@ -31,7 +31,7 @@
     "bump": "node scripts/bump-version.mjs",
     "evidence:workspace-shell": "node scripts/workspace-shell-evidence.mjs",
     "nav": "node scripts/dev-nav.mjs",
-    "test": "pnpm test:parallel && pnpm test:heavy-serial && pnpm test:updater-serial && pnpm test:installer-serial && pnpm test:launcher-serial && pnpm test:workspace-narrow && pnpm test:review-dock && pnpm test:workspace-shell-evidence && pnpm test:whats-new-loading && pnpm test:alone",
+    "test": "node ../scripts/test-support/run-stages.mjs test:parallel test:heavy-serial test:updater-serial test:installer-serial test:launcher-serial test:workspace-narrow test:review-dock test:workspace-shell-evidence test:whats-new-loading test:alone",
     "test:parallel": "vitest run --project ui --project node",
     "test:updater-serial": "vitest run scripts/update-with-local-fixes.test.ts --no-file-parallelism --tags-filter=!alone",
     "test:installer-serial": "vitest run scripts/install-local-patched.test.mjs --no-file-parallelism --tags-filter=!alone",

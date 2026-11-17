@@ -213,6 +213,52 @@ describe("Project Notes durable phase execution", () => {
     ).toEqual({ status: "operation-conflict", revision: 3 });
   });
 
+  it("replaces an approved plan only while none of its steps or evidence exist", async () => {
+    const phaseId = document.phases[0]!.id;
+    await expect(approve()).resolves.toMatchObject({ status: "committed" });
+    const replanned = createApprovedPlan({
+      planId: "plan-2",
+      content: "# Plan\n\n## Steps\n\n1. Add the demo pass\n2. Settle completion safely\n",
+      snapshotPath: ".gg/plans/approved/plan-2.md",
+      approvedAt: "2026-08-30T11:00:00.000Z",
+      approvedRevision: 2,
+      baseCommit: workspace.headCommit,
+    });
+    const replace = (expectedRevision: number, plan = replanned) =>
+      repository.approvePhaseExecutionPlan(cwd, {
+        operationId: `approve-${plan.planId}`,
+        phaseId,
+        expectedRevision,
+        repository: identity,
+        plan,
+        lastSession: document.phases[0]!.session,
+      });
+
+    await expect(replace(1)).resolves.toEqual({ status: "stale-revision", revision: 2 });
+    await expect(replace(2)).resolves.toMatchObject({
+      status: "committed",
+      snapshot: { revision: 3 },
+      phase: { execution: { plan: replanned, evidence: [] } },
+    });
+    await expect(replace(3)).resolves.toEqual({ status: "duplicate", revision: 3 });
+
+    await repository.checkpointPhaseExecutionStep(cwd, {
+      phaseId,
+      expectedRevision: 3,
+      planHash: replanned.contentHash,
+      stepId: replanned.steps[0]!.id,
+      completedAt: NOW,
+      workspace,
+    });
+    await expect(replace(4, approvedPlan())).resolves.toEqual({
+      status: "operation-conflict",
+      revision: 4,
+    });
+    const loaded = await repository.load(cwd);
+    if (loaded.status !== "ok") throw new Error("Expected persisted Project Notes");
+    expect(loaded.snapshot.document.phases[0]!.execution?.plan?.planId).toBe("plan-2");
+  });
+
   it("persists snapshot reconciliation before execution can resume", async () => {
     await expect(approve()).resolves.toMatchObject({ status: "committed" });
     const plan = approvedPlan();

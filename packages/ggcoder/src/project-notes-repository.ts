@@ -1967,10 +1967,16 @@ export class ProjectNotesRepository {
       const currentPhase = current.document.phases[phaseIndex]!;
       if (isNotesPhaseDeleted(currentPhase)) return { status: "phase-not-found" };
       if (currentPhase.execution) {
-        return isDeepStrictEqual(currentPhase.execution.repository, request.repository) &&
+        if (
+          isDeepStrictEqual(currentPhase.execution.repository, request.repository) &&
           isDeepStrictEqual(currentPhase.execution.plan, request.plan)
-          ? { status: "duplicate", revision }
-          : { status: "operation-conflict", revision };
+        ) {
+          return { status: "duplicate", revision };
+        }
+        // A replanned phase may swap its approved plan only while nothing was done under it.
+        if (!isUnstartedExecution(currentPhase.execution)) {
+          return { status: "operation-conflict", revision };
+        }
       }
       if (request.expectedRevision !== revision) return { status: "stale-revision", revision };
       if (currentPhase.archivedAt !== null) return { status: "phase-archived" };
@@ -3329,6 +3335,15 @@ function isTimestamp(value: unknown): value is string {
 
 function serializeEnvelope(envelope: StoredProjectNotes): string {
   return `${JSON.stringify(envelope, null, 2)}\n`;
+}
+
+function isUnstartedExecution(execution: NonNullable<NotesPhase["execution"]>): boolean {
+  return (
+    execution.state === "implementing" &&
+    execution.evidence.length === 0 &&
+    execution.pendingCompletion === null &&
+    (execution.plan?.steps.every((step) => step.state === "pending") ?? false)
+  );
 }
 
 function executionRequiresReconciliation(phase: NotesPhase): boolean {

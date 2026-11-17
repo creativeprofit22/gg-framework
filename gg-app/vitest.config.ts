@@ -1,5 +1,6 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { defaultExclude, defineConfig } from "vitest/config";
+import { moduleCacheSettings } from "../scripts/test-support/module-cache.mjs";
 import { whatsNewHeadDefines } from "./scripts/whats-new-heads";
 
 // Calendar tests exercise New York's DST gap. Set the timezone in the main
@@ -57,6 +58,9 @@ export default defineConfig({
   test: {
     globals: true,
     globalSetup: ["../scripts/test-support/run-temp.mjs"],
+    // Opt-in prepared-file cache on the system drive (GG_VITEST_MODULE_CACHE=on); projects
+    // inherit it. JSON defines are set per worker, never cached.
+    experimental: moduleCacheSettings({ packageName: "gg-app" }),
     // Windows fork fan-out repeatedly exceeded worker startup limits in the
     // full suite, so use threads. One worker made the suite ~4x slower; four
     // keeps the real-sidecar fixtures within their startup budget.

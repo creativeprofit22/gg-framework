@@ -1,10 +1,13 @@
 import { defineConfig } from "vitest/config";
+import { moduleCacheSettings } from "../../scripts/test-support/module-cache.mjs";
 import { isCi, LOCAL_FLAKY_NAMES, retryCount } from "../../scripts/test-support/retry-policy.mjs";
 
 export default defineConfig({
   test: {
     include: ["src/**/*.test.ts", "src/**/*.test.tsx"],
     globalSetup: ["../../scripts/test-support/run-temp.mjs"],
+    // Opt-in prepared-file cache on the system drive (GG_VITEST_MODULE_CACHE=on).
+    experimental: moduleCacheSettings({ packageName: "ggcoder" }),
     // Cap Windows process-fixture contention while preserving parallel coverage.
     maxWorkers: process.platform === "win32" ? 4 : undefined,
     // Ink suppresses incremental frame writes when `is-in-ci` detects CI

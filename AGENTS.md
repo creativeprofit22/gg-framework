@@ -58,6 +58,7 @@ pnpm monorepo for GG Coder: a multi-provider coding agent shipped as the `ggcode
 - After a timeout-only or timing failure, rerun just that one file once; never rerun the full suite to confirm it. Local vitest runs don't retry `alone` tests (ggcoder's `alone` tests retry twice on CI via `scripts/test-support/retry-policy.mjs`; gg-app's never retry).
 - When skipping the full run, say so in the report and name the scoped tests that were run instead.
 - Test runs get their own temp folder (`ggt-*`, via `scripts/test-support/run-temp.mjs` in every vitest `globalSetup` and `with-run-temp.mjs` for root `node --test` scripts), so `os.tmpdir()` in tests is not the system temp. `node scripts/test-support/clean-legacy-temp.mjs` only lists leftovers; `--apply` deletes and needs the user's approval.
+- Vitest's prepared-file cache (`experimental.fsModuleCache`, via `scripts/test-support/module-cache.mjs`) is off by default for ggcoder and gg-app: measured 2026-11, warm runs were not faster than the uncached baseline. Opt in with `GG_VITEST_MODULE_CACHE=on`; it then lives in `%LOCALAPPDATA%\gg-vitest-cache\<package>` (about 55 MB each; `GG_VITEST_MODULE_CACHE_DIR` overrides the base, never `node_modules`). Clear it with `vitest --clearCache` in that package (with the variable on) or delete the folder.
 
 ## Verification status handoff
 

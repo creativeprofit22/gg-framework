@@ -27,6 +27,8 @@ const TOOL_PREFIX = `mcp__${CLAUDE_CODE_MCP_SERVER}__`;
 const DEFAULT_TOOL_TIMEOUT_MS = 300_000;
 // Our own per-tool timeout must fire first so its specific message reaches the model.
 const SERVER_TIMEOUT_MARGIN_MS = 60_000;
+// Server ceiling when a tool owns its own deadline; bash's hard limit is 60 min by default.
+const NO_DEADLINE_SERVER_TIMEOUT_MS = 6 * 60 * 60_000;
 // How long a call that changed the tool list waits for Claude Code to re-list.
 const RELIST_WAIT_MS = 3_000;
 
@@ -206,7 +208,10 @@ export function createToolBridge(initial: ToolBridgeOptions): ToolBridge {
             throw originalError;
           }
         }
-        const signals = [cancel, AbortSignal.timeout(tool.timeoutMs ?? DEFAULT_TOOL_TIMEOUT_MS)];
+        // Zero means the tool owns its own deadline (bash, ask_user). Never pass it to
+        // AbortSignal.timeout: zero aborts on the next tick and cancels every call.
+        const timeoutMs = tool.timeoutMs ?? DEFAULT_TOOL_TIMEOUT_MS;
+        const signals = timeoutMs === 0 ? [cancel] : [cancel, AbortSignal.timeout(timeoutMs)];
         if (options.signal) signals.push(options.signal);
         if (isInterruptibleTool(tool, name)) {
           preempt = new AbortController();
@@ -402,10 +407,11 @@ export function createToolBridge(initial: ToolBridgeOptions): ToolBridge {
     },
   };
 
-  const longestTimeout = Math.max(
-    DEFAULT_TOOL_TIMEOUT_MS,
-    ...initial.tools.map((t) => t.timeoutMs ?? 0),
-  );
+  // A tool with no deadline (timeoutMs 0: bash, ask_user) must not be cut off by
+  // Claude Code's own per-call timeout either, so give the server a long ceiling.
+  const longestTimeout = initial.tools.some((t) => t.timeoutMs === 0)
+    ? NO_DEADLINE_SERVER_TIMEOUT_MS
+    : Math.max(DEFAULT_TOOL_TIMEOUT_MS, ...initial.tools.map((t) => t.timeoutMs ?? 0));
 
   return {
     config: {

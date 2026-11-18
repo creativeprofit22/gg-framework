@@ -360,6 +360,46 @@ describe("createToolBridge", () => {
   });
 });
 
+describe("createToolBridge — tools that own their deadline (timeoutMs: 0)", () => {
+  // Local Fork: bash and ask_user set timeoutMs 0 ("no implicit deadline"). The
+  // bridge once passed that to AbortSignal.timeout, which aborts on the next tick,
+  // so every bash call on the Claude sign-in route came back CANCELLED.
+  it("does not abort a tool whose timeoutMs is 0", async () => {
+    const seen: boolean[] = [];
+    const owner: AgentTool = {
+      name: "owner",
+      description: "Owns its deadline",
+      parameters: z.object({}),
+      timeoutMs: 0,
+      execute: async (_args, ctx) => {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        seen.push(ctx.signal.aborted);
+        return ctx.signal.aborted ? "aborted" : "ran";
+      },
+    };
+    const { call } = await connect({ tools: [owner] });
+    const reply = await call("owner", {});
+    expect(seen).toEqual([false]);
+    expect(reply.result?.content).toEqual([{ type: "text", text: "ran" }]);
+  });
+
+  it("gives Claude Code a long server timeout when a tool has no deadline", () => {
+    const owner: AgentTool = {
+      name: "owner",
+      description: "Owns its deadline",
+      parameters: z.object({}),
+      timeoutMs: 0,
+      execute: () => "ok",
+    };
+    const withOwner = createToolBridge({ tools: [owner, echo], onEvent: () => {} });
+    const without = createToolBridge({ tools: [echo], onEvent: () => {} });
+    const timeoutOf = (b: ReturnType<typeof createToolBridge>) =>
+      (b.config as unknown as { timeout: number }).timeout;
+    expect(timeoutOf(withOwner)).toBeGreaterThanOrEqual(60 * 60_000);
+    expect(timeoutOf(without)).toBe(360_000);
+  });
+});
+
 describe("createToolBridge — promotion without a re-list", () => {
   it("still answers when Claude Code never re-lists", async () => {
     const tools: AgentTool[] = [];

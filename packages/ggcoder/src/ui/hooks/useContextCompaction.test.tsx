@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Message, Provider, Usage } from "@kenkaiiii/gg-ai";
 import type { OpenAICodexContextProfile } from "@kenkaiiii/gg-core/models";
 import type * as CompactorModule from "../../core/compaction/compactor.js";
+import * as Pruner from "../../core/compaction/tool-result-pruner.js";
 import type { SettingsManager } from "../../core/settings-manager.js";
 import type { CompletedItem } from "../app-items.js";
 import { useContextCompaction } from "./useContextCompaction.js";
@@ -16,6 +17,17 @@ vi.mock("../../core/compaction/compactor.js", async () => {
     "../../core/compaction/compactor.js",
   );
   return { ...actual, compact: compactMock };
+});
+
+vi.mock("../../core/compaction/tool-result-pruner.js", async () => {
+  const actual = await vi.importActual<typeof Pruner>(
+    "../../core/compaction/tool-result-pruner.js",
+  );
+  return {
+    ...actual,
+    shouldPruneToolResults: vi.fn(actual.shouldPruneToolResults),
+    pruneStaleToolResults: vi.fn(actual.pruneStaleToolResults),
+  };
 });
 
 const usage: Usage = {
@@ -221,5 +233,46 @@ describe("useContextCompaction", () => {
       { role: "system", content: "sys" },
       { role: "user", content: "[compacted]" },
     ]);
+  });
+
+  it("uses the cache-aware prune floor when the prompt cache is warm", async () => {
+    const shouldPrune = vi.mocked(Pruner.shouldPruneToolResults);
+    const prune = vi.mocked(Pruner.pruneStaleToolResults);
+    shouldPrune.mockClear();
+    prune.mockClear();
+    // Probe the compaction target, then size the context just above the prune threshold.
+    shouldPrune.mockReturnValueOnce(false);
+    let transformed: Message[] | undefined;
+    const probe = render(
+      <Harness provider="openai" onTransformed={(messages) => (transformed = messages)} />,
+      { patchConsole: false },
+    );
+    await vi.waitFor(() => expect(transformed).toBeDefined());
+    probe.unmount();
+    const target = shouldPrune.mock.calls[0][1];
+    shouldPrune.mockClear();
+    compactMock.mockClear();
+
+    const warmUsage: Usage = {
+      inputTokens: Math.ceil(target * Pruner.PRUNE_START_FRACTION) + 5_000,
+      outputTokens: 0,
+    };
+    transformed = undefined;
+    const mounted = render(
+      <Harness
+        provider="openai"
+        providerUsage={warmUsage}
+        onTransformed={(messages) => (transformed = messages)}
+      />,
+      { patchConsole: false },
+    );
+    await vi.waitFor(() => expect(transformed).toBeDefined());
+    mounted.unmount();
+
+    expect(prune).toHaveBeenCalledTimes(1);
+    const [activeTokens, pruneTarget] = shouldPrune.mock.calls[0];
+    const expected = Pruner.pruneMinimumTokens(activeTokens, false, pruneTarget);
+    expect(expected).not.toBe(Pruner.PRUNE_MINIMUM_TOKENS);
+    expect(prune.mock.calls[0][1]).toEqual({ minimumTokens: expected });
   });
 });

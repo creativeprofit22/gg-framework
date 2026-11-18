@@ -10,9 +10,11 @@ import type { TransformContextOptions } from "@kenkaiiii/gg-agent";
 import { compact, shouldCompact } from "../../core/compaction/compactor.js";
 import { calculateActiveContextTokens } from "../../core/compaction/active-context.js";
 import {
+  pruneMinimumTokens,
   pruneStaleToolResults,
   shouldPruneToolResults,
 } from "../../core/compaction/tool-result-pruner.js";
+import { assessCacheExpiry, resolveCacheTtl, type CacheTouch } from "../../core/cache-expiry.js";
 import {
   estimateConversationTokens,
   calibrateEstimatorFromUsage,
@@ -52,6 +54,17 @@ export interface ContextCompaction {
   recordProviderUsage: (usage: Usage, messages: Message[]) => void;
 }
 
+function tuiCacheTtl(
+  provider: Provider,
+  model: string,
+  baseUrl: string | undefined,
+  accountId: string | undefined,
+) {
+  // The TUI sends no cacheRetention, so mirror gg-ai's per-provider default.
+  const cacheRetention = provider === "anthropic" ? "long" : "short";
+  return resolveCacheTtl({ provider, model, cacheRetention, baseUrl, accountId });
+}
+
 /**
  * Owns context compaction: the manual `compactConversation` flow (spinner +
  * credential resolution + abort handling) and the `transformContext` callback
@@ -76,6 +89,9 @@ export function useContextCompaction({
   const compactionAbortRef = useRef<AbortController | null>(null);
   const lastCompactionTimeRef = useRef(0);
   const providerContextRef = useRef<{ usage: Usage; anchor: Message } | null>(null);
+  // The TUI has no AgentSession cache diagnostics, so track the last successful
+  // provider request here to tell a warm prompt cache from a cold one.
+  const lastCacheTouchRef = useRef<CacheTouch | null>(null);
   const modelKey = `${currentProvider}:${currentModel}`;
   const providerContextModelKeyRef = useRef(modelKey);
   if (providerContextModelKeyRef.current !== modelKey) {
@@ -83,8 +99,34 @@ export function useContextCompaction({
     providerContextRef.current = null;
   }
 
+  const noteCacheTouch = useCallback((): void => {
+    const policy = tuiCacheTtl(currentProvider, currentModel, activeBaseUrl, activeAccountId);
+    lastCacheTouchRef.current = policy
+      ? { at: Date.now(), provider: currentProvider, model: currentModel, policy }
+      : null;
+  }, [currentProvider, currentModel, activeBaseUrl, activeAccountId]);
+
+  const isCacheCold = useCallback(
+    (messages: Message[], prefixTokens: number): boolean => {
+      const status = assessCacheExpiry({
+        current: {
+          provider: currentProvider,
+          model: currentModel,
+          policy: tuiCacheTtl(currentProvider, currentModel, activeBaseUrl, activeAccountId),
+        },
+        lastTouch: lastCacheTouchRef.current,
+        now: Date.now(),
+        prefixTokens,
+        hasHistory: messages.some((m) => m.role === "user"),
+      });
+      return status?.expired ?? false;
+    },
+    [currentProvider, currentModel, activeBaseUrl, activeAccountId],
+  );
+
   const rememberProviderUsage = useCallback(
     (usage: Usage, messages: Message[], pendingMessages: Message[]): void => {
+      noteCacheTouch();
       const anchorIndex = messages.length - pendingMessages.length - 1;
       const anchor = messages[anchorIndex];
       if (anchor?.role === "assistant") {
@@ -94,18 +136,22 @@ export function useContextCompaction({
         calibrateEstimatorFromUsage(messages.slice(0, anchorIndex), usage);
       }
     },
-    [],
+    [noteCacheTouch],
   );
 
-  const recordProviderUsage = useCallback((usage: Usage, messages: Message[]): void => {
-    for (let index = messages.length - 1; index >= 0; index--) {
-      const anchor = messages[index];
-      if (anchor?.role === "assistant") {
-        providerContextRef.current = { usage: { ...usage }, anchor };
-        return;
+  const recordProviderUsage = useCallback(
+    (usage: Usage, messages: Message[]): void => {
+      noteCacheTouch();
+      for (let index = messages.length - 1; index >= 0; index--) {
+        const anchor = messages[index];
+        if (anchor?.role === "assistant") {
+          providerContextRef.current = { usage: { ...usage }, anchor };
+          return;
+        }
       }
-    }
-  }, []);
+    },
+    [noteCacheTouch],
+  );
 
   const compactConversation = useCallback(
     async (messages: Message[], signal?: AbortSignal): Promise<Message[]> => {
@@ -265,7 +311,10 @@ export function useContextCompaction({
       // identity; drop the retained usage afterwards since it counted the
       // pruned content.
       if (shouldPruneToolResults(activeTokens, policy.targetTokens)) {
-        const pruneResult = pruneStaleToolResults(messages);
+        const cacheCold = isCacheCold(messages, activeTokens);
+        const pruneResult = pruneStaleToolResults(messages, {
+          minimumTokens: pruneMinimumTokens(activeTokens, cacheCold, policy.targetTokens),
+        });
         if (pruneResult.pruned) {
           providerContextRef.current = null;
           log("INFO", "compaction", "Pruned stale tool outputs", {
@@ -304,6 +353,7 @@ export function useContextCompaction({
       settingsRef,
       messagesRef,
       rememberProviderUsage,
+      isCacheCold,
     ],
   );
 

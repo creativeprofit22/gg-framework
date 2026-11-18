@@ -6738,6 +6738,19 @@ async function createSession(
           json(res, 404, { error: `unknown model: ${modelId}` });
           return;
         }
+        // Same rule the picker uses: a model the connected plan or keys can't
+        // run is refused here too, so no client can switch into a failing run.
+        if (target.provider !== "local") {
+          const loggedIn: Provider[] = [];
+          for (const p of ALL_PROVIDERS) {
+            if (await auth.hasProviderAuth(p)) loggedIn.push(p);
+          }
+          const reason = (await unavailableModelReasons(auth, loggedIn))(target.id);
+          if (reason) {
+            json(res, 409, { error: reason });
+            return;
+          }
+        }
         // A model that spends real money is never switched to implicitly: the
         // caller must pass the user's explicit confirmation. Fails closed for
         // every client of this route.

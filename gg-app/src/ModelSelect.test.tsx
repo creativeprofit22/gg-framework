@@ -114,6 +114,42 @@ describe("ModelSelect — models that change what you pay", () => {
   });
 });
 
+describe("ModelSelect — models the connected plan or keys can't run", () => {
+  const unavailable: ModelOption = {
+    id: "kimi-for-coding",
+    name: "Kimi K2.8 Preview",
+    provider: "moonshot",
+    unavailable: "Needs a Kimi Code plan key",
+  };
+
+  it.each([true, false])("renders it disabled with the reason (native=%s)", (native) => {
+    supportsNativeMock.mockReturnValue(native);
+    const onSelect = vi.fn();
+    render(
+      <ModelSelect
+        models={[...MODELS, unavailable]}
+        currentModel="claude-sonnet-5"
+        onSelect={onSelect}
+        title="Switch model"
+        label="Choose model"
+      />,
+    );
+    if (native) {
+      const option = screen.getByRole("option", {
+        name: "Kimi K2.8 Preview — Needs a Kimi Code plan key",
+      });
+      expect(option.hasAttribute("disabled")).toBe(true);
+      return;
+    }
+    fireEvent.click(screen.getByRole("button", { name: "Choose model" }));
+    const item = screen.getByRole("menuitemradio", { name: "Kimi K2.8 Preview" });
+    expect(item.hasAttribute("disabled")).toBe(true);
+    expect(item.getAttribute("title")).toBe("Needs a Kimi Code plan key");
+    fireEvent.click(item);
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+});
+
 describe("ModelSelect — native popup", () => {
   it("groups every provider under its own label, local last", () => {
     supportsNativeMock.mockReturnValue(true);

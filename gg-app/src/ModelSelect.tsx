@@ -254,23 +254,27 @@ export function ModelSelect({
     // A local model that can't call tools can't run the agent — keep it visible
     // (so the user knows it was found) but unselectable, with the reason.
     const toolless = model.supportsTools === false;
+    // Likewise a model the connected plan or keys can't run, with the daemon's reason.
+    const blocked = toolless || Boolean(model.unavailable);
     return (
       <button
         key={`${model.provider}:${model.id}`}
         className="model-menu-item"
         role="menuitemradio"
         aria-checked={active}
-        disabled={toolless}
-        style={{ color: toolless ? theme.textDim : active ? theme.primary : theme.text }}
+        disabled={blocked}
+        style={{ color: blocked ? theme.textDim : active ? theme.primary : theme.text }}
         onClick={() => chooseModel(model.id)}
         title={
           toolless
             ? `${model.name} has no tool calling, so it can't run the agent`
-            : model.billing
-              ? `${model.provider} · ${model.id} · ${model.billing.detail}`
-              : model.endpoint
-                ? `${model.endpoint} · ${model.id}`
-                : `${model.provider} · ${model.id}`
+            : model.unavailable
+              ? model.unavailable
+              : model.billing
+                ? `${model.provider} · ${model.id} · ${model.billing.detail}`
+                : model.endpoint
+                  ? `${model.endpoint} · ${model.id}`
+                  : `${model.provider} · ${model.id}`
         }
       >
         {model.billing ? `${model.name} · ${model.billing.label}` : model.name}
@@ -316,13 +320,15 @@ export function ModelSelect({
                 <option
                   key={`${model.provider}:${model.id}`}
                   value={model.id}
-                  disabled={model.supportsTools === false}
+                  disabled={model.supportsTools === false || Boolean(model.unavailable)}
                 >
                   {model.supportsTools === false
                     ? `${model.name} — no tool calling`
-                    : model.billing
-                      ? `${model.name} · ${model.billing.label}`
-                      : model.name}
+                    : model.unavailable
+                      ? `${model.name} — ${model.unavailable}`
+                      : model.billing
+                        ? `${model.name} · ${model.billing.label}`
+                        : model.name}
                 </option>
               ))}
             </optgroup>

@@ -805,6 +805,28 @@ describe("dual-auth providers (OAuth + API key)", () => {
     expect(reason("mimo-v2.6-flash")).toBeUndefined();
   }, 90_000);
 
+  it("refuses to switch to a model the connected keys can't run", async () => {
+    const session = await createSession();
+    await fs.writeFile(
+      path.join(tmpHome, ".gg", "auth.json"),
+      JSON.stringify({
+        moonshot: {
+          accessToken: "sk-moonshot",
+          refreshToken: "",
+          expiresAt: Date.now() + 1_000_000,
+        },
+      }),
+    );
+    const before = (await request("GET", "/state", { session })).json.model;
+    const refused = await request("POST", "/model", {
+      session,
+      body: { model: "kimi-for-coding" },
+    });
+    expect(refused.status).toBe(409);
+    expect(refused.json.error).toBe("Needs a Kimi Code plan key");
+    expect((await request("GET", "/state", { session })).json.model).toBe(before);
+  }, 90_000);
+
   it("counts a stale Ollama credential only while Ollama serves models", async () => {
     const session = await createSession();
     await fs.writeFile(

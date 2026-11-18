@@ -1237,7 +1237,13 @@ export function getDefaultModel(provider: Provider): ModelInfo {
   // Local Fork providers: Qwen Cloud's default lives with its policy, and
   // Azure models are user-configured deployments (first registered wins).
   if (provider === "qwen-cloud") return getModel(QWEN_CLOUD_DEFAULT_MODEL_ID)!;
-  if (provider === "azure") return MODELS.find((model) => model.provider === "azure")!;
+  if (provider === "azure") {
+    const azure = getModelsForProvider("azure")[0];
+    if (!azure) {
+      throw new Error("No Azure deployment is configured. Set an Azure OpenAI deployment first.");
+    }
+    return azure;
+  }
   // Local models only exist once discovery has run, and there's no "the" local
   // model. Never throw here (callers rely on a ModelInfo): fall back to a
   // placeholder that carries the conservative defaults, so a caller asking

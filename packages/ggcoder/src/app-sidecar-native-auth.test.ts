@@ -21,11 +21,15 @@ it("keeps Qwen and Azure native managed and guards the generic API-key route bef
 });
 
 it("keeps Qwen out of CLI automatic fallback while accepting an explicitly selected provider", () => {
-  const source = readFileSync(new URL("./cli.ts", import.meta.url), "utf8");
-  const resolver = source.slice(
-    source.indexOf("async function resolveActiveProvider("),
-    source.indexOf("function extractText("),
+  const cli = readFileSync(new URL("./cli.ts", import.meta.url), "utf8");
+  expect(cli).toContain(
+    'import { resolveActiveProvider } from "./core/resolve-active-provider.js";',
   );
+  const source = readFileSync(
+    new URL("./core/resolve-active-provider.ts", import.meta.url),
+    "utf8",
+  );
+  const resolver = source.slice(source.indexOf("export async function resolveActiveProvider("));
   const fallbacks = resolver.slice(resolver.indexOf("const allProviders"), resolver.indexOf("];"));
   expect(fallbacks).not.toContain('"qwen-cloud"');
   expect(resolver).toContain('if (preferred === "qwen-cloud")');

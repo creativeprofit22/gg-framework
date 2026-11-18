@@ -801,6 +801,11 @@ describe("runtime model registry", () => {
 
     expect(getDefaultModel("local")).toBe(local);
   });
+
+  it("throws a clear error for getDefaultModel('azure') without a deployment", () => {
+    expect(getModelsForProvider("azure")).toEqual([]);
+    expect(() => getDefaultModel("azure")).toThrow("No Azure deployment is configured.");
+  });
 });
 
 describe("GPT-6.1 Terra", () => {

@@ -110,7 +110,6 @@ import {
   getContextWindow,
   getDefaultModel,
   getDefaultThinkingLevel,
-  getModel,
   getModelsForProvider,
   isPaidModel,
   type OpenAICodexContextProfile,
@@ -139,6 +138,8 @@ import {
   resolveSavedCliModel,
 } from "./core/cli-model-resolution.js";
 import { parseThinkingLevel } from "./cli/thinking-arg.js";
+import { resolveActiveProvider } from "./core/resolve-active-provider.js";
+import { isStartableProvider } from "./core/resolve-start.js";
 
 const PROVIDERS = new Set<Provider>([
   "anthropic",
@@ -633,6 +634,8 @@ async function runInkTUI(opts: {
   const modelResolves = (p: Provider, modelId: string): boolean =>
     resolvedKeyFor(p, modelId) !== undefined;
   const resolvableModelFor = (p: Provider): string | undefined => {
+    // Local Fork: Azure without a configured deployment has no default model.
+    if (!isStartableProvider(p)) return undefined;
     const def = getDefaultModel(p).id;
     if (modelResolves(p, def)) return def;
     return getModelsForProvider(p).find((m) => !isPaidModel(m.id) && modelResolves(p, m.id))?.id;
@@ -1615,85 +1618,6 @@ async function runAgentHome(): Promise<void> {
 }
 
 // ── Helpers ────────────────────────────────────────────────
-
-/**
- * Pick the provider/model to start with. If the preferred provider isn't
- * one the user is logged into, fall back to the first provider they ARE
- * logged into (in `allProviders` order). Throws if nothing is logged in.
- *
- * This prevents the CLI from crashing with "Not logged in" on startup just
- * because settings.json remembers a provider the user later logged out of.
- */
-async function resolveActiveProvider(
-  authStorage: AuthStorage,
-  preferred: Provider,
-  savedModel: string | undefined,
-  providerWasExplicit = false,
-): Promise<{ provider: Provider; model: string; loggedInProviders: Provider[] }> {
-  const allProviders: Provider[] = [
-    "anthropic",
-    "xiaomi",
-    "openai",
-    "azure",
-    "gemini",
-    "glm",
-    "moonshot",
-    "minimax",
-    "deepseek",
-    "openrouter",
-    "opencode-go",
-    "opencode",
-    "sakana",
-    "xai",
-  ];
-  // Retired sign-ins (old Claude, Codex, Kimi, Grok or Google tokens) are never
-  // used. Tell the user once, then remove them.
-  for (const retired of await authStorage.legacySignIns()) {
-    if (!(await authStorage.takeLegacySignIn(retired.provider))) continue;
-    console.warn(chalk.yellow(`⚠ ${retired.message}\n  Run "ggcoder login" to connect again.`));
-  }
-  // Qwen is opt-in only: neither fall into it nor silently leave it on missing auth.
-  if (preferred === "qwen-cloud") {
-    if (!(await authStorage.hasProviderAuth(preferred))) {
-      throw new Error("Qwen Cloud requires dedicated Token Plan runtime authentication.");
-    }
-    const savedModelInfo = savedModel ? getModel(savedModel) : undefined;
-    return {
-      provider: preferred,
-      model:
-        savedModelInfo?.provider === preferred ? savedModelInfo.id : getDefaultModel(preferred).id,
-      loggedInProviders: [preferred],
-    };
-  }
-  const loggedInProviders: Provider[] = [];
-  for (const p of allProviders) {
-    if (await authStorage.hasProviderAuth(p)) loggedInProviders.push(p);
-  }
-
-  if (loggedInProviders.length === 0) {
-    throw new Error('Not logged in to any provider. Run "ggcoder login" to authenticate.');
-  }
-
-  if (loggedInProviders.includes(preferred)) {
-    const savedModelInfo = savedModel ? getModel(savedModel) : undefined;
-    return {
-      provider: preferred,
-      model:
-        savedModelInfo?.provider === preferred ? savedModelInfo.id : getDefaultModel(preferred).id,
-      loggedInProviders,
-    };
-  }
-
-  if (providerWasExplicit) {
-    throw new Error(`Not logged in to ${preferred}. Run "ggcoder login" to authenticate.`);
-  }
-
-  // Preferred provider isn't authenticated — fall back to the first one
-  // that is, and use that provider's default model (the saved model
-  // belonged to a provider the user can no longer reach).
-  const provider = loggedInProviders[0]!;
-  return { provider, model: getDefaultModel(provider).id, loggedInProviders };
-}
 
 function extractText(content: string | Array<{ type: string; text?: string }>): string {
   if (typeof content === "string") return content;

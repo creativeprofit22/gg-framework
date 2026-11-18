@@ -41,6 +41,12 @@ Package layering is `gg-ai → gg-agent`/`gg-core → ggcoder`. Keep transports/
 
 ## Polish
 
+**Hard rule: UImaxxxing is mandatory for all UI/UX work in this project, no exceptions.** UI/UX means anything users see or do in `gg-app`: layout, CSS, components, copy and microcopy, accessibility, motion, assets, UI performance, source-backed or reference components, design specs, and user journeys. It applies in every mode, not just `/polish`: normal conversation, plan mode, reviews, delegated child agents, and Roadmap work.
+
+- Plan mode: read the methodology shards below before researching. The plan names the UImaxxxing route (`polish.md`, `ref-ui.md`, `asset.md`, `perf-ui.md` or `ingest-spec.md`), the journey or surfaces affected, and the trigger-table probes that will verify it.
+- Roadmap: every drafted or edited phase that touches UI/UX says in `sourcePrompt` to follow `.gg/commands/polish.md` and the matching route, and its `doneWhen` includes the UImaxxxing verification (the CSS-change floor, affected trigger-table probes, and inspected 1280×800 and 390×844 screenshots). A UI phase is not Done without that evidence. This shapes proposals only; Roadmap approval and completion stay with the user.
+- Child-agent briefs for UI/UX work carry this rule and the paths they need. Skip UImaxxxing only when the user explicitly says so for that task. Work with no user-facing surface (engine, Rust, tests, docs-only) is out of scope. This rule adds steps; it never loosens an approval gate or the invariants above.
+
 This project's tuned UImaxxxing workflow is `.gg/commands/polish.md`; read it for
 UI work on **gg-app**, not the separate Matey app. Read `.gg/style-pack.md` before
 every CSS turn. Canonical methodology and agent contract live at

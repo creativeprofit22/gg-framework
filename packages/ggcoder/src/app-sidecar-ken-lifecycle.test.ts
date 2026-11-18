@@ -777,7 +777,8 @@ describe("core before-transition integration", () => {
       await fs.writeFile(
         path.join(home, ".gg", "auth.json"),
         JSON.stringify({
-          openai: {
+          // The official ChatGPT sign-in slot; a refreshable token under `openai` is a retired sign-in.
+          "openai-chatgpt": {
             accessToken: ["test", "token"].join("-"),
             refreshToken: ["test", "refresh"].join("-"),
             expiresAt: Date.now() + 3_600_000,
@@ -792,7 +793,7 @@ describe("core before-transition integration", () => {
       await run(async () => {
         const session = new AgentSession({
           provider: "openai",
-          model: "gpt-6-astra",
+          model: "gpt-6.2-astra",
           cwd,
           sessionRootDir: store,
           systemPrompt: "deterministic test",

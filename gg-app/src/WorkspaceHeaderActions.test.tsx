@@ -45,7 +45,17 @@ function renderTitleBar(
   );
 }
 
-function renderMenu(workspaceMode: WorkspaceMode, isGoal = false): void {
+function renderMenu(
+  workspaceMode: WorkspaceMode,
+  isGoal = false,
+  extra: {
+    onAddFolder?: () => void;
+    onRemoveFolder?: () => void;
+    hasHealth?: boolean;
+    onOpenLivePreview?: () => void;
+    livePreviewRunning?: boolean;
+  } = {},
+): void {
   render(
     <DeckMenu
       workspaceMode={workspaceMode}
@@ -57,8 +67,14 @@ function renderMenu(workspaceMode: WorkspaceMode, isGoal = false): void {
       onOpenMemories={vi.fn()}
       showChecklist={false}
       onOpenChecklist={vi.fn()}
+      onOpenLivePreview={extra.onOpenLivePreview}
+      livePreviewRunning={extra.livePreviewRunning}
       onOpenRadio={vi.fn()}
       onOpenGoalSettings={isGoal ? vi.fn() : undefined}
+      onAddFolder={extra.onAddFolder ?? vi.fn()}
+      onRemoveFolder={extra.onRemoveFolder}
+      hasHealth={extra.hasHealth}
+      onOpenHealth={vi.fn()}
       onArrange={vi.fn()}
       onBack={vi.fn()}
       backLabel="Back"
@@ -169,12 +185,55 @@ describe("DeckMenu", () => {
     }
   });
 
+  it("offers Live preview in a code window, lit while it runs", () => {
+    const onOpenLivePreview = vi.fn();
+    renderMenu("code", false, { onOpenLivePreview, livePreviewRunning: true });
+    const key = screen.getByRole("button", { name: "Live preview, running" });
+    expect(key.querySelector(".led")?.getAttribute("data-state")).toBe("on");
+    fireEvent.click(key);
+    expect(onOpenLivePreview).toHaveBeenCalledOnce();
+    cleanup();
+    renderMenu("chat", false, { onOpenLivePreview });
+    expect(screen.queryByRole("button", { name: /Live preview/ })).toBeNull();
+  });
+
   it("offers Brain in a chat window, and no project tools", () => {
     renderMenu("chat");
     expect(screen.getByRole("button", { name: "Brain" })).toBeDefined();
     expect(screen.queryByRole("button", { name: "New chat" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Checklist" })).toBeNull();
     expect(screen.queryByRole("switch", { name: "Autopilot" })).toBeNull();
+  });
+
+  it("offers Add folder after Project Health in a code window, and runs it from the button", () => {
+    const onAddFolder = vi.fn();
+    renderMenu("code", false, { onAddFolder, hasHealth: true });
+    // Every key in on-screen order (Autopilot is a switch, not a button).
+    // Local Fork: New session, Notes and Tasks are pinned in the title bar instead.
+    const keys = [...document.querySelectorAll("button")].map((b) => b.textContent);
+    expect(keys.slice(0, 4)).toEqual(["Autopilot", "Checklist", "Project Health", "Add folder"]);
+    fireEvent.click(screen.getByRole("button", { name: "Add folder" }));
+    expect(onAddFolder).toHaveBeenCalledOnce();
+  });
+
+  it("offers Remove folder right after Add folder only once a folder is added", () => {
+    renderMenu("code");
+    expect(screen.queryByRole("button", { name: "Remove folder" })).toBeNull();
+    cleanup();
+    const onRemoveFolder = vi.fn();
+    renderMenu("chat", false, { onRemoveFolder });
+    const keys = [...document.querySelectorAll("button")].map((b) => b.textContent);
+    expect(keys[keys.indexOf("Add folder") + 1]).toBe("Remove folder");
+    fireEvent.click(screen.getByRole("button", { name: "Remove folder" }));
+    expect(onRemoveFolder).toHaveBeenCalledOnce();
+  });
+
+  it("offers Add folder in a chat window too, but not in Motion or a Goal", () => {
+    renderMenu("chat");
+    expect(screen.getByRole("button", { name: "Add folder" })).toBeDefined();
+    cleanup();
+    renderMenu("motion");
+    expect(screen.queryByRole("button", { name: "Add folder" })).toBeNull();
   });
 
   it("keeps a Goal window to its settings, radio, layout and the way back", () => {

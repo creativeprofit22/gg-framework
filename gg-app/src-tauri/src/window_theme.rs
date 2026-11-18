@@ -70,7 +70,7 @@ impl WindowTheme {
     /// enforced by src/window-theme-colors.test.ts.
     pub fn background(self) -> tauri::window::Color {
         match self {
-            WindowTheme::Dark => tauri::window::Color(15, 17, 21, 255),
+            WindowTheme::Dark => tauri::window::Color(17, 18, 23, 255),
             WindowTheme::Light => tauri::window::Color(252, 251, 253, 255),
         }
     }

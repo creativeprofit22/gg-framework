@@ -8,7 +8,7 @@ import { AppSidecarSessionMutationCoordinator } from "./app-sidecar-session-muta
 
 const state = {
   provider: "openai",
-  model: "gpt-6-astra",
+  model: "gpt-6.2-astra",
   accountId: "account-1",
   openAICodexContextProfileEligibility: { canChange: true as const },
 };
@@ -67,7 +67,7 @@ describe("app sidecar context profile route", () => {
     await expect(
       runContextProfileMutation({
         profile: "experimental",
-        state: { provider: "openai", model: "gpt-6-astra" },
+        state: { provider: "openai", model: "gpt-6.2-astra" },
         running: false,
         activeUsage: 0,
         mutations: new AppSidecarSessionMutationCoordinator(),
@@ -76,7 +76,7 @@ describe("app sidecar context profile route", () => {
     ).resolves.toEqual({
       status: 409,
       body: {
-        error: "Context profiles are available only for GPT-6 Astra through OpenAI Codex OAuth.",
+        error: "Context profiles are available only for GPT-6.2 Astra through OpenAI Codex OAuth.",
       },
     });
   });

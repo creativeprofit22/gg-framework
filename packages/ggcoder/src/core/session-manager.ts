@@ -335,6 +335,8 @@ export interface RunStartedPayload {
   startedAt: string;
   /** Non-system message count when the run began, for locating it in the transcript. */
   afterMessageCount: number;
+  /** The process running it, so another app restoring the chat can tell live from crashed. */
+  pid?: number;
 }
 
 export interface RunFinishedPayload {
@@ -349,6 +351,17 @@ export interface RunJournalEntry {
   startedAt: string;
   afterMessageCount: number;
   outcome?: RunOutcome;
+  pid?: number;
+}
+
+/** True unless the OS says no such process exists (EPERM means it does). */
+export function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "ESRCH";
+  }
 }
 
 export type SessionEntry =
@@ -394,7 +407,7 @@ export interface SessionHeader {
   openAICodexContextProfile?: OpenAICodexContextProfile;
   /**
    * Retired Astra Fast flag, read only to move older sessions onto
-   * `gpt-6-astra-fast` (see `AgentSession.migrateLegacyOpenAICodexFast`).
+   * `gpt-6.2-astra-fast` (see `AgentSession.migrateLegacyOpenAICodexFast`).
    * New headers never write it; `clearLegacyOpenAICodexFast` removes it.
    */
   openAICodexFast?: boolean;
@@ -573,12 +586,7 @@ export class SessionManager {
   }
 
   private processIsAlive(pid: number): boolean {
-    try {
-      process.kill(pid, 0);
-      return true;
-    } catch (error) {
-      return (error as NodeJS.ErrnoException).code !== "ESRCH";
-    }
+    return processIsAlive(pid);
   }
 
   private async waitForLease(signal?: AbortSignal): Promise<void> {
@@ -1748,6 +1756,7 @@ export class SessionManager {
           generation: p.generation,
           startedAt: typeof p.startedAt === "string" ? p.startedAt : entry.timestamp,
           afterMessageCount: typeof p.afterMessageCount === "number" ? p.afterMessageCount : 0,
+          ...(typeof p.pid === "number" ? { pid: p.pid } : {}),
         };
         openByGeneration.set(p.generation, run);
         runs.push(run);

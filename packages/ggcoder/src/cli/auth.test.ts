@@ -4,17 +4,15 @@ import type { OAuthLoginCallbacks } from "../core/oauth/types.js";
 const mocks = vi.hoisted(() => ({
   selector: vi.fn(),
   load: vi.fn(),
+  getCredentials: vi.fn(),
   setCredentials: vi.fn(),
   question: vi.fn(),
   close: vi.fn(),
   createInterface: vi.fn(),
   closeLogger: vi.fn(),
   openBrowser: vi.fn(),
-  anthropic: vi.fn(),
-  openai: vi.fn(),
-  gemini: vi.fn(),
-  kimi: vi.fn(),
-  xai: vi.fn(),
+  loginChatGPT: vi.fn(),
+  signInWithClaudeCode: vi.fn(),
 }));
 
 vi.mock("../ui/login.js", () => ({ renderLoginSelector: mocks.selector }));
@@ -27,15 +25,22 @@ vi.mock("../core/logger.js", () => ({
 vi.mock("../core/auth-storage.js", () => ({
   AuthStorage: class {
     load = mocks.load;
+    getCredentials = mocks.getCredentials;
     setCredentials = mocks.setCredentials;
   },
 }));
 vi.mock("node:readline/promises", () => ({ default: { createInterface: mocks.createInterface } }));
-vi.mock("../core/oauth/anthropic.js", () => ({ loginAnthropic: mocks.anthropic }));
-vi.mock("../core/oauth/openai.js", () => ({ loginOpenAI: mocks.openai }));
-vi.mock("../core/oauth/gemini.js", () => ({ loginGemini: mocks.gemini }));
-vi.mock("../core/oauth/kimi.js", () => ({ loginKimi: mocks.kimi }));
-vi.mock("../core/oauth/xai.js", () => ({ loginXai: mocks.xai }));
+vi.mock("../core/oauth/openai.js", () => ({
+  CHATGPT_USAGE_URL: "https://example.invalid/usage",
+  ChatGPTPlanNotEnabledError: class extends Error {},
+  loginChatGPT: mocks.loginChatGPT,
+  revokeChatGPTSignIn: vi.fn(),
+}));
+vi.mock("@kenkaiiii/gg-core", async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  signInWithClaudeCode: mocks.signInWithClaudeCode,
+  signOutOfClaudeCode: vi.fn(),
+}));
 vi.mock("./shared.js", () => ({
   CLI_VERSION: "test",
   clearVisibleScreen: vi.fn(),
@@ -45,24 +50,28 @@ vi.mock("./shared.js", () => ({
   requireInteractiveTTY: vi.fn(),
 }));
 
+import { OPENAI_CHATGPT_KEY } from "@kenkaiiii/gg-core";
 import { runLogin } from "./auth.js";
 import * as authProviders from "../core/auth-providers.js";
 
-const credentials = { accessToken: "test-only", refreshToken: "", expiresAt: 12345 };
-const oauthHelpers = [mocks.anthropic, mocks.openai, mocks.gemini, mocks.kimi, mocks.xai];
+const credentials = { accessToken: "test-only", refreshToken: "r", expiresAt: 12345 };
+const signIns = [mocks.loginChatGPT, mocks.signInWithClaudeCode];
+
+function answers(...values: string[]): void {
+  for (const value of values) mocks.question.mockResolvedValueOnce(value);
+}
 
 describe("runLogin", () => {
   beforeEach(() => {
     vi.resetAllMocks();
     vi.spyOn(console, "log").mockImplementation(() => {});
     mocks.createInterface.mockReturnValue({ question: mocks.question, close: mocks.close });
-    mocks.question.mockResolvedValue("test-only-key");
-    for (const helper of oauthHelpers) {
-      helper.mockImplementation(async (callbacks: OAuthLoginCallbacks) => {
-        callbacks.onOpenUrl("https://example.invalid/oauth");
-        return credentials;
-      });
-    }
+    mocks.getCredentials.mockResolvedValue(undefined);
+    mocks.loginChatGPT.mockImplementation(async (callbacks: OAuthLoginCallbacks) => {
+      callbacks.onOpenUrl("https://example.invalid/oauth");
+      return credentials;
+    });
+    mocks.signInWithClaudeCode.mockResolvedValue({ email: "user@example.invalid" });
   });
 
   afterEach(() => vi.restoreAllMocks());
@@ -81,14 +90,20 @@ describe("runLogin", () => {
     expect(output).not.toContain("successfully");
     expect(mocks.createInterface).not.toHaveBeenCalled();
     expect(mocks.question).not.toHaveBeenCalled();
-    for (const helper of oauthHelpers) expect(helper).not.toHaveBeenCalled();
+    for (const signIn of signIns) expect(signIn).not.toHaveBeenCalled();
     expect(mocks.openBrowser).not.toHaveBeenCalled();
     expect(mocks.setCredentials).not.toHaveBeenCalled();
     expect(mocks.closeLogger).toHaveBeenCalledOnce();
   });
 
   it.each([
-    { value: "future-native", label: "Future Native", description: "", methods: [] },
+    {
+      value: "future-native",
+      label: "Future Native",
+      description: "",
+      methods: [],
+      methodDetails: {},
+    },
     undefined,
   ])("rejects other empty-method or unknown providers before prompting: %j", async (meta) => {
     mocks.selector.mockResolvedValue("future-native");
@@ -98,23 +113,26 @@ describe("runLogin", () => {
 
     expect(mocks.createInterface).not.toHaveBeenCalled();
     expect(mocks.question).not.toHaveBeenCalled();
-    for (const helper of oauthHelpers) expect(helper).not.toHaveBeenCalled();
+    for (const signIn of signIns) expect(signIn).not.toHaveBeenCalled();
     expect(mocks.openBrowser).not.toHaveBeenCalled();
     expect(mocks.setCredentials).not.toHaveBeenCalled();
   });
 
-  it("does not route an unimplemented OAuth provider to OpenAI", async () => {
+  it("does not route a sign-in-only provider without a terminal flow to ChatGPT", async () => {
     mocks.selector.mockResolvedValue("future-oauth");
     vi.spyOn(authProviders, "getAuthProvider").mockReturnValue({
       value: "future-oauth",
       label: "Future OAuth",
       description: "",
       methods: ["oauth"],
+      methodDetails: {},
     });
 
-    await expect(runLogin()).rejects.toThrow("No supported terminal login method");
+    await runLogin();
 
-    for (const helper of oauthHelpers) expect(helper).not.toHaveBeenCalled();
+    const output = vi.mocked(console.log).mock.calls.flat().join("\n");
+    expect(output).toContain("has no API key option");
+    for (const signIn of signIns) expect(signIn).not.toHaveBeenCalled();
     expect(mocks.openBrowser).not.toHaveBeenCalled();
     expect(mocks.question).not.toHaveBeenCalled();
     expect(mocks.setCredentials).not.toHaveBeenCalled();
@@ -122,19 +140,55 @@ describe("runLogin", () => {
     expect(mocks.closeLogger).toHaveBeenCalledOnce();
   });
 
-  it("keeps OpenAI OAuth and credential persistence working", async () => {
+  it("signs in with ChatGPT by default and stores it in the ChatGPT slot, not the API-key slot", async () => {
     mocks.selector.mockResolvedValue("openai");
+    answers("");
 
     await runLogin();
 
-    expect(mocks.openai).toHaveBeenCalledOnce();
-    for (const helper of oauthHelpers.filter((helper) => helper !== mocks.openai)) {
-      expect(helper).not.toHaveBeenCalled();
-    }
+    expect(mocks.loginChatGPT).toHaveBeenCalledOnce();
+    expect(mocks.signInWithClaudeCode).not.toHaveBeenCalled();
     expect(mocks.openBrowser).toHaveBeenCalledWith("https://example.invalid/oauth");
-    expect(mocks.question).not.toHaveBeenCalled();
-    expect(mocks.setCredentials).toHaveBeenCalledExactlyOnceWith("openai", credentials);
+    expect(mocks.setCredentials).toHaveBeenCalledExactlyOnceWith(OPENAI_CHATGPT_KEY, credentials);
     expect(mocks.close).toHaveBeenCalledOnce();
     expect(mocks.closeLogger).toHaveBeenCalledOnce();
+  });
+
+  it("stores an OpenAI API key under openai without starting a sign-in", async () => {
+    mocks.selector.mockResolvedValue("openai");
+    answers("2", "  sk-test-only  ");
+
+    await runLogin();
+
+    for (const signIn of signIns) expect(signIn).not.toHaveBeenCalled();
+    expect(mocks.setCredentials).toHaveBeenCalledExactlyOnceWith(
+      "openai",
+      expect.objectContaining({ accessToken: "sk-test-only", refreshToken: "" }),
+    );
+  });
+
+  it("signs in with Claude through Claude Code and writes no look-alike token", async () => {
+    mocks.selector.mockResolvedValue("anthropic");
+    answers("");
+
+    await runLogin();
+
+    expect(mocks.signInWithClaudeCode).toHaveBeenCalledOnce();
+    expect(mocks.loginChatGPT).not.toHaveBeenCalled();
+    expect(mocks.setCredentials).not.toHaveBeenCalled();
+  });
+
+  it("connects xAI with an API key only", async () => {
+    mocks.selector.mockResolvedValue("xai");
+    answers("xai-test-only");
+
+    await runLogin();
+
+    for (const signIn of signIns) expect(signIn).not.toHaveBeenCalled();
+    expect(mocks.openBrowser).not.toHaveBeenCalled();
+    expect(mocks.setCredentials).toHaveBeenCalledExactlyOnceWith(
+      "xai",
+      expect.objectContaining({ accessToken: "xai-test-only", refreshToken: "" }),
+    );
   });
 });

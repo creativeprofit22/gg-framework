@@ -84,10 +84,17 @@ describe("AgentSession semantic loop check", () => {
         signal: parent.signal,
       });
       const internal = session as unknown as SemanticInternals & {
-        authStorage: { resolveCredentials(): Promise<object> };
+        authStorage: {
+          hasClaudeCodeLogin(): Promise<boolean>;
+          resolveCredentials(): Promise<object>;
+        };
       };
       internal.settingsManager = { get: () => true };
-      internal.authStorage = { resolveCredentials: vi.fn().mockResolvedValue({}) };
+      internal.authStorage = {
+        // Not a Claude Code login, so the judge takes the direct provider route.
+        hasClaudeCodeLogin: async () => false,
+        resolveCredentials: vi.fn().mockResolvedValue({}),
+      };
       let finish!: (value: string) => void;
       const pending = new Promise<string>((resolve) => {
         finish = resolve;
@@ -131,11 +138,15 @@ describe("AgentSession semantic loop check", () => {
     vi.useFakeTimers();
     const internal = makeSession(async () => "unused") as SemanticInternals & {
       opts: { semanticLoopJudge?: unknown };
-      authStorage: { resolveCredentials(): Promise<object> };
+      authStorage: {
+        hasClaudeCodeLogin(): Promise<boolean>;
+        resolveCredentials(): Promise<object>;
+      };
     };
     internal.opts.semanticLoopJudge = undefined;
     let resolve!: (credentials: object) => void;
     internal.authStorage = {
+      hasClaudeCodeLogin: async () => false,
       resolveCredentials: () =>
         new Promise((r) => {
           resolve = r;
@@ -155,10 +166,16 @@ describe("AgentSession semantic loop check", () => {
   it("accepts provider text parts through the real stream response seam", async () => {
     const internal = makeSession(async () => "unused") as SemanticInternals & {
       opts: { semanticLoopJudge?: unknown };
-      authStorage: { resolveCredentials(): Promise<object> };
+      authStorage: {
+        hasClaudeCodeLogin(): Promise<boolean>;
+        resolveCredentials(): Promise<object>;
+      };
     };
     internal.opts.semanticLoopJudge = undefined;
-    internal.authStorage = { resolveCredentials: async () => ({}) };
+    internal.authStorage = {
+      hasClaudeCodeLogin: async () => false,
+      resolveCredentials: async () => ({}),
+    };
     vi.mocked(stream).mockImplementation(
       () =>
         new StreamResult(

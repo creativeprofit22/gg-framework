@@ -143,7 +143,7 @@ describe("AgentPane lifecycle", () => {
             : "@Ken next?",
       );
     else expect(input.value).not.toBe("@Ken next?");
-    expect(screen.queryByRole("button", { name: "Cancel Ken's reply" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Stop Ken" })).toBeNull();
   });
 
   it("reports a rejected mentor send without claiming a run started", async () => {
@@ -749,7 +749,7 @@ describe("AgentPane lifecycle", () => {
     const emit = paneEvents(pane);
     const actual = { ...destination, profile: request.profile ?? ("stable" as const) };
     vi.mocked(pane.getState).mockResolvedValue({
-      ...agentState("gpt-6-astra"),
+      ...agentState("gpt-6.2-astra"),
       ...actual,
       openAICodexContextProfile: actual.profile,
     });
@@ -784,7 +784,7 @@ describe("AgentPane lifecycle", () => {
       const sourceProfile = profile === "stable" ? "experimental" : "stable";
       await renderKenPromptPane(pane, false, KEN_PROMPT, undefined, {
         provider: "openai",
-        model: "gpt-6-astra",
+        model: "gpt-6.2-astra",
         accountId: "account-1",
         openAICodexContextProfile: sourceProfile,
         openAICodexContextProfileEligibility: { canChange: false, reason: "Started" },
@@ -886,7 +886,7 @@ describe("AgentPane lifecycle", () => {
       });
       await renderKenPromptPane(pane, false, KEN_PROMPT, undefined, {
         provider: "openai",
-        model: "gpt-6-astra",
+        model: "gpt-6.2-astra",
         accountId: "account-1",
         openAICodexContextProfile: "experimental",
       });
@@ -1026,7 +1026,7 @@ describe("AgentPane lifecycle", () => {
     }));
     await renderKenPromptPane(pane, false, KEN_PROMPT, undefined, {
       provider: "openai",
-      model: "gpt-6-astra",
+      model: "gpt-6.2-astra",
       accountId: "account-1",
       openAICodexContextProfile: "experimental",
     });

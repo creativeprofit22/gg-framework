@@ -95,7 +95,7 @@ describe("skill routing prompts", () => {
         .filter((s) => !s.hidden)
         .map((s) => s.name)
         .sort();
-      expect(visible).toEqual(["compliance-guard", "durable"]);
+      expect(visible).toEqual(["compliance-guard", "durable", "gg-guide"]);
       expect(
         skills
           .filter((s) => s.hidden)
@@ -177,9 +177,16 @@ describe("skill routing prompts", () => {
   });
 
   it("shows the launch-readiness rule in the live skill tool, not only the fallback prompt", () => {
-    const tool = createSkillTool([skill]);
+    const named = (name: string): Skill => ({ ...skill, name, root: `/skills/${name}` });
+    const tool = createSkillTool([skill, named("durable"), named("compliance-guard")]);
     expect(tool.description).toContain("(durable, compliance-guard)");
     expect(tool.description).toContain("report-only child");
+  });
+
+  it("leaves out the launch-readiness rule when its skills aren't listed (Chat, Motion)", () => {
+    const tool = createSkillTool([skill]);
+    expect(tool.description).not.toContain("Launch-readiness");
+    expect(tool.description).toContain("Respect exclusions; never reload one.\n\n- ");
   });
 
   it("never names a mode-specific helper agent as a bare agent type in a bundled skill", async () => {

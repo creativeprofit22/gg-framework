@@ -67,7 +67,7 @@ describe("ChatPicker", () => {
     expect(screen.queryByRole("button", { name: "Radio" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Windows" })).toBeNull();
     fireEvent.click(buttons[1]);
-    expect(bindChat).toHaveBeenCalledWith("/workspaces", undefined, "general");
+    expect(bindChat).toHaveBeenCalledWith("/workspaces/GG Chat", undefined, "general");
     for (const button of buttons) expect(button.disabled).toBe(true);
     fireEvent.click(buttons[0]);
     expect(bindChat).toHaveBeenCalledOnce();
@@ -83,17 +83,17 @@ describe("ChatPicker", () => {
 
     expect(await screen.findByText("Plan my week")).toBeDefined();
     expect(waitForReadyMock).toHaveBeenCalledOnce();
-    expect(listSessionsMock).toHaveBeenCalledWith("/workspaces", "all");
+    expect(listSessionsMock).toHaveBeenCalledWith("/workspaces/GG Chat", "all");
 
     fireEvent.click(screen.getByText("Plan my week"));
     await waitFor(() => {
       expect(selectWorkspaceMock).toHaveBeenCalledWith(
         "chat",
-        "/workspaces",
+        "/workspaces/GG Chat",
         "/sessions/chat-1.jsonl",
         "therapist",
       );
-      expect(onChosen).toHaveBeenCalledWith("/workspaces");
+      expect(onChosen).toHaveBeenCalledWith("/workspaces/GG Chat");
     });
   });
 
@@ -108,7 +108,12 @@ describe("ChatPicker", () => {
     const newChatButtons = await screen.findAllByRole("button", { name: "+ New chat" });
     fireEvent.click(newChatButtons[0]);
     await waitFor(() => {
-      expect(selectWorkspaceMock).toHaveBeenCalledWith("chat", "/workspaces", undefined, "general");
+      expect(selectWorkspaceMock).toHaveBeenCalledWith(
+        "chat",
+        "/workspaces/GG Chat",
+        undefined,
+        "general",
+      );
     });
   });
 
@@ -123,10 +128,10 @@ describe("ChatPicker", () => {
     fireEvent.click(newChatButtons[0]);
 
     await waitFor(() => {
-      expect(listSessionsMock).toHaveBeenCalledWith("/workspaces", "all");
+      expect(listSessionsMock).toHaveBeenCalledWith("/workspaces/GG Chat", "all");
       expect(selectWorkspaceMock).toHaveBeenCalledWith(
         "chat",
-        "/workspaces",
+        "/workspaces/GG Chat",
         undefined,
         "research",
       );
@@ -199,14 +204,14 @@ describe("ChatPicker", () => {
     expect(bindChat).toHaveBeenCalledTimes(2);
     expect(bindChat).toHaveBeenNthCalledWith(
       2,
-      "/workspaces",
+      "/workspaces/GG Chat",
       "/sessions/chat-1.jsonl",
       "therapist",
     );
     expect(screen.queryByRole("alert")).toBeNull();
 
     finishRetry();
-    await waitFor(() => expect(onChosen).toHaveBeenCalledWith("/workspaces"));
+    await waitFor(() => expect(onChosen).toHaveBeenCalledWith("/workspaces/GG Chat"));
     expect(screen.queryByRole("alert")).toBeNull();
   });
 

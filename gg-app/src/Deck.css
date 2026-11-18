@@ -522,11 +522,6 @@
   background: var(--surface-3);
   text-decoration: none;
 }
-/* The tool-panel chevron beside Stop: the panel is a single floating line
-   now, so there's nothing to fold. */
-.deck .statusrow-tools-toggle {
-  display: none;
-}
 .deck-flag {
   flex: none;
   margin-right: var(--space-6);
@@ -719,6 +714,9 @@
 .deck-note[data-paid] {
   color: var(--warning);
 }
+.deck-note a {
+  color: var(--primary);
+}
 .paid-confirm .deck-note + .deck-note {
   padding-top: 0;
 }
@@ -792,25 +790,6 @@
 }
 .deck-prow + .deck-prow {
   border-top: 1px dashed var(--border);
-}
-/* A row whose readouts all came back empty (no health score yet, no rank)
-   would be a label on its own: drop it. */
-.deck-prow:has(> .deck-pl:only-child) {
-  display: none;
-}
-.deck-pl {
-  flex: none;
-  width: 44px;
-  color: var(--text-muted);
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-.deck-pv {
-  color: var(--text);
-  font-size: var(--fs-base);
-  font-weight: 600;
 }
 .deck-pm {
   min-width: 0;
@@ -1224,6 +1203,10 @@
   padding: var(--tool-pad-top) var(--tool-pad-x);
   scrollbar-width: thin;
 }
+.tool-body.fit {
+  height: auto;
+  max-height: min(52vh, 460px);
+}
 .tool-body > .settings-panel {
   min-height: 100%;
   display: flex;
@@ -1546,14 +1529,6 @@
   --well-shadow: var(--night-well-shadow);
   color: var(--text);
 }
-/* The logo's moving highlight is a dark-scene effect; on a light page it read
-   as a grey smear, so the light theme gets the letters solid. */
-:root[data-theme="light"] .ascii-logo-glitch {
-  background: none;
-  -webkit-text-fill-color: currentColor;
-  animation-name: none, gg-glitch-shake;
-}
-
 /* ── Git panel (the branch key) ── */
 .git-tabs {
   flex-wrap: wrap;

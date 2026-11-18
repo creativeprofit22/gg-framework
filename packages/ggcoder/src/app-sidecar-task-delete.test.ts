@@ -46,7 +46,7 @@ beforeEach(() => {
   vi.mocked(readFileSync).mockImplementation(((path: string) => {
     if (String(path).endsWith("tasks.json")) return tasksFile;
     throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
-  }) as typeof readFileSync);
+  }) as unknown as typeof readFileSync);
   vi.mocked(writeFileSync).mockImplementation(((path: string, data: string) => {
     staged.set(String(path), String(data));
   }) as typeof writeFileSync);

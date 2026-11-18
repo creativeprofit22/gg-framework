@@ -4,6 +4,7 @@ import {
   type Provider,
   type TextContent,
   type ThinkingLevel,
+  type StreamResponse,
 } from "@kenkaiiii/gg-ai";
 
 /**
@@ -217,9 +218,9 @@ export async function enhancePrompt(opts: {
   apiKey?: string;
   baseUrl?: string;
   accountId?: string;
-  projectId?: string;
-  userAgent?: string;
   signal?: AbortSignal;
+  /** Sends the request elsewhere (a Claude subscription runs it through Claude Code). */
+  complete?: (messages: Message[]) => Promise<StreamResponse>;
 }): Promise<EnhanceResult> {
   // Append a one-line, fact-only stack hint so code terminology is idiomatic to
   // the user's project (e.g. "reactive state" for React vs "goroutine" for Go),
@@ -233,29 +234,9 @@ export async function enhancePrompt(opts: {
     { role: "user", content: opts.prompt },
   ];
 
-  const result = stream({
-    provider: opts.provider,
-    model: opts.model,
-    messages,
-    // Use the session's model-clamped ceiling: always-on reasoning (e.g. Fable)
-    // shares this allowance with the answer, even for a tiny draft.
-    maxTokens: opts.maxTokens,
-    thinking: opts.thinking,
-    // No temperature — the enhancer runs on whatever model is active, and some
-    // (e.g. OpenAI reasoning models like gpt-5.5) reject the parameter outright.
-    apiKey: opts.apiKey,
-    baseUrl: opts.baseUrl,
-    accountId: opts.accountId,
-    projectId: opts.projectId,
-    userAgent: opts.userAgent,
-    signal: opts.signal,
-  });
-
-  // Attach a no-op catch immediately to prevent Node's unhandled rejection
-  // detection from firing in the microtask gap before our await hooks up.
-  result.response.catch(() => {});
-
-  const response = await result;
+  const response = opts.complete
+    ? await opts.complete(messages)
+    : await streamEnhance(opts, messages);
   if (response.stopReason === "max_tokens") {
     throw new Error("Prompt enhancement was cut short. Your original draft has been kept.");
   }
@@ -273,4 +254,31 @@ export async function enhancePrompt(opts: {
     throw new Error("Prompt enhancement returned no text. Your original draft has been kept.");
   }
   return enhanced;
+}
+
+async function streamEnhance(
+  opts: Parameters<typeof enhancePrompt>[0],
+  messages: Message[],
+): Promise<StreamResponse> {
+  const result = stream({
+    provider: opts.provider,
+    model: opts.model,
+    messages,
+    // Use the session's model-clamped ceiling: always-on reasoning (e.g. Fable)
+    // shares this allowance with the answer, even for a tiny draft.
+    maxTokens: opts.maxTokens,
+    thinking: opts.thinking,
+    // No temperature — the enhancer runs on whatever model is active, and some
+    // (e.g. OpenAI reasoning models like gpt-5.5) reject the parameter outright.
+    apiKey: opts.apiKey,
+    baseUrl: opts.baseUrl,
+    accountId: opts.accountId,
+    signal: opts.signal,
+  });
+
+  // Attach a no-op catch immediately to prevent Node's unhandled rejection
+  // detection from firing in the microtask gap before our await hooks up.
+  result.response.catch(() => {});
+
+  return await result;
 }

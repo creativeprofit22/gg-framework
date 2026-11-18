@@ -23,6 +23,14 @@ export type ChatAgentOptions = Omit<
   getSystemPromptTailForAgent?: (agentId: ChatAgentId) => string;
 };
 
+/** Folder name of GG Chat's workspace inside the projects root. */
+export const CHAT_FOLDER_NAME = "GG Chat";
+
+/** The chat folder for a chat cwd: older windows still point at the projects root. */
+export function chatWorkspaceDir(cwd: string): string {
+  return path.basename(cwd) === CHAT_FOLDER_NAME ? cwd : path.join(cwd, CHAT_FOLDER_NAME);
+}
+
 export function chatAgentSessionsDir(coderSessionsDir: string, agentId: ChatAgentId): string {
   return path.resolve(coderSessionsDir, "..", "chat-sessions", agentId);
 }
@@ -51,6 +59,7 @@ export function buildChatAgentSystemPrompt(
   const durableContextInstructions = canMutateDurableContext
     ? `${MEMORY_CURATION_INSTRUCTIONS}${JIWA_CURATION_INSTRUCTIONS}`
     : "";
+  const skillsInstructions = `\n\nSkills:\nNew skills go in ${path.join(cwd, ".gg", "skills")} as <name>/SKILL.md with name and description frontmatter. Every GG Chat session and all three chat agents can use them; GG Coder and GG Motion cannot. A new skill loads in the next chat.`;
   const runtimeContext = [
     "Runtime context:",
     `- Active agent: ${agentId}`,
@@ -59,7 +68,7 @@ export function buildChatAgentSystemPrompt(
     "- Conversation history and tool results are the authoritative changing context for this session.",
   ].join("\n");
 
-  return `${rolePrompt}${durableContextInstructions}${handoffInstructions}\n\n${runtimeContext}`;
+  return `${rolePrompt}${durableContextInstructions}${handoffInstructions}${skillsInstructions}\n\n${runtimeContext}`;
 }
 
 /** Create a chat agent on the shared caching/compaction spine without GG Coder behavior. */

@@ -91,21 +91,21 @@ describe("Azure OpenAI app boundaries", () => {
     const authPath = join(directory, "auth.json");
     try {
       const auth = new AuthStorage(authPath, completeEnvironment);
-      await auth.setCredentials("openai", {
+      await auth.setCredentials("openai-chatgpt", {
         accessToken: "token-a",
         refreshToken: "token-a-refresh",
         expiresAt: Date.now() + 1_000_000,
       });
-      await auth.resolveCredentials("openai");
+      await auth.resolveCredentials("openai-chatgpt");
 
-      await new CoreAuthStorage(authPath).setCredentials("openai", {
+      await new CoreAuthStorage(authPath).setCredentials("openai-chatgpt", {
         accessToken: "token-b",
         refreshToken: "token-b-refresh",
         expiresAt: Date.now() + 1_000_000,
       });
 
       await expect(
-        auth.resolveCredentials("openai", { forceRefresh: true, rejectedToken: "token-a" }),
+        auth.resolveCredentials("openai-chatgpt", { forceRefresh: true, rejectedToken: "token-a" }),
       ).resolves.toMatchObject({ accessToken: "token-b" });
     } finally {
       await rm(directory, { recursive: true, force: true });
@@ -188,19 +188,19 @@ describe("Azure OpenAI app boundaries", () => {
     // Use a model the OpenAI catalog still ships so both identities coexist.
     const currentEnvironment = {
       ...completeEnvironment,
-      AZURE_OPENAI_DEPLOYMENT: "gpt-6.1-sol",
-      AZURE_OPENAI_MODEL_ID: "gpt-6.1-sol",
+      AZURE_OPENAI_DEPLOYMENT: "gpt-6.2-sol",
+      AZURE_OPENAI_MODEL_ID: "gpt-6.2-sol",
     };
-    addedModelIds.add("azure:gpt-6.1-sol");
+    addedModelIds.add("azure:gpt-6.2-sol");
     const openAIModel = MODELS.find(
-      (candidate) => candidate.id === "gpt-6.1-sol" && candidate.provider === "openai",
+      (candidate) => candidate.id === "gpt-6.2-sol" && candidate.provider === "openai",
     );
     const model = registerConfiguredAzureModel(currentEnvironment);
 
     expect(openAIModel).toBeDefined();
     expect(model).toMatchObject({
-      id: "azure:gpt-6.1-sol",
-      name: "Azure OpenAI (gpt-6.1-sol)",
+      id: "azure:gpt-6.2-sol",
+      name: "Azure OpenAI (gpt-6.2-sol)",
       provider: "azure",
       contextWindow: 1_050_000,
       maxOutputTokens: 128_000,
@@ -212,10 +212,10 @@ describe("Azure OpenAI app boundaries", () => {
     });
     expect(JSON.stringify(model)).not.toContain("azure-test-secret");
     expect(registerConfiguredAzureModel(currentEnvironment)).toBe(model);
-    expect(MODELS.filter((candidate) => candidate.id === "gpt-6.1-sol")).toEqual([openAIModel]);
-    expect(MODELS.filter((candidate) => candidate.id === "azure:gpt-6.1-sol")).toEqual([model]);
+    expect(MODELS.filter((candidate) => candidate.id === "gpt-6.2-sol")).toEqual([openAIModel]);
+    expect(MODELS.filter((candidate) => candidate.id === "azure:gpt-6.2-sol")).toEqual([model]);
     expect(getDefaultModel("azure")).toBe(model);
-    expect(getModelDisplayId(model!.id)).toBe("gpt-6.1-sol");
+    expect(getModelDisplayId(model!.id)).toBe("gpt-6.2-sol");
     expect(getSupportedThinkingLevels("azure", model!.id)).toEqual([
       "low",
       "medium",
@@ -224,7 +224,7 @@ describe("Azure OpenAI app boundaries", () => {
       "max",
       "ultra",
     ]);
-    expect(resolveTransportModel("azure", model!.id, currentEnvironment)).toBe("gpt-6.1-sol");
+    expect(resolveTransportModel("azure", model!.id, currentEnvironment)).toBe("gpt-6.2-sol");
 
     const selected = await resolveStartOrFallback(
       { hasProviderAuth: async (provider) => provider === "azure" },
@@ -234,7 +234,7 @@ describe("Azure OpenAI app boundaries", () => {
     );
     expect(selected).toEqual({
       provider: "azure",
-      model: "azure:gpt-6.1-sol",
+      model: "azure:gpt-6.2-sol",
       loggedIn: true,
     });
   });

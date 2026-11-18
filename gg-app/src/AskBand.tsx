@@ -331,6 +331,8 @@ export function AskBand({
   answeredLive,
   cancelled,
   deferred,
+  answeredBy,
+  kenLeft,
   onAnswer,
   onTypeInstead,
 }: {
@@ -356,6 +358,10 @@ export function AskBand({
    * band stays fully answerable — a later answer is sent as a message.
    */
   deferred?: boolean;
+  /** Autopilot Ken answered it in the user's place. */
+  answeredBy?: "ken";
+  /** Autopilot Ken left it to the user, with this reason. */
+  kenLeft?: string;
   /**
    * Report answered questions. App merges, then settles once none are left —
    * or at once when `sendNow` is set, leaving the rest unanswered.
@@ -528,7 +534,10 @@ export function AskBand({
       .join(" · ");
     return (
       <div className={`ask-band is-done${settleClass}`} data-swap-row="">
-        <AnsweredLine text={text} live={!settledAtMount || answeredLive === true} />
+        <AnsweredLine
+          text={answeredBy === "ken" ? `Ken: ${text}` : text}
+          live={!settledAtMount || answeredLive === true}
+        />
       </div>
     );
   }
@@ -542,7 +551,13 @@ export function AskBand({
   // that has picks.
   const isSettled = (q: AskQuestion): boolean =>
     shown[q.id] !== undefined || (q.kind === "multi" && picksOf(q).length > 0);
-  const hint = keyHint(questions.find((q) => !isSettled(q)));
+  // From the answers already sent, not the pick being committed: dropping the
+  // hint on that pick shrank the card a line and dropped the chat with it.
+  const hint = keyHint(
+    questions.find(
+      (q) => answers[q.id] === undefined && !(q.kind === "multi" && picksOf(q).length > 0),
+    ),
+  );
 
   // The footer holds the band's one send. A multi-select needs it because its
   // selection cannot commit itself ("Tests and Build" and "Tests, so far" look
@@ -586,6 +601,11 @@ export function AskBand({
       {deferred && prompt.noDeadline !== true && (
         <p className="ask-deferred-note" role="status">
           The agent stopped waiting — your answer will still be sent
+        </p>
+      )}
+      {kenLeft !== undefined && (
+        <p className="ask-ken-note" role="status">
+          {kenLeft ? `Ken left this one for you: ${kenLeft}` : "Ken left this one for you."}
         </p>
       )}
       {questions.map((q, i) => (

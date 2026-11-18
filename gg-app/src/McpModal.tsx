@@ -465,11 +465,17 @@ export function McpModal({ onClose, client }: Props): React.ReactElement {
             )}
           </SettingsSection>
 
-          <div className="modal-hint" style={{ color: theme.textDim, marginTop: "var(--space-6)" }}>
-            Changes are saved right away. New conversations use them automatically; conversations
-            that are already open need to be restarted to pick them up. Tools are available only
-            when the server connects and trust requirements are met.
-          </div>
+          {/* On the page the section description already says this. */}
+          {!embedded && (
+            <div
+              className="modal-hint"
+              style={{ color: theme.textDim, marginTop: "var(--space-6)" }}
+            >
+              Changes are saved right away. New conversations use them automatically; conversations
+              that are already open need to be restarted to pick them up. Tools are available only
+              when the server connects and trust requirements are met.
+            </div>
+          )}
 
           {/* On the page, Add sits in the screen's header bar instead. */}
           {!embedded && (

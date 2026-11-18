@@ -53,10 +53,24 @@ export const CURRENT_LOCAL_RELEASE_NOTES = requireCurrentReleaseNotes(releaseNot
 /** Newest first. Maintained only by the Local Fork release flow. */
 export const LOCAL_CHANGELOG: LocalChangelogEntry[] = [
   {
-    id: "local-2026-11-05-upstream-01031-gifs-and-provider-brain",
+    id: "local-2026-11-18-upstream-01150-official-sign-ins-live-preview",
     label: CURRENT_LOCAL_RELEASE_NOTES.label,
     date: CURRENT_LOCAL_RELEASE_NOTES.date,
     items: CURRENT_LOCAL_RELEASE_NOTES.sections.flatMap(({ items }) => items),
+  },
+  {
+    id: "local-2026-11-05-upstream-01031-gifs-and-provider-brain",
+    label: "Upstream 0.103.1, with GIFs and a brain for your providers",
+    date: "2026-11-05",
+    items: [
+      "Your agent can make real animated `GIFs`. Ask for a frog walking or a rocket taking off and it draws every frame, stitches them into a looping GIF and plays it right in your chat. Once your `OpenAI` account is connected it already knows it can make images and GIFs, so no more hand-coded animations.",
+      "Waiting on an image is fun now. A glowing dot board fills in as your picture develops, with a live progress pill, and one click starts a game of `Snake` while you wait.",
+      "Every image in your chat has a `Save image` button in its corner. Click it, pick any folder, and the full-size original is yours.",
+      "The `AI Providers` page is a living brain. Providers sit in banks grouped by country, and each one you connect sends a glowing nerve into a `3D` brain that lights up as you wire in more. It looks right in a tiny window or full screen.",
+      "`Save image` works in every pane. It always saves the picture from the pane that showed it, so a split window never grabs a file from the wrong project, and it works on images from your agent's tools as well as the ones in replies.",
+      "GIFs keep your saved chats light. The chat history keeps a still first frame, and when you reopen the chat the real GIF plays again as long as the file is still on your computer, so each saved GIF takes several times less room.",
+      "`Qwen Cloud` has its own card in the China bank of the new providers brain.",
+    ],
   },
   {
     id: "local-2026-11-05-upstream-01021-local-models-and-attachments",

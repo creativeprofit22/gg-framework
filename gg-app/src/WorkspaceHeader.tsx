@@ -11,6 +11,8 @@ interface WorkspaceHeaderProps {
   cwd?: string;
   /** A Goal window: titled with the goal's name instead of its folder slug. */
   goalName?: string | null;
+  /** A chat window: titled by its conversation instead of its folder. */
+  title?: string | null;
   /** Feed the title's tooltip: the full project context on hover. */
   gitBranch?: string | null;
   gitDirtyFileCount?: number;
@@ -38,6 +40,7 @@ export function WorkspaceHeader({
   workspaceMode,
   cwd,
   goalName = null,
+  title = null,
   gitBranch,
   gitDirtyFileCount = 0,
   gitHubIssues = null,
@@ -50,7 +53,7 @@ export function WorkspaceHeader({
 }: WorkspaceHeaderProps): React.ReactElement {
   const paneId = useContext(PaneIdContext);
   const fallbackTitle = workspaceProductName(workspaceMode, goalName !== null);
-  const directory = goalName ?? cwd?.split(/[\\/]/).filter(Boolean).pop();
+  const directory = title ?? goalName ?? cwd?.split(/[\\/]/).filter(Boolean).pop();
   // Stable per-project colour, so a wall of identical windows stays tellable
   // apart at a glance.
   const accent = projectAccent(cwd);

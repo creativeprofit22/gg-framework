@@ -7,6 +7,7 @@ import { ResearchSourceLedger } from "../core/research-sources.js";
 import type { CreateToolsResult } from "./index.js";
 import { createTools } from "./index.js";
 import { localOperations } from "./operations.js";
+import { REVIEW_SKIPPED_NOTE } from "./bash.js";
 import type { VerifyPlan } from "@kenkaiiii/gg-core/verify-plan";
 import { useFakeHome } from "../test-support/fake-home.js";
 
@@ -242,9 +243,12 @@ describe("createTools verify-plan wiring", () => {
   }
 
   it("forwards getVerifyPlan to bash so review accepts an exact plan gate", async () => {
-    expect(await runReviewedGate()).toContain("Nothing was run");
+    // Without an (approved) plan the gate is not review-eligible: it still runs, review skipped.
+    const unplanned = await runReviewedGate();
+    expect(unplanned).toMatch(/^Exit code: 0\b/);
+    expect(unplanned).toContain(REVIEW_SKIPPED_NOTE);
     const accepted = await runReviewedGate(() => plan);
-    expect(accepted).not.toContain("Nothing was run");
+    expect(accepted).not.toContain(REVIEW_SKIPPED_NOTE);
     expect(accepted).toMatch(/^Exit code: 0\b/);
   });
 

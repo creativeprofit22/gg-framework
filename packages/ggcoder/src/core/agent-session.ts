@@ -84,20 +84,25 @@ import { expandPromptCommand } from "./prompt-command-expansion.js";
 import { SettingsManager } from "./settings-manager.js";
 import { AuthStorage } from "./auth-storage.js";
 import {
+  claudeCodeConfigDir,
   dualAuthProvider,
+  OPENAI_CHATGPT_KEY,
   parseReferencedFiles,
   type NotesWorkspaceSnapshotV1,
   type SlashCommandListing,
 } from "@kenkaiiii/gg-core";
-import { getClaudeCliUserAgent, noteRequiredClaudeCodeVersion } from "./claude-code-version.js";
+import {
+  claudeCodeTranscriptExists,
+  holdClaudeCodeTranscript,
+  pruneClaudeCodeTranscriptsOnce,
+} from "./claude-code/transcripts.js";
 import {
   runSideWebSearch,
+  runSideWebSearchViaClaudeCode,
   SIDE_SEARCH_MODEL,
   type SideSearchRequest,
   type SideSearchResult,
 } from "../tools/side-web-search.js";
-import { kimiCodingHeaders, isKimiCodingEndpoint } from "./oauth/kimi.js";
-import { isGrokCliEndpoint } from "./oauth/xai.js";
 import {
   SessionManager,
   RequiredSessionPersistenceError,
@@ -106,6 +111,7 @@ import {
   APP_MARKER_CUSTOM_KIND,
   type ApprovedPlanConsumptionInput,
   type ApprovedPlanConsumptionRecord,
+  processIsAlive,
   type MessageEntry,
   type BranchInfo,
   type CustomEntry,
@@ -168,7 +174,6 @@ import type { DirectCommandExecutor } from "./programmatic/execution.js";
 import type { BackgroundProcess } from "./process-manager.js";
 import type { DebugManager } from "../tools/debug.js";
 import type { DevAppManager } from "../tools/dev-app.js";
-import { REVIEW_REJECTED_BEFORE_START } from "../tools/bash.js";
 import { buildProcessCompletionFollowUp, mergeCompletionGateFollowUps } from "./process-gate.js";
 import { PLAN_SUBMISSION_NUDGE, shouldNudgePlanSubmission } from "./plan-submission-gate.js";
 import { canonicalProjectKey } from "../project-notes-repository.js";
@@ -179,11 +184,7 @@ import {
   type SubAgentSnapshot,
 } from "./subagent-manager.js";
 import { applyAsyncSubagentPolicy } from "./subagent-policy.js";
-import {
-  resolveResponsesLite,
-  resolveStrictTools,
-  type CodexShapeSetting,
-} from "./codex-request-shape.js";
+import { resolveStrictTools, type CodexShapeSetting } from "./codex-request-shape.js";
 import { subAgentDescription } from "../tools/subagent.js";
 import { z } from "zod";
 import { MCPClientManager, getAllMcpServers } from "./mcp/index.js";
@@ -220,7 +221,12 @@ import {
 } from "./internal-diagnostics.js";
 import { log } from "./logger.js";
 import { CacheDiagnostics } from "./cache-diagnostics.js";
-import { assessCacheExpiry, resolveCacheTtl, type CacheExpiryStatus } from "./cache-expiry.js";
+import {
+  assessCacheExpiry,
+  CLAUDE_CODE_CACHE_TTL,
+  resolveCacheTtl,
+  type CacheExpiryStatus,
+} from "./cache-expiry.js";
 import {
   setEstimatorModel,
   calibrateEstimatorFromUsage,
@@ -244,6 +250,21 @@ import {
 } from "./compaction/tool-result-pruner.js";
 import { discoverAgents, type AgentDefinition } from "./agents.js";
 import { enhancePrompt, type EnhanceResult } from "../utils/prompt-enhancer.js";
+import { assistantText, renderTranscript } from "./claude-code/events.js";
+import { ClaudeCodeLiveSession, systemPrompt } from "./claude-code/live-session.js";
+import {
+  CLAUDE_CODE_SEED_CHARS,
+  CLAUDE_CODE_SESSION_KIND,
+  claudeCodeResumeId,
+  claudeCodeSessionEntryData,
+  parseClaudeCodeSessionState,
+  type ClaudeCodeSessionState,
+} from "./claude-code/session-sync.js";
+import {
+  claudeCodeComplete,
+  resolveClaudeCodeProcess,
+  type ClaudeCodeProcess,
+} from "./claude-code/complete.js";
 import { detectLanguages, detectProjectStack, type LanguageId } from "./language-detector.js";
 import {
   evaluateLoopBreak,
@@ -404,6 +425,16 @@ export class PaidModelConfirmationError extends Error {
 /** A chat attachment (image / video / other file) prepared for the model. The
  *  raw base64 `data` rides native blocks; `path` (when persisted to disk) lets
  *  the agent's tools open the file directly. */
+/** What applying one MCP config change did in a session. */
+export interface McpServerChange {
+  name: string;
+  removed: boolean;
+  connected: boolean;
+  toolCount: number;
+  error?: string;
+  requiresAuth?: boolean;
+}
+
 export interface SessionAttachment {
   kind: "image" | "video" | "file";
   mediaType: string;
@@ -639,6 +670,8 @@ export interface AgentSessionOptions {
    * its skills stay invisible to every other mode, and vice versa.
    */
   skills?: readonly Skill[];
+  /** Skills the caller's own discovery refused, shown alongside `skills`. */
+  blockedSkills?: readonly BlockedSkill[];
   /**
    * Background check of the project's lockfiles for packages flagged as
    * malware after install. Default on, except under vitest.
@@ -762,6 +795,8 @@ interface QueuedPrompt {
    * host takes them with {@link AgentSession.takeNextQueuedMessage}.
    */
   deferred?: boolean;
+  /** Typed as the answer to an open ask_user question. */
+  answeredAsk?: boolean;
 }
 
 /** Display hints persisted with a consumed user message; `command` restores the `/name` chip. */
@@ -1067,6 +1102,11 @@ export class AgentSession {
   private promptHints = new WeakMap<Message, PromptHint>();
   /** Serializes {@link queuePrompt} so entries are queued in arrival order. */
   private queuePromptChain: Promise<unknown> = Promise.resolve();
+  // Steering whose text the model already read in an ask_user result.
+  private askAnswerSteering = new WeakSet<Message>();
+  // Taken into the run but not yet in the transcript. Claude Code takes queued
+  // messages at once but reads them at its next turn, so they still show as queued.
+  private deliveringQueue: Array<{ id: string; text: string; content: unknown }> = [];
   private queueSeq = 0;
   /** Monotonic count of human-originated prompts; idle-wake budgets reset on it. */
   private humanPromptSeq = 0;
@@ -1126,6 +1166,8 @@ export class AgentSession {
   private readonly reportedProjectMcpSkips = new Set<string>();
   /** Servers whose latest connect attempt on the current MCP manager failed. */
   private readonly failedMcpServers = new Map<string, { requiresAuth: boolean }>();
+  /** Each session-owned server's last connected config (as JSON), for mid-session changes. */
+  private readonly mcpServerConfigs = new Map<string, string>();
   /** Deferred built-ins in tier order, fixed at session start. Sent as the
    * provider's on-demand catalog (see gg-ai `deferredTools`) so promoting one
    * loads it through the transcript and the cached tools block stays put. */
@@ -1230,6 +1272,8 @@ export class AgentSession {
    */
   /** Commands the user ran themselves, held until their next message. */
   private pendingUserShell: Array<{ runId: string; text: string }> = [];
+  /** MCP servers the user added or removed mid-session, not yet told to the model. */
+  private pendingMcpNotices: string[] = [];
 
   private persistedTranscriptCount(): number {
     return this.messages.slice(0, this.lastPersistedIndex).filter((m) => m.role !== "system")
@@ -1292,12 +1336,6 @@ export class AgentSession {
   async initialize(): Promise<void> {
     // Set model for accurate token estimation
     setEstimatorModel(this.model);
-
-    // The Anthropic transport needs the current Claude Code version for its
-    // User-Agent before the first request. Without a fresh on-disk cache that
-    // is an npm round-trip (~0.3–3s) on the user's first prompt; start it now
-    // so it overlaps session setup and the user's typing instead.
-    if (this.provider === "anthropic") void getClaudeCliUserAgent().catch(() => {});
     // The prompt's file list is a `git ls-files` (~30 ms on a mid-size repo)
     // that nothing before buildBasePrompt depends on: start it now so it runs
     // alongside settings/auth/skills/tools instead of after them.
@@ -1341,6 +1379,7 @@ export class AgentSession {
     }
     if (this.opts.skills) {
       this.skills = [...this.opts.skills];
+      this.blockedSkills = [...(this.opts.blockedSkills ?? [])];
     } else if (projectCustomization) {
       const discovery = await discoverSkillsWithBlocked({
         globalSkillsDir: paths.skillsDir,
@@ -1669,6 +1708,7 @@ export class AgentSession {
             message: error instanceof Error ? error.message : String(error),
           });
         });
+      void pruneClaudeCodeTranscriptsOnce(claudeCodeConfigDir());
     }
     // GG Coder owns its command registry. Other agents start with an isolated
     // empty registry and can register their own commands in their own file.
@@ -1939,11 +1979,13 @@ export class AgentSession {
     const generation = this.mcpConnectionGeneration;
     // Outcomes belong to one manager; a fresh connect starts a fresh record.
     this.failedMcpServers.clear();
+    this.mcpServerConfigs.clear();
     if (this.mcpBlockedByAllowList()) return;
     const acquiredLeases = new Set<SharedMcpClientLease>();
     try {
       const servers = await this.resolveMcpServers(generation, manager);
       if (!servers) return;
+      for (const server of servers) this.mcpServerConfigs.set(server.name, JSON.stringify(server));
       const pool = this.opts.sharedMcpPool;
       const sharedServers = pool ? servers.filter((server) => pool.canShare(server)) : [];
       const privateServers = pool ? servers.filter((server) => !pool.canShare(server)) : servers;
@@ -2078,6 +2120,114 @@ export class AgentSession {
     return status === null
       ? { ok: false, reason: "changed", status: await this.getVerifyPlanStatus() }
       : { ok: true, status };
+  }
+
+  /**
+   * The user added, changed or removed one MCP server mid-session: connect,
+   * reconnect or drop just that server, without a restart. `config` is its
+   * current effective config, or undefined when it is gone (or not allowed).
+   *
+   * New tools go into the tool_search catalog (or are appended when deferral
+   * is off), and the model learns about the change from a hidden note with the
+   * next message, never from a re-rendered system prompt. Returns null when
+   * nothing changed here. Queued on the MCP reload tail so it never overlaps a
+   * full reload or retry.
+   */
+  applyMcpServerChange(
+    name: string,
+    config: MCPServerConfig | undefined,
+  ): Promise<McpServerChange | null> {
+    const run = this.mcpReloadTail.then(
+      () => this.applyMcpServerChangeNow(name, config),
+      () => this.applyMcpServerChangeNow(name, config),
+    );
+    this.mcpReloadTail = run.then(
+      () => {},
+      () => {},
+    );
+    return run;
+  }
+
+  private async applyMcpServerChangeNow(
+    name: string,
+    config: MCPServerConfig | undefined,
+  ): Promise<McpServerChange | null> {
+    const manager = this.mcpManager;
+    if (!manager || this.mcpBlockedByAllowList()) return null;
+    const whitelist = this.opts.allowedMcpServers;
+    if (this.opts.allowedTools && !whitelist?.includes(name)) return null;
+    // Daemon-pooled servers are shared by every session; a full reload owns them.
+    if (config && this.opts.sharedMcpPool?.canShare(config)) return null;
+    const wanted = config && config.enabled !== false ? config : undefined;
+    const previous = this.mcpServerConfigs.get(name);
+    // Same config still connected: nothing to do. Same config that failed
+    // (e.g. before an OAuth sign-in) is retried.
+    if (wanted && previous === JSON.stringify(wanted) && !this.failedMcpServers.has(name)) {
+      return null;
+    }
+    if (!wanted && previous === undefined) return null;
+    const generation = this.mcpConnectionGeneration;
+
+    if (previous !== undefined) {
+      await manager.disconnect(name);
+      if (!this.isCurrentMcpConnection(generation, manager)) return null;
+      this.applyMcpServerState({ name, status: "disconnected", tools: [] });
+      this.mcpServerConfigs.delete(name);
+      this.failedMcpServers.delete(name);
+    }
+    if (!wanted) {
+      this.pendingMcpNotices.push(
+        `- MCP server "${name}" was removed by the user. Its mcp__${name}__* tools no longer work; don't call them.`,
+      );
+      log("INFO", "mcp", `Removed MCP server "${name}" mid-session`);
+      return { name, removed: true, connected: false, toolCount: 0 };
+    }
+
+    this.mcpServerConfigs.set(name, JSON.stringify(wanted));
+    const [result] = await manager.connectAllDetailed([wanted]);
+    if (!this.isCurrentMcpConnection(generation, manager)) return null;
+    const ok = result?.ok ?? false;
+    const tools = (ok ? (result?.tools ?? []) : []).filter(
+      (t) => !this.opts.allowedTools || this.isToolAllowed(t.name, getMcpToolIdentity(t)),
+    );
+    this.addMcpTools(tools);
+    if (ok) {
+      const deferred = !this.opts.allowedTools && this.settingsManager.get("deferredMcpTools");
+      const names = tools.map((t) => t.name);
+      const shown = names.slice(0, 20).join(", ") + (names.length > 20 ? ", …" : "");
+      this.pendingMcpNotices.push(
+        `- The user connected MCP server "${name}" with ${tools.length} tool${tools.length === 1 ? "" : "s"}` +
+          (names.length > 0 ? `: ${shown}.` : ".") +
+          (deferred
+            ? " Load them with tool_search (e.g. by capability or the server name) when they help."
+            : " They are in your tool list now."),
+      );
+    }
+    log("INFO", "mcp", `Applied MCP server "${name}" mid-session`, {
+      ok: String(ok),
+      tools: String(tools.length),
+    });
+    return {
+      name,
+      removed: false,
+      connected: ok,
+      toolCount: tools.length,
+      ...(result?.error ? { error: result.error } : {}),
+      ...(result?.requiresAuth ? { requiresAuth: true } : {}),
+    };
+  }
+
+  private takeMcpNotice(): Message | null {
+    if (this.pendingMcpNotices.length === 0) return null;
+    const lines = this.pendingMcpNotices.splice(0);
+    return {
+      role: "user",
+      provenance: { source: "runtime", kind: "notification", visibility: "hidden" },
+      content:
+        "MCP update. The user changed MCP servers during this session:\n" +
+        lines.join("\n") +
+        "\nTrust this over anything earlier that disagrees. Do not restate this note; just proceed.",
+    };
   }
 
   /** Persist explicit per-project trust for project-scope MCP servers. */
@@ -2251,14 +2401,325 @@ export class AgentSession {
 
   private async runSideWebSearch(request: SideSearchRequest): Promise<SideSearchResult | null> {
     if (this.provider !== "anthropic") return null;
+    const claudeCode = await this.claudeCodeProcess();
+    if (claudeCode) return await runSideWebSearchViaClaudeCode(request, claudeCode);
     const creds = await this.authStorage.resolveCredentials("anthropic", {
       storageKeys: getAuthStorageKeys("anthropic", SIDE_SEARCH_MODEL),
     });
     return await runSideWebSearch(request, {
       apiKey: creds.accessToken,
       baseUrl: this.baseUrl ?? creds.baseUrl,
-      userAgent: await getClaudeCliUserAgent(),
     });
+  }
+
+  // No creds = Claude subscription route; compact() then summarizes through Claude Code.
+  private async maybeCompactPreRun(creds?: {
+    accessToken: string;
+    accountId?: string;
+    baseUrl?: string;
+  }): Promise<void> {
+    if (this.settingsManager.get("autoCompact") && Date.now() >= this.compactionRetryAfter) {
+      // A post-turn compaction may still be running in the background. Let it
+      // settle first: it usually already compacted this history, so the
+      // decision below turns into a no-op instead of duplicate work.
+      if (this.postTurnCompaction) await this.postTurnCompaction;
+      const contextWindow = getContextWindow(this.model, {
+        provider: this.provider,
+        accountId: creds?.accountId,
+        openAICodexContextProfile: this.openAICodexContextProfile,
+      });
+      const policy = resolveCompactionPolicy({
+        provider: this.provider,
+        model: this.model,
+        contextWindow,
+        threshold: this.settingsManager.get("compactThreshold"),
+        compactAtTokens: this.settingsManager.get("compactAtTokens"),
+        accountId: creds?.accountId,
+        approvedPlanPath: this.approvedPlanPath,
+      });
+      let activeTokens: number | undefined;
+      if (this.providerContext) {
+        const anchorIndex = this.messages.lastIndexOf(this.providerContext.anchor);
+        if (anchorIndex >= 0) {
+          activeTokens = calculateActiveContextTokens(this.messages, {
+            usage: this.providerContext.usage,
+            pendingMessages: this.messages.slice(anchorIndex + 1),
+          });
+        } else {
+          this.providerContext = null;
+        }
+      }
+      log("INFO", "compaction", "Pre-run compaction decision", {
+        provider: this.provider,
+        model: this.model,
+        transport: this.compactionTransport(creds),
+        contextWindow: String(contextWindow),
+        activeTokens: activeTokens === undefined ? "estimated" : String(activeTokens),
+        triggerLimit: String(policy.targetTokens),
+      });
+      if (
+        shouldCompact(
+          this.messages,
+          contextWindow,
+          policy.threshold,
+          activeTokens,
+          policy.targetTokens,
+        )
+      ) {
+        try {
+          await this.compact(creds, "automatic");
+          if (this.lastCompactionCompacted) {
+            // Re-grounding hook keys off this — the context was just summarized.
+            this.compactionOccurred = true;
+            this.compactionRetryAfter = 0;
+          } else {
+            this.compactionRetryAfter = Date.now() + 30_000;
+          }
+        } catch (error) {
+          if (error instanceof RequiredSessionPersistenceError) throw error;
+          this.compactionRetryAfter = Date.now() + 30_000;
+          if (isAbortError(error) || this.opts.signal?.aborted) throw error;
+          log(
+            "WARN",
+            "compaction",
+            `Pre-run compaction failed; cooling down for 30s: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        }
+      }
+    }
+  }
+
+  private compactionTransport(creds?: { accountId?: string }): string {
+    if (!creds) return "claude_code";
+    return this.provider === "openai" && creds.accountId ? "codex_oauth" : "public_api";
+  }
+
+  /** One run on the Claude subscription route: Claude Code drives the loop with our prompt and tools. */
+  private async runClaudeCodeLoop(
+    process: ClaudeCodeProcess,
+    options: PromptRunOptions,
+  ): Promise<void> {
+    let loopMessages = await this.prepareDynamicContext();
+    let resume = claudeCodeResumeId(this.claudeCodeSession, loopMessages);
+    // Claude Code fails a resume whose transcript is gone (retention pass, or
+    // removed by hand); our history can seed a fresh session instead.
+    if (
+      resume &&
+      !(await claudeCodeTranscriptExists(
+        process.env.CLAUDE_CONFIG_DIR ?? claudeCodeConfigDir(),
+        resume,
+      ))
+    ) {
+      log("INFO", "claude-code", "Transcript missing; seeding a fresh session from history");
+      resume = undefined;
+    }
+    // A fresh Claude Code session gets our history as text; summarize it first
+    // when it would not fit.
+    if (
+      !resume &&
+      renderTranscript(loopMessages, Number.MAX_SAFE_INTEGER).length > CLAUDE_CODE_SEED_CHARS
+    ) {
+      try {
+        await this.compact(undefined, "automatic");
+      } catch (error) {
+        if (isAbortError(error) || this.opts.signal?.aborted) throw error;
+        log("WARN", "compaction", "Summary before seeding Claude Code failed", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+      loopMessages = await this.prepareDynamicContext();
+    }
+    let sessionId = resume;
+    const title = this.sessionPreview?.trim().slice(0, 80);
+    const thinking =
+      this.planModeRef.current || options.capThinking
+        ? clampThinkingForPlanMode(this.thinkingLevel)
+        : this.thinkingLevel;
+    const live = await this.claudeCodeLiveFor(process, loopMessages, resume, thinking, options);
+    const generator = live.run(loopMessages, {
+      provider: this.provider,
+      model: this.model,
+      tools: options.disableTools ? [] : this.tools,
+      maxTurns: this.opts.maxTurns,
+      thinking,
+      signal: this.opts.signal,
+      maxToolResultChars: resolveSessionToolResultCharLimit(this.model, this.provider, undefined),
+      transformToolResult: flagUntrustedToolResult,
+      ...(options.disableTools
+        ? {}
+        : { resolveTool: (name: string) => this.promoteDeferredBuiltin(name) }),
+      getSteeringMessages: () => this.getHookSteeringMessages(),
+      steeringAlreadyRead: (message) => this.askAnswerSteering.has(message),
+      onSteeringAvailable: (listener) => {
+        this.steeringListeners.add(listener);
+        return () => this.steeringListeners.delete(listener);
+      },
+      getFollowUpMessages: () => this.getHookFollowUpMessages(),
+      claudeCode: {
+        ...process,
+        maxSeedChars: CLAUDE_CODE_SEED_CHARS,
+        ...(resume ? { resume } : {}),
+        ...(title ? { title } : {}),
+        onSessionId: (id) => {
+          sessionId = id;
+        },
+      },
+    });
+
+    this.activeLoopMessages = loopMessages;
+    try {
+      for await (const event of generator) {
+        await this.trackHookEvent(event);
+        // Claude Code sends the requests, so the cache-diagnostics pass never
+        // sees them; without a touch every idle chat read as an expired cache.
+        if (event.type === "turn_end" && event.stopReason !== "error") {
+          this.cacheDiagnostics.noteCacheTouch({
+            at: Date.now(),
+            provider: this.provider,
+            model: this.model,
+            policy: CLAUDE_CODE_CACHE_TTL,
+          });
+        }
+        // Same line names as the public-API route, which logs them from the agent loop.
+        if (event.type === "turn_end") {
+          const cacheRead = event.usage.cacheRead ?? 0;
+          const cacheWrite = event.usage.cacheWrite ?? 0;
+          const promptTokens = event.usage.inputTokens + cacheRead + cacheWrite;
+          log("INFO", "stream", "cache_health", {
+            promptTokens,
+            cacheRead,
+            cacheWrite,
+            ...(promptTokens > 0
+              ? { ratio: Math.round((cacheRead / promptTokens) * 100) / 100 }
+              : {}),
+            ...(event.timing.ttftMs !== undefined ? { ttftMs: event.timing.ttftMs } : {}),
+            providerDurationMs: event.timing.providerDurationMs,
+            outputTokens: event.usage.outputTokens,
+            provider: this.provider,
+            model: this.model,
+            transport: "claude_code",
+          });
+        } else if (event.type === "retry") {
+          log("INFO", "stream", "retry", {
+            reason: event.reason,
+            attempt: event.attempt,
+            maxAttempts: event.maxAttempts,
+            delayMs: event.delayMs,
+            transport: "claude_code",
+          });
+        }
+        this.eventBus.forwardAgentEvent(event);
+      }
+    } finally {
+      // The SDK counts maxTurns per process, so a capped session runs one process per run.
+      if (live !== this.claudeCodeLive?.session) live.close("one-shot");
+      this.activeLoopMessages = null;
+      // A stopped run records unplaced messages without an event.
+      this.settleDeliveredMessages(() => true);
+      this.messages = loopMessages;
+      for (let i = this.lastPersistedIndex; i < this.messages.length; i++) {
+        await this.persistMessage(this.messages[i]);
+      }
+      this.lastPersistedIndex = this.messages.length;
+      if (sessionId) await this.recordClaudeCodeSession(sessionId);
+    }
+  }
+
+  /**
+   * The Claude Code process for this run: the chat's live one when it holds
+   * exactly our history with the same settings, else a new one (the old one is
+   * closed first, so a chat never keeps two).
+   */
+  private async claudeCodeLiveFor(
+    process: ClaudeCodeProcess,
+    messages: readonly Message[],
+    resume: string | undefined,
+    thinking: ThinkingLevel | undefined,
+    options: PromptRunOptions,
+  ): Promise<ClaudeCodeLiveSession> {
+    const hash = (value: unknown) =>
+      crypto.createHash("sha256").update(JSON.stringify(value)).digest("hex").slice(0, 16);
+    const key: Record<string, string> = {
+      executable: process.executable,
+      cwd: process.cwd,
+      model: this.model,
+      system: hash(systemPrompt(messages, undefined)),
+      thinking: thinking ? "on" : "off",
+      tools: options.disableTools ? "off" : "on",
+    };
+    // Per variable, so a restart log names what moved (names only, never values).
+    for (const [name, value] of Object.entries(process.env)) {
+      // The SDK writes this into the daemon's env on its first query(); it sets it for the child anyway.
+      if (name !== "CLAUDE_AGENT_SDK_VERSION") key[`env:${name}`] = hash(value);
+    }
+    const current = this.claudeCodeLive;
+    const changed = current
+      ? [...new Set([...Object.keys(key), ...Object.keys(current.key)])].filter(
+          (name) => current.key[name] !== key[name],
+        )
+      : [];
+    if (
+      current &&
+      changed.length === 0 &&
+      current.session.alive &&
+      !current.session.busy &&
+      resume !== undefined &&
+      resume === current.session.sessionId &&
+      (await current.session.setEffort(thinking))
+    ) {
+      return current.session;
+    }
+    this.closeClaudeCodeLive(
+      changed.length > 0 ? `changed: ${changed.join(",")}` : "history or effort changed",
+    );
+    const session = new ClaudeCodeLiveSession();
+    if (!this.opts.maxTurns) this.claudeCodeLive = { session, key };
+    return session;
+  }
+
+  private closeClaudeCodeLive(reason: string): void {
+    this.claudeCodeLive?.session.close(reason);
+    this.claudeCodeLive = null;
+  }
+
+  private async recordClaudeCodeSession(sessionId: string): Promise<void> {
+    const history = this.messages.filter((m) => m.role !== "system");
+    const state = { sessionId, messageCount: history.length, anchor: history.at(-1) };
+    this.claudeCodeSession = state;
+    this.holdClaudeCodeTranscript();
+    if (!this.sessionPath) return;
+    await this.sessionManager.appendEntry(this.sessionPath, {
+      type: "custom",
+      kind: CLAUDE_CODE_SESSION_KIND,
+      id: crypto.randomUUID(),
+      parentId: null,
+      timestamp: new Date().toISOString(),
+      data: claudeCodeSessionEntryData(state),
+    });
+  }
+
+  /** Claude Code settings when this session runs on a Claude subscription, else null. */
+  private claudeCodeProcess(): Promise<ClaudeCodeProcess | null> {
+    return resolveClaudeCodeProcess(this.authStorage, this.provider, this.cwd);
+  }
+
+  // A restored conversation still calls the on-demand tools it used; Claude
+  // Code refuses any name missing from the list this process gives it.
+  private reloadUsedTools(messages: readonly Message[]): void {
+    if (this.deferredBuiltinToolNames.length === 0) return;
+    for (const message of messages) {
+      if (message.role === "assistant" && Array.isArray(message.content)) {
+        for (const part of message.content) {
+          if (part.type === "tool_call") this.promoteDeferredBuiltin(part.name);
+        }
+      } else if (message.role === "tool") {
+        for (const result of message.content) {
+          for (const name of result.loadedTools ?? []) this.promoteDeferredBuiltin(name);
+        }
+      }
+    }
   }
 
   /**
@@ -2827,6 +3288,13 @@ export class AgentSession {
     await this.runLoop();
   }
 
+  /** A typed reply's attachments as blocks for the question it answers (ask_user). */
+  askReplyAttachmentParts(
+    attachments: SessionAttachment[],
+  ): Array<TextContent | ImageContent | VideoContent> {
+    return this.buildAttachmentParts("", attachments);
+  }
+
   /**
    * Build the native content blocks (text + image/video notes + file notes) for
    * a user message with attachments. Shared by {@link promptWithAttachments} and
@@ -3018,16 +3486,8 @@ export class AgentSession {
         if (safetyRule) this.recordSafetyBlock(safetyRule, name, args, event.details);
         if (call) {
           const command = typeof call.args.command === "string" ? call.args.command : "";
-          // A review the bash tool rejected before spawning ran nothing: it is
-          // neither a pass nor a failure, so it must not count as a check.
-          const rejectedBeforeStart =
-            call.name === "bash" &&
-            call.args.review === true &&
-            event.result === REVIEW_REJECTED_BEFORE_START;
           const verificationCandidate =
-            call.name === "bash" &&
-            !rejectedBeforeStart &&
-            this.verificationEvidenceLedger.classify(command).candidate;
+            call.name === "bash" && this.verificationEvidenceLedger.classify(command).candidate;
           const workspace =
             verificationCandidate && this.opts.captureVerificationWorkspace
               ? await this.opts.captureVerificationWorkspace().catch(() => undefined)
@@ -3035,16 +3495,15 @@ export class AgentSession {
           const settledCoverage =
             call.name === "task_output" ? await this.settleCheckHandoff(event.details) : null;
           if (this.hookToolCalls.get(event.toolCallId) !== call) break;
-          if (!rejectedBeforeStart)
-            this.verificationEvidenceLedger.recordToolResult({
-              ...call,
-              isError: event.isError,
-              details: event.details,
-              workspace,
-              planMode: this.getPlanMode(),
-              sessionCwd: this.cwd,
-              settledCoverage,
-            });
+          this.verificationEvidenceLedger.recordToolResult({
+            ...call,
+            isError: event.isError,
+            details: event.details,
+            workspace,
+            planMode: this.getPlanMode(),
+            sessionCwd: this.cwd,
+            settledCoverage,
+          });
           // Upstream saves completion-review state whenever verification state
           // changes; the evidence ledger replaced that save point here.
           if (verificationCandidate) await this.persistCompletionReviewState();
@@ -3099,6 +3558,9 @@ export class AgentSession {
         // The assistant message for this turn is now in the array.
         await this.flushPendingMessages();
         break;
+      case "steering_message":
+        this.settleDeliveredMessages((m) => m.content === event.content);
+        break;
       case "checkpoint":
         // Tool results for this step are in the array and their side effects
         // already hit the filesystem. Flushing here is what makes a crash lose
@@ -3133,6 +3595,15 @@ export class AgentSession {
     if (this.advisoryTurn !== pending.turn || !pending.turn.active || pending.signal.aborted)
       return;
     this.eventBus.emit("text_delta", { text: pending.text, standalone: true });
+  }
+
+  /** Drop delivered queued messages and announce the new queue depth. */
+  private settleDeliveredMessages(delivered: (m: { content: unknown }) => boolean): void {
+    const before = this.deliveringQueue.length;
+    this.deliveringQueue = this.deliveringQueue.filter((m) => !delivered(m));
+    if (this.deliveringQueue.length !== before) {
+      this.eventBus.emit("queue_drained", { count: this.userQueue.length });
+    }
   }
 
   /**
@@ -3220,6 +3691,7 @@ export class AgentSession {
     if (planNotice) {
       log("INFO", "session", "Injecting plan state update instead of rebuilding the prompt");
     }
+    const mcpNotice = this.takeMcpNotice();
     if (environmentDelta) {
       // The model has now been told; only a further change re-triggers this.
       this.renderedEnvironment = this.promptEnvironment();
@@ -3259,11 +3731,9 @@ export class AgentSession {
     if (this.userQueue.some((m) => !m.deferred)) {
       const queued = this.userQueue.filter((m) => !m.deferred);
       this.userQueue = this.userQueue.filter((m) => m.deferred);
-      // The agent has now consumed these. Announce the new depth immediately so
-      // clients can drop the "queued" affordance at the turn boundary rather
-      // than holding it until the whole run ends — the message is already in
-      // the loop, and showing it as still-pending for minutes is a lie.
-      this.eventBus.emit("queue_drained", { count: this.userQueue.length });
+      // `queue_drained` fires when each lands in the transcript (its
+      // steering_message event), not here, so clients drop the "queued" look
+      // when the agent reads it, not minutes later at run end.
       // Frame each queued item as concurrent steering — without this wrapper
       // the model treats a mid-run message as a fresh request that supersedes
       // the original task and silently drops it. ONE message per queued item
@@ -3298,19 +3768,26 @@ export class AgentSession {
         if (m.meta) this.promptHints.set(message, m.meta);
         return message;
       });
+      steeringMessages.forEach((message, index) => {
+        const { id, text, answeredAsk } = queued[index]!;
+        if (answeredAsk) this.askAnswerSteering.add(message);
+        this.deliveringQueue.push({ id, text, content: message.content });
+      });
       const userShell = this.takeUserShellContext();
       return [
         ...(environmentDelta ? [environmentDelta] : []),
         ...(planNotice ? [planNotice] : []),
+        ...(mcpNotice ? [mcpNotice] : []),
         ...(userShell ? [userShell] : []),
         ...steeringMessages,
         ...(notificationMessage ? [notificationMessage] : []),
       ];
     }
-    if (environmentDelta || planNotice || notificationMessage) {
+    if (environmentDelta || planNotice || mcpNotice || notificationMessage) {
       return [
         ...(environmentDelta ? [environmentDelta] : []),
         ...(planNotice ? [planNotice] : []),
+        ...(mcpNotice ? [mcpNotice] : []),
         ...(notificationMessage ? [notificationMessage] : []),
       ];
     }
@@ -3459,6 +3936,23 @@ export class AgentSession {
       throw new Error("Active model has no confirmed image support");
     signal.throwIfAborted();
     try {
+      const messages: Message[] = [
+        { role: "system", content: request.instruction },
+        { role: "user", content: [{ type: "text", text: request.context }, ...request.images] },
+      ];
+      const claudeCode = await this.claudeCodeProcess();
+      if (claudeCode) {
+        const response = await claudeCodeComplete({
+          ...claudeCode,
+          model,
+          messages,
+          thinking,
+          signal,
+        });
+        const text = assistantText(response.message.content);
+        if (text.length > 32_768) throw new Error("Review response exceeded its limit");
+        return { text, model, provider, thinking };
+      }
       const creds = await this.authStorage.resolveCredentials(provider, {
         storageKeys: this.currentAuthStorageKeys(),
       });
@@ -3466,23 +3960,14 @@ export class AgentSession {
       const result = stream({
         provider,
         model,
-        messages: [
-          { role: "system", content: request.instruction },
-          { role: "user", content: [{ type: "text", text: request.context }, ...request.images] },
-        ],
+        messages,
         maxTokens: 4000,
         thinking,
         apiKey: creds.accessToken,
         accountId: creds.accountId,
-        projectId: creds.projectId,
         baseUrl,
         signal,
         transportSessionId: this.sessionId || this.transportSessionId,
-        defaultHeaders:
-          provider === "moonshot" && isKimiCodingEndpoint(baseUrl)
-            ? kimiCodingHeaders()
-            : undefined,
-        userAgent: provider === "anthropic" ? await getClaudeCliUserAgent() : undefined,
         supportsImages: true,
       });
       const response = await result.response;
@@ -3508,6 +3993,17 @@ export class AgentSession {
    *  model swaps false negatives for false positives. */
   private async callSemanticLoopJudge(prompt: string, signal: AbortSignal): Promise<string> {
     signal.throwIfAborted();
+    const claudeCode = await this.claudeCodeProcess();
+    if (claudeCode) {
+      assertProviderExecutionAllowed(this.provider, this.opts.unattended);
+      const response = await claudeCodeComplete({
+        ...claudeCode,
+        model: this.model,
+        messages: [{ role: "user", content: prompt }],
+        signal,
+      });
+      return assistantText(response.message.content);
+    }
     const creds = await this.resolveRunCredentials(this.provider, {
       storageKeys: this.currentAuthStorageKeys(),
     });
@@ -3519,7 +4015,6 @@ export class AgentSession {
       maxTokens: 500,
       apiKey: creds.accessToken,
       accountId: creds.accountId,
-      projectId: creds.projectId,
       baseUrl: this.baseUrl ?? creds.baseUrl,
       signal,
     });
@@ -3829,6 +4324,17 @@ export class AgentSession {
       .find((m) => m.role === "user" && m.provenance?.kind !== "notification");
     this.resetHookState(requestTextForRegrounding(lastUser));
 
+    // A Claude subscription only connects through Claude Code; compaction stays ours.
+    const claudeCode = await this.claudeCodeProcess();
+    if (claudeCode) {
+      await this.maybeCompactPreRun();
+      await this.runClaudeCodeLoop(claudeCode, options);
+      this.maybeCompactPostTurn();
+      return;
+    }
+    // Left the Claude subscription route (provider switch, sign-out).
+    this.closeClaudeCodeLive("route changed");
+
     // Resolve OAuth credentials and run agent loop.
     // On 401, force-refresh the token and retry once — the provider may have
     // revoked the token server-side before the stored expiry (e.g. after a restart).
@@ -3845,89 +4351,14 @@ export class AgentSession {
 
     // Auto-compact if needed. This must happen after credential resolution so
     // OpenAI OAuth/Codex sessions use the Codex product context window instead
-    // of the public API model window. Failed/no-op attempts cool down across
-    // prompts; provider overflow recovery still bypasses this path entirely.
-    if (this.settingsManager.get("autoCompact") && Date.now() >= this.compactionRetryAfter) {
-      // A post-turn compaction may still be running in the background. Let it
-      // settle first: it usually already compacted this history, so the
-      // decision below turns into a no-op instead of duplicate work.
-      if (this.postTurnCompaction) await this.postTurnCompaction;
-      const contextWindow = getContextWindow(this.model, {
-        provider: this.provider,
-        accountId: creds.accountId,
-        openAICodexContextProfile: this.openAICodexContextProfile,
-      });
-      const policy = resolveCompactionPolicy({
-        provider: this.provider,
-        model: this.model,
-        contextWindow,
-        threshold: this.settingsManager.get("compactThreshold"),
-        compactAtTokens: this.settingsManager.get("compactAtTokens"),
-        accountId: creds.accountId,
-        approvedPlanPath: this.approvedPlanPath,
-      });
-      let activeTokens: number | undefined;
-      if (this.providerContext) {
-        const anchorIndex = this.messages.lastIndexOf(this.providerContext.anchor);
-        if (anchorIndex >= 0) {
-          activeTokens = calculateActiveContextTokens(this.messages, {
-            usage: this.providerContext.usage,
-            pendingMessages: this.messages.slice(anchorIndex + 1),
-          });
-        } else {
-          this.providerContext = null;
-        }
-      }
-      log("INFO", "compaction", "Pre-run compaction decision", {
-        provider: this.provider,
-        model: this.model,
-        transport: this.provider === "openai" && creds.accountId ? "codex_oauth" : "public_api",
-        contextWindow: String(contextWindow),
-        activeTokens: activeTokens === undefined ? "estimated" : String(activeTokens),
-        triggerLimit: String(policy.targetTokens),
-      });
-      if (
-        shouldCompact(
-          this.messages,
-          contextWindow,
-          policy.threshold,
-          activeTokens,
-          policy.targetTokens,
-        )
-      ) {
-        try {
-          await this.compact(creds, "automatic");
-          if (this.lastCompactionCompacted) {
-            // Re-grounding hook keys off this — the context was just summarized.
-            this.compactionOccurred = true;
-            this.compactionRetryAfter = 0;
-          } else {
-            this.compactionRetryAfter = Date.now() + 30_000;
-          }
-        } catch (error) {
-          if (error instanceof RequiredSessionPersistenceError) throw error;
-          this.compactionRetryAfter = Date.now() + 30_000;
-          if (isAbortError(error) || this.opts.signal?.aborted) throw error;
-          log(
-            "WARN",
-            "compaction",
-            `Pre-run compaction failed; cooling down for 30s: ${
-              error instanceof Error ? error.message : String(error)
-            }`,
-          );
-        }
-      }
-    }
-
-    // Reassignable: Anthropic can reject the spoofed claude-cli version as too
-    // old for a newly released model, and the retry below rebuilds it.
-    let userAgent = this.provider === "anthropic" ? await getClaudeCliUserAgent() : undefined;
+    // of the public API model window.
+    await this.maybeCompactPreRun(creds);
 
     const loopMessages = await this.prepareDynamicContext();
     // Re-read every run so rule-file edits apply on the next turn; a few small files.
     const streamRules = await loadStreamRules(this.cwd);
 
-    const runAgentLoop = async (apiKey: string, accountId?: string, projectId?: string) => {
+    const runAgentLoop = async (apiKey: string, accountId?: string) => {
       lastResolvedAccessToken = apiKey;
       const modelInfo = getModel(this.model);
       const effectiveBaseUrl = this.baseUrl ?? creds.baseUrl;
@@ -3965,30 +4396,17 @@ export class AgentSession {
           lastResolvedAccessToken = live.accessToken;
           return {
             apiKey: live.accessToken,
-            accountId: live.accountId,
-            ...(live.projectId !== undefined ? { projectId: live.projectId } : {}),
+            ...(live.accountId !== undefined ? { accountId: live.accountId } : {}),
           };
         },
         baseUrl: effectiveBaseUrl,
         signal: this.opts.signal,
         accountId,
         transportSessionId: this.sessionId || this.transportSessionId,
-        projectId,
-        // Kimi For Coding gates the managed endpoint on coding-agent identity
-        // headers; attach them only when the Kimi OAuth token is in use.
-        defaultHeaders:
-          this.provider === "moonshot" && isKimiCodingEndpoint(effectiveBaseUrl)
-            ? kimiCodingHeaders()
-            : undefined,
         // speedProfile "optimized": 1-h cache TTL (survives turns >5 min apart)
         // + pre-warm before the first turn. "baseline": current 5-min default.
         cacheRetention: this.isSpeedOptimized() ? "long" : "short",
         promptCacheKey: this.getPromptCacheKey(),
-        responsesLite: resolveResponsesLite(
-          this.codexShapeSetting("codexResponsesLite"),
-          this.provider,
-          this.model,
-        ),
         strictTools: resolveStrictTools(this.codexShapeSetting("codexStrictTools"), this.provider),
         onContextPrepared: (context) => {
           const report = this.cacheDiagnostics.prepare(context, {
@@ -4025,7 +4443,6 @@ export class AgentSession {
         },
         supportsImages: modelInfo?.supportsImages,
         supportsVideo: modelInfo?.supportsVideo,
-        userAgent,
         // Codex caps each tool output at 10K tokens. Other transports retain the
         // generic 30%-of-context allowance used before this provider policy.
         maxToolResultChars: resolveSessionToolResultCharLimit(
@@ -4123,7 +4540,7 @@ export class AgentSession {
             if (shouldPruneToolResults(activeTokens, policy.targetTokens)) {
               const cacheCold = this.getCacheExpiryStatus()?.expired ?? false;
               const pruneResult = pruneStaleToolResults(messages, {
-                minimumTokens: pruneMinimumTokens(activeTokens, cacheCold),
+                minimumTokens: pruneMinimumTokens(activeTokens, cacheCold, policy.targetTokens),
               });
               if (pruneResult.pruned) {
                 this.cacheDiagnostics.noteEdit("tool_prune", pruneResult.freedTokens);
@@ -4177,7 +4594,6 @@ export class AgentSession {
               {
                 accessToken: apiKey,
                 accountId,
-                projectId,
                 baseUrl: effectiveBaseUrl,
               },
               force ? "forced" : "automatic",
@@ -4217,6 +4633,7 @@ export class AgentSession {
         }
       } finally {
         this.activeLoopMessages = null;
+        this.settleDeliveredMessages(() => true);
         // An in-flight compaction rebinds `this.messages` to the compacted array
         // while the loop keeps appending to `loopMessages`. Resync on every exit
         // — a failed or aborted run included — or the session silently drops
@@ -4246,35 +4663,31 @@ export class AgentSession {
     };
 
     try {
-      await runAgentLoop(creds.accessToken, creds.accountId, creds.projectId);
+      await runAgentLoop(creds.accessToken, creds.accountId);
     } catch (err) {
       // Abort errors are expected (user cancellation) — don't retry or re-throw
       if (isAbortError(err) || this.opts.signal?.aborted) {
         return;
       }
-      // A subscription OAuth plan ran out of usage (hard usage-limit stop, or an
-      // HTTP 402 billing stop). If the user ALSO configured that provider's API
-      // key, mark the OAuth credential usage-exhausted (honoring the
-      // provider-stated reset time when present) and retry this turn on the API
-      // key — OAuth stays the preferred credential and resumes automatically once
+      // The ChatGPT plan ran out of usage (hard usage-limit stop, or an HTTP 402
+      // billing stop). If the user ALSO configured an OpenAI API key, mark the
+      // plan usage-exhausted (honoring a stated reset time when present) and
+      // retry this turn on the key — the plan stays preferred and resumes once
       // the mark lapses. A generic 429 is deliberately excluded: it may be a
-      // transient rate limit and must not silently switch the user to a billed
-      // API key.
+      // transient rate limit and must not silently switch the user to a billed key.
       //
-      // Grok adds one case Kimi doesn't have: xAI gates its CLI chat proxy by
-      // subscription tier, so an entitled-looking account can be refused outright
-      // with a 403. That means "OAuth cannot serve this", not a transient error,
-      // so it counts as exhausted too — otherwise a dual-configured user would
-      // hard-fail while holding a perfectly good API key.
+      // An account or workspace that isn't eligible for plan use is refused with
+      // a 403; that means "the plan cannot serve this", so it counts too.
       //
-      // Guarded on the subscription endpoint actually being in use: if the API key
-      // was already active, the same error means BOTH are out and must surface.
+      // Guarded on the plan route actually being in use: if the API key was
+      // already active, the same error means BOTH are out and must surface.
       const dualAuth = dualAuthProvider(this.provider);
-      const onSubscriptionEndpoint =
-        (this.provider === "moonshot" && isKimiCodingEndpoint(creds.baseUrl)) ||
-        (this.provider === "xai" && isGrokCliEndpoint(creds.baseUrl));
+      const onSubscriptionEndpoint = this.provider === "openai" && Boolean(creds.accountId);
       const tierRefusal =
-        this.provider === "xai" && err instanceof ProviderError && err.statusCode === 403;
+        this.provider === "openai" &&
+        err instanceof ProviderError &&
+        err.statusCode === 403 &&
+        /ChatGPT plan use isn't available/.test(err.message);
       const oauthIsOut =
         isUsageLimitError(err) ||
         (err instanceof ProviderError && err.statusCode === 402) ||
@@ -4298,11 +4711,10 @@ export class AgentSession {
           storageKeys: this.currentAuthStorageKeys(),
         });
         this.lastAccountId = creds.accountId;
-        // The runAgentLoop closure re-reads `creds`, so the retry picks up the
-        // API key's public baseUrl (api.moonshot.ai / api.x.ai) and drops the
-        // subscription endpoint's client-identity headers.
+        // The runAgentLoop closure re-reads `creds`, so the retry runs on the
+        // API key without the plan's account.
         try {
-          await runAgentLoop(creds.accessToken, creds.accountId, creds.projectId);
+          await runAgentLoop(creds.accessToken, creds.accountId);
         } catch (fallbackErr) {
           // The fallback is inside this catch branch, so its errors do not pass
           // through the outer 401 handler. Clear a rejected API key explicitly
@@ -4310,16 +4722,6 @@ export class AgentSession {
           await clearInvalidStaticApiKey(fallbackErr);
           throw fallbackErr;
         }
-      } else if (
-        this.provider === "anthropic" &&
-        (await noteRequiredClaudeCodeVersion(err instanceof Error ? err.message : String(err)))
-      ) {
-        // A just-released model requires a newer Claude Code client than our
-        // cached version spoofs. The floor has been raised on disk — rebuild the
-        // User-Agent and retry this turn once instead of failing the user.
-        userAgent = await getClaudeCliUserAgent();
-        log("INFO", "anthropic", `Retrying with refreshed client version: ${userAgent}`);
-        await runAgentLoop(creds.accessToken, creds.accountId, creds.projectId);
       } else if (
         err instanceof ProviderError &&
         err.statusCode === 401 &&
@@ -4332,7 +4734,7 @@ export class AgentSession {
         });
         this.lastAccountId = creds.accountId;
         try {
-          await runAgentLoop(creds.accessToken, creds.accountId, creds.projectId);
+          await runAgentLoop(creds.accessToken, creds.accountId);
         } catch (retryErr) {
           await clearInvalidStaticApiKey(retryErr);
           throw retryErr;
@@ -4357,7 +4759,7 @@ export class AgentSession {
           rejectedToken: lastResolvedAccessToken,
         });
         this.lastAccountId = creds.accountId;
-        await runAgentLoop(creds.accessToken, creds.accountId, creds.projectId);
+        await runAgentLoop(creds.accessToken, creds.accountId);
       } else {
         throw err;
       }
@@ -4436,7 +4838,7 @@ export class AgentSession {
 
   /**
    * One-time move off the retired per-session Astra Fast flag. A session saved
-   * with it on resumes on `gpt-6-astra-fast`, but only where the flag used to
+   * with it on resumes on `gpt-6.2-astra-fast`, but only where the flag used to
    * apply: standard Astra through Codex OAuth, so no other pane is moved onto
    * premium billing. The flag is then cleared so a later choice of standard
    * Astra sticks. Clearing is best effort: a failed header write never blocks
@@ -4447,8 +4849,8 @@ export class AgentSession {
     sessionPath: string,
   ): Promise<void> {
     if (header.openAICodexFast !== true) return;
-    if (this.provider === "openai" && this.model === "gpt-6-astra" && this.lastAccountId) {
-      await this.switchModel("openai", "gpt-6-astra-fast");
+    if (this.provider === "openai" && this.model === "gpt-6.2-astra" && this.lastAccountId) {
+      await this.switchModel("openai", "gpt-6.2-astra-fast");
     }
     if (this.opts.transient) return;
     await this.sessionManager.clearLegacyOpenAICodexFast(sessionPath).catch((error: unknown) => {
@@ -4844,10 +5246,9 @@ export class AgentSession {
    * completed approved-plan step may compact when the cache-cost rule in
    * compaction/plan-step-policy.ts says the shrink pays for itself.
    */
-  private maybeCompactPostTurn(creds: {
+  private maybeCompactPostTurn(creds?: {
     accessToken: string;
     accountId?: string;
-    projectId?: string;
     baseUrl?: string;
   }): void {
     if (!this.settingsManager.get("autoCompact")) return;
@@ -4857,7 +5258,7 @@ export class AgentSession {
     if (Date.now() < this.compactionRetryAfter) return;
     const contextWindow = getContextWindow(this.model, {
       provider: this.provider,
-      accountId: creds.accountId,
+      accountId: creds?.accountId,
     });
     // One compaction per turn boundary: a pre-run, in-flight or overflow
     // compaction already shrank this run's history — re-probing right after
@@ -4873,7 +5274,7 @@ export class AgentSession {
       contextWindow,
       threshold: this.settingsManager.get("compactThreshold"),
       compactAtTokens: this.settingsManager.get("compactAtTokens"),
-      accountId: creds.accountId,
+      accountId: creds?.accountId,
       approvedPlanPath: this.approvedPlanPath,
     });
     let activeTokens: number | undefined;
@@ -4902,7 +5303,7 @@ export class AgentSession {
       trigger: planStep?.compact ? `plan-step (${planStep.reason})` : "size",
       provider: this.provider,
       model: this.model,
-      transport: this.provider === "openai" && creds.accountId ? "codex_oauth" : "public_api",
+      transport: this.compactionTransport(creds),
       contextWindow: String(contextWindow),
       activeTokens: activeTokens === undefined ? "estimated" : String(activeTokens),
       triggerLimit: String(policy.targetTokens),
@@ -4939,11 +5340,22 @@ export class AgentSession {
     })();
   }
 
+  // A caller's token was captured at run start; the loop may have rotated it since.
+  private async withLiveAccessToken<T extends { accessToken: string }>(captured: T): Promise<T> {
+    try {
+      const live = await this.authStorage.resolveCredentials(this.provider, {
+        storageKeys: this.currentAuthStorageKeys(),
+      });
+      return { ...captured, accessToken: live.accessToken };
+    } catch {
+      return captured;
+    }
+  }
+
   async compact(
     existingCredentials?: {
       accessToken: string;
       accountId?: string;
-      projectId?: string;
       baseUrl?: string;
     },
     mode: "manual" | "automatic" | "forced" = "manual",
@@ -4958,11 +5370,14 @@ export class AgentSession {
       abortSignal && this.opts.signal
         ? AbortSignal.any([this.opts.signal, abortSignal])
         : (abortSignal ?? this.opts.signal);
-    const creds =
-      existingCredentials ??
-      (await this.resolveRunCredentials(this.provider, {
-        storageKeys: this.currentAuthStorageKeys(),
-      }));
+    const claudeCode = existingCredentials ? null : await this.claudeCodeProcess();
+    const creds = existingCredentials
+      ? await this.withLiveAccessToken(existingCredentials)
+      : claudeCode
+        ? { accessToken: "" }
+        : await this.resolveRunCredentials(this.provider, {
+            storageKeys: this.currentAuthStorageKeys(),
+          });
     const contextWindow = getContextWindow(this.model, {
       provider: this.provider,
       accountId: creds.accountId,
@@ -4989,13 +5404,22 @@ export class AgentSession {
         transportModel: resolveTransportModel(this.provider, this.model),
         apiKey: creds.accessToken,
         accountId: creds.accountId,
-        projectId: creds.projectId,
         baseUrl: this.baseUrl ?? creds.baseUrl,
         contextWindow,
         targetTokens: policy.targetTokens,
         signal: compactionSignal,
         approvedPlanPath: this.approvedPlanPath,
         focus,
+        ...(claudeCode
+          ? {
+              complete: (req: {
+                model: string;
+                messages: Message[];
+                signal: AbortSignal;
+                onActivity: () => void;
+              }) => claudeCodeComplete({ ...claudeCode, ...req }),
+            }
+          : {}),
       });
       contextSelection = output.result.contextSelection;
       return output;
@@ -5144,7 +5568,8 @@ export class AgentSession {
     // planning conversation and lose the approved-plan prompt). Await only when
     // one is pending so an idle reset still invalidates in-flight work
     // synchronously, before the caller's next tick.
-    if (this.postTurnCompaction) await this.postTurnCompaction;
+    if (this.postTurnCompaction) await this.settlePostTurnCompaction();
+    this.closeClaudeCodeLive("new session");
     this.commandCreation?.cancel();
     this.programmaticProfile?.cancel();
     this.discoveryReview?.close();
@@ -5324,6 +5749,7 @@ export class AgentSession {
     this.areaSearchCache = null;
     this.setupInspection?.close();
     const finish = this.beforeConversationTransition?.("restore");
+    this.closeClaudeCodeLive("session loaded");
     try {
       await this.loadExistingSession(sessionPath);
       this.cacheDiagnostics.reset();
@@ -5349,6 +5775,7 @@ export class AgentSession {
     this.areaSearchCache = null;
     this.setupInspection?.close();
     const finish = this.beforeConversationTransition?.(retain ? "checkpoint" : "restore");
+    this.closeClaudeCodeLive("session loaded");
     try {
       await this.loadExistingSession(sessionPath, false, expectedConversationId);
       this.cacheDiagnostics.reset();
@@ -5464,6 +5891,11 @@ export class AgentSession {
       )
       .digest("hex");
     return { ...identity, fingerprint };
+  }
+
+  /** The session's first user-authored prompt, or "" before there is one. */
+  getSessionPreview(): string {
+    return this.sessionPreview;
   }
 
   /** Skills the safety scan kept out of this session, for the app/CLI to show. */
@@ -5681,9 +6113,14 @@ export class AgentSession {
   /** Queue a user message (optionally with attachments) to be injected mid-run
    *  as steering. Returns the new queue length. No-op semantics are the caller's
    *  concern. */
-  queueMessage(text: string, attachments: SessionAttachment[] = [], meta?: PromptMeta): number {
+  queueMessage(
+    text: string,
+    attachments: SessionAttachment[] = [],
+    meta?: PromptMeta,
+    opts: { answeredAsk?: boolean } = {},
+  ): number {
     this.assertQueueable(text, attachments);
-    return this.enqueue(text, attachments, meta);
+    return this.enqueue(text, attachments, meta, undefined, false, opts.answeredAsk === true);
   }
 
   /**
@@ -5708,7 +6145,7 @@ export class AgentSession {
     text: string,
     attachments: SessionAttachment[] = [],
     meta?: PromptMeta,
-    options: { deferred?: boolean } = {},
+    options: { deferred?: boolean; answeredAsk?: boolean } = {},
   ): Promise<{ count: number; id: string }> {
     // Policy errors reject this call immediately (as a rejection, not a
     // synchronous throw) and never hold up the chain.
@@ -5728,7 +6165,14 @@ export class AgentSession {
         resolved?.kind === "template" && !resolved.setupInspection
           ? resolved.fullPrompt
           : undefined;
-      const count = this.enqueue(text, attachments, meta, modelText, options.deferred === true);
+      const count = this.enqueue(
+        text,
+        attachments,
+        meta,
+        modelText,
+        options.deferred === true,
+        options.answeredAsk === true,
+      );
       return { count, id: `q${this.queueSeq}` };
     });
     // A failed expansion rejects only its own call; later calls still run.
@@ -5750,6 +6194,7 @@ export class AgentSession {
     meta: PromptMeta | undefined,
     modelText?: string,
     deferred = false,
+    answeredAsk = false,
   ): number {
     if (text.trim() || attachments.length > 0) this.contextProfileLocked = true;
     this.queueSeq += 1;
@@ -5761,6 +6206,7 @@ export class AgentSession {
       ...(displayMeta ? { meta: displayMeta } : {}),
       ...(modelText !== undefined ? { modelText } : {}),
       ...(deferred ? { deferred } : {}),
+      ...(answeredAsk ? { answeredAsk: true } : {}),
     });
     // Instant interrupt: preempt running tools so the steer lands right away.
     // A deferred entry waits for the run to end, so it must not cut tools short.
@@ -5800,9 +6246,13 @@ export class AgentSession {
     await this.persistMessage(message);
   }
 
-  /** Pending queued messages (id + text), oldest first, for client display. */
-  listQueuedMessages(): Array<{ id: string; text: string }> {
-    return this.userQueue.map((m) => ({ id: m.id, text: m.text }));
+  /** Pending queued messages (id + text), oldest first, for client display.
+   *  `delivering` ones are already with the agent and can no longer be cancelled. */
+  listQueuedMessages(): Array<{ id: string; text: string; delivering?: true }> {
+    return [
+      ...this.deliveringQueue.map((m) => ({ id: m.id, text: m.text, delivering: true as const })),
+      ...this.userQueue.map((m) => ({ id: m.id, text: m.text })),
+    ];
   }
 
   /** Cancel one pending message by id. Returns true if it was still queued.
@@ -6107,6 +6557,8 @@ export class AgentSession {
    */
   stopBackgroundProcesses(): void {
     this.processManager?.shutdownAll();
+    // Synchronous, so app quit stops Claude Code even when later teardown hangs.
+    this.closeClaudeCodeLive("shutdown");
   }
 
   /** Replace a host-owned system prompt in place without resetting conversation history. */
@@ -6183,7 +6635,10 @@ export class AgentSession {
       return;
     }
     const state = await this.currentPlanPromptState();
-    const message = buildPlanStateMessage(this.seenPlanState, state);
+    const message = buildPlanStateMessage(this.seenPlanState, state, [
+      ...this.tools.map((t) => t.name),
+      ...this.deferredBuiltinToolNames,
+    ]);
     this.pendingPlanNotice = message ? { message, state } : null;
   }
 
@@ -6425,6 +6880,9 @@ export class AgentSession {
     }
     const toolNames = this.tools.map((tool) => tool.name);
     const deferredToolNames = this.deferredToolNamesForPrompt(toolNames);
+    // A missing Claude Code binary fails the run itself with a clear message, not the prompt build.
+    const deferredNeedSearch =
+      deferredToolNames.length > 0 && (await this.claudeCodeProcess().then(Boolean, () => false));
     // Whatever is rendered now is what the model has been told.
     this.announcedLanguages = new Set(this.activeLanguages);
     if (this.agentPrompt !== undefined) {
@@ -6432,6 +6890,7 @@ export class AgentSession {
         cwd: this.cwd,
         toolNames,
         deferredToolNames,
+        deferredNeedSearch,
         context: this.opts.agentContext,
         role: this.opts.agentRole,
         environment: this.recordRenderedEnvironment(),
@@ -6457,6 +6916,7 @@ export class AgentSession {
       this.recordRenderedEnvironment(),
       deferredToolNames,
       this.contextLimits,
+      deferredNeedSearch,
     );
   }
 
@@ -6489,6 +6949,12 @@ export class AgentSession {
    * update is saved in order with the rest of the conversation.
    */
   private async announceNewLanguages(): Promise<void> {
+    const mcpNotice = this.takeMcpNotice();
+    if (mcpNotice) {
+      this.messages.push(mcpNotice);
+      await this.persistMessage(mcpNotice);
+      this.lastPersistedIndex = this.messages.length;
+    }
     const planNotice = this.takePlanNotice();
     if (planNotice) {
       this.messages.push(planNotice);
@@ -6992,6 +7458,7 @@ export class AgentSession {
       generation,
       startedAt,
       afterMessageCount,
+      pid: process.pid,
     });
     this.runJournal.push({ generation, startedAt, afterMessageCount });
   }
@@ -7065,9 +7532,12 @@ export class AgentSession {
     const { provider, model, thinkingLevel, maxTokens: requestedMaxTokens, baseUrl } = this;
     const threshold = this.settingsManager.get("compactThreshold");
     const compactAtTokens = this.settingsManager.get("compactAtTokens");
-    const creds = await this.resolveRunCredentials(provider, {
-      storageKeys: this.currentAuthStorageKeys(),
-    });
+    const claudeCode = await this.claudeCodeProcess();
+    const creds: { accessToken: string; accountId?: string; baseUrl?: string } = claudeCode
+      ? { accessToken: "" }
+      : await this.resolveRunCredentials(provider, {
+          storageKeys: this.currentAuthStorageKeys(),
+        });
     const maxTokens = outputCapForRequest({
       provider,
       model,
@@ -7089,14 +7559,24 @@ export class AgentSession {
       model: resolveTransportModel(provider, model),
       thinking: thinkingLevel,
       maxTokens,
-      userAgent: provider === "anthropic" ? await getClaudeCliUserAgent() : undefined,
-      projectId: creds.projectId,
       prompt: text,
       stack,
       apiKey: creds.accessToken,
       baseUrl: baseUrl ?? creds.baseUrl,
       accountId: creds.accountId,
       signal: this.opts.signal,
+      ...(claudeCode
+        ? {
+            complete: (messages: Message[]) =>
+              claudeCodeComplete({
+                ...claudeCode,
+                model,
+                messages,
+                thinking: thinkingLevel,
+                signal: this.opts.signal,
+              }),
+          }
+        : {}),
     });
   }
 
@@ -7156,6 +7636,19 @@ export class AgentSession {
       .catch(() => {});
   }
   private prewarmController: AbortController | null = null;
+  /** Claude Code session that has seen this history (Claude subscription route). */
+  private claudeCodeSession: ClaudeCodeSessionState | null = null;
+  private releaseClaudeCodeTranscript: (() => void) | undefined;
+
+  /** Keep the retention pass off the transcript this chat would resume. */
+  private holdClaudeCodeTranscript(): void {
+    this.releaseClaudeCodeTranscript?.();
+    const sessionId = this.claudeCodeSession?.sessionId;
+    this.releaseClaudeCodeTranscript = sessionId ? holdClaudeCodeTranscript(sessionId) : undefined;
+  }
+  /** This chat's running Claude Code process, reused while `key` (its start settings) matches. */
+  private claudeCodeLive: { session: ClaudeCodeLiveSession; key: Record<string, string> } | null =
+    null;
 
   /**
    * Best-effort Anthropic prompt-cache prewarm before the user's next turn
@@ -7165,6 +7658,9 @@ export class AgentSession {
    * first real reply is a cache read instead of a cold write.
    */
   async prewarm(signal?: AbortSignal): Promise<{ ok: boolean; reason: string; usage?: Usage }> {
+    // Claude Code keeps its own cache; there is no request prefix of ours to warm.
+    if (await this.claudeCodeProcess().catch(() => null))
+      return { ok: false, reason: "claude_code" };
     // Every provider: the user is typing, so the first request is seconds away.
     this.preconnect();
     if (this.provider !== "anthropic") return { ok: false, reason: "provider" };
@@ -7234,7 +7730,6 @@ export class AgentSession {
         promptCacheKey: this.getPromptCacheKey(),
         supportsImages: modelInfo?.supportsImages,
         supportsVideo: modelInfo?.supportsVideo,
-        userAgent: await getClaudeCliUserAgent(),
         prewarm: true,
         signal: controller.signal,
       });
@@ -7284,7 +7779,7 @@ export class AgentSession {
     }
   }
 
-  private codexShapeSetting(key: "codexResponsesLite" | "codexStrictTools"): CodexShapeSetting {
+  private codexShapeSetting(key: "codexStrictTools"): CodexShapeSetting {
     return this.settingsManager?.get(key) ?? "auto";
   }
 
@@ -7312,7 +7807,8 @@ export class AgentSession {
   async refreshStoredAuthState(): Promise<void> {
     this.lastAccountId =
       this.provider === "openai"
-        ? (await this.authStorage.getCredentials("openai"))?.accountId
+        ? // The ChatGPT plan sign-in lives under its own key; the `openai` slot holds the API key.
+          (await this.authStorage.getCredentials(OPENAI_CHATGPT_KEY))?.accountId
         : undefined;
   }
 
@@ -7419,6 +7915,8 @@ export class AgentSession {
     this.semanticLoop.controller?.abort();
     this.semanticLoop.verdict = null;
     this.verifyPlanLoader?.dispose();
+    this.releaseClaudeCodeTranscript?.();
+    this.releaseClaudeCodeTranscript = undefined;
     // Quiesce any in-flight post-turn compaction BEFORE tearing down state.
     // Capped: a hung summary call must not hold MCP/LSP/sub-agent teardown and
     // window close hostage. Past the cap it is aborted (compact() checks the
@@ -7528,11 +8026,15 @@ export class AgentSession {
     const loadedMessages = this.sessionManager.getMessages(loaded.entries, loaded.header.leafId);
     // Backward scan for the latest host checkpoint (no full copy).
     let savedCompletionReview: (typeof loaded.entries)[number] | undefined;
+    let savedClaudeCode: (typeof loaded.entries)[number] | undefined;
     for (let i = loaded.entries.length - 1; i >= 0; i--) {
+      if (savedCompletionReview && savedClaudeCode) break;
       const entry = loaded.entries[i];
-      if (entry?.type === "custom" && entry.kind === COMPLETION_REVIEW_STATE_KIND) {
+      if (entry?.type !== "custom") continue;
+      if (!savedClaudeCode && entry.kind === CLAUDE_CODE_SESSION_KIND) {
+        savedClaudeCode = entry;
+      } else if (!savedCompletionReview && entry.kind === COMPLETION_REVIEW_STATE_KIND) {
         savedCompletionReview = entry;
-        break;
       }
     }
     this.opts.completionReview?.restore(
@@ -7605,6 +8107,12 @@ export class AgentSession {
     // not fail when Anthropic's stricter many-image limit activates later.
     const systemMsg = this.messages[0]; // Already built
     this.messages = [systemMsg, ...loadedMessages];
+    this.reloadUsedTools(loadedMessages);
+    this.claudeCodeSession = parseClaudeCodeSessionState(
+      savedClaudeCode?.type === "custom" ? savedClaudeCode.data : null,
+      loadedMessages,
+    );
+    this.holdClaudeCodeTranscript();
     // Reads recorded for the previous conversation don't carry over.
     this.clearReadTracker?.();
     const normalizedImageCount = await normalizeMessageImages(this.messages);
@@ -7699,6 +8207,15 @@ export class AgentSession {
    */
   private async recordInterruptedRuns(runs: RunJournalEntry[]): Promise<void> {
     for (const run of runs) {
+      // Another app has this chat open and is still running it: not a crash.
+      if (run.pid !== undefined && run.pid !== process.pid && processIsAlive(run.pid)) {
+        log("WARN", "session", "Unfinished run belongs to another live process; left open", {
+          generation: String(run.generation),
+          startedAt: run.startedAt,
+          pid: String(run.pid),
+        });
+        continue;
+      }
       log("WARN", "session", "Restored a session with an unfinished run", {
         generation: String(run.generation),
         startedAt: run.startedAt,

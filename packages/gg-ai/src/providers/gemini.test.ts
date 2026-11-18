@@ -1,107 +1,16 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
-import { isCodeAssistLicenseRequired, streamGemini } from "./gemini.js";
+import { streamGemini } from "./gemini.js";
 import { formatError } from "../errors.js";
 
 const originalFetch = globalThis.fetch;
-const originalCodeAssistEndpoint = process.env.CODE_ASSIST_ENDPOINT;
-const originalCodeAssistApiVersion = process.env.CODE_ASSIST_API_VERSION;
 
 describe("streamGemini", () => {
   afterEach(() => {
     vi.useRealTimers();
     globalThis.fetch = originalFetch;
-    if (originalCodeAssistEndpoint === undefined) {
-      delete process.env.CODE_ASSIST_ENDPOINT;
-    } else {
-      process.env.CODE_ASSIST_ENDPOINT = originalCodeAssistEndpoint;
-    }
-    if (originalCodeAssistApiVersion === undefined) {
-      delete process.env.CODE_ASSIST_API_VERSION;
-    } else {
-      process.env.CODE_ASSIST_API_VERSION = originalCodeAssistApiVersion;
-    }
     vi.restoreAllMocks();
   });
-
-  it.each([
-    { custom: true, streaming: true },
-    { custom: true, streaming: false },
-    { custom: false, streaming: true },
-    { custom: false, streaming: false },
-  ])(
-    "preserves the wire request with custom=$custom streaming=$streaming",
-    async ({ custom, streaming }) => {
-      process.env.CODE_ASSIST_ENDPOINT = "https://code-assist.example.test";
-      process.env.CODE_ASSIST_API_VERSION = "v2test";
-      const globalFetch = vi.fn<typeof fetch>(() => {
-        throw new Error("Global fetch must not be called");
-      });
-      const payload = {
-        response: {
-          candidates: [{ content: { parts: [{ text: "Hello" }] }, finishReason: "STOP" }],
-          usageMetadata: { promptTokenCount: 7, candidatesTokenCount: 2 },
-        },
-      };
-      const fetchMock = vi
-        .fn<typeof fetch>()
-        .mockResolvedValueOnce(
-          new Response(
-            streaming ? `data: ${JSON.stringify(payload)}\n\n` : JSON.stringify(payload),
-            { headers: { "content-type": streaming ? "text/event-stream" : "application/json" } },
-          ),
-        );
-      globalThis.fetch = custom ? globalFetch : fetchMock;
-      const signal = new AbortController().signal;
-      const result = streamGemini({
-        provider: "gemini",
-        model: "gemini-3-flash-preview",
-        apiKey: "test-key",
-        projectId: "test-project",
-        promptCacheKey: "test-session",
-        streaming,
-        signal,
-        messages: [
-          { role: "system", content: "Be concise" },
-          { role: "user", content: "hi" },
-        ],
-        ...(custom ? { fetch: fetchMock } : {}),
-      });
-      const response = await result.response;
-      const events = [];
-      for await (const event of result) events.push(event);
-      expect(events).toEqual([
-        { type: "text_delta", text: "Hello" },
-        { type: "done", stopReason: "stop_sequence" },
-      ]);
-      expect(response.message.content).toEqual([{ type: "text", text: "Hello" }]);
-      expect(response.usage).toMatchObject({ inputTokens: 7, outputTokens: 2 });
-      expect(globalFetch).not.toHaveBeenCalled();
-      expect(fetchMock).toHaveBeenCalledOnce();
-      const [url, init] = fetchMock.mock.calls[0]!;
-      expect(url.toString()).toBe(
-        `https://code-assist.example.test/v2test:${streaming ? "streamGenerateContent?alt=sse" : "generateContent"}`,
-      );
-      expect(init?.method).toBe("POST");
-      expect(init?.signal).toBe(signal);
-      expect(init?.headers).toEqual({
-        Authorization: "Bearer test-key",
-        "Content-Type": "application/json",
-        "User-Agent": "google-gemini-cli",
-        "X-Goog-Api-Client": "gemini-cli/0.0.0",
-      });
-      expect(JSON.parse(init?.body as string)).toEqual({
-        model: "gemini-3-flash-preview",
-        project: "test-project",
-        user_prompt_id: expect.any(String),
-        request: {
-          systemInstruction: { parts: [{ text: "Be concise" }] },
-          contents: [{ role: "user", parts: [{ text: "hi" }] }],
-          session_id: "test-session",
-        },
-      });
-    },
-  );
 
   it.each(["gemini-3-flash-preview", "gemini-3.8-flash", "gemini-3.5-flash-lite"])(
     "wires %s with tools, output cap, and Ultra clamped to high",
@@ -109,10 +18,8 @@ describe("streamGemini", () => {
       const fetchMock = vi.fn().mockResolvedValue(
         new Response(
           JSON.stringify({
-            response: {
-              candidates: [{ content: { parts: [{ text: "ok" }] }, finishReason: "STOP" }],
-              usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 2, totalTokenCount: 12 },
-            },
+            candidates: [{ content: { parts: [{ text: "ok" }] }, finishReason: "STOP" }],
+            usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 2, totalTokenCount: 12 },
           }),
           { status: 200, headers: { "content-type": "application/json" } },
         ),
@@ -122,7 +29,6 @@ describe("streamGemini", () => {
       const result = streamGemini({
         provider: "gemini",
         model,
-        projectId: "test-project",
         apiKey: "access-token",
         streaming: false,
         maxTokens: 65_536,
@@ -154,58 +60,53 @@ describe("streamGemini", () => {
 
       expect(fetchMock).toHaveBeenCalledOnce();
       const [url, init] = fetchMock.mock.calls[0] as [URL, RequestInit];
-      expect(url.toString()).toBe("https://cloudcode-pa.googleapis.com/v1internal:generateContent");
-      expect(init.headers).toMatchObject({
-        Authorization: "Bearer access-token",
+      expect(url.toString()).toBe(
+        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
+      );
+      expect(init.headers).toEqual({
         "Content-Type": "application/json",
-        "User-Agent": "google-gemini-cli",
-        "X-Goog-Api-Client": "gemini-cli/0.0.0",
+        "x-goog-api-key": "access-token",
       });
       expect(JSON.parse(init.body as string)).toMatchObject({
-        model,
-        project: "test-project",
-        request: {
-          systemInstruction: { parts: [{ text: "system" }] },
-          contents: [
-            {
-              role: "model",
-              parts: [
-                {
-                  functionCall: { id: "call_1", name: "bash", args: { command: "pwd" } },
-                  thoughtSignature: "skip_thought_signature_validator",
-                },
-              ],
-            },
-            {
-              role: "user",
-              parts: [
-                {
-                  functionResponse: {
-                    id: "call_1",
-                    name: "bash",
-                    response: { content: "done" },
-                  },
-                },
-              ],
-            },
-            { role: "user", parts: [{ text: "hi" }] },
-          ],
-          tools: [
-            {
-              functionDeclarations: [
-                {
-                  name: "bash",
-                  description: "Run a command",
-                },
-              ],
-            },
-          ],
-          toolConfig: { functionCallingConfig: { mode: "AUTO" } },
-          generationConfig: {
-            maxOutputTokens: 65_536,
-            thinkingConfig: { includeThoughts: true, thinkingLevel: "HIGH" },
+        systemInstruction: { parts: [{ text: "system" }] },
+        contents: [
+          {
+            role: "model",
+            parts: [
+              {
+                functionCall: { id: "call_1", name: "bash", args: { command: "pwd" } },
+                thoughtSignature: "skip_thought_signature_validator",
+              },
+            ],
           },
-          session_id: "ggcoder:test-session",
+          {
+            role: "user",
+            parts: [
+              {
+                functionResponse: {
+                  id: "call_1",
+                  name: "bash",
+                  response: { content: "done" },
+                },
+              },
+            ],
+          },
+          { role: "user", parts: [{ text: "hi" }] },
+        ],
+        tools: [
+          {
+            functionDeclarations: [
+              {
+                name: "bash",
+                description: "Run a command",
+              },
+            ],
+          },
+        ],
+        toolConfig: { functionCallingConfig: { mode: "AUTO" } },
+        generationConfig: {
+          maxOutputTokens: 65_536,
+          thinkingConfig: { includeThoughts: true, thinkingLevel: "HIGH" },
         },
       });
     },
@@ -215,9 +116,7 @@ describe("streamGemini", () => {
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(
         JSON.stringify({
-          response: {
-            candidates: [{ content: { parts: [{ text: "ok" }] }, finishReason: "STOP" }],
-          },
+          candidates: [{ content: { parts: [{ text: "ok" }] }, finishReason: "STOP" }],
         }),
         { status: 200, headers: { "content-type": "application/json" } },
       ),
@@ -227,7 +126,6 @@ describe("streamGemini", () => {
     const result = streamGemini({
       provider: "gemini",
       model: "gemini-3-flash-preview",
-      projectId: "test-project",
       apiKey: "access-token",
       streaming: false,
       messages: [{ role: "user", content: "hi" }],
@@ -239,20 +137,18 @@ describe("streamGemini", () => {
     await result.response;
 
     const [, init] = fetchMock.mock.calls[0] as [URL, RequestInit];
-    const body = JSON.parse(init.body as string) as { request: Record<string, unknown> };
-    expect(body.request.safetySettings).toEqual([
+    const body = JSON.parse(init.body as string) as Record<string, unknown>;
+    expect(body.safetySettings).toEqual([
       { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_NONE" },
     ]);
-    expect(body.request.contents).toEqual([{ role: "user", parts: [{ text: "hi" }] }]);
+    expect(body.contents).toEqual([{ role: "user", parts: [{ text: "hi" }] }]);
   });
 
   it("rewrites exclusive bounds Gemini rejects into inclusive ones", async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(
         JSON.stringify({
-          response: {
-            candidates: [{ content: { parts: [{ text: "ok" }] }, finishReason: "STOP" }],
-          },
+          candidates: [{ content: { parts: [{ text: "ok" }] }, finishReason: "STOP" }],
         }),
         { status: 200, headers: { "content-type": "application/json" } },
       ),
@@ -262,7 +158,6 @@ describe("streamGemini", () => {
     const result = streamGemini({
       provider: "gemini",
       model: "gemini-3.8-flash",
-      projectId: "test-project",
       apiKey: "access-token",
       streaming: false,
       messages: [{ role: "user", content: "hi" }],
@@ -287,13 +182,9 @@ describe("streamGemini", () => {
     expect(body).not.toContain("exclusiveMaximum");
     const props = (
       JSON.parse(body) as {
-        request: {
-          tools: [
-            { functionDeclarations: [{ parameters: { properties: Record<string, object> } }] },
-          ];
-        };
+        tools: [{ functionDeclarations: [{ parameters: { properties: Record<string, object> } }] }];
       }
-    ).request.tools[0].functionDeclarations[0].parameters.properties;
+    ).tools[0].functionDeclarations[0].parameters.properties;
     expect(props.follow).toMatchObject({ type: "integer", minimum: 1 });
     expect(props.ratio).toMatchObject({ type: "number", maximum: 1 });
   });
@@ -302,10 +193,8 @@ describe("streamGemini", () => {
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(
         JSON.stringify({
-          response: {
-            candidates: [{ content: { parts: [{ text: "ok" }] }, finishReason: "STOP" }],
-            usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 2, totalTokenCount: 12 },
-          },
+          candidates: [{ content: { parts: [{ text: "ok" }] }, finishReason: "STOP" }],
+          usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 2, totalTokenCount: 12 },
         }),
         { status: 200, headers: { "content-type": "application/json" } },
       ),
@@ -315,7 +204,6 @@ describe("streamGemini", () => {
     const result = streamGemini({
       provider: "gemini",
       model: "gemini-3-flash-preview",
-      projectId: "test-project",
       apiKey: "access-token",
       streaming: false,
       messages: [
@@ -345,84 +233,46 @@ describe("streamGemini", () => {
 
     const [, init] = fetchMock.mock.calls[0] as [URL, RequestInit];
     const body = JSON.parse(init.body as string) as {
-      request: { contents: Array<{ role: string; parts: unknown[] }> };
+      contents: Array<{ role: string; parts: unknown[] }>;
     };
-    const toolTurn = body.request.contents.find((c) => c.role === "user");
+    const toolTurn = body.contents.find((c) => c.role === "user");
     // functionResponse carries the text marker; the video rides as inlineData.
     expect(toolTurn?.parts).toContainEqual({
       inlineData: { mimeType: "video/mp4", data: "QUJD" },
     });
   });
 
-  it("still sends Code Assist requests for Code Assist-only preview models", async () => {
-    const fetchMock = vi.fn().mockResolvedValue(
-      new Response(
-        JSON.stringify({
-          response: {
+  it("retries non-streaming requests on upstream retryable statuses", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response("rate limited", { status: 429 }))
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
             candidates: [{ content: { parts: [{ text: "ok" }] }, finishReason: "STOP" }],
-            usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 2, totalTokenCount: 12 },
-          },
-        }),
-        { status: 200, headers: { "content-type": "application/json" } },
-      ),
-    );
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      );
     globalThis.fetch = fetchMock;
 
     const result = streamGemini({
       provider: "gemini",
       model: "gemini-3-flash-preview",
-      projectId: "test-project",
       apiKey: "access-token",
       streaming: false,
       messages: [{ role: "user", content: "hi" }],
     });
 
-    await result.response;
+    const responsePromise = result.response;
+    await vi.advanceTimersByTimeAsync(1_000);
+    await responsePromise;
 
-    const [url, init] = fetchMock.mock.calls[0] as [URL, RequestInit];
-    expect(url.toString()).toBe("https://cloudcode-pa.googleapis.com/v1internal:generateContent");
-    expect(init.headers).toMatchObject({
-      Authorization: "Bearer access-token",
-      "User-Agent": "google-gemini-cli",
-      "X-Goog-Api-Client": "gemini-cli/0.0.0",
-    });
-    expect(JSON.parse(init.body as string)).toMatchObject({
-      model: "gemini-3-flash-preview",
-      project: "test-project",
-      request: { contents: [{ role: "user", parts: [{ text: "hi" }] }] },
-    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
-  it("honors Gemini CLI Code Assist endpoint overrides", async () => {
-    process.env.CODE_ASSIST_ENDPOINT = "https://code-assist.example.test";
-    process.env.CODE_ASSIST_API_VERSION = "v2test";
-    const fetchMock = vi.fn().mockResolvedValue(
-      new Response(
-        JSON.stringify({
-          response: {
-            candidates: [{ content: { parts: [{ text: "ok" }] }, finishReason: "STOP" }],
-          },
-        }),
-        { status: 200, headers: { "content-type": "application/json" } },
-      ),
-    );
-    globalThis.fetch = fetchMock;
-
-    const result = streamGemini({
-      provider: "gemini",
-      model: "gemini-3-flash-preview",
-      projectId: "test-project",
-      apiKey: "access-token",
-      streaming: false,
-      messages: [{ role: "user", content: "hi" }],
-    });
-
-    await result.response;
-
-    const [url] = fetchMock.mock.calls[0] as [URL, RequestInit];
-    expect(url.toString()).toBe("https://code-assist.example.test/v2test:generateContent");
-  });
-
+  // Local Fork: an injected fetch must carry every request, including retries.
   it.each([429, 499, 503])(
     "keeps custom fetch on non-streaming retries for HTTP %s",
     async (status) => {
@@ -433,9 +283,7 @@ describe("streamGemini", () => {
         .mockResolvedValueOnce(
           new Response(
             JSON.stringify({
-              response: {
-                candidates: [{ content: { parts: [{ text: "ok" }] }, finishReason: "STOP" }],
-              },
+              candidates: [{ content: { parts: [{ text: "ok" }] }, finishReason: "STOP" }],
             }),
             { status: 200, headers: { "content-type": "application/json" } },
           ),
@@ -449,7 +297,6 @@ describe("streamGemini", () => {
       const result = streamGemini({
         provider: "gemini",
         model: "gemini-3-flash-preview",
-        projectId: "test-project",
         apiKey: "access-token",
         streaming: false,
         fetch: fetchMock,
@@ -481,7 +328,6 @@ describe("streamGemini", () => {
     const result = streamGemini({
       provider: "gemini",
       model: "gemini-3-flash-preview",
-      projectId: "test-project",
       apiKey: "access-token",
       messages: [{ role: "user", content: "hi" }],
     });
@@ -500,7 +346,6 @@ describe("streamGemini", () => {
     const result = streamGemini({
       provider: "gemini",
       model: "gemini-3-flash-preview",
-      projectId: "test-project",
       apiKey: "access-token",
       messages: [{ role: "user", content: "hi" }],
     });
@@ -520,63 +365,10 @@ describe("streamGemini", () => {
     );
   });
 
-  it("explains unsupported Gemini OAuth models without calling paid endpoints", async () => {
-    const fetchMock = vi.fn();
-    globalThis.fetch = fetchMock;
-
-    const result = streamGemini({
-      provider: "gemini",
-      model: "gemini-1.5-flash",
-      projectId: "test-project",
-      apiKey: "access-token",
-      messages: [{ role: "user", content: "hi" }],
-    });
-
-    await expect(result.response).rejects.toThrow(
-      'Gemini OAuth is configured to use the Gemini Code Assist subscription endpoint only. That endpoint does not currently expose model "gemini-1.5-flash".',
-    );
-    expect(fetchMock).not.toHaveBeenCalled();
-  });
-
-  it("surfaces an account-gated 404 as an entitlement error with actionable guidance", async () => {
-    const body = JSON.stringify({
-      error: { code: 404, message: "Requested entity was not found.", status: "NOT_FOUND" },
-    });
-
-    for (const model of ["gemini-3-flash", "gemini-3.1-pro-preview"]) {
-      globalThis.fetch = vi.fn().mockResolvedValue(new Response(body, { status: 404 }));
-      const result = streamGemini({
-        provider: "gemini",
-        model,
-        projectId: "test-project",
-        apiKey: "access-token",
-        messages: [{ role: "user", content: "hi" }],
-      });
-
-      const err = await result.response.then(
-        () => {
-          throw new Error("expected rejection");
-        },
-        (e: unknown) => e,
-      );
-
-      // The clean message names the model and frames it as an entitlement gap,
-      // never the raw "Requested entity was not found" body.
-      const formatted = formatError(err);
-      expect(formatted.message).toMatch(/isn't entitled to/i);
-      expect(formatted.message).toContain(model);
-      expect(formatted.message).not.toMatch(/Requested entity was not found/i);
-      // The guidance line carries the fix.
-      expect(formatted.guidance).toMatch(/Gemini 3\.1 Flash Lite/i);
-      expect(formatted.guidance).toMatch(/Code Assist Standard\/Enterprise/i);
-    }
-  });
-
-  it("sends an AI Studio API key to the public Gemini API, not Code Assist", async () => {
+  it("sends an AI Studio API key to the public Gemini API", async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(
         JSON.stringify({
-          // The public API answers unwrapped (no Code Assist `response` envelope).
           candidates: [{ content: { parts: [{ text: "ok" }] }, finishReason: "STOP" }],
           usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 2, totalTokenCount: 12 },
         }),
@@ -587,7 +379,7 @@ describe("streamGemini", () => {
 
     const result = streamGemini({
       provider: "gemini",
-      // Code Assist's wire name for 3.5 Flash; the public API calls it gemini-3.5-flash.
+      // The registry id for 3.5 Flash; the public API calls it gemini-3.5-flash.
       model: "gemini-3-flash",
       apiKey: "aistudio-key",
       baseUrl: "https://generativelanguage.googleapis.com/v1beta",
@@ -606,7 +398,7 @@ describe("streamGemini", () => {
     expect(headers["x-goog-api-key"]).toBe("aistudio-key");
     expect(headers.Authorization).toBeUndefined();
     const body = JSON.parse(String(init.body)) as Record<string, unknown>;
-    // Bare request: no Code Assist envelope, and no Code Assist-only session_id.
+    // Bare request: no envelope, project or session_id.
     expect(body.contents).toBeDefined();
     expect(body.request).toBeUndefined();
     expect(body.project).toBeUndefined();
@@ -644,110 +436,6 @@ describe("streamGemini", () => {
     expect(formatted.guidance).toMatch(/aistudio\.google\.com\/apikey/);
     expect(formatted.message).not.toContain("INVALID_ARGUMENT");
   });
-
-  it("does not call a public-API 403 a missing Code Assist licence", async () => {
-    const body = JSON.stringify({
-      error: {
-        code: 403,
-        message: "API key not valid. Please pass a valid API key.",
-        status: "PERMISSION_DENIED",
-        details: [{ reason: "SUBSCRIPTION_REQUIRED" }],
-      },
-    });
-    globalThis.fetch = vi.fn().mockResolvedValue(new Response(body, { status: 403 }));
-    const result = streamGemini({
-      provider: "gemini",
-      model: "gemini-3.8-flash",
-      apiKey: "bad-key",
-      baseUrl: "https://generativelanguage.googleapis.com/v1beta",
-      messages: [{ role: "user", content: "hi" }],
-    });
-    const err = await result.response.then(
-      () => {
-        throw new Error("expected rejection");
-      },
-      (e: unknown) => e,
-    );
-    expect(formatError(err).message).not.toMatch(/Code Assist licence/);
-  });
-
-  it("explains a personal account with no Code Assist licence instead of suggesting a model switch", async () => {
-    // Real response on a Google AI Pro account (2026-10-16), every model: Google
-    // stopped serving Code Assist to personal accounts on 2026-06-18.
-    const body = JSON.stringify({
-      error: {
-        code: 403,
-        message: "The caller does not have permission",
-        status: "PERMISSION_DENIED",
-        details: [
-          {
-            "@type": "type.googleapis.com/google.rpc.ErrorInfo",
-            reason: "SUBSCRIPTION_REQUIRED",
-            domain: "cloudcode-pa.googleapis.com",
-          },
-        ],
-      },
-    });
-    expect(isCodeAssistLicenseRequired(403, body)).toBe(true);
-    expect(isCodeAssistLicenseRequired(403, '{"error":{"code":403}}')).toBe(false);
-    expect(isCodeAssistLicenseRequired(404, body)).toBe(false);
-
-    for (const model of ["gemini-3.1-flash-lite", "gemini-3.8-flash"]) {
-      globalThis.fetch = vi.fn().mockResolvedValue(new Response(body, { status: 403 }));
-      const result = streamGemini({
-        provider: "gemini",
-        model,
-        projectId: "test-project",
-        apiKey: "access-token",
-        messages: [{ role: "user", content: "hi" }],
-      });
-      const err = await result.response.then(
-        () => {
-          throw new Error("expected rejection");
-        },
-        (e: unknown) => e,
-      );
-      const formatted = formatError(err);
-      expect(formatted.message).toMatch(/no Gemini Code Assist licence/);
-      expect(formatted.message).toMatch(/every Gemini model/);
-      expect(formatted.guidance).toMatch(/Standard or Enterprise licence/);
-      // Never the old advice to switch to a Gemini model "that works".
-      expect(formatted.guidance).not.toMatch(/it works on this account/);
-    }
-  });
-
-  it.each(["gemini-3.8-flash", "gemini-3.5-flash-lite"])(
-    "explains unavailable OAuth access for %s without promising paid access",
-    async (model) => {
-      globalThis.fetch = vi
-        .fn()
-        .mockResolvedValue(
-          new Response(
-            JSON.stringify({ error: { code: 404, message: "Requested entity was not found." } }),
-            { status: 404 },
-          ),
-        );
-      const result = streamGemini({
-        provider: "gemini",
-        model,
-        projectId: "test-project",
-        apiKey: "offline-test-key",
-        messages: [{ role: "user", content: "hi" }],
-      });
-      const error = await result.response.then(
-        () => {
-          throw new Error("expected rejection");
-        },
-        (err: unknown) => err,
-      );
-      const formatted = formatError(error);
-      expect(formatted.message).toContain(model);
-      expect(formatted.message).toContain("does not guarantee Code Assist OAuth access");
-      expect(formatted.guidance).toContain("Gemini 3.1 Flash Lite");
-      expect(formatted.guidance).not.toContain("Enterprise");
-      expect(globalThis.fetch).toHaveBeenCalledOnce();
-    },
-  );
 
   it("emits thoughts, text, and tool calls from SSE chunks", async () => {
     const body = [
@@ -790,7 +478,6 @@ describe("streamGemini", () => {
     const result = streamGemini({
       provider: "gemini",
       model: "gemini-3-flash-preview",
-      projectId: "test-project",
       apiKey: "access-token",
       messages: [{ role: "user", content: "hi" }],
     });
@@ -835,12 +522,10 @@ describe("streamGemini", () => {
     globalThis.fetch = vi.fn().mockResolvedValue(
       new Response(
         JSON.stringify({
-          response: {
-            candidates: [
-              { content: { parts: [{ text: "internal", thought: true }] }, finishReason: "STOP" },
-            ],
-            usageMetadata,
-          },
+          candidates: [
+            { content: { parts: [{ text: "internal", thought: true }] }, finishReason: "STOP" },
+          ],
+          usageMetadata,
         }),
         { status: 200, headers: { "content-type": "application/json" } },
       ),
@@ -849,7 +534,6 @@ describe("streamGemini", () => {
     const result = streamGemini({
       provider: "gemini",
       model: "gemini-3-flash-preview",
-      projectId: "test-project",
       apiKey: "test-token",
       streaming: false,
       messages: [{ role: "user", content: "hi" }],

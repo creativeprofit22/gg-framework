@@ -52,7 +52,6 @@ export interface RenderAppConfig {
   apiKey?: string;
   baseUrl?: string;
   accountId?: string;
-  projectId?: string;
   cwd: string;
   version: string;
   theme?: "auto" | ThemeName;
@@ -62,7 +61,7 @@ export interface RenderAppConfig {
   loggedInProviders?: Provider[];
   credentialsByProvider?: Record<
     string,
-    { accessToken: string; accountId?: string; projectId?: string; baseUrl?: string }
+    { accessToken: string; accountId?: string; baseUrl?: string }
   >;
   initialHistory?: CompletedItem[];
   initialTurnMetrics?: TurnMetricPayload[];
@@ -584,7 +583,6 @@ export async function renderApp(config: RenderAppConfig): Promise<void> {
             apiKey: config.apiKey,
             baseUrl: config.baseUrl,
             accountId: config.accountId,
-            projectId: config.projectId,
             cwd: config.cwd,
             version: config.version,
             showTokenUsage: config.showTokenUsage,

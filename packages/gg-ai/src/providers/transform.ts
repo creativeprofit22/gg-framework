@@ -476,8 +476,8 @@ function isDefaultOrHost(baseUrl: string | undefined, host: string): boolean {
 
 /**
  * Pick the tool-name rule for the transport a request will actually use. Mirrors
- * the routing in `stream.ts`: `openai` with an `accountId` is the Codex
- * (Responses) endpoint, MiniMax rides the Anthropic transport but is a third
+ * the routing in `stream.ts`: `openai` itself (the ChatGPT plan or an API key)
+ * is the Responses API, MiniMax rides the Anthropic transport but is a third
  * party, and an `openai` pointed at a custom baseUrl is an unknown compatible
  * server.
  */
@@ -491,7 +491,7 @@ export function toolCallNameRuleFor(
     case "openai":
       if (options?.accountId) return TOOL_CALL_NAME_RULES["openai-responses"];
       return isDefaultOrHost(options?.baseUrl, "api.openai.com")
-        ? TOOL_CALL_NAME_RULES["openai-chat"]
+        ? TOOL_CALL_NAME_RULES["openai-responses"]
         : TOOL_CALL_NAME_RULES.generic;
     case "gemini":
       return TOOL_CALL_NAME_RULES.gemini;
@@ -860,8 +860,13 @@ export function usesDeferredToolLoading(options: {
   if (options.provider === "anthropic") {
     return isDirectAnthropicApi(options.baseUrl) && supportsAnthropicDeferredTools(options.model);
   }
-  if (options.provider === "openai" && options.accountId) {
-    return supportsResponsesToolSearch(options.model);
+  // OpenAI API keys only: the ChatGPT plan route (accountId) rejects
+  // `tool_search`, so promoted tools are appended to `tools` there instead.
+  if (options.provider === "openai" && !options.accountId) {
+    return (
+      isDefaultOrHost(options.baseUrl, "api.openai.com") &&
+      supportsResponsesToolSearch(options.model)
+    );
   }
   return false;
 }
@@ -1708,7 +1713,7 @@ export function toGlmReasoningEffort(
 }
 
 /**
- * Codex Ultra is a local delegation preset. Astra/Sol declare xhigh as their
+ * Codex Ultra is a local delegation preset. Astra/Sol/Terra declare xhigh as their
  * multi_agent_reasoning_effort; older catalogs without that override use max.
  * Source: openai/codex 4c9f42f4, models-manager/models.json and
  * protocol/src/openai_models/reasoning_effort.rs.
@@ -1718,7 +1723,9 @@ export function toCodexReasoningEffort(
   model: string,
 ): Exclude<ThinkingLevel, "ultra"> {
   if (level !== "ultra") return level;
-  return model === "gpt-6-astra" || model === "gpt-6.1-sol" ? "xhigh" : "max";
+  return model === "gpt-6.2-astra" || model === "gpt-6.2-sol" || model === "gpt-6.1-terra"
+    ? "xhigh"
+    : "max";
 }
 
 const DECLARED_EFFORT_ORDER = ["low", "medium", "high", "xhigh", "max"] as const;
@@ -1748,7 +1755,7 @@ export function toOpenAIReasoningEffort(
   level: ThinkingLevel,
   model: string,
 ): "low" | "medium" | "high" | "xhigh" | "max" {
-  if (model === "gpt-6-astra" && level === "max") return "max";
+  if (model === "gpt-6.2-astra" && level === "max") return "max";
   const effort = level === "max" || level === "ultra" ? "xhigh" : level;
   // Sakana Fugu models reject any effort other than "high"/"xhigh", so floor a
   // lower manual selection up to "high" rather than letting the API 400.

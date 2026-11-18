@@ -162,6 +162,8 @@ const PROVIDER_DISPLAY: Record<string, string> = {
   sakana: "Sakana",
   xai: "xAI (Grok)",
   huggingface: "Hugging Face",
+  opencode: "OpenCode",
+  "opencode-go": "OpenCode Go",
   xiaomi: "Xiaomi (MiMo)",
   minimax: "MiniMax",
 };
@@ -319,7 +321,7 @@ export function formatError(err: unknown): FormattedError {
         statusCode: err.statusCode,
         ...(err.requestId ? { requestId: err.requestId } : {}),
         guidance:
-          "Request access via your Anthropic account team (see platform.claude.com/docs/en/about-claude/models/overview), or switch to Claude Fable 5.1 via the model selector — same underlying model, generally available.",
+          "Request access via your Anthropic account team (see platform.claude.com/docs/en/about-claude/models/overview), or switch to Claude Fable 5.2 via the model selector — same underlying model, generally available.",
       };
     }
     // Fast mode rejections must never read as the plan's usage running out:
@@ -339,6 +341,23 @@ export function formatError(err: unknown): FormattedError {
     }
     const miniMax = err.provider === "minimax" ? formatMiniMaxError(err, cleanMessage) : undefined;
     if (miniMax) return miniMax;
+    if (isUsageLimitError(err) && err.provider === "openai" && /chatgpt/i.test(err.message)) {
+      // OpenAI: don't assume the whole plan is empty or guess a reset time —
+      // the limit can be one the user set for GG Coder.
+      return {
+        headline: "ChatGPT plan usage limit reached.",
+        source: "provider",
+        message:
+          "GG Coder has used what your ChatGPT plan allows for now. That can be your plan's limit or one you set for GG Coder.",
+        provider: err.provider,
+        statusCode: err.statusCode,
+        ...(err.requestId ? { requestId: err.requestId } : {}),
+        ...(err.resetsAt ? { resetsAt: err.resetsAt } : {}),
+        guidance:
+          err.hint ??
+          "Check or raise it at chatgpt.com/settings/usage, or add an OpenAI API key to keep going.",
+      };
+    }
     if (isUsageLimitError(err)) {
       const resetClause = err.resetsAt ? ` It resets at ${formatResetTime(err.resetsAt)}.` : "";
       return {

@@ -5,16 +5,17 @@ import { renderLoginSelector } from "../ui/login.js";
 import { ensureAppDirs } from "../config.js";
 import { initLogger, log, closeLogger } from "../core/logger.js";
 import { AuthStorage } from "../core/auth-storage.js";
-import { loginAnthropic } from "../core/oauth/anthropic.js";
-import { loginOpenAI } from "../core/oauth/openai.js";
-import { loginGemini } from "../core/oauth/gemini.js";
-import { loginKimi } from "../core/oauth/kimi.js";
-import { loginXai } from "../core/oauth/xai.js";
 import {
-  GEMINI_API_KEY,
-  GEMINI_API_KEY_BASE_URL,
-  XIAOMI_CREDITS_KEY,
+  CHATGPT_USAGE_URL,
+  ChatGPTPlanNotEnabledError,
+  loginChatGPT,
+  revokeChatGPTSignIn,
+} from "../core/oauth/openai.js";
+import {
+  OPENAI_CHATGPT_KEY,
   dualAuthProvider,
+  signInWithClaudeCode,
+  signOutOfClaudeCode,
 } from "@kenkaiiii/gg-core";
 import { getAuthProvider, describeAuthMethods } from "../core/auth-providers.js";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "../core/oauth/types.js";
@@ -44,13 +45,13 @@ export async function runLogin(): Promise<void> {
     return;
   }
 
-  const meta = getAuthProvider(provider);
+  const providerMeta = getAuthProvider(provider);
   // Native-only providers must never reach generic prompts or OAuth dispatch.
-  if (!meta || meta.methods.length === 0) {
+  if (!providerMeta || providerMeta.methods.length === 0) {
     console.log(
       chalk.hex("#fbbf24")(
-        meta
-          ? `${meta.label} setup is not supported by ggcoder login. Use the desktop app's native connection service.`
+        providerMeta
+          ? `${providerMeta.label} setup is not supported by ggcoder login. Use the desktop app's native connection service.`
           : `Terminal login is not supported for ${provider}.`,
       ),
     );
@@ -74,9 +75,17 @@ export async function runLogin(): Promise<void> {
   // Phase 2: OAuth flow (readline needed for Anthropic code paste)
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
 
+  // Download progress repaints one terminal line instead of printing ~100.
+  let progressLine = false;
+  const endProgressLine = () => {
+    if (progressLine) process.stdout.write("\n");
+    progressLine = false;
+  };
+
   try {
     const callbacks: OAuthLoginCallbacks = {
       onOpenUrl: (url) => {
+        endProgressLine();
         console.log(chalk.hex("#60a5fa").bold("Opening browser..."));
         openBrowser(url);
         console.log(
@@ -92,14 +101,20 @@ export async function runLogin(): Promise<void> {
         return signal ? rl.question(message + " ", { signal }) : rl.question(message + " ");
       },
       onStatus: (message) => {
+        if (process.stdout.isTTY && message.startsWith("Downloading Claude Code…")) {
+          process.stdout.write(`\r\x1b[2K${chalk.hex("#6b7280")(message)}`);
+          progressLine = true;
+          return;
+        }
+        endProgressLine();
         console.log(chalk.hex("#6b7280")(message));
       },
     };
 
-    // Dual-auth providers (Moonshot/Kimi, xAI/Grok) accept subscription OAuth
-    // *and* a metered API key. Let the user pick; OAuth credentials are stored
-    // under a distinct key so both can coexist (OAuth wins at runtime, the key
-    // covers OAuth being out — see gg-core's DUAL_AUTH_PROVIDERS).
+    // Dual-auth providers (OpenAI) take a plan sign-in *and* a pay-per-token
+    // API key. Let the user pick; the sign-in is stored under a distinct key so
+    // both can coexist (the plan wins at runtime, the key covers it while its
+    // usage is out — see gg-core's DUAL_AUTH_PROVIDERS).
     const dual = dualAuthProvider(provider);
     let useOAuth = false;
     if (dual) {
@@ -111,99 +126,121 @@ export async function runLogin(): Promise<void> {
       }
       console.log(
         chalk.hex("#6b7280")(
-          `\n  Connecting both is fine — ${dual.oauthLabel} is used first and the ` +
-            `${dual.apiKeyLabel} covers it while subscription usage is out.\n`,
+          `\n  Connecting both is fine — your ${dual.oauthLabel} is used first and the ` +
+            `${dual.apiKeyLabel} covers it while its usage is out.\n`,
         ),
       );
+      const [signIn, apiKey] = describeAuthMethods(provider);
       const choice = (
         await rl.question(
-          chalk.hex("#60a5fa")(
-            `Sign in with (1) ${dual.oauthLabel} [default] or (2) ${dual.apiKeyLabel}? `,
-          ),
+          chalk.hex("#60a5fa")(`Use (1) ${signIn?.label} [default] or (2) ${apiKey?.label}? `),
         )
       ).trim();
       useOAuth = choice === "" || choice === "1";
     }
 
-    // Gemini: a Google AI Studio API key (default — Code Assist sign-in now
-    // refuses personal accounts) or the Code Assist Google sign-in. They are
-    // stored under different keys, so connecting both is fine.
-    let geminiOAuth = false;
-    if (provider === "gemini") {
-      for (const detail of describeAuthMethods(provider).reverse()) {
-        const n = detail.method === "apikey" ? "1" : "2";
+    // Anthropic: Sign in with Claude (runs through Claude Code, downloaded on
+    // first use) or an Anthropic API key on the normal request path.
+    let claudeSignIn = false;
+    if (provider === "anthropic") {
+      const details = describeAuthMethods(provider);
+      for (const detail of details) {
+        const n = detail.method === "oauth" ? "1" : "2";
         console.log(chalk.hex("#a78bfa")(`  (${n}) ${detail.label}`));
         console.log(chalk.hex("#6b7280")(`      ${detail.billing}`));
         if (detail.when) console.log(chalk.hex("#6b7280")(`      ${detail.when}`));
       }
-      const choice = (
-        await rl.question(
-          chalk.hex("#60a5fa")("Use (1) a Gemini API key [default] or (2) Sign in with Google? "),
-        )
-      ).trim();
-      geminiOAuth = choice === "2";
+      if (details.some((d) => d.method === "apikey")) {
+        const choice = (
+          await rl.question(
+            chalk.hex("#60a5fa")(
+              "Use (1) Sign in with Claude [default] or (2) an Anthropic API key? ",
+            ),
+          )
+        ).trim();
+        claudeSignIn = choice === "" || choice === "1";
+      } else {
+        claudeSignIn = true;
+      }
     }
 
-    // Xiaomi splits API-key auth across two distinct endpoints: the Token Plan
-    // (default, current behavior) and API Credits (required for models like
-    // mimo-v2.6-pro-ultraspeed that aren't served over the Token Plan).
-    let xiaomiCredits = false;
-    if (provider === "xiaomi") {
+    if (claudeSignIn) {
+      const status = await signInWithClaudeCode(authStorage, callbacks);
+      endProgressLine();
+      log("INFO", "auth", "Signed in with Claude through Claude Code");
+      console.log(
+        chalk.hex("#4ade80")(
+          `\n✓ Signed in with Claude${status.email ? ` as ${status.email}` : ""}!`,
+        ),
+      );
+      return;
+    }
+
+    if (dual && useOAuth) {
+      try {
+        const previous = await authStorage.getCredentials(OPENAI_CHATGPT_KEY);
+        const creds = await loginChatGPT(callbacks, previous ? { previous } : {});
+        await authStorage.setCredentials(OPENAI_CHATGPT_KEY, creds);
+      } catch (err) {
+        if (!(err instanceof ChatGPTPlanNotEnabledError)) throw err;
+        console.log(chalk.hex("#fbbf24")(`\n${err.message}`));
+        return;
+      }
+      log("INFO", "auth", "Signed in with ChatGPT");
+      console.log(chalk.hex("#4ade80")("\n✓ Signed in with ChatGPT!"));
+      console.log(chalk.hex("#6b7280")(`  Manage what GG Coder may use at ${CHATGPT_USAGE_URL}`));
+      return;
+    }
+
+    const meta = getAuthProvider(provider);
+    if (!meta?.methods.includes("apikey")) {
+      console.log(chalk.hex("#ef4444")(`${displayName(provider)} has no API key option.`));
+      return;
+    }
+    // A provider taking both a plan key and a pay-per-token key (Kimi, Xiaomi)
+    // stores each under its own key; ask which one this is.
+    const variants = meta.apiKeyVariants ?? [];
+    let variant = variants[0];
+    if (variants.length > 1) {
+      variants.forEach((v, i) => {
+        console.log(chalk.hex("#a78bfa")(`  (${i + 1}) ${v.label}`));
+        console.log(chalk.hex("#6b7280")(`      ${v.billing}`));
+      });
       const choice = (
         await rl.question(
           chalk.hex("#60a5fa")(
-            "Use (1) Token Plan [default] or (2) API Credits (required for UltraSpeed)? ",
+            `Which key is this? ${variants.map((v, i) => `(${i + 1}) ${v.label}`).join(" or ")} [1] `,
           ),
         )
       ).trim();
-      xiaomiCredits = choice === "2";
-    }
-
-    let creds;
-    let storageKey: string = provider;
-    if (dual && useOAuth && meta.methods.includes("oauth")) {
-      creds = provider === "moonshot" ? await loginKimi(callbacks) : await loginXai(callbacks);
-      storageKey = dual.oauthKey;
-    } else if (provider === "gemini" && geminiOAuth) {
-      creds = await loginGemini(callbacks);
-    } else if (getAuthProvider(provider)?.methods.includes("apikey")) {
-      // Key label comes from AUTH_PROVIDERS so the CLI and the desktop app can
-      // never drift on what a provider's key is called.
-      const keyLabel = getAuthProvider(provider)?.apiKeyLabel ?? displayName(provider);
-      const apiKey = await rl.question(chalk.hex("#60a5fa")(`Paste your ${keyLabel} API key: `));
-      if (!apiKey.trim()) {
-        console.log(chalk.hex("#ef4444")("No API key provided. Login cancelled."));
-        return;
-      }
-      creds = {
-        accessToken: apiKey.trim(),
-        refreshToken: "",
-        expiresAt: Date.now() + 365 * 24 * 60 * 60 * 1000 * 100, // ~100 years
-        ...(provider === "xiaomi"
-          ? {
-              baseUrl: xiaomiCredits
-                ? "https://api.xiaomimimo.com/v1"
-                : "https://token-plan-sgp.xiaomimimo.com/v1",
-            }
-          : {}),
-        ...(provider === "gemini" ? { baseUrl: GEMINI_API_KEY_BASE_URL } : {}),
-      } satisfies OAuthCredentials;
-      if (provider === "xiaomi" && xiaomiCredits) {
-        storageKey = XIAOMI_CREDITS_KEY;
-      }
-      if (provider === "gemini") storageKey = GEMINI_API_KEY;
-    } else if (meta.methods.includes("oauth") && provider === "anthropic") {
-      creds = await loginAnthropic(callbacks);
-    } else if (meta.methods.includes("oauth") && provider === "openai") {
-      creds = await loginOpenAI(callbacks);
+      variant = variants[Number(choice) - 1] ?? variants[0];
     } else {
-      throw new Error(`No supported terminal login method for ${meta.label}.`);
+      const detail = describeAuthMethods(provider).find((d) => d.method === "apikey");
+      if (detail?.billing) console.log(chalk.hex("#6b7280")(`  ${detail.billing}`));
+      if (detail?.when) console.log(chalk.hex("#6b7280")(`  ${detail.when}`));
     }
+    // Key label comes from AUTH_PROVIDERS so the CLI and the desktop app can
+    // never drift on what a provider's key is called.
+    const keyLabel = variant?.label ?? meta.apiKeyLabel ?? displayName(provider);
+    const apiKey = await rl.question(chalk.hex("#60a5fa")(`Paste your ${keyLabel} API key: `));
+    if (!apiKey.trim()) {
+      console.log(chalk.hex("#ef4444")("No API key provided. Login cancelled."));
+      return;
+    }
+    const baseUrl = variant?.baseUrl ?? meta.apiKeyBaseUrl;
+    const creds = {
+      accessToken: apiKey.trim(),
+      refreshToken: "",
+      expiresAt: Date.now() + 365 * 24 * 60 * 60 * 1000 * 100, // ~100 years
+      ...(baseUrl ? { baseUrl } : {}),
+    } satisfies OAuthCredentials;
+    const storageKey = variant?.key ?? provider;
 
     await authStorage.setCredentials(storageKey, creds);
     log("INFO", "auth", `Login succeeded for ${displayName(provider)}`);
     console.log(chalk.hex("#4ade80")(`\n✓ Logged in to ${displayName(provider)} successfully!`));
   } finally {
+    endProgressLine();
     rl.close();
     closeLogger();
   }
@@ -475,8 +512,20 @@ export async function runLogout(): Promise<void> {
 
   const authStorage = new AuthStorage();
   await authStorage.load();
+  // Claude Code holds the Claude login itself; the marker goes with clearAll.
+  await signOutOfClaudeCode(authStorage);
+  // End the ChatGPT plan's renewable session at OpenAI before dropping it.
+  const chatgpt = await authStorage.getCredentials(OPENAI_CHATGPT_KEY);
+  const revoked = chatgpt ? await revokeChatGPTSignIn(chatgpt) : true;
   await authStorage.clearAll();
   log("INFO", "auth", "Logout succeeded");
   closeLogger();
   console.log(chalk.green("Logged out successfully."));
+  if (!revoked) {
+    console.log(
+      chalk.hex("#fbbf24")(
+        "OpenAI didn't confirm the ChatGPT sign-out. Disconnect GG Coder in ChatGPT settings to be sure.",
+      ),
+    );
+  }
 }

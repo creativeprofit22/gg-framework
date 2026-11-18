@@ -84,7 +84,7 @@ const state = {
 const astraState = {
   ...state,
   provider: "openai",
-  model: "gpt-6-astra",
+  model: "gpt-6.2-astra",
   accountId: "fixture-account",
   // Eligibility fails closed when absent; the daemon grants it for an eligible account.
   openAICodexContextProfileEligibility: { canChange: true },

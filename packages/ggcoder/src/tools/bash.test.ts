@@ -8,6 +8,7 @@ import {
   createBashTool,
   executeForegroundCommand,
   renderBashOutput,
+  REVIEW_SKIPPED_NOTE,
 } from "./bash.js";
 import type { ForegroundLimits } from "./foreground-limits.js";
 import type { BashToolResultDetails } from "../types.js";
@@ -178,20 +179,18 @@ describe("foreground verification review", () => {
   });
 
   it.each([
-    { command: "npm test; git diff" },
-    { command: "npm test && git diff --check" },
+    { command: "echo edited > note.txt && npm test" },
     { command: "echo not-a-check" },
-    { command: "npm test", persist: true },
-    { command: "npm test", run_in_background: true },
-  ])("rejects unsupported review execution before spawning: %j", async (args) => {
-    const spawnSpy = vi.spyOn(localOperations.process, "spawn");
-    try {
-      const tool = createBashTool(tmpHome, new ProcessManager());
-      const result = await tool.execute({ ...args, review: true }, context());
-      expect(result).toContain("Nothing was run");
-      expect(spawnSpy).not.toHaveBeenCalled();
-    } finally {
-      spawnSpy.mockRestore();
+    { command: "echo bg", run_in_background: true },
+  ])("runs a command that cannot carry a review and skips only the review: %j", async (args) => {
+    const tool = createBashTool(tmpHome, new ProcessManager());
+    const result = outputText(await tool.execute({ ...args, review: true }, context()));
+    // The edits used to be thrown away here, and the model re-sent them unreviewed.
+    expect(result).toContain(REVIEW_SKIPPED_NOTE);
+    expect(result).not.toContain("Independent read-only review");
+    expect(result).not.toContain("Nothing was run");
+    if (args.command.startsWith("echo edited")) {
+      expect(await fs.readFile(path.join(tmpHome, "note.txt"), "utf8")).toBe("edited\n");
     }
   });
 
@@ -216,7 +215,12 @@ describe("foreground verification review", () => {
     };
     const args = { command: "node gate.mjs", review: true };
     const withoutPlan = createBashTool(tmpHome, new ProcessManager());
-    expect(await withoutPlan.execute(args, context())).toContain("Nothing was run");
+    // Without a plan the command is not a gate: it runs, with review marked skipped.
+    const unplanned = outputText(await withoutPlan.execute(args, context()));
+    expect(unplanned.split("\n")[0]).toBe("Exit code: 0");
+    expect(unplanned).toContain("gate ok");
+    expect(unplanned).toContain(REVIEW_SKIPPED_NOTE);
+    expect(unplanned).not.toContain("Independent read-only review");
     const tool = createBashTool(
       tmpHome,
       new ProcessManager(),

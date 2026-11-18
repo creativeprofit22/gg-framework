@@ -66,14 +66,10 @@ beforeEach(async () => {
     );
   await fs.mkdir(path.join(tempHome, ".gg"), { recursive: true });
   await fs.writeFile(
-    path.join(tempHome, ".gg", "claude-code-version.json"),
-    JSON.stringify({ version: "2.1.75", fetchedAt: Date.now() }),
-  );
-  await fs.writeFile(
     path.join(tempHome, ".gg", "auth.json"),
     JSON.stringify({
       anthropic: { accessToken: "t", refreshToken: "t", expiresAt: Date.now() + 3_600_000 },
-      openai: { accessToken: "t", refreshToken: "t", expiresAt: Date.now() + 3_600_000 },
+      openai: { accessToken: "t", refreshToken: "", expiresAt: Date.now() + 3_600_000 },
     }),
   );
 });
@@ -89,7 +85,7 @@ async function createSession(historyChars: number) {
   const { AgentSession } = await import("./agent-session.js");
   const session = new AgentSession({
     provider: "anthropic",
-    model: "claude-fable-5-1",
+    model: "claude-fable-5-2",
     cwd: process.cwd(),
     systemPrompt: "stable role prompt",
     thinkingLevel: "high",
@@ -131,7 +127,6 @@ describe("AgentSession.prewarm", () => {
         "cacheRetention",
         "promptCacheKey",
         "transportSessionId",
-        "userAgent",
       ]) {
         // The loop takes webSearch as a per-request getter (native search can
         // be attached mid-run); parity is about the value the request carries.
@@ -158,7 +153,7 @@ describe("AgentSession.prewarm", () => {
     const { AgentSession } = await import("./agent-session.js");
     const session = new AgentSession({
       provider: "anthropic",
-      model: "claude-fable-5-1",
+      model: "claude-fable-5-2",
       cwd: project,
       thinkingLevel: "high",
       transient: true,

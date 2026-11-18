@@ -1,16 +1,31 @@
 {
   "name": "@kenkaiiii/ggcoder",
-  "version": "5.92.0",
+  "version": "5.104.0",
   "type": "module",
-  "description": "Lean CLI coding agent for 12 LLM providers and local models, with OAuth for Anthropic, OpenAI and Gemini",
+  "description": "The engine and CLI behind the GG Coder desktop app: a lean coding agent for Claude, ChatGPT, Grok, Kimi, 12 providers and local models.",
+  "author": "Ken Kai",
+  "keywords": [
+    "coding-agent",
+    "ai",
+    "cli",
+    "llm",
+    "claude",
+    "openai",
+    "agent",
+    "terminal"
+  ],
   "license": "AGPL-3.0-only",
   "engines": {
     "node": ">=22"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/kenkaiiii/gg-framework.git",
+    "url": "git+https://github.com/KenKaiii/gg-framework.git",
     "directory": "packages/ggcoder"
+  },
+  "homepage": "https://github.com/KenKaiii/gg-framework/tree/main/packages/ggcoder#readme",
+  "bugs": {
+    "url": "https://github.com/KenKaiii/gg-framework/issues"
   },
   "bin": {
     "ggcoder": "./dist/cli.js"
@@ -88,6 +103,10 @@
       "import": "./dist/core/auth/index.js",
       "types": "./dist/core/auth/index.d.ts"
     },
+    "./web": {
+      "import": "./dist/web.js",
+      "types": "./dist/web.d.ts"
+    },
     "./utils/open-browser": {
       "import": "./dist/utils/open-browser.js",
       "types": "./dist/utils/open-browser.d.ts"
@@ -113,49 +132,49 @@
     "test:daemon-serial": "vitest run src/app-sidecar-ask-supersede.test.ts src/app-sidecar-attachments-http.test.ts src/app-sidecar-new-session-http.test.ts src/app-sidecar-programmatic-focus.test.ts src/app-sidecar-progress.test.ts src/app-sidecar-prompt-http.test.ts src/app-sidecar-prompt-supersession-http.test.ts src/app-sidecar-qwen-auth.test.ts src/app-sidecar-refusal-http.test.ts src/app-sidecar-restored-enhancements.test.ts src/app-sidecar-trophies-http.test.ts --no-file-parallelism"
   },
   "dependencies": {
-    "@anthropic-ai/sandbox-runtime": "0.0.78",
-    "@jridgewell/trace-mapping": "^0.3.25",
+    "@anthropic-ai/sandbox-runtime": "0.0.82",
+    "@anthropic-ai/claude-agent-sdk": "0.3.321",
     "@kenkaiiii/agent-home-sdk": "^0.3.8",
     "@kenkaiiii/gg-agent": "workspace:*",
     "@kenkaiiii/gg-ai": "workspace:*",
     "@kenkaiiii/gg-core": "workspace:*",
-    "@modelcontextprotocol/client": "^2.0.0",
+    "@modelcontextprotocol/client": "^2.4.0",
     "chalk": "^5.6.2",
-    "diff": "^8.0.3",
+    "diff": "^8.0.4",
     "fast-glob": "^3.3.3",
-    "ignore": "^7.0.5",
+    "ignore": "^7.0.14",
     "ink": "npm:@kenkaiiii/ink@6.8.0-gg.2",
     "lowlight": "^3.3.0",
     "marked": "^15.0.12",
     "opensrc": "^0.7.2",
-    "react": "^19.2.5",
-    "sharp": "^0.35.3",
-    "string-width": "^8.2.0",
+    "react": "^19.3.1",
+    "sharp": "^0.35.5",
+    "string-width": "^8.3.0",
     "strip-ansi": "^7.2.0",
-    "tslib": "2.8.1",
+    "tslib": "2.9.1",
     "typescript": "^6.0.3",
     "typescript-language-server": "^5.3.0",
-    "wrap-ansi": "^10.0.0",
-    "zod": "^4.4.3"
+    "wrap-ansi": "^10.0.2",
+    "zod": "^4.6.7"
   },
   "optionalDependencies": {
-    "@huggingface/transformers": "4.2.0",
+    "@huggingface/transformers": "4.3.2",
     "@mozilla/readability": "^0.6.0",
     "hyperframes": "0.8.82",
-    "linkedom": "^0.18.12",
+    "linkedom": "^0.18.15",
     "ogg-opus-decoder": "^1.6.13",
-    "playwright": "^1.50.0",
-    "turndown": "^7.2.4",
+    "playwright": "^1.65.0",
+    "turndown": "^7.2.5",
     "turndown-plugin-gfm": "^1.0.2",
     "unpdf": "^1.6.2"
   },
   "devDependencies": {
     "@types/hast": "^3.0.4",
-    "@types/node": "^25.6.0",
-    "@types/react": "^19.2.14",
+    "@types/node": "^26.6.6",
+    "@types/react": "^19.3.0",
     "@types/turndown": "^5.0.6",
     "esbuild": "0.28.2",
-    "tsx": "^4.22.3",
+    "tsx": "^4.23.15",
     "vitest": "^4.1.4"
   },
   "publishConfig": {

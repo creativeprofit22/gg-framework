@@ -1,4 +1,4 @@
-import type { AgentSession } from "../core/agent-session.js";
+import type { AgentSession, McpServerChange } from "../core/agent-session.js";
 import type { AuthStorage } from "../core/auth-storage.js";
 import type { GoalRecord } from "../core/goals-store.js";
 import type { RunClaim } from "../core/run-claim.js";
@@ -25,6 +25,8 @@ export interface SessionRouteContext {
   readonly trophies: TrophyManager;
   readonly sessionId: string;
   readonly sessionIdsAt: (cwd: string) => string[];
+  /** Apply a saved MCP server change to every open window; result per session id. */
+  readonly syncMcpServer: (name: string) => Promise<Map<string, McpServerChange | null>>;
   readonly busyAt: (cwd: string) => boolean;
   /** Set when this session's cwd is a Goal folder; null for every other session. */
   goal: { dir: string; record: GoalRecord } | null;

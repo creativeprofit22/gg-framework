@@ -37,7 +37,7 @@ import {
   toModelInfo,
   DEFAULT_LOCAL_ENDPOINTS,
 } from "@kenkaiiii/gg-core";
-import type { Message, ContentPart, ToolResult } from "@kenkaiiii/gg-ai";
+import type { Message, ContentPart, StreamResponse, ToolResult } from "@kenkaiiii/gg-ai";
 
 // ── Helpers ────────────────────────────────────────────────
 
@@ -250,8 +250,8 @@ describe("compaction thresholds across all models", () => {
   });
 
   const openAITransportCases = [
-    { id: "gpt-6-astra", publicWindow: 1_050_000, codexWindow: 272_000 },
-    { id: "gpt-6.1-sol", publicWindow: 1_050_000, codexWindow: 272_000 },
+    { id: "gpt-6.2-astra", publicWindow: 1_050_000, codexWindow: 272_000 },
+    { id: "gpt-6.2-sol", publicWindow: 1_050_000, codexWindow: 272_000 },
     { id: "gpt-6-luna", publicWindow: 1_050_000, codexWindow: 272_000 },
   ] as const;
 
@@ -784,6 +784,71 @@ describe("compact", () => {
     }
   });
 
+  it("sends the summary request through `complete` when given one", async () => {
+    const mockStream = vi.mocked(stream);
+    mockStream.mockReset();
+    const complete = vi.fn(async () => ({
+      message: { role: "assistant" as const, content: "Summary from the hook." },
+      stopReason: "end_turn" as const,
+      usage: { inputTokens: 10, outputTokens: 5 },
+    }));
+    const result = await compact(buildConversation(30), { ...baseOptions, complete });
+    expect(mockStream).not.toHaveBeenCalled();
+    expect(complete).toHaveBeenCalledTimes(1);
+    expect(complete.mock.calls[0]).toMatchObject([
+      { model: expect.any(String), maxTokens: expect.any(Number) },
+    ]);
+    expect(result.messages[1]!.content as string).toContain("Summary from the hook.");
+  });
+
+  it("keeps a `complete` summary alive past the deadline while it reports activity", async () => {
+    vi.useFakeTimers();
+    try {
+      const beatGap = SUMMARY_ATTEMPT_TIMEOUT_MS * 0.66;
+      const totalDuration = SUMMARY_ATTEMPT_TIMEOUT_MS * 2.5;
+      const complete = vi.fn(
+        ({ onActivity }: { onActivity: () => void }) =>
+          new Promise<StreamResponse>((resolve) => {
+            const beat = setInterval(onActivity, beatGap);
+            setTimeout(() => {
+              clearInterval(beat);
+              resolve({
+                message: { role: "assistant", content: "Slow summary from the hook." },
+                stopReason: "end_turn",
+                usage: { inputTokens: 10, outputTokens: 5 },
+              });
+            }, totalDuration);
+          }),
+      );
+      const promise = compact(buildConversation(30), { ...baseOptions, complete });
+      await vi.advanceTimersByTimeAsync(totalDuration + 1);
+      const result = await promise;
+      expect(complete).toHaveBeenCalledTimes(1);
+      expect(result.messages[1]!.content as string).toContain("Slow summary from the hook.");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("still times out a `complete` summary that goes silent", async () => {
+    vi.useFakeTimers();
+    try {
+      let signal: AbortSignal | undefined;
+      const complete = vi.fn((request: { signal: AbortSignal }) => {
+        signal = request.signal;
+        return new Promise<StreamResponse>(() => {});
+      });
+      const promise = compact(buildConversation(30), { ...baseOptions, complete });
+      await vi.advanceTimersByTimeAsync(SUMMARY_ATTEMPT_TIMEOUT_MS + 1);
+      const result = await promise;
+      expect(complete).toHaveBeenCalledTimes(1);
+      expect(signal?.aborted).toBe(true);
+      expect(result.messages[1]!.content as string).toContain("## Goal");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("produces summary message with LLM response", async () => {
     const mockStream = vi.mocked(stream);
     mockStream.mockReturnValue(
@@ -841,7 +906,7 @@ describe("compact", () => {
 
   it.each([
     ["anthropic", "claude-opus-5-5", "claude-sonnet-5-5"],
-    ["openai", "gpt-6.1-sol", "gpt-6-luna"],
+    ["openai", "gpt-6.2-sol", "gpt-6-luna"],
     ["glm", "glm-5.3", "glm-5.3-flash"],
     ["deepseek", "deepseek-v4-pro", "deepseek-flash"],
   ] as const)(
@@ -974,7 +1039,7 @@ describe("compact", () => {
       await compact(buildConversation(30), {
         ...baseOptions,
         provider: "openai",
-        model: "gpt-6.1-sol",
+        model: "gpt-6.2-sol",
       });
 
       expect(mockStream.mock.calls.map(([request]) => request.model)).toEqual(["gpt-6-luna"]);

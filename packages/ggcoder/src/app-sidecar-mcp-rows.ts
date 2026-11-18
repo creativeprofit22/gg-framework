@@ -5,8 +5,11 @@ import { hiddenToolMessage } from "./core/mcp/index.js";
 import { loadServers } from "./core/mcp/store.js";
 import type { MCPServerConfig } from "./core/mcp/types.js";
 
+/** One wire row for the MCP list (upstream name for the shared gg-core row). */
+export type McpWireRow = McpServerRow;
+
 /** A short transport summary for display (URL or command + arguments). */
-function mcpRowSummary(config: MCPServerConfig): string {
+export function mcpRowSummary(config: MCPServerConfig): string {
   if (config.url) return config.url;
   return [config.command, ...(config.args ?? [])].filter(Boolean).join(" ");
 }
@@ -69,6 +72,25 @@ export async function buildMcpRows(cwd: string, settingsFile: string): Promise<M
         summary: mcpRowSummary(s.config),
       })),
     ];
+  } finally {
+    await manager.dispose();
+  }
+}
+
+/** Probe one server before persisting it. Never throws: a failed probe returns
+ * ok:false with a readable error so the config can still be saved. */
+export async function probeMcp(
+  config: MCPServerConfig,
+): Promise<{ ok: boolean; toolCount: number; error?: string; requiresAuth?: boolean }> {
+  const manager = new MCPClientManager();
+  try {
+    const result = await manager.probe(config);
+    return {
+      ok: result.ok,
+      toolCount: result.toolCount,
+      error: result.error,
+      requiresAuth: result.requiresAuth,
+    };
   } finally {
     await manager.dispose();
   }

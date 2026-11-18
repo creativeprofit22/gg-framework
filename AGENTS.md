@@ -4,13 +4,16 @@
 
 pnpm monorepo for GG Coder: a multi-provider coding agent shipped as the `ggcoder` CLI and a Tauri desktop app driven by that CLI's Node daemon. This checkout is the **Local Fork** of upstream.
 
-## Ownership
+- User-facing work must work in `gg-app`; a CLI/Ink-only change is incomplete.
+- Read `CONTEXT.md` before naming anything.
+- `gg-app` reaches the engine over HTTP only. `gg-core` depends only on `gg-ai` and owns model and auth logic.
+- Retired, never re-add to builds or releases: Realtime Voice, Boss, Editor, Premiere Panel, Eyes.
 
 - `packages/gg-ai`: provider adapters behind one streaming API.
 - `packages/gg-agent`: agent loop and tool execution only (exposes a `transformContext` hook). Compaction and subagents live in `ggcoder/src/core/`.
 - `packages/gg-core`: auth/config/path storage and the cross-process contracts (Project Notes, Roadmap, slash commands, programmatic execution, `verify-plan`) exported as subpaths. Harness check module map: [docs/harness-checks.md](docs/harness-checks.md).
 - `packages/ggcoder`: CLI, tools, compaction, subagent manager, desktop daemon (`app-sidecar.ts` + `app-sidecar-*.ts` routes), slash-command installers in `scripts/`.
-- `packages/gg-world`: in-app "game mode" built into `gg-app/public/world`; gg-app `dev`/`build` rebuild it `--if-stale`. `gg-boss`, `gg-editor*`, `gg-voice`, `ggcoder-eyes`, `experiments/`, `stranger/` are empty.
+- `gg-boss`, `gg-editor*`, `gg-voice`, `ggcoder-eyes`, `experiments/`, `stranger/` are empty.
 - `gg-app`: React UI; Rust `src-tauri` owns native access and spawns/proxies the daemon.
 - `Matey`: unrelated Electron app; imports no framework packages but is in the workspace and root lint/format.
 
@@ -28,7 +31,7 @@ pnpm monorepo for GG Coder: a multi-provider coding agent shipped as the `ggcode
 - Provider HTTP goes through `gg-ai/src/utils/provider-fetch.ts` (undici's 300s header/body caps killed long requests). The stall watchdog counts SSE pings as activity because silent thinking can last many minutes.
 - Windows file locks (`gg-core/src/file-lock.ts`): a released lock dir may still be pending delete (EPERM, not EEXIST); never break a live holder's lock before its contents are written. Flaky-test fixes here use injected clocks/polling, not sleeps.
 - `.gitattributes` forces LF (CRLF only for `.bat/.cmd/.ps1`): ggcoder's seeded agent fixtures are SHA-256 hashed, so CRLF breaks Windows tests.
-- `script-src` in `tauri.conf.json` needs both `tauri://localhost` and `http://tauri.localhost`; the release-build World frame broke twice without it, and dev runs don't catch it.
+- `script-src` in `tauri.conf.json` needs both `tauri://localhost` and `http://tauri.localhost`; release builds broke twice without it, and dev runs don't catch it.
 - Identities: base `tauri.conf.json` stays upstream (`com.ggcoder.app`, updater on). Local Fork (`com.ggcoder.local-fork`) lives in `tauri.local.conf.json` + the `build-local-hotfix.mjs` overlay with updater off. `tauri.installed-smoke.conf.json` adds `com.ggcoder.local-fork.installed-smoke`. `assertIsolatedIdentities` fails the build if they leak (keeps local builds off the official install).
 - Rust `reqwest` is `rustls-no-provider` (updater feature unification): building a client before `install_rustls_provider` panics. Use `http_client_builder()`, including in tests.
 - `// Local Fork:` comments (`daemon.rs`, `commands/agent.rs`, `auth.rs`, `commands/files.rs`) mark fork replacements of upstream tests/behavior; keep them through upstream syncs.
@@ -38,7 +41,34 @@ pnpm monorepo for GG Coder: a multi-provider coding agent shipped as the `ggcode
 - A `.gg/verify-plan.json` command runs only after per-descriptor approval (`verifyPlanApprovals`, sha256 of the exact text); project MCP trust never approves it, and any edit needs approval again.
 - Machine-profile defaults pass `VITEST_MAX_WORKERS`/Jest worker vars through but never set them (that would override a project's `maxWorkers`/`fileParallelism: false`).
 
-## Workflows
+## Build and test
+
+- Packages resolve each other through `dist`: run `pnpm build` before `pnpm check`, `pnpm test` or `pnpm --filter gg-app tauri dev`. After engine or Rust edits, rebuild and restart the app.
+- One test file: `pnpm --filter <pkg> test <name>`. Adding `--` runs the whole suite, and the repo root has no vitest config.
+- pnpm settings live in `pnpm-workspace.yaml`, not package.json. A new native dep must be added to `onlyBuiltDependencies` or its install script silently doesn't run.
+- `patches/ink@6.8.0.patch` is not applied; ggcoder uses the fork `@kenkaiiii/ink`.
+- After bumping `@anthropic-ai/claude-agent-sdk`, run `node .github/ci/claude-code-manifest.mjs`; CI fails on a stale manifest.
+- Windows CI fails with EBUSY/EPERM when a test removes files a live child still holds: wait for exit first, or reuse `retryWindowsReplace` / `removeWhenReleased`.
+
+## App and sidecar
+
+- A new sidecar feature needs four parts: sidecar handler, Rust `#[tauri::command]` proxy that attaches the session, its `generate_handler!` entry, and a typed `agent.ts` wrapper that awaits `waitForReady()`.
+- `~/.gg/gg-app.json` is written by Rust and the sidecar: change its schema on both sides, and merge your own key under the lock instead of overwriting the file.
+- App-visible agent errors go through `broadcastError` in `app-sidecar.ts`, never a raw provider string.
+- Passing `skills` to `AgentSession` disables skill discovery; Motion relies on this, so keep `assets/motion/skills` out of `assets/skills`.
+- Rust: resolve `~/.gg` paths with `paths::home_dir()` and spawn children through `hide_console`; anything else breaks only on Windows.
+- The packaged sidecar runs Node 22.12.0, not your dev Node. A new native, WASM, lazily loaded or spawned package must be externalized in `bundle-sidecar.mjs` (peers in `RUNTIME_PEERS`). Both fail only in installed builds.
+- App logs are in `~/.gg/gg-app-sidecar.log`, not `debug.log`.
+
+## Prompt cache
+
+- The tool array is append-only: `tool_search` promotion must `push` onto `this.tools`; reordering invalidates the prefix cache.
+- Mid-session env changes go in as an appended env-delta message (`core/env-delta.ts`); never re-render the cached system prompt.
+
+## Release and packaging
+
+- Every npm release also needs a desktop release: `pnpm --filter gg-app bump …`, a `gg-app/src/changelog.ts` entry, and the `v<version>` tag pushed last, on `origin/main`.
+- Packaging: follow `gg-app/DISTRIBUTION.md`; `tauri build` does not stage Node or bundle the sidecar.
 
 - Build order: `gg-ai` → `gg-agent` → `gg-core` → `ggcoder`, then `pnpm --filter gg-app stage:node` → `bundle:sidecar` → `node gg-app/scripts/smoke-sidecar.mjs` → Tauri build. Root `build` (`pnpm -r`) doesn't enforce this; CI does. Sidecar bundles hold a staged Node + native addons, so they are per-OS.
 - Generated-output audit: `node --test scripts/audit-generated.test.mjs`, then `node scripts/audit-generated.mjs --inspect` (`--inspect` must be the only arg).

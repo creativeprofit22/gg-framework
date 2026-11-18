@@ -5,6 +5,7 @@ import {
 } from "@kenkaiiii/gg-core";
 import { discoverCommands, type CommandDiscoveryOptions } from "./core/command-discovery.js";
 
+// Local Fork: folders stay on /add-dir and /remove-dir (upstream's Folders panel was not ported).
 export const WORKSPACE_ACTIONS: SlashCommandListing[] = [
   {
     name: "programmatic-run",

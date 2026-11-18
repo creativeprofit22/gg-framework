@@ -91,6 +91,7 @@ export default defineConfig({
           include: [
             "src/**/*.test.ts",
             "src/**/*.test.tsx",
+            "live-preview/**/*.test.ts",
             "scripts/**/*.test.mjs",
             "scripts/**/*.test.ts",
           ],

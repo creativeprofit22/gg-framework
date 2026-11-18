@@ -1,5 +1,97 @@
 # @kenkaiiii/gg-ai
 
+## 5.104.0
+
+### Minor Changes
+
+- 7c90836: Replace GPT-6 Astra with GPT-6.2 Astra (`gpt-6.2-astra`) and GPT-6.1 Sol with GPT-6.2 Sol (`gpt-6.2-sol`), plus their Fast variants. Both have 1.05M context on the public Responses API (922K max input), 128K output and text+image input. Astra costs $8/$40 per MTok (cached input $0.40) and Sol $2/$10 (cached input $0.10). The 272K ChatGPT-plan window, the `low` default effort and the full ladder up to `ultra` carry over from the models they replace.
+
+  GPT-6.2 Sol is the new OpenAI default (registry, CLI, benchmarks). The login hub, footer names, READMEs, Fast mode, Ultra delegation and subagent policy now use the 6.2 ids. `gpt-6-astra` and `gpt-6.1-sol` are retired, so a saved session still on one falls back to the provider default on next start.
+
+### Patch Changes
+
+- 7c90836: When OpenAI stops ChatGPT plan requests with `subscription_sharing_usage_limit_exceeded`, the desktop error now says the limit can be the plan's or the one ChatGPT sets for GG Coder, and offers a Manage usage button that opens chatgpt.com/settings/usage. It used to say "Wait for the reset, or use another provider", which left users thinking GG Coder was broken. A `subscription_sharing_usage_unavailable` reply (OpenAI couldn't check usage) no longer shows as "usage limit reached".
+
+## 5.103.0
+
+## 5.102.0
+
+## 5.101.0
+
+## 5.100.3
+
+## 5.100.2
+
+## 5.100.1
+
+## 5.100.0
+
+## 5.99.0
+
+## 5.98.2
+
+## 5.98.1
+
+## 5.98.0
+
+### Minor Changes
+
+- ec684b8: Add OpenCode as two providers: **OpenCode Go** (the subscription) and **OpenCode** (pay-as-you-go), each connected with an OpenCode Console API key (#142). Every request carries GG Coder's own User-Agent and a stable `x-opencode-session` per conversation, which Go requires; calls made outside a conversation (summaries, the prompt enhancer) share one fallback id. Models are listed as `opencode-go/<id>` and `opencode/<id>` and run over the gateway's Chat Completions API, so only the models OpenCode serves on that API are offered (19 of Go's 30 today); models whose own API is Responses, Anthropic Messages or Gemini are left out for now. Requests cap output with `max_tokens` and return earlier thinking as `reasoning_content`, which the gateway's backends require. The desktop app reads each connected plan's public model list (context, output cap, image input, effort levels) and refreshes it every six hours; pay-as-you-go leaves out the free tier, which only runs inside OpenCode. Kimi K3, GLM-5.3 and GLM-5.3-Flash are built in for the CLI and offline starts.
+
+  - gg-ai: new `opencode` and `opencode-go` providers.
+  - gg-core: `parseOpenCodeCatalog`, `OPENCODE_CATALOG_URLS`, `OPENCODE_PROVIDERS`, `formatOpenCodeModelId`.
+
+## 5.97.1
+
+## 5.97.0
+
+### Minor Changes
+
+- 4900c19: Add Claude Fable 5.2 (`claude-fable-5-2`, released 2026-11-09) to the model registry — 1M context, 128k output, image input, always-on adaptive thinking, now $8/$40 MTok (down from $10/$50) with cache reads at $0.20/MTok. It replaces Fable 5.1, which is retired from the registry, model picker and login copy — a session still pinned to it falls back to the provider default on next start. The API surface matches 5.1 (no forced tool use, no prefill, no sampling params), so no call path changes.
+
+  Add Claude Fable 5.2 Fast (`claude-fable-5-2-fast`): the same model in fast mode at up to 2.5x output speed, billed to Claude usage credits at $16/$80 MTok, with the same paid-model confirmation as Opus 5.5 Fast. The thinking picker now offers `xhigh` on the Fable line, which Anthropic supports on all five effort levels. Fast-mode refusals now point back to "the same model without Fast" instead of always naming Opus 5.5.
+
+## 5.96.2
+
+## 5.96.1
+
+## 5.96.0
+
+## 5.95.4
+
+## 5.95.3
+
+## 5.95.2
+
+## 5.95.1
+
+## 5.95.0
+
+### Minor Changes
+
+- f5d115b: Every provider now connects only in a way its owner allows, and GG Coder no longer poses as Codex CLI, Kimi Code CLI, Grok CLI or Gemini CLI anywhere (#139).
+
+  - **OpenAI:** "Continue with ChatGPT" uses OpenAI's official Sign in with ChatGPT for open-source apps: GG Coder registers itself once per ChatGPT account, checks the ID token against OpenAI's keys, needs the "Use your ChatGPT plan" permission, and revokes the session on sign-out. Requests go to the public Responses API (`api.openai.com/v1/responses`) with GG Coder's own User-Agent. An OpenAI API key is new and rides the same Responses transport, so GPT-6 models can call tools on a key; it takes over while the plan's usage is out. The ChatGPT usage meter is replaced by a "Using ChatGPT plan · Manage usage" link, and plan usage-limit errors point to chatgpt.com/settings/usage.
+  - **Models your plan or keys can't run** are greyed out in the app's model picker with the reason ("Not in your ChatGPT plan", read from the account's own model list; "Needs a Kimi Code plan key"; "Needs an API Credits key"). Requests that still hit those limits say so: "gpt-6.1-sol isn't included in your ChatGPT plan", "Fast mode isn't included in your ChatGPT plan".
+  - **Kimi:** the Kimi sign-in is gone. Paste a Kimi Code plan key (from the Kimi Code Console; `api.kimi.com` or `api.kimi.ai` is detected) or a Moonshot API key. K2.8 Preview needs the plan key.
+  - **xAI:** API key only (xAI offers SuperGrok and X Premium usage only in apps it partners with).
+  - **Gemini:** the Google sign-in and Code Assist route are gone; Gemini is back in the provider list with a Google AI Studio key.
+  - **GLM:** keys use Z.AI's standard pay-per-token endpoint, because the GLM Coding Plan is limited to the tools Z.AI lists.
+  - **MiniMax and Xiaomi:** each key type now says what it bills (plan or pay-per-token).
+  - Old sign-ins (Codex, Kimi, Grok, Google) are never used and never read as API keys. The app and CLI ask once to reconnect, and connecting again or dismissing removes them.
+  - gg-agent: the per-turn credential refresh now drops the ChatGPT account when the credential switches to an API key, so a key never rides the plan route.
+  - `generate_image` moves to OpenAI's public Image API (GPT Image 2.6) and needs an OpenAI API key; with only the ChatGPT plan it explains that.
+  - gg-core: `loginOpenAI`/`refreshOpenAIToken` become `loginChatGPT`/`refreshChatGPTToken`/`revokeChatGPTSignIn`; `loginKimi`, `loginXai`, `loginGemini` and their helpers are removed; new `KIMI_CODE_KEY`, `OPENAI_CHATGPT_KEY`, `RETIRED_SIGN_INS`, `AuthStorage.legacySignIns()`/`takeLegacySignIn()`/`hasApiKey()`/`resolveApiKey()` and `detectKimiCodeBaseUrl`. gg-ai: `streamOpenAICodex` becomes `streamOpenAIResponses`, `CODEX_CLIENT_VERSION` and the `responsesLite`/`projectId` stream options are removed, and `GG_CODER_USER_AGENT` is exported. The `codexResponsesLite` setting is removed.
+
+## 5.94.0
+
+### Minor Changes
+
+- 5092ebc: Updated Claude sign-in. Claude Pro/Max plans now connect through Anthropic's official sign-in, and an Anthropic API key is also an option. If you were signed in to Claude before, sign in once more (`ggcoder login`, or AI Providers in the desktop app) to keep using Claude models. Removed `loginAnthropic`, `refreshAnthropicToken` and `getClaudeCliUserAgent`.
+- 5092ebc: Add GPT-6.1 Terra (`gpt-6.1-terra`, released 2026-10-26) and its Fast mode (`gpt-6.1-terra-fast`, 1.5x speed). It has a 1.05M context window on the public Responses API, 500K on the ChatGPT OAuth/Codex route, 128K output and text+image input, and costs $1/$5 per MTok (cached input $0.05). It starts at `low` effort and runs the full ladder up to `ultra`, which maps to xhigh plus the async-subagent orchestration prompt, the same as Sol and Astra. GPT-6.1 Sol stays the OpenAI default.
+
+## 5.93.0
+
 ## 5.92.0
 
 ## 5.91.2

@@ -51,7 +51,8 @@ async function withStore(
     await fs.writeFile(
       path.join(home, ".gg", "auth.json"),
       JSON.stringify({
-        openai: {
+        // The official ChatGPT sign-in slot; a refreshable token under `openai` is a retired sign-in.
+        "openai-chatgpt": {
           accessToken: "test-token",
           refreshToken: "test-refresh",
           expiresAt: Date.now() + 3_600_000,
@@ -73,7 +74,7 @@ async function withStore(
     await run(async (sessionId, transient = false) => {
       const session = new AgentSession({
         provider: "openai",
-        model: "gpt-6-astra",
+        model: "gpt-6.2-astra",
         cwd,
         sessionId,
         transient,

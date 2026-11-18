@@ -75,6 +75,8 @@ describe("ask_user", () => {
   it("states optional offers plainly and keeps every real question on the card", async () => {
     const { description } = createAskUserTool(vi.fn());
     expect(description).toContain("instead of a prose question");
+    // Chat and Goals see only this description, so the short lead-in rule lives here too.
+    expect(description).toContain("First write one to three sentences answering what they asked");
     // The routing rule now lives in the system prompt (rendered whenever this
     // tool is registered) rather than repeated in the schema.
     const prompt = await buildSystemPrompt(os.tmpdir(), undefined, false, undefined, ["ask_user"]);
@@ -233,6 +235,52 @@ describe("ask_user", () => {
     // wait for them" would strand the user's actual instruction.
     expect(text).not.toContain("stop and wait");
     expect(bridge.pendingCount).toBe(0);
+  });
+
+  it("puts the user's own message in the result, so the model needn't wait for it", async () => {
+    // Regression: on Claude Code the typed message queued behind the turn, so
+    // the model read "it arrives next" alone and replied "I'll wait for your message".
+    const { bridge, call, prompt } = harness();
+    const result = call({
+      questions: [
+        { id: "name", question: "Use a descriptive name?", kind: "confirm", detail: "Pick one." },
+      ],
+    });
+    await prompt();
+    bridge.cancelAll({ action: "cancel", superseded: true, message: "I like proper names." });
+    const text = await result;
+    expect(text).toContain("<user_message>\nI like proper names.\n</user_message>");
+    expect(text).toContain("Treat it as their answer");
+    expect(text).not.toContain("arrives next");
+  });
+
+  it("puts a reply's attachments in the result too, so nothing is left to arrive later", async () => {
+    // Regression: a reply with a screenshot kept the "arrives next" wording, and on
+    // Claude Code the model filled the gap with "[Awaiting the user's next message.]".
+    const { bridge, call, prompt } = harness();
+    const result = call({
+      questions: [
+        { id: "layout", question: "Header layout?", kind: "confirm", detail: "Pick one." },
+      ],
+    });
+    await prompt();
+    const image = { type: "image" as const, mediaType: "image/png", data: "AAAA" };
+    bridge.cancelAll({
+      action: "cancel",
+      superseded: true,
+      message: "Course title + step title",
+      attachments: [image, { type: "text", text: "[Image saved at /tmp/a.png]" }],
+    });
+    const { content } = (await result) as unknown as { content: unknown[] };
+    expect(content[0]).toMatchObject({ type: "text" });
+    const text = (content[0] as { text: string }).text;
+    expect(text).toContain("<user_message>\nCourse title + step title\n</user_message>");
+    expect(text).toContain("Their attachments follow.");
+    expect(text).not.toContain("arrives next");
+    expect(content.slice(1)).toEqual([
+      image,
+      { type: "text", text: "[Image saved at /tmp/a.png]" },
+    ]);
   });
 
   it("reports a question that cannot be rendered instead of parking the turn", async () => {

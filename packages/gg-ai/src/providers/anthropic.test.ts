@@ -14,12 +14,6 @@ const createMock = vi.fn();
 const streamMock = vi.fn();
 const withOptionsMock = vi.fn();
 
-// OAuth cases must not reach npm or the real ~/.gg version cache.
-vi.mock("../claude-code-version.js", async (importOriginal) => ({
-  ...(await importOriginal<Record<string, unknown>>()),
-  getClaudeCliUserAgent: vi.fn(async () => "claude-cli/2.1.999 (external, cli)"),
-}));
-
 vi.mock("@anthropic-ai/sdk", () => {
   class APIError extends Error {
     status: number | undefined;
@@ -722,6 +716,7 @@ describe("streamAnthropic request shaping", () => {
 
   it.each([
     { label: "fast-mode id", model: "claude-opus-5-5-fast", baseUrl: undefined, fast: true },
+    { label: "Fable fast-mode id", model: "claude-fable-5-2-fast", baseUrl: undefined, fast: true },
     { label: "standard id", model: "claude-opus-5-5", baseUrl: undefined, fast: false },
     {
       label: "fast-mode id via a gateway",
@@ -751,7 +746,7 @@ describe("streamAnthropic request shaping", () => {
       Record<string, unknown>,
       { headers?: Record<string, string> },
     ];
-    expect(params.model).toBe("claude-opus-5-5");
+    expect(params.model).toBe(route.model.replace(/-fast$/, ""));
     const beta = requestOptions.headers?.["anthropic-beta"] ?? "";
     if (route.fast) {
       expect(params.speed).toBe("fast");
@@ -1096,7 +1091,7 @@ describe("streamAnthropic error normalization", () => {
       expect(rejection).toMatchObject({
         statusCode: 429,
         message: `Fast mode unavailable (${reason ?? "unknown"}): ${headline}.`,
-        hint: expect.stringContaining("Claude Opus 5.5 (standard speed)"),
+        hint: expect.stringContaining("same model without Fast (standard speed)"),
       });
       expect(isUsageLimitError(rejection)).toBe(false);
       expect(isHardBillingMessage((rejection as Error).message)).toBe(true);

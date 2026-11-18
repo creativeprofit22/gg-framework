@@ -61,7 +61,7 @@ describe("app sidecar context snapshot", () => {
     expect(
       getAgentSessionContextWindow({
         provider: "openai",
-        model: "gpt-6-astra",
+        model: "gpt-6.2-astra",
         accountId: "account-1",
         openAICodexContextProfile: "stable",
       }),

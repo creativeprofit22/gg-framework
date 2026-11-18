@@ -1,3 +1,4 @@
+import type { Message } from "@kenkaiiii/gg-ai";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   stream,
@@ -321,11 +322,9 @@ describe("enhancePrompt", () => {
     respond("Fix the bug.");
     const active = {
       provider: "anthropic" as const,
-      model: "claude-fable-5-1",
+      model: "claude-fable-5-2",
       maxTokens: 128000,
       thinking: "high" as const,
-      projectId: "account-project",
-      userAgent: "claude-cli/test",
       baseUrl: "https://provider.example/v1",
       accountId: "account-id",
       signal: new AbortController().signal,
@@ -333,6 +332,23 @@ describe("enhancePrompt", () => {
     await enhancePrompt({ ...active, prompt: "fix bug" });
     expect(vi.mocked(stream).mock.calls[0][0]).toMatchObject(active);
     expect(vi.mocked(stream).mock.calls[0][0]).not.toHaveProperty("temperature");
+  });
+
+  it("uses `complete` instead of stream() when given one", async () => {
+    const complete = vi.fn(async (_messages: Message[]) => ({
+      message: { role: "assistant" as const, content: examples[1].output },
+      stopReason: "end_turn" as const,
+      usage: { inputTokens: 1, outputTokens: 1 },
+    }));
+    const result = await enhancePrompt({ ...options, prompt: examples[1].input, complete });
+    expect(vi.mocked(stream)).not.toHaveBeenCalled();
+    expect(complete.mock.calls[0]![0]).toEqual([
+      { role: "system", content: expect.stringContaining(ENHANCER_SYSTEM_PROMPT) },
+      { role: "user", content: examples[1].input },
+    ]);
+    expect(result.enhanced).toBe(
+      "In Search.tsx, debounce search requests: send the request after typing has stopped for 300ms.",
+    );
   });
 
   it("rejects empty output instead of returning an empty replacement", async () => {

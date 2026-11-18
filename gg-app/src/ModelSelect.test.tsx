@@ -11,7 +11,7 @@ const supportsNativeMock = vi.mocked(supportsNativeSelectPopup);
 
 const MODELS: ModelOption[] = [
   { id: "claude-sonnet-5", name: "Claude Sonnet 5", provider: "anthropic" },
-  { id: "gpt-6.1-sol", name: "GPT-6.1 Sol", provider: "openai" },
+  { id: "gpt-6.2-sol", name: "GPT-6.2 Sol", provider: "openai" },
   { id: "grok-4.5", name: "Grok 4.5", provider: "xai" },
   {
     id: "local/ollama/gemma4:e2b",
@@ -465,13 +465,13 @@ describe("ModelSelect — in-webview menu", () => {
     const trigger = screen.getByRole("button", { name: "Claude Sonnet 5" });
     const menu = screen.getByRole("menu", { name: "Switch model" });
     const active = screen.getByRole("menuitemradio", { name: "Claude Sonnet 5" });
-    const next = screen.getByRole("menuitemradio", { name: "GPT-6.1 Sol" });
+    const next = screen.getByRole("menuitemradio", { name: "GPT-6.2 Sol" });
 
     expect(document.activeElement).toBe(active);
     fireEvent.keyDown(menu, { key: "ArrowDown" });
     expect(document.activeElement).toBe(next);
     fireEvent.click(next);
-    expect(onSelect).toHaveBeenCalledWith("gpt-6.1-sol");
+    expect(onSelect).toHaveBeenCalledWith("gpt-6.2-sol");
     expect(document.activeElement).toBe(trigger);
 
     fireEvent.click(trigger);

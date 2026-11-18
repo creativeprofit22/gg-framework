@@ -4,15 +4,16 @@
 //   dist:ggcoder — total bytes of packages/ggcoder/dist (the shipped CLI).
 //   frontend:initial — entry JS + static imports, excluding on-demand chunks.
 //   sidecar      — app-sidecar.mjs + bundled skills bytes (gg-app/src-tauri/sidecar).
-//                  Deliberately EXCLUDES node_modules: it carries platform-
-//                  conditional binaries (sharp, onnxruntime), so one baseline
-//                  cannot hold across the CI matrix's three OSes. Dependency-
-//                  tree churn is still caught by the dist:ggcoder artifact.
+//   sidecar:deps — the sidecar's copied node_modules. Its native binaries differ
+//                  per OS/arch, so it is baselined per platform
+//                  (e.g. sidecar:deps:darwin-arm64).
+//   prompt:prefix — the golden cached system-prompt prefix, sent on every request.
 // Usage:
 //   node .github/ci/size-gate.mjs                 # check all artifacts against baseline
 //   node .github/ci/size-gate.mjs --only sidecar  # check one artifact
 //   node .github/ci/size-gate.mjs --update        # re-baseline after an intentional change
-// Highlight growth above baseline + max(2%, 100KB; 10KB for initial frontend JS).
+// Highlight growth above baseline + max(2%, 100KB; 10KB for initial frontend JS,
+// 1KB for the prompt prefix).
 // Size growth never fails CI; missing or unreadable build artifacts still do.
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
@@ -57,7 +58,12 @@ const ARTIFACTS = {
   sidecar: () =>
     dirBytes(path.join(REPO_ROOT, "gg-app/src-tauri/sidecar/app-sidecar.mjs")) +
     dirBytes(path.join(REPO_ROOT, "gg-app/src-tauri/sidecar/skills")),
+  "sidecar:deps": () => dirBytes(path.join(REPO_ROOT, "gg-app/src-tauri/sidecar/node_modules")),
+  "prompt:prefix": () =>
+    dirBytes(path.join(REPO_ROOT, "packages/ggcoder/src/__golden__/system-prompt-prefix.md")),
 };
+const ABSOLUTE_TOLERANCE = { "frontend:initial": 10 * 1024, "prompt:prefix": 1024 };
+const PER_PLATFORM = new Set(["sidecar:deps"]);
 
 const fmt = (bytes) => `${(bytes / 1024).toFixed(1)}KB`;
 const args = process.argv.slice(2);
@@ -87,21 +93,22 @@ for (const [name, measure] of Object.entries(ARTIFACTS)) {
     failed = true;
     continue;
   }
-  const entry = baseline.artifacts[name];
-  baseline.artifacts[name] = { bytes, recorded_at: new Date().toISOString() };
+  const key = PER_PLATFORM.has(name) ? `${name}:${process.platform}-${process.arch}` : name;
+  const entry = baseline.artifacts[key];
+  baseline.artifacts[key] = { bytes, recorded_at: new Date().toISOString() };
 
   if (!entry) {
-    rows.push([name, "—", fmt(bytes), "—", "no baseline"]);
+    rows.push([key, "—", fmt(bytes), "—", "no baseline"]);
     continue;
   }
-  const absoluteTolerance = name === "frontend:initial" ? 10 * 1024 : TOLERANCE.absoluteBytes;
+  const absoluteTolerance = ABSOLUTE_TOLERANCE[name] ?? TOLERANCE.absoluteBytes;
   const allowed = entry.bytes + Math.max(entry.bytes * TOLERANCE.relative, absoluteTolerance);
   const delta = bytes - entry.bytes;
   const verdict = bytes > allowed ? "growth (informational)" : delta < 0 ? "smaller" : "ok";
-  rows.push([name, fmt(entry.bytes), fmt(bytes), `${delta >= 0 ? "+" : ""}${fmt(delta)}`, verdict]);
+  rows.push([key, fmt(entry.bytes), fmt(bytes), `${delta >= 0 ? "+" : ""}${fmt(delta)}`, verdict]);
 }
 
-const widths = [18, 12, 12, 12, 28];
+const widths = [28, 12, 12, 12, 28];
 const header = ["artifact", "baseline", "current", "change", "note"];
 console.log(
   rows

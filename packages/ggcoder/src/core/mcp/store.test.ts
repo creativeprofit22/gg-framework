@@ -257,6 +257,16 @@ describe("mcp store", () => {
     );
   });
 
+  it("round-trips Claude's oauth field on http servers", () => {
+    const config = fromStoredEntry("o", {
+      type: "http",
+      url: "https://o.dev/mcp",
+      oauth: { clientId: "cid", callbackPort: 8080 },
+    });
+    expect(config.oauth).toEqual({ clientId: "cid", callbackPort: 8080 });
+    expect(toStoredEntry(config)).toMatchObject({ oauth: { clientId: "cid", callbackPort: 8080 } });
+  });
+
   it("parses Claude's .mcp.json type field for http and sse", () => {
     expect(fromStoredEntry("n", { type: "http", url: "https://x/mcp" })).toEqual({
       name: "n",

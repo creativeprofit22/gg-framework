@@ -3713,20 +3713,6 @@ describe("agentLoop — per-turn credential resolution", () => {
     expect(mockStream.mock.calls[1]?.[0].accountId).toBeUndefined();
   });
 
-  it("falls back only when account identity is omitted", async () => {
-    mockStream.mockReturnValueOnce(mockOkResult("Done") as unknown as ReturnType<typeof stream>);
-
-    await collectLoop([{ role: "user", content: "test" }], {
-      provider: "openai",
-      model: "gpt-6-astra",
-      apiKey: ["captured", "token"].join("-"),
-      accountId: "captured-account",
-      resolveCredentials: async () => ({ apiKey: ["fresh", "token"].join("-") }),
-    });
-
-    expect(mockStream.mock.calls[0]?.[0].accountId).toBe("captured-account");
-  });
-
   it("falls back to the captured key when the resolver fails", async () => {
     // A transient failure reading auth.json must not abort a live run — let the
     // provider report the real auth error instead.
@@ -3742,6 +3728,44 @@ describe("agentLoop — per-turn credential resolution", () => {
     });
 
     expect(mockStream.mock.calls[0]?.[0].apiKey).toBe("token-captured");
+  });
+
+  it("drops the ChatGPT account when the resolved credential switches to an API key", async () => {
+    // Plan usage ran out mid-run in another window: the next turn resolves the
+    // OpenAI API key, which has no account and must not ride the plan route.
+    mockStream
+      .mockReturnValueOnce(
+        mockToolCallResult("context_probe", {
+          inputTokens: 10,
+          outputTokens: 5,
+        }) as unknown as ReturnType<typeof stream>,
+      )
+      .mockReturnValueOnce(mockOkResult("Done") as unknown as ReturnType<typeof stream>);
+    const creds = [{ apiKey: "plan-token", accountId: "user-sub" }, { apiKey: "sk-key" }];
+    let calls = 0;
+
+    await collectLoop([{ role: "user", content: "test" }], {
+      provider: "openai",
+      model: "test",
+      apiKey: "plan-token",
+      accountId: "user-sub",
+      resolveCredentials: async () => creds[calls++] ?? { apiKey: "sk-key" },
+      tools: [
+        {
+          name: "context_probe",
+          description: "continue the test",
+          parameters: emptyParams,
+          execute: () => "ok",
+        },
+      ],
+    });
+
+    expect(mockStream.mock.calls[0]?.[0]).toMatchObject({
+      apiKey: "plan-token",
+      accountId: "user-sub",
+    });
+    expect(mockStream.mock.calls[1]?.[0].apiKey).toBe("sk-key");
+    expect(mockStream.mock.calls[1]?.[0].accountId).toBeUndefined();
   });
 });
 

@@ -28,6 +28,7 @@ import {
 import { copyFile, readFile } from "node:fs/promises";
 import { dirname, join, posix, relative, resolve, sep, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
+import { pruneOnnxRuntimePayloads } from "./prune-native-payloads.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(here, "..", "..");
@@ -52,6 +53,10 @@ const FINGERPRINT_ENV = [
   "NODE_PRESERVE_SYMLINKS",
   "NODE_PRESERVE_SYMLINKS_MAIN",
 ];
+// Live preview's overlay (page script + chat frame), served by the sidecar.
+// Built here, not taken from a previous app build, so it is never stale.
+const livePreviewConfig = join(here, "..", "vite.live-preview.config.ts");
+const livePreviewBuilt = join(here, "..", "dist-live-preview");
 
 // Packages that must NOT be inlined: native addons, lazily-loaded optional
 // heavy deps, and child-process entry points that esbuild cannot discover.
@@ -64,9 +69,6 @@ const EXTERNAL = [
   "turndown",
   "turndown-plugin-gfm",
   "@mozilla/readability",
-  // The Codex transport loads this package's zstd.wasm by path at runtime.
-  // Keep the package external so the WASM asset survives the sidecar bundle.
-  "@bokuweb/zstd-wasm",
   // LSP servers run as child processes from their real package entry points.
   // The server resolver also needs a physical tsserver.js path. Neither package
   // is imported by the sidecar, so esbuild would otherwise omit both and every
@@ -81,7 +83,20 @@ const EXTERNAL = [
   // Bash launches SRT's physical CLI as a child process for per-session OS
   // sandboxing; keep its platform binaries and CLI files on disk.
   "@anthropic-ai/sandbox-runtime",
+  // The Claude subscription route drives the Agent SDK, which spawns Claude Code
+  // and loads its own chunks by path. Its ~200 MB platform binaries are never
+  // shipped: GG downloads one on first "Sign in with Claude".
+  "@anthropic-ai/claude-agent-sdk",
 ];
+
+// Claude Code platform builds; see the EXTERNAL note above.
+const NEVER_SHIPPED = /^@anthropic-ai\/claude-agent-sdk-/;
+
+// Peer dependencies an external package imports at runtime. copyPackage only
+// follows dependencies/optionalDependencies, so name these explicitly.
+const RUNTIME_PEERS = {
+  "@anthropic-ai/claude-agent-sdk": ["zod"],
+};
 
 // require resolver anchored at the ggcoder package, where these deps live.
 const ggcoderRequire = createRequire(join(repoRoot, "packages", "ggcoder", "package.json"));
@@ -122,7 +137,7 @@ const OPENSRC_BINARIES = new Set([
 const PACKAGE_PAYLOAD_ALLOWLISTS = [
   {
     name: "onnxruntime-web",
-    version: "1.26.0-dev.20260416-b7804b056c",
+    version: "1.31.0-dev.20260914-8d85527a0",
     requiredPaths: ["package.json", "types.d.ts", "dist/ort.node.min.js", "dist/ort.node.min.mjs"],
     operations: [
       {
@@ -147,9 +162,9 @@ const PACKAGE_PAYLOAD_ALLOWLISTS = [
   },
   {
     name: "@huggingface/transformers",
-    version: "4.2.0",
+    version: "4.3.2",
     // Node import still selects this self-contained ESM bundle and onnxruntime-node;
-    // 4.2.0 no longer publishes the browser JSEP WASM alongside its dist loader.
+    // 4.2.0+ no longer publishes the browser JSEP WASM alongside its dist loader.
     requiredPaths: ["package.json", "LICENSE", "dist/transformers.node.mjs"],
     operations: [
       {
@@ -223,7 +238,7 @@ const PACKAGE_PAYLOAD_ALLOWLISTS = [
   },
   {
     name: "@anthropic-ai/sandbox-runtime",
-    version: "0.0.78",
+    version: "0.0.82",
     requiredPaths: [
       "package.json",
       "LICENSE",
@@ -536,7 +551,7 @@ export function selectedOptionalDependencies(
  */
 function planPackageCopy(name, fromRequire, fromDir, copied, jobs, options) {
   const { destination, platform, arch } = options;
-  if (copied.has(name)) return;
+  if (copied.has(name) || NEVER_SHIPPED.test(name)) return;
   const linkedRoot = packageRoot(name, fromRequire, fromDir);
   if (!linkedRoot) {
     console.warn(`skip (not found): ${name}`);
@@ -558,7 +573,9 @@ function planPackageCopy(name, fromRequire, fromDir, copied, jobs, options) {
   jobs.push({ name, source: root, dest: join(destination, ...name.split("/")) });
 
   const childRequire = createRequire(join(root, "package.json"));
-  for (const dep of deps) planPackageCopy(dep, childRequire, root, copied, jobs, options);
+  for (const dep of [...deps, ...(RUNTIME_PEERS[name] ?? [])]) {
+    planPackageCopy(dep, childRequire, root, copied, jobs, options);
+  }
 }
 
 /**
@@ -684,6 +701,8 @@ export async function copyPackagesConcurrently(
   return copyPlannedFiles(plan, { concurrency });
 }
 
+const LOCKED_ONNXRUNTIME_NODE_VERSION = "1.30.0";
+
 /**
  * Native packages can publish binaries for every supported OS/architecture in
  * one npm tarball. Keep only this build runner's payload: shipping dormant Intel
@@ -694,49 +713,46 @@ export function pruneForeignNativePayloads(
   stagedOutDir,
   { platform = process.platform, arch = process.arch } = {},
 ) {
-  const packageRoot = join(stagedOutDir, "node_modules", "onnxruntime-node");
+  const nodeModules = join(stagedOutDir, "node_modules");
+  const packageRoot = join(nodeModules, "onnxruntime-node");
   const manifest = JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf8"));
-  if (
-    manifest.name !== "onnxruntime-node" ||
-    manifest.version !== "1.24.3" ||
-    JSON.stringify(manifest.binary?.napi_versions) !== "[6]"
-  ) {
-    throw new Error("onnxruntime-node version or N-API layout changed: expected 1.24.3 / [6]");
+  const declared = manifest.binary?.napi_versions;
+  if (manifest.name !== "onnxruntime-node" || !Array.isArray(declared) || declared.length === 0) {
+    throw new Error("onnxruntime-node manifest changed: expected binary.napi_versions");
   }
+  // Local Fork: a new release is a new native payload; review it before shipping.
+  if (manifest.version !== LOCKED_ONNXRUNTIME_NODE_VERSION) {
+    throw new Error(
+      `onnxruntime-node version changed: expected ${LOCKED_ONNXRUNTIME_NODE_VERSION}, found ${manifest.version}`,
+    );
+  }
+  // Every N-API ABI the package ships gets pruned (upstream once pruned only
+  // one and shipped the rest); any other bin entry is unreviewed layout.
   const bin = join(packageRoot, "bin");
-  if (JSON.stringify(readdirSync(bin).sort()) !== '["napi-v6"]') {
-    throw new Error("onnxruntime-node bin layout changed: expected only napi-v6");
-  }
-  const runtimes = join(bin, "napi-v6");
-  const selected = join(runtimes, platform, arch);
-  if (!existsSync(selected)) {
-    throw new Error(`onnxruntime-node has no native payload for ${platform}/${arch}`);
+  const expectedAbis = declared.map((v) => `napi-v${v}`).sort();
+  if (JSON.stringify(readdirSync(bin).sort()) !== JSON.stringify(expectedAbis)) {
+    throw new Error(
+      `onnxruntime-node bin layout changed: expected only ${expectedAbis.join(", ")}`,
+    );
   }
 
-  // Validate regular files (and reject links) before changing the candidate.
-  const nativeFiles = walkFiles(selected).map((file) => file.relative);
-  if (!nativeFiles.includes("onnxruntime_binding.node")) {
-    throw new Error("onnxruntime-node selected runtime is missing its native binding");
-  }
-  if (platform === "win32" && arch === "x64") {
-    const expected = [
-      "DirectML.dll",
-      "dxcompiler.dll",
-      "dxil.dll",
-      "onnxruntime.dll",
-      "onnxruntime_binding.node",
-    ].sort();
-    if (JSON.stringify(nativeFiles.sort()) !== JSON.stringify(expected)) {
-      throw new Error("onnxruntime-node Windows x64 payload layout changed");
+  // Validate every selected runtime (regular files, no links) before removing anything.
+  for (const abi of expectedAbis) {
+    const selected = join(bin, abi, platform, arch);
+    if (!existsSync(selected)) {
+      throw new Error(`onnxruntime-node ${abi} has no native payload for ${platform}/${arch}`);
+    }
+    const nativeFiles = walkFiles(selected).map((file) => file.relative);
+    if (!nativeFiles.includes("onnxruntime_binding.node")) {
+      throw new Error(`onnxruntime-node ${abi} selected runtime is missing its native binding`);
+    }
+    if (platform === "win32" && arch === "x64" && !nativeFiles.includes("onnxruntime.dll")) {
+      throw new Error(`onnxruntime-node ${abi} Windows x64 payload is missing onnxruntime.dll`);
     }
   }
-  const keep = join(stagedOutDir, `.gg-onnxruntime-${process.pid}`);
-  cpSync(selected, keep, { recursive: true });
-  rmSync(runtimes, { recursive: true, force: true });
-  mkdirSync(join(runtimes, platform), { recursive: true });
-  cpSync(keep, selected, { recursive: true });
-  rmSync(keep, { recursive: true, force: true });
-  console.log(`pruned onnxruntime-node payloads to ${platform}/${arch}`);
+  for (const abi of pruneOnnxRuntimePayloads(nodeModules, platform, arch)) {
+    console.log(`pruned onnxruntime-node ${abi} payloads to ${platform}/${arch}`);
+  }
 }
 
 export function pruneSourceMaps(stagedOutDir) {
@@ -1590,6 +1606,15 @@ async function main(argv) {
           return !(parts.includes("__pycache__") || /\.(?:aep|aepx|pyc)$/i.test(source));
         },
       });
+
+      const { build: viteBuild } = await import("vite");
+      await viteBuild({ configFile: livePreviewConfig, logLevel: "warn" });
+      for (const file of ["page.js", "frame.html"]) {
+        if (!existsSync(join(livePreviewBuilt, file))) {
+          throw new Error(`live preview build missing ${file}: ${livePreviewBuilt}`);
+        }
+      }
+      cpSync(livePreviewBuilt, join(stagedOutDir, "live-preview"), { recursive: true });
 
       await build({
         entryPoints: [sidecarEntry],

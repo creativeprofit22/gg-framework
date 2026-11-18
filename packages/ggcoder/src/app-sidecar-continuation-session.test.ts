@@ -37,7 +37,7 @@ function fixture() {
   const runClaim = new RunClaim();
   const state = (): ReturnType<AgentSession["getState"]> => ({
     provider: "openai",
-    model: "gpt-6-astra",
+    model: "gpt-6.2-astra",
     cwd: "/project",
     sessionPath: "/project/session.jsonl",
     ...identity,

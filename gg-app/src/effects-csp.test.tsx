@@ -35,12 +35,3 @@ it("keeps the working beam on static CSS, with no runtime stylesheet to authoriz
   expect(container.querySelector(".working-beam")).not.toBeNull();
   expect(document.querySelectorAll("style")).toHaveLength(before);
 });
-
-it("authorizes metal's import-time stylesheet before it enters the document", async () => {
-  await import("metal-fx");
-  const styles = [...document.head.querySelectorAll("style")].filter((style) =>
-    style.textContent?.includes(".metal-fx-root"),
-  );
-  expect(styles.length).toBeGreaterThan(0);
-  for (const style of styles) expect(style.nonce).toBe(nonceStyle.nonce);
-});

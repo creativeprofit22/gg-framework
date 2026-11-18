@@ -225,12 +225,14 @@ describe("idle shutdown", () => {
 describe("progress-aware call timeout", () => {
   it("lets a call that reports progress run past its timeout", async () => {
     const m = manager();
-    const tools = await connect(m, server({ timeout: 400 }));
+    // Timeout well above the 100 ms progress interval: at 400 ms a stalled
+    // macOS CI runner let it fire between two progress ticks.
+    const tools = await connect(m, server({ timeout: 1_000 }));
     const updates: unknown[] = [];
     const result = await call(
       tools,
       "progress",
-      { ms: 1_500, every: 100 },
+      { ms: 2_500, every: 100 },
       ctx((u) => updates.push(u)),
     );
     expect(result).toBe("done");
@@ -276,4 +278,32 @@ describe("progress-aware call timeout", () => {
     const tools = await connect(m, server({ timeout: 400, maxTotalTimeout: 800 }));
     expect(tool(tools, "echo").timeoutMs).toBe(1_200);
   }, 30_000);
+});
+
+describe("disconnect", () => {
+  it("drops one server mid-session and makes its handed-out tools refuse calls", async () => {
+    const m = manager();
+    const tools = await connect(m, server());
+    expect(m.isServerRunning("life")).toBe(true);
+
+    await m.disconnect("life");
+    expect(m.isServerRunning("life")).toBe(false);
+    await expect(call(tools, "echo", { text: "hi" })).rejects.toThrow(/was removed/);
+    expect(await m.whenConnected("life", 50)).toEqual({
+      ok: false,
+      error: "the server was removed",
+    });
+
+    // Adding it back revives it.
+    const again = await connect(m, server());
+    expect(await call(again, "echo", { text: "back" })).toContain("back");
+  }, 20_000);
+
+  it("releases a pooled server's claim", async () => {
+    const pool = new SharedMcpPool();
+    const m = manager({ sharedPool: pool });
+    const tools = await connect(m, server({ shared: true }));
+    await m.disconnect("life");
+    await expect(call(tools, "echo", { text: "hi" })).rejects.toThrow(/was removed/);
+  }, 20_000);
 });

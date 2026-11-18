@@ -81,7 +81,6 @@ function Harness({
     },
     activeApiKey: "test-key",
     activeAccountId: codexOAuth ? "chatgpt-account" : undefined,
-    activeProjectId: undefined,
     activeBaseUrl: undefined,
     setLiveItems,
     getId: () => "compact-1",
@@ -152,7 +151,7 @@ describe("useContextCompaction", () => {
     const experimental = render(
       <Harness
         provider="openai"
-        model="gpt-6-astra"
+        model="gpt-6.2-astra"
         codexOAuth
         codexProfile="experimental"
         providerUsage={highUsage}
@@ -169,7 +168,7 @@ describe("useContextCompaction", () => {
     const legacy = render(
       <Harness
         provider="openai"
-        model="gpt-6-astra"
+        model="gpt-6.2-astra"
         codexOAuth
         providerUsage={highUsage}
         onTransformed={(messages) => (transformed = messages)}

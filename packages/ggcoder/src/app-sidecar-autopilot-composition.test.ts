@@ -81,6 +81,7 @@ async function pane(
     getBlockedSkills: () => [],
     getInstalledThreats: () => [],
     getPendingUserShellRunIds: () => [],
+    getSessionPreview: () => "",
     dispose: async () => {},
   };
   const events = vi.fn();

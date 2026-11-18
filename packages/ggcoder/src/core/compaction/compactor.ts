@@ -4,12 +4,12 @@ import {
   type Provider,
   type ContentPart,
   type ToolResult,
+  type StreamResponse,
 } from "@kenkaiiii/gg-ai";
 import { estimateConversationTokens, estimateMessageTokens } from "./token-estimator.js";
 import { findLatestHumanQuery, selectQueryAwareContext } from "./query-aware-selector.js";
 import { getSummaryModel, getContextWindow, getModel } from "../model-registry.js";
 import { isModelUnavailableFailure } from "../model-unavailable.js";
-import { kimiCodingHeaders, isKimiCodingEndpoint } from "../oauth/kimi.js";
 import { log } from "../logger.js";
 import { editTargetPaths } from "../../tools/edit-targets.js";
 
@@ -151,7 +151,8 @@ class SummaryTimeoutError extends Error {
 }
 
 async function awaitSummaryResponseWithTimeout<T>(
-  response: Promise<T>,
+  // A function receives `touch`, which resets the deadline like a stream event does.
+  response: Promise<T> | ((touch: () => void) => Promise<T>),
   timeoutMs: number,
   signal?: AbortSignal,
   onTimeout?: () => void,
@@ -194,7 +195,7 @@ async function awaitSummaryResponseWithTimeout<T>(
         })();
       }
 
-      response.then(resolve, reject);
+      (typeof response === "function" ? response(arm) : response).then(resolve, reject);
     });
   } finally {
     settled = true;
@@ -1181,7 +1182,6 @@ export async function compact(
     transportModel?: string;
     apiKey?: string;
     accountId?: string;
-    projectId?: string;
     baseUrl?: string;
     contextWindow: number;
     /** The active-context trigger this rewrite must land below. */
@@ -1193,6 +1193,15 @@ export async function compact(
      * everything relevant to it verbatim. Optional — default behaviour is
      * unchanged. */
     focus?: string;
+    /** Sends the summary request elsewhere (a Claude subscription runs it through Claude Code). */
+    complete?: (request: {
+      model: string;
+      messages: Message[];
+      maxTokens: number;
+      signal: AbortSignal;
+      /** Call on any sign of life; a summary silent past the attempt timeout is dropped. */
+      onActivity: () => void;
+    }) => Promise<StreamResponse>;
   },
 ): Promise<{ messages: Message[]; result: CompactionResult }> {
   const originalCount = messages.length;
@@ -1423,6 +1432,26 @@ export async function compact(
         request.modelId === options.model
           ? (options.transportModel ?? request.modelId)
           : request.modelId;
+      if (options.complete) {
+        const complete = options.complete;
+        const response = await awaitSummaryResponseWithTimeout(
+          (touch) =>
+            complete({
+              model: request.modelId,
+              messages: request.summaryMessages,
+              maxTokens: request.outputTokens,
+              signal: attemptController.signal,
+              onActivity: touch,
+            }),
+          SUMMARY_ATTEMPT_TIMEOUT_MS,
+          options.signal,
+          () => attemptController.abort(),
+        );
+        options.signal?.throwIfAborted();
+        summaryText = extractSummaryText(response.message.content);
+        if (summaryText.length > 0) break;
+        continue;
+      }
       const result = stream({
         provider: options.provider,
         model: summaryTransportModel,
@@ -1430,12 +1459,7 @@ export async function compact(
         maxTokens: request.outputTokens,
         apiKey: options.apiKey,
         accountId: options.accountId,
-        projectId: options.projectId,
         baseUrl: options.baseUrl,
-        defaultHeaders:
-          options.provider === "moonshot" && isKimiCodingEndpoint(options.baseUrl)
-            ? kimiCodingHeaders()
-            : undefined,
         signal: attemptController.signal,
       });
 

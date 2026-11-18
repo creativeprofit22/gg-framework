@@ -194,9 +194,14 @@ describe("AgentSession queue — deferred prompts", () => {
       ).getHookSteeringMessages();
       expect(JSON.stringify(steering)).toContain("steer now");
       expect(JSON.stringify(steering)).not.toContain("first");
-      expect(session.listQueuedMessages().map((m) => m.text)).toEqual(["first", "second", "third"]);
+      // Upstream: drained steering stays listed as `delivering` until it lands in the transcript.
+      expect(session.listQueuedMessages()).toEqual([
+        expect.objectContaining({ text: "steer now", delivering: true }),
+        ...["first", "second", "third"].map((text) => ({ id: expect.any(String), text })),
+      ]);
 
-      expect(session.cancelQueuedMessage(session.listQueuedMessages()[1]!.id)).toBe(true);
+      const deferred = session.listQueuedMessages().filter((m) => !m.delivering);
+      expect(session.cancelQueuedMessage(deferred[1]!.id)).toBe(true);
       expect(session.takeNextQueuedMessage()?.text).toBe("first");
       expect(session.takeNextQueuedMessage()?.text).toBe("third");
       expect(session.takeNextQueuedMessage()).toBeNull();
@@ -320,4 +325,54 @@ describe("AgentSession queue — per-message cancellation", () => {
       await session.dispose();
     }
   });
+});
+
+describe("AgentSession queue — delivery", () => {
+  it("keeps a taken message listed as queued until it lands in the transcript", async () => {
+    // Regression: Claude Code takes queued messages at once but reads them at
+    // its next turn. Announcing the drain on take made the "queued" look vanish
+    // the instant a message was sent.
+    const { AgentSession } = await import("./agent-session.js");
+    const session = new AgentSession({
+      provider: "anthropic",
+      model: "claude-test",
+      cwd: tmpProject,
+      systemPrompt: "test system prompt",
+      transient: true,
+    });
+    await session.initialize();
+    const drains: number[] = [];
+    session.eventBus.on("queue_drained", (d) => drains.push(d.count));
+    const seen: Array<{ list: unknown; cancelled: boolean; drains: number }> = [];
+    agentLoopMock.mockImplementation(async function* (
+      messages: unknown[],
+      opts: { getSteeringMessages: () => Array<{ content: unknown }> | null },
+    ) {
+      session.queueMessage("also check the logs");
+      const [taken] = opts.getSteeringMessages() ?? [];
+      const id = session.listQueuedMessages()[0]?.id ?? "";
+      seen.push({
+        list: session.listQueuedMessages(),
+        cancelled: session.cancelQueuedMessage(id),
+        drains: drains.length,
+      });
+      messages.push(taken);
+      yield { type: "steering_message", content: taken!.content };
+      seen.push({ list: session.listQueuedMessages(), cancelled: false, drains: drains.length });
+      messages.push({ role: "assistant", content: "done" });
+      yield { type: "agent_done", totalTurns: 1, totalUsage: { inputTokens: 0, outputTokens: 0 } };
+    });
+    try {
+      await session.prompt("start");
+      expect(seen[0]).toEqual({
+        list: [{ id: expect.any(String), text: "also check the logs", delivering: true }],
+        cancelled: false,
+        drains: 0,
+      });
+      expect(seen[1]).toEqual({ list: [], cancelled: false, drains: 1 });
+      expect(drains).toEqual([0]);
+    } finally {
+      await session.dispose();
+    }
+  }, 15_000);
 });

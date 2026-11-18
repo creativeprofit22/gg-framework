@@ -277,7 +277,7 @@ function createNativePruneFixture() {
     "package.json",
     JSON.stringify({
       name: "onnxruntime-node",
-      version: "1.24.3",
+      version: "1.30.0",
       binary: { napi_versions: [6] },
     }),
   );
@@ -336,7 +336,7 @@ function createPackagePruneFixture() {
   temporaryDirectories.push(root);
   const nodeModules = join(root, "node_modules");
 
-  createVersionedPackage(nodeModules, "onnxruntime-web", "1.26.0-dev.20260416-b7804b056c", [
+  createVersionedPackage(nodeModules, "onnxruntime-web", "1.31.0-dev.20260914-8d85527a0", [
     "README.md",
     "__commit.txt",
     "types.d.ts",
@@ -346,7 +346,7 @@ function createPackagePruneFixture() {
     "docs/webgl-operators.md",
     "lib/index.ts",
   ]);
-  createVersionedPackage(nodeModules, "@huggingface/transformers", "4.2.0", [
+  createVersionedPackage(nodeModules, "@huggingface/transformers", "4.3.2", [
     "LICENSE",
     "dist/ort-wasm-simd-threaded.jsep.mjs",
     "dist/transformers.js",
@@ -384,7 +384,7 @@ function createPackagePruneFixture() {
     ".yarn/plugins/plugin.cjs",
     ".yarn/versions/version.yml",
   ]);
-  createVersionedPackage(nodeModules, "@anthropic-ai/sandbox-runtime", "0.0.78", [
+  createVersionedPackage(nodeModules, "@anthropic-ai/sandbox-runtime", "0.0.82", [
     "LICENSE",
     "dist/cli.js",
     "vendor/java-proxy-agent/build.ts",

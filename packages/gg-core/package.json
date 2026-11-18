@@ -1,16 +1,29 @@
 {
   "name": "@kenkaiiii/gg-core",
-  "version": "5.92.0",
+  "version": "5.104.0",
   "type": "module",
-  "description": "Provider-agnostic, UI-free shared foundation: model registry, auth, paths, telegram, voice",
+  "description": "Model registry, sign-in and stored credentials, and local model discovery for apps built on gg-ai. No UI, no agent loop.",
+  "author": "Ken Kai",
+  "keywords": [
+    "llm",
+    "ai",
+    "model-registry",
+    "oauth",
+    "ollama",
+    "local-models"
+  ],
   "license": "AGPL-3.0-only",
   "engines": {
     "node": ">=22"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/kenkaiiii/gg-framework.git",
+    "url": "git+https://github.com/KenKaiii/gg-framework.git",
     "directory": "packages/gg-core"
+  },
+  "homepage": "https://github.com/KenKaiii/gg-framework/tree/main/packages/gg-core#readme",
+  "bugs": {
+    "url": "https://github.com/KenKaiii/gg-framework/issues"
   },
   "exports": {
     "./qwen-cloud-token-plan": {
@@ -130,11 +143,11 @@
     "@kenkaiiii/gg-ai": "workspace:*"
   },
   "optionalDependencies": {
-    "@huggingface/transformers": "4.2.0",
+    "@huggingface/transformers": "4.3.2",
     "ogg-opus-decoder": "^1.7.5"
   },
   "devDependencies": {
-    "@types/node": "^25.6.0",
+    "@types/node": "^26.6.6",
     "typescript": "^6.0.3",
     "vitest": "^4.1.4"
   },

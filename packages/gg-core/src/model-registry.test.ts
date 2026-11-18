@@ -33,6 +33,8 @@ const PROVIDERS = [
   "deepseek",
   "openrouter",
   "huggingface",
+  "opencode",
+  "opencode-go",
   "sakana",
   "xai",
 ] as const;
@@ -94,9 +96,11 @@ describe("model registry invariants", () => {
   it("registers fast-mode entries as the same model as their base, wired in gg-ai", () => {
     const fastIds = MODELS.filter((m) => m.id.endsWith(FAST_MODE_SUFFIX)).map((m) => m.id);
     expect(fastIds).toEqual([
+      "claude-fable-5-2-fast",
       "claude-opus-5-5-fast",
-      "gpt-6-astra-fast",
-      "gpt-6.1-sol-fast",
+      "gpt-6.2-astra-fast",
+      "gpt-6.2-sol-fast",
+      "gpt-6.1-terra-fast",
       "gpt-6-luna-fast",
     ]);
     for (const id of fastIds) {
@@ -112,15 +116,17 @@ describe("model registry invariants", () => {
     }
     // Claude fast mode spends real money (usage credits); Codex fast spends plan allowance.
     expect(getModel("claude-opus-5-5-fast")?.billing?.paid).toBe(true);
-    expect(getModel("gpt-6.1-sol-fast")?.billing?.paid).toBe(false);
+    expect(getModel("gpt-6.2-sol-fast")?.billing?.paid).toBe(false);
     // Only a real-money tier is ever stripped back to the standard model.
     expect(isPaidModel("claude-opus-5-5-fast")).toBe(true);
     expect(withoutPaidTier("claude-opus-5-5-fast")).toBe("claude-opus-5-5");
-    expect(withoutPaidTier("gpt-6.1-sol-fast")).toBe("gpt-6.1-sol-fast");
+    expect(isPaidModel("claude-fable-5-2-fast")).toBe(true);
+    expect(withoutPaidTier("claude-fable-5-2-fast")).toBe("claude-fable-5-2");
+    expect(withoutPaidTier("gpt-6.2-sol-fast")).toBe("gpt-6.2-sol-fast");
     expect(withoutPaidTier("claude-sonnet-5-5")).toBe("claude-sonnet-5-5");
     expect(withoutPaidTier("not-a-model")).toBe("not-a-model");
     // Compaction summaries never land on a fast (premium) tier.
-    expect(getSummaryModel("openai", "gpt-6.1-sol-fast").id).toBe("gpt-6-luna");
+    expect(getSummaryModel("openai", "gpt-6.2-sol-fast").id).toBe("gpt-6-luna");
     expect(getSummaryModel("anthropic", "claude-opus-5-5-fast").id).toBe("claude-sonnet-5-5");
   });
 
@@ -267,7 +273,7 @@ describe("getSummaryModel when the catalog changes", () => {
   });
 
   it.each([
-    ["openai", "gpt-6-luna", "gpt-6.1-sol"],
+    ["openai", "gpt-6-luna", "gpt-6.2-sol"],
     ["glm", "glm-5.3-flash", "glm-5.3"],
     ["deepseek", "deepseek-flash", "deepseek-v4-pro"],
   ] as const)(
@@ -306,12 +312,12 @@ describe("getSummaryModel when the catalog changes", () => {
   });
 });
 
-describe("GPT-6.1 Sol", () => {
-  it("replaces GPT-6 Sol in the catalog and OpenAI defaults", () => {
-    const model = getModel("gpt-6.1-sol");
+describe("GPT-6.2 Sol", () => {
+  it("replaces GPT-6.1 Sol in the catalog and OpenAI defaults", () => {
+    const model = getModel("gpt-6.2-sol");
     expect(model).toEqual({
-      id: "gpt-6.1-sol",
-      name: "GPT-6.1 Sol",
+      id: "gpt-6.2-sol",
+      name: "GPT-6.2 Sol",
       provider: "openai",
       contextWindow: 1_050_000,
       codexContextWindow: 272_000,
@@ -325,15 +331,25 @@ describe("GPT-6.1 Sol", () => {
     });
     expect(getModelsForProvider("openai")).toContain(model);
     expect(getModel("gpt-6-sol")).toBeUndefined();
-    // Local Fork keeps GPT-6 Astra as the OpenAI default (upstream: GPT-6.1 Sol).
-    expect(getDefaultModel("openai").id).toBe("gpt-6-astra");
+    // Local Fork keeps GPT-6.2 Astra as the OpenAI default (upstream: GPT-6.2 Sol).
+    expect(getDefaultModel("openai").id).toBe("gpt-6.2-astra");
+  });
+});
+
+describe("GPT-6.2 Astra", () => {
+  it("replaces GPT-6 Astra and retires the 6.1 Sol ids", () => {
+    expect(getModel("gpt-6.2-astra")?.name).toBe("GPT-6.2 Astra");
+    expect(getModel("gpt-6.2-astra-fast")?.billing).toBeDefined();
+    for (const retired of ["gpt-6-astra", "gpt-6-astra-fast", "gpt-6.1-sol", "gpt-6.1-sol-fast"]) {
+      expect(getModel(retired), `${retired} retired`).toBeUndefined();
+    }
   });
 });
 
 describe("model registry context windows", () => {
   it("registers Astra as the OpenAI default and retires only GPT-5.5", () => {
     expect(getDefaultModel("openai")).toMatchObject({
-      id: "gpt-6-astra",
+      id: "gpt-6.2-astra",
       contextWindow: 1_050_000,
       codexContextWindow: 272_000,
       codexExperimentalContextWindow: 872_000,
@@ -351,16 +367,16 @@ describe("model registry context windows", () => {
   });
 
   it.each([
-    ["gpt-6-astra", 1_050_000],
-    ["gpt-6.1-sol", 1_050_000],
+    ["gpt-6.2-astra", 1_050_000],
+    ["gpt-6.2-sol", 1_050_000],
     ["gpt-6-luna", 1_050_000],
   ] as const)("uses the %s public API context window without an OAuth account", (model, limit) => {
     expect(getContextWindow(model, { provider: "openai" })).toBe(limit);
   });
 
   it.each([
-    ["gpt-6-astra", 272_000],
-    ["gpt-6.1-sol", 272_000],
+    ["gpt-6.2-astra", 272_000],
+    ["gpt-6.2-sol", 272_000],
     ["gpt-6-luna", 272_000],
   ] as const)("uses the %s Codex product window for OpenAI OAuth", (model, limit) => {
     const options = { provider: "openai" as const, accountId: "acct_123" };
@@ -375,15 +391,15 @@ describe("model registry context windows", () => {
       accountId: "acct_123",
       openAICodexContextProfile: "experimental" as const,
     };
-    expect(getContextWindow("gpt-6-astra", experimental)).toBe(872_000);
-    expect(getContextWindow("gpt-6.1-sol", experimental)).toBe(272_000);
+    expect(getContextWindow("gpt-6.2-astra", experimental)).toBe(872_000);
+    expect(getContextWindow("gpt-6.2-sol", experimental)).toBe(272_000);
     expect(
-      getContextWindow("gpt-6-astra", {
+      getContextWindow("gpt-6.2-astra", {
         provider: "openai",
         openAICodexContextProfile: "experimental",
       }),
     ).toBe(1_050_000);
-    expect(getModel("gpt-6-astra")?.maxOutputTokens).toBe(128_000);
+    expect(getModel("gpt-6.2-astra")?.maxOutputTokens).toBe(128_000);
   });
 
   it("caps custom OpenAI model IDs on Codex transport", () => {
@@ -396,7 +412,7 @@ describe("model registry context windows", () => {
   });
 
   it("keeps the generic tool-output allowance outside Codex OAuth", () => {
-    expect(getToolResultCharLimit("gpt-6.1-sol", { provider: "openai" })).toBeUndefined();
+    expect(getToolResultCharLimit("gpt-6.2-sol", { provider: "openai" })).toBeUndefined();
     expect(
       getToolResultCharLimit("claude-sonnet-5-5", {
         provider: "anthropic",
@@ -435,21 +451,29 @@ describe("model registry context windows", () => {
       contextWindow: 262_144,
       maxThinkingLevel: "high",
     });
-    // K2.8 Preview only exists on the Kimi sign-in endpoint, and is never
+    // K2.8 Preview only exists on the Kimi Code plan endpoint, and is never
     // mislabelled with the K2.7 name it replaced behind the rolling alias.
     expect(getModel("kimi-for-coding")).toMatchObject({
       name: "Kimi K2.8 Preview",
       contextWindow: 1_048_576,
       maxThinkingLevel: "max",
-      authStorageKeys: ["moonshot-oauth"],
+      authStorageKeys: ["kimi-code"],
     });
-    expect(getAuthStorageKeys("moonshot", "kimi-for-coding")).toEqual(["moonshot-oauth"]);
+    expect(getAuthStorageKeys("moonshot", "kimi-for-coding")).toEqual(["kimi-code"]);
+    // The other Kimi models take the plan key first, then a Moonshot key.
+    for (const id of ["kimi-k3", "kimi-k2.7-code", "kimi-k2.7-code-highspeed"]) {
+      expect(getAuthStorageKeys("moonshot", id), id).toEqual(["kimi-code", "moonshot"]);
+    }
+    expect(getAuthStorageKeys("gemini", "gemini-3.8-flash")).toEqual(["gemini-api"]);
     expect(getContextWindow("kimi-k3", { provider: "moonshot" })).toBe(1_048_576);
   });
 
-  it("starts Kimi K3 at the endpoint's declared default effort, kimi-code-style", () => {
-    // Kimi For Coding OAuth endpoint declares default_effort "high" …
+  it("starts Kimi K3 at the endpoint's declared default effort", () => {
+    // The Kimi Code plan endpoint (either host) declares default_effort "high" …
     expect(getDefaultThinkingLevel("kimi-k3", { baseUrl: "https://api.kimi.com/coding/v1" })).toBe(
+      "high",
+    );
+    expect(getDefaultThinkingLevel("kimi-k3", { baseUrl: "https://api.kimi.ai/coding/v1" })).toBe(
       "high",
     );
     // … the public Moonshot API declares "max" …
@@ -474,13 +498,13 @@ describe("model registry context windows", () => {
 
   it("starts Codex models at their catalog default, not the ladder ceiling", () => {
     // openai/codex models.json `default_reasoning_level`: the deep-reasoning
-    // models (Astra, GPT-6.1 Sol) ship "low", GPT-6 Luna "medium". Defaulting to
+    // models (Astra, GPT-6.2 Sol) ship "low", GPT-6 Luna "medium". Defaulting to
     // maxThinkingLevel made fresh Astra sessions reason at max effort.
-    expect(getDefaultThinkingLevel("gpt-6-astra")).toBe("low");
-    expect(getDefaultThinkingLevel("gpt-6.1-sol")).toBe("low");
+    expect(getDefaultThinkingLevel("gpt-6.2-astra")).toBe("low");
+    expect(getDefaultThinkingLevel("gpt-6.2-sol")).toBe("low");
     expect(getDefaultThinkingLevel("gpt-6-luna")).toBe("medium");
     // Ceilings are unchanged — users can still opt up.
-    expect(getModel("gpt-6-astra")?.maxThinkingLevel).toBe("ultra");
+    expect(getModel("gpt-6.2-astra")?.maxThinkingLevel).toBe("ultra");
     expect(getModel("gpt-6-luna")?.maxThinkingLevel).toBe("max");
   });
 
@@ -776,5 +800,21 @@ describe("runtime model registry", () => {
     registerRuntimeModels([local]);
 
     expect(getDefaultModel("local")).toBe(local);
+  });
+});
+
+describe("GPT-6.1 Terra", () => {
+  it("matches the Codex catalog: 500K Codex window, low default, Ultra ladder", () => {
+    expect(getModel("gpt-6.1-terra")).toMatchObject({
+      provider: "openai",
+      contextWindow: 1_050_000,
+      codexContextWindow: 500_000,
+      defaultThinkingLevel: "low",
+      maxThinkingLevel: "ultra",
+      costTier: "medium",
+    });
+    expect(getModel("gpt-6.1-terra-fast")?.billing).toBeDefined();
+    // Local Fork keeps GPT-6.2 Astra as the OpenAI default (upstream: GPT-6.2 Sol).
+    expect(getDefaultModel("openai").id).toBe("gpt-6.2-astra");
   });
 });

@@ -51,7 +51,7 @@ const DEFAULT_TOOL_TIMEOUT_MS = 300_000;
  * interruptible tool that ignores its AbortSignal gets this long to settle
  * before the loop records it as interrupted and moves on without it.
  */
-const PREEMPT_GRACE_MS = 500;
+export const PREEMPT_GRACE_MS = 500;
 
 /** Result text for a tool call cut short by a mid-run steering message. */
 export const STEER_INTERRUPTED_TEXT = "Interrupted: the user sent a new message.";
@@ -62,12 +62,12 @@ export const STEER_INTERRUPTED_TEXT = "Interrupted: the user sent a new message.
  */
 const ATOMIC_TOOL_NAMES = new Set(["edit", "write", "multi_edit", "apply_patch", "notebook_edit"]);
 
-function isInterruptibleTool(tool: AgentTool | undefined, name: string): boolean {
+export function isInterruptibleTool(tool: AgentTool | undefined, name: string): boolean {
   if (tool?.interruptible !== undefined) return tool.interruptible;
   return !ATOMIC_TOOL_NAMES.has(name);
 }
 
-function markSteerInterrupted(record: ToolExecutionRecord): ToolExecutionRecord {
+export function markSteerInterrupted(record: ToolExecutionRecord): ToolExecutionRecord {
   const content = record.content;
   let next: ToolResultContent;
   if (typeof content === "string") {
@@ -385,10 +385,6 @@ export function classifyOverload(
     return "provider_error";
   }
   return null;
-}
-
-export function isOverloaded(err: unknown): boolean {
-  return classifyOverload(err) !== null;
 }
 
 /**
@@ -1041,15 +1037,13 @@ export async function* agentLoop(
         // let the provider report the real auth error.
         let liveApiKey = options.apiKey;
         let liveAccountId = options.accountId;
-        let liveProjectId = options.projectId;
         if (options.resolveCredentials) {
           try {
             const fresh = await options.resolveCredentials();
             liveApiKey = fresh.apiKey;
-            if (Object.prototype.hasOwnProperty.call(fresh, "accountId")) {
-              liveAccountId = fresh.accountId;
-            }
-            if (fresh.projectId !== undefined) liveProjectId = fresh.projectId;
+            // The account belongs to the credential: a ChatGPT plan that fell
+            // back to an OpenAI API key must drop it, or the key rides the plan route.
+            liveAccountId = fresh.accountId;
           } catch (credErr) {
             diag("credential_refresh_failed", {
               error: (credErr instanceof Error ? credErr.message : String(credErr)).slice(0, 200),
@@ -1121,19 +1115,16 @@ export async function* agentLoop(
               signal,
               accountId: liveAccountId,
               transportSessionId: options.transportSessionId,
-              projectId: liveProjectId,
               cacheRetention: options.cacheRetention,
               // A hedge duplicates an already-observed request; observe it once.
               onContextPrepared: arm === "primary" ? options.onContextPrepared : undefined,
               promptCacheKey: options.promptCacheKey,
               serviceTier: options.serviceTier,
-              responsesLite: options.responsesLite,
               strictTools: options.strictTools,
               supportsImages: options.supportsImages,
               supportsVideo: options.supportsVideo,
               compaction: options.compaction,
               clearToolUses: options.clearToolUses,
-              userAgent: options.userAgent,
               defaultHeaders: options.defaultHeaders,
               providerOptions: options.providerOptions,
               fetch: options.fetch,
@@ -2271,7 +2262,7 @@ function canonicalToolArgs(value: unknown): unknown {
   return value;
 }
 
-interface ToolExecutionRecord {
+export interface ToolExecutionRecord {
   toolCallId: string;
   content: ToolResultContent;
   isError: boolean;

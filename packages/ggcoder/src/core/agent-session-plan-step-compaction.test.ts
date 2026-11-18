@@ -122,7 +122,7 @@ async function runApprovedPlan(): Promise<{ internals: PlanStepInternals }> {
   const { AgentSession } = await import("./agent-session.js");
   const session = new AgentSession({
     provider: "openai",
-    model: "gpt-6.1-sol",
+    model: "gpt-6.2-sol",
     cwd: tmpProject,
     systemPrompt: "test system prompt",
     transient: true,
@@ -162,11 +162,12 @@ beforeEach(async () => {
   await fs.writeFile(
     path.join(tmpHome, ".gg", "auth.json"),
     JSON.stringify({
-      openai: {
+      "openai-chatgpt": {
         accessToken: "test-openai-token",
         refreshToken: "test-openai-refresh",
         expiresAt: Date.now() + 3_600_000,
         accountId: "chatgpt-account",
+        clientId: "oaiapp_test",
       },
     }),
   );

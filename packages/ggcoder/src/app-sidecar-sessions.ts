@@ -1,7 +1,9 @@
 import fs from "node:fs/promises";
+import path from "node:path";
 
 import {
   CHAT_AGENT_IDS,
+  CHAT_FOLDER_NAME,
   chatAgentSessionsDir,
   sessionsDirForChatAgent,
   type ChatAgentId,
@@ -34,6 +36,24 @@ export interface ListSidecarSessionsOptions {
   cache?: SessionReadCache;
 }
 
+/** Chats from before the GG Chat folder were saved against the projects root itself. */
+function chatListingCwds(cwd: string): string[] {
+  return path.basename(cwd) === CHAT_FOLDER_NAME ? [cwd, path.dirname(cwd)] : [cwd];
+}
+
+async function listChatSessions(
+  cwd: string,
+  sessionsDir: string,
+  cache?: SessionReadCache,
+): Promise<RecentSession[]> {
+  const groups = await Promise.all(
+    chatListingCwds(cwd).map((dir) =>
+      listRecentSessions(dir, CHAT_SESSION_LIMIT, sessionsDir, cache),
+    ),
+  );
+  return groups.flat();
+}
+
 /** List coding or chat sessions using the documented 100/30 caps exposed by the gg-app sidecar. */
 export async function listSidecarSessions(
   cwd: string,
@@ -54,21 +74,20 @@ export async function listSidecarSessions(
     // Chat agents have their own private stores; only the coding list (no
     // requested agent) shares a cwd with Claude Code and Codex.
     if (requestedAgent) {
-      return listRecentSessions(
+      const sessions = await listChatSessions(
         cwd,
-        CHAT_SESSION_LIMIT,
         sessionsDirForChatAgent(coderSessionsDir, requestedAgent),
         cache,
       );
+      return sessions.slice(0, CHAT_SESSION_LIMIT);
     }
     return listCodingSessions(cwd, coderSessionsDir, homeDir, cache);
   }
 
   const groups = await Promise.all(
     CHAT_AGENT_IDS.map(async (agentId) => {
-      const sessions = await listRecentSessions(
+      const sessions = await listChatSessions(
         cwd,
-        CHAT_SESSION_LIMIT,
         chatAgentSessionsDir(coderSessionsDir, agentId),
         cache,
       );

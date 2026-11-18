@@ -240,8 +240,9 @@ describe("explicit single-opportunity app command", () => {
       sidecar.indexOf("executeReviewedCommand: (async (request)"),
       sidecar.indexOf("programmaticExecutionActive = true;"),
     );
-    expect(executor).toContain(
-      "reviewedExecutionBlocked({ mode, planMode: session.getPlanMode(), active: programmaticExecutionActive })",
+    // Whitespace-insensitive: the call may be wrapped by the formatter.
+    expect(executor.replace(/\s+|,(?=\s*\})/g, "")).toContain(
+      "reviewedExecutionBlocked({mode,planMode:session.getPlanMode(),active:programmaticExecutionActive})",
     );
     expect(executor).toContain("throw new Error(REVIEWED_EXECUTION_UNAVAILABLE)");
     expect(REVIEWED_EXECUTION_UNAVAILABLE).toContain("outside Code mode");

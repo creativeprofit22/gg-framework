@@ -53,8 +53,6 @@ const allowedRootChildren = [
   (el) => el.tag === "Confetti",
   (el) => el.tag === "Toaster",
   (el) => /Modal$/.test(el.tag),
-  // World's full-window overlay is `position: fixed; inset: 0` (App.css).
-  (el) => el.classes.includes("world-overlay"),
   (el) => el.classes.includes("visually-hidden") || el.classes.includes("sr-only"),
 ];
 

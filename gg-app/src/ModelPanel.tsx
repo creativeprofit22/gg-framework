@@ -1,6 +1,7 @@
 import { useContext, useEffect, useId, useMemo, useRef, useState } from "react";
 import { PaneIdContext } from "./pane-context";
-import { setThinkingLevel, type AgentState, type ModelOption } from "./agent";
+import { authStatus, openUrl, setThinkingLevel, type AgentState, type ModelOption } from "./agent";
+import { CHATGPT_USAGE_URL } from "./chat-error";
 import { PanelHead } from "./DeckPanelHead";
 import { Icon } from "./icons";
 import { modelDisplayName } from "./model-name";
@@ -114,6 +115,25 @@ export function ModelPanel({
   const primaryRoleId = useId();
   const secondRoleId = useId();
 
+  // OpenAI asks apps to say when requests use the ChatGPT plan, with a link
+  // to manage that usage. Read once per open from the native auth status.
+  const [chatgptPlan, setChatgptPlan] = useState(false);
+  const onOpenAI = state?.provider === "openai";
+  useEffect(() => {
+    if (!onOpenAI) {
+      setChatgptPlan(false);
+      return;
+    }
+    let live = true;
+    void authStatus().then((providers) => {
+      if (live)
+        setChatgptPlan(providers.find((p) => p.value === "openai")?.activeMethod === "oauth");
+    });
+    return () => {
+      live = false;
+    };
+  }, [onOpenAI]);
+
   const forSecond = target === "second" && second !== null;
   const currentId = forSecond ? second.model : (state?.model ?? "");
   const locked = forSecond ? second.disabled : running;
@@ -145,14 +165,17 @@ export function ModelPanel({
             id: model.id,
             name: model.name,
             provider: modelSourceLabel(model),
-            disabled: model.supportsTools === false || paidForSecond,
+            disabled: model.supportsTools === false || paidForSecond || Boolean(model.unavailable),
             // Fast modes change what the user pays, so the row says so up front.
+            // A model the user's plan or keys can't run says why, rather than
+            // failing after it is picked.
             hint:
-              model.supportsTools === false
+              model.unavailable ??
+              (model.supportsTools === false
                 ? "no tool calling"
                 : paidForSecond
                   ? "main chat only"
-                  : model.billing?.label,
+                  : model.billing?.label),
             paid: model.billing?.paid,
             billingDetail: model.billing?.detail,
             standardName: model.billing?.standardModel
@@ -320,6 +343,20 @@ export function ModelPanel({
           onConfirm={() => confirmPaid(pendingPaid)}
           onCancel={cancelPaid}
         />
+      )}
+      {chatgptPlan && !forSecond && !pendingPaid && (
+        <p className="deck-note">
+          Using ChatGPT plan ·{" "}
+          <a
+            href={CHATGPT_USAGE_URL}
+            onClick={(e) => {
+              e.preventDefault();
+              void openUrl(CHATGPT_USAGE_URL);
+            }}
+          >
+            Manage usage
+          </a>
+        </p>
       )}
       {currentBilling && !pendingPaid && (
         <p className="deck-note" data-paid={currentBilling.paid || undefined}>

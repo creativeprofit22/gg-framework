@@ -255,10 +255,6 @@ export async function mutateTasks(
   return mutateTasksSync(cwd, fn);
 }
 
-export function getTaskCount(cwd: string): number {
-  return loadTasksSync(cwd).filter((task) => task.status !== "done").length;
-}
-
 export function getNextRunnableTask(cwd: string): RunnableTaskInfo | null {
   const runnable = loadTasksSync(cwd).find((task) => isRunnableTaskStatus(task.status));
   if (!runnable) return null;

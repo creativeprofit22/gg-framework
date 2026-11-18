@@ -27,7 +27,14 @@ import {
 } from "./agent";
 import type { RoadmapPhaseDraft } from "@kenkaiiii/gg-core/roadmap-workflow";
 import { isPhaseLaunchErrorEvent } from "./notes-types";
-import { closeAsks, isAskUserPrompt, markAskDeferred, reconcilePendingAsks } from "./ask-user";
+import {
+  closeAsks,
+  completeAskFromSidecar,
+  isAskUserPrompt,
+  markAskDeferred,
+  markAskLeftByKen,
+  reconcilePendingAsks,
+} from "./ask-user";
 import {
   extractImageWarnings,
   type AssistantTextDeltaPayload,
@@ -45,7 +52,7 @@ import { type SubAgentLine } from "./SubAgentFeed";
 import { playSound } from "./sounds";
 import { takeNewSecurityNotices, withSecurityRow } from "./security-notices";
 import { toast } from "./toast";
-import { findCompletedSteps, countPlanSteps } from "./plan-steps";
+import { findCompletedSteps, countPlanSteps, stepsDoneThrough } from "./plan-steps";
 import type { PendingAttachment } from "./attachments";
 import type { Item } from "./App";
 import { readChatError } from "./chat-error";
@@ -262,6 +269,9 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
 
   // ── Event-machine private refs (used nowhere outside this hook) ──
   const streamingIdRef = useRef<number | null>(null);
+  // A model turn ended: its text is complete, so the next turn's text gets its
+  // own bubble instead of running on ("…skills.**Next reply**") in one run.
+  const turnEndedRef = useRef(false);
   const pendingChunksRef = useRef<string>("");
   const flushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Retain acknowledged IDs through receipt delivery, even when enqueue and
@@ -786,6 +796,22 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           if (readyState.goal?.needsResume) onGoalNeedsResume?.();
           break;
         }
+        case "live_preview_prompt": {
+          // Sent from the live preview chat on the running web app: show the
+          // typed words and the picked element, not the context block the agent
+          // receives (core/live-preview.ts in ggcoder).
+          const text = typeof d.text === "string" ? d.text : "";
+          const element = typeof d.element === "string" && d.element ? d.element : null;
+          if (!text.trim() && !element) break;
+          stickToBottomRef.current = true;
+          pushItem({
+            kind: "user",
+            id: nextId(),
+            text,
+            ...(element ? { attachments: [{ kind: "file" as const, name: element }] } : {}),
+          });
+          break;
+        }
         case "run_start":
           // Land any still-buffered sub-agent snapshots on their (previous
           // run's) group before the active-group pointer resets below.
@@ -801,6 +827,7 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           runOpenRef.current = true;
           runErroredRef.current = false;
           runFromItemRef.current = lastIssuedId();
+          turnEndedRef.current = false;
 
           tokensRef.current = 0;
           turnsRef.current = 0;
@@ -841,6 +868,11 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
             pushItem({ kind: "assistant", id: nextId(), text: chunk });
             break;
           }
+          // Each model turn gets its own reply bubble.
+          if (turnEndedRef.current) {
+            turnEndedRef.current = false;
+            endStreamingText();
+          }
           appendAssistant(chunk);
           // Track plan-step completion for the activity bar. Accumulate the
           // run's assistant text (markers can split across deltas) and union in
@@ -849,9 +881,7 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           const done = findCompletedSteps(assistantTextRef.current);
           if (done.length > 0) {
             const next = new Set(planDoneRef.current);
-            for (const n of done) {
-              if (n >= 1 && n <= planTotalRef.current) next.add(n);
-            }
+            for (const n of stepsDoneThrough(done, planTotalRef.current)) next.add(n);
             if (next.size !== planDoneRef.current.size) {
               planDoneRef.current = next;
               setPlanDone(next);
@@ -1103,12 +1133,17 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
               }
             | undefined;
           turnsRef.current += 1;
+          turnEndedRef.current = true;
           if (usage && typeof usage.outputTokens === "number") {
             tokensRef.current += usage.outputTokens;
             setTokens(tokensRef.current);
           }
           break;
         }
+        case "truncated":
+          // A reply cut off at the output limit continues mid-sentence: keep one bubble.
+          if (d.continued === true) turnEndedRef.current = false;
+          break;
         case "agent_done": {
           // The loop stopped and no review was injected, so anything held under
           // arming was the real final answer after all — paint it. The loop has
@@ -1426,6 +1461,28 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           if (typeof d.id === "string") {
             const promptId = d.id;
             setItems((prev) => markAskDeferred(prev, promptId));
+          }
+          break;
+        case "ask_user_answered":
+          // Autopilot Ken answered the card in the user's place.
+          if (typeof d.id === "string" && typeof d.answers === "object" && d.answers !== null) {
+            const promptId = d.id;
+            const answers: Record<string, string | string[]> = {};
+            for (const [key, value] of Object.entries(d.answers as Record<string, unknown>)) {
+              if (typeof value === "string") answers[key] = value;
+              else if (Array.isArray(value) && value.every((v) => typeof v === "string")) {
+                answers[key] = value as string[];
+              }
+            }
+            setItems((prev) => completeAskFromSidecar(prev, promptId, answers, nextId));
+          }
+          break;
+        case "ask_user_left":
+          // Autopilot Ken left the card to the user; it stays open.
+          if (typeof d.id === "string") {
+            const promptId = d.id;
+            const reason = typeof d.reason === "string" ? d.reason : "";
+            setItems((prev) => markAskLeftByKen(prev, promptId, reason));
           }
           break;
         case "ask_user_closed":

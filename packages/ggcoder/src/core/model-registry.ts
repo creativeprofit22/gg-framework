@@ -41,7 +41,7 @@ export function getModelDisplayId(modelId: string): string {
 
 type AzureIdentityCapabilities = Omit<ModelInfo, "name" | "provider">;
 
-/** Window and modality shape shared by the retired GPT-5.6 family and GPT-6 Sol. */
+/** Window and modality shape shared by the retired GPT-5.6/GPT-6 ids. */
 const RETIRED_GPT_CAPABILITIES = {
   contextWindow: 1_050_000,
   codexContextWindow: 272_000,
@@ -52,9 +52,9 @@ const RETIRED_GPT_CAPABILITIES = {
 } as const;
 
 /**
- * Upstream retired GPT-5.6 and then GPT-6 Sol (replaced by GPT-6.1 Sol) from
- * the OpenAI catalog, but an Azure customer can still run a deployment of
- * either. Keep their last-shipped capabilities for Azure identity mapping only,
+ * Upstream retired GPT-5.6, GPT-6 Sol, GPT-6.1 Sol and GPT-6 Astra from the
+ * OpenAI catalog, but an Azure customer can still run a deployment of any of
+ * them. Keep their last-shipped capabilities for Azure identity mapping only,
  * so such a deployment is not downgraded to the conservative fallback. These
  * entries never reappear in the OpenAI model menu.
  */
@@ -86,6 +86,22 @@ const RETIRED_AZURE_IDENTITIES: readonly AzureIdentityCapabilities[] = [
     ...RETIRED_GPT_CAPABILITIES,
     defaultThinkingLevel: "medium",
     costTier: "medium",
+    maxThinkingLevel: "ultra",
+  },
+  {
+    // As last shipped before upstream v0.115.0 replaced it with GPT-6.2 Sol.
+    id: "gpt-6.1-sol",
+    ...RETIRED_GPT_CAPABILITIES,
+    defaultThinkingLevel: "low",
+    costTier: "medium",
+    maxThinkingLevel: "ultra",
+  },
+  {
+    // As last shipped before upstream v0.115.0 replaced it with GPT-6.2 Astra.
+    id: "gpt-6-astra",
+    ...RETIRED_GPT_CAPABILITIES,
+    defaultThinkingLevel: "low",
+    costTier: "high",
     maxThinkingLevel: "ultra",
   },
 ];

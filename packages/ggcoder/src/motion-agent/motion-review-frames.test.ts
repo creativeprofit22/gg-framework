@@ -6,6 +6,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { findMotionBundle } from "../core/skills.js";
+import { missingSystemTools } from "../test-support/system-tools.js";
 
 const run = promisify(execFile);
 let tmp = "";
@@ -54,7 +55,10 @@ async function extract(
   });
   return result.stdout;
 }
-describe("review-frames real media evidence", () => {
+const noMedia = missingSystemTools("motion-review-frames.test.ts", "ffmpeg", "ffprobe");
+
+// Covers the inner ffmpeg/extract budgets; loaded Windows runners run these 4x slower.
+describe.skipIf(noMedia)("review-frames real media evidence", { timeout: 90_000 }, () => {
   it("extracts the actual early red and late blue pixels at labeled times", async () => {
     const video = path.join(tmp, "colors.mp4");
     await run(
@@ -114,7 +118,7 @@ describe("review-frames real media evidence", () => {
       expect(result.stdout[channel]).toBeGreaterThan(230);
       expect(result.stdout[channel === 0 ? 2 : 0]).toBeLessThan(20);
     }
-  }, 30_000);
+  });
   it("binds consecutive action, overview and phone images to the rendered video", async () => {
     const video = await clip();
     await extract(video, [{ label: "handoff", start: 0.5, end: 1 }]);
@@ -141,7 +145,7 @@ describe("review-frames real media evidence", () => {
       expect(page.height).toBeLessThanOrEqual(1600);
       expect((await fs.stat(path.join(tmp, "evidence", page.file))).size).toBeGreaterThan(100);
     }
-  }, 30_000);
+  });
   it("covers every supplied window instead of silently truncating a page", async () => {
     await extract(await clip(), [
       { label: "first", start: 0, end: 0.3 },
@@ -155,7 +159,7 @@ describe("review-frames real media evidence", () => {
         .filter((p: { kind: string }) => p.kind === "action")
         .map((p: { label: string }) => p.label),
     ).toEqual(["first", "last"]);
-  }, 30_000);
+  });
   it("rejects overwrite and output escape", async () => {
     const video = await clip();
     await fs.mkdir(path.join(tmp, "existing"));

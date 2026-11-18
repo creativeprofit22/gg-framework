@@ -343,7 +343,7 @@ describe("pane agent client", () => {
     await c.listJiwa();
     await c.deleteJiwa("j");
     await c.getProgress();
-    await c.getSubscriptionUsage("openai");
+    await c.getSubscriptionUsage("anthropic");
     await c.enhancePrompt("e");
     await c.sendPrompt("p", [], { kenSent: true });
     await c.prepareContinuationHandoff("next exactly");

@@ -43,6 +43,27 @@ describe("resolveStartOrFallback", () => {
     expect(res.model).toBe(getDefaultModel("anthropic").id);
   });
 
+  it("skips Azure without a configured deployment instead of crashing", async () => {
+    // A saved Azure default with no deployment configured has no model to start on.
+    const loggedOut = await resolveStartOrFallback(auth(), ALL, "azure", "azure:gpt-5.6-sol");
+    expect(loggedOut).toEqual({
+      provider: "anthropic",
+      model: getDefaultModel("anthropic").id,
+      loggedIn: false,
+    });
+    const withAzureKey = await resolveStartOrFallback(
+      auth("azure", "openai"),
+      ["azure", ...ALL],
+      "azure",
+      "azure:gpt-5.6-sol",
+    );
+    expect(withAzureKey).toEqual({
+      provider: "openai",
+      model: getDefaultModel("openai").id,
+      loggedIn: true,
+    });
+  });
+
   it("honors a non-anthropic preferred provider in the logged-out fallback", async () => {
     const res = await resolveStartOrFallback(auth(), ALL, "openai", undefined);
     expect(res.loggedIn).toBe(false);

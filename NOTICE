@@ -1,5 +1,5 @@
 GG Coder
-Copyright (C) 2025-2026 KenKai
+Copyright (C) 2025-2026 Ken Kai
 
 This program is free software: you can redistribute it and/or modify it under
 the terms of the GNU Affero General Public License as published by the Free
@@ -55,6 +55,5 @@ Third-party components
 Bundled third-party code, fonts and media keep their own licenses, listed in:
   gg-app/src/assets/fonts/THIRD-PARTY.md
   packages/ggcoder/assets/motion/THIRD-PARTY.md
-  packages/gg-world/CREDITS.md
 and in the LICENSE / OFL.txt files beside each component. npm and Cargo
 dependencies are installed under their own licenses.

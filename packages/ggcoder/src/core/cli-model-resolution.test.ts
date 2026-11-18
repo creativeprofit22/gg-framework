@@ -33,19 +33,19 @@ describe("CLI model resolution", () => {
   });
 
   it("rejects invalid explicit interactive models instead of silently defaulting", () => {
-    expect(() => resolveInteractiveCliModel("openai", "gpt-5.5", "gpt-6-astra")).toThrow(
+    expect(() => resolveInteractiveCliModel("openai", "gpt-5.5", "gpt-6.2-astra")).toThrow(
       'Unknown --model value "gpt-5.5".',
     );
   });
 
   it("uses Astra for RPC OpenAI defaults while preserving explicit transport models", () => {
-    expect(resolveRpcModel("openai", undefined)).toBe("gpt-6-astra");
+    expect(resolveRpcModel("openai", undefined)).toBe("gpt-6.2-astra");
     expect(resolveRpcModel("openai", "gpt-5.5")).toBe("gpt-5.5");
   });
 
   it("shows Astra rather than GPT-5.5 in CLI model guidance", () => {
     const cliSource = fs.readFileSync(new URL("../cli.ts", import.meta.url), "utf8");
-    expect(cliSource).toContain("Model to use (e.g. claude-sonnet-5-5, gpt-6-astra)");
+    expect(cliSource).toContain("Model to use (e.g. claude-sonnet-5-5, gpt-6.2-astra)");
     expect(cliSource).not.toContain("gpt-5.5)");
   });
 });

@@ -21,7 +21,6 @@ interface Internals {
     resolveCredentials(): Promise<{
       accessToken: string;
       accountId: string;
-      projectId: string;
       baseUrl: string;
     }>;
   };
@@ -37,7 +36,7 @@ describe("optional completion-review seam", () => {
   it("preserves synchronous event tracking when no completion policy is installed", async () => {
     const session = new AgentSession({
       provider: "openai",
-      model: "gpt-6-astra",
+      model: "gpt-6.2-astra",
       cwd: process.cwd(),
       transient: true,
     });
@@ -67,7 +66,7 @@ describe("optional completion-review seam", () => {
     };
     const session = new AgentSession({
       provider: "openai",
-      model: "gpt-6-astra",
+      model: "gpt-6.2-astra",
       cwd: process.cwd(),
       transient: true,
       selfCorrectionHooks: false,
@@ -96,7 +95,7 @@ describe("optional completion-review seam", () => {
     });
     const session = new AgentSession({
       provider: "openai",
-      model: "gpt-6-astra",
+      model: "gpt-6.2-astra",
       cwd: process.cwd(),
       thinkingLevel: "high",
       transient: true,
@@ -107,7 +106,6 @@ describe("optional completion-review seam", () => {
         return {
           accessToken: "test-only-token",
           accountId: "account-route",
-          projectId: "project-route",
           baseUrl: "https://example.invalid",
         };
       },
@@ -119,11 +117,10 @@ describe("optional completion-review seam", () => {
       { instruction: "review", context: "brief only", images },
       controller.signal,
     );
-    expect(response.model).toBe("gpt-6-astra");
+    expect(response.model).toBe("gpt-6.2-astra");
     expect(transport).toHaveBeenCalledWith(
       expect.objectContaining({
         accountId: "account-route",
-        projectId: "project-route",
         apiKey: "test-only-token",
         thinking: "high",
         signal: controller.signal,
@@ -144,7 +141,7 @@ describe("optional completion-review seam", () => {
   it("does nothing to a chat-style session without the option", async () => {
     const session = new AgentSession({
       provider: "openai",
-      model: "gpt-6-astra",
+      model: "gpt-6.2-astra",
       cwd: process.cwd(),
       transient: true,
       selfCorrectionHooks: false,

@@ -24,6 +24,10 @@ export interface AppPaths {
   progressBackupFile: string;
   /** Earned trophies and the counters that unlock them. */
   trophiesFile: string;
+  /** On-demand Claude Code binaries for "Sign in with Claude", one dir per version. */
+  claudeCodeDir: string;
+  /** GG Coder's own Claude Code login (CLAUDE_CONFIG_DIR), separate from the user's. */
+  claudeCodeConfigDir: string;
 }
 
 export function resolveAgentDir(
@@ -60,5 +64,7 @@ export function getAppPaths(): AppPaths {
     progressFile: path.join(agentDir, "progress.json"),
     progressBackupFile: path.join(agentDir, "progress.backup.json"),
     trophiesFile: path.join(agentDir, "trophies.json"),
+    claudeCodeDir: path.join(agentDir, "claude-code"),
+    claudeCodeConfigDir: path.join(agentDir, "claude-code", "config"),
   };
 }

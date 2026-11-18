@@ -77,13 +77,6 @@ describe("dock layering build gate", () => {
     expect(problems.join("\n")).not.toMatch(/NewThingModal/);
   });
 
-  it("allows World's fixed full-window overlay at the pane root", () => {
-    const problems = checkDockLayering(
-      pane({ root: '{showWorld && <div className="world-overlay"><WorldScreen /></div>}' }),
-    );
-    expect(problems).toEqual([]);
-  });
-
   it("fails closed when the dock can't be found", () => {
     expect(checkDockLayering(pane().replace('className="dock"', 'className="bottom"'))).toEqual([
       expect.stringMatching(/expected exactly one floating dock/),

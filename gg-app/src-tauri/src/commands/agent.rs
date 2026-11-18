@@ -1518,6 +1518,45 @@ pub(crate) async fn agent_shell_run(
     sidecar_json(res).await
 }
 
+/// Proxy: "Add folder" from the More panel. Returns `{ root, additionalRoots }`;
+/// a folder that can't be added comes back as the sidecar's error message.
+#[tauri::command]
+pub(crate) async fn agent_add_dir(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+    path: String,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let res = client
+        .post(format!("{}/workspace/add-dir", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
+        .json(&serde_json::json!({ "path": path }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    sidecar_json(res).await
+}
+
+/// Proxy: "Remove folder" from the More panel. Returns `{ root, additionalRoots }`.
+#[tauri::command]
+pub(crate) async fn agent_remove_dir(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+    path: String,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let res = client
+        .post(format!("{}/workspace/remove-dir", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
+        .json(&serde_json::json!({ "path": path }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    sidecar_json(res).await
+}
+
 /// Proxy: stop a running `!cmd` and everything it started.
 #[tauri::command]
 pub(crate) async fn agent_shell_cancel(
@@ -1776,75 +1815,6 @@ pub(crate) async fn agent_set_thinking(
         .await
         .map_err(|e| e.to_string())?;
     sidecar_json(res).await
-}
-
-#[tauri::command]
-pub(crate) async fn agent_plugins(
-    webview: WebviewWindow,
-    client: State<'_, reqwest::Client>,
-) -> Result<serde_json::Value, String> {
-    let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = session_for(&webview).ok_or("session not ready")?;
-    let res = client
-        .get(format!("{}/plugins", sidecar_base(port)))
-        .header("x-gg-session", &gg_sid)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    res.error_for_status()
-        .map_err(|e| e.to_string())?
-        .json::<serde_json::Value>()
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub(crate) async fn agent_install_plugin(
-    webview: WebviewWindow,
-    client: State<'_, reqwest::Client>,
-    bundle_path: String,
-) -> Result<serde_json::Value, String> {
-    let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = session_for(&webview).ok_or("session not ready")?;
-    let res = client
-        .post(format!("{}/plugins/install", sidecar_base(port)))
-        .header("x-gg-session", &gg_sid)
-        .json(&serde_json::json!({ "bundlePath": bundle_path }))
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    res.error_for_status()
-        .map_err(|e| e.to_string())?
-        .json::<serde_json::Value>()
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub(crate) async fn agent_remove_plugin(
-    webview: WebviewWindow,
-    client: State<'_, reqwest::Client>,
-    plugin_id: String,
-) -> Result<serde_json::Value, String> {
-    let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = session_for(&webview).ok_or("session not ready")?;
-    let mut endpoint = reqwest::Url::parse(&format!("{}/plugins/", sidecar_base(port)))
-        .map_err(|e| e.to_string())?;
-    endpoint
-        .path_segments_mut()
-        .map_err(|_| "invalid sidecar URL".to_string())?
-        .push(&plugin_id);
-    let res = client
-        .delete(endpoint)
-        .header("x-gg-session", &gg_sid)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    res.error_for_status()
-        .map_err(|e| e.to_string())?
-        .json::<serde_json::Value>()
-        .await
-        .map_err(|e| e.to_string())
 }
 
 pub(crate) fn copy_window_label(copy_id: &str) -> String {

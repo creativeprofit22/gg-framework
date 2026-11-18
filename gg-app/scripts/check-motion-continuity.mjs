@@ -135,7 +135,6 @@ async function disclosureChecks(page, traces, immediate = false) {
     const samples = [];
     for (const [selector, toggle] of [
       [".chat-error-details", ".chat-error-details-toggle"],
-      [".queued-list-shell", ".queued-toggle"],
       [".code-block", ".code-expand"],
     ]) {
       const el = document.querySelector(selector);
@@ -186,8 +185,6 @@ async function disclosureChecks(page, traces, immediate = false) {
       Math.abs(sample.final - sample.folded) <= 1,
       `No final padding/height snap: ${sample.selector}`,
     );
-    if (sample.selector === ".queued-list-shell")
-      assert(sample.expanded > 180, "12 queue rows are not capped at 180px");
     for (const step of sample.steps) {
       assert(step.oldCancelled, `Previous height animation is cancelled: ${sample.selector}`);
       assert.equal(step.filter, "none", "Reading text stays sharp");
@@ -220,10 +217,7 @@ async function contentChecks(page, traces) {
         [...document.querySelectorAll("button")].find((b) => b.textContent === text).click(),
       );
     const sizes = [];
-    for (const [selector, toggle, grow] of [
-      [".code-block", ".code-expand", "Grow fixture code"],
-      [".queued-list-shell", ".queued-toggle", "Grow fixture queue"],
-    ]) {
+    for (const [selector, toggle, grow] of [[".code-block", ".code-expand", "Grow fixture code"]]) {
       const el = document.querySelector(selector);
       window.motionCommit(() => document.querySelector(toggle).click());
       for (const a of el.getAnimations()) a.finish();
@@ -246,15 +240,10 @@ async function contentChecks(page, traces) {
         count: motions.length,
       });
     }
-    press("Drain fixture queue");
-    const shell = document.querySelector(".queued-list-shell");
-    for (const a of shell.getAnimations()) a.finish();
-    const drained = shell.getBoundingClientRect().height;
-    const hidden = shell.inert && shell.getAttribute("aria-hidden") === "true";
     window.motionCommit(() => document.querySelector(".code-expand").click());
     const running = document.querySelector(".code-block").getAnimations();
     press("Unmount fixture disclosures");
-    return { sizes, drained, hidden, cancelled: running.every((a) => a.playState === "idle") };
+    return { sizes, cancelled: running.every((a) => a.playState === "idle") };
   });
   traces.push({ name: "content-growth-drain-unmount", ...result });
   if (!record) {
@@ -263,8 +252,6 @@ async function contentChecks(page, traces) {
       assert(Math.abs(size.first - size.before) <= 1, "Content growth starts at its old size");
       assert(size.after > size.before, "Content growth reaches its natural height");
     }
-    assert.equal(result.drained, 0, "One remaining queued item collapses the list");
-    assert(result.hidden, "Collapsed queue list is inert");
     assert(result.cancelled, "Unmount cancels owned motion");
   }
 }
@@ -377,12 +364,6 @@ async function fallbackChecks(page, url, traces) {
     await page.goto(`${url}?components`);
     await page.getByRole("button", { name: "Show error details" }).waitFor();
     await disclosureChecks(page, traces, true);
-    await page.getByRole("button", { name: "Empty fixture queue" }).click();
-    assert.equal(
-      await page.locator(".queued-bar").count(),
-      0,
-      `${mode}: final queue removal is immediate`,
-    );
     const trigger = page.getByRole("button", { name: "Fixture choice", exact: true });
     await trigger.click();
     await page.getByRole("option", { name: "Two", exact: true }).click();
@@ -422,7 +403,49 @@ async function fallbackChecks(page, url, traces) {
   }
 }
 
-async function toolTransaction(page, events, traces) {
+// The dock floats over the chat and hands its height to the transcript through
+// an observer. A glide has to outlive that: one that is cut short, or never
+// starts, moves the rows the rest of the way in a single frame.
+async function dockGlide(page, name, act, traces, duration = 600) {
+  const sampling = page.evaluate(async (duration) => {
+    const transcript = document.querySelector(".transcript");
+    const rows = [...transcript.children].slice(-4);
+    const sample = (start) => ({
+      time: performance.now() - start,
+      tops: rows.map((row) => (row.isConnected ? row.getBoundingClientRect().top : null)),
+      gliding: transcript
+        .getAnimations({ subtree: true })
+        .filter((a) => a.effect?.getKeyframes().some((frame) => frame.translate !== undefined))
+        .length,
+    });
+    const start = performance.now();
+    const frames = [sample(start)];
+    while (performance.now() - start < duration) {
+      await new Promise(requestAnimationFrame);
+      // After the frame's observers and paint, not before them.
+      await new Promise((resolve) => {
+        const channel = new MessageChannel();
+        channel.port1.onmessage = resolve;
+        channel.port2.postMessage(0);
+      });
+      frames.push(sample(start));
+    }
+    return frames;
+  }, duration);
+  await act();
+  const frames = await sampling;
+  traces.push({ name, frames });
+  if (record) return;
+  const row = frames[0].tops.findIndex((_, i) => frames.every((frame) => frame.tops[i] !== null));
+  const travel = Math.abs(frames.at(-1).tops[row] - frames[0].tops[row]);
+  const gliding = frames.filter((frame) => frame.gliding > 0);
+  const lasted = gliding.length ? gliding.at(-1).time - gliding[0].time : 0;
+  assert(travel > 20, `${name}: the chat has somewhere to go (${travel}px)`);
+  assert(lasted >= 120, `${name}: rows glide the whole way, not ${Math.round(lasted)}ms of it`);
+  assert(Math.abs((await chatGeometry(page)).bottom) <= 2, `${name}: ends pinned to the bottom`);
+}
+
+async function toolTransaction(page, events, traces, moves = true) {
   const result = await page.evaluate(async (events) => {
     const transcript = document.querySelector(".transcript");
     const row = transcript.lastElementChild;
@@ -432,13 +455,15 @@ async function toolTransaction(page, events, traces) {
     const animations = document
       .getAnimations()
       .filter((a) => a.effect?.getKeyframes().some((frame) => frame.translate !== undefined));
-    for (const animation of animations) {
-      animation.pause();
-      animation.currentTime = 0;
-    }
+    // Read live, then paused where they are. Not rewound: a glide already
+    // under way takes the new destination on its own clock, so its time 0 is
+    // not this moment. Not paused first either: WebKit's styles run on a live
+    // clock inside a task while pause() holds the frame's earlier time.
     const first = row.getBoundingClientRect().top;
+    for (const animation of animations) animation.pause();
     const scroll = transcript.scrollTop;
-    for (const animation of animations) animation.currentTime = 75;
+    for (const animation of animations)
+      animation.currentTime = Number(animation.currentTime ?? 0) + 75;
     const middle = row.getBoundingClientRect().top;
     for (const animation of animations) animation.finish();
     const last = row.getBoundingClientRect().top;
@@ -464,7 +489,7 @@ async function toolTransaction(page, events, traces) {
     // The fork's tool feed keeps a fixed height while it fills, so only a
     // change that moves the conversation owes a transition.
     assert(
-      result.count > 0 || Math.abs(result.last - result.before) <= 1,
+      (moves && result.count > 0) || Math.abs(result.last - result.before) <= 1,
       `Tool geometry uses a coordinated transition: ${JSON.stringify(result)}`,
     );
     assert(
@@ -540,6 +565,7 @@ try {
           await page.goto(url);
           await page.getByRole("button", { name: "More", exact: true }).waitFor();
           const input = page.locator("textarea.input");
+          await input.waitFor();
           await input.fill(
             Array.from({ length: 18 }, (_, i) => `Fictional draft line ${i}`).join("\n"),
           );
@@ -581,19 +607,101 @@ try {
               },
             })),
             traces,
+            false,
           );
           await toolTransaction(page, "toggle", traces);
           await toolTransaction(page, "toggle", traces);
-          await toolTransaction(
+          // A message sent mid-run: its glide is under way when the sidecar's
+          // answer marks the bubble queued.
+          const queuedPrompt = { id: "queued-1", text: "Fictional queued prompt" };
+          await input.fill(queuedPrompt.text);
+          await dockGlide(
             page,
-            [
-              {
-                type: "queued",
-                data: { count: 1, messages: [{ id: "queued-1", text: "Fictional queued prompt" }] },
-              },
-            ],
+            "queued-send-glide",
+            async () => {
+              await input.press("Enter");
+              await page.waitForTimeout(30);
+              await page.evaluate(
+                (message) =>
+                  window.motionBridge.emit({
+                    type: "queued",
+                    data: { count: 1, messages: [message] },
+                  }),
+                queuedPrompt,
+              );
+            },
             traces,
           );
+          await dockGlide(
+            page,
+            "queued-cancel-glide",
+            () =>
+              page.evaluate(
+                (id) =>
+                  window.motionBridge.emit({
+                    type: "queued",
+                    data: { count: 0, messages: [], cancelledId: id },
+                  }),
+                queuedPrompt.id,
+              ),
+            traces,
+          );
+          await dockGlide(
+            page,
+            "first-reply-glide",
+            () =>
+              page.evaluate(async () => {
+                await window.motionBridge.emit({ type: "turn_end", data: {} });
+                await window.motionBridge.emit({
+                  type: "text_delta",
+                  data: { text: "Fictional first words of a reply." },
+                });
+              }),
+            traces,
+          );
+          // An answered question holds, dissolves, then leaves its place for a
+          // one-line answer at the end of the chat.
+          await page.evaluate(() =>
+            window.motionBridge.emit({
+              type: "ask_user",
+              data: {
+                id: "fixture-ask",
+                questions: [
+                  {
+                    id: "fixture-question",
+                    question: "Fictional question?",
+                    kind: "choice",
+                    options: [{ label: "Fictional one" }, { label: "Fictional two" }],
+                  },
+                ],
+              },
+            }),
+          );
+          await page.waitForTimeout(400);
+          await dockGlide(
+            page,
+            "answered-question-glide",
+            () => page.getByText("Fictional one", { exact: true }).click(),
+            traces,
+            1100,
+          );
+          // Steps in the dock's own height that no state setter announces: a
+          // Deck panel taking the message box's place, and a draft deleted.
+          await dockGlide(
+            page,
+            "deck-panel-open-glide",
+            () => page.getByRole("button", { name: "More", exact: true }).click(),
+            traces,
+          );
+          await dockGlide(
+            page,
+            "deck-panel-close-glide",
+            () => page.keyboard.press("Escape"),
+            traces,
+          );
+          await input.fill(Array.from({ length: 6 }, (_, i) => `Fictional draft ${i}`).join("\n"));
+          await page.waitForTimeout(400);
+          await dockGlide(page, "draft-cleared-glide", () => input.fill(""), traces);
           await input.fill("Fictional short queued send");
           await trace(
             page,
@@ -715,16 +823,16 @@ try {
                 Math.abs(height - finalHeight) <= 1 && Math.abs(height - naturalHeight) <= 1,
                 `Composer settles to its empty intrinsic height at zoom ${zoom}: ${height}/${finalHeight}/${naturalHeight}`,
               );
+              const pinned = await chatGeometry(page);
               assert(
-                Math.abs((await chatGeometry(page)).bottom) <= 2,
-                `Zoom ${zoom} send retains bottom pin`,
+                Math.abs(pinned.bottom) <= 2,
+                `Zoom ${zoom} send retains bottom pin: ${JSON.stringify(pinned)}`,
               );
             }
           }
           await page.evaluate(() => {
             document.documentElement.style.zoom = "1";
           });
-          await checklistChecks(page, traces);
           // Record the resting screen as well as the timed intermediate traces.
           await page.waitForTimeout(350);
           await page.screenshot({ path: path.join(evidence, `${name}-${width}-chat.png`) });
@@ -745,23 +853,6 @@ try {
             "details-close",
             () => page.getByRole("button", { name: "Hide error details" }).click(),
             ".chat-error-details",
-            traces,
-          );
-          await trace(
-            page,
-            "queue-open",
-            () => page.locator(".queued-toggle").click(),
-            ".queued-list",
-            traces,
-          );
-          await trace(
-            page,
-            "queue-close",
-            () =>
-              record
-                ? page.locator(".queued-toggle").press("Enter")
-                : page.locator(".queued-toggle").click(),
-            ".queued-list",
             traces,
           );
           await trace(
@@ -788,7 +879,7 @@ try {
                   const animations = document
                     .getAnimations()
                     .filter((a) => a.effect?.pseudoElement?.includes("view-transition"));
-                  // Dialogs exit with surface-out; popovers and menus with pop-out.
+                  // Menus shrink back toward their trigger (pop-out); dialogs fade (surface-out).
                   const exits = animations.filter((a) =>
                     ["surface-out", "pop-out"].includes(a.animationName),
                   );

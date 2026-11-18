@@ -22,6 +22,218 @@ export interface ChangelogEntry {
 /** Newest first. Prepended by the `/release` flow. */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.115.0",
+    date: "2026-11-18",
+    items: [
+      "OpenAI's newest brains just landed. `GPT-6.2 Astra` is their most capable model yet, now cheaper to run, and `GPT-6.2 Sol` is your new OpenAI default for everyday coding. Both come with Fast mode and the full reasoning dial up to `ultra`, so just pick them and go.",
+      "Hit a ChatGPT usage wall that made no sense? I fixed that. ChatGPT lets you cap how much GG Coder can use, and when that cap stops you I now say so plainly and give you a `Manage usage` button that takes you straight to the switch. One click and you're coding again.",
+    ],
+  },
+  {
+    version: "0.114.0",
+    date: "2026-11-17",
+    items: [
+      "Meet `Live Preview`. Open it from the `More` panel and your running web app pops up in your browser with GG's chat right on the page. Right-click any button, card or heading and ask GG to change it. No dev server running yet? I start it for you in one click.",
+      "Typing feels calmer. I fixed the tiny jump when you cleared your message, so the box stays perfectly still when you delete everything.",
+    ],
+  },
+  {
+    version: "0.113.1",
+    date: "2026-11-15",
+    items: [
+      "Running models on `llama.cpp` now just works with images. I check whether your model can see before sending a screenshot or picture, so vision models get them and text-only ones never choke on them.",
+    ],
+  },
+  {
+    version: "0.113.0",
+    date: "2026-11-15",
+    items: [
+      "`Autopilot` now handles its own questions. When GG Coder stops to ask you something, Ken answers it for you and you see exactly what he picked. Anything that really needs you, he leaves on the card with a one-line reason, so you never come back to a run that's stuck waiting.",
+      "`/init` now writes a lean, sharp project file. I cut it down to just the traps your agent would actually fall into, so every chat carries less baggage and stays focused on your task.",
+      "The `Checklist` git and CI checks now walk you through fixing branch protection and hardening your workflows right in the chat, and the slash command trophy unlocks after `3` commands instead of 5.",
+    ],
+  },
+  {
+    version: "0.112.1",
+    date: "2026-11-14",
+    items: [
+      "No more surprise `Sign in with Claude` nags. If the Claude Code engine ever goes missing, I quietly fetch it again and keep you working, and GG Coder now plays nicely with your other apps that share it, so they stop knocking each other's copy out.",
+    ],
+  },
+  {
+    version: "0.112.0",
+    date: "2026-11-14",
+    items: [
+      "Your critters now put on a real show. They drop in by `parachute`, hatch out of eggs and tumble from a flying saucer, and when a mean monster stomps in, `Ken` himself turns up to knock it flat while the whole crowd cheers.",
+      "Hover any critter and a little `name tag` pops up with who it is and exactly what it's working on right now. Click one and the tag stays up for a moment, in your chat and on the farm.",
+      "Four new faces joined the gang: a penguin, a bunny, a capybara and an alien. That makes `19` critters, and your Home screen now rotates a fresh crew of `9`, so it never looks the same twice.",
+      "The `Goals` farm has visitors. A saucer swoops in to pinch a daikon, a monster rattles the gate, and little Ken powers up to send it packing. Your workers can now arrive by saucer and float home on a `lantern`.",
+      "The `Prompt Enhancer` keeps its highlights when you tweak the draft. Fix one word and every other corrected term stays lit, tooltip and all, right through to the message you send.",
+    ],
+  },
+  {
+    version: "0.111.2",
+    date: "2026-11-13",
+    items: [
+      "Your chat now stays perfectly still when you send a message while I'm working. No more jumping up and snapping back. The `queued` label floats calmly above your message and fades away the moment I pick it up, and every queued message gets its own `x` right there in the chat, so cancelling the exact one you want takes a single click.",
+    ],
+  },
+  {
+    version: "0.111.1",
+    date: "2026-11-13",
+    items: [
+      "I tightened up the engine under the hood. When you add a tool server, every open window now picks it up in a steady, predictable order, and the `web_fetch` engine got a new safety hook that checks every redirect before following it. Same GG Coder, just more solid.",
+    ],
+  },
+  {
+    version: "0.111.0",
+    date: "2026-11-13",
+    items: [
+      "Adding tools from Claude Code is now pure copy and paste. Put a `!` in front of any `claude mcp add` line, send it, and GG Coder sets the server up for itself. It loads straight into every open window, no restart needed.",
+      "`Add folder` and `Remove folder` now live right in the More panel, in both Code and Chat. Point GG Coder at a second folder, like your docs or another repo, and drop it again with one click.",
+      "GG Coder now knows its own app inside out. Ask it how anything works, from `Autopilot` to your settings, and you get a straight answer in Code or Chat.",
+      "When GG Coder asks you to pick, it now gives you the answer first. A line or two of real context, then the choices, so you always know what you're clicking.",
+    ],
+  },
+  {
+    version: "0.110.3",
+    date: "2026-11-13",
+    items: [
+      "Typing in the composer feels smoother than ever. When you delete back down to `one line`, the box now glides down in a single smooth motion instead of jumping for a split second. Pure butter.",
+      "Your download just went on a diet. GG Coder was quietly carrying about `180 MB` of AI engine files built for other kinds of computers. I now keep only the ones your machine actually runs, so installs are leaner and Apple silicon Macs see a true native app.",
+    ],
+  },
+  {
+    version: "0.110.2",
+    date: "2026-11-12",
+    items: [
+      "`Continue with ChatGPT` now signs you in on the first go. If OpenAI turns down the very first sign-in code, I quietly retry once the way OpenAI recommends, so you land straight in your chat instead of on an `invalid_grant` error. Cancelling now frees things up instantly, so you can try again right away.",
+      "I gave GG Coder a deep spring clean. Nearly `3,000` lines of old code and two unused libraries are gone, so the app you download is leaner and there's less that can ever go wrong.",
+    ],
+  },
+  {
+    version: "0.110.1",
+    date: "2026-11-11",
+    items: [
+      "Dark mode has a brand new look, and I call it `Obsidian`. Deep near-black surfaces with a soft sheen, cool `Ice Grey` text, and a bold `Racing Red` accent on the buttons that matter. Light mode stays exactly as you know it.",
+      "Running all your `Tasks` in one go is now rock solid. A message you send between two tasks waits its turn and runs right after the last one, instead of crashing into the next task, and a new session can no longer cut in halfway.",
+    ],
+  },
+  {
+    version: "0.110.0",
+    date: "2026-11-11",
+    items: [
+      "Your `OpenCode Go` subscription now plugs straight into GG Coder. Paste your OpenCode API key under AI Providers and pick from models like `Kimi K3` and `GLM-5.3`, with the model list keeping itself fresh. Pay-as-you-go OpenCode credits work the same way. This one is brand new, so tell me if a model misbehaves.",
+    ],
+  },
+  {
+    version: "0.109.1",
+    date: "2026-11-11",
+    items: [
+      "The chat now moves like one smooth sheet. When the message box grows, a `Deck` panel opens, or you answer a question, your messages glide to their new spot instead of jumping there in a single frame. I also fixed a sneaky bug that could nudge a pinned chat up by `330px` and stop it following the reply.",
+      "Chats on your `Claude` subscription pick up where you left off far more reliably. If an old conversation's saved state has gone missing, I now rebuild it from your own history instead of failing, the tools that chat was using come back with it, and long summaries no longer get cut off mid-stream.",
+      "Long sessions waste fewer tokens. I made the cleanup of old tool output much pickier about when it runs, so your cache stays warm for longer and you spend less re-reading the same conversation.",
+    ],
+  },
+  {
+    version: "0.109.0",
+    date: "2026-11-10",
+    items: [
+      "`Claude Fable 5.2` is here, and it is cheaper and faster to pick up. I added it with a full `1M` context window, and there is a `Fable 5.2 Fast` option when you want answers up to `2.5x` quicker. It replaces Fable 5.1 in the picker, and `xhigh` thinking now works on it.",
+      "Updates can no longer fail in silence. If an install does not go through, I now show an `Update failed` bar with `Retry` and a one-click manual download, so you are never left staring at nothing.",
+    ],
+  },
+  {
+    version: "0.108.2",
+    date: "2026-11-09",
+    items: [
+      "Marathon chats on your `Claude subscription` now stay lean. I taught GG Coder to tidy up long conversations at `400k` tokens, just like every other model, so your sessions stay fast and focused instead of ballooning until they are nearly full.",
+    ],
+  },
+  {
+    version: "0.108.1",
+    date: "2026-11-09",
+    items: [
+      "Skip a question card and just reply with a `screenshot`, and Claude reads it all in one go. No more stray `Awaiting the user's next message` lines sneaking into your chat before the real answer.",
+    ],
+  },
+  {
+    version: "0.108.0",
+    date: "2026-11-09",
+    items: [
+      "Every mode now has its own skills. Drop one into `GG Chat` and all three chat agents can use it, drop one into `GG Motion` for your videos, and your coding skills stay in code. Just ask for a new skill: the agent knows exactly where it goes, and in code mode it asks whether it's for `this project` or every project.",
+      "Your chats now live in their own tidy `GG Chat` folder, and every chat window is named after what you asked, so you can tell your conversations apart at a glance. Your older chats are all still right there.",
+      "Replies never run into each other anymore. When Claude answers twice in a row, each answer gets its own clean bubble instead of mashing together mid-sentence.",
+    ],
+  },
+  {
+    version: "0.107.1",
+    date: "2026-11-09",
+    items: [
+      "When Claude asks you a question with a choice card, you can now just type your answer instead. It reads your reply on the spot and gets right back to work, no more `I'll wait for your message` stalls.",
+      "Your messages cut straight through again on your `Claude` subscription. Send one while Claude is sitting on a long wait and it stops within a blink to answer you, and a message you fire off mid-answer always gets its own reply instead of vanishing.",
+      "Connecting `Anthropic` now speaks plain app. If a sign-in hiccups you get a clear try-again message, never a terminal command you can't run.",
+    ],
+  },
+  {
+    version: "0.107.0",
+    date: "2026-11-08",
+    items: [
+      "Home now has a `Weekly poll`, and you get a say in what I build next. Pick the feature you want most, watch the bars fill as everyone votes, and change your mind any time that week. Your vote is anonymous.",
+      "Claude on your subscription now stays warm between messages. I keep one live `Claude Code` session per chat instead of starting fresh every time, so replies kick off faster, and a message you send mid-run slips straight into the work Claude is already doing.",
+      "Plans tick themselves off reliably again. Every finished step lands on the `progress` bar as Claude goes, so a plan never sits at `0/8` while the work is actually getting done.",
+      "I retired `GG World` to keep GG Coder lean and focused on your work. Fewer moving parts, a lighter app, more speed where it counts.",
+    ],
+  },
+  {
+    version: "0.106.2",
+    date: "2026-11-08",
+    items: [
+      "Messages you send while Claude is mid-task now show up right where they belong. On a `Claude` subscription, the `Queued` label clears the moment Claude picks your message up, and a message you fire off just as a run wraps is kept safe for the next one.",
+    ],
+  },
+  {
+    version: "0.106.1",
+    date: "2026-11-08",
+    items: [
+      "Claude on your subscription now grabs the right tool on the very first try. When it reaches for `web search`, `web fetch` or a `screenshot`, it just works instead of stumbling once and retrying, so your runs go smoother and waste less of your plan.",
+    ],
+  },
+  {
+    version: "0.106.0",
+    date: "2026-11-07",
+    items: [
+      "Connecting your AI accounts got a clean upgrade. `Continue with ChatGPT` now uses OpenAI's official sign-in, and you can add an OpenAI `API key` too, which steps in automatically if your plan's usage runs out. Kimi, xAI and Gemini now connect with an `API key`, and if you used an older sign-in, the app asks you once to reconnect. That's it.",
+      "The model picker now tells you upfront what you can run. Any model your plan or keys don't cover is greyed out with a short note saying exactly what it needs.",
+      "Plan review now feels like part of the chat. `Accept plan` and `Reject` sit right beside send, so you can give feedback or decide in one spot.",
+      "Image generation now runs on OpenAI's Image API with `GPT Image 2.6`. Add an OpenAI API key and you're set.",
+    ],
+  },
+  {
+    version: "0.105.0",
+    date: "2026-11-07",
+    items: [
+      "I refreshed how your `Claude` account connects so your Claude models keep running smoothly. One quick thing: if you use Claude, open `AI Providers` and sign in to Anthropic once more. You can now connect with an Anthropic `API key` too.",
+      "`GPT-6.1 Terra` just landed, with a Fast mode that runs `1.5x` quicker. It is light, cheap and climbs all the way up to `Ultra` when you want it to really think.",
+    ],
+  },
+  {
+    version: "0.104.1",
+    date: "2026-11-06",
+    items: [
+      "A quick follow-up so your `Mac` gets this update too. The smarter `Plan Mode`, the one red Stop button and Ken's fresh look now land on Mac, Windows and Linux together.",
+    ],
+  },
+  {
+    version: "0.104.0",
+    date: "2026-11-06",
+    items: [
+      "`Plan Mode` got a full glow-up. It now kicks in on its own for the big, careful jobs and stays out of your way on quick fixes. It researches the real code first, asks you when something is unclear, and can send read-only helpers like `researcher` to dig in parallel. Plans land under a gold pixel title with crisp pixel ticks as each step is done.",
+      "Stopping is now one big red button. The send key turns red and pulses while GG, `Autopilot` or Ken is working, and one click stops whichever of them is busy. No more hunting for a tiny Stop link.",
+      "Ken has a fresh look. Your `@Ken` messages are solid teal bubbles, and his replies come with his little pixel face and name on top, so you always know who is talking.",
+    ],
+  },
+  {
     version: "0.103.1",
     date: "2026-11-05",
     items: [

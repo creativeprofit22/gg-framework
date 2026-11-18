@@ -47,7 +47,7 @@ describe("resolveCompactionPolicy", () => {
   it("keeps the explicit Experimental Astra window on Codex OAuth while the API key stays capped", () => {
     // Local Fork regression: upstream's 272K OpenAI price-line cap must not
     // silently turn the user's Experimental (872K) choice back into Stable.
-    const experimental = getContextWindow("gpt-6-astra", {
+    const experimental = getContextWindow("gpt-6.2-astra", {
       provider: "openai",
       accountId: "account",
       openAICodexContextProfile: "experimental",
@@ -55,13 +55,13 @@ describe("resolveCompactionPolicy", () => {
     expect(experimental).toBe(872_000);
     const oauth = resolveCompactionPolicy({
       provider: "openai",
-      model: "gpt-6-astra",
+      model: "gpt-6.2-astra",
       contextWindow: experimental,
       accountId: "account",
     });
     const apiKey = resolveCompactionPolicy({
       provider: "openai",
-      model: "gpt-6-astra",
+      model: "gpt-6.2-astra",
       contextWindow: 1_050_000,
     });
     expect(oauth.targetTokens).toBe(741_200); // 0.85 × 872K
@@ -69,7 +69,7 @@ describe("resolveCompactionPolicy", () => {
     // An explicit compactAtTokens still caps the experimental window.
     const capped = resolveCompactionPolicy({
       provider: "openai",
-      model: "gpt-6-astra",
+      model: "gpt-6.2-astra",
       contextWindow: experimental,
       accountId: "account",
       compactAtTokens: 500_000,
@@ -127,7 +127,7 @@ describe("resolveCompactionPolicy", () => {
   });
 
   it("applies the conservative default cap only to providers with no evidence", () => {
-    for (const provider of ["sakana", "huggingface"] as const) {
+    for (const provider of ["sakana", "huggingface", "opencode-go", "opencode"] as const) {
       expect(resolveLatencyWindowCap(provider), provider).toBe(400_000);
     }
     const policy = resolveCompactionPolicy({
@@ -163,7 +163,7 @@ describe("resolveCompactionPolicy", () => {
     expect(
       resolveCompactionPolicy({
         provider: "openai",
-        model: "gpt-6.1-sol",
+        model: "gpt-6.2-sol",
         contextWindow: 1_050_000,
       }).targetTokens,
     ).toBe(231_200);
@@ -201,7 +201,7 @@ describe("resolveCompactionPolicy", () => {
     // means adding a sourced rule to policy.ts, or listing it here on purpose.
     // qwen-cloud (Local Fork, Token Plan credits): its docs establish only the
     // 1M windows, with no caching or long-context pricing evidence either way.
-    const unverified = new Set(["sakana", "huggingface", "qwen-cloud"]);
+    const unverified = new Set(["sakana", "huggingface", "opencode-go", "opencode", "qwen-cloud"]);
     for (const model of MODELS) {
       const contextWindow = getContextWindow(model.id, { provider: model.provider });
       const { targetTokens } = resolveCompactionPolicy({

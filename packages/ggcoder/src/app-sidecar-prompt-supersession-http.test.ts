@@ -15,6 +15,7 @@ import {
   getPromptCommand,
   PROMPT_COMMANDS,
 } from "./core/prompt-commands.js";
+import { CHAT_FOLDER_NAME } from "./chat-agents/shared.js";
 import { mentionedPaths, slashCommandName } from "./core/trophies/engine.js";
 
 it.each(["research", "attachment", "accepted"] as const)(
@@ -30,8 +31,10 @@ it.each(["research", "attachment", "accepted"] as const)(
         expect((await request("/prompt", pane, { text: "Ask for approval" })).status).toBe(202);
         const question = await stream.waitFor("ask_user");
         if (scenario === "attachment") {
-          await fs.mkdir(path.join(project, ".gg"), { recursive: true });
-          await fs.writeFile(path.join(project, ".gg", "uploads"), "Not a directory");
+          // Chat panes work inside the project's chat folder, so uploads land there.
+          const chatRoot = path.join(project, CHAT_FOLDER_NAME);
+          await fs.mkdir(path.join(chatRoot, ".gg"), { recursive: true });
+          await fs.writeFile(path.join(chatRoot, ".gg", "uploads"), "Not a directory");
         }
         const response = await request("/prompt", pane, {
           text: scenario === "research" ? "/research" : "Change direction",
@@ -160,6 +163,7 @@ it.each(["cancelling", "cancel_failed", "new-question"] as const)(
         promptSteersRun,
         programmaticExecutionActive: false,
         text: "Change direction",
+        typed: "Change direction",
         attachments: [{}],
         running: true,
         runClaim: { active: false },
@@ -189,6 +193,7 @@ it.each(["cancelling", "cancel_failed", "new-question"] as const)(
         res: {},
         json,
         broadcast: vi.fn(),
+        announceLivePreview: vi.fn(),
         cwd: ".",
         prepareAttachments: async () => {
           asks.settle(originalId, { action: "answer", answers: { q: "yes" } });

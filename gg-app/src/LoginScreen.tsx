@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { theme } from "./theme";
-import { authStatus, subscribe, type AuthProvider, type SidecarEvent } from "./agent";
+import { authLogout, authStatus, subscribe, type AuthProvider, type SidecarEvent } from "./agent";
 import { Badge } from "./Badge";
 import { BackButton } from "./BackButton";
 import { ProviderLoginModal } from "./ProviderLoginModal";
@@ -85,6 +85,14 @@ export function LoginScreen({ onClose }: Props): React.ReactElement {
   // the read failed (authStatus reports failure as []). Say so, with a retry,
   // rather than showing a blank grid.
   const readFailed = !loading && providers.length === 0;
+  const reauth = providers.find((p) => p.reauthRequired);
+
+  // Dismissing removes only the dead sign-in, so the notice shows until the user acts.
+  const dismissReauth = (provider: AuthProvider): void => {
+    void authLogout(provider.value, "legacy")
+      .catch(() => undefined)
+      .then(refresh);
+  };
 
   const connectedBadge =
     loading || readFailed ? null : (
@@ -105,14 +113,39 @@ export function LoginScreen({ onClose }: Props): React.ReactElement {
       </button>
     </div>
   ) : (
-    <div className="providers-frame">
-      <ProvidersBay
-        providers={providers}
-        onOpen={setActive}
-        onOpenLocal={() => setLocalOpen(true)}
-        onOpenHfPull={() => setHfOpen(true)}
-      />
-    </div>
+    <>
+      {reauth && (
+        <div className="login-reauth" role="status">
+          <span className="login-reauth-text">
+            {reauth.reauthMessage ?? `Your old ${reauth.label} sign-in no longer works.`}
+          </span>
+          <div className="login-reauth-actions">
+            <button
+              type="button"
+              className="btn btn-sm btn-primary"
+              onClick={() => setActive(reauth)}
+            >
+              Reconnect
+            </button>
+            <button
+              type="button"
+              className="btn btn-sm btn-ghost"
+              onClick={() => dismissReauth(reauth)}
+            >
+              Dismiss
+            </button>
+          </div>
+        </div>
+      )}
+      <div className="providers-frame">
+        <ProvidersBay
+          providers={providers}
+          onOpen={setActive}
+          onOpenLocal={() => setLocalOpen(true)}
+          onOpenHfPull={() => setHfOpen(true)}
+        />
+      </div>
+    </>
   );
 
   return (

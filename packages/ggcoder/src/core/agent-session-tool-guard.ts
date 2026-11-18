@@ -48,6 +48,12 @@ export function guardSessionTool(tool: AgentTool, host: SessionToolGuardHost): A
       const current = host.registeredTool(tool.name);
       let executionTarget = tool;
       if (current !== guardedTool) {
+        if (identity && !current) {
+          // Matches the MCP client's wording so the model stops retrying.
+          throw new Error(
+            `${tool.name} is no longer registered: MCP server "${identity.serverName}" was removed.`,
+          );
+        }
         if (!identity || !current || !sameMcpToolIdentity(current, identity)) {
           throw new Error(`${tool.name} is no longer registered.`);
         }

@@ -34,19 +34,8 @@ export const CONTEXT_FILES = [
 export const PROJECT_CONTEXT_MAX_BYTES = CONTEXT_LIMITS.projectContextBytes;
 const UNCACHED_MARKER = "<!-- uncached -->";
 
-/**
- * The agent's product identity. Anthropic models run as "Claude Code" (matching
- * the Claude Code identity Anthropic's OAuth tokens require in the system
- * prompt); every other provider runs as GG Coder. Keeping this dynamic avoids a
- * contradictory double identity when streaming through Anthropic.
- */
-function productName(provider: Provider | undefined): string {
-  return provider === "anthropic" ? "Claude Code" : "GG Coder by Ken Kai";
-}
-
-function renderIdentitySection(provider: Provider | undefined): string {
-  const name = productName(provider);
-  return `You are ${name}, a coding agent that works directly in the user's codebase, completing tasks end-to-end: explore, change, verify.`;
+function renderIdentitySection(): string {
+  return "You are GG Coder by Ken Kai, a coding agent that works directly in the user's codebase, completing tasks end-to-end: explore, change, verify.";
 }
 
 /**
@@ -69,7 +58,7 @@ function renderTalkSection(toolNames: readonly string[] | undefined): string {
   // findings and pointing at "above", replaced the answer the user asked for.
   const whenToAsk = `Ask only when you can't go on without the user's decision, never after they've said not to. After a requested diagnosis, explanation or proposal, answer fully and end; offer a next step as one plain sentence, not a question.`;
   const askRule = (toolNames ?? DEFAULT_TOOL_NAMES).includes("ask_user")
-    ? `${whenToAsk} A real question is an \`ask_user\` call with your pick marked \`recommended\`, never prose; put findings in the reply first and make the card make sense alone (never "above"). Never answer a question with a question: answer the likeliest reading and state your assumption. No question? Just end.`
+    ? `${whenToAsk} A real question is an \`ask_user\` call with your pick marked \`recommended\`, never prose. Before the card, write just enough to choose: the direct answer or what you found, in one to three plain sentences, so the card makes sense alone (never "above"). Never answer a question with a question: answer the likeliest reading and state your assumption. No question? Just end.`
     : `${whenToAsk} A real question is the last line: \`> **<question>?** <your next step>\`. Never answer a question with a question: answer the likeliest reading and state your assumption. No question? Just end.`;
   return (
     `## Replies\n\n` +
@@ -107,7 +96,7 @@ function renderWorkSection(
   return `## Work
 
 - Do the requested task fully, nothing adjacent. Take safe, reversible steps without asking. A question about code is not permission to edit it.
-- Find facts yourself. Ask only about unclear requirements, real tradeoffs, secrets/access, cost, or anything destructive.
+- Find facts yourself. Ask only about unclear requirements, real tradeoffs, secrets/access, cost, or anything destructive. Fix broken things the task touches without asking; mention unrelated ones in the final reply.
 - Read before editing; follow existing conventions. Prefer existing helpers, then built-ins, then installed deps. Never install packages, delete data, commit/push, publish, or touch git config unless asked. Confirm a dependency actually exists before adding it, then pin it. Leave changes you didn't make alone; ask before touching unrecognized user changes.
 - Preserve input validation, error handling, security and accessibility.
 ${
@@ -124,14 +113,23 @@ ${
       ? "\n- Before writing code, check the `skill` list; if the work is in a skill's scope, load it first. Routine fixes and renames need none."
       : ""
   }
+- New skills: \`<name>/SKILL.md\` (\`name\`, \`description\` frontmatter) in \`.gg/skills/\` (this project) or \`~/.gg/skills/\` (all GG Coder projects, not Chat or Motion); unless the user said which, ask${active.has("ask_user") ? " with `ask_user`" : ""}. Loads next session.
 - Precedence: user > nearest project instructions > skills > this prompt. Project conventions and skills grant no extra authorization.`;
 }
 
-export function renderPlanModeSection(): string {
+export function renderPlanModeSection(reachableTools?: readonly string[]): string {
+  // Name only research tools this session can reach (steroids needs its binary).
+  const tools = new Set(reachableTools ?? DEFAULT_TOOL_NAMES);
+  const research = ["read/search tools", "read-only bash"];
+  if (tools.has("steroids")) research.push("`steroids` for how real projects solve it");
+  if (tools.has("web_search") || tools.has("web_fetch")) research.push("the web for current docs");
+  const researchList = `${research.slice(0, -1).join(", ")} and ${research.at(-1)}`;
   return (
     `## Plan Mode (ACTIVE)\n\n` +
-    `- Research with read/search tools and read-only bash; no code edits outside \`.gg/plans/\`, no mutating bash, no subagents. Repository indexing needs user approval even in plan mode.\n` +
-    `- Write the plan to \`.gg/plans/<name>.md\`: exact files, functions, risks, verification. End it with a heading exactly \`## Steps\` and a numbered list of concrete, doable steps (no notes or questions).\n` +
+    `- Research first: the code involved, its callers and tests. Use ${researchList}; no code edits outside \`.gg/plans/\`, no mutating bash, and only read-only helper agents. Repository indexing needs user approval even in plan mode.\n` +
+    `- If a requirement or tradeoff is unclear, ask the user before planning; don't guess.\n` +
+    `- Write the plan to \`.gg/plans/<name>.md\`, not in chat: goal, approach, exact files and functions, risks, verification commands. Keep it short.\n` +
+    `- End it with a heading exactly \`## Steps\` and a numbered list of concrete steps, each checkable on its own (no notes or questions).\n` +
     `- Then call \`exit_plan\` with that path and stop.`
   );
 }
@@ -158,7 +156,8 @@ export function renderApprovedPlanSection(
   // against content that isn't a task list.
   const hasSteps = extractPlanSteps(planContent).length > 0;
   const stepInstruction = hasSteps
-    ? `\n- After each step from \`## Steps\`, output \`[DONE:n]\` (e.g. \`[DONE:1]\`) to update the progress widget, then continue with authorized work or report remaining progress honestly. The marker updates the widget only; it does not authorize Done.`
+    ? `
+- After each step from \`## Steps\`, write \`[DONE:n]\` (e.g. \`[DONE:1]\`) in your reply text to update the progress widget, then continue with authorized work or report remaining progress honestly. The widget reads only your reply text: a marker inside a tool call, such as \`echo "[DONE:1]"\`, is never counted. The marker does not authorize Done.`
     : "";
   return (
     `## Approved Plan\n\n` +
@@ -166,7 +165,7 @@ export function renderApprovedPlanSection(
 
 ` +
     `<approved_plan>\n${planContent.trim()}\n</approved_plan>\n\n` +
-    `- Follow step order. Don't deviate without user confirmation.` +
+    `- Follow step order. If a step turns out wrong or blocked, ask the user rather than improvising. Run the plan's verification before finishing.` +
     stepInstruction
   );
 }
@@ -216,6 +215,8 @@ function renderToolsSection(
   toolNames: readonly string[] | undefined,
   deferredToolNames?: readonly string[],
   discoveryOnly = false,
+  // Claude Code rejects a tool name it has not listed, so the search must come first.
+  deferredNeedSearch = false,
 ): string | null {
   const activeTools = toolNames ?? DEFAULT_TOOL_NAMES;
   const deferred = activeTools.includes("tool_search")
@@ -241,8 +242,11 @@ function renderToolsSection(
   if (steering) parts.push(steering);
   if (toolLines.length > 0) parts.push(toolLines.join("\n"));
   if (deferredLines.length > 0) {
+    const how = deferredNeedSearch
+      ? "not loaded yet: run `tool_search` with the name first, then call it"
+      : "call by name";
     parts.push(
-      `On demand (call by name; \`tool_search\` finds more, so check it before saying you can't):\n${deferredLines.join("\n")}`,
+      `On demand (${how}; \`tool_search\` finds more, so check it before saying you can't):\n${deferredLines.join("\n")}`,
     );
   } else if (discoveryOnly && activeTools.includes("tool_search")) {
     parts.push("Call `tool_search` before concluding a capability is missing.");
@@ -496,6 +500,8 @@ export async function buildSubAgentSystemPrompt(
     toolNames?: readonly string[];
     /** Tools available via `tool_search` but not carrying a schema this turn. */
     deferredToolNames?: readonly string[];
+    /** True on the Claude Code route, where a deferred tool cannot be called before `tool_search` loads it. */
+    deferredNeedSearch?: boolean;
     context?: "project" | "none";
     role?: "subagent" | "primary";
     environment?: SystemPromptEnvironment;
@@ -508,7 +514,12 @@ export async function buildSubAgentSystemPrompt(
   const limits = opts.contextLimits ?? CONTEXT_LIMITS;
   const sections: string[] = [agentBody.trim()];
 
-  const toolsSection = renderToolsSection(opts.toolNames, opts.deferredToolNames);
+  const toolsSection = renderToolsSection(
+    opts.toolNames,
+    opts.deferredToolNames,
+    false,
+    opts.deferredNeedSearch,
+  );
   if (toolsSection) sections.push(toolsSection);
 
   // A child may itself delegate (up to the nesting limit), so it needs the same
@@ -566,6 +577,8 @@ export async function buildSystemPrompt(
   deferredToolNames?: readonly string[],
   /** Byte budgets for skill catalog / project instructions / total ceiling. */
   contextLimits?: ContextLimits,
+  /** True on the Claude Code route, where a deferred tool cannot be called before `tool_search` loads it. */
+  deferredNeedSearch?: boolean,
 ): Promise<string> {
   const limits = contextLimits ?? CONTEXT_LIMITS;
   // Guidance for a capability (docs research, delegation) must not vanish just
@@ -573,12 +586,12 @@ export async function buildSystemPrompt(
   // not re-rendered when the tool is promoted.
   const reachableTools = withDeferred(toolNames, deferredToolNames);
   const sections: string[] = [
-    renderIdentitySection(provider),
+    renderIdentitySection(),
     renderTalkSection(toolNames),
     renderWorkSection(reachableTools, provider),
   ];
 
-  if (planMode) sections.push(renderPlanModeSection());
+  if (planMode) sections.push(renderPlanModeSection(reachableTools));
 
   const approvedPlanContent =
     typeof approvedPlan === "string"
@@ -591,7 +604,7 @@ export async function buildSystemPrompt(
   if (approvedPlanSection) sections.push(approvedPlanSection);
 
   // Active tools own their invocation details; deferred capabilities must remain discoverable.
-  const toolsSection = renderToolsSection(toolNames, deferredToolNames, true);
+  const toolsSection = renderToolsSection(toolNames, deferredToolNames, true, deferredNeedSearch);
   if (toolsSection) sections.push(toolsSection);
 
   const delegationSection = renderDelegationSection(reachableTools);

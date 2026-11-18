@@ -19,6 +19,10 @@ export type Provider =
   | "palsu"
   /** Hugging Face Inference Providers router (OpenAI-compatible). */
   | "huggingface"
+  /** OpenCode Console gateway, pay-as-you-go (opencode.ai/inference). */
+  | "opencode"
+  /** OpenCode Go subscription gateway (opencode.ai/inference/go). */
+  | "opencode-go"
   /** Locally hosted OpenAI-compatible server (Ollama, LM Studio, llama.cpp, vLLM). */
   | "local";
 
@@ -363,26 +367,18 @@ export interface StreamOptions {
   /** OpenAI service tier for latency-sensitive requests. Only sent to first-party OpenAI API calls. */
   serviceTier?: "auto" | "default" | "flex" | "priority";
   /** Provider speed tier. "fast" sends Anthropic `speed: "fast"` (first-party API
-   *  only) or OpenAI/Codex `service_tier: "priority"`. Set automatically by
+   *  only) or OpenAI `service_tier: "priority"`. Set automatically by
    *  `stream()` for fast-mode model ids (see `resolveFastModeModel`). */
   speed?: "standard" | "fast";
-  /** Codex endpoint only: send the Responses-Lite request shape (lite header,
-   *  `parallel_tool_calls: false`, all-turns reasoning context). Unset follows
-   *  the model family (on for gpt-5.6/gpt-6 models). Lite allows only one tool
-   *  call per response, so turning it off lets the model batch calls. */
-  responsesLite?: boolean;
-  /** OpenAI only (Codex and API-key routes): send tools with strict
+  /** OpenAI only (ChatGPT plan and API-key routes): send tools with strict
    *  (grammar-constrained) schemas. Default true. Strict calls carry every
    *  optional field as null, which costs output tokens and latency per call. */
   strictTools?: boolean;
-  /** OpenAI ChatGPT account ID (from OAuth JWT) for codex endpoint */
+  /** ChatGPT plan sign-in: the account subject. Set, it routes OpenAI to the plan. */
   accountId?: string;
-  /** Stable conversation identity for Codex transport headers. This is distinct from
-   *  promptCacheKey: sessions with matching prefixes may share a cache key, but must
-   *  retain independent session/thread identities. */
+  /** Stable conversation identity, distinct from promptCacheKey: sessions with
+   *  matching prefixes may share a cache key but keep independent identities. */
   transportSessionId?: string;
-  /** Google Cloud/Code Assist project ID used by Gemini OAuth transport. */
-  projectId?: string;
   /** Enable provider-native web search. Each provider uses its own format:
    *  - Anthropic: server tool `web_search_20250305`
    *  - Moonshot: `builtin_function` `$web_search`
@@ -427,20 +423,8 @@ export interface StreamOptions {
    *  budget_tokens < max_tokens), no request is sent and the response has
    *  zero usage with stopReason "end_turn". */
   prewarm?: boolean;
-  /** Override the User-Agent sent with OAuth-authenticated Anthropic requests.
-   *  Anthropic's OAuth edge rejects requests whose claude-cli version lags too
-   *  far behind the real Claude Code release; callers that track the live
-   *  version should pass it here. Ignored for non-Anthropic providers and for
-   *  Anthropic requests using a regular API key. */
-  userAgent?: string;
-  /** Extra HTTP headers merged into SDK default headers by the OpenAI-compatible
-   *  Chat Completions adapter only (e.g. Kimi For Coding client-identity headers).
-   *  - Supported built-in routes: OpenAI without accountId, Xiaomi, GLM, Moonshot
-   *    (including Kimi For Coding), DeepSeek, OpenRouter, Hugging Face, Sakana,
-   *    xAI, and local OpenAI-compatible servers.
-   *  - Not forwarded by Anthropic (including MiniMax), OpenAI Codex OAuth
-   *    (OpenAI with accountId), Gemini Code Assist, or Azure OpenAI Responses.
-   *  Custom providers define their own support for this option. */
+  /** Extra HTTP headers attached to every model request. Merged into the
+   *  underlying SDK's default headers. */
   defaultHeaders?: Record<string, string>;
   /** Provider-specific request-body fields, merged into the JSON body of every
    *  model request (e.g. OpenRouter's routing object:

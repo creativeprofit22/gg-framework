@@ -9,17 +9,17 @@ import { providerFetch } from "./provider-fetch.js";
 export const PRECONNECT_INTERVAL_MS = 30_000;
 
 /** Default origin each provider's first request goes to, when no baseUrl is set. */
-function defaultBaseUrl(provider: Provider, accountId: string | undefined): string | undefined {
+function defaultBaseUrl(provider: Provider): string | undefined {
   switch (provider) {
     case "anthropic":
       return "https://api.anthropic.com";
     case "openai":
-      // ChatGPT-subscription (Codex) tokens carry an accountId and route to chatgpt.com.
-      return accountId ? "https://chatgpt.com/backend-api" : "https://api.openai.com/v1";
+      // The ChatGPT plan and API keys both go to the public API.
+      return "https://api.openai.com/v1";
     case "gemini":
-      return "https://cloudcode-pa.googleapis.com";
+      return "https://generativelanguage.googleapis.com/v1beta";
     case "glm":
-      return "https://api.z.ai/api/coding/paas/v4";
+      return "https://api.z.ai/api/paas/v4";
     case "moonshot":
       return "https://api.moonshot.ai/v1";
     case "deepseek":
@@ -34,6 +34,10 @@ function defaultBaseUrl(provider: Provider, accountId: string | undefined): stri
       return "https://api.x.ai/v1";
     case "huggingface":
       return "https://router.huggingface.co/v1";
+    case "opencode":
+      return "https://opencode.ai/inference/openai/v1";
+    case "opencode-go":
+      return "https://opencode.ai/inference/go/openai/v1";
     case "sakana":
       return "https://api.sakana.ai/v1";
     case "local":
@@ -66,7 +70,7 @@ export function preconnectTarget(options: {
   baseUrl?: string;
   accountId?: string;
 }): URL | undefined {
-  const raw = options.baseUrl ?? defaultBaseUrl(options.provider, options.accountId);
+  const raw = options.baseUrl ?? defaultBaseUrl(options.provider);
   if (!raw || options.provider === "local" || options.provider === "palsu") return undefined;
   let url: URL;
   try {

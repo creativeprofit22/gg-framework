@@ -14,7 +14,7 @@ import { RunClaim } from "./core/run-claim.js";
 const APP_SIDECAR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "app-sidecar.ts");
 const eligibleState = {
   provider: "openai",
-  model: "gpt-6-astra",
+  model: "gpt-6.2-astra",
   accountId: "account-1",
   openAICodexContextProfileEligibility: { canChange: true as const },
 };

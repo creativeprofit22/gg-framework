@@ -124,7 +124,7 @@ const WATCH_MAX_REPORTS = 3;
 const CHECKPOINT_TAIL_CHARS = 320;
 /** Ceiling on a single blocking `waitForExitOrWake`, so one wedged process cannot
  *  hold the agent loop indefinitely; callers re-wait if they still want to. */
-export const MAX_PROCESS_WAIT_MS = 600_000;
+export const MAX_PROCESS_WAIT_MS = 300_000;
 /** Chars of the matched log line carried in a pattern-wake notification. */
 const WAKE_LINE_CHARS = 200;
 /**

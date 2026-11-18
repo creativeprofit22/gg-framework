@@ -10,7 +10,7 @@ interface NativeAppearanceWindow {
   /** Remembers the theme so the next native window opens without a flash. */
   rememberTheme(theme: Theme): Promise<void>;
 }
-export const NATIVE_APPEARANCE_BACKGROUNDS = { dark: "#0f1115", light: "#fcfbfd" } as const;
+export const NATIVE_APPEARANCE_BACKGROUNDS = { dark: "#111217", light: "#fcfbfd" } as const;
 
 // One in-flight update and one latest desired value; no unbounded promise chain.
 export function createNativeAppearanceSync(target: NativeAppearanceWindow, report: () => void) {

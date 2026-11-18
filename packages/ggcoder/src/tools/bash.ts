@@ -131,6 +131,10 @@ const MAX_OUTPUT_BYTES = BOUNDED_OUTPUT_MAX_BYTES;
 export const REVIEW_REJECTED_BEFORE_START =
   "Error: review requires a local, non-persistent foreground verification check. Pass only the check in command; do not combine it with edits or diff inspection. Nothing was run.";
 
+/** Appended when `review` was set on a command that cannot carry one; the command itself still ran. */
+export const REVIEW_SKIPPED_NOTE =
+  "Review skipped: it runs only after a command that is just the final check, in the foreground. The command above ran normally.";
+
 /**
  * Result for a call whose Stop arrived while the launch was still being
  * prepared. Wording matches the agent loop's result for a tool call that never
@@ -1104,7 +1108,7 @@ export function createBashTool(
       FOREGROUND_LIMITS_DESCRIPTION
     : "Run a non-interactive bash command (TERM=dumb, pipefail) in the project root. " +
       FOREGROUND_LIMITS_DESCRIPTION;
-  return {
+  const tool: AgentTool<typeof BashParams> = {
     name: "bash",
     description:
       description +
@@ -1132,7 +1136,17 @@ export function createBashTool(
             verifyPlan: getVerifyPlan?.() ?? null,
           }).accepted)
       ) {
-        return REVIEW_REJECTED_BEFORE_START;
+        // Rejecting a review-flagged edit+test command threw the edits away, and the
+        // model re-sent them without review every time, so run the command as
+        // asked and skip only the review.
+        const result = await tool.execute(
+          { command, timeout: timeoutMs, run_in_background, persist, wake, review: false },
+          context,
+        );
+        if (typeof result === "string") return `${result}\n\n${REVIEW_SKIPPED_NOTE}`;
+        return typeof result.content === "string"
+          ? { ...result, content: `${result.content}\n\n${REVIEW_SKIPPED_NOTE}` }
+          : result;
       }
       const commandMode = run_in_background === true ? "background" : "foreground";
       if (wake && !run_in_background) {
@@ -1571,4 +1585,5 @@ ${await renderBashOutput(inspection)}`,
       }
     },
   };
+  return tool;
 }

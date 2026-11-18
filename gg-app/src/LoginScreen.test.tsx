@@ -3,13 +3,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { StrictMode } from "react";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import type { AuthProvider, SidecarEvent } from "./agent";
-import { authStatus } from "./agent";
+import { authLogout, authStatus } from "./agent";
 import { LoginScreen } from "./LoginScreen";
 
 const listeners = vi.hoisted(() => new Set<(e: SidecarEvent) => void>());
 
 vi.mock("./agent", () => ({
   authStatus: vi.fn(),
+  authLogout: vi.fn(),
   subscribe: (fn: (e: SidecarEvent) => void) => {
     listeners.add(fn);
     return () => listeners.delete(fn);
@@ -347,5 +348,44 @@ describe("LoginScreen brain bay", () => {
     // A new connection re-wires the existing brain; it isn't rebuilt.
     expect(bay.mount).toHaveBeenCalledTimes(1);
     expect(bay.setConnected).toHaveBeenLastCalledWith(["deepseek", "openai"]);
+  });
+});
+
+describe("LoginScreen retired sign-ins", () => {
+  const RETIRED_MESSAGE =
+    "Grok sign-in was removed: xAI offers SuperGrok and X Premium usage only in apps it partners with. Add an xAI API key instead.";
+  function withRetiredSignIn(): AuthProvider[] {
+    return providers([]).map((p) =>
+      p.value === "xai" ? { ...p, reauthRequired: true, reauthMessage: RETIRED_MESSAGE } : p,
+    );
+  }
+
+  it("shows the provider's own reconnect message and opens its login", async () => {
+    vi.mocked(authStatus).mockResolvedValue(withRetiredSignIn());
+    await act(async () => {
+      render(<LoginScreen onClose={vi.fn()} />);
+    });
+    expect(screen.getByText(RETIRED_MESSAGE)).toBeTruthy();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Reconnect" }));
+    });
+    expect(screen.getByRole("dialog")).toBeTruthy();
+  });
+
+  it("removes only the retired sign-in on dismiss and hides the notice", async () => {
+    vi.mocked(authStatus)
+      .mockResolvedValueOnce(withRetiredSignIn())
+      .mockResolvedValue(providers([]));
+    vi.mocked(authLogout).mockResolvedValue(undefined);
+    await act(async () => {
+      render(<LoginScreen onClose={vi.fn()} />);
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+    });
+    expect(authLogout).toHaveBeenCalledWith("xai", "legacy");
+    expect(screen.queryByText(RETIRED_MESSAGE)).toBeNull();
   });
 });

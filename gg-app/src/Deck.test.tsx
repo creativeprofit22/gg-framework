@@ -140,7 +140,6 @@ describe("deck Escape across split panes", () => {
       onStopSchedule: vi.fn(),
       projectHealth: null,
       usageExtras: null,
-      onOpenWorld: vi.fn(),
       progress: null,
       trophies: null,
       tools: {},

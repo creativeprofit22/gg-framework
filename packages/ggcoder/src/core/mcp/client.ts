@@ -288,6 +288,9 @@ export class MCPClientManager {
    */
   private idleSuccessor = new WeakMap<ConnectedServer, ConnectedServer>();
 
+  /** Servers the user removed mid-session: their already-published tools refuse calls. */
+  private removed = new Set<string>();
+
   constructor(opts: MCPClientManagerOptions = {}) {
     this.catalogCache = opts.catalogCache ?? new McpCatalogCache();
     // Pins sit beside the catalog cache, so a test that isolates the cache
@@ -542,6 +545,7 @@ export class MCPClientManager {
       const wrapped: AgentTool = {
         ...tool,
         execute: async (args: unknown, context?: ToolContext) => {
+          this.assertNotRemoved(config.name);
           const endCall = handle.beginCall();
           try {
             return await tool.execute(args, context as ToolContext);
@@ -582,6 +586,7 @@ export class MCPClientManager {
    * removed from the config since the catalog cache was written).
    */
   async whenConnected(name: string, timeoutMs = 30_000): Promise<ConnectionOutcome> {
+    if (this.removed.has(name)) return { ok: false, error: "the server was removed" };
     if (this.servers.some((server) => server.name === name)) return { ok: true };
     const slot = this.connectionSlot(name);
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -625,6 +630,7 @@ export class MCPClientManager {
     // caller that arrives before a slow server's turn still waits on the right
     // promise instead of creating a second one.
     for (const config of enabled) {
+      this.removed.delete(config.name);
       // A settled slot belongs to an earlier attempt. A retry gets a fresh one
       // so waiters see the new outcome rather than the old failure.
       if (this.connections.get(config.name)?.settled) this.connections.delete(config.name);
@@ -728,17 +734,20 @@ export class MCPClientManager {
       codeReject = reject;
     });
 
+    const callbackPort = config.oauth?.callbackPort ?? MCP_OAUTH_CALLBACK_PORT;
     const provider = new McpOAuthProvider({
       serverName: config.name,
       store,
       onRedirect: (authUrl) => onAuthorizationUrl(authUrl.toString()),
+      clientId: config.oauth?.clientId,
+      callbackPort,
     });
     const expectedState = await provider.state();
 
     // Loopback server that receives the OAuth redirect. Bound to the fixed
     // callback port that the registered redirect_uri points at.
     const server = http.createServer((req, res) => {
-      const reqUrl = new URL(req.url || "", `http://localhost:${MCP_OAUTH_CALLBACK_PORT}`);
+      const reqUrl = new URL(req.url || "", `http://localhost:${callbackPort}`);
       if (reqUrl.pathname !== MCP_OAUTH_CALLBACK_PATH) {
         res.statusCode = 404;
         res.end("Not found");
@@ -772,13 +781,13 @@ export class MCPClientManager {
     try {
       await new Promise<void>((resolve, reject) => {
         server.once("error", reject);
-        server.listen(MCP_OAUTH_CALLBACK_PORT, "127.0.0.1", () => resolve());
+        server.listen(callbackPort, "127.0.0.1", () => resolve());
       });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       const hint =
         msg.includes("EADDRINUSE") || msg.includes("in use")
-          ? `Port ${MCP_OAUTH_CALLBACK_PORT} is in use — close whatever is using it and retry.`
+          ? `Port ${callbackPort} is in use — close whatever is using it and retry.`
           : msg;
       return { ok: false, toolCount: 0, error: `Could not start login callback server: ${hint}` };
     }
@@ -1118,6 +1127,7 @@ export class MCPClientManager {
         execute: async (args, context) => {
           // Counted synchronously, before any await, so an idle timer that
           // fires while this call is still starting cannot stop the server.
+          this.assertNotRemoved(config.name);
           const idle = this.idleEligible(config) ? this.idleState(config.name) : undefined;
           if (idle) {
             idle.inFlight += 1;
@@ -1244,7 +1254,13 @@ export class MCPClientManager {
     transport: StreamableHTTPClientTransport | SSEClientTransport;
   }> {
     const reqInit = config.headers ? { headers: config.headers } : undefined;
-    const authProvider = isLocal ? undefined : new McpOAuthProvider({ serverName: config.name });
+    const authProvider = isLocal
+      ? undefined
+      : new McpOAuthProvider({
+          serverName: config.name,
+          clientId: config.oauth?.clientId,
+          callbackPort: config.oauth?.callbackPort,
+        });
     const sseTransport = (): SSEClientTransport =>
       new SSEClientTransport(url, {
         eventSourceInit: config.headers ? { fetch: createHeaderFetch(config.headers) } : undefined,
@@ -1298,6 +1314,45 @@ export class MCPClientManager {
       return await this.catalogCache.protocolEraFor(config);
     } catch {
       return undefined;
+    }
+  }
+
+  /**
+   * Drop one server mid-session (the user removed or replaced it). Its child
+   * process or pooled claim is released, and tools already handed out refuse
+   * further calls until a later connect brings the server back.
+   */
+  async disconnect(name: string): Promise<void> {
+    this.removed.add(name);
+    const state = this.idle.get(name);
+    if (state?.timer) clearTimeout(state.timer);
+    await state?.restarting?.catch(() => {});
+    this.idle.delete(name);
+    this.idleStoppedServers.delete(name);
+    this.connections.delete(name);
+    this.reconnecting.delete(name);
+    this.hiddenTools.delete(name);
+    const handle = this.sharedHandles.get(name);
+    this.sharedHandles.delete(name);
+    await handle?.release();
+    const owned = this.servers.filter((s) => s.name === name);
+    this.servers = this.servers.filter((s) => s.name !== name);
+    for (const server of owned) {
+      // Closed on purpose: not a death to report.
+      this.idleStopped.add(server.client);
+      try {
+        await server.client.close();
+      } catch {
+        // Already gone.
+      }
+    }
+  }
+
+  private assertNotRemoved(name: string): void {
+    if (this.removed.has(name)) {
+      throw new McpToolError(
+        `MCP server "${name}" was removed from the user's configuration; its tools no longer work.`,
+      );
     }
   }
 

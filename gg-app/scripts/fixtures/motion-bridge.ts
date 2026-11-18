@@ -207,6 +207,12 @@ mockIPC(
         if (!state.running) return { queued: false, count: 0 };
         queuedPrompts += 1;
         return { queued: true, count: queuedPrompts, queueId: `q${queuedPrompts}`, steers: false };
+      case "agent_shell_trust":
+        return { trusted: false };
+      case "agent_cancel_queued":
+        return { cancelled: true };
+      case "agent_ask_user":
+        return null;
       case "plugin:log|log":
       case "plugin:window|set_title":
         return null;

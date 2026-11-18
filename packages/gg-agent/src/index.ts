@@ -2,11 +2,16 @@
 export { Agent, AgentStream } from "./agent.js";
 export {
   agentLoop,
+  capToolResults,
   cancelledBeforeStartText,
   indeterminateOutcomeText,
   isAbortError,
   isContextOverflow,
   isBillingError,
+  isInterruptibleTool,
+  markSteerInterrupted,
+  PREEMPT_GRACE_MS,
+  STEER_INTERRUPTED_TEXT,
   isUsageLimitError,
   repairToolPairingAdjacent,
   setStreamDiagnostic,
@@ -27,6 +32,7 @@ export type {
   StreamRulesConfig,
 } from "./stream-rules.js";
 export { isLocalBackendUrl } from "./local-backend.js";
+export { argumentHints, unknownToolMessage } from "./tool-call-hints.js";
 
 // Types
 export type {

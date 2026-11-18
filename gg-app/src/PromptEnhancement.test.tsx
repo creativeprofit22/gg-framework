@@ -158,4 +158,8 @@ describe("followDraftEdit", () => {
   it("drops a stale enhancement that no longer matches the draft", () => {
     expect(followDraftEdit(enhancement, "Other draft", "Other draft!")).toBeNull();
   });
+
+  it("returns null when there is no enhancement", () => {
+    expect(followDraftEdit(null, "a", "ab")).toBeNull();
+  });
 });

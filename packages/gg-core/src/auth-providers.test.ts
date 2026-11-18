@@ -1,7 +1,13 @@
 import { describe, expect, it } from "vitest";
 import type { Provider } from "@kenkaiiii/gg-ai";
 import { getListedModels, getModelsForProvider, isHiddenProvider } from "./model-registry.js";
-import { AUTH_PROVIDERS } from "./auth-providers.js";
+import {
+  AUTH_PROVIDERS,
+  authPriorityNote,
+  describeAuthMethods,
+  getAuthProvider,
+  requiredKeyLabel,
+} from "./auth-providers.js";
 
 /**
  * The login screen advertises each provider's models in prose. Nothing else
@@ -11,7 +17,7 @@ import { AUTH_PROVIDERS } from "./auth-providers.js";
  */
 describe("AUTH_PROVIDERS descriptions match the model registry", () => {
   /**
-   * Descriptions abbreviate after the first mention ("Claude Fable 5.1, Opus 5.5"
+   * Descriptions abbreviate after the first mention ("Claude Fable 5.2, Opus 5.5"
    * — not "Claude Opus 5"), so a model counts as listed when either its full
    * registry name or that name minus its leading brand word appears.
    */
@@ -35,6 +41,7 @@ describe("AUTH_PROVIDERS descriptions match the model registry", () => {
   it("names no model the registry has retired", () => {
     const retired = [
       "Fable 5,",
+      "Fable 5.1",
       "Opus 5,",
       "Sonnet 5,",
       "Opus 4.8",
@@ -53,13 +60,76 @@ describe("AUTH_PROVIDERS descriptions match the model registry", () => {
 });
 
 describe("hidden providers", () => {
-  it("are left out of the login list and the unfiltered model lists", () => {
-    // Gemini is hidden until a sign-in path works for personal accounts.
-    expect(isHiddenProvider("gemini")).toBe(true);
-    expect(AUTH_PROVIDERS.map((p) => p.value)).not.toContain("gemini");
-    expect(getListedModels().some((m) => m.provider === "gemini")).toBe(false);
-    // The registry itself keeps the models, so un-hiding is a one-line change.
-    expect(getModelsForProvider("gemini").length).toBeGreaterThan(0);
-    expect(AUTH_PROVIDERS.map((p) => p.value)).toContain("anthropic");
+  it("hides none: Gemini is listed with an API key", () => {
+    expect(isHiddenProvider("gemini")).toBe(false);
+    expect(AUTH_PROVIDERS.map((p) => p.value)).toContain("gemini");
+    expect(getListedModels().some((m) => m.provider === "gemini")).toBe(true);
+  });
+});
+
+describe("allowed sign-in methods", () => {
+  it("offers a real sign-in only for Claude and ChatGPT", () => {
+    const withOAuth = AUTH_PROVIDERS.filter((p) => p.methods.includes("oauth")).map((p) => p.value);
+    expect(withOAuth).toEqual(["anthropic", "openai"]);
+  });
+
+  it("offers a pay-per-token key for every provider", () => {
+    // Local Fork: Qwen Cloud connects only through its native setup, never a pasted key.
+    for (const p of AUTH_PROVIDERS.filter((provider) => provider.value !== "qwen-cloud")) {
+      expect(p.methods, p.value).toContain("apikey");
+      expect(p.methodDetails.apikey, p.value).toBeDefined();
+    }
+  });
+
+  it("labels the OpenAI sign-in Continue with ChatGPT and adds an OpenAI API key", () => {
+    const methods = describeAuthMethods("openai");
+    expect(methods.map((m) => m.label)).toEqual(["Continue with ChatGPT", "OpenAI API key"]);
+    expect(methods[0]!.billing).toMatch(/ChatGPT plan/);
+    expect(authPriorityNote("openai")).toMatch(/ChatGPT plan first/);
+  });
+
+  it("splits Kimi into a Kimi Code plan key and a Moonshot key", () => {
+    const variants = getAuthProvider("moonshot")!.apiKeyVariants!;
+    expect(variants.map((v) => [v.key, v.kind])).toEqual([
+      ["kimi-code", "plan"],
+      ["moonshot", "payg"],
+    ]);
+  });
+
+  it("marks every variant as plan or pay-per-token, with its own storage key", () => {
+    for (const p of AUTH_PROVIDERS) {
+      const variants = p.apiKeyVariants ?? [];
+      expect(new Set(variants.map((v) => v.key)).size, p.value).toBe(variants.length);
+      for (const v of variants) {
+        expect(["plan", "payg"], `${p.value}/${v.key}`).toContain(v.kind);
+        expect(v.billing.length, `${p.value}/${v.key}`).toBeGreaterThan(0);
+      }
+    }
+  });
+
+  it("tells GLM users the Coding Plan can't be used here", () => {
+    expect(describeAuthMethods("glm")[0]!.when).toMatch(/Coding Plan/);
+  });
+});
+
+describe("Anthropic auth methods", () => {
+  it("offers Sign in with Claude (via Claude Code) and an API key", () => {
+    const methods = describeAuthMethods("anthropic");
+    expect(methods.map((m) => m.method)).toEqual(["oauth", "apikey"]);
+    expect(methods[0]!.label).toBe("Sign in with Claude");
+    expect(methods[0]!.when).toMatch(/Claude Code/);
+    expect(methods[0]!.when).toMatch(/downloads/);
+    expect(methods[1]!.label).toBe("Anthropic API key");
+  });
+});
+
+describe("requiredKeyLabel", () => {
+  it("names the key a plan-only or credits-only model needs", () => {
+    expect(requiredKeyLabel("moonshot", ["kimi-code"])).toBe("Needs a Kimi Code plan key");
+    expect(requiredKeyLabel("xiaomi", ["xiaomi-credits"])).toBe("Needs an API Credits key");
+  });
+  it("is undefined when any of the provider's keys runs the model", () => {
+    expect(requiredKeyLabel("moonshot", ["kimi-code", "moonshot"])).toBeUndefined();
+    expect(requiredKeyLabel("glm", ["glm"])).toBeUndefined();
   });
 });

@@ -11,15 +11,33 @@
 </p>
 
 <p align="center">
+  <strong>English</strong> | <a href="README.zh-CN.md">简体中文</a> | <a href="README.ja.md">日本語</a> | <a href="README.ko.md">한국어</a> | <a href="README.es.md">Español</a> | <a href="README.pt-BR.md">Português</a> | <a href="README.de.md">Deutsch</a> | <a href="README.fr.md">Français</a>
+</p>
+
+<p align="center">
   <a href="https://github.com/KenKaiii/gg-framework/releases/latest"><img src="https://img.shields.io/github/v/release/KenKaiii/gg-framework?style=for-the-badge&label=Download&color=b0b6ff" alt="GG Coder desktop release"></a>
-  <a href="https://github.com/KenKaiii/gg-framework/stargazers"><img src="https://img.shields.io/github/stars/KenKaiii/gg-framework?style=for-the-badge&label=Stars&color=yellow" alt="Star GG Coder on GitHub"></a>
+  <a href="https://github.com/KenKaiii/gg-framework"><img src="https://img.shields.io/github/stars/KenKaiii/gg-framework?style=for-the-badge&label=Stars&color=yellow" alt="Star GG Coder on GitHub"></a>
+  <a href="https://github.com/KenKaiii/gg-framework/releases"><img src="https://img.shields.io/github/downloads/KenKaiii/gg-framework/total?style=for-the-badge&label=App%20downloads&color=2ecc71" alt="Desktop app downloads"></a>
+  <a href="https://www.npmjs.com/package/@kenkaiiii/ggcoder"><img src="https://img.shields.io/npm/dm/@kenkaiiii/ggcoder?style=for-the-badge&label=CLI%20downloads&color=2ecc71" alt="ggcoder npm downloads per month"></a>
   <a href="https://www.npmjs.com/package/@kenkaiiii/ggcoder"><img src="https://img.shields.io/npm/v/@kenkaiiii/ggcoder?style=for-the-badge&label=CLI&color=blue" alt="ggcoder npm version"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-AGPL--3.0-blue.svg?style=for-the-badge" alt="AGPL-3.0 License"></a>
   <a href="https://youtube.com/@kenkaidoesai"><img src="https://img.shields.io/badge/YouTube-FF0000?style=for-the-badge&logo=youtube&logoColor=white" alt="YouTube"></a>
-  <a href="https://skool.com/kenkai"><img src="https://img.shields.io/badge/Skool-Community-b0b6ff?style=for-the-badge" alt="Skool"></a>
+  <a href="https://www.skool.com/raid"><img src="https://img.shields.io/badge/Skool-Free%20community-b0b6ff?style=for-the-badge" alt="Free Skool community"></a>
+  <a href="https://www.skool.com/kenkai"><img src="https://img.shields.io/badge/Skool-Raid%2B-b0b6ff?style=for-the-badge" alt="Raid+ on Skool"></a>
+  <a href="https://www.kenkais.com"><img src="https://img.shields.io/badge/Website-kenkais.com-b0b6ff?style=for-the-badge" alt="kenkais.com"></a>
 </p>
 
 GG Coder is a desktop coding agent that gets more out of the AI subscription you already pay for.
+
+<!-- prettier-ignore-start -->
+> [!TIP]
+> **Want the step-by-step guide?**
+> - **Free community:** the full GG Coder setup, a 7-day build challenge and 20+ projects: [skool.com/raid](https://www.skool.com/raid)
+> - **Raid+:** make money with AI, a sellable app in 30 days, live every Thursday: [skool.com/kenkai](https://www.skool.com/kenkai)
+> - **Want it built for you?** [work.kenkais.com](https://work.kenkais.com/)
+
+> ⭐ **If GG Coder saves you time or money, give it a star.** It's the main way other developers find it.
+<!-- prettier-ignore-end -->
 
 ## Why GG Coder
 
@@ -27,7 +45,7 @@ GG Coder is a desktop coding agent that gets more out of the AI subscription you
 - **Real code, not guesses.** Agent Steroids searches real, current open-source code on your machine. No rate-limited MCP server, no limits.
 - **Done means checked.** Ken Autopilot keeps the work going until it's actually verified.
 - **Ship it properly, even as a beginner.** Coding is only part of it. One-click checks for security, compliance, data safety, accessibility, tests and more, plus a Project health score, so you don't need to know what to ask for.
-- **Your subscriptions.** Claude, ChatGPT, Gemini, Grok, Kimi, API keys or local models.
+- **Your subscriptions.** Claude, ChatGPT, Kimi Code, MiniMax and MiMo plans, any API key, or local models.
 
 | Agent              | Time for the full suite | Usage per suite | Time vs GG Coder | Usage vs GG Coder |
 | ------------------ | ----------------------- | --------------- | ---------------- | ----------------- |
@@ -132,6 +150,29 @@ npm install @kenkaiiii/gg-ai @kenkaiiii/gg-agent
 
 The package links above cover setup and usage. Licensed under AGPL-3.0: you can build on it, and if you distribute your changes or run them as a network service, you share their source under the same license.
 
+## Contributing
+
+Bug reports, ideas and pull requests are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) and the [Code of Conduct](CODE_OF_CONDUCT.md) before you start.
+
 ## Learn with me
 
-Come build with me in my [Skool community](https://skool.com/kenkai). Get help, share what you're making, and learn how to get more out of AI.
+New to building with AI? Start in **[RAID](https://www.skool.com/raid)**, my free community:
+
+- Step-by-step setup for GG Coder (Mac and Windows)
+- A free 7-day challenge: build your first app, one short lesson a day
+- 20+ more projects you can build yourself
+
+Want to make money with AI? **[Raid+](https://www.skool.com/kenkai)**: a sellable app in 30 days, live every Thursday.
+
+Want it built for you? **[work.kenkais.com](https://work.kenkais.com/)**
+
+## Star history
+
+<a href="https://star-history.com/#KenKaiii/gg-framework&Date">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=KenKaiii/gg-framework&amp;type=Date&amp;theme=dark">
+    <img alt="GG Coder star history chart" src="https://api.star-history.com/svg?repos=KenKaiii/gg-framework&amp;type=Date">
+  </picture>
+</a>
+
+<p align="center">If GG Coder is useful to you, ⭐ star the repo so more people find it.</p>

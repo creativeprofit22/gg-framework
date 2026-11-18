@@ -243,7 +243,7 @@ function pollUntilExited(): Step {
       } else if (last.startsWith(`Process ${taskId}: exited`)) {
         return null;
       }
-      return palsuToolCall("task_output", { id: taskId, wait_ms: 600_000 });
+      return palsuToolCall("task_output", { id: taskId, wait_ms: 300_000 });
     },
   };
 }

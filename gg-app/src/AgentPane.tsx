@@ -26,6 +26,7 @@ import { createEntranceLifetime, dissolveInVisible, enterTranscriptRow } from ".
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { theme } from "./theme";
+import { QueuedBar } from "./QueuedBar";
 import { WorkingBeam } from "./WorkingBeam";
 import { ChatErrorNotice } from "./ChatErrorNotice";
 import { showScreen } from "./view-transition";
@@ -38,6 +39,11 @@ import { ActionMetal } from "./ActionMetal";
 import { menuCommands, paletteCommands } from "./menu-commands";
 import { CommandPalette } from "./CommandPalette";
 import { autosizeComposer } from "./composer-autosize";
+import { sendKeyAction } from "./send-key";
+import { LivePreviewPanel } from "./LivePreviewPanel";
+import { livePreviewAvailable, START_DEV_SERVER_PROMPT } from "./livePreviewAvailable";
+import { useLivePreview } from "./useLivePreview";
+import { chatTitle } from "./chat-title";
 import { pageKeyDirection, shouldPageTranscript, transcriptPageStep } from "./transcript-page-keys";
 import { pinAfterScroll, pinAfterWheel } from "./transcript-pin";
 import {
@@ -153,7 +159,6 @@ import {
   slashTokenFor,
   type SlashMenuKeyAction,
 } from "./slash-menu-keys";
-import { QueuedBar } from "./QueuedBar";
 import { ScheduleHint } from "./ScheduleHint";
 import {
   describeSchedule,
@@ -196,14 +201,13 @@ import { ChatPicker } from "./ChatPicker";
 import { BackButton } from "./BackButton";
 import { Badge } from "./Badge";
 import { HomeScreen } from "./HomeScreen";
-import { WorldScreen } from "./WorldScreen";
 // Lazy: Goals is an opt-in surface; keep its picker out of the startup bundle.
 const GoalPicker = lazy(() =>
   import("./GoalPicker").then((module) => ({ default: module.GoalPicker })),
 );
 import { SettingsModal } from "./LazySettingsModal";
 import { initialEntryView, type EntryView } from "./app-entry-view";
-import { submitDisposition, withoutSupersedingMessage } from "./submit-disposition";
+import { submitDisposition } from "./submit-disposition";
 import { Toaster } from "./Toaster";
 import { RankBadge } from "./RankBadge";
 import { Confetti } from "./Confetti";
@@ -246,6 +250,7 @@ import {
   ListChecksIcon,
   SparkleIcon,
   SquareIcon,
+  XIcon,
 } from "./phosphor-icons";
 import { ActionDial, type DialOption } from "./ActionDial";
 import {
@@ -842,9 +847,6 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   // Enhance pill mid-call.
   const [enhancement, setEnhancement] = useState<DraftEnhancement | null>(null);
   const [enhancing, setEnhancing] = useState(false);
-  // The floating "Enhance" pill is shown only after the user pauses typing for
-  // ~1s (and hidden again on the next keystroke / send / empty input).
-  const [enhanceHintVisible, setEnhanceHintVisible] = useState(false);
   // Drives the Matrix dissolve→decode animation over the input while enhancing.
   // `newText` is null until the enhancer returns (dissolve/scramble), then the
   // enhanced text (decode). Null when no animation is playing.
@@ -1133,40 +1135,9 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   const [restoreChecked, setRestoreChecked] = useState(false);
   // Every window starts from the mode-neutral home screen before choosing Code or Chat.
   const [entryView, setEntryView] = useState<EntryView>(initialEntryView(kind === "auxiliary"));
-  // World has faded in over Home (Home holds its World plate down until then).
-  const [worldShown, setWorldShown] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTabId>("general");
   // Re-open the matching session picker over an already-open workspace.
   const [showPicker, setShowPicker] = useState(false);
-  // World over whatever this pane shows (Home, a picker or a workspace); Back returns to it. ONE World layer for
-  // every screen (see worldLayer below), so switching screens under it (the in-game computer opening a project)
-  // never reloads the game.
-  const [showWorld, setShowWorld] = useState(false);
-  // The in-game computer: this pane's own GG Coder over World (WorldScreen.tsx).
-  const [worldComputer, setWorldComputer] = useState(false);
-  // In the computer the pane keeps its full-window layout and is scaled into the space between World's top bar and
-  // Stand up (.app-in-monitor reads --mon-tf).
-  const monitorOpen = showWorld && worldComputer;
-  useEffect(() => {
-    if (!monitorOpen) return;
-    const root = document.documentElement;
-    const fit = (): void => {
-      const w = window.innerWidth;
-      const h = window.innerHeight;
-      const top = 52;
-      const bottom = 64;
-      const k = Math.max(0.5, Math.min((w - 40) / w, (h - top - bottom) / h));
-      // scaled about the window's centre (.app-in-monitor's transform-origin), then shifted into the free band
-      const dy = top + (h - top - bottom - k * h) / 2 - (h - k * h) / 2;
-      root.style.setProperty("--mon-tf", `translateY(${dy.toFixed(1)}px) scale(${k.toFixed(4)})`);
-    };
-    fit();
-    window.addEventListener("resize", fit);
-    return () => {
-      window.removeEventListener("resize", fit);
-      root.style.removeProperty("--mon-tf");
-    };
-  }, [monitorOpen]);
   // Bumped on each workspace/session choice to force re-hydration.
   const [hydrateNonce, setHydrateNonce] = useState(0);
   const { activity, handleActivityEvent } = useTaskActivity(hydrateNonce);
@@ -1834,23 +1805,39 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     };
   }, [insertDroppedFolderPaths, ownsWindowGlobals, stageAttachments]);
 
+  // A chat is titled by its first prompt: the saved one survives compaction,
+  // the transcript's covers a new chat before the next state refresh.
+  const chatHeaderTitle =
+    workspaceMode === "chat"
+      ? chatTitle(
+          state?.sessionTitle ??
+            items.find(
+              (item): item is Extract<Item, { kind: "user" }> =>
+                item.kind === "user" && !item.ken && !item.kenSent && item.text.trim() !== "",
+            )?.text,
+        )
+      : null;
+
   // Keep the native window title aligned with the visible title-bar context.
   useEffect(() => {
     if (!ownsWindowGlobals) return;
     const fallbackTitle = workspaceProductName(workspaceMode);
     const title =
-      !needsProject && !showPicker
-        ? formatWorkspaceTitle(
-            state?.cwd,
-            state?.gitBranch,
-            fallbackTitle,
-            state?.gitDirtyFileCount,
-            state?.gitHubIssues ?? null,
-            state?.gitHubPRs ?? null,
-          )
-        : fallbackTitle;
+      chatHeaderTitle !== null && !needsProject && !showPicker
+        ? `${chatHeaderTitle} · ${fallbackTitle}`
+        : !needsProject && !showPicker
+          ? formatWorkspaceTitle(
+              state?.cwd,
+              state?.gitBranch,
+              fallbackTitle,
+              state?.gitDirtyFileCount,
+              state?.gitHubIssues ?? null,
+              state?.gitHubPRs ?? null,
+            )
+          : fallbackTitle;
     setWindowTitle(title);
   }, [
+    chatHeaderTitle,
     needsProject,
     ownsWindowGlobals,
     showPicker,
@@ -2963,7 +2950,29 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   }
   const mentionOpen = mention !== null && fileMatches.length > 0 && !kenActive && !shellMode;
   // A command is run as typed, so there is nothing to enhance.
+  // Show the "Enhance" pill whenever the input holds text, even mid-run (a
+  // queued follow-up can be enhanced too). Skipped mid-enhance, with a menu
+  // open, on a `/schedule` draft (the enhancer would mangle its `| 15m` tail),
+  // or when the draft is already the current enhancement.
+  // Derived in render, not an effect: a post-paint update left the pill in the
+  // row for the frame the input emptied, so the composer measured the empty
+  // field at the narrower width, where the placeholder wraps, and flashed taller.
+  const enhanceHintVisible =
+    !enhancing &&
+    hydrated &&
+    input.trim().length > 0 &&
+    !slashHasMatches &&
+    !mentionOpen &&
+    !scheduleDraft &&
+    !(enhancement && enhancement.enhanced === input);
   const enhancePillVisible = enhanceHintVisible && !shellMode;
+  // Local Fork: the live preview's Rust commands target the window's session, not a pane's,
+  // so only the primary pane offers it.
+  const canLivePreview =
+    kind === "primary" && livePreviewAvailable(workspaceMode, needsProject, state);
+  const livePreview = useLivePreview(canLivePreview);
+  const sendAction = sendKeyAction({ shellMode, running, kenRunning, autopilotReviewing });
+  const sendStopping = sendAction !== "send";
   const clampedFileIndex = fileMatches.length > 0 ? fileIndex % fileMatches.length : 0;
 
   // True when `text` is a known workflow command invocation (first token).
@@ -3024,11 +3033,6 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       el.setSelectionRange(caretAt, caretAt);
       setCaret(caretAt);
     });
-  }
-
-  /** Ordered pane events own queue state, including confirmed cancellation IDs. */
-  function handleCancelQueued(id: string): void {
-    void cancelQueued(id);
   }
 
   function pickSlashCommand(cmd: SlashCommand): void {
@@ -3315,7 +3319,6 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
         // Only the sidecar knows whether this reply reaches the run now or waits
         // (a deferred question does not steer); a waiting prompt stays visible.
         const steers = submission.queued && submission.steers;
-        if (steers) noteSupersedingSend(trimmed);
         stickToBottomRef.current = true;
         acceptSubmission(userItem, submission, steers);
         if (!submission.queued) planResumePromptRef.current = trimmed;
@@ -3458,35 +3461,23 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       typingAskRef.current = null;
   }, [items, setItems]);
 
-  const supersedingTextRef = useRef<string | null>(null);
-  const [supersedingText, setSupersedingText] = useState<string | null>(null);
-  const supersedeClearRef = useRef<number | null>(null);
-  const noteSupersedingSend = useCallback((text: string): void => {
-    supersedingTextRef.current = text;
-    setSupersedingText(text);
-    if (supersedeClearRef.current !== null) window.clearTimeout(supersedeClearRef.current);
-    supersedeClearRef.current = window.setTimeout(() => {
-      supersedingTextRef.current = null;
-      setSupersedingText(null);
-    }, 5000);
-  }, []);
-  useEffect(() => {
-    const text = supersedingTextRef.current;
-    if (text !== null && !queuedMessages.some((message) => message.text === text)) {
-      supersedingTextRef.current = null;
-      setSupersedingText(null);
-    }
-  }, [queuedMessages]);
-  useEffect(
-    () => () => {
-      if (supersedeClearRef.current !== null) window.clearTimeout(supersedeClearRef.current);
-    },
-    [],
+  // Queue entries a bubble may still cancel (one already handed to the agent can't be).
+  const cancellableQueueIds = useMemo(
+    () => new Set(queuedMessages.filter((m) => !m.delivering).map((m) => m.id)),
+    [queuedMessages],
   );
-  const visibleQueuedMessages = useMemo(
-    () => withoutSupersedingMessage(queuedMessages, supersedingText),
-    [queuedMessages, supersedingText],
-  );
+  // Stable, so passing it doesn't defeat the transcript rows' memo. Queue events
+  // own the outcome: a confirmed cancel removes the bubble (useAgentEvents).
+  const cancelQueuedMessage = useCallback((id: string) => void cancelQueued(id), [cancelQueued]);
+  // Local Fork: queue entries with no bubble here (queued before this pane attached,
+  // or by Ken) would otherwise be invisible and uncancellable, so the strip keeps them.
+  const bubbleQueueIds = items
+    .flatMap((it) => (it.kind === "user" && it.queued && it.queueId ? [it.queueId] : []))
+    .join(" ");
+  const strayQueuedMessages = useMemo(() => {
+    const onBubble = new Set(bubbleQueueIds ? bubbleQueueIds.split(" ") : []);
+    return queuedMessages.filter((m) => !onBubble.has(m.id));
+  }, [bubbleQueueIds, queuedMessages]);
   // Sub-agent groups for the critter floor. Recomputed with `items`, but the
   // floor compares group identities and ignores token-only re-renders.
   const critterGroups = useMemo(
@@ -3867,7 +3858,6 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
           // Ken corrections always steer; without a question to replace they
           // still wear the queued look until the run picks them up.
           const hideQueued = supersedesQuestion && submission.queued && submission.steers;
-          if (hideQueued) noteSupersedingSend(prompt);
           if (!submission.queued) planResumePromptRef.current = prompt;
           stickToBottomRef.current = true;
           acceptSubmission(
@@ -4027,7 +4017,6 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       commitPreparedContinuation,
       dismissOpenAsks,
       endStreamingText,
-      noteSupersedingSend,
       planReview,
       pushItem,
       restorePromptToComposer,
@@ -4141,7 +4130,6 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     if (!draft.trim() || draft.length > ENHANCE_PROMPT_MAX_CHARS || enhancing) return;
     const sessionIsCurrent = capturePromptSession();
     const isCurrent = () => sessionIsCurrent() && composerRef.current.input === draft;
-    setEnhanceHintVisible(false);
     setEnhancing(true);
 
     const reduced =
@@ -4204,24 +4192,6 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       }
     });
   }
-
-  // Show the corner "Enhance" pill whenever the input holds text — it stays put
-  // (no debounce) and only hides when the box is empty. Shows even while the agent
-  // is running, so a queued follow-up draft can be enhanced too: enhancePrompt is
-  // a standalone one-shot call, independent of the agent loop. Still skipped mid-
-  // enhance, with a menu open, or when the draft is already the current
-  // enhancement (nothing left to improve).
-  useEffect(() => {
-    if (enhancing || !hydrated) return setEnhanceHintVisible(false);
-    if (input.trim().length === 0) return setEnhanceHintVisible(false);
-    if (slashHasMatches || mentionOpen) return setEnhanceHintVisible(false);
-    // Never offer to rewrite a `/schedule` draft: the enhancer rewrites prose
-    // and would happily mangle the `| 15m` argument tail into something the
-    // parser rejects.
-    if (scheduleDraft) return setEnhanceHintVisible(false);
-    if (enhancement && enhancement.enhanced === input) return setEnhanceHintVisible(false);
-    setEnhanceHintVisible(true);
-  }, [input, enhancing, hydrated, slashHasMatches, mentionOpen, scheduleDraft, enhancement]);
 
   // Both typed `@Ken` prompts and composer quick actions use this path so Ken's
   // transcript identity and transport stay identical. Quick actions opt out of
@@ -4443,7 +4413,6 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
           if (supersedesQuestion) dismissOpenAsks();
           // Server-decided: a deferred question does not make this prompt steer.
           const steers = submission.queued && submission.steers;
-          if (steers) noteSupersedingSend(prompt);
           acceptSubmission(userItem, submission, steers);
           if (!submission.queued) planResumePromptRef.current = prompt;
         })
@@ -4829,41 +4798,6 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     return () => registerInput?.(paneId, null);
   }, [insertDroppedFolderPaths, paneId, registerInput, stageAttachments]);
 
-  // World (one layer for every screen, so changing screen under it never reloads the game) and the in-game
-  // computer: while it's open this pane's GG Coder sits inside a monitor over World (.app-in-monitor).
-  // World's Back always lands on GG Coder's Home screen, never on whatever the in-game computer was last
-  // showing. A session opened there keeps running and is one click away from Home.
-  const closeWorld = (): void => {
-    setShowWorld(false);
-    setWorldShown(false);
-    setWorldComputer(false);
-    setShowPicker(false);
-    setNeedsProject(true);
-    setEntryView("home");
-  };
-  const onWorldComputer = (open: boolean): void => {
-    setWorldComputer(open);
-    // The computer always boots to GG Coder's Home screen, whatever this pane was showing: the same way
-    // the app's own Back gets there (a running session carries on underneath and is one click away again).
-    if (open) {
-      setShowPicker(false);
-      setNeedsProject(true);
-      setEntryView("home");
-    }
-  };
-  const inMonitor = monitorOpen ? " app-in-monitor" : "";
-  const worldLayer = showWorld ? (
-    <div className="world-overlay">
-      <WorldScreen
-        player={progress}
-        onShown={() => setWorldShown(true)}
-        onClose={closeWorld}
-        computer={worldComputer}
-        onComputer={onWorldComputer}
-      />
-    </div>
-  ) : null;
-
   // Show explicit recovery feedback while Rust resolves this window's durable
   // target. This branch used to paint only the dark background, which looked
   // indistinguishable from a dead/black webview during a slow recovery.
@@ -4881,11 +4815,8 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   if (needsProject) {
     return (
       <>
-        <div className={`app${inMonitor}`} style={{ background: theme.background }}>
-          {/* World opens OVER Home (as it does over a workspace), so Home
-            stays put underneath while the game fades in, and Back fades
-            straight back to it. */}
-          {entryView === "home" || entryView === "world" ? (
+        <div className="app" style={{ background: theme.background }}>
+          {entryView === "home" ? (
             <HomeScreen
               onProjects={() => {
                 setWorkspaceMode("code");
@@ -4903,9 +4834,6 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
                 setWorkspaceMode("code");
                 setEntryView("goals");
               }}
-              // On the in-game computer World is already open behind it: World just stands the player up.
-              onWorld={() => (worldComputer ? setWorldComputer(false) : setShowWorld(true))}
-              worldShown={worldShown}
               onSettings={(tab) => {
                 setSettingsTab(tab ?? "general");
                 setEntryView("settings");
@@ -4968,7 +4896,6 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
           {showTraySettings && <SettingsModal onClose={closeTraySettings} />}
           <Toaster />
         </div>
-        {worldLayer}
       </>
     );
   }
@@ -4993,7 +4920,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     };
     return (
       <>
-        <div className={`app${inMonitor}`} style={{ background: theme.background }}>
+        <div className="app" style={{ background: theme.background }}>
           {workspaceMode === "chat" ? (
             <ChatPicker
               initialAgent={state?.chatAgent ?? "general"}
@@ -5024,7 +4951,6 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
           )}
           {showTraySettings && <SettingsModal onClose={closeTraySettings} />}
         </div>
-        {worldLayer}
       </>
     );
   }
@@ -5141,7 +5067,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
 
   const content = (
     <div
-      className={`app agent-pane${props.focused !== false ? " pane-focused" : ""}${isFileDragOver ? " app-file-dragover" : ""}${windowFocused && props.windowFocused !== false ? " window-focused" : ""}${workspaceMode === "code" && showChecklist ? " checklist-open" : ""}${goalWorldOpen && !showChecklist ? " goal-world-open" : ""}${inMonitor}`}
+      className={`app agent-pane${props.focused !== false ? " pane-focused" : ""}${isFileDragOver ? " app-file-dragover" : ""}${windowFocused && props.windowFocused !== false ? " window-focused" : ""}${workspaceMode === "code" && showChecklist ? " checklist-open" : ""}${goalWorldOpen && !showChecklist ? " goal-world-open" : ""}`}
       data-glow={glowState}
       style={{ background: "var(--workspace-pane-bg, var(--bg))", ...glowStyle }}
       onPointerDown={() => props.onFocus?.(paneId)}
@@ -5158,6 +5084,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
         workspaceMode={workspaceMode}
         cwd={state?.cwd}
         goalName={state?.goal?.name ?? null}
+        title={chatHeaderTitle}
         gitBranch={state?.gitBranch}
         gitDirtyFileCount={state?.gitDirtyFileCount}
         gitHubIssues={state?.gitHubIssues}
@@ -5359,6 +5286,14 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
                           onImageLoad: maybeScrollToBottom,
                           onAskAnswer: handleAskAnswer,
                           onAskType: handleAskType,
+                          queueId:
+                            it.kind === "user" &&
+                            it.queued &&
+                            it.queueId !== undefined &&
+                            cancellableQueueIds.has(it.queueId)
+                              ? it.queueId
+                              : undefined,
+                          onCancelQueued: cancelQueuedMessage,
                           shellActions,
                         }),
                       )}
@@ -5513,6 +5448,28 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
             projectHealth={projectHealth}
             onReviewHealth={reviewProjectHealth}
             tools={{
+              preview: canLivePreview
+                ? {
+                    title: "Live preview",
+                    meta: livePreview.status?.running ? "Running" : undefined,
+                    fit: true,
+                    body: (
+                      <LivePreviewPanel
+                        preview={livePreview}
+                        onStartDevServer={() => {
+                          if (
+                            submitText(
+                              START_DEV_SERVER_PROMPT,
+                              "Start the dev server and open the live preview",
+                              { keepInput: true },
+                            )
+                          )
+                            setDeckPanel(null);
+                        }}
+                      />
+                    ),
+                  }
+                : undefined,
               todo:
                 workspaceMode === "code" && !state?.goal
                   ? {
@@ -5610,7 +5567,6 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
             }}
             progress={progress}
             trophies={trophies.snapshot}
-            onOpenWorld={() => setShowWorld(true)}
             usageExtras={
               windowTotal > 1 &&
               windowIndex !== null && (
@@ -5634,6 +5590,15 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
                 onOpenMemories={() => setDeckPanel("brain")}
                 showChecklist={showChecklist}
                 onOpenChecklist={openChecklist}
+                onOpenLivePreview={
+                  canLivePreview
+                    ? () => {
+                        setDeckPanel("preview");
+                        void livePreview.start();
+                      }
+                    : undefined
+                }
+                livePreviewRunning={livePreview.status?.running ?? false}
                 hasHealth={projectHealth !== null}
                 onOpenHealth={() => setDeckPanel("health")}
                 onOpenRadio={() => setDeckPanel("radio")}
@@ -5718,7 +5683,6 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
                   <KenActivityBar
                     runStartTs={kenRunStartTs}
                     tokens={kenTokens}
-                    onCancel={() => cancelCurrentKen()}
                     toolsHidden={toolsHidden}
                     onToggleTools={toggleTools}
                   />
@@ -5735,7 +5699,6 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
                     thinkingAccumMs={thinkingAccumMs}
                     planTotal={workspaceMode !== "code" ? 0 : planTotal}
                     planDone={workspaceMode !== "code" ? 0 : Math.min(planDone.size, planTotal)}
-                    onCancel={requestCancel}
                     toolsHidden={toolsHidden}
                     hasToolFeed={liveToolFeed.length > 0}
                     onToggleTools={toggleTools}
@@ -5808,7 +5771,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
                     onOpenImage={(src) => void openImageDataUrl(src)}
                   />
                   <ReferencedFiles paths={mentionedPaths} onRemove={removeMentionChip} />
-                  <QueuedBar messages={visibleQueuedMessages} onCancel={handleCancelQueued} />
+                  <QueuedBar messages={strayQueuedMessages} onCancel={cancelQueuedMessage} />
                   <div className="inputrow">
                     <input
                       ref={fileInputRef}
@@ -5999,10 +5962,9 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
                             e.preventDefault();
                             submit();
                           } else if (e.key === "Escape") {
-                            // Cancel the build if it's running; otherwise cancel Ken so the
-                            // "esc to cancel" on his bar actually works.
-                            if (running && !cancelling) requestCancel();
-                            else if (kenRunning) cancelCurrentKen();
+                            // Escape stops whatever the send key would stop.
+                            if (sendAction === "stop-run" && !cancelling) requestCancel();
+                            else if (sendAction === "stop-ken") cancelCurrentKen();
                           }
                         }}
                         autoFocus
@@ -6036,7 +5998,6 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
                       </button>
                     )}
                     <div className="inputactions-trailing">
-                      <WorkingBeam active={running} size="sm" />
                       <ActionMetal
                         active={
                           !running &&
@@ -6051,27 +6012,35 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
                       />
                       <button
                         type="button"
-                        className={`icon-circle icon-circle-primary composer-send-icon${running && !shellMode ? " is-stop" : ""}`}
+                        className={`icon-circle icon-circle-primary composer-send-icon${sendStopping ? " is-stop icon-circle-stop" : ""}`}
                         aria-label={
-                          shellMode ? "Run command" : running ? "Stop response" : "Send message"
+                          shellMode
+                            ? "Run command"
+                            : sendAction === "stop-run"
+                              ? "Stop response"
+                              : sendAction === "stop-ken"
+                                ? "Stop Ken"
+                                : "Send message"
                         }
                         title={
                           shellMode
                             ? "Run command"
-                            : running
+                            : sendAction === "stop-run"
                               ? cancelling
                                 ? "Stopping…"
                                 : "Stop response"
-                              : attachmentsLoading
-                                ? "Loading attachments…"
-                                : "Send message"
+                              : sendAction === "stop-ken"
+                                ? "Stop Ken"
+                                : attachmentsLoading
+                                  ? "Loading attachments…"
+                                  : "Send message"
                         }
                         disabled={
                           shellMode
                             ? !readyRef.current ||
                               planReview !== null ||
                               !shellCommandFromInput(input)
-                            : running
+                            : sendStopping
                               ? cancelling
                               : !readyRef.current ||
                                 planReview !== null ||
@@ -6080,10 +6049,15 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
                                   attachments.length === 0 &&
                                   mentionedPaths.length === 0)
                         }
+                        // The send key is the only Stop control (the activity bars have none).
                         // A command runs alongside the agent, so mid-run this is Run, not Stop.
-                        onClick={running && !shellMode ? requestCancel : submit}
+                        onClick={() => {
+                          if (sendAction === "stop-run") requestCancel();
+                          else if (sendAction === "stop-ken") cancelCurrentKen();
+                          else submit();
+                        }}
                       >
-                        {running && !shellMode ? (
+                        {sendStopping ? (
                           <SquareIcon size={12} weight="fill" />
                         ) : (
                           <ArrowUpIcon size={16} />
@@ -6254,12 +6228,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       {showTraySettings && <SettingsModal onClose={closeTraySettings} />}
     </div>
   );
-  return (
-    <PaneIdProvider value={paneId}>
-      {content}
-      {worldLayer}
-    </PaneIdProvider>
-  );
+  return <PaneIdProvider value={paneId}>{content}</PaneIdProvider>;
 }
 
 /**
@@ -6392,6 +6361,8 @@ const TranscriptRowBody = memo(function TranscriptRowBody({
   onImageLoad,
   onAskAnswer,
   onAskType,
+  queueId,
+  onCancelQueued,
   shellActions,
 }: {
   item: Item;
@@ -6407,6 +6378,9 @@ const TranscriptRowBody = memo(function TranscriptRowBody({
     sendNow?: boolean,
   ) => void;
   onAskType?: (itemId: number, promptId: string, questionId: string, seed?: string) => void;
+  /** Set while this queued bubble can still be cancelled. */
+  queueId?: string;
+  onCancelQueued?: (id: string) => void;
   shellActions?: ShellActions;
 }): React.ReactElement | null {
   const paneId = useContext(PaneIdContext);
@@ -6448,9 +6422,26 @@ const TranscriptRowBody = memo(function TranscriptRowBody({
           data-swap-row={item.id}
           className={`user-msg${item.queued ? " queued" : ""}${item.promoted ? " promoted" : ""}${item.ken ? " user-ken" : ""}`}
         >
+          {/* Kept mounted through the promotion beat so it can fade out; hidden
+              from screen readers once the message stops actually being queued. */}
           {(item.queued || item.promoted) && (
-            <span className="queued-pill" aria-hidden={item.promoted}>
-              queued
+            <span
+              className="queued-tag"
+              aria-hidden={item.promoted}
+              title="Sends at the agent's next turn"
+            >
+              <span className="queued-pill">queued</span>
+              {item.queued && queueId !== undefined && onCancelQueued && (
+                <button
+                  type="button"
+                  className="queued-cancel"
+                  title="Cancel this queued message"
+                  aria-label="Cancel queued message"
+                  onClick={() => onCancelQueued(queueId)}
+                >
+                  <XIcon size={12} weight="bold" aria-hidden="true" />
+                </button>
+              )}
             </span>
           )}
           {item.images && item.images.length > 0 && (

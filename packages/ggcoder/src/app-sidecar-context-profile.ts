@@ -66,7 +66,7 @@ export async function runContextProfileMutation(
     return {
       status: 409,
       body: {
-        error: "Context profiles are available only for GPT-6 Astra through OpenAI Codex OAuth.",
+        error: "Context profiles are available only for GPT-6.2 Astra through OpenAI Codex OAuth.",
       },
     };
   }

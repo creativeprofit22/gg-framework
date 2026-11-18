@@ -123,17 +123,22 @@ beforeEach(async () => {
     "deepseek",
     "openrouter",
     "huggingface",
+    "opencode-go",
+    "opencode",
   ];
   await writeJson(
     path.join(tmpHome, ".gg", "auth.json"),
     Object.fromEntries(
       authProviders.map((provider) => [
-        provider,
+        // OpenAI as the ChatGPT plan sign-in, Gemini as its AI Studio key.
+        provider === "openai" ? "openai-chatgpt" : provider === "gemini" ? "gemini-api" : provider,
         {
           accessToken: `test-${provider}-token`,
-          refreshToken: `test-${provider}-refresh`,
+          refreshToken: provider === "openai" ? "test-openai-refresh" : "",
           expiresAt: Date.now() + 3_600_000,
-          ...(provider === "openai" ? { accountId: "chatgpt-account" } : {}),
+          ...(provider === "openai"
+            ? { accountId: "chatgpt-account", clientId: "oaiapp_test" }
+            : {}),
         },
       ]),
     ),
@@ -150,6 +155,53 @@ afterEach(async () => {
   await fs.rm(tmpHome, { recursive: true, force: true });
   await fs.rm(tmpProject, { recursive: true, force: true });
   vi.clearAllMocks();
+});
+
+describe("AgentSession compaction credentials", () => {
+  const unchanged = (messages: Message[]) => ({
+    messages,
+    result: {
+      compacted: false,
+      originalCount: messages.length,
+      newCount: messages.length,
+      tokensBeforeEstimate: 10,
+      tokensAfterEstimate: 10,
+    },
+  });
+
+  async function compactWithCapturedToken() {
+    compactMock.mockImplementation(async (messages: Message[]) => unchanged(messages));
+    const { AgentSession } = await import("./agent-session.js");
+    const session = new AgentSession({
+      provider: "anthropic",
+      model: "claude-test",
+      cwd: tmpProject,
+      systemPrompt: "system prompt",
+      transient: true,
+    });
+    await session.initialize();
+    await session.compact(
+      { accessToken: "token-from-run-start", accountId: "acct", baseUrl: "https://example.test" },
+      "automatic",
+    );
+    await session.dispose();
+    return compactMock.mock.calls.at(-1)?.[1];
+  }
+
+  it("summarizes with the token on disk now, not the one captured at run start", async () => {
+    expect(await compactWithCapturedToken()).toMatchObject({
+      apiKey: "test-anthropic-token",
+      accountId: "acct",
+      baseUrl: "https://example.test",
+    });
+  });
+
+  it("keeps the passed token when credentials cannot be resolved", async () => {
+    await writeJson(path.join(tmpHome, ".gg", "auth.json"), {});
+    expect(await compactWithCapturedToken()).toMatchObject({
+      apiKey: "token-from-run-start",
+    });
+  });
 });
 
 describe("AgentSession worker auto-compaction", () => {
@@ -1249,7 +1301,7 @@ describe("AgentSession mid-turn compaction", () => {
     const { AgentSession } = await import("./agent-session.js");
     const session = new AgentSession({
       provider: "anthropic",
-      model: "claude-fable-5-1",
+      model: "claude-fable-5-2",
       cwd: tmpProject,
       systemPrompt: "system prompt",
       transient: true,
@@ -1315,7 +1367,7 @@ describe("AgentSession mid-turn compaction", () => {
     const { AgentSession } = await import("./agent-session.js");
     const session = new AgentSession({
       provider: "anthropic",
-      model: "claude-fable-5-1",
+      model: "claude-fable-5-2",
       cwd: tmpProject,
       systemPrompt: "system prompt",
       transient: true,

@@ -86,7 +86,7 @@ it("renders queued startup and later native failures through the standalone entr
   expect(screen.getByRole("alert").textContent).toBe(message);
   expect(mocks.invoke).toHaveBeenCalledWith("plugin:window|set_background_color", {
     label: "whatsnew",
-    value: "#0f1115",
+    value: "#111217",
   });
   expect(mocks.invoke).toHaveBeenLastCalledWith("set_window_theme_hint", { theme: "dark" });
   expect(document.documentElement.dataset.appearanceTheme).toBe("dark");

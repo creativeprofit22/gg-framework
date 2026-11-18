@@ -359,10 +359,12 @@ describe("spawn_agent worker", () => {
 
   it("restores inherited OpenAI Ultra when a pinned model falls back to the parent", async () => {
     await writeJson(path.join(tmpHome, ".gg", "auth.json"), {
-      openai: {
+      "openai-chatgpt": {
         accessToken: "test-access",
         refreshToken: "test-refresh",
         expiresAt: Date.now() + 3_600_000,
+        accountId: "chatgpt-account",
+        clientId: "oaiapp_test",
       },
     });
     agentLoopMock
@@ -375,7 +377,7 @@ describe("spawn_agent worker", () => {
     const { done } = await runWorkerTurn({
       provider: "openai",
       model: "gpt-6-luna",
-      fallbackModel: "gpt-6.1-sol",
+      fallbackModel: "gpt-6.2-sol",
       thinkingLevel: "max",
       parentThinkingLevel: "ultra",
     });
@@ -388,7 +390,7 @@ describe("spawn_agent worker", () => {
       }),
     ).toEqual([
       { model: "gpt-6-luna", thinking: "max" },
-      { model: "gpt-6.1-sol", thinking: "ultra" },
+      { model: "gpt-6.2-sol", thinking: "ultra" },
     ]);
   });
 

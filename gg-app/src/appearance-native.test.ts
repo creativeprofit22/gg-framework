@@ -70,7 +70,7 @@ describe("native appearance", () => {
       await flush();
       expect(mocks.invoke.mock.calls).toEqual([
         ["plugin:window|set_theme", { label, value: "dark" }, undefined],
-        ["plugin:window|set_background_color", { label, value: "#0f1115" }, undefined],
+        ["plugin:window|set_background_color", { label, value: "#111217" }, undefined],
         ["set_window_theme_hint", { theme: "dark" }, undefined],
         ["plugin:window|set_theme", { label, value: "light" }, undefined],
         ["plugin:window|set_background_color", { label, value: "#fcfbfd" }, undefined],
@@ -148,7 +148,7 @@ describe("native appearance", () => {
     expect(report).toHaveBeenCalledOnce();
     sync.update("dark");
     await flush();
-    expect(target.setBackgroundColor).toHaveBeenLastCalledWith("#0f1115");
+    expect(target.setBackgroundColor).toHaveBeenLastCalledWith("#111217");
     sync.stop();
   });
   it("does not issue background work after teardown", async () => {
@@ -191,7 +191,7 @@ describe("native appearance", () => {
     await flush();
     expect(report).not.toHaveBeenCalled();
     expect(target.rememberTheme.mock.calls).toEqual([["light"], ["dark"]]);
-    expect(target.setBackgroundColor).toHaveBeenLastCalledWith("#0f1115");
+    expect(target.setBackgroundColor).toHaveBeenLastCalledWith("#111217");
     sync.stop();
   });
   it("never calls native setters in a regular browser", () => {

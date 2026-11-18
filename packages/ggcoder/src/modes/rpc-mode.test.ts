@@ -13,10 +13,6 @@ import { runRpcMode } from "./rpc-mode.js";
 
 const captured = vi.hoisted(() => ({ options: [] as AgentSessionOptions[] }));
 
-vi.mock("../core/claude-code-version.js", () => ({
-  getClaudeCliUserAgent: async () => "rpc-test-fixture",
-}));
-
 vi.mock("@kenkaiiii/gg-ai", async (original) => ({
   ...(await original<Record<string, unknown>>()),
   stream: vi.fn(),

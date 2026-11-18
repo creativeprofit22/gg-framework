@@ -28,6 +28,8 @@ export interface UpdateInfo {
   statusMessage: string | null;
   progressLines: string[];
   installerPath: string | null;
+  /** Why the last official install failed (null unless phase is "error"). */
+  error: string | null;
   install: (options?: { summarizeDecisions?: boolean }) => Promise<void>;
 }
 
@@ -91,6 +93,7 @@ export function useAppUpdate(): UpdateInfo {
   const [update, setUpdate] = useState<Update | null>(null);
   const [phase, setPhase] = useState<UpdatePhase>("idle");
   const [progress, setProgress] = useState<number | null>(null);
+  const [error, setError] = useState<string | null>(null);
   const [fakeVersion, setFakeVersion] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [progressLines, setProgressLines] = useState<string[]>([]);
@@ -271,6 +274,7 @@ export function useAppUpdate(): UpdateInfo {
       if (!update) return;
       setPhase("installing");
       setProgress(0);
+      setError(null);
       try {
         let total = 0;
         let downloaded = 0;
@@ -286,6 +290,7 @@ export function useAppUpdate(): UpdateInfo {
         setPhase("error");
         setProgress(null);
         setStatusMessage(`Update install failed: ${String(error)}`);
+        setError(error instanceof Error ? error.message : String(error));
         logError(`Update install failed: ${String(error)}`);
       }
     },
@@ -301,6 +306,8 @@ export function useAppUpdate(): UpdateInfo {
       return version ? `Update v${version} (local fixes)` : "Update (local fixes)";
     }
     if (phase === "installing") return "Installing…";
+    // A failed official install must say so (the home key adds "Retry").
+    if (phase === "error") return "Update failed";
     return version ? `Update to ${version}` : "Update";
   }, [phase, version]);
   const installTitle = appBuildInfo.localPatched
@@ -321,6 +328,7 @@ export function useAppUpdate(): UpdateInfo {
     statusMessage,
     progressLines,
     installerPath,
+    error,
     install,
   };
 }

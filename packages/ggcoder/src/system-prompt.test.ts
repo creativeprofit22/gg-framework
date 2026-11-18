@@ -10,6 +10,7 @@ import {
   buildSystemPrompt,
   collectProjectContext,
   PROJECT_CONTEXT_MAX_BYTES,
+  renderApprovedPlanSection,
 } from "./system-prompt.js";
 import { buildKenSystemPrompt } from "./core/ken-prompt.js";
 import { resolveContextLimits } from "./core/context-limits.js";
@@ -270,7 +271,7 @@ describe("buildSystemPrompt", () => {
     // Local Fork: hashes pin the merged Replies section, which keeps the fork's
     // status list, ADHD reply style and interjection lines on top of upstream's.
     [[], "59de80cdafd0191d88eaa4a881b26c7f2671df86ad5ca9cba4d0834e0e96cffa"],
-    [["ask_user"], "4269b032fb002e8bf406302ac7c3fd6b05aed194e19d20dae29bd601c6d67e93"],
+    [["ask_user"], "e444706b65a053f57f75ed44332ee729940681c3cbf3d03ead55a4ef6ed985f3"],
   ] as const)(
     "preserves the paragraph-first response policy with tools %j",
     async (toolNames, hash) => {
@@ -350,7 +351,12 @@ describe("buildSystemPrompt", () => {
     // Local Fork: optional offers are a plain statement, so they need neither a
     // prose question nor a card; a real card carries its own context.
     expect(prompt).toContain("offer a next step as one plain sentence, not a question");
-    expect(prompt).toContain('make the card make sense alone (never "above")');
+    expect(prompt).toContain('so the card makes sense alone (never "above")');
+    // A bare card left the user choosing without the answer or context; a short
+    // lead-in fixes that without turning every question into a full report.
+    expect(prompt).toContain(
+      "Before the card, write just enough to choose: the direct answer or what you found, in one to three plain sentences",
+    );
     expect(prompt).toContain("No question? Just end.");
     expect(prompt).not.toContain("is the last line");
     expect(prompt.match(/`> \*\*/g) ?? []).toHaveLength(0);
@@ -477,6 +483,8 @@ describe("buildSystemPrompt", () => {
       "Leave changes you didn't make alone",
       "Find facts yourself",
       "Ask only about unclear requirements, real tradeoffs, secrets/access, cost, or anything destructive",
+      // #152: agents paused mid-task to ask "fix it or ignore it?".
+      "Fix broken things the task touches without asking; mention unrelated ones in the final reply",
       "Fix the root cause minimally",
       "Precedence: user > nearest project instructions > skills > this prompt",
       "Research only an unresolved API, design choice, or risk: local/installed source first",
@@ -557,7 +565,7 @@ describe("buildSystemPrompt", () => {
         expect(prompt).not.toContain("Tip: install Agent Steroids");
         expect(prompt).not.toContain("does not count toward the word budget");
         if (planMode) {
-          expect(prompt).toContain("Research with read/search tools and read-only bash");
+          expect(prompt).toContain("Use read/search tools");
           expect(prompt).toContain("Repository indexing needs user approval even in plan mode");
           expect(prompt).toContain("no code edits outside `.gg/plans/`");
           expect(prompt).toContain("End it with a heading exactly `## Steps`");
@@ -685,14 +693,14 @@ describe("buildSystemPrompt", () => {
     // asked for; bench/h2h/DIRAC-FINDINGS.md). Deferring steroids+subagent
     // removed ~5.4k chars of schemas from the same prefix.
     // Local Fork: deliberate fork rules (status list incl. 'released', fork research
-    // one-liner, ADHD reply style; see .gg/local-fixes) add ~730 chars over upstream.
-    // Caps are measured merged sizes (3,905 / 4,359 / 5,028 after upstream's 0.97.4
-    // light-comments rule, +119 each; upstream raised its own caps +100 for it)
-    // rounded up to the next 100. The fork's plain-language and when-to-ask reply
-    // rules then added ~450 each (4,354 / 4,808 / 5,477).
-    expect(measurements.normal.characters).toBeLessThan(4_400);
-    expect(measurements.planMode.characters).toBeLessThan(4_900);
-    expect(measurements.typescriptProjectContextToolsSkills.characters).toBeLessThan(5_500);
+    // one-liner, ADHD reply style, plain-language and when-to-ask reply rules; see
+    // .gg/local-fixes) add ~1,200 chars over upstream. Upstream 0.115 then added the
+    // new-skills line (+~200), the plan-mode refresh (+300), "fix broken things
+    // without asking" (+~100, #152) and the card lead-in. Caps are measured merged
+    // sizes (4,624 / 5,378 / 5,172) rounded up to the next 100.
+    expect(measurements.normal.characters).toBeLessThan(4_700);
+    expect(measurements.planMode.characters).toBeLessThan(5_400);
+    expect(measurements.typescriptProjectContextToolsSkills.characters).toBeLessThan(5_200);
     expect(measurements.planMode.characters).toBeGreaterThan(measurements.normal.characters);
     expect(measurements.typescriptProjectContextToolsSkills.characters).toBeGreaterThan(
       measurements.normal.characters,
@@ -821,7 +829,7 @@ describe("buildSystemPrompt", () => {
     expect(prompt).toContain("the nearest file wins");
   });
 
-  it("uses the Claude Code identity for Anthropic and GG Coder for other providers", async () => {
+  it("uses the GG Coder identity for every provider, Anthropic included", async () => {
     const cwd = await makeProject();
     const anthropic = await buildSystemPrompt(
       cwd,
@@ -842,10 +850,9 @@ describe("buildSystemPrompt", () => {
       "openai",
     );
 
-    expect(anthropic.startsWith("You are Claude Code")).toBe(true);
-    expect(anthropic).not.toContain("GG Coder by Ken Kai");
+    expect(anthropic.startsWith("You are GG Coder by Ken Kai")).toBe(true);
     expect(openai.startsWith("You are GG Coder by Ken Kai")).toBe(true);
-    expect(openai).not.toContain("You are Claude Code");
+    expect(anthropic).not.toContain("Claude Code");
   });
 
   it("renders the exact approved snapshot after its source file is mutated", async () => {
@@ -1138,5 +1145,17 @@ describe("system prompt byte ceiling", () => {
     );
     expect(Buffer.byteLength(prompt, "utf8")).toBeLessThanOrEqual(16 * 1024);
     expect(prompt).toContain("system prompt exceeded the 16384-byte ceiling");
+  });
+});
+
+describe("renderApprovedPlanSection", () => {
+  it("asks for [DONE:n] in reply text, not inside a tool call", async () => {
+    // Regression: a run echoed `[DONE:n]` from bash, which the widget never
+    // reads, so an 8-step plan showed 0/8 while steps 1-7 were done.
+    const section = renderApprovedPlanSection({
+      content: "# Plan\n\n## Steps\n1. First step.\n2. Second step.\n",
+    });
+    expect(section).toContain("write `[DONE:n]` (e.g. `[DONE:1]`) in your reply text");
+    expect(section).toContain("a marker inside a tool call");
   });
 });

@@ -13,7 +13,10 @@ it("keeps Qwen and Azure native managed and guards the generic API-key route bef
     source.indexOf('if (method === "POST" && url === "/auth/apikey")'),
     source.indexOf('if (method === "POST" && url === "/auth/oauth/start")'),
   );
-  expect(route).toContain('isNativeManagedAuthProvider(provider) || key.startsWith("sk-sp-")');
+  // Formatting-independent: prettier may wrap the guard across lines.
+  expect(route.replace(/\s+/g, " ")).toContain(
+    'isNativeManagedAuthProvider(provider) || key.startsWith("sk-sp-")',
+  );
   expect(route.indexOf("json(res, 400")).toBeLessThan(route.indexOf("await auth.setCredentials"));
 });
 

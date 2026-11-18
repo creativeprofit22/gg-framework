@@ -12,9 +12,9 @@ beforeAll(async () => {
   await import("@kenkaiiii/gg-ai");
 });
 const TEST_API_KEY = "azure-test-key";
-const MODEL_ID = "azure:gpt-6.1-sol";
-const DEPLOYMENT = "gpt-6.1-sol";
-// Exceed the upstream GPT-6.1 Sol 1.05M-window 10% compaction threshold across two turns.
+const MODEL_ID = "azure:gpt-6.2-sol";
+const DEPLOYMENT = "gpt-6.2-sol";
+// Exceed the upstream GPT-6.2 Sol 1.05M-window 10% compaction threshold across two turns.
 const LARGE_RESPONSE = "old context ".repeat(20_000);
 const SUMMARY =
   "### Primary Request and Intent\nPreserve Azure compaction context.\n\n### Next Step\nResume the Azure session.";

@@ -9,7 +9,7 @@ import { useFakeHome } from "../test-support/fake-home.js";
 import { removeWhenReleased } from "./lsp/test-support.js";
 import type { AgentSession } from "./agent-session.js";
 import type { ProcessManager } from "./process-manager.js";
-import { createBashTool, REVIEW_REJECTED_BEFORE_START } from "../tools/bash.js";
+import { createBashTool, REVIEW_SKIPPED_NOTE } from "../tools/bash.js";
 
 interface FlowInternals {
   processManager: ProcessManager;
@@ -151,9 +151,9 @@ describe("honest reports without stop gates", () => {
     expect(events).not.toContain("verification");
   });
 
-  // Upstream regression: a review the bash tool rejects before spawning ran
-  // nothing, so it is neither a pass nor a failure.
-  it("records nothing for a review rejected before start, but keeps real failures", async () => {
+  // Upstream: a review-ineligible command still runs (the review is skipped),
+  // so the gate judges it by its real result and never counts it as a pass.
+  it("runs a review-ineligible command with the review skipped, and keeps real failures", async () => {
     const { internal } = await makeSession();
     await tool(internal, "edit", { file_path: "subject.mjs" });
     const bash = createBashTool(cwd, internal.processManager);
@@ -166,21 +166,28 @@ describe("honest reports without stop gates", () => {
       args,
     } as AgentEvent);
     const result = await bash.execute(args, { signal: new AbortController().signal, toolCallId });
-    expect(result).toBe(REVIEW_REJECTED_BEFORE_START);
+    // Local Fork: bash may return a structured result; the note ends its text content.
+    const text = typeof result === "string" ? result : result.content;
+    expect(typeof text).toBe("string");
+    expect(String(text).endsWith(REVIEW_SKIPPED_NOTE)).toBe(true);
     await internal.trackHookEvent({
       type: "tool_call_end",
       toolCallId,
-      result,
+      // Tool-call events carry the result text, not the structured return.
+      result: text,
       isError: false,
       durationMs: 1,
     } as AgentEvent);
-    expect(session!.getVerificationEvidenceLedgerSnapshot().currentEvidence).toEqual([]);
+    // a.test.mjs does not exist, so the check really failed.
+    expect(
+      session!.getVerificationEvidenceLedgerSnapshot().currentEvidence.map((entry) => entry.status),
+    ).not.toContain("passed");
 
     // Matching text from a check that actually ran must still count.
     await tool(internal, "bash", { command: "node --test a.test.mjs", review: true }, 1);
-    expect(
-      session!.getVerificationEvidenceLedgerSnapshot().currentEvidence.map((entry) => entry.status),
-    ).toEqual(["failed"]);
+    expect(session!.getVerificationEvidenceLedgerSnapshot().currentEvidence.at(-1)?.status).toBe(
+      "failed",
+    );
   });
 
   it("accepts format-check evidence without restoring automatic reminders", async () => {

@@ -66,6 +66,32 @@ describe("AskBand", () => {
     expect(onAnswer).toHaveBeenCalledWith({ flag: "yes" });
   });
 
+  it("credits Ken's answer and notes when Ken left a card to the user", () => {
+    const q: AskQuestion = { id: "go", question: "Add the test?", kind: "confirm" };
+    const { rerender } = render(
+      <AskBand
+        prompt={prompt(q)}
+        kenLeft="Pricing is your call."
+        onAnswer={vi.fn()}
+        onTypeInstead={onTypeInstead}
+      />,
+    );
+    expect(screen.getByRole("status").textContent).toBe(
+      "Ken left this one for you: Pricing is your call.",
+    );
+    rerender(
+      <AskBand
+        prompt={prompt(q)}
+        answers={{ go: "yes" }}
+        sent
+        answeredBy="ken"
+        onAnswer={vi.fn()}
+        onTypeInstead={onTypeInstead}
+      />,
+    );
+    expect(screen.getByText("Ken: yes")).toBeTruthy();
+  });
+
   it("dissolves into its answered line when answered live, not when restored answered", () => {
     const flag = prompt({
       id: "flag",
@@ -995,6 +1021,9 @@ describe("AskBand", () => {
       expect(screen.getByRole("button", { name: "No", hidden: true }).className).toContain(
         "btn-primary",
       );
+      // Regression: the key hint left on the pick, so the card lost a line and
+      // the chat dropped with it before the card had started to dissolve.
+      expect(document.querySelector(".ask-band.is-committing .ask-hint")).toBeTruthy();
       // A second pick mid-beat cannot change the answer.
       fireEvent.click(screen.getByRole("button", { name: "Yes", hidden: true }));
       vi.advanceTimersByTime(379);

@@ -1,6 +1,6 @@
 import type { AskAnswerDelta } from "./ask-user";
 import { memo, useLayoutEffect, useRef, useState } from "react";
-import { AtIcon, FileTextIcon, FilmStripIcon } from "./phosphor-icons";
+import { AtIcon, FileTextIcon, FilmStripIcon, XIcon } from "./phosphor-icons";
 import { theme } from "./theme";
 import { ChatErrorNotice } from "./ChatErrorNotice";
 import { openImageDataUrl, openProjectPath } from "./agent";
@@ -11,6 +11,7 @@ import { HookNotice } from "./HookNotice";
 import { SubAgentFeed } from "./SubAgentFeed";
 import { CompactionNotice } from "./CompactionNotice";
 import { PlanModeLogo } from "./PlanModeLogo";
+import { KenFace } from "./KenFace";
 import { PlanDecisionNotice } from "./PlanDecisionNotice";
 import { SecurityNotice } from "./SecurityNotice";
 import { AskBand } from "./AskBand";
@@ -20,6 +21,7 @@ import { Markdown } from "./Markdown";
 import { ImageGenCard } from "./image-gen/ImageGenCard";
 import { ImageCard } from "./ImageCard";
 import { segmentDoneMarkers, hasDoneMarker } from "./plan-steps";
+import { PLAN_STEP_TICK } from "./plan-step-tick";
 import { hidePartialKenLine, stripKenLine } from "./goal-ken-talk";
 import { EnhancedSegments } from "./PromptEnhancement";
 import { basename } from "./tool-format";
@@ -88,9 +90,7 @@ function AssistantReply({
       {segments.map((seg, i) =>
         seg.kind === "done" ? (
           <div key={i} className={`plan-step-done${i >= mountedSegments ? " dissolve-in" : ""}`}>
-            <span className="plan-step-check" aria-hidden="true">
-              {"\u2713"}
-            </span>
+            <img className="plan-step-check" src={PLAN_STEP_TICK} alt="" draggable={false} />
             <span className="plan-step-label">{`Step ${seg.stepNum} completed`}</span>
           </div>
         ) : (
@@ -105,9 +105,18 @@ function AssistantReply({
   );
 }
 
+/** Ken's face and name on their own row above his reply (the face talks while he types). */
+function KenByline({ talking = false }: { talking?: boolean }): React.ReactElement {
+  return (
+    <div className="ken-byline">
+      <KenFace mood="chat" talking={talking} />
+      <span className="ken-byline-name">Ken</span>
+    </div>
+  );
+}
+
 /**
- * Ken Kai's reply: led by his little pixel face (it talks while the reply
- * streams in) instead of the dot, framed by a teal rule. No badge, no byline.
+ * Ken Kai's reply: his byline (face and name) on its own row above the text.
  * The Markdown component special-cases ```prompt fences into a "Send to GG
  * Coder" button. Streams through the live-text store like `AssistantReply`.
  */
@@ -125,6 +134,7 @@ function KenReply({
   const { text, streaming } = useLiveText(id, stored);
   return (
     <div className="assistant-msg ken-msg" data-talking={talking || undefined}>
+      <KenByline talking={talking} />
       <div className="assistant-text">
         <StreamingMarkdown text={text} streaming={streaming} onGrow={onGrow} />
       </div>
@@ -148,6 +158,8 @@ export const TranscriptRow = memo(function TranscriptRow({
   errorActive = false,
   errorModelPicker,
   onContentGrow,
+  queueId,
+  onCancelQueued,
   onAskAnswer,
   onAskType,
   shellActions,
@@ -162,6 +174,8 @@ export const TranscriptRow = memo(function TranscriptRow({
   errorActive?: boolean;
   errorModelPicker?: React.ReactNode;
   onContentGrow?: () => void;
+  queueId?: string;
+  onCancelQueued?: (id: string) => void;
   onAskAnswer?: (itemId: number, promptId: string, delta: AskAnswerDelta) => void;
   onAskType?: (itemId: number, promptId: string, questionId: string, seed?: string) => void;
   shellActions?: ShellActions;
@@ -187,6 +201,8 @@ export const TranscriptRow = memo(function TranscriptRow({
       errorActive={errorActive}
       errorModelPicker={errorModelPicker}
       onContentGrow={onContentGrow}
+      queueId={queueId}
+      onCancelQueued={onCancelQueued}
       onAskAnswer={onAskAnswer}
       onAskType={onAskType}
       shellActions={shellActions}
@@ -207,6 +223,8 @@ function TranscriptRowBody({
   errorActive = false,
   errorModelPicker,
   onContentGrow,
+  queueId,
+  onCancelQueued,
   onAskAnswer,
   onAskType,
   shellActions,
@@ -217,6 +235,9 @@ function TranscriptRowBody({
   errorActive?: boolean;
   errorModelPicker?: React.ReactNode;
   onContentGrow?: () => void;
+  /** The sidecar queue entry this queued bubble is, while it can still be cancelled. */
+  queueId?: string;
+  onCancelQueued?: (id: string) => void;
   /** Record answers for an `ask_user` band (App settles the tool call). */
   onAskAnswer?: (itemId: number, promptId: string, delta: AskAnswerDelta) => void;
   /** Answer this question by typing in the composer instead of clicking. */
@@ -256,14 +277,27 @@ function TranscriptRowBody({
             item.promoted ? " promoted" : ""
           }${item.ken ? " user-ken" : ""}`}
         >
-          {/* Kept mounted through the promotion beat so it can collapse
-              smoothly; unmounting it outright shrinks the bubble in a single
-              frame and shunts the whole transcript. Hidden from screen readers
-              as soon as the message stops actually being queued, since the
-              remaining frames are decoration. */}
+          {/* Kept mounted through the promotion beat so it can fade out. Hidden
+              from screen readers as soon as the message stops actually being
+              queued, since the remaining frames are decoration. */}
           {(item.queued || item.promoted) && (
-            <span className="queued-pill" aria-hidden={item.promoted}>
-              queued
+            <span
+              className="queued-tag"
+              aria-hidden={item.promoted}
+              title="Sends at the agent's next turn"
+            >
+              <span className="queued-pill">queued</span>
+              {item.queued && queueId !== undefined && onCancelQueued && (
+                <button
+                  type="button"
+                  className="queued-cancel"
+                  title="Cancel this queued message"
+                  aria-label="Cancel queued message"
+                  onClick={() => onCancelQueued(queueId)}
+                >
+                  <XIcon size={12} weight="bold" aria-hidden="true" />
+                </button>
+              )}
             </span>
           )}
           {item.images && item.images.length > 0 && (
@@ -340,6 +374,7 @@ function TranscriptRowBody({
       };
       return (
         <div className="assistant-msg ken-msg">
+          <KenByline />
           <div className="assistant-text">
             <Markdown>{copy[item.phase]}</Markdown>
           </div>
@@ -409,6 +444,8 @@ function TranscriptRowBody({
           answeredLive={item.answeredLive}
           cancelled={item.cancelled}
           deferred={item.deferred}
+          answeredBy={item.answeredBy}
+          kenLeft={item.kenLeft}
           onAnswer={(delta) => onAskAnswer?.(item.id, item.prompt.id, delta)}
           onTypeInstead={(questionId, seed) =>
             onAskType?.(item.id, item.prompt.id, questionId, seed)

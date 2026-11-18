@@ -18,6 +18,8 @@ const PROVIDER_LABELS: Record<string, string> = {
   deepseek: "DeepSeek",
   "qwen-cloud": "Qwen Cloud (Token Plan)",
   huggingface: "Hugging Face",
+  "opencode-go": "OpenCode Go",
+  opencode: "OpenCode",
   sakana: "Sakana (Fugu)",
   openrouter: "OpenRouter",
   local: "Local",
@@ -40,6 +42,8 @@ const PROVIDER_ORDER = [
   "deepseek",
   "qwen-cloud",
   "huggingface",
+  "opencode-go",
+  "opencode",
   "sakana",
   "openrouter",
 ];

@@ -401,6 +401,8 @@ export interface AgentState extends DesktopContextSnapshot, DesktopSessionUXStat
   sessionPath?: string | null;
   mode: WorkspaceMode;
   chatAgent?: ChatAgentId;
+  /** The session's first user prompt; a chat window's title. Absent until there is one. */
+  sessionTitle?: string;
   running: boolean;
   runState?: "idle" | "running" | "cancelling";
   /** Current reasoning level, or null when thinking is off. May be absent on
@@ -652,6 +654,11 @@ export interface ModelOption {
    * `standardModel` is what replaces it wherever it isn't carried over.
    */
   billing?: { label: string; detail: string; paid: boolean; standardModel?: string };
+  /**
+   * Why this model can't run on what is connected, e.g. "Not in your ChatGPT
+   * plan" or "Needs a Kimi Code plan key". The picker shows it, disabled.
+   */
+  unavailable?: string;
 }
 
 export type SlashCommand = SlashCommandListing;
@@ -789,59 +796,35 @@ export async function getTrophies(): Promise<TrophySnapshot> {
   return invoke<TrophySnapshot>("agent_trophies");
 }
 
-/**
- * A GG World online-save reply, as the World server sent it: `status` is its
- * HTTP status (409 stale ver, 400 with `body.error`), or 0 when it couldn't be
- * reached or online save isn't available. Never throws.
- */
-export interface WorldSaveResult {
+// ── Weekly poll (Home) ───────────────────────────────────────────────────
+
+export interface Poll {
+  id: string;
+  question: string;
+  options: string[];
+  closesAt: number;
+}
+
+/** The open poll as the sidecar sees it. `status` is the poll server's HTTP status (0 = unreachable);
+ *  `poll` is null when none is open; `myChoice` is this install's pick. */
+export interface PollState {
   status: number;
-  body: unknown;
+  poll: Poll | null;
+  counts: number[];
+  total: number;
+  myChoice: number | null;
+  error?: string;
 }
 
-function worldSaveResult(r: unknown): WorldSaveResult {
-  const o = typeof r === "object" && r !== null ? (r as Record<string, unknown>) : {};
-  return { status: typeof o.status === "number" ? o.status : 0, body: o.body ?? null };
+export async function getPoll(): Promise<PollState> {
+  await waitForReady();
+  return invoke<PollState>("agent_poll_get");
 }
 
-async function worldSaveCall(
-  command: string,
-  args?: Record<string, unknown>,
-): Promise<WorldSaveResult> {
-  try {
-    await waitForReady();
-    return worldSaveResult(await invoke<unknown>(command, args));
-  } catch {
-    return { status: 0, body: null };
-  }
-}
-
-/** Read the GG World online save (links this device on first use). */
-export function worldSaveGet(): Promise<WorldSaveResult> {
-  return worldSaveCall("agent_world_get");
-}
-
-/** Write the GG World online save: `patch` on top of server version `ver`. */
-export function worldSavePut(
-  ver: number,
-  patch: Record<string, unknown>,
-): Promise<WorldSaveResult> {
-  return worldSaveCall("agent_world_put", { ver, patch });
-}
-
-/** A one-time GG World live ticket: body `{ world, ticket, url }` on 200 (403 = consent off / banned). */
-export function worldLive(): Promise<WorldSaveResult> {
-  return worldSaveCall("agent_world_live");
-}
-
-/** Delete the whole GG World account; the sidecar forgets this device's link on success. */
-export function worldAccountDelete(): Promise<WorldSaveResult> {
-  return worldSaveCall("agent_world_account_delete");
-}
-
-/** Delete the GG World online save. */
-export function worldSaveDelete(): Promise<WorldSaveResult> {
-  return worldSaveCall("agent_world_delete");
+/** Vote, or move this install's vote, in the open poll. */
+export async function votePoll(pollId: string, choice: number): Promise<PollState> {
+  await waitForReady();
+  return invoke<PollState>("agent_poll_vote", { pollId, choice });
 }
 
 /** Non-2xx sidecar errors throw from the proxy; also reject a malformed body. */
@@ -862,7 +845,8 @@ export async function setKeepAwake(enabled: boolean): Promise<boolean> {
   return keepAwakeEnabled(await invoke<{ enabled?: unknown }>("agent_keep_awake_set", { enabled }));
 }
 
-export type SubscriptionUsageProvider = "anthropic" | "openai" | "moonshot";
+// ChatGPT has no meter: plan usage is managed at chatgpt.com/settings/usage.
+export type SubscriptionUsageProvider = "anthropic" | "moonshot";
 
 export interface SubscriptionUsageWindow {
   kind: "current" | "weekly";
@@ -1042,6 +1026,25 @@ export async function runShellCommand(
     if (error !== "confirmation_required") await logError(`agent_shell_run failed: ${error}`);
     return { ok: false, error };
   }
+}
+
+/**
+ * Add another folder GG can work in ("Add folder" in the More panel). Throws
+ * with a user-facing message when the folder can't be added.
+ */
+export async function addWorkspaceFolder(
+  path: string,
+): Promise<{ root: string; additionalRoots: string[] }> {
+  await waitForReady();
+  return invoke<{ root: string; additionalRoots: string[] }>("agent_add_dir", { path });
+}
+
+/** Drop a folder added with "Add folder". Throws with a user-facing message. */
+export async function removeWorkspaceFolder(
+  path: string,
+): Promise<{ root: string; additionalRoots: string[] }> {
+  await waitForReady();
+  return invoke<{ root: string; additionalRoots: string[] }>("agent_remove_dir", { path });
 }
 
 /** Stop a running `!cmd` and everything it started. */
@@ -1240,10 +1243,20 @@ export async function readDroppedFileAttachment(path: string): Promise<Attachmen
 /** Display hints for the user bubble this prompt creates — persisted by the
  *  sidecar so a resumed session re-renders the same bubble (Ken "Sent to GG
  *  Coder" label, enhancer term highlights). */
-/** Prompt metadata sent with `agent_prompt`. `scheduled` marks a `/schedule`
- *  timer send (not typed) so the sidecar uses the short unattended ask_user
- *  deadline for this run. */
-export type PromptMeta = CorePromptMeta & { scheduled?: boolean };
+/** Prompt metadata sent with `agent_prompt`. */
+export type PromptMeta = CorePromptMeta & {
+  /** Fired by a `/schedule` timer, not typed — the sidecar uses the short
+   *  unattended ask_user deadline for this run. */
+  scheduled?: boolean;
+  /** Plan feedback from the review box: the sidecar revises the plan back in
+   *  read-only plan mode instead of with full write access. */
+  planRevision?: boolean;
+  /** Sent from the live preview chat: the page and the element picked on it. */
+  livePreview?: {
+    url: string;
+    element: { selector: string; html: string; tag: string; text: string } | null;
+  };
+};
 
 export type ContinuationHandoffResponse = ContinuationPrepareResponse;
 export type {
@@ -1675,13 +1688,17 @@ export interface ApiKeyVariant {
   key: string;
   /** Display label, e.g. "Token Plan" or "API Credits". */
   label: string;
+  /** "plan" bills the user's subscription; "payg" bills per token. */
+  kind?: "plan" | "payg";
+  /** What the user spends with this key. */
+  billing?: string;
   baseUrl?: string;
 }
 
 /** What one auth method bills against and when to pick it. */
 export interface AuthMethodGuidance {
   method: AuthMethod;
-  /** Button/row label, e.g. "Sign in with Grok". */
+  /** Button/row label, e.g. "Continue with ChatGPT". */
   label: string;
   /** What the user spends on this method. */
   billing: string;
@@ -1735,6 +1752,10 @@ export interface AuthProvider {
   priorityNote?: string;
   /** Per-method guidance — only set when a provider offers a real choice. */
   methodGuidance?: AuthMethodGuidance[];
+  /** An old sign-in that no longer works is still saved; ask the user to reconnect. */
+  reauthRequired?: boolean;
+  /** What to tell the user about that retired sign-in. */
+  reauthMessage?: string;
 }
 
 /**
@@ -1898,7 +1919,8 @@ export async function answerAskUser(
  * drop a spent xAI API key without signing out of the Grok subscription. Omit it
  * to disconnect the provider entirely.
  */
-export async function authLogout(provider: string, method?: AuthMethod): Promise<void> {
+/** `legacy` dismisses a retired sign-in and removes nothing else. */
+export async function authLogout(provider: string, method?: AuthMethod | "legacy"): Promise<void> {
   if (provider === "qwen-cloud") throw new Error("Use the native Qwen Cloud connection form.");
   await invoke("app_auth_logout", { provider, method });
 }
@@ -1970,6 +1992,8 @@ export async function setRadioVolume(volume: number): Promise<number> {
 export interface QueuedMessage {
   id: string;
   text: string;
+  /** Already handed to the agent, which reads it at its next turn: no longer cancellable. */
+  delivering?: boolean;
 }
 
 /**
@@ -2033,16 +2057,6 @@ export async function importTranscript(
   } catch (error) {
     await logError(`agent_import_transcript failed: ${String(error)}`);
     return { ok: false, error: String(error) };
-  }
-}
-
-/** Cycle the reasoning/thinking level to the next supported value (or off). */
-export async function cycleThinking(): Promise<ThinkingState | null> {
-  try {
-    return await invoke<ThinkingState>("agent_cycle_thinking", { paneId: "primary" });
-  } catch (e) {
-    await logError(`agent_cycle_thinking failed: ${String(e)}`);
-    return null;
   }
 }
 
@@ -2255,37 +2269,6 @@ export async function readSettings(): Promise<AppSettings> {
  */
 export async function saveSettings(projectsRoot: string): Promise<void> {
   await invoke("app_settings_save", { projectsRoot });
-}
-
-export interface InstalledPlugin {
-  schemaVersion: 1;
-  id: string;
-  name: string;
-  version: string;
-  entry: string;
-  description?: string;
-  commands?: string[];
-  installPath: string;
-}
-
-export async function listPlugins(): Promise<InstalledPlugin[]> {
-  await waitForReady();
-  const result = await invoke<{ plugins: InstalledPlugin[] }>("agent_plugins");
-  return result.plugins;
-}
-
-export async function installPluginBundle(
-  bundlePath: string,
-): Promise<{ plugin: InstalledPlugin; restartRequired: boolean }> {
-  await waitForReady();
-  return invoke("agent_install_plugin", { bundlePath });
-}
-
-export async function removePluginBundle(
-  pluginId: string,
-): Promise<{ removed: string; restartRequired: boolean }> {
-  await waitForReady();
-  return invoke("agent_remove_plugin", { pluginId });
 }
 
 export interface PermissionsStatus {
@@ -2958,6 +2941,35 @@ export async function startServe(): Promise<void> {
 export async function stopServe(): Promise<void> {
   await waitForReady();
   await invoke("agent_serve_stop", { paneId: "primary" });
+}
+
+/** This window's live preview: the running web app in the browser, with the chat on it. */
+export interface LivePreviewStatus {
+  running: boolean;
+  /** The link to open in the browser. */
+  url: string | null;
+  /** The dev server it shows. */
+  target: string | null;
+  /** No dev server was found: ask the user for its address. */
+  needsUrl?: boolean;
+  error?: string;
+}
+
+/** Start (or reuse) the live preview. `url` is a dev server address the user typed. */
+export async function startLivePreview(url?: string): Promise<LivePreviewStatus> {
+  await waitForReady();
+  return invoke<LivePreviewStatus>("live_preview_start", { url: url ?? null });
+}
+
+/** Stop the live preview and close its session. */
+export async function stopLivePreview(): Promise<LivePreviewStatus> {
+  await waitForReady();
+  return invoke<LivePreviewStatus>("live_preview_stop");
+}
+
+export async function getLivePreviewStatus(): Promise<LivePreviewStatus> {
+  await waitForReady();
+  return invoke<LivePreviewStatus>("live_preview_status");
 }
 
 // ── Agent Steroids (local code corpus) ────────────────────────

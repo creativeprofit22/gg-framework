@@ -18,7 +18,7 @@ import type { ThinkingLevel } from "@kenkaiiii/gg-ai";
 describe("getLowestThinkingLevel", () => {
   it.each([
     ["anthropic", "claude-opus-5-5"],
-    ["openai", "gpt-6.1-sol"],
+    ["openai", "gpt-6.2-sol"],
     ["gemini", "gemini-3.8-flash"],
     ["glm", "glm-5.3"],
     ["deepseek", "deepseek-v4-pro"],
@@ -56,8 +56,8 @@ describe("thinking-level helpers", () => {
     expect(resolveInitialThinkingLevel("qwen-cloud", model, false, "high")).toBeUndefined();
   });
 
-  it("cycles GPT-6 Astra through the full six-rung ladder up to ultra", () => {
-    expect(getSupportedThinkingLevels("openai", "gpt-6-astra")).toEqual([
+  it("cycles GPT-6.2 Astra through the full six-rung ladder up to ultra", () => {
+    expect(getSupportedThinkingLevels("openai", "gpt-6.2-astra")).toEqual([
       "low",
       "medium",
       "high",
@@ -65,14 +65,14 @@ describe("thinking-level helpers", () => {
       "max",
       "ultra",
     ]);
-    expect(getDefaultThinkingLevel("gpt-6-astra")).toBe("low");
-    expect(getNextThinkingLevel("openai", "gpt-6-astra", undefined)).toBe("low");
-    expect(getNextThinkingLevel("openai", "gpt-6-astra", "low")).toBe("medium");
-    expect(getNextThinkingLevel("openai", "gpt-6-astra", "medium")).toBe("high");
-    expect(getNextThinkingLevel("openai", "gpt-6-astra", "high")).toBe("xhigh");
-    expect(getNextThinkingLevel("openai", "gpt-6-astra", "xhigh")).toBe("max");
-    expect(getNextThinkingLevel("openai", "gpt-6-astra", "max")).toBe("ultra");
-    expect(getNextThinkingLevel("openai", "gpt-6-astra", "ultra")).toBeUndefined();
+    expect(getDefaultThinkingLevel("gpt-6.2-astra")).toBe("low");
+    expect(getNextThinkingLevel("openai", "gpt-6.2-astra", undefined)).toBe("low");
+    expect(getNextThinkingLevel("openai", "gpt-6.2-astra", "low")).toBe("medium");
+    expect(getNextThinkingLevel("openai", "gpt-6.2-astra", "medium")).toBe("high");
+    expect(getNextThinkingLevel("openai", "gpt-6.2-astra", "high")).toBe("xhigh");
+    expect(getNextThinkingLevel("openai", "gpt-6.2-astra", "xhigh")).toBe("max");
+    expect(getNextThinkingLevel("openai", "gpt-6.2-astra", "max")).toBe("ultra");
+    expect(getNextThinkingLevel("openai", "gpt-6.2-astra", "ultra")).toBeUndefined();
   });
 
   it("keeps the legacy medium/high ladder for unregistered custom GPT ids", () => {
@@ -82,10 +82,10 @@ describe("thinking-level helpers", () => {
 
   it("exposes Ultra only for GPT-6 models that support proactive delegation", () => {
     const baseLevels = ["low", "medium", "high", "xhigh", "max"];
-    expect(getSupportedThinkingLevels("openai", "gpt-6.1-sol")).toEqual([...baseLevels, "ultra"]);
+    expect(getSupportedThinkingLevels("openai", "gpt-6.2-sol")).toEqual([...baseLevels, "ultra"]);
     expect(getSupportedThinkingLevels("openai", "gpt-6-luna")).toEqual(baseLevels);
-    expect(getNextThinkingLevel("openai", "gpt-6.1-sol", "max")).toBe("ultra");
-    expect(getNextThinkingLevel("openai", "gpt-6.1-sol", "ultra")).toBeUndefined();
+    expect(getNextThinkingLevel("openai", "gpt-6.2-sol", "max")).toBe("ultra");
+    expect(getNextThinkingLevel("openai", "gpt-6.2-sol", "ultra")).toBeUndefined();
   });
 
   it("cycles Anthropic adaptive Opus models through max, including xhigh", () => {
@@ -127,15 +127,18 @@ describe("thinking-level helpers", () => {
     expect(getNextThinkingLevel("anthropic", "claude-haiku-5-5", "max")).toBeUndefined();
   });
 
-  it("cycles Claude Fable 5.1 through the adaptive ladder without xhigh", () => {
-    expect(getSupportedThinkingLevels("anthropic", "claude-fable-5-1")).toEqual([
-      "low",
-      "medium",
-      "high",
-      "max",
-    ]);
-    expect(getNextThinkingLevel("anthropic", "claude-fable-5-1", "high")).toBe("max");
-    expect(isThinkingLevelSupported("anthropic", "claude-fable-5-1", "xhigh")).toBe(false);
+  it("cycles Claude Fable 5.2 (and its fast tier) through the full adaptive ladder, including xhigh", () => {
+    for (const model of ["claude-fable-5-2", "claude-fable-5-2-fast"]) {
+      expect(getSupportedThinkingLevels("anthropic", model)).toEqual([
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+      ]);
+      expect(getNextThinkingLevel("anthropic", model, "high")).toBe("xhigh");
+      expect(isThinkingLevelSupported("anthropic", model, "xhigh")).toBe(true);
+    }
   });
 
   it("cycles xAI Grok 4.7 through low, medium, high, and its xhigh rung", () => {

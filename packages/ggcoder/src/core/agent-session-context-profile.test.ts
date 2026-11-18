@@ -54,7 +54,7 @@ beforeEach(async () => {
   tmpProject = await fs.mkdtemp(path.join(os.tmpdir(), "agent-context-profile-project-"));
   restoreHome = useFakeHome(tmpHome);
   await writeJson(path.join(tmpHome, ".gg", "auth.json"), {
-    openai: {
+    "openai-chatgpt": {
       accessToken: ["test", "token"].join("-"),
       refreshToken: ["test", "refresh"].join("-"),
       expiresAt: Date.now() + 3_600_000,
@@ -84,7 +84,7 @@ async function createSession(sessionId?: string) {
   const { AgentSession } = await import("./agent-session.js");
   const session = new AgentSession({
     provider: "openai",
-    model: "gpt-6-astra",
+    model: "gpt-6.2-astra",
     cwd: tmpProject,
     systemPrompt: "test system prompt",
     sessionId,
@@ -816,7 +816,7 @@ describe("AgentSession OpenAI Codex context profiles", () => {
 
     const { SessionManager } = await import("./session-manager.js");
     const manager = new SessionManager(path.join(tmpHome, ".gg", "sessions"));
-    const stored = await manager.create(tmpProject, "openai", "gpt-6-astra");
+    const stored = await manager.create(tmpProject, "openai", "gpt-6.2-astra");
     await manager.appendEntry(stored.path, {
       type: "message",
       id: "system",
@@ -863,7 +863,7 @@ describe("AgentSession OpenAI Codex context profiles", () => {
     const { AgentSession } = await import("./agent-session.js");
     const session = new AgentSession({
       provider: "openai",
-      model: "gpt-6-astra",
+      model: "gpt-6.2-astra",
       cwd: tmpProject,
       systemPrompt: "test system prompt",
       mcpEnabled: false,
@@ -925,7 +925,7 @@ describe("AgentSession OpenAI Codex context profiles", () => {
 
     const resumed = new AgentSession({
       provider: "openai",
-      model: "gpt-6-astra",
+      model: "gpt-6.2-astra",
       cwd: tmpProject,
       systemPrompt: "test system prompt",
       sessionId: checkpointPath,
@@ -987,19 +987,19 @@ describe("AgentSession OpenAI Codex context profiles", () => {
       unknown
     >;
 
-  it("moves a saved Astra Fast session onto GPT-6 Astra Fast exactly once", async () => {
-    const sessionPath = await legacyFastSession("gpt-6-astra");
+  it("moves a saved Astra Fast session onto GPT-6.2 Astra Fast exactly once", async () => {
+    const sessionPath = await legacyFastSession("gpt-6.2-astra");
 
-    const migrated = await resume(sessionPath, "gpt-6-astra");
+    const migrated = await resume(sessionPath, "gpt-6.2-astra");
     expect(migrated.getState()).toMatchObject({
       accountId: "chatgpt-account",
-      model: "gpt-6-astra-fast",
+      model: "gpt-6.2-astra-fast",
       openAICodexContextProfile: "experimental",
     });
     expect(migrated.getContextUsage().size).toBe(872_000);
     expect(migrated.getOpenAICodexContextProfileEligibility()).toEqual(lockedEligibility);
     await migrated.prompt("first turn after upgrade");
-    expect(agentLoopMock.mock.calls.at(-1)?.[1]).toMatchObject({ model: "gpt-6-astra-fast" });
+    expect(agentLoopMock.mock.calls.at(-1)?.[1]).toMatchObject({ model: "gpt-6.2-astra-fast" });
     expect(agentLoopMock.mock.calls.at(-1)?.[1]?.serviceTier).toBeUndefined();
     const header = await savedHeader(migrated.getState().sessionPath);
     expect(header).not.toHaveProperty("openAICodexFast");
@@ -1007,8 +1007,8 @@ describe("AgentSession OpenAI Codex context profiles", () => {
     await migrated.dispose();
 
     // With the flag gone, a later choice of standard Astra sticks on resume.
-    const later = await resume(sessionPath, "gpt-6-astra");
-    expect(later.getState().model).toBe("gpt-6-astra");
+    const later = await resume(sessionPath, "gpt-6.2-astra");
+    expect(later.getState().model).toBe("gpt-6.2-astra");
     await later.dispose();
   });
 
@@ -1026,11 +1026,11 @@ describe("AgentSession OpenAI Codex context profiles", () => {
         expiresAt: Date.now() + 3_600_000,
       },
     });
-    const apiKeyPath = await legacyFastSession("gpt-6-astra");
-    const apiKey = await resume(apiKeyPath, "gpt-6-astra");
-    expect(apiKey.getState()).toMatchObject({ accountId: undefined, model: "gpt-6-astra" });
+    const apiKeyPath = await legacyFastSession("gpt-6.2-astra");
+    const apiKey = await resume(apiKeyPath, "gpt-6.2-astra");
+    expect(apiKey.getState()).toMatchObject({ accountId: undefined, model: "gpt-6.2-astra" });
     await apiKey.prompt("api-key turn");
-    expect(agentLoopMock.mock.calls.at(-1)?.[1]).toMatchObject({ model: "gpt-6-astra" });
+    expect(agentLoopMock.mock.calls.at(-1)?.[1]).toMatchObject({ model: "gpt-6.2-astra" });
     expect(await savedHeader(apiKeyPath)).not.toHaveProperty("openAICodexFast");
     await apiKey.dispose();
   });
@@ -1039,7 +1039,7 @@ describe("AgentSession OpenAI Codex context profiles", () => {
     const { AgentSession } = await import("./agent-session.js");
     const session = new AgentSession({
       provider: "openai",
-      model: "gpt-6-astra",
+      model: "gpt-6.2-astra",
       cwd: tmpProject,
       systemPrompt: "test system prompt",
       mcpEnabled: false,
@@ -1051,14 +1051,14 @@ describe("AgentSession OpenAI Codex context profiles", () => {
 
     const authPath = path.join(tmpHome, ".gg", "auth.json");
     const storedAuth = JSON.parse(await fs.readFile(authPath, "utf-8")) as {
-      openai: { expiresAt: number; accountId: string };
+      "openai-chatgpt": { expiresAt: number; accountId: string };
     };
     await writeJson(authPath, {});
     await session.refreshStoredAuthState();
     expect(session.getState().accountId).toBeUndefined();
 
-    storedAuth.openai.expiresAt = 0;
-    storedAuth.openai.accountId = "new-account";
+    storedAuth["openai-chatgpt"].expiresAt = 0;
+    storedAuth["openai-chatgpt"].accountId = "new-account";
     await writeJson(authPath, storedAuth);
     await session.refreshStoredAuthState();
     expect(session.getState().accountId).toBe("new-account");
@@ -1086,7 +1086,7 @@ describe("AgentSession OpenAI Codex context profiles", () => {
         },
       });
       const live = await resolveCredentials();
-      expect(Object.prototype.hasOwnProperty.call(live, "accountId")).toBe(true);
+      // The loop now takes the resolved accountId as-is, so an omitted one clears the plan identity.
       expect(live.accountId).toBeUndefined();
 
       messages.push({ role: "assistant", content: "done" });
@@ -1096,7 +1096,7 @@ describe("AgentSession OpenAI Codex context profiles", () => {
     const { AgentSession } = await import("./agent-session.js");
     const session = new AgentSession({
       provider: "openai",
-      model: "gpt-6-astra",
+      model: "gpt-6.2-astra",
       cwd: tmpProject,
       systemPrompt: "test system prompt",
       mcpEnabled: false,
@@ -1116,7 +1116,7 @@ describe("AgentSession OpenAI Codex context profiles", () => {
       import("./session-manager.js"),
     ]);
     const manager = new SessionManager(path.join(tmpHome, ".gg", "sessions"));
-    const legacy = await manager.create(tmpProject, "openai", "gpt-6-astra");
+    const legacy = await manager.create(tmpProject, "openai", "gpt-6.2-astra");
     await manager.appendEntry(legacy.path, {
       type: "message",
       id: "legacy-message",
@@ -1127,7 +1127,7 @@ describe("AgentSession OpenAI Codex context profiles", () => {
 
     const resumed = new AgentSession({
       provider: "openai",
-      model: "gpt-6-astra",
+      model: "gpt-6.2-astra",
       cwd: tmpProject,
       systemPrompt: "test system prompt",
       sessionId: legacy.path,
@@ -1141,7 +1141,7 @@ describe("AgentSession OpenAI Codex context profiles", () => {
       size: 272_000,
       openAICodexContextProfile: "stable",
     });
-    expect(resumed.getState().model).toBe("gpt-6-astra");
+    expect(resumed.getState().model).toBe("gpt-6.2-astra");
     expect(resumed.getOpenAICodexContextProfileEligibility()).toEqual(lockedEligibility);
     await expect(resumed.switchOpenAICodexContextProfile("experimental")).rejects.toThrow(
       /fixed after/,

@@ -126,6 +126,8 @@ jobs:
           # every artifact — including the sidecar this job never builds (that
           # one is reported in the `app` job, which bundles it).
           node .github/ci/size-gate.mjs --only dist:ggcoder
+          # Fixed cost of every request: the cached system-prompt prefix.
+          node .github/ci/size-gate.mjs --only prompt:prefix
           node .github/ci/startup-gate.mjs
           node .github/ci/sidecar-startup-gate.mjs
 
@@ -136,6 +138,8 @@ jobs:
         run: |
           pnpm lint
           pnpm format:check
+          # The on-demand Claude Code download must match the pinned Agent SDK.
+          node .github/ci/claude-code-manifest.mjs --check
 
       - name: Typecheck
         shell: bash
@@ -281,11 +285,12 @@ jobs:
         run: node gg-app/scripts/smoke-sidecar.mjs
         shell: bash
 
-      # OS-independent slice of the sidecar bundle (app-sidecar.mjs + skills;
-      # node_modules carries platform-conditional binaries so one baseline
-      # cannot hold across the matrix).
+      # app-sidecar.mjs + skills share one baseline; the copied node_modules
+      # carries native binaries, so size-gate baselines it per OS/arch.
       - name: Sidecar size report
-        run: node .github/ci/size-gate.mjs --only sidecar
+        run: |
+          node .github/ci/size-gate.mjs --only sidecar
+          node .github/ci/size-gate.mjs --only sidecar:deps
         shell: bash
 
       # Workspace zoom tests load an extension through full Chromium on every OS.

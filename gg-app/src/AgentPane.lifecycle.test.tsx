@@ -116,7 +116,7 @@ describe("AgentPane lifecycle", () => {
       const reason =
         "Context mode is fixed after this session starts. Start a new session to change it.";
       vi.mocked(pane.getState).mockResolvedValue({
-        ...agentState("gpt-6-astra"),
+        ...agentState("gpt-6.2-astra"),
         provider: "openai",
         accountId: "account-1",
         openAICodexContextProfile: "experimental",
@@ -142,7 +142,7 @@ describe("AgentPane lifecycle", () => {
   it("shows context profiles only for GPT-6 Astra using Codex OAuth", async () => {
     const oauthPane = client("astra-oauth", 1);
     vi.mocked(oauthPane.getState).mockResolvedValue({
-      ...agentState("gpt-6-astra"),
+      ...agentState("gpt-6.2-astra"),
       provider: "openai",
       accountId: "account-1",
       openAICodexContextProfile: "stable",
@@ -165,7 +165,7 @@ describe("AgentPane lifecycle", () => {
     // profiles stay reachable after the toggle's retirement.
     const fastPane = client("astra-fast-oauth", 1);
     vi.mocked(fastPane.getState).mockResolvedValue({
-      ...agentState("gpt-6-astra-fast"),
+      ...agentState("gpt-6.2-astra-fast"),
       provider: "openai",
       accountId: "account-1",
       openAICodexContextProfile: "experimental",
@@ -183,13 +183,13 @@ describe("AgentPane lifecycle", () => {
 
     const apiKeyPane = client("astra-api-key", 1);
     vi.mocked(apiKeyPane.getState).mockResolvedValue({
-      ...agentState("gpt-6-astra"),
+      ...agentState("gpt-6.2-astra"),
       provider: "openai",
       openAICodexContextProfile: "stable",
       contextWindow: 1_050_000,
     });
     render(<AgentPane client={apiKeyPane} target={target} workspaceOwnsSessionLifecycle />);
-    await screen.findAllByText("gpt-6-astra");
+    await screen.findAllByText("gpt-6.2-astra");
     await openMoreMenus();
     expect(screen.queryByRole("combobox", { name: "OpenAI Codex context profile" })).toBeNull();
   });
@@ -198,7 +198,7 @@ describe("AgentPane lifecycle", () => {
     const left = client("astra-left", 1);
     const right = client("astra-right", 1);
     vi.mocked(left.getState).mockResolvedValue({
-      ...agentState("gpt-6-astra"),
+      ...agentState("gpt-6.2-astra"),
       provider: "openai",
       accountId: "left-account",
       openAICodexContextProfile: "stable",
@@ -206,7 +206,7 @@ describe("AgentPane lifecycle", () => {
       contextWindow: 272_000,
     });
     vi.mocked(right.getState).mockResolvedValue({
-      ...agentState("gpt-6-astra"),
+      ...agentState("gpt-6.2-astra"),
       provider: "openai",
       accountId: "right-account",
       openAICodexContextProfile: "experimental",
@@ -291,7 +291,7 @@ describe("AgentPane lifecycle", () => {
   it("disables the context profile selector while running", async () => {
     const pane = client("astra-running", 1);
     vi.mocked(pane.getState).mockResolvedValue({
-      ...agentState("gpt-6-astra"),
+      ...agentState("gpt-6.2-astra"),
       provider: "openai",
       accountId: "account-1",
       openAICodexContextProfile: "stable",
@@ -311,7 +311,7 @@ describe("AgentPane lifecycle", () => {
     const pane = client("astra-autopilot", 1);
     const emit = paneEvents(pane);
     vi.mocked(pane.getState).mockResolvedValue({
-      ...agentState("gpt-6-astra"),
+      ...agentState("gpt-6.2-astra"),
       provider: "openai",
       accountId: "account-1",
       openAICodexContextProfile: "stable",
@@ -333,7 +333,7 @@ describe("AgentPane lifecycle", () => {
   it.each([false, true])("restores context profile focus unless moved (%s)", async (moved) => {
     const pane = client("astra-switch", 1);
     vi.mocked(pane.getState).mockResolvedValue({
-      ...agentState("gpt-6-astra"),
+      ...agentState("gpt-6.2-astra"),
       provider: "openai",
       accountId: "account-1",
       openAICodexContextProfile: "stable",
@@ -375,7 +375,7 @@ describe("AgentPane lifecycle", () => {
     const pane = client("astra-stale", 1);
     const emit = paneEvents(pane);
     vi.mocked(pane.getState).mockResolvedValue({
-      ...agentState("gpt-6-astra"),
+      ...agentState("gpt-6.2-astra"),
       provider: "openai",
       accountId: "account-1",
       openAICodexContextProfile: "experimental",
@@ -408,7 +408,7 @@ describe("AgentPane lifecycle", () => {
   it("displays a refused context-profile change without mutating the selector", async () => {
     const pane = client("astra-refusal", 1);
     vi.mocked(pane.getState).mockResolvedValue({
-      ...agentState("gpt-6-astra"),
+      ...agentState("gpt-6.2-astra"),
       provider: "openai",
       accountId: "account-1",
       openAICodexContextProfile: "experimental",
@@ -3316,7 +3316,7 @@ describe("AgentPane lifecycle", () => {
         kenState: { conversationId: "old", activationEpoch: "old", activeRunId: "old-run" },
       } as AgentModule.AgentState),
     );
-    expect(screen.queryByRole("button", { name: "Cancel Ken's reply" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Stop Ken" })).toBeNull();
     act(() => {
       emit("ready", { running: false, kenState: { ...ken, activeRunId: ken.runId } });
       emit("ken_text_delta", { ken, text: "reconnected mentor output" });
@@ -3328,7 +3328,7 @@ describe("AgentPane lifecycle", () => {
         "reconnected mentor output",
       ),
     );
-    fireEvent.click(screen.getByRole("button", { name: "Cancel Ken's reply" }));
+    fireEvent.click(screen.getByRole("button", { name: "Stop Ken" }));
     expect(pane.cancelKen).toHaveBeenCalledWith(ken);
   });
 
@@ -3358,7 +3358,7 @@ describe("AgentPane lifecycle", () => {
       const pending = deferred<void>();
       vi.mocked(pane.cancelKen).mockReturnValue(pending.promise);
       render(<AgentPane client={pane} target={target} workspaceOwnsSessionLifecycle />);
-      const cancel = await screen.findByRole("button", { name: "Cancel Ken's reply" });
+      const cancel = await screen.findByRole("button", { name: "Stop Ken" });
       fireEvent.click(cancel);
       expect(pane.cancelKen).toHaveBeenCalledWith(identity);
       act(() =>
@@ -3370,10 +3370,10 @@ describe("AgentPane lifecycle", () => {
         pending.reject(new Error("cancel rejected for captured run"));
       });
       expect(screen.queryByText(/cancel rejected for captured run/) !== null).toBe(!replace);
-      expect(screen.getByRole("button", { name: "Cancel Ken's reply" })).toBeTruthy();
+      expect(screen.getByRole("button", { name: "Stop Ken" })).toBeTruthy();
       if (replace) {
         act(() => emit("ken_run_end", { ken: identity }));
-        expect(screen.getByRole("button", { name: "Cancel Ken's reply" })).toBeTruthy();
+        expect(screen.getByRole("button", { name: "Stop Ken" })).toBeTruthy();
       }
     },
   );

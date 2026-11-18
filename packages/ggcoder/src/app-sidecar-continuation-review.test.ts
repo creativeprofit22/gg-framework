@@ -63,7 +63,7 @@ function fixture(kind = "eligible") {
   const runClaim = new RunClaim();
   const state = (): ReturnType<AgentSession["getState"]> => ({
     provider: "openai",
-    model: "gpt-6-astra",
+    model: "gpt-6.2-astra",
     cwd: "/project",
     sessionPath: "/project/session.jsonl",
     ...identity,
@@ -246,7 +246,8 @@ describe("production continuation reviewer context persistence (B)", () => {
       await fs.writeFile(
         path.join(tmpHome, ".gg", "auth.json"),
         JSON.stringify({
-          openai: {
+          // The official ChatGPT sign-in slot; a refreshable token under `openai` is a retired sign-in.
+          "openai-chatgpt": {
             accessToken: ["test", "token"].join("-"),
             refreshToken: ["test", "refresh"].join("-"),
             expiresAt: Date.now() + 3_600_000,
@@ -268,7 +269,7 @@ describe("production continuation reviewer context persistence (B)", () => {
       const { AgentSession: RealAgentSession } = await import("./core/agent-session.js");
       const options = {
         provider: "openai" as const,
-        model: "gpt-6-astra",
+        model: "gpt-6.2-astra",
         cwd: tmpProject,
         systemPrompt: "Deterministic test system prompt",
         mcpEnabled: false,
@@ -494,7 +495,8 @@ async function withReviewerStore(
     await fs.writeFile(
       path.join(home, ".gg", "auth.json"),
       JSON.stringify({
-        openai: {
+        // The official ChatGPT sign-in slot; a refreshable token under `openai` is a retired sign-in.
+        "openai-chatgpt": {
           accessToken: ["test", "token"].join("-"),
           refreshToken: ["test", "refresh"].join("-"),
           expiresAt: Date.now() + 3_600_000,
@@ -514,7 +516,7 @@ async function withReviewerStore(
     await run(async (sessionId) => {
       const session = new RealAgentSession({
         provider: "openai",
-        model: "gpt-6-astra",
+        model: "gpt-6.2-astra",
         cwd,
         sessionId,
         systemPrompt: "deterministic test",

@@ -2,7 +2,7 @@ import { z } from "zod";
 import type { AgentTool } from "@kenkaiiii/gg-agent";
 import {
   ASK_USER_INTERRUPTED_TEXT,
-  formatAskResult,
+  askResultContent,
   type AskQuestion,
   type AskUserRequest,
   type AskUserResult,
@@ -90,7 +90,8 @@ export function createAskUserTool(ask: AskUserHandler): AgentTool<typeof AskUser
   return {
     name: "ask_user",
     description:
-      "Ask the user with clickable options instead of a prose question. Not for facts you can " +
+      "Ask the user with clickable options instead of a prose question. First write one to three " +
+      "sentences answering what they asked or giving what they need to choose. Not for facts you can " +
       "look up. Plain words; each option a complete outcome (never 'Something else'); mark " +
       "your pick `recommended`.\n\n" +
       // Local Fork rule (restored after upstream prompt trim).
@@ -152,7 +153,8 @@ export function createAskUserTool(ask: AskUserHandler): AgentTool<typeof AskUser
         );
       }
       const normalized = questions.map(normalize);
-      return formatAskResult(normalized, await ask({ questions: normalized }));
+      const content = askResultContent(normalized, await ask({ questions: normalized }));
+      return typeof content === "string" ? content : { content };
     },
   };
 }

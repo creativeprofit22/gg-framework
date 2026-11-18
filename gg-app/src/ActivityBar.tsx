@@ -22,7 +22,6 @@ export const SPINNER_FRAMES = [
   "\u2807",
   "\u280f",
 ];
-export const SPINNER_FRAME_MS = 80;
 
 /**
  * Idle-line variations for the ready state — rotated so the quiet line under
@@ -92,7 +91,6 @@ interface Props {
   planTotal?: number;
   /** Completed plan steps so far. */
   planDone?: number;
-  onCancel: () => void;
   /** Whether the live tool panel is currently collapsed. */
   toolsHidden?: boolean;
   /** True when there are tool entries to show (gates the toggle's visibility). */
@@ -223,7 +221,6 @@ export function ActivityBar({
   doneStatus,
   planTotal = 0,
   planDone = 0,
-  onCancel,
   toolsHidden = false,
   hasToolFeed = false,
   onToggleTools,
@@ -289,7 +286,6 @@ export function ActivityBar({
     (!active && outcomePhrase(fullLabel, activity?.startedAt ?? 0)) ||
     SHORT_LABELS[fullLabel] ||
     fullLabel;
-  const canCancel = running || active;
   const state = plainState({ activity, running, cancelling, doneStatus });
   // Idle phrases are pure decoration, so idle announces only the state word.
   // Otherwise announce the plain event label, hiding a playful visible label.
@@ -384,17 +380,6 @@ export function ActivityBar({
         <span className="statusrow-right">
           {showToolsToggle && onToggleTools && (
             <ToolsToggle hidden={toolsHidden} onToggle={onToggleTools} />
-          )}
-          {canCancel && (
-            <button
-              className="cancel dissolve-in"
-              style={{ color: cancelling ? theme.textMuted : theme.error }}
-              onClick={onCancel}
-              disabled={cancelling}
-              aria-label={cancelling ? "Cancellation in progress" : "Cancel agent run"}
-            >
-              {cancelling ? "Stopping…" : "Stop"}
-            </button>
           )}
         </span>
       </div>

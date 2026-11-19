@@ -112,6 +112,7 @@ export function fakePaneClient(
     addMcpServer: vi.fn(),
     loginMcpServer: vi.fn(),
     removeMcpServer: vi.fn(),
+    setBuiltinMcpServerEnabled: vi.fn(),
     ...overrides,
   } as unknown as PaneAgentClient;
   return {

@@ -1212,3 +1212,29 @@
     animation: none;
   }
 }
+
+/* MCP list: a built-in server's name carries a "Built-in" badge. In a narrow
+   row the badge wraps under the name instead of squeezing it away. */
+.mcp-name-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-3);
+  min-width: 0;
+}
+.mcp-name-line .mcp-name {
+  flex: 0 1 auto;
+}
+.mcp-builtin-badge,
+.mcp-builtin-switch {
+  flex: 0 0 auto;
+}
+/* 32px desktop target floor; .btn-sm alone is 28px. */
+.mcp-builtin-switch {
+  min-height: 32px;
+}
+@media (pointer: coarse) {
+  .mcp-builtin-switch {
+    min-height: 44px;
+  }
+}

@@ -3047,7 +3047,7 @@ export interface AddMcpResult {
   requiresAuth?: boolean;
 }
 
-type McpManagementAction = "load" | "add" | "remove" | "login";
+type McpManagementAction = "load" | "add" | "remove" | "login" | "switch";
 
 /** Set by the native MCP proxies on daemon 4xx replies: the remainder is a
  *  user-facing reason (duplicate name, parse error, unknown server). */
@@ -3065,6 +3065,7 @@ function mcpManagementError(action: McpManagementAction, cause: unknown): Error 
     add: "Could not add the MCP server. Check the command and retry.",
     remove: "Could not remove the MCP server. Retry to confirm whether it still exists.",
     login: "Could not start MCP sign-in. Check the connection, then retry.",
+    switch: "Could not turn the MCP server on or off. Check the connection, then retry.",
   };
   return new Error(
     malformed ? "An MCP config file is malformed. Fix it, then retry." : messages[action],
@@ -3084,7 +3085,9 @@ function isMcpServerRow(value: unknown): value is LegacyMcpServerRow {
     (row.error === undefined || typeof row.error === "string") &&
     (row.failureReason === undefined ||
       row.failureReason === "trust-blocked" ||
-      row.failureReason === "connection-failed") &&
+      row.failureReason === "connection-failed" ||
+      row.failureReason === "program-not-found") &&
+    (row.builtin === undefined || typeof row.builtin === "boolean") &&
     (row.requiresAuth === undefined || typeof row.requiresAuth === "boolean") &&
     (row.warning === undefined || typeof row.warning === "string") &&
     typeof row.toolCount === "number" &&
@@ -3372,6 +3375,8 @@ export interface PaneAgentClient extends NotesClient {
     scope: "global" | "project",
     cwd?: string,
   ): Promise<{ removed: boolean }>;
+  /** Turn a built-in MCP server (Supa Drivah) on or off. */
+  setBuiltinMcpServerEnabled(name: string, enabled: boolean): Promise<void>;
 }
 
 /** Primary compatibility client for legacy children/tests during the pane extraction. */
@@ -4027,6 +4032,15 @@ export function createPaneAgentClient(paneId: string): PaneAgentClient {
       } catch (error) {
         await logError(`agent_mcp_remove failed: ${String(error)}`);
         throw mcpManagementError("remove", error);
+      }
+    },
+    async setBuiltinMcpServerEnabled(name, enabled) {
+      await ready();
+      try {
+        await call("agent_mcp_set_builtin", { name, enabled });
+      } catch (error) {
+        await logError(`agent_mcp_set_builtin failed: ${String(error)}`);
+        throw mcpManagementError("switch", error);
       }
     },
   };

@@ -459,6 +459,30 @@ pub(crate) async fn agent_mcp_remove(
     parse_mcp_management_response(status, &body)
 }
 
+/// Proxy: turn a built-in MCP server (Supa Drivah) on or off. Returns
+/// `{ ok, name, enabled }`.
+#[tauri::command]
+pub(crate) async fn agent_mcp_set_builtin(
+    webview: WebviewWindow,
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
+    name: String,
+    enabled: bool,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
+    let res = client
+        .post(format!("{}/mcp/builtin", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
+        .json(&serde_json::json!({ "name": name, "enabled": enabled }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = res.status();
+    let body = res.text().await.map_err(|e| e.to_string())?;
+    parse_mcp_management_response(status, &body)
+}
+
 /// Proxy: begin an interactive OAuth login for a remote (HTTP) MCP server.
 /// Returns 202 immediately; progress + outcome stream back via `agent-event`
 /// (`mcp_auth_url`, `mcp_auth_done`, `mcp_auth_error`). The

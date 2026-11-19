@@ -25,6 +25,7 @@ const addMcpServerMock = vi.fn<McpPaneClient["addMcpServer"]>();
 const listMcpServersMock = vi.fn<McpPaneClient["listMcpServers"]>();
 const loginMcpServerMock = vi.fn<McpPaneClient["loginMcpServer"]>();
 const removeMcpServerMock = vi.fn<McpPaneClient["removeMcpServer"]>();
+const setBuiltinMock = vi.fn<McpPaneClient["setBuiltinMcpServerEnabled"]>();
 const subscribeMock = vi.fn<McpPaneClient["subscribe"]>((handler) => {
   eventHandler = handler;
   return vi.fn();
@@ -34,6 +35,7 @@ const client: McpPaneClient = {
   addMcpServer: addMcpServerMock,
   loginMcpServer: loginMcpServerMock,
   removeMcpServer: removeMcpServerMock,
+  setBuiltinMcpServerEnabled: setBuiltinMock,
   subscribe: subscribeMock,
 };
 const listProjectsMock = vi.mocked(listProjects);
@@ -52,6 +54,7 @@ beforeEach(() => {
   });
   loginMcpServerMock.mockResolvedValue();
   removeMcpServerMock.mockResolvedValue({ removed: true });
+  setBuiltinMock.mockResolvedValue();
 });
 
 afterEach(() => {
@@ -201,6 +204,76 @@ describe("McpModal server status", () => {
     expect(screen.queryByText("Disabled")).toBeNull();
     if (text) expect(screen.getByText(text)).toBeTruthy();
     expect(Boolean(screen.queryByRole("button", { name: "Sign in" }))).toBe(row === authRow);
+  });
+});
+
+describe("McpModal built-in server", () => {
+  const drivahRow = {
+    ...connectedRow,
+    name: "drivah",
+    kind: "stdio" as const,
+    summary: "drivah.exe mcp",
+    toolCount: 30,
+    builtin: true,
+  };
+
+  it("labels the row and turns it off with the switch, then refreshes", async () => {
+    listMcpServersMock.mockResolvedValue([drivahRow]);
+    render(<McpModal client={client} onClose={vi.fn()} />);
+    const toggle = await screen.findByRole("switch", { name: "Use Supa Drivah" });
+    expect(toggle.getAttribute("aria-checked")).toBe("true");
+    expect(screen.getByText("Built-in")).toBeTruthy();
+    expect(toggle.textContent).toContain("On");
+
+    listMcpServersMock.mockResolvedValue([{ ...drivahRow, enabled: false, toolCount: 0 }]);
+    fireEvent.click(toggle);
+    await waitFor(() => expect(setBuiltinMock).toHaveBeenCalledWith("drivah", false));
+    await waitFor(() =>
+      expect(
+        screen.getByRole("switch", { name: "Use Supa Drivah" }).getAttribute("aria-checked"),
+      ).toBe("false"),
+    );
+    expect(listMcpServersMock).toHaveBeenCalledTimes(2);
+    // The switch already says Off; no second "Disabled" label.
+    expect(screen.queryByText("Disabled")).toBeNull();
+  });
+
+  it("shows no switch on user-added rows", async () => {
+    listMcpServersMock.mockResolvedValue([connectedRow]);
+    render(<McpModal client={client} onClose={vi.fn()} />);
+    await screen.findByText("example");
+    expect(screen.queryByRole("switch")).toBeNull();
+    expect(screen.queryByText("Built-in")).toBeNull();
+  });
+
+  it("explains a missing program with fixed copy, never the raw reason", async () => {
+    listMcpServersMock.mockResolvedValue([
+      {
+        ...drivahRow,
+        ok: false,
+        toolCount: 0,
+        failureReason: "program-not-found",
+        error: String.raw`Supa Drivah (drivah.exe) was not found on PATH or at C:\private\drivah.exe.`,
+      },
+    ]);
+    render(<McpModal client={client} onClose={vi.fn()} />);
+    expect(
+      await screen.findByText("Supa Drivah wasn't found. Install it or set its path in settings."),
+    ).toBeTruthy();
+    expect(document.body.textContent).not.toContain(String.raw`C:\private`);
+  });
+
+  it("keeps a failed switch visible with Retry", async () => {
+    listMcpServersMock.mockResolvedValue([drivahRow]);
+    setBuiltinMock.mockRejectedValueOnce(new Error("Could not turn the MCP server on or off."));
+    render(<McpModal client={client} onClose={vi.fn()} />);
+    fireEvent.click(await screen.findByRole("switch", { name: "Use Supa Drivah" }));
+    expect((await screen.findByRole("alert")).textContent).toContain(
+      "Could not turn the MCP server on or off.",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(setBuiltinMock).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
   });
 });
 

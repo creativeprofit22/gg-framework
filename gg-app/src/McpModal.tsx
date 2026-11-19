@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { CheckCircleIcon, XCircleIcon, LockIcon, MinusCircleIcon, XIcon } from "./phosphor-icons";
 import { theme } from "./theme";
+import { Badge } from "./Badge";
 import { Modal } from "./Modal";
 import { ModalDismissButton, useModalEmbedState } from "./modal-embed";
 import { ListSkeleton } from "./Skeleton";
@@ -20,8 +21,20 @@ import { toast } from "./toast";
 
 export type McpPaneClient = Pick<
   PaneAgentClient,
-  "listMcpServers" | "addMcpServer" | "loginMcpServer" | "removeMcpServer" | "subscribe"
+  | "listMcpServers"
+  | "addMcpServer"
+  | "loginMcpServer"
+  | "removeMcpServer"
+  | "setBuiltinMcpServerEnabled"
+  | "subscribe"
 >;
+
+/** Display names for built-in servers; the row keeps the short tool-prefix name. */
+const BUILTIN_DISPLAY_NAMES: Record<string, string> = { drivah: "Supa Drivah" };
+
+function builtinDisplayName(name: string): string {
+  return BUILTIN_DISPLAY_NAMES[name] ?? name;
+}
 
 interface Props {
   onClose: () => void;
@@ -98,6 +111,8 @@ export function McpModal({ onClose, client }: Props): React.ReactElement {
   const [loggingIn, setLoggingIn] = useState<string | null>(null);
   const [managementError, setManagementError] = useState<McpManagementError | null>(null);
   const [retrying, setRetrying] = useState(false);
+  // Built-in server whose on/off switch is saving.
+  const [switching, setSwitching] = useState<string | null>(null);
   const loginTargetRef = useRef<{ name: string; scope: "global" | "project" } | null>(null);
 
   const refresh = useCallback(
@@ -243,6 +258,23 @@ export function McpModal({ onClose, client }: Props): React.ReactElement {
     }
   }
 
+  async function setBuiltinEnabled(name: string, enabled: boolean): Promise<void> {
+    if (switching) return;
+    setSwitching(name);
+    try {
+      await client.setBuiltinMcpServerEnabled(name, enabled);
+      setManagementError(null);
+      await refresh(listCwd);
+    } catch (e) {
+      setManagementError({
+        message: e instanceof Error ? e.message : "Could not turn the MCP server on or off.",
+        retry: () => setBuiltinEnabled(name, enabled),
+      });
+    } finally {
+      setSwitching(null);
+    }
+  }
+
   async function retryManagementAction(): Promise<void> {
     if (!managementError || retrying) return;
     setRetrying(true);
@@ -307,8 +339,15 @@ export function McpModal({ onClose, client }: Props): React.ReactElement {
                   )}
                 </span>
                 <div style={{ flex: "1 1 auto", minWidth: 0 }}>
-                  <div className="mcp-name" style={{ color: theme.text }} title={s.summary}>
-                    {s.name}
+                  <div className="mcp-name-line">
+                    <div className="mcp-name" style={{ color: theme.text }} title={s.summary}>
+                      {s.name}
+                    </div>
+                    {s.builtin && (
+                      <Badge className="mcp-builtin-badge" title="Comes with GG Coder">
+                        Built-in
+                      </Badge>
+                    )}
                   </div>
                   {s.enabled && !s.ok && !s.requiresAuth && (
                     <div
@@ -318,14 +357,19 @@ export function McpModal({ onClose, client }: Props): React.ReactElement {
                       {/* Raw s.error is diagnostic-only, even after transport redaction. */}
                       {s.failureReason === "trust-blocked"
                         ? "Project server blocked. Add or re-add it in this project to trust it."
-                        : "Could not connect. Check the server settings and availability."}
+                        : s.failureReason === "program-not-found"
+                          ? `${builtinDisplayName(s.name)} wasn't found. Install it or set its path in settings.`
+                          : "Could not connect. Check the server settings and availability."}
                     </div>
                   )}
                 </div>
                 {!s.enabled ? (
-                  <span className="mcp-meta" style={{ color: theme.textMuted }}>
-                    Disabled
-                  </span>
+                  // A built-in row's switch already says Off.
+                  !s.builtin && (
+                    <span className="mcp-meta" style={{ color: theme.textMuted }}>
+                      Disabled
+                    </span>
+                  )
                 ) : s.ok ? (
                   <span className="mcp-meta" style={{ color: theme.textDim }}>
                     {`${s.toolCount} tool${s.toolCount === 1 ? "" : "s"}`}
@@ -346,12 +390,38 @@ export function McpModal({ onClose, client }: Props): React.ReactElement {
                     {loggingIn === s.name ? "Signing in…" : "Sign in"}
                   </button>
                 )}
+                {s.builtin && (
+                  <button
+                    type="button"
+                    className="btn btn-ghost btn-sm mcp-builtin-switch"
+                    role="switch"
+                    aria-checked={s.enabled}
+                    aria-label={`Use ${builtinDisplayName(s.name)}`}
+                    disabled={switching !== null}
+                    title={
+                      s.enabled
+                        ? `On — conversations get ${builtinDisplayName(s.name)}'s tools.`
+                        : `Off — ${builtinDisplayName(s.name)} isn't started.`
+                    }
+                    style={s.enabled ? undefined : { color: theme.textMuted }}
+                    onClick={() => void setBuiltinEnabled(s.name, !s.enabled)}
+                  >
+                    Use
+                    <Badge color={s.enabled ? theme.success : theme.textMuted}>
+                      {s.enabled ? "On" : "Off"}
+                    </Badge>
+                  </button>
+                )}
                 <button
                   type="button"
                   className="mcp-delete"
                   style={{ color: theme.textDim }}
                   aria-label={`Delete ${s.name}`}
-                  title={`Remove "${s.name}"`}
+                  title={
+                    s.builtin
+                      ? `Hide "${s.name}". Add your own "${s.name}" server to bring it back.`
+                      : `Remove "${s.name}"`
+                  }
                   onClick={() => void remove(s.name, s.scope)}
                 >
                   <XIcon size={12} weight="bold" aria-hidden="true" />

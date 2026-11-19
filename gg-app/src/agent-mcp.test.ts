@@ -56,7 +56,7 @@ describe("pane MCP status decoding", () => {
     expect(mocks.invoke).toHaveBeenCalledWith("agent_mcp_list", { paneId, cwd: "fixture-project" });
   });
 
-  it.each(["trust-blocked", "connection-failed"])(
+  it.each(["trust-blocked", "connection-failed", "program-not-found"])(
     "retains the safe %s display discriminator",
     async (failureReason) => {
       const row = {
@@ -70,6 +70,28 @@ describe("pane MCP status decoding", () => {
       await expect(list()).resolves.toEqual([row]);
     },
   );
+
+  it("keeps the built-in marker and rejects a malformed one", async () => {
+    const row = { ...base, name: "drivah", kind: "stdio", enabled: true, builtin: true };
+    respondToMcp("agent_mcp_list", { servers: [row] });
+    await expect(list()).resolves.toEqual([row]);
+    respondToMcp("agent_mcp_list", { servers: [{ ...row, builtin: "yes" }] });
+    await expect(list()).rejects.toThrow("Could not load MCP servers");
+  });
+
+  it("turns a built-in server on or off through the pane proxy", async () => {
+    respondToMcp("agent_mcp_set_builtin", { ok: true, name: "drivah", enabled: false });
+    await pane.setBuiltinMcpServerEnabled("drivah", false);
+    expect(mocks.invoke).toHaveBeenCalledWith("agent_mcp_set_builtin", {
+      paneId,
+      name: "drivah",
+      enabled: false,
+    });
+    respondToMcp("agent_mcp_set_builtin", new Error("sidecar unavailable"), true);
+    await expect(pane.setBuiltinMcpServerEnabled("drivah", true)).rejects.toThrow(
+      "Could not turn the MCP server on or off",
+    );
+  });
 
   it.each(["arbitrary diagnostic", null, 42])(
     "rejects invalid failure reasons %s",

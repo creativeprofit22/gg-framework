@@ -546,6 +546,7 @@ export function client(paneId: string, generation: number): PaneAgentClient {
     addMcpServer: vi.fn(),
     loginMcpServer: vi.fn(),
     removeMcpServer: vi.fn(),
+    setBuiltinMcpServerEnabled: vi.fn(),
   } as unknown as PaneAgentClient;
   paneEvents(pane);
   return pane;

@@ -30,7 +30,7 @@ import {
 import { writeOverflow } from "./overflow.js";
 import { localOperations, type ToolOperations } from "./operations.js";
 import { getSafeToolEnv } from "./safe-env.js";
-import { resolveShell, type ResolveShellOpts } from "../core/shell.js";
+import { resolveShell, shellSpawnEnv, type ResolveShellOpts } from "../core/shell.js";
 import { PersistentShell } from "../core/persistent-shell.js";
 import { isReadOnlyCommand, sleepOnlySeconds } from "./read-only-bash.js";
 import { backgroundWatchWarnings } from "./background-watch-lint.js";
@@ -592,7 +592,7 @@ export async function executeForegroundCommand({
         cwd,
         detached: true,
         stdio: ["ignore", "pipe", "pipe"],
-        env: sandboxAwareEnv(effectiveLaunch.sandboxed, env),
+        env: shellSpawnEnv(effectiveLaunch, sandboxAwareEnv(effectiveLaunch.sandboxed, env)),
       });
       pid = child.pid ?? null;
 
@@ -1296,7 +1296,8 @@ export function createBashTool(
         }
         if (!sessionShell) {
           try {
-            const resolved = resolveShell("", shellOpts);
+            // Commands go in over stdin, so drop the one-shot command env.
+            const { env: _oneShotEnv, ...resolved } = resolveShell("", shellOpts);
             const launch = await prepareLaunch({
               ...resolved,
               args: ["--norc", "--noprofile", "-o", "pipefail"],

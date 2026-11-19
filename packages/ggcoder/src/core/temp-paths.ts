@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
-import { resolveShell, type ResolveShellOpts } from "./shell.js";
+import { resolveShell, shellSpawnEnv, type ResolveShellOpts } from "./shell.js";
 
 let cached: { key: string; directory: string | null } | undefined;
 
@@ -21,7 +21,7 @@ export function getMsysTempDir(opts: ResolveShellOpts = {}): string | null {
       maxBuffer: 4096,
       windowsHide: true,
       cwd: os.tmpdir(),
-      env,
+      env: shellSpawnEnv(shell, env),
       stdio: ["ignore", "pipe", "ignore"],
     }).trim();
     // Reject malformed output and dangerously broad mount roots.

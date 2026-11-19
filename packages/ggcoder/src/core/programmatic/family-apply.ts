@@ -14,7 +14,7 @@ import {
 } from "../generated-files/owner.js";
 import { generatedFile, renderPlaceholders } from "../generated-files/render.js";
 import { detectLanguages } from "../language-detector.js";
-import { resolveShell } from "../shell.js";
+import { resolveShell, shellSpawnEnv } from "../shell.js";
 import { compareText, containedPath, sha256, stableJson } from "../tauri-package/paths.js";
 import { detectVerifyCommands } from "../verify-commands.js";
 import type { GeneratorForApply } from "./command-verification.js";
@@ -405,7 +405,7 @@ export function runProjectCheck(
   return new Promise((resolve, reject) => {
     const child = spawn(shell.file, shell.args, {
       cwd: root,
-      env: getSafeToolEnv(),
+      env: shellSpawnEnv(shell, getSafeToolEnv()),
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
       detached: process.platform !== "win32",

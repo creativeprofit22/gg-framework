@@ -1,5 +1,6 @@
+import { execFileSync } from "node:child_process";
 import { describe, it, expect } from "vitest";
-import { resolveShell } from "./shell.js";
+import { resolveShell, SHELL_COMMAND_ENV, shellSpawnEnv } from "./shell.js";
 
 describe("resolveShell", () => {
   it("uses bash on macOS/Linux", () => {
@@ -20,12 +21,54 @@ describe("resolveShell", () => {
       // Even though Git Bash also 'exists', the override wins.
       exists: () => true,
     });
-    expect(r).toEqual({
+    expect(r).toMatchObject({
       file: "C:\\msys64\\usr\\bin\\bash.exe",
+      env: { [SHELL_COMMAND_ENV]: "echo hi" },
+      isCmdFallback: false,
+    });
+  });
+
+  it("keeps the GG_BASH command in argv off Windows", () => {
+    const r = resolveShell("echo hi", { platform: "linux", env: { GG_BASH: "/opt/bash" } });
+    expect(r).toEqual({
+      file: "/opt/bash",
       args: ["-o", "pipefail", "-c", "echo hi"],
       isCmdFallback: false,
     });
   });
+
+  it("passes the Windows bash command through the environment, never argv", () => {
+    // MSYS bash re-parses its command line and turns `\\` into `\`.
+    const command = "printf '%s' 'a\\\\b' \"{x,y}\"";
+    const r = resolveShell(command, {
+      platform: "win32",
+      env: { ProgramFiles: "C:\\Program Files" },
+      exists: (p) => p === "C:\\Program Files\\Git\\bin\\bash.exe",
+    });
+    expect(r.env).toEqual({ [SHELL_COMMAND_ENV]: command });
+    expect(r.args.join(" ")).not.toContain(command);
+    expect(r.args.join(" ")).not.toContain("\\");
+    expect(shellSpawnEnv(r, { PATH: "p" })).toEqual({ PATH: "p", [SHELL_COMMAND_ENV]: command });
+  });
+
+  it.skipIf(process.platform !== "win32")(
+    "runs backslashes, quotes and braces through real Windows bash unchanged",
+    () => {
+      const shell = resolveShell("");
+      if (shell.isCmdFallback) return;
+      const command =
+        "printf '%s|' 'one\\two' 'two\\\\x' \"dq\\\\y\" {a,b}\ncat <<'EOF'\nre\\\\.\\\\d+\nEOF\nenv | grep -c " +
+        SHELL_COMMAND_ENV +
+        " || true";
+      const run = resolveShell(command);
+      const out = execFileSync(run.file, run.args, {
+        encoding: "utf8",
+        env: shellSpawnEnv(run, { ...process.env }),
+        windowsHide: true,
+      });
+      expect(out).toBe("one\\two|two\\\\x|dq\\y|a|b|re\\\\.\\\\d+\n0\n");
+    },
+  );
 
   it("prefers Git Bash at the standard Program Files location on Windows", () => {
     const gitBash = "C:\\Program Files\\Git\\bin\\bash.exe";
@@ -34,9 +77,9 @@ describe("resolveShell", () => {
       env: { ProgramFiles: "C:\\Program Files" },
       exists: (p) => p === gitBash,
     });
-    expect(r).toEqual({
+    expect(r).toMatchObject({
       file: gitBash,
-      args: ["-o", "pipefail", "-c", "grep -r foo ."],
+      env: { [SHELL_COMMAND_ENV]: "grep -r foo ." },
       isCmdFallback: false,
     });
   });

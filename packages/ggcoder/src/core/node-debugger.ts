@@ -2,7 +2,7 @@ import type { ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { resolveShell } from "./shell.js";
+import { resolveShell, shellSpawnEnv } from "./shell.js";
 import { prepareSandboxLaunch, SANDBOX_ENV_PATCH, type SandboxPolicy } from "./sandbox.js";
 import { getSafeToolEnv } from "../tools/safe-env.js";
 import {
@@ -253,7 +253,10 @@ export class NodeDebugSession {
       cwd: options.cwd,
       detached: true,
       stdio: ["ignore", "pipe", "pipe"],
-      env: launch.sandboxed ? { ...getSafeToolEnv(), ...SANDBOX_ENV_PATCH } : getSafeToolEnv(),
+      env: shellSpawnEnv(
+        launch,
+        launch.sandboxed ? { ...getSafeToolEnv(), ...SANDBOX_ENV_PATCH } : getSafeToolEnv(),
+      ),
     });
     child.on("error", () => {}); // 'close' below owns failure handling
 

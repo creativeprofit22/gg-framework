@@ -816,6 +816,16 @@ describe.skipIf(process.platform !== "win32")("createBashTool on real Windows", 
     expect(out).toContain("Exit code: 3");
   });
 
+  it("keeps double backslashes in a quoted heredoc (Git Bash used to collapse them)", async () => {
+    const tool = createBashTool(tmpHome, new ProcessManager());
+    const body = 's = "a\\\\b"\nr = re.compile("\\\\d+\\\\.")\n';
+    const out = outputText(
+      await tool.execute({ command: `cat > bs.py <<'EOF'\n${body}EOF` }, ctx("win-bash-backslash")),
+    );
+    expect(out).toContain("Exit code: 0");
+    expect(await fs.readFile(path.join(tmpHome, "bs.py"), "utf-8")).toBe(body);
+  });
+
   it("runs a command through the real cmd.exe fallback", async () => {
     // Force the no-Git-Bash path on a real Windows host: `exists: () => false`
     // makes resolveShell fall back to ComSpec, which genuinely exists here.

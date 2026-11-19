@@ -8,7 +8,7 @@ import crypto from "node:crypto";
 import { killProcessTree as killLocalProcessTree, type ProcessTarget } from "../utils/process.js";
 import { localProcessLifecycle, type ProcessLifecycleAdapter } from "../tools/operations.js";
 import { getSafeToolEnv } from "../tools/safe-env.js";
-import { resolveShell } from "./shell.js";
+import { resolveShell, shellSpawnEnv } from "./shell.js";
 import { SANDBOX_ENV_PATCH, type SandboxLaunch } from "./sandbox.js";
 import type { AgentNotificationQueue } from "./agent-notifications.js";
 import { createCommandWatchdog, type CommandWatchdog } from "./command-watchdog.js";
@@ -1091,7 +1091,7 @@ export class ProcessManager {
         // Keep adapter-owned process I/O as pipes. Numeric descriptors would
         // bypass remote/SSH/Docker adapters and execute logging on their target.
         stdio: ["pipe", "pipe", "pipe"],
-        env: environment,
+        env: shellSpawnEnv(shell, environment),
       });
     } catch (error) {
       logStream.end();

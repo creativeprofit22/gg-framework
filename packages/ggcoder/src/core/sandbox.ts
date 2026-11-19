@@ -488,6 +488,7 @@ export async function prepareSandboxLaunch(
     file: process.execPath,
     args: [resolveSandboxCli(), "--settings", settingsPath, "--", shell.file, ...shell.args],
     isCmdFallback: shell.isCmdFallback,
+    ...(shell.env ? { env: shell.env } : {}),
     sandboxed: true,
   };
 }

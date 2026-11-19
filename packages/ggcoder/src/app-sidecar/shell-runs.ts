@@ -2,7 +2,7 @@ import { spawn as nodeSpawn, type ChildProcess, type SpawnOptions } from "node:c
 import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { environmentSecrets, redactText } from "@kenkaiiii/gg-ai";
-import { resolveShell } from "../core/shell.js";
+import { resolveShell, shellSpawnEnv, type ShellResolution } from "../core/shell.js";
 import { killProcessTree } from "../utils/process.js";
 
 /**
@@ -106,7 +106,7 @@ export function userShellEnv(env: NodeJS.ProcessEnv): Record<string, string> {
 export function userShellLaunch(
   command: string,
   opts: { platform?: NodeJS.Platform; env?: NodeJS.ProcessEnv } = {},
-): { file: string; args: string[] } {
+): Pick<ShellResolution, "file" | "args" | "env"> {
   const platform = opts.platform ?? process.platform;
   const env = opts.env ?? process.env;
   const login = env.SHELL?.trim();
@@ -114,7 +114,9 @@ export function userShellLaunch(
     return { file: login, args: ["-c", command] };
   }
   const shell = resolveShell(command, { platform, env });
-  return { file: shell.file, args: shell.args };
+  return shell.env
+    ? { file: shell.file, args: shell.args, env: shell.env }
+    : { file: shell.file, args: shell.args };
 }
 
 /** The last `maxLines` lines, capped to `maxChars`, and whether anything was cut. */
@@ -203,7 +205,7 @@ export class ShellRunner {
     try {
       child = (this.opts.spawn ?? nodeSpawn)(launch.file, launch.args, {
         cwd,
-        env: userShellEnv(env),
+        env: shellSpawnEnv(launch, userShellEnv(env)),
         // Own process group, so Stop ends everything the command started.
         detached: process.platform !== "win32",
         stdio: ["ignore", "pipe", "pipe"],

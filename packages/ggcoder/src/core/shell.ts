@@ -36,6 +36,34 @@ export interface ShellResolution {
   args: string[];
   /** True when `file` is a cmd.exe fallback (non-POSIX semantics). */
   isCmdFallback: boolean;
+  /** Variables the launch needs; spawn with `shellSpawnEnv` so they land on top. */
+  env?: Readonly<Record<string, string>>;
+}
+
+/** Carries the command into Windows bash; dropped before the command runs. */
+export const SHELL_COMMAND_ENV = "GG_SHELL_COMMAND";
+
+// MSYS/Cygwin bash re-parses its Windows command line (quotes, globs, `@file`)
+// and collapses `\\` to `\`, so the command can't travel as an argument. The
+// wrapper has no backslashes; `${X?}` fails loudly if a caller drops the env.
+const WINDOWS_BASH_WRAPPER =
+  'eval "unset ' + SHELL_COMMAND_ENV + "; ${" + SHELL_COMMAND_ENV + '?}"';
+
+function windowsBash(file: string, command: string): ShellResolution {
+  return {
+    file,
+    args: ["-o", "pipefail", "-c", WINDOWS_BASH_WRAPPER],
+    isCmdFallback: false,
+    env: { [SHELL_COMMAND_ENV]: command },
+  };
+}
+
+/** Spawn environment for `shell`: `base` plus whatever the launch itself needs. */
+export function shellSpawnEnv<T extends Record<string, string | undefined>>(
+  shell: Pick<ShellResolution, "env">,
+  base: T,
+): T {
+  return shell.env ? { ...base, ...shell.env } : base;
 }
 
 export interface ResolveShellOpts {
@@ -127,6 +155,7 @@ export function resolveShell(command: string, opts: ResolveShellOpts = {}): Shel
   // Explicit override (power users / tests): treat as a POSIX bash.
   const override = env.GG_BASH?.trim();
   if (override) {
+    if (platform === "win32") return windowsBash(override, command);
     return { file: override, args: ["-o", "pipefail", "-c", command], isCmdFallback: false };
   }
 
@@ -142,9 +171,7 @@ export function resolveShell(command: string, opts: ResolveShellOpts = {}): Shel
   }
 
   const gitBash = findGitBash(env, exists);
-  if (gitBash) {
-    return { file: gitBash, args: ["-o", "pipefail", "-c", command], isCmdFallback: false };
-  }
+  if (gitBash) return windowsBash(gitBash, command);
 
   // Last resort: cmd.exe. `/d` skips AutoRun, `/s` + `/c` runs the rest as a
   // single command verbatim (correct quoting for an arbitrary command string).

@@ -7,7 +7,10 @@ import { getMsysTempDir, getTempRoots } from "./temp-paths.js";
 import { resolvePath } from "../tools/path-utils.js";
 
 vi.mock("node:child_process", () => ({ execFileSync: vi.fn() }));
-vi.mock("./shell.js", () => ({ resolveShell: vi.fn() }));
+vi.mock(import("./shell.js"), async (importOriginal) => ({
+  ...(await importOriginal()),
+  resolveShell: vi.fn(),
+}));
 let counter = 0;
 beforeEach(() => {
   vi.clearAllMocks();

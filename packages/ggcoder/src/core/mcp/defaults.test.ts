@@ -150,3 +150,61 @@ describe("getAllMcpServers untrusted project-scope warning", () => {
     expect(mcpWarnings()).toHaveLength(0);
   });
 });
+
+describe("getAllMcpServers built-in Supa Drivah", () => {
+  const drivahExe = String.raw`C:\tools\drivah.exe`;
+  const found = {
+    exists: (p: string) => p === drivahExe,
+    env: { PATH: String.raw`C:\tools` },
+    platform: "win32" as const,
+  };
+  const names = async (opts: Parameters<typeof getAllMcpServers>[3] = {}) =>
+    (await getAllMcpServers("anthropic", undefined, tmpProject, opts)).map((s) => s.name);
+
+  it("adds drivah when its program is found", async () => {
+    const servers = await getAllMcpServers("anthropic", undefined, tmpProject, {
+      builtinDeps: found,
+    });
+    expect(servers).toEqual([{ name: "drivah", command: drivahExe, args: ["mcp"] }]);
+  });
+
+  it("skips drivah without spawning anything when the program is missing", async () => {
+    expect(await names({ builtinDeps: { ...found, exists: () => false } })).toEqual([]);
+  });
+
+  it("lets the user's own drivah win, globally or in a trusted project", async () => {
+    await addServer({ name: "drivah", url: "https://mine.invalid/mcp" }, "global", tmpProject);
+    const servers = await getAllMcpServers("anthropic", undefined, tmpProject, {
+      builtinDeps: found,
+    });
+    expect(servers).toEqual([
+      { name: "drivah", url: "https://mine.invalid/mcp", transport: "http" },
+    ]);
+
+    await addServer({ name: "drivah", command: "repo-drivah" }, "project", tmpProject);
+    const trusted = await getAllMcpServers("anthropic", undefined, tmpProject, {
+      allowProjectScope: true,
+      builtinDeps: found,
+    });
+    expect(trusted).toEqual([{ name: "drivah", command: "repo-drivah" }]);
+  });
+
+  it("keeps the built-in when only an untrusted project declares drivah", async () => {
+    await addServer({ name: "drivah", command: "repo-drivah" }, "project", tmpProject);
+    const servers = await getAllMcpServers("anthropic", undefined, tmpProject, {
+      builtinDeps: found,
+    });
+    expect(servers).toEqual([{ name: "drivah", command: drivahExe, args: ["mcp"] }]);
+  });
+
+  it("follows the saved switch and remove", async () => {
+    const off = await getAllMcpServers("anthropic", undefined, tmpProject, {
+      builtinDeps: found,
+      builtinSettings: { drivah: { enabled: false } },
+    });
+    expect(off).toEqual([{ name: "drivah", command: drivahExe, args: ["mcp"], enabled: false }]);
+    expect(
+      await names({ builtinDeps: found, builtinSettings: { drivah: { removed: true } } }),
+    ).toEqual([]);
+  });
+});

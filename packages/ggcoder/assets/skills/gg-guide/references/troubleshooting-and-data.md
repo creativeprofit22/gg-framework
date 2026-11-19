@@ -6,7 +6,7 @@ GG Coder keeps its data in one folder in the user's home directory, `~/.gg/`. Th
 
 Settings and sign-ins:
 
-- `~/.gg/settings.json`: agent settings such as the chosen model, thinking level, keep-awake and the trust choices for project MCP servers. Shared with the CLI.
+- `~/.gg/settings.json`: agent settings such as the chosen model, thinking level, keep-awake, the trust choices for project MCP servers and the built-in Supa Drivah server's path, on/off and hidden state (`builtinMcpServers`). Shared with the CLI.
 - `~/.gg/gg-app.json`: desktop-app settings, such as the projects folder and per-project app options like autopilot.
 - `~/.gg/gg-app-workspace.json`: a record of which windows were open, with their project, chat and position. The app uses it to reopen windows after a restart.
 - `~/.gg/auth.json`: sign-ins and API keys for AI providers. Every app window and the CLI share it. This is a credential file. Never share it.
@@ -98,6 +98,7 @@ MCP server not working (Settings, MCP):
 - A red cross shows the connection error under the server's row. Errors that start with "blocked" are safety blocks. Tools hidden by the safety guard are listed under the row.
 - A server from a project's `.gg/mcp.json` stays disconnected until that project is trusted, because the file can run commands chosen by the repo. Adding or re-adding the server for that project in the MCP screen trusts that project.
 - If the list says "Couldn't reach the agent to list servers.", use **Try again**.
+- The built-in **drivah** row says "Supa Drivah wasn't found" when the program isn't installed. Install Supa Drivah, put `drivah` on PATH, or save its full path in `~/.gg/settings.json` as `builtinMcpServers.drivah.path`. Its **Use** switch turns it off without removing it.
 
 `!` commands ask for confirmation:
 

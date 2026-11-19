@@ -27,6 +27,7 @@ function deps(over: Partial<McpShellDeps> = {}): McpShellDeps {
     listRows: vi.fn(async () => []),
     probe: vi.fn(async () => ({ ok: true, toolCount: 3 })),
     clearOAuth: vi.fn(async () => {}),
+    hideBuiltin: vi.fn(async () => false),
     trustProject: vi.fn(async () => {}),
     onAdded: vi.fn(),
     saveOAuthClient: vi.fn(async () => {}),
@@ -50,6 +51,16 @@ describe("isMcpShellCommand", () => {
 });
 
 describe("runMcpShellCommand", () => {
+  it("hides a built-in server when no saved entry has that name", async () => {
+    const d = deps({ hideBuiltin: vi.fn(async (name: string) => name === "drivah") });
+    const hidden = await runMcpShellCommand("claude mcp remove drivah", d);
+    expect(hidden.exitCode).toBe(0);
+    expect(hidden.output).toContain('Hid the built-in "drivah" server');
+    expect(d.hideBuiltin).toHaveBeenCalledWith("drivah");
+    expect(d.sync).toHaveBeenCalledWith("drivah");
+    expect((await runMcpShellCommand("claude mcp remove other", d)).exitCode).toBe(1);
+  });
+
   it("adds a server to this project, then lists and removes it", async () => {
     const d = deps();
     const added = await runMcpShellCommand("claude mcp add airtable -- npx -y airtable-mcp", d);

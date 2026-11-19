@@ -23,6 +23,7 @@ import {
   type ShellRunEnd,
 } from "./shell-runs.js";
 import type { SessionRouteContext } from "./route-context.js";
+import { hideVisibleBuiltin } from "./mcp-sync.js";
 
 /**
  * `!claude mcp …` / `!ggcoder mcp …` typed in the app's input. Handled here
@@ -46,6 +47,8 @@ export interface McpShellDeps {
   saveOAuthClient: (name: string, clientId: string, secret?: string) => Promise<void>;
   /** Load the saved change into open windows: this one's result, and how many others took it. */
   sync: (name: string) => Promise<{ here: McpServerChange | null; others: number }>;
+  /** Hide a built-in server (Supa Drivah) shown under `name`; true when hidden. */
+  hideBuiltin: (name: string) => Promise<boolean>;
 }
 
 export interface McpShellOutcome {
@@ -209,6 +212,12 @@ async function remove(args: string[], deps: McpShellDeps, out: Output): Promise<
   }
   const scope = flags.scope ?? (await getServer(name, deps.cwd))?.scope;
   if (!scope || !(await removeServer(name, scope, deps.cwd))) {
+    if (await deps.hideBuiltin(name)) {
+      out.line(`✓ Hid the built-in "${name}" server. Add your own "${name}" to bring it back.`);
+      const hidden = await deps.sync(name);
+      if (hidden.here?.removed) out.line("  Unloaded from this session.");
+      return 0;
+    }
     out.error(`No server named "${name}"${flags.scope ? ` in ${flags.scope} scope` : ""}.`);
     return 1;
   }
@@ -312,6 +321,7 @@ export async function runMcpShell(
       listRows: (cwd) => buildMcpRows(cwd, ctx.paths.settingsFile),
       probe: probeMcp,
       clearOAuth: (name) => new McpOAuthStore().clear(name),
+      hideBuiltin: (name) => hideVisibleBuiltin(name, ctx.cwd, ctx.paths.settingsFile),
       saveOAuthClient: (name, clientId, secret) =>
         new McpOAuthStore().setClient(name, clientId, secret),
       trustProject: (cwd) => ctx.session.trustProject(cwd),

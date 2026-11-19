@@ -9,7 +9,9 @@ export interface McpServerRow {
   /** Diagnostic only; may contain sensitive transport details. Do not render verbatim. */
   error?: string;
   /** Safe display discriminator; clients render fixed copy, never diagnostic text. */
-  failureReason?: "trust-blocked" | "connection-failed";
+  failureReason?: "trust-blocked" | "connection-failed" | "program-not-found";
+  /** Shipped with GG Coder (e.g. Supa Drivah) rather than added by the user; has an on/off switch. */
+  builtin?: boolean;
   /** "http" for HTTP/SSE transports, "stdio" for spawned processes. */
   kind: "stdio" | "http";
   /** Transport summary for display (URL or command + arguments). */

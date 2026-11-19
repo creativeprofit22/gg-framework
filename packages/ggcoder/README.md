@@ -124,7 +124,7 @@ The agent always has `read`, `write`, `edit`, `bash`, `grep`, `skill`, `ask_user
 - **Project instructions.** Put an `AGENTS.md` or `CLAUDE.md` in your repo (or a parent folder) and it's loaded automatically. Per folder, the first match wins: `AGENTS.override.md`, `AGENTS.md`, `CLAUDE.md`, `.cursorrules`, `CONVENTIONS.md`.
 - **Custom commands.** Each Markdown file in `.gg/commands/` becomes a slash command for that project.
 - **Skills.** Reusable instructions in `~/.gg/skills/` (everywhere) or `.gg/skills/` (one project), as `name.md` or `name/SKILL.md`. The agent loads one when the work matches. Two ship built in: `compliance-guard` (legal exposure such as personal data, payments or marketing) and `durable` (not losing stored data).
-- **MCP servers.** `ggcoder mcp add` uses the same syntax and `mcpServers` format as Claude Code. Servers go in `~/.gg/mcp.json` (everywhere) or `.gg/mcp.json` (one project). Project servers only connect after you trust them in settings.
+- **MCP servers.** `ggcoder mcp add` uses the same syntax and `mcpServers` format as Claude Code. Servers go in `~/.gg/mcp.json` (everywhere) or `.gg/mcp.json` (one project). Project servers only connect after you trust them in settings. One server is built in: **drivah** (Supa Drivah) starts as `drivah mcp` when the program is found (the `builtinMcpServers.drivah.path` setting, then PATH); turn it off in the MCP panel, hide it with `ggcoder mcp remove drivah`, or set `GG_BUILTIN_MCP_SERVERS=off` to skip every built-in.
 
 `/rewind` restores files the agent changed with `write` and `edit`. Changes made through `bash` (for example `rm` or code generators) aren't tracked. Checkpoints live in `~/.gg/checkpoints/`, never in your repo.
 

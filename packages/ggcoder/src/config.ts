@@ -6,6 +6,7 @@ import type { Provider, ThinkingLevel } from "@kenkaiiii/gg-ai";
 import { getAppPaths, withoutPaidTier, type AppPaths } from "@kenkaiiii/gg-core";
 import type { ThemeName } from "./ui/theme/theme.js";
 import { parseVerifyPlanApprovals, type VerifyPlanApproval } from "./core/verify-plan-approval.js";
+import { parseBuiltinMcpSettings, type BuiltinMcpSettings } from "./core/mcp/builtin-settings.js";
 import {
   DEFAULT_FOREGROUND_LIMIT_SETTINGS,
   type ForegroundLimitSettings,
@@ -59,6 +60,8 @@ export interface SavedSettings {
   /** Per-descriptor approvals to run a repo's .gg/verify-plan.json command,
    *  bound to the descriptor's sha256 (see core/verify-plan-approval.ts). */
   verifyPlanApprovals: VerifyPlanApproval[];
+  /** Built-in MCP servers' saved state (path override, on/off, removed). */
+  builtinMcpServers: BuiltinMcpSettings;
   /** Max concurrent subagents per resolved child model (1–4). Unset = global limit only. */
   subagentMaxPerModel?: number;
   /** Days to keep session transcripts before startup pruning. 0 disables. */
@@ -159,6 +162,7 @@ export function loadSavedSettings(
     trustProjectMcpServers: false,
     trustedProjects: [],
     verifyPlanApprovals: [],
+    builtinMcpServers: {},
   };
   try {
     const raw = JSON.parse(fsSync.readFileSync(filePath, "utf-8"));
@@ -230,6 +234,7 @@ export function loadSavedSettings(
         (x: unknown): x is string => typeof x === "string",
       );
     result.verifyPlanApprovals = parseVerifyPlanApprovals(raw.verifyPlanApprovals);
+    result.builtinMcpServers = parseBuiltinMcpSettings(raw.builtinMcpServers);
   } catch {
     // No settings file or invalid JSON — use defaults
   }

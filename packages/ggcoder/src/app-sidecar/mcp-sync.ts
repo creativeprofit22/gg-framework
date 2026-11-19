@@ -1,17 +1,26 @@
 import { loadSavedSettings, projectScopeAllowed } from "../config.js";
 import type { AgentSession, McpServerChange } from "../core/agent-session.js";
 import { log } from "../core/logger.js";
-import { loadServers, type MCPServerConfig } from "../core/mcp/index.js";
+import {
+  isBuiltinServerName,
+  loadServers,
+  removeBuiltinServer,
+  withBuiltinServers,
+  type BuiltinLookupDeps,
+  type MCPServerConfig,
+} from "../core/mcp/index.js";
 
 /**
  * One server's config as a session in `cwd` would load it at startup:
  * project scope wins over global, and project servers count only when the
- * project is trusted (same rule as getAllMcpServers).
+ * project is trusted, and a built-in counts when no user server uses its name
+ * and its program exists (same rules as getAllMcpServers).
  */
 export async function effectiveMcpServer(
   name: string,
   cwd: string,
   settingsFile: string,
+  builtinDeps?: BuiltinLookupDeps,
 ): Promise<MCPServerConfig | undefined> {
   const settings = loadSavedSettings(settingsFile);
   const allowProject = projectScopeAllowed(
@@ -19,9 +28,40 @@ export async function effectiveMcpServer(
     settings.trustedProjects,
     cwd,
   );
-  const scoped = await loadServers(cwd);
-  return scoped.find((s) => s.config.name === name && (allowProject || s.scope !== "project"))
-    ?.config;
+  const scoped = withBuiltinServers(await loadServers(cwd), settings.builtinMcpServers ?? {}, {
+    allowProjectScope: allowProject,
+    deps: builtinDeps,
+  });
+  return scoped.find(
+    (s) =>
+      s.config.name === name && !s.unavailableReason && (allowProject || s.scope !== "project"),
+  )?.config;
+}
+
+/**
+ * Hide a built-in server when it is what `name` currently shows in `cwd` (no
+ * saved entry by that name loads there). True when it was hidden.
+ */
+export async function hideVisibleBuiltin(
+  name: string,
+  cwd: string,
+  settingsFile: string,
+  builtinDeps?: BuiltinLookupDeps,
+): Promise<boolean> {
+  if (!isBuiltinServerName(name)) return false;
+  const settings = loadSavedSettings(settingsFile);
+  const allowProject = projectScopeAllowed(
+    settings.trustProjectMcpServers,
+    settings.trustedProjects,
+    cwd,
+  );
+  const scoped = withBuiltinServers(await loadServers(cwd), settings.builtinMcpServers ?? {}, {
+    allowProjectScope: allowProject,
+    deps: builtinDeps,
+  });
+  if (!scoped.some((s) => s.builtin && s.config.name === name)) return false;
+  await removeBuiltinServer(name, settingsFile);
+  return true;
 }
 
 /**

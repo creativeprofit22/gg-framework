@@ -35,6 +35,8 @@ export interface McpServerRow {
   error?: string;
   /** gg-safe: one line per tool the guard hid from the model. */
   warning?: string;
+  /** Shipped with GG Coder (Supa Drivah), not from an mcp.json file. */
+  builtin?: boolean;
 }
 
 export type McpDashboardAction =
@@ -81,9 +83,10 @@ function renderDashboard(rows: McpServerRow[], selectedIndex: number, version: s
     const nameColor = selected ? PRIMARY : TEXT;
     const meta = row.ok
       ? chalk.hex(TEXT_DIM)(
-          ` · ${row.toolCount} tool${row.toolCount === 1 ? "" : "s"} · ${row.scope}`,
+          ` · ${row.toolCount} tool${row.toolCount === 1 ? "" : "s"} · ${row.builtin ? "built-in" : row.scope}`,
         )
-      : chalk.hex(TEXT_DIM)(` · ${row.scope} · `) + chalk.hex(BAD)(shortError(row.error));
+      : chalk.hex(TEXT_DIM)(` · ${row.builtin ? "built-in" : row.scope} · `) +
+        chalk.hex(BAD)(shortError(row.error));
     lines.push(`${marker}${dot} ` + chalk.hex(nameColor)(row.config.name) + meta);
   }
 

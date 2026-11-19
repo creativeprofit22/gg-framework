@@ -1,8 +1,10 @@
 import type { Provider } from "@kenkaiiii/gg-ai";
 import type { MCPServerConfig } from "./types.js";
 import { loadServers } from "./store.js";
-import { getAppPaths } from "../../config.js";
+import { getAppPaths, loadSavedSettings } from "../../config.js";
 import { log } from "../logger.js";
+import { withBuiltinServers, type BuiltinLookupDeps } from "./builtin.js";
+import type { BuiltinMcpSettings } from "./builtin-settings.js";
 
 /** Servers every provider gets. Real-code research is the native `steroids`
  *  tool now, so nothing ships here by default; provider-specific servers are
@@ -70,7 +72,13 @@ export interface McpServerSelectionOptions {
    * every call.
    */
   reportedProjectSkips?: Set<string>;
+  /** Built-in server state; read from the settings file when omitted. */
+  builtinSettings?: BuiltinMcpSettings;
+  builtinDeps?: BuiltinLookupDeps;
 }
+
+/** Missing-program reasons already logged, so reconnects don't repeat them. */
+const reportedMissingBuiltins = new Set<string>();
 
 /** Repo-controlled names go into a log line; keep them on one line. */
 function printableServerName(name: string): string {
@@ -79,8 +87,10 @@ function printableServerName(name: string): string {
 
 /**
  * Full startup set: provider defaults + user-configured servers from
- * ~/.gg/mcp.json and ./.gg/mcp.json. Provider defaults stay authoritative —
- * a user server can only ADD a new name, never override a default.
+ * ~/.gg/mcp.json and ./.gg/mcp.json, then built-ins (Supa Drivah) whose name
+ * no loaded user server uses. Provider defaults stay authoritative — a user
+ * server can only ADD a new name, never override a default. A built-in whose
+ * program is missing is skipped, never spawned.
  */
 export async function getAllMcpServers(
   provider: Provider,
@@ -124,5 +134,23 @@ export async function getAllMcpServers(
     }
   }
 
-  return [...defaults, ...userServers];
+  const builtinSettings =
+    opts?.builtinSettings ?? loadSavedSettings(getAppPaths().settingsFile).builtinMcpServers;
+  const builtins: MCPServerConfig[] = [];
+  for (const s of withBuiltinServers(scoped, builtinSettings, {
+    allowProjectScope,
+    deps: opts?.builtinDeps,
+  })) {
+    if (!s.builtin || defaultNames.has(s.config.name)) continue;
+    if (s.unavailableReason) {
+      if (!reportedMissingBuiltins.has(s.unavailableReason)) {
+        reportedMissingBuiltins.add(s.unavailableReason);
+        log("INFO", "mcp", `Skipped built-in MCP server ${s.config.name}: ${s.unavailableReason}`);
+      }
+      continue;
+    }
+    builtins.push(s.config);
+  }
+
+  return [...defaults, ...userServers, ...builtins];
 }

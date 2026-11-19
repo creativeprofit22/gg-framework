@@ -3,9 +3,9 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentSession } from "../core/agent-session.js";
-import { addServer } from "../core/mcp/index.js";
+import { addServer, removeServer } from "../core/mcp/index.js";
 import { useFakeHome } from "../test-support/fake-home.js";
-import { effectiveMcpServer, syncMcpServerAcross } from "./mcp-sync.js";
+import { effectiveMcpServer, hideVisibleBuiltin, syncMcpServerAcross } from "./mcp-sync.js";
 
 let restoreHome: (() => void) | undefined;
 let home: string;
@@ -66,5 +66,34 @@ describe("syncMcpServerAcross", () => {
       ["a", null],
       ["b", null],
     ]);
+  });
+});
+
+describe("built-in servers", () => {
+  const exe = String.raw`C:\tools\drivah.exe`;
+  const found = {
+    exists: (p: string) => p === exe,
+    env: { PATH: String.raw`C:\tools` },
+    platform: "win32" as const,
+  };
+
+  it("resolves the built-in for live sync, and hides it only while it is what shows", async () => {
+    expect(await effectiveMcpServer("drivah", project, settingsFile, found)).toEqual({
+      name: "drivah",
+      command: exe,
+      args: ["mcp"],
+    });
+    expect(
+      await effectiveMcpServer("drivah", project, settingsFile, { ...found, exists: () => false }),
+    ).toBeUndefined();
+
+    await addServer({ name: "drivah", url: "https://mine.invalid/mcp" }, "global", project);
+    expect(await hideVisibleBuiltin("drivah", project, settingsFile, found)).toBe(false);
+    await removeServer("drivah", "global", project);
+
+    expect(await hideVisibleBuiltin("drivah", project, settingsFile, found)).toBe(true);
+    expect(await effectiveMcpServer("drivah", project, settingsFile, found)).toBeUndefined();
+    expect(await hideVisibleBuiltin("drivah", project, settingsFile, found)).toBe(false);
+    expect(await hideVisibleBuiltin("other", project, settingsFile, found)).toBe(false);
   });
 });

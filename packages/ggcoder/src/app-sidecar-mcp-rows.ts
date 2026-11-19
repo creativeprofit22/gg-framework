@@ -2,6 +2,7 @@ import type { McpServerRow } from "@kenkaiiii/gg-core";
 import { loadSavedSettings, projectScopeAllowed } from "./config.js";
 import { MCPClientManager } from "./core/mcp/client.js";
 import { hiddenToolMessage } from "./core/mcp/index.js";
+import { withBuiltinServers, type BuiltinLookupDeps } from "./core/mcp/builtin.js";
 import { loadServers } from "./core/mcp/store.js";
 import type { MCPServerConfig } from "./core/mcp/types.js";
 
@@ -14,19 +15,30 @@ export function mcpRowSummary(config: MCPServerConfig): string {
   return [config.command, ...(config.args ?? [])].filter(Boolean).join(" ");
 }
 
-/** Join saved configs with live status. Disabled and untrusted project servers
- * are never connected: even a status probe could execute a repo-controlled command. */
-export async function buildMcpRows(cwd: string, settingsFile: string): Promise<McpServerRow[]> {
-  const scoped = await loadServers(cwd);
-  if (scoped.length === 0) return [];
-
+/** Join saved configs (plus built-ins) with live status. Disabled, untrusted project
+ * and built-in servers whose program is missing are never connected: even a status
+ * probe could execute a repo-controlled command. */
+export async function buildMcpRows(
+  cwd: string,
+  settingsFile: string,
+  builtinDeps?: BuiltinLookupDeps,
+): Promise<McpServerRow[]> {
   const settings = loadSavedSettings(settingsFile);
   const allowProject = projectScopeAllowed(
     settings.trustProjectMcpServers,
     settings.trustedProjects,
     cwd,
   );
-  const connectable = scoped.filter((s) => allowProject || s.scope !== "project");
+  const scoped = withBuiltinServers(await loadServers(cwd), settings.builtinMcpServers ?? {}, {
+    allowProjectScope: allowProject,
+    deps: builtinDeps,
+  });
+  if (scoped.length === 0) return [];
+
+  const missing = scoped.filter((s) => s.unavailableReason);
+  const connectable = scoped.filter(
+    (s) => !s.unavailableReason && (allowProject || s.scope !== "project"),
+  );
   const blocked = scoped.filter((s) => !allowProject && s.scope === "project");
 
   const manager = new MCPClientManager();
@@ -51,6 +63,7 @@ export async function buildMcpRows(cwd: string, settingsFile: string): Promise<M
               : undefined,
           kind: s.config.url ? "http" : "stdio",
           summary: mcpRowSummary(s.config),
+          ...(s.builtin ? { builtin: true } : {}),
           requiresAuth: result?.requiresAuth,
           ...(result?.hidden?.length
             ? { warning: result.hidden.map(hiddenToolMessage).join("\n") }
@@ -70,6 +83,18 @@ export async function buildMcpRows(cwd: string, settingsFile: string): Promise<M
           "the MCP modal to trust it.",
         kind: s.config.url ? "http" : "stdio",
         summary: mcpRowSummary(s.config),
+      })),
+      ...missing.map((s): McpServerRow => ({
+        name: s.config.name,
+        scope: s.scope,
+        enabled: s.config.enabled !== false,
+        ok: false,
+        toolCount: 0,
+        failureReason: "program-not-found",
+        error: s.unavailableReason,
+        kind: "stdio",
+        summary: mcpRowSummary(s.config),
+        builtin: true,
       })),
     ];
   } finally {

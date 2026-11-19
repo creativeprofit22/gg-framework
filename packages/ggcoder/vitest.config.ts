@@ -16,6 +16,8 @@ export default defineConfig({
     env: {
       CI: "false",
       CONTINUOUS_INTEGRATION: "false",
+      // No test may start the real Supa Drivah; built-in tests inject their own env.
+      GG_BUILTIN_MCP_SERVERS: "off",
     },
     // Keeps fake test edits out of the user's real ~/.gg/edit-quality.jsonl.
     // Set in the worker, where os.tmpdir() is already this run's folder.

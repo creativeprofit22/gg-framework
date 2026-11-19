@@ -10,6 +10,7 @@ import {
   parseVerifyPlanApprovals,
   verifyPlanApproval,
 } from "./verify-plan-approval.js";
+import { parseBuiltinMcpSettings, type BuiltinMcpSetting } from "./mcp/builtin-settings.js";
 
 // ── Settings Schema ────────────────────────────────────────
 
@@ -149,6 +150,17 @@ const SettingsSchema = z.object({
   verifyPlanApprovals: z
     .array(z.object({ project: z.string(), descriptorSha256: z.string() }))
     .default([]),
+  /** Built-in MCP servers (e.g. `drivah`): program path, on/off, removed. */
+  builtinMcpServers: z
+    .record(
+      z.string(),
+      z.object({
+        path: z.string().optional(),
+        enabled: z.boolean().optional(),
+        removed: z.boolean().optional(),
+      }),
+    )
+    .default({}),
   /** Max concurrent subagents per resolved child model. Unset = only the
    *  global limit applies. Can only REDUCE concurrency, never raise it. */
   subagentMaxPerModel: z.number().int().min(1).max(4).optional(),
@@ -228,6 +240,7 @@ export const DEFAULT_SETTINGS: Settings = {
   trustProjectMcpServers: false,
   trustedProjects: [],
   verifyPlanApprovals: [],
+  builtinMcpServers: {},
   sessionRetentionDays: 30,
   speedProfile: "optimized",
   keepAwake: true,
@@ -390,6 +403,22 @@ export class SettingsManager {
         JSON.stringify({ ...raw, verifyPlanApprovals: approvals }, null, 2),
       );
       this.settings.verifyPlanApprovals = approvals;
+    });
+  }
+
+  /** Merge `patch` into one built-in MCP server's saved state under the shared
+   *  lock, so another process's settings survive. */
+  async setBuiltinMcpServer(name: string, patch: BuiltinMcpSetting): Promise<BuiltinMcpSetting> {
+    await fs.mkdir(path.dirname(this.filePath), { recursive: true });
+    return withFileLock(this.filePath, async () => {
+      const raw = await this.readRawFile();
+      const all = parseBuiltinMcpSettings(raw.builtinMcpServers);
+      const next = { ...all[name], ...patch };
+      all[name] = next;
+      await atomicWrite(this.filePath, JSON.stringify({ ...raw, builtinMcpServers: all }, null, 2));
+      this.settings.builtinMcpServers = all;
+      this.raw = { ...this.raw, builtinMcpServers: all };
+      return next;
     });
   }
 

@@ -241,3 +241,31 @@ describe("loadSavedSettings with a local default", () => {
     });
   });
 });
+
+describe("SettingsManager built-in MCP servers", () => {
+  it("merges one server's state under the lock and loadSavedSettings reads it", async () => {
+    const settings = await load();
+    await fs.writeFile(file, JSON.stringify({ theme: "dark", customKey: 7 }), "utf-8");
+    await settings.setBuiltinMcpServer("drivah", { enabled: false });
+    await settings.setBuiltinMcpServer("drivah", { removed: true });
+    const raw = JSON.parse(await fs.readFile(file, "utf-8")) as Record<string, unknown>;
+    expect(raw).toEqual({
+      theme: "dark",
+      customKey: 7,
+      builtinMcpServers: { drivah: { enabled: false, removed: true } },
+    });
+    expect(settings.get("builtinMcpServers")).toEqual({
+      drivah: { enabled: false, removed: true },
+    });
+    expect(loadSavedSettings(file).builtinMcpServers).toEqual({
+      drivah: { enabled: false, removed: true },
+    });
+  });
+
+  it("refuses to overwrite a settings file it cannot parse", async () => {
+    const settings = await load();
+    await fs.writeFile(file, "{ not json", "utf-8");
+    await expect(settings.setBuiltinMcpServer("drivah", { enabled: false })).rejects.toThrow();
+    expect(await fs.readFile(file, "utf-8")).toBe("{ not json");
+  });
+});

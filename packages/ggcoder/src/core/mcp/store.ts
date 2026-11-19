@@ -70,6 +70,10 @@ export type McpFile = z.infer<typeof McpFileSchema>;
 export interface ScopedServer {
   config: MCPServerConfig;
   scope: MCPScope;
+  /** Shipped with GG Coder (see builtin.ts), not read from an mcp.json file. */
+  builtin?: true;
+  /** Why a built-in server can't start (its program is missing); never spawned. */
+  unavailableReason?: string;
 }
 
 export function globalMcpPath(): string {

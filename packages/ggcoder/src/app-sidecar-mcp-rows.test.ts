@@ -125,6 +125,49 @@ describe("desktop MCP list row building", () => {
     expect(probe).not.toHaveBeenCalled();
   });
 
+  it("lists a built-in whose program is missing without connecting it", async () => {
+    vi.mocked(loadServers).mockResolvedValue([]);
+    const connect = vi.spyOn(Client.prototype, "connect");
+    const detailed = vi.spyOn(MCPClientManager.prototype, "connectAllDetailed");
+    const rows = await buildMcpRows("fixture-project", "fixture-settings", {
+      exists: () => false,
+      env: { PATH: String.raw`C:\tools` },
+      platform: "win32",
+    });
+    expect(rows).toEqual([
+      expect.objectContaining({
+        name: "drivah",
+        scope: "global",
+        builtin: true,
+        enabled: true,
+        ok: false,
+        toolCount: 0,
+        kind: "stdio",
+        failureReason: "program-not-found",
+      }),
+    ]);
+    expect(connect).not.toHaveBeenCalled();
+    expect(detailed).not.toHaveBeenCalled();
+  });
+
+  it("marks a found built-in row and connects it like any server", async () => {
+    vi.mocked(loadServers).mockResolvedValue([]);
+    const detailed = vi
+      .spyOn(MCPClientManager.prototype, "connectAllDetailed")
+      .mockResolvedValue([{ name: "drivah", ok: true, toolCount: 30, tools: [] }]);
+    const exe = String.raw`C:\tools\drivah.exe`;
+    const rows = await buildMcpRows("fixture-project", "fixture-settings", {
+      exists: (p) => p === exe,
+      env: { PATH: String.raw`C:\tools` },
+      platform: "win32",
+    });
+    expect(detailed).toHaveBeenCalledWith([{ name: "drivah", command: exe, args: ["mcp"] }]);
+    expect(rows).toEqual([
+      expect.objectContaining({ name: "drivah", builtin: true, ok: true, toolCount: 30 }),
+    ]);
+    expect(rows[0]?.failureReason).toBeUndefined();
+  });
+
   it("preserves project trust errors independently of enabled state", async () => {
     vi.mocked(loadServers).mockResolvedValue(
       [true, false].map((enabled) => ({

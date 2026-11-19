@@ -334,7 +334,7 @@ import { handleLivePreviewRoutes } from "./app-sidecar/live-preview/routes.js";
 import { findProjectServers, probePort } from "./app-sidecar/live-preview/servers.js";
 import { createLivePreviewTool, type LivePreviewResult } from "./tools/live-preview.js";
 import { ShellRunner } from "./app-sidecar/shell-runs.js";
-import { syncMcpServerAcross } from "./app-sidecar/mcp-sync.js";
+import { hideVisibleBuiltin, syncMcpServerAcross } from "./app-sidecar/mcp-sync.js";
 import type { SessionRouteContext } from "./app-sidecar/route-context.js";
 import { keepAwake } from "./app-sidecar/keep-awake.js";
 import { searchProjectFiles } from "./app-sidecar/file-search.js";
@@ -367,6 +367,8 @@ import {
   MCPClientManager,
   McpOAuthStore,
   createElicitationBridge,
+  isBuiltinServerName,
+  setBuiltinServerEnabled,
   type MCPScope,
   type MCPServerConfig,
 } from "./core/mcp/index.js";
@@ -8050,7 +8052,9 @@ async function createSession(
               // Clear OAuth first: if credential cleanup fails, preserve the
               // server config rather than reporting a partial removal as success.
               await new McpOAuthStore().clear(name);
-              const removed = await removeServer(name, scope, targetCwd);
+              const removed =
+                (await removeServer(name, scope, targetCwd)) ||
+                (await hideVisibleBuiltin(name, targetCwd, paths.settingsFile));
               return { removed };
             },
             (result) => result.removed,
@@ -8060,6 +8064,45 @@ async function createSession(
         } catch (err) {
           captureSidecarError(err, "app-sidecar.mcp.remove", { server: name });
           const failure = mcpManagementRouteFailure("remove", err);
+          json(res, failure.status, { error: failure.error });
+        }
+      });
+      return;
+    }
+
+    // On/off switch for a built-in MCP server (Supa Drivah). Saved in settings,
+    // then this window reloads and other windows pick it up live.
+    if (method === "POST" && url === "/mcp/builtin") {
+      void readBody(req, res).then(async (raw) => {
+        if (raw === null) return;
+        let name: string;
+        let enabled: unknown;
+        try {
+          const body = JSON.parse(raw) as { name?: unknown; enabled?: unknown };
+          name = typeof body.name === "string" ? body.name : "";
+          enabled = body.enabled;
+        } catch {
+          json(res, 400, { error: "invalid JSON body" });
+          return;
+        }
+        if (!isBuiltinServerName(name)) {
+          json(res, 400, { error: `"${name}" is not a built-in MCP server.` });
+          return;
+        }
+        if (typeof enabled !== "boolean") {
+          json(res, 400, { error: "enabled must be true or false" });
+          return;
+        }
+        try {
+          await applyDesktopMcpMutation(
+            () => session,
+            () => setBuiltinServerEnabled(name, enabled, paths.settingsFile),
+          );
+          await syncMcpServer(name);
+          json(res, 200, { ok: true, name, enabled });
+        } catch (err) {
+          captureSidecarError(err, "app-sidecar.mcp.builtin", { server: name });
+          const failure = mcpManagementRouteFailure("switch", err);
           json(res, failure.status, { error: failure.error });
         }
       });

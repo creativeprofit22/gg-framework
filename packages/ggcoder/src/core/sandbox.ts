@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { withoutQwenRuntimeSecret } from "../tools/safe-env.js";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import fs from "node:fs/promises";
 import { realpathSync } from "node:fs";
 import os from "node:os";
@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { log } from "./logger.js";
 import { getAppPaths } from "../config.js";
 import { DEFAULT_ALLOWED_DOMAINS } from "./sandbox-domains.js";
-import type { ShellResolution } from "./shell.js";
+import { SHELL_COMMAND_ENV, type ShellResolution } from "./shell.js";
 import { getTempRoots } from "./temp-paths.js";
 
 export interface SandboxPolicy {
@@ -87,6 +87,9 @@ interface SandboxSettings {
 
 const SANDBOX_CONFIG_DIR = path.join(os.homedir(), ".gg", "sandbox-configs");
 const PROBE_TIMEOUT_MS = 20_000;
+// A script is consumed the moment bash starts; anything older was never run.
+const STALE_SCRIPT_MS = 60 * 60 * 1000;
+let sweptScripts = false;
 let warnedUnsupported = false;
 let warnedDegraded = false;
 
@@ -413,6 +416,62 @@ async function writeStableSettings(settings: SandboxSettings): Promise<string> {
   return settingsPath;
 }
 
+// The Windows sandbox starts bash with a fresh profile env and no caller
+// overlay, so SHELL_COMMAND_ENV can't reach it; the agent dir is a write root.
+async function writeSandboxCommandScript(command: string): Promise<string> {
+  const dir = path.join(getAppPaths().agentDir, "sandbox-scripts");
+  await fs.mkdir(dir, { recursive: true, mode: 0o700 });
+  if (!sweptScripts) {
+    sweptScripts = true;
+    await sweepStaleScripts(dir);
+  }
+  const body = command.endsWith("\n") ? command : `${command}\n`;
+  let delimiter: string;
+  do delimiter = `GG_COMMAND_END_${randomBytes(12).toString("hex")}`;
+  while (body.split("\n").includes(delimiter));
+  // A quoted heredoc keeps backslashes and quotes verbatim, and is fully read
+  // before the script removes itself.
+  const script =
+    `IFS= read -r -d '' ${SHELL_COMMAND_ENV} <<'${delimiter}'\n${body}${delimiter}\n` +
+    `rm -f -- "$0" 2>/dev/null; eval "unset ${SHELL_COMMAND_ENV}; \${${SHELL_COMMAND_ENV}?}"\n`;
+  const scriptPath = path.join(dir, `${randomBytes(12).toString("hex")}.sh`);
+  await fs.writeFile(scriptPath, script, { encoding: "utf8", mode: 0o600, flag: "wx" });
+  return scriptPath;
+}
+
+/** Remove scripts a launch prepared but never ran (e.g. cancelled before spawn). */
+async function sweepStaleScripts(dir: string): Promise<void> {
+  try {
+    const cutoff = Date.now() - STALE_SCRIPT_MS;
+    for (const name of await fs.readdir(dir)) {
+      if (!name.endsWith(".sh")) continue;
+      const file = path.join(dir, name);
+      const stat = await fs.stat(file).catch(() => null);
+      if (stat && stat.mtimeMs < cutoff) await fs.rm(file, { force: true });
+    }
+  } catch {
+    // Best effort: a leftover script is inert.
+  }
+}
+
+/** Swap the env-carried Windows bash command for a script the sandbox can read. */
+async function withScriptCommand(shell: ShellResolution): Promise<ShellResolution> {
+  const command = shell.env?.[SHELL_COMMAND_ENV];
+  if (command === undefined) return shell;
+  const { [SHELL_COMMAND_ENV]: _carried, ...env } = shell.env ?? {};
+  const cIndex = shell.args.indexOf("-c");
+  const options = cIndex >= 0 ? shell.args.slice(0, cIndex) : shell.args;
+  const scriptPath = await writeSandboxCommandScript(command);
+  return {
+    file: shell.file,
+    // Forward slashes: Git Bash takes `C:/x` as-is, and a backslash would be
+    // re-parsed on the way in.
+    args: [...options, scriptPath.replace(/\\/g, "/")],
+    isCmdFallback: shell.isCmdFallback,
+    ...(Object.keys(env).length > 0 ? { env } : {}),
+  };
+}
+
 /**
  * Known limitations when `sandboxMode` is enabled (upstream, not fixable here):
  *
@@ -484,11 +543,12 @@ export async function prepareSandboxLaunch(
     }
   }
 
+  const inner = await withScriptCommand(shell);
   return {
     file: process.execPath,
-    args: [resolveSandboxCli(), "--settings", settingsPath, "--", shell.file, ...shell.args],
-    isCmdFallback: shell.isCmdFallback,
-    ...(shell.env ? { env: shell.env } : {}),
+    args: [resolveSandboxCli(), "--settings", settingsPath, "--", inner.file, ...inner.args],
+    isCmdFallback: inner.isCmdFallback,
+    ...(inner.env ? { env: inner.env } : {}),
     sandboxed: true,
   };
 }

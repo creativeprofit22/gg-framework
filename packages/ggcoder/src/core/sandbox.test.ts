@@ -1,5 +1,5 @@
 import type * as ChildProcessModule from "node:child_process";
-import { ChildProcess, spawn } from "node:child_process";
+import { ChildProcess, execFileSync, spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getAppPaths } from "../config.js";
 import { createTestSymlinkSync } from "../test-utils/symlink.js";
 import { DEFAULT_SETTINGS } from "./settings-manager.js";
+import { resolveShell, SHELL_COMMAND_ENV } from "./shell.js";
 import {
   buildSandboxSettings,
   prepareSandboxLaunch,
@@ -384,6 +385,40 @@ describe("prepareSandboxLaunch", () => {
     });
     // `auto` degrades rather than breaking every command — but still sandboxes.
     expect(launch.sandboxed).toBe(true);
+  });
+
+  it("delivers the exact Windows bash command, backslashes included, without the env", async () => {
+    // The Windows sandbox starts bash with a fresh profile env, so the
+    // env-carried command must not be relied on once sandboxed.
+    const command = String.raw`printf '%s' 'a\\b'`;
+    const windowsShell = resolveShell(command, {
+      platform: "win32",
+      env: { ProgramFiles: "C:\\Program Files" },
+      exists: (candidate) => candidate === "C:\\Program Files\\Git\\bin\\bash.exe",
+    });
+    expect(windowsShell.env?.[SHELL_COMMAND_ENV]).toBe(command);
+    resetSandboxSupportProbeForTests({ supported: true, reason: "ok", degraded: null });
+
+    const launch = await prepareSandboxLaunch(windowsShell, os.tmpdir(), {
+      mode: "workspace",
+      allowedDomains: [],
+    });
+
+    expect(launch.env?.[SHELL_COMMAND_ENV]).toBeUndefined();
+    const inner = launch.args.slice(launch.args.indexOf("--") + 1);
+    const scriptPath = inner.at(-1)!;
+    expect(inner).toEqual([windowsShell.file, "-o", "pipefail", scriptPath]);
+    expect(scriptPath).not.toContain("\\");
+    expect(fs.readFileSync(scriptPath, "utf8")).toContain(`\n${command}\n`);
+
+    const hostBash = resolveShell("");
+    if (hostBash.isCmdFallback) {
+      fs.rmSync(scriptPath, { force: true });
+      return;
+    }
+    const output = execFileSync(hostBash.file, inner.slice(1), { encoding: "utf8" });
+    expect(output).toBe(String.raw`a\\b`);
+    expect(fs.existsSync(scriptPath)).toBe(false);
   });
 
   it("keeps sandboxing when isolation is intact", async () => {

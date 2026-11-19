@@ -13,10 +13,17 @@ vi.mock("./agent", () => ({
 }));
 vi.mock("./toast", () => ({ toast: vi.fn() }));
 
-import { getRadioState, killTask, type BackgroundTask } from "./agent";
+import {
+  getGitOverview,
+  getRadioState,
+  killTask,
+  openUrl,
+  type AgentState,
+  type BackgroundTask,
+} from "./agent";
 import { useRadio } from "./useRadio";
 import { toast } from "./toast";
-import { Deck, TasksPanel, type DeckProps } from "./Deck";
+import { Deck, gitHubOpenTarget, TasksPanel, UNPUSHED_BRANCH_NOTE, type DeckProps } from "./Deck";
 import { formatBackgroundTaskStatus, isBackgroundTaskRunning } from "./background-task-status";
 
 function task(over: Partial<BackgroundTask> = {}): BackgroundTask {
@@ -118,35 +125,35 @@ describe("deck radio", () => {
 // Fork: split panes each render a deck, and the Escape listener is
 // window-wide. Ungated, the first-mounted deck claims the key, so Escape in
 // pane 2 closed pane 1's panel. Only the focused pane's panel may close.
-describe("deck Escape across split panes", () => {
-  function deckProps(over: Partial<DeckProps>): DeckProps {
-    return {
-      state: null,
-      hydrated: true,
-      showGit: false,
-      panel: "more",
-      onPanelChange: vi.fn(),
-      status: null,
-      composer: null,
-      menu: null,
-      running: false,
-      contextPct: 0,
-      models: [],
-      modelsFailed: false,
-      onSelectModel: vi.fn(),
-      second: null,
-      tasks: [],
-      schedules: [],
-      onStopSchedule: vi.fn(),
-      projectHealth: null,
-      usageExtras: null,
-      progress: null,
-      trophies: null,
-      tools: {},
-      ...over,
-    };
-  }
+function deckProps(over: Partial<DeckProps>): DeckProps {
+  return {
+    state: null,
+    hydrated: true,
+    showGit: false,
+    panel: "more",
+    onPanelChange: vi.fn(),
+    status: null,
+    composer: null,
+    menu: null,
+    running: false,
+    contextPct: 0,
+    models: [],
+    modelsFailed: false,
+    onSelectModel: vi.fn(),
+    second: null,
+    tasks: [],
+    schedules: [],
+    onStopSchedule: vi.fn(),
+    projectHealth: null,
+    usageExtras: null,
+    progress: null,
+    trophies: null,
+    tools: {},
+    ...over,
+  };
+}
 
+describe("deck Escape across split panes", () => {
   it("closes the focused pane's panel and leaves the other pane's open", () => {
     vi.mocked(getRadioState).mockResolvedValue({ stations: [], current: null, volume: 1 });
     const focusedChange = vi.fn();
@@ -163,5 +170,77 @@ describe("deck Escape across split panes", () => {
     expect(focusedChange).toHaveBeenCalledTimes(1);
     expect(focusedChange).toHaveBeenCalledWith(null);
     expect(otherChange).not.toHaveBeenCalled();
+  });
+});
+
+describe("Open on GitHub", () => {
+  const repo = "https://github.com/o/r";
+  const branchUrl = "https://github.com/o/r/tree/feat/x";
+
+  it("opens the branch page when GitHub has the branch", () => {
+    expect(
+      gitHubOpenTarget({
+        gitHubRepoUrl: repo,
+        gitHubBranchUrl: branchUrl,
+        gitHubBranchOnGitHub: true,
+      }),
+    ).toEqual({ url: branchUrl, note: undefined });
+  });
+
+  it("opens the repo home page on the default branch or a detached HEAD", () => {
+    // Default branch: GitHub has it, but the engine sends no branch page.
+    expect(
+      gitHubOpenTarget({ gitHubRepoUrl: repo, gitHubBranchUrl: null, gitHubBranchOnGitHub: true }),
+    ).toEqual({ url: repo, note: undefined });
+    // Detached HEAD (or unknown, or an older engine): no branch information at all.
+    expect(
+      gitHubOpenTarget({ gitHubRepoUrl: repo, gitHubBranchUrl: null, gitHubBranchOnGitHub: null }),
+    ).toEqual({ url: repo, note: undefined });
+    expect(gitHubOpenTarget({ gitHubRepoUrl: repo })).toEqual({ url: repo, note: undefined });
+  });
+
+  it("opens the repo home page and says why for a branch not pushed yet", () => {
+    expect(
+      gitHubOpenTarget({ gitHubRepoUrl: repo, gitHubBranchUrl: null, gitHubBranchOnGitHub: false }),
+    ).toEqual({ url: repo, note: UNPUSHED_BRANCH_NOTE });
+  });
+
+  it("is hidden without a GitHub repo", () => {
+    expect(gitHubOpenTarget(null)).toBeNull();
+    expect(gitHubOpenTarget({ gitHubRepoUrl: null, gitHubBranchUrl: branchUrl })).toBeNull();
+  });
+
+  it("wires the Git panel button to the target and its tooltip", () => {
+    vi.mocked(getRadioState).mockResolvedValue({ stations: [], current: null, volume: 1 });
+    vi.mocked(getGitOverview).mockReturnValue(new Promise(() => {}));
+    const gitState = (over: Partial<AgentState>) =>
+      ({ gitBranch: "feat/x", gitHubRepoUrl: repo, ...over }) as AgentState;
+
+    const { rerender } = render(
+      <Deck
+        {...deckProps({
+          showGit: true,
+          panel: "git",
+          state: gitState({ gitHubBranchUrl: branchUrl, gitHubBranchOnGitHub: true }),
+        })}
+      />,
+    );
+    const button = screen.getByRole("button", { name: "Open on GitHub" });
+    expect(button.getAttribute("title")).toBeNull();
+    fireEvent.click(button);
+    expect(openUrl).toHaveBeenLastCalledWith(branchUrl);
+
+    rerender(
+      <Deck
+        {...deckProps({
+          showGit: true,
+          panel: "git",
+          state: gitState({ gitHubBranchUrl: null, gitHubBranchOnGitHub: false }),
+        })}
+      />,
+    );
+    expect(button.getAttribute("title")).toBe(UNPUSHED_BRANCH_NOTE);
+    fireEvent.click(button);
+    expect(openUrl).toHaveBeenLastCalledWith(repo);
   });
 });

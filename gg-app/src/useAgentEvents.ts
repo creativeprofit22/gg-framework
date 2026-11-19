@@ -1871,6 +1871,14 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
                     d.gitHubRepoUrl !== undefined
                       ? (d.gitHubRepoUrl as string | null)
                       : s.gitHubRepoUrl,
+                  gitHubBranchUrl:
+                    d.gitHubBranchUrl !== undefined
+                      ? (d.gitHubBranchUrl as string | null)
+                      : s.gitHubBranchUrl,
+                  gitHubBranchOnGitHub:
+                    d.gitHubBranchOnGitHub !== undefined
+                      ? (d.gitHubBranchOnGitHub as boolean | null)
+                      : s.gitHubBranchOnGitHub,
                   gitHubCI:
                     d.gitHubCI !== undefined
                       ? (d.gitHubCI as AgentState["gitHubCI"])

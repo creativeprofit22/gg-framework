@@ -483,6 +483,21 @@ function ToolPanel({ tool, onClose }: { tool: DeckTool; onClose: () => void }): 
 
 type GitTab = "changes" | "pulls" | "issues";
 
+export const UNPUSHED_BRANCH_NOTE =
+  "This branch hasn't been pushed to GitHub yet, so you'll get the repo's home page.";
+
+/** Where "Open on GitHub" goes: the branch page when GitHub has it, else the repo home. */
+export function gitHubOpenTarget(
+  state: Pick<AgentState, "gitHubRepoUrl" | "gitHubBranchUrl" | "gitHubBranchOnGitHub"> | null,
+): { url: string; note: string | undefined } | null {
+  const repo = state?.gitHubRepoUrl ?? null;
+  if (!repo) return null;
+  return {
+    url: state?.gitHubBranchUrl ?? repo,
+    note: state?.gitHubBranchOnGitHub === false ? UNPUSHED_BRANCH_NOTE : undefined,
+  };
+}
+
 /**
  * The Git panel (the branch key): the working tree's changed files with line
  * counts, and the repo's open pull requests and issues, each a tab, plus a
@@ -499,6 +514,7 @@ function GitPanel({
   const branch = state?.gitBranch ?? null;
   const dirty = state?.gitDirtyFileCount ?? 0;
   const repo = state?.gitHubRepoUrl ?? null;
+  const openTarget = gitHubOpenTarget(state);
   const ci: GitHubCI | null = state?.gitHubCI ?? null;
   const [tab, setTab] = useState<GitTab>("changes");
   const [data, setData] = useState<GitOverview | null>(null);
@@ -557,8 +573,13 @@ function GitPanel({
         </div>
         <span className="deck-spacer" />
         <CIIndicator ci={ci} />
-        {repo && (
-          <button type="button" className="key key-sm" onClick={() => void openUrl(repo)}>
+        {openTarget && (
+          <button
+            type="button"
+            className="key key-sm"
+            title={openTarget.note}
+            onClick={() => void openUrl(openTarget.url)}
+          >
             Open on GitHub
           </button>
         )}

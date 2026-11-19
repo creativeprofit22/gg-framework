@@ -425,6 +425,11 @@ export interface AgentState extends DesktopContextSnapshot, DesktopSessionUXStat
   gitHubPRs?: number | null;
   /** Web URL of the project's GitHub origin repo (title-bar chip links). */
   gitHubRepoUrl?: string | null;
+  /** GitHub page of the current branch; null means use gitHubRepoUrl (default
+   *  branch, detached HEAD, not pushed, or unknown). Absent on older sidecars. */
+  gitHubBranchUrl?: string | null;
+  /** false when origin doesn't have the current branch yet; null when unknown. */
+  gitHubBranchOnGitHub?: boolean | null;
   /** GitHub Actions for the current commit; null when no runs are available. */
   gitHubCI?: GitHubCI | null;
   /** Raw Project Health from the sidecar (code mode); validate with

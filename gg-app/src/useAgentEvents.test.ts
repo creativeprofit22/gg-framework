@@ -1652,6 +1652,28 @@ describe("useAgentEvents", () => {
     });
   });
 
+  it("merges the branch's GitHub page, keeps it in partial frames, and clears it on null", () => {
+    const { hook, getState } = setup();
+    const url = "https://github.com/o/r/tree/feat/x";
+
+    act(() => {
+      hook.result.current.handleEvent(
+        ev("extras", { gitHubBranchUrl: url, gitHubBranchOnGitHub: true }),
+      );
+    });
+    expect(getState()).toMatchObject({ gitHubBranchUrl: url, gitHubBranchOnGitHub: true });
+
+    act(() => hook.result.current.handleEvent(ev("extras", { gitDirtyFileCount: 1 })));
+    expect(getState()).toMatchObject({ gitHubBranchUrl: url, gitHubBranchOnGitHub: true });
+
+    act(() => {
+      hook.result.current.handleEvent(
+        ev("extras", { gitHubBranchUrl: null, gitHubBranchOnGitHub: false }),
+      );
+    });
+    expect(getState()).toMatchObject({ gitHubBranchUrl: null, gitHubBranchOnGitHub: false });
+  });
+
   it("merges CI updates, preserves them in partial frames, and clears them on null", () => {
     const { hook, getState } = setup();
     const ci: NonNullable<AgentState["gitHubCI"]> = {

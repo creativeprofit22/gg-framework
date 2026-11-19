@@ -3374,9 +3374,24 @@ export interface PaneAgentClient extends NotesClient {
     name: string,
     scope: "global" | "project",
     cwd?: string,
-  ): Promise<{ removed: boolean }>;
+  ): Promise<RemoveMcpResult>;
   /** Turn a built-in MCP server (Supa Drivah) on or off. */
   setBuiltinMcpServerEnabled(name: string, enabled: boolean): Promise<void>;
+}
+
+/** `hidden`: a built-in server was hidden instead of deleted from mcp.json. */
+export interface RemoveMcpResult {
+  removed: boolean;
+  hidden?: boolean;
+}
+
+function decodeRemoveMcpResult(value: unknown): RemoveMcpResult {
+  const body = (typeof value === "object" && value !== null ? value : {}) as Record<
+    string,
+    unknown
+  >;
+  const removed = body.removed === true;
+  return removed && body.hidden === true ? { removed, hidden: true } : { removed };
 }
 
 /** Primary compatibility client for legacy children/tests during the pane extraction. */
@@ -4028,7 +4043,9 @@ export function createPaneAgentClient(paneId: string): PaneAgentClient {
     async removeMcpServer(name, scope, cwd) {
       await ready();
       try {
-        return await call("agent_mcp_remove", { name, scope, cwd: cwd ?? null });
+        return decodeRemoveMcpResult(
+          await call<unknown>("agent_mcp_remove", { name, scope, cwd: cwd ?? null }),
+        );
       } catch (error) {
         await logError(`agent_mcp_remove failed: ${String(error)}`);
         throw mcpManagementError("remove", error);

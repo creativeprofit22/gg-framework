@@ -11,6 +11,7 @@ import {
   McpOAuthStore,
   type MCPScope,
   type MCPServerConfig,
+  type ScopedServer,
 } from "../core/mcp/index.js";
 import { splitMcpCommandLine } from "../core/mcp/parse-add-command.js";
 import { buildMcpRows, mcpRowSummary, probeMcp, type McpWireRow } from "../app-sidecar-mcp-rows.js";
@@ -23,7 +24,7 @@ import {
   type ShellRunEnd,
 } from "./shell-runs.js";
 import type { SessionRouteContext } from "./route-context.js";
-import { hideVisibleBuiltin } from "./mcp-sync.js";
+import { findVisibleBuiltin, hideVisibleBuiltin } from "./mcp-sync.js";
 
 /**
  * `!claude mcp …` / `!ggcoder mcp …` typed in the app's input. Handled here
@@ -49,6 +50,8 @@ export interface McpShellDeps {
   sync: (name: string) => Promise<{ here: McpServerChange | null; others: number }>;
   /** Hide a built-in server (Supa Drivah) shown under `name`; true when hidden. */
   hideBuiltin: (name: string) => Promise<boolean>;
+  /** The built-in server (Supa Drivah) shown under `name`, when no saved entry uses it. */
+  findBuiltin: (name: string) => Promise<ScopedServer | undefined>;
 }
 
 export interface McpShellOutcome {
@@ -189,12 +192,14 @@ async function get(args: string[], deps: McpShellDeps, out: Output): Promise<num
     out.error("Usage: claude mcp get <name>");
     return 1;
   }
-  const found = await getServer(name, deps.cwd);
+  const saved = await getServer(name, deps.cwd);
+  const found = saved ?? (await deps.findBuiltin(name));
   if (!found) {
     out.error(`No server named "${name}".`);
     return 1;
   }
-  out.line(`${found.config.name} (${found.scope})`);
+  out.line(`${found.config.name} (${found.builtin ? "built-in" : found.scope})`);
+  if (found.unavailableReason) out.error(`  ${found.unavailableReason}`);
   describeConfig(found.config, out);
   return 0;
 }
@@ -213,7 +218,9 @@ async function remove(args: string[], deps: McpShellDeps, out: Output): Promise<
   const scope = flags.scope ?? (await getServer(name, deps.cwd))?.scope;
   if (!scope || !(await removeServer(name, scope, deps.cwd))) {
     if (await deps.hideBuiltin(name)) {
-      out.line(`✓ Hid the built-in "${name}" server. Add your own "${name}" to bring it back.`);
+      out.line(
+        `✓ Hid the built-in "${name}" server. Add your own "${name}" server to use one in its place.`,
+      );
       const hidden = await deps.sync(name);
       if (hidden.here?.removed) out.line("  Unloaded from this session.");
       return 0;
@@ -322,6 +329,7 @@ export async function runMcpShell(
       probe: probeMcp,
       clearOAuth: (name) => new McpOAuthStore().clear(name),
       hideBuiltin: (name) => hideVisibleBuiltin(name, ctx.cwd, ctx.paths.settingsFile),
+      findBuiltin: (name) => findVisibleBuiltin(name, ctx.cwd, ctx.paths.settingsFile),
       saveOAuthClient: (name, clientId, secret) =>
         new McpOAuthStore().setClient(name, clientId, secret),
       trustProject: (cwd) => ctx.session.trustProject(cwd),

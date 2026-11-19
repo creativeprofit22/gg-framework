@@ -79,6 +79,18 @@ describe("pane MCP status decoding", () => {
     await expect(list()).rejects.toThrow("Could not load MCP servers");
   });
 
+  it("decodes whether remove only hid a built-in server", async () => {
+    respondToMcp("agent_mcp_remove", { removed: true, hidden: true });
+    await expect(pane.removeMcpServer("drivah", "global")).resolves.toEqual({
+      removed: true,
+      hidden: true,
+    });
+    respondToMcp("agent_mcp_remove", { removed: true });
+    await expect(pane.removeMcpServer("docs", "global")).resolves.toEqual({ removed: true });
+    respondToMcp("agent_mcp_remove", { removed: false, hidden: "yes" });
+    await expect(pane.removeMcpServer("docs", "global")).resolves.toEqual({ removed: false });
+  });
+
   it("turns a built-in server on or off through the pane proxy", async () => {
     respondToMcp("agent_mcp_set_builtin", { ok: true, name: "drivah", enabled: false });
     await pane.setBuiltinMcpServerEnabled("drivah", false);

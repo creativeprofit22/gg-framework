@@ -217,6 +217,25 @@ describe("McpModal built-in server", () => {
     builtin: true,
   };
 
+  it("says Hid, not Removed, when the delete button only hid the built-in", async () => {
+    listMcpServersMock.mockResolvedValue([drivahRow]);
+    removeMcpServerMock.mockResolvedValueOnce({ removed: true, hidden: true });
+    render(<McpModal client={client} onClose={vi.fn()} />);
+    const hide = await screen.findByRole("button", { name: "Delete drivah" });
+    expect(hide.getAttribute("title")).toBe(
+      'Hide "drivah". Your own "drivah" server can take its place.',
+    );
+    fireEvent.click(hide);
+
+    await waitFor(() =>
+      expect(toastMock).toHaveBeenCalledWith(
+        'Hid "Supa Drivah". Add your own "drivah" server to use one in its place.',
+        "success",
+      ),
+    );
+    expect(toastMock).not.toHaveBeenCalledWith(expect.stringContaining("Removed"), "success");
+  });
+
   it("labels the row and turns it off with the switch, then refreshes", async () => {
     listMcpServersMock.mockResolvedValue([drivahRow]);
     render(<McpModal client={client} onClose={vi.fn()} />);
@@ -258,7 +277,9 @@ describe("McpModal built-in server", () => {
     ]);
     render(<McpModal client={client} onClose={vi.fn()} />);
     expect(
-      await screen.findByText("Supa Drivah wasn't found. Install it or set its path in settings."),
+      await screen.findByText(
+        "Supa Drivah wasn't found. Install it, or set builtinMcpServers.drivah.path in ~/.gg/settings.json.",
+      ),
     ).toBeTruthy();
     expect(document.body.textContent).not.toContain(String.raw`C:\private`);
   });

@@ -5,9 +5,12 @@ import {
   isBuiltinServerName,
   loadServers,
   removeBuiltinServer,
+  removeServer,
   withBuiltinServers,
   type BuiltinLookupDeps,
+  type MCPScope,
   type MCPServerConfig,
+  type ScopedServer,
 } from "../core/mcp/index.js";
 
 /**
@@ -39,16 +42,16 @@ export async function effectiveMcpServer(
 }
 
 /**
- * Hide a built-in server when it is what `name` currently shows in `cwd` (no
- * saved entry by that name loads there). True when it was hidden.
+ * The built-in server `name` shows in `cwd`, when no saved entry by that name
+ * loads there (same rule as `mcp list`). Includes one whose program is missing.
  */
-export async function hideVisibleBuiltin(
+export async function findVisibleBuiltin(
   name: string,
   cwd: string,
   settingsFile: string,
   builtinDeps?: BuiltinLookupDeps,
-): Promise<boolean> {
-  if (!isBuiltinServerName(name)) return false;
+): Promise<ScopedServer | undefined> {
+  if (!isBuiltinServerName(name)) return undefined;
   const settings = loadSavedSettings(settingsFile);
   const allowProject = projectScopeAllowed(
     settings.trustProjectMcpServers,
@@ -59,9 +62,40 @@ export async function hideVisibleBuiltin(
     allowProjectScope: allowProject,
     deps: builtinDeps,
   });
-  if (!scoped.some((s) => s.builtin && s.config.name === name)) return false;
+  return scoped.find((s) => s.builtin && s.config.name === name);
+}
+
+/**
+ * Hide a built-in server when it is what `name` currently shows in `cwd` (no
+ * saved entry by that name loads there). True when it was hidden.
+ */
+export async function hideVisibleBuiltin(
+  name: string,
+  cwd: string,
+  settingsFile: string,
+  builtinDeps?: BuiltinLookupDeps,
+): Promise<boolean> {
+  if (!(await findVisibleBuiltin(name, cwd, settingsFile, builtinDeps))) return false;
   await removeBuiltinServer(name, settingsFile);
   return true;
+}
+
+/**
+ * Delete `name` from mcp.json, or else hide the built-in it shows as.
+ * `hidden` tells the app the server was only hidden, not deleted.
+ */
+export async function removeOrHideServer(
+  name: string,
+  scope: MCPScope,
+  cwd: string,
+  settingsFile: string,
+  builtinDeps?: BuiltinLookupDeps,
+): Promise<{ removed: boolean; hidden?: true }> {
+  if (await removeServer(name, scope, cwd)) return { removed: true };
+  if (await hideVisibleBuiltin(name, cwd, settingsFile, builtinDeps)) {
+    return { removed: true, hidden: true };
+  }
+  return { removed: false };
 }
 
 /**

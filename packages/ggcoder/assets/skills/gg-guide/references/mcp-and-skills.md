@@ -20,8 +20,8 @@ GG Coder comes with one built-in server, **drivah** (Supa Drivah, which drives d
 
 - Its row in the Global list has a **Built-in** label and a **Use** switch that shows On or Off. Off means it isn't started; turning it back on loads it again.
 - GG Coder looks for the program in this order: the path saved in `~/.gg/settings.json` under `builtinMcpServers.drivah.path`, then `drivah` on PATH, then the local Supa Drivah build on this machine.
-- If none is found, the row says "Supa Drivah wasn't found. Install it or set its path in settings." Nothing is started.
-- The x on its row hides it. To bring it back, add your own server named `drivah`; your own server always replaces the built-in one.
+- If none is found, the row says "Supa Drivah wasn't found. Install it, or set builtinMcpServers.drivah.path in ~/.gg/settings.json." Nothing is started.
+- The x on its row hides it for good. You can add your own server named `drivah` to take its place. To restore the built-in one, open `~/.gg/settings.json` and delete `removed` under `builtinMcpServers.drivah`.
 - `ggcoder mcp list` shows it as `drivah (built-in)`, and `ggcoder mcp remove drivah` hides it.
 - If the list can't be loaded, click **Try again**.
 

@@ -4,7 +4,7 @@ export interface BuiltinMcpSetting {
   path?: string;
   /** Off via the panel switch; the server stays listed but never starts. */
   enabled?: boolean;
-  /** Hidden by removing it; adding a user server of the same name replaces it. */
+  /** Hidden for good; only deleting this key restores it. A same-name user server can stand in. */
   removed?: boolean;
 }
 

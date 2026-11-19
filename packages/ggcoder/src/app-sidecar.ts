@@ -334,7 +334,7 @@ import { handleLivePreviewRoutes } from "./app-sidecar/live-preview/routes.js";
 import { findProjectServers, probePort } from "./app-sidecar/live-preview/servers.js";
 import { createLivePreviewTool, type LivePreviewResult } from "./tools/live-preview.js";
 import { ShellRunner } from "./app-sidecar/shell-runs.js";
-import { hideVisibleBuiltin, syncMcpServerAcross } from "./app-sidecar/mcp-sync.js";
+import { removeOrHideServer, syncMcpServerAcross } from "./app-sidecar/mcp-sync.js";
 import type { SessionRouteContext } from "./app-sidecar/route-context.js";
 import { keepAwake } from "./app-sidecar/keep-awake.js";
 import { searchProjectFiles } from "./app-sidecar/file-search.js";
@@ -361,7 +361,6 @@ import { startSteroidsRefresh } from "./core/steroids-refresh.js";
 import { loadTelegramConfig, saveTelegramConfig, verifyBotToken } from "./core/telegram-config.js";
 import {
   addServer,
-  removeServer,
   getServer,
   parseMcpAddCommand,
   MCPClientManager,
@@ -8046,21 +8045,18 @@ async function createSession(
         }
         const targetCwd = bodyCwd ?? cwd;
         try {
-          const { removed } = await applyDesktopMcpMutation(
+          const result = await applyDesktopMcpMutation(
             () => session,
             async () => {
               // Clear OAuth first: if credential cleanup fails, preserve the
               // server config rather than reporting a partial removal as success.
               await new McpOAuthStore().clear(name);
-              const removed =
-                (await removeServer(name, scope, targetCwd)) ||
-                (await hideVisibleBuiltin(name, targetCwd, paths.settingsFile));
-              return { removed };
+              return removeOrHideServer(name, scope, targetCwd, paths.settingsFile);
             },
             (result) => result.removed,
           );
-          if (removed) await syncMcpServer(name);
-          json(res, 200, { removed });
+          if (result.removed) await syncMcpServer(name);
+          json(res, 200, result);
         } catch (err) {
           captureSidecarError(err, "app-sidecar.mcp.remove", { server: name });
           const failure = mcpManagementRouteFailure("remove", err);

@@ -28,6 +28,7 @@ function deps(over: Partial<McpShellDeps> = {}): McpShellDeps {
     probe: vi.fn(async () => ({ ok: true, toolCount: 3 })),
     clearOAuth: vi.fn(async () => {}),
     hideBuiltin: vi.fn(async () => false),
+    findBuiltin: vi.fn(async () => undefined),
     trustProject: vi.fn(async () => {}),
     onAdded: vi.fn(),
     saveOAuthClient: vi.fn(async () => {}),
@@ -55,7 +56,9 @@ describe("runMcpShellCommand", () => {
     const d = deps({ hideBuiltin: vi.fn(async (name: string) => name === "drivah") });
     const hidden = await runMcpShellCommand("claude mcp remove drivah", d);
     expect(hidden.exitCode).toBe(0);
-    expect(hidden.output).toContain('Hid the built-in "drivah" server');
+    expect(hidden.output).toContain(
+      'Hid the built-in "drivah" server. Add your own "drivah" server to use one in its place.',
+    );
     expect(d.hideBuiltin).toHaveBeenCalledWith("drivah");
     expect(d.sync).toHaveBeenCalledWith("drivah");
     expect((await runMcpShellCommand("claude mcp remove other", d)).exitCode).toBe(1);
@@ -125,6 +128,27 @@ describe("runMcpShellCommand", () => {
     const out = await runMcpShellCommand("claude mcp get api", d);
     expect(out.output).toContain("https://x.dev/mcp");
     expect(out.output).not.toContain("supersecrettoken");
+  });
+
+  it("shows a visible built-in server in get output, like list does", async () => {
+    const d = deps({
+      findBuiltin: vi.fn(async (name: string) =>
+        name === "drivah"
+          ? {
+              config: { name: "drivah", command: "drivah", args: ["mcp"] },
+              scope: "global" as const,
+              builtin: true as const,
+              unavailableReason: "Supa Drivah was not found.",
+            }
+          : undefined,
+      ),
+    });
+    const out = await runMcpShellCommand("ggcoder mcp get drivah", d);
+    expect(out.exitCode).toBe(0);
+    expect(out.output).toContain("drivah (built-in)");
+    expect(stripStderrMarks(out.output)).toContain("Supa Drivah was not found.");
+    expect(out.output).toContain("drivah mcp");
+    expect((await runMcpShellCommand("ggcoder mcp get other", d)).exitCode).toBe(1);
   });
 });
 

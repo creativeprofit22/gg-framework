@@ -238,13 +238,18 @@ export function McpModal({ onClose, client }: Props): React.ReactElement {
 
   async function remove(name: string, rowScope: "global" | "project"): Promise<void> {
     try {
-      const { removed } = await client.removeMcpServer(
+      const { removed, hidden } = await client.removeMcpServer(
         name,
         rowScope,
         rowScope === "project" ? listCwd : undefined,
       );
       if (removed) {
-        toast(`Removed "${name}".`, "success");
+        toast(
+          hidden
+            ? `Hid "${builtinDisplayName(name)}". Add your own "${name}" server to use one in its place.`
+            : `Removed "${name}".`,
+          "success",
+        );
         await refresh(listCwd);
       } else {
         toast(`No "${name}" found.`, "warning");
@@ -355,11 +360,22 @@ export function McpModal({ onClose, client }: Props): React.ReactElement {
                       style={{ color: theme.error, whiteSpace: "normal", overflowWrap: "anywhere" }}
                     >
                       {/* Raw s.error is diagnostic-only, even after transport redaction. */}
-                      {s.failureReason === "trust-blocked"
-                        ? "Project server blocked. Add or re-add it in this project to trust it."
-                        : s.failureReason === "program-not-found"
-                          ? `${builtinDisplayName(s.name)} wasn't found. Install it or set its path in settings.`
-                          : "Could not connect. Check the server settings and availability."}
+                      {s.failureReason === "trust-blocked" ? (
+                        "Project server blocked. Add or re-add it in this project to trust it."
+                      ) : s.failureReason === "program-not-found" ? (
+                        // <wbr> lets the long settings key wrap at its dots, not mid-word.
+                        <>
+                          {builtinDisplayName(s.name)} wasn't found. Install it, or set
+                          builtinMcpServers.
+                          <wbr />
+                          {s.name}.<wbr />
+                          path in ~/.gg/
+                          <wbr />
+                          settings.json.
+                        </>
+                      ) : (
+                        "Could not connect. Check the server settings and availability."
+                      )}
                     </div>
                   )}
                 </div>
@@ -419,7 +435,7 @@ export function McpModal({ onClose, client }: Props): React.ReactElement {
                   aria-label={`Delete ${s.name}`}
                   title={
                     s.builtin
-                      ? `Hide "${s.name}". Add your own "${s.name}" server to bring it back.`
+                      ? `Hide "${s.name}". Your own "${s.name}" server can take its place.`
                       : `Remove "${s.name}"`
                   }
                   onClick={() => void remove(s.name, s.scope)}

@@ -5,7 +5,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentSession } from "../core/agent-session.js";
 import { addServer, removeServer } from "../core/mcp/index.js";
 import { useFakeHome } from "../test-support/fake-home.js";
-import { effectiveMcpServer, hideVisibleBuiltin, syncMcpServerAcross } from "./mcp-sync.js";
+import {
+  effectiveMcpServer,
+  findVisibleBuiltin,
+  hideVisibleBuiltin,
+  removeOrHideServer,
+  syncMcpServerAcross,
+} from "./mcp-sync.js";
 
 let restoreHome: (() => void) | undefined;
 let home: string;
@@ -87,7 +93,16 @@ describe("built-in servers", () => {
       await effectiveMcpServer("drivah", project, settingsFile, { ...found, exists: () => false }),
     ).toBeUndefined();
 
+    expect(await findVisibleBuiltin("drivah", project, settingsFile, found)).toMatchObject({
+      builtin: true,
+      config: { name: "drivah", command: exe },
+    });
+    expect(
+      await findVisibleBuiltin("drivah", project, settingsFile, { ...found, exists: () => false }),
+    ).toMatchObject({ builtin: true, unavailableReason: expect.any(String) });
+
     await addServer({ name: "drivah", url: "https://mine.invalid/mcp" }, "global", project);
+    expect(await findVisibleBuiltin("drivah", project, settingsFile, found)).toBeUndefined();
     expect(await hideVisibleBuiltin("drivah", project, settingsFile, found)).toBe(false);
     await removeServer("drivah", "global", project);
 
@@ -95,5 +110,19 @@ describe("built-in servers", () => {
     expect(await effectiveMcpServer("drivah", project, settingsFile, found)).toBeUndefined();
     expect(await hideVisibleBuiltin("drivah", project, settingsFile, found)).toBe(false);
     expect(await hideVisibleBuiltin("other", project, settingsFile, found)).toBe(false);
+  });
+
+  it("says whether remove deleted a saved server or only hid the built-in", async () => {
+    await addServer({ name: "drivah", url: "https://mine.invalid/mcp" }, "global", project);
+    expect(await removeOrHideServer("drivah", "global", project, settingsFile, found)).toEqual({
+      removed: true,
+    });
+    expect(await removeOrHideServer("drivah", "global", project, settingsFile, found)).toEqual({
+      removed: true,
+      hidden: true,
+    });
+    expect(await removeOrHideServer("drivah", "global", project, settingsFile, found)).toEqual({
+      removed: false,
+    });
   });
 });

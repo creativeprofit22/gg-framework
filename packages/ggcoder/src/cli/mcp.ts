@@ -103,8 +103,9 @@ Scopes:
 Built-in:
   drivah   Supa Drivah, started as "drivah mcp" when the program is found
            (settings builtinMcpServers.drivah.path, PATH, or the local build).
-           "ggcoder mcp remove drivah" hides it; adding your own "drivah"
-           server replaces it.
+           "ggcoder mcp remove drivah" hides it for good; your own "drivah"
+           server can take its place. To restore the built-in, delete
+           builtinMcpServers.drivah.removed in ~/.gg/settings.json.
 
 Configs are stored in the same { "mcpServers": { … } } shape Claude Code uses.`);
 }
@@ -117,6 +118,10 @@ async function loadWithBuiltins(cwd: string): Promise<{ scoped: ScopedServer[]; 
     allowProjectScope: trust,
   });
   return { scoped, trust };
+}
+
+export function serverScopeLabel(server: Pick<ScopedServer, "builtin" | "scope">): string {
+  return server.builtin ? "built-in" : server.scope;
 }
 
 /** One server by name: a saved entry (project wins), else a visible built-in. */
@@ -214,7 +219,7 @@ async function runGet(rest: string[], cwd: string): Promise<void> {
     console.log(dim(`No server named "${name}".`));
     return;
   }
-  console.log(primary(found.config.name) + dim(` (${found.builtin ? "built-in" : found.scope})`));
+  console.log(primary(found.config.name) + dim(` (${serverScopeLabel(found)})`));
   if (found.unavailableReason) console.log(bad(`  ${found.unavailableReason}`));
   console.log(formatConfig(found.config));
 }
@@ -272,7 +277,9 @@ async function runRemove(rest: string[], cwd: string): Promise<void> {
   }
   if (await hideBuiltinIfVisible(name, cwd)) {
     console.log(
-      good(`✓ Hid the built-in "${name}" server. Add your own "${name}" to bring it back.`),
+      good(
+        `✓ Hid the built-in "${name}" server. Add your own "${name}" server to use one in its place.`,
+      ),
     );
     return;
   }
@@ -391,7 +398,10 @@ async function runDashboard(cwd: string): Promise<void> {
       const found = await findServer(action.name, cwd);
       if (found) {
         clearVisibleScreen();
-        console.log(bannerLines(CLI_VERSION, `${found.config.name} (${found.scope})`).join("\n"));
+        console.log(
+          bannerLines(CLI_VERSION, `${found.config.name} (${serverScopeLabel(found)})`).join("\n"),
+        );
+        if (found.unavailableReason) console.log(bad(`  ${found.unavailableReason}`));
         console.log("");
         console.log(formatConfig(found.config));
         console.log(dim("\n  Press Enter to return…"));

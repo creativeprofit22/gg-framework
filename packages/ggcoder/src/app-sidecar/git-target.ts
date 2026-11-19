@@ -5,7 +5,7 @@ import {
   isGitRepo,
   type GitReadOptions,
 } from "../utils/git.js";
-import { getGitHubRepoSlug } from "../utils/github.js";
+import { getGitHubBranch, getGitHubRepoSlug, type GitHubBranch } from "../utils/github.js";
 
 /**
  * The folder whose git state a window's titlebar shows (branch, uncommitted
@@ -38,6 +38,8 @@ export interface GitState {
   isRepo: boolean;
   dirtyFileCount: number;
   gitHubSlug: string | null;
+  /** The current branch's GitHub page and whether origin has it (local refs only). */
+  gitHubBranch: GitHubBranch;
   /**
    * False when git didn't answer whether this is a repo, or how many files
    * changed in one (a timeout on a busy machine): isRepo and dirtyFileCount
@@ -54,11 +56,13 @@ export async function readGitState(dir: string, options: GitReadOptions = {}): P
     getGitDirtyFileCount(dir, options).catch(() => null),
     getGitHubRepoSlug(dir).catch(() => null),
   ]);
+  const gitHubBranch = await getGitHubBranch(dir, gitHubSlug, branch, options);
   return {
     branch,
     isRepo: isRepo ?? false,
     dirtyFileCount: dirtyFileCount ?? 0,
     gitHubSlug,
+    gitHubBranch,
     // Outside a repo the count fails by design; only a repo needs one.
     settled: isRepo === false || (isRepo === true && dirtyFileCount !== null),
   };

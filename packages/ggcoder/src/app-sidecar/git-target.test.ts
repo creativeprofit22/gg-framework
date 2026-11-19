@@ -96,12 +96,48 @@ describe("readGitState", () => {
     },
   );
 
+  it("reports whether origin has the current branch, from local refs", async () => {
+    const cwd = await mkdtemp(path.join(tmpdir(), "gg-git-target-branch-"));
+    tempDirs.push(cwd);
+    const git = (...args: string[]) => execFileAsync("git", args, { cwd });
+    await git("init", "-q", "-b", "feature/a#1");
+    await git(
+      "-c",
+      "user.name=t",
+      "-c",
+      "user.email=t@t",
+      "commit",
+      "-q",
+      "--allow-empty",
+      "-m",
+      "x",
+    );
+    await git("remote", "add", "origin", "https://github.com/o/r.git");
+
+    // Not pushed yet: no refs/remotes/origin/feature/a#1.
+    expect((await readGitState(cwd)).gitHubBranch).toEqual({
+      gitHubBranchUrl: null,
+      gitHubBranchOnGitHub: false,
+    });
+
+    await git("update-ref", "refs/remotes/origin/feature/a#1", "HEAD");
+    expect(await readGitState(cwd)).toMatchObject({
+      branch: "feature/a#1",
+      gitHubSlug: "o/r",
+      gitHubBranch: {
+        gitHubBranchUrl: "https://github.com/o/r/tree/feature/a%231",
+        gitHubBranchOnGitHub: true,
+      },
+    });
+  });
+
   it("is settled for a folder git says is not a repo", async () => {
     const cwd = await mkdtemp(path.join(tmpdir(), "gg-git-target-plain-"));
     tempDirs.push(cwd);
     expect(await readGitState(cwd)).toMatchObject({
       isRepo: false,
       dirtyFileCount: 0,
+      gitHubBranch: { gitHubBranchUrl: null, gitHubBranchOnGitHub: null },
       settled: true,
     });
   });

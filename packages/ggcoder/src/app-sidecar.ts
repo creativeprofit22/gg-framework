@@ -219,7 +219,7 @@ import { createRepoPolls, type RepoPolls } from "./app-sidecar/repo-polls.js";
 import { resolveThinkingRequest } from "./app-sidecar/thinking-request.js";
 import { KEN_ALLOWED_MCP_SERVERS, lastAssistantText } from "./app-sidecar/ken-context.js";
 import { prepareAttachments, type AppAttachment } from "./app-sidecar/attachments.js";
-import { getGitHubRepoSlug } from "./utils/github.js";
+import { getGitHubBranch, getGitHubRepoSlug, type GitHubBranch } from "./utils/github.js";
 import { getGitOverview } from "./utils/git-overview.js";
 
 let daemonRepoPolls: RepoPolls | undefined;
@@ -2631,6 +2631,8 @@ async function createSession(
   // Open issue/PR counts for the origin repo's GitHub slug, via the `gh` CLI's
   // auth. null = unknown (gh missing/unauthed, non-GitHub origin) → chips hidden.
   let gitHubSlug: string | null = initialGit.gitHubSlug;
+  // Where "Open on GitHub" goes for the current branch; refreshed with gitBranch.
+  let gitHubBranch: GitHubBranch = initialGit.gitHubBranch;
   let gitHubIssues: number | null = null;
   let gitHubPRs: number | null = null;
   let gitHubCI: GitHubCI | null = null;
@@ -2662,6 +2664,8 @@ async function createSession(
     gitHubIssues: number | null;
     gitHubPRs: number | null;
     gitHubRepoUrl: string | null;
+    gitHubBranchUrl: string | null;
+    gitHubBranchOnGitHub: boolean | null;
     gitHubCI: GitHubCI | null;
     projectHealth: ProjectHealth | null;
     tasks: ReturnType<typeof session.listBackgroundProcesses>;
@@ -2679,6 +2683,7 @@ async function createSession(
       gitHubCI,
       projectHealth: currentProjectHealth(),
       gitHubRepoUrl: gitHubSlug ? `https://github.com/${gitHubSlug}` : null,
+      ...gitHubBranch,
       tasks: session.listBackgroundProcesses(),
       // Roots added with /add-dir — the header shows a badge when non-empty.
       additionalRoots: session.getAdditionalRoots(),
@@ -3574,6 +3579,7 @@ async function createSession(
         isGitRepo(gitCwd).catch(() => gitIsRepo),
         getGitDirtyFileCount(gitCwd).catch(() => gitDirtyFileCount),
       ]);
+      gitHubBranch = await getGitHubBranch(gitCwd, gitHubSlug, gitBranch);
       // A run may have opened/closed issues or PRs — refresh fire-and-forget so
       // teardown isn't delayed by the network. Broadcasts itself on change.
       void refreshGitHubCounts();
@@ -4713,6 +4719,7 @@ async function createSession(
     gitIsRepo = state.isRepo;
     gitDirtyFileCount = state.dirtyFileCount;
     gitHubSlug = state.gitHubSlug;
+    gitHubBranch = state.gitHubBranch;
     if (moved) {
       // The old repo's numbers don't apply; the new watchers fill these in.
       repoWatch.unsubscribe();

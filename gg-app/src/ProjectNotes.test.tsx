@@ -5276,19 +5276,35 @@ describe("ProjectNotes", () => {
     );
 
     chooseTaskAction("Renamed", "Edit");
-    fireEvent.keyDown(screen.getByLabelText("Edit task: Renamed"), { key: "Escape" });
+    const editField = screen.getByLabelText("Edit task: Renamed") as HTMLTextAreaElement;
+    // Edits wrap and grow like the New task field instead of scrolling sideways.
+    expect(editField.tagName).toBe("TEXTAREA");
+    fireEvent.change(editField, { target: { value: "Pasted\nedit" } });
+    expect(editField.value).toBe("Pasted edit");
+    fireEvent.keyDown(editField, { key: "Enter" });
+    await waitFor(() =>
+      expect(globalThis.document.activeElement).toBe(
+        screen.getByRole("button", { name: "Task actions: Pasted edit" }),
+      ),
+    );
+    expect(client.snapshots.get(canonicalProjectKey(cwd))?.document.tasks[0]?.text).toBe(
+      "Pasted edit",
+    );
+
+    chooseTaskAction("Pasted edit", "Edit");
+    fireEvent.keyDown(screen.getByLabelText("Edit task: Pasted edit"), { key: "Escape" });
     expect(screen.getByRole("dialog")).toBeTruthy();
     await waitFor(() =>
       expect(globalThis.document.activeElement).toBe(
-        screen.getByRole("button", { name: "Task actions: Renamed" }),
+        screen.getByRole("button", { name: "Task actions: Pasted edit" }),
       ),
     );
 
-    chooseTaskAction("Renamed", "Archive");
+    chooseTaskAction("Pasted edit", "Archive");
     await waitFor(() =>
       expect(globalThis.document.activeElement).toBe(screen.getByLabelText("New task")),
     );
-    expect(screen.queryByRole("button", { name: "Task actions: Renamed" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Task actions: Pasted edit" })).toBeNull();
   });
 
   it("labels the add field once and keeps Current focus to one wrapping line", async () => {

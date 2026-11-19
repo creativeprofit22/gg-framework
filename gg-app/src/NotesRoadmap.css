@@ -1408,7 +1408,7 @@ button.notes-btn-quiet.notes-btn-danger:is(:hover, :focus-visible):not(:disabled
   gap: var(--space-4);
 }
 .notes-add-controls textarea,
-.notes-edit-form input,
+.notes-edit-form textarea,
 .notes-field textarea {
   box-sizing: border-box;
   width: 100%;
@@ -1423,11 +1423,12 @@ button.notes-btn-quiet.notes-btn-danger:is(:hover, :focus-visible):not(:disabled
   outline: none;
 }
 .notes-add-controls textarea,
-.notes-edit-form input {
+.notes-edit-form textarea {
   padding: var(--space-4) var(--space-5);
 }
 /* One line at rest, like a text field; NotesTaskList grows it with the text. */
-.notes-add-controls textarea {
+.notes-add-controls textarea,
+.notes-edit-form textarea {
   display: block;
   flex: 1 1 auto;
   max-height: 160px;
@@ -2885,7 +2886,7 @@ button.notes-btn-quiet.notes-btn-danger:is(:hover, :focus-visible):not(:disabled
   .notes-phase-form textarea,
   .notes-reference-form input,
   .notes-reference-form textarea,
-  .notes-edit-form input,
+  .notes-edit-form textarea,
   .notes-field textarea,
   .notes-phase-status.is-tinted {
     border-color: CanvasText;

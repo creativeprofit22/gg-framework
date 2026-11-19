@@ -35,6 +35,20 @@ function focusTarget(
   return refs.get(target === "up" ? "down" : "up")?.get(taskId) ?? element;
 }
 
+/** Tasks are one line: pasted line breaks become spaces; long text wraps. */
+function oneLine(text: string): string {
+  return text.replace(/\r?\n/g, " ");
+}
+
+/** Grow a one-line field with its text; "auto" first so it can also shrink. */
+function growField(field: HTMLTextAreaElement | null, text: string): void {
+  if (!field) return;
+  field.style.height = "auto";
+  if (!text) return;
+  const borders = field.offsetHeight - field.clientHeight;
+  field.style.height = `${field.scrollHeight + borders}px`;
+}
+
 export function NotesTaskList({
   tasks,
   addInputRef,
@@ -53,15 +67,10 @@ export function NotesTaskList({
   const [focusRequest, setFocusRequest] = useState<FocusRequest | null>(null);
   const focusRefs = useRef(new Map<FocusTarget, Map<string, HTMLElement>>());
 
-  // Grow the one-line field with its text; "auto" first so it can also shrink.
-  useLayoutEffect(() => {
-    const field = addInputRef.current;
-    if (!field) return;
-    field.style.height = "auto";
-    if (!draft) return;
-    const borders = field.offsetHeight - field.clientHeight;
-    field.style.height = `${field.scrollHeight + borders}px`;
-  }, [addInputRef, draft]);
+  const editInputRef = useRef<HTMLTextAreaElement | null>(null);
+
+  useLayoutEffect(() => growField(addInputRef.current, draft), [addInputRef, draft]);
+  useLayoutEffect(() => growField(editInputRef.current, editText), [editingId, editText]);
 
   // Re-runs when the groups change, so a moved or reopened row is focused once it lands
   // in its new place. A target that is not shown yet keeps the request waiting.
@@ -170,12 +179,19 @@ export function NotesTaskList({
             }}
           >
             <label htmlFor={`notes-edit-${task.id}`}>Edit task: {task.text}</label>
-            <input
+            <textarea
+              ref={editInputRef}
               id={`notes-edit-${task.id}`}
+              rows={1}
               value={editText}
               autoFocus
-              onChange={(event) => setEditText(event.target.value)}
+              onChange={(event) => setEditText(oneLine(event.target.value))}
               onKeyDown={(event) => {
+                if (event.key === "Enter" && !event.nativeEvent.isComposing) {
+                  event.preventDefault();
+                  if (editText.trim()) finishEdit(task, true);
+                  return;
+                }
                 if (event.key !== "Escape") return;
                 event.preventDefault();
                 event.stopPropagation();
@@ -244,8 +260,7 @@ export function NotesTaskList({
             id="notes-add-task"
             rows={1}
             value={draft}
-            // Tasks are one line: pasted line breaks become spaces; long text wraps.
-            onChange={(event) => setDraft(event.target.value.replace(/\r?\n/g, " "))}
+            onChange={(event) => setDraft(oneLine(event.target.value))}
             onKeyDown={(event) => {
               if (event.key === "Enter" && !event.nativeEvent.isComposing) {
                 event.preventDefault();

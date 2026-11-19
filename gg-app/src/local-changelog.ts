@@ -53,10 +53,28 @@ export const CURRENT_LOCAL_RELEASE_NOTES = requireCurrentReleaseNotes(releaseNot
 /** Newest first. Maintained only by the Local Fork release flow. */
 export const LOCAL_CHANGELOG: LocalChangelogEntry[] = [
   {
-    id: "local-2026-11-18-upstream-01150-official-sign-ins-live-preview",
+    id: "local-2026-11-18-supa-drivah-built-in",
     label: CURRENT_LOCAL_RELEASE_NOTES.label,
     date: CURRENT_LOCAL_RELEASE_NOTES.date,
     items: CURRENT_LOCAL_RELEASE_NOTES.sections.flatMap(({ items }) => items),
+  },
+  {
+    id: "local-2026-11-18-upstream-01150-official-sign-ins-live-preview",
+    label: "Upstream 0.115.0, with official sign-ins and Live preview",
+    date: "2026-11-18",
+    items: [
+      "Signing in now goes through each company's official door. `Continue with ChatGPT` uses OpenAI's own sign-in, and you can add an OpenAI `API key` that steps in if your plan runs out. Claude Pro and Max run through the real `Claude Code`, which the app fetches for you. Kimi, xAI and Gemini connect with an `API key`. If you used an older sign-in, the app asks you once to reconnect.",
+      "New models landed: `GPT-6.2 Astra`, `GPT-6.2 Sol`, `GPT-6.1 Terra` and `Claude Fable 5.2`. The model picker greys out anything your plan or keys don't cover and says what it needs.",
+      "Meet `Live preview`. Open it from the top of your workspace and your running web app opens in your browser with GG's chat on the page, so you can right-click a button or heading and ask for a change.",
+      "Stopping is one button. While GG or Ken is working, the send key turns into a red stop key, and when it's Ken it reads `Stop Ken`.",
+      "`Autopilot` answers its own question cards and shows you what it picked. Anything that really needs you stays on the card with a one-line reason.",
+      "Dark mode has a new `Obsidian` look, and your Home screen has a bigger crowd of critters.",
+      "Long sessions re-read less. Old tool output is now cleared less often while your provider's cache is still warm, so more of each request comes from that cheaper cache.",
+      "Image generation now needs an OpenAI `API key`, and `GG World` has been retired.",
+      "`GPT-6.2 Astra` stays your OpenAI default, with the same Experimental Astra context option on the ChatGPT plan.",
+      "Every queued message gets its own `x` right on its bubble. Messages queued from somewhere else, like before this pane opened, still show above the message box so you can cancel those too.",
+      "`Qwen Cloud` still connects through its own setup, and `/add-dir` and `/remove-dir` still work as before.",
+    ],
   },
   {
     id: "local-2026-11-05-upstream-01031-gifs-and-provider-brain",

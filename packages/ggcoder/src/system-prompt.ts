@@ -10,6 +10,7 @@ import {
 } from "./tools/prompt-hints.js";
 import { listProjectFiles, type ProjectFileList } from "./core/project-files.js";
 import { pythonInsteadOfPython3 } from "./core/python-command.js";
+import { ripgrepOnPath } from "./core/ripgrep-command.js";
 import { AUTO_LOADED_TOOL_NAMES } from "./tools/tool-tiers.js";
 import type { LanguageId } from "./core/language-detector.js";
 import { cleanInstructionText } from "./utils/text.js";
@@ -378,12 +379,15 @@ async function withProjectFiles(
   return { ...environment, projectFiles: await listProjectFiles(cwd) };
 }
 
-function renderEnvironmentSection(cwd: string, environment?: SystemPromptEnvironment): string {
+function renderEnvironmentSection(
+  cwd: string,
+  environment: SystemPromptEnvironment | undefined,
+  reachableTools: readonly string[] | undefined,
+): string {
   // Which shell bash commands actually execute under (cmd.exe fallback on
   // bash-less Windows).
-  const shellLine = resolveShell("").isCmdFallback
-    ? "- Shell: cmd.exe (no bash found)"
-    : "- Shell: bash (POSIX)";
+  const cmdFallback = resolveShell("").isCmdFallback;
+  const shellLine = cmdFallback ? "- Shell: cmd.exe (no bash found)" : "- Shell: bash (POSIX)";
   const lines = [`- Working directory: ${cwd}`];
   const files = environment?.projectFiles;
   if (files) {
@@ -405,7 +409,20 @@ function renderEnvironmentSection(cwd: string, environment?: SystemPromptEnviron
     pathExt: process.env.PATHEXT,
   });
   const pythonNote = python ? ` (run \`${python}\`; \`python3\` won't run here)` : "";
-  lines.push(`- Platform: ${process.platform}${pythonNote}`, shellLine);
+  // Local Fork: the cached steering line names `rg`; say so when it is missing.
+  const tools = reachableTools ?? DEFAULT_TOOL_NAMES;
+  const rgNote =
+    !cmdFallback &&
+    tools.includes("bash") &&
+    tools.includes("grep") &&
+    !ripgrepOnPath({
+      platform: process.platform,
+      pathEnv: process.env.PATH ?? "",
+      pathExt: process.env.PATHEXT,
+    })
+      ? "; no `rg` installed: search code with the `grep` tool, as `grep -r` is slow here"
+      : "";
+  lines.push(`- Platform: ${process.platform}${pythonNote}`, shellLine + rgNote);
   const allow = environment?.networkAllow ?? [];
   if (allow.length > 0) {
     lines.push(`- Network allowlist: ${allow.join(", ")} (other hosts are blocked)`);
@@ -543,7 +560,11 @@ export async function buildSubAgentSystemPrompt(
   // layout: everything above is stable and cached.
   sections.push(
     renderUncachedTail(
-      renderEnvironmentSection(opts.cwd, await withProjectFiles(opts.cwd, opts.environment)),
+      renderEnvironmentSection(
+        opts.cwd,
+        await withProjectFiles(opts.cwd, opts.environment),
+        withDeferred(opts.toolNames, opts.deferredToolNames),
+      ),
     ),
   );
 
@@ -626,7 +647,9 @@ export async function buildSystemPrompt(
   if (platformClis) sections.push(platformClis);
 
   sections.push(
-    renderUncachedTail(renderEnvironmentSection(cwd, await withProjectFiles(cwd, environment))),
+    renderUncachedTail(
+      renderEnvironmentSection(cwd, await withProjectFiles(cwd, environment), reachableTools),
+    ),
   );
 
   return enforcePromptCeiling(sections.join("\n\n"), limits.systemPromptCeilingBytes);

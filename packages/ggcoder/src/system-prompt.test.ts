@@ -45,7 +45,10 @@ function toolsSection(prompt: string): string {
 function promptSize(raw: string): { characters: number; lines: number; sections: number } {
   // Local Fork: the Windows `python3` placeholder note depends on the host's PATH,
   // so sizes are measured without it (covered by core/python-command.test.ts).
-  const prompt = raw.replace(/^(- Platform: \S+) \(run `python`;[^\n]*\)$/m, "$1");
+  // The missing-ripgrep note is host-dependent too (core/ripgrep-command.test.ts).
+  const prompt = raw
+    .replace(/^(- Platform: \S+) \(run `python`;[^\n]*\)$/m, "$1")
+    .replace(/; no `rg` installed:[^\n]*$/m, "");
   return {
     characters: prompt.length,
     lines: prompt.split("\n").length,

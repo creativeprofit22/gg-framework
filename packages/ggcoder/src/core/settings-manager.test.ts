@@ -262,6 +262,30 @@ describe("SettingsManager built-in MCP servers", () => {
     });
   });
 
+  it("keeps another manager's built-in server state when an older manager saves", async () => {
+    const a = await load();
+    const b = await load();
+    await b.setBuiltinMcpServer("drivah", { enabled: false, path: "C:/tools/drivah.exe" });
+    await a.set("defaultModel", "claude-opus-5-5");
+    const raw = JSON.parse(await fs.readFile(file, "utf-8")) as Record<string, unknown>;
+    expect(raw.defaultModel).toBe("claude-opus-5-5");
+    expect(raw.builtinMcpServers).toEqual({
+      drivah: { enabled: false, path: "C:/tools/drivah.exe" },
+    });
+    expect(a.get("builtinMcpServers")).toEqual({
+      drivah: { enabled: false, path: "C:/tools/drivah.exe" },
+    });
+  });
+
+  it("still writes builtinMcpServers when set directly", async () => {
+    const a = await load();
+    const b = await load();
+    await b.setBuiltinMcpServer("drivah", { enabled: false });
+    await a.set("builtinMcpServers", { drivah: { removed: true } });
+    const raw = JSON.parse(await fs.readFile(file, "utf-8")) as Record<string, unknown>;
+    expect(raw.builtinMcpServers).toEqual({ drivah: { removed: true } });
+  });
+
   it("refuses to overwrite a settings file it cannot parse", async () => {
     const settings = await load();
     await fs.writeFile(file, "{ not json", "utf-8");

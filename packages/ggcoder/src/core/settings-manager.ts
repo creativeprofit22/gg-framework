@@ -340,11 +340,31 @@ export class SettingsManager {
     return this.settings;
   }
 
-  async save(): Promise<void> {
-    const out: Record<string, unknown> = { ...this.raw, ...this.settings };
-    for (const key of this.rejected) out[key] = this.raw[key];
-    // Atomic: a crash mid-write left a file the next load read as all defaults.
-    await atomicWrite(this.filePath, JSON.stringify(out, null, 2));
+  async save(ownBuiltinMcpServers = false): Promise<void> {
+    await fs.mkdir(path.dirname(this.filePath), { recursive: true });
+    await withFileLock(this.filePath, async () => {
+      // Built-in MCP state is written by other managers (the MCP panel); a stale snapshot here re-enabled them.
+      if (!ownBuiltinMcpServers) {
+        let fresh: Record<string, unknown> | undefined;
+        try {
+          fresh = await this.readRawFile();
+        } catch {
+          fresh = undefined;
+        }
+        if (fresh) {
+          const value = fresh.builtinMcpServers ?? {};
+          this.raw = { ...this.raw, builtinMcpServers: value };
+          this.settings.builtinMcpServers = parseBuiltinMcpSettings(value);
+          this.rejected.delete("builtinMcpServers");
+        }
+      }
+      const out: Record<string, unknown> = { ...this.raw, ...this.settings };
+      for (const key of this.rejected) out[key] = this.raw[key];
+      if (!ownBuiltinMcpServers && "builtinMcpServers" in this.raw)
+        out.builtinMcpServers = this.raw.builtinMcpServers;
+      // Atomic: a crash mid-write left a file the next load read as all defaults.
+      await atomicWrite(this.filePath, JSON.stringify(out, null, 2));
+    });
   }
 
   get<K extends keyof Settings>(key: K): Settings[K] {
@@ -354,7 +374,7 @@ export class SettingsManager {
   async set<K extends keyof Settings>(key: K, value: Settings[K]): Promise<void> {
     this.settings[key] = value;
     this.rejected.delete(key);
-    await this.save();
+    await this.save(key === "builtinMcpServers");
   }
 
   getAll(): Settings {

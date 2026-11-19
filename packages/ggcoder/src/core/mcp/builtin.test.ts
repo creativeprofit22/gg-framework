@@ -39,6 +39,21 @@ describe("resolveDrivahProgram", () => {
   it("explains where it looked when the program is missing", () => {
     const missing = resolveDrivahProgram(String.raw`D:\gone.exe`, deps([]));
     expect("reason" in missing && missing.reason).toContain(String.raw`D:\gone.exe`);
+    expect("reason" in missing && missing.reason).toContain(DRIVAH_FALLBACK_PATH);
+  });
+
+  it("does not mention the Windows local build on other platforms", () => {
+    const linux = {
+      platform: "linux",
+      env: { PATH: "/usr/bin" },
+      exists: () => false,
+    } satisfies BuiltinLookupDeps;
+    expect(resolveDrivahProgram(undefined, linux)).toEqual({
+      reason: "Supa Drivah (drivah) was not found on PATH.",
+    });
+    const saved = resolveDrivahProgram("/opt/gone/drivah", linux);
+    expect("reason" in saved && saved.reason).toContain("/opt/gone/drivah");
+    expect("reason" in saved && saved.reason).not.toContain(DRIVAH_FALLBACK_PATH);
   });
 
   it("looks for a bare drivah on POSIX PATH", () => {

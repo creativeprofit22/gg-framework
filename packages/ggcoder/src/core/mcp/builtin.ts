@@ -44,10 +44,20 @@ export function resolveDrivahProgram(
   }
   if (win && exists(DRIVAH_FALLBACK_PATH)) return { path: DRIVAH_FALLBACK_PATH };
 
+  // Name only the places actually checked: the local build is Windows-only.
+  const places = [
+    ...(pathSetting ? [`at the saved path ${pathSetting}`] : []),
+    "on PATH",
+    ...(win ? [`at ${DRIVAH_FALLBACK_PATH}`] : []),
+  ];
+  const where =
+    places.length > 2
+      ? `${places.slice(0, -1).join(", ")}, or ${places[places.length - 1]}`
+      : places.join(" or ");
   return {
     reason: pathSetting
-      ? `Supa Drivah was not found at the saved path ${pathSetting}, on PATH, or at ${DRIVAH_FALLBACK_PATH}.`
-      : `Supa Drivah (${exe}) was not found on PATH or at ${DRIVAH_FALLBACK_PATH}.`,
+      ? `Supa Drivah was not found ${where}.`
+      : `Supa Drivah (${exe}) was not found ${where}.`,
   };
 }
 

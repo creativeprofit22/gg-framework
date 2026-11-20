@@ -8,15 +8,24 @@
  * the last value at once), and the last one to leave stops it.
  */
 
+/**
+ * `fresh: true` asks for a read that starts after this call: a read already in
+ * flight may predate a change the caller just made (a run's `git checkout`), so
+ * one follow-up read is chained after it instead of joining it.
+ */
+export interface RefreshOptions {
+  fresh?: boolean;
+}
+
 /** A running poller: `refresh` asks for a check now, `stop` ends it for good. */
 export interface Poller {
-  refresh(): void | Promise<void>;
+  refresh(options?: RefreshOptions): void | Promise<void>;
   stop(): void;
 }
 
 export interface SharedSubscription {
   /** Check now (e.g. after an agent run). Shared: one check serves every subscriber. */
-  refresh(): Promise<void>;
+  refresh(options?: RefreshOptions): Promise<void>;
   /** Leave. The poller stops when its last subscriber leaves. */
   unsubscribe(): void;
 }
@@ -77,8 +86,8 @@ export function createSharedPolls<T>(
       }
       let left = false;
       return {
-        async refresh() {
-          if (!left) await entry.poller?.refresh();
+        async refresh(options) {
+          if (!left) await entry.poller?.refresh(options);
         },
         unsubscribe() {
           if (left) return;
@@ -95,6 +104,36 @@ export function createSharedPolls<T>(
 }
 
 /**
+ * One read at a time. Plain requests join the read in flight; fresh ones share
+ * a single follow-up read chained after it.
+ */
+function serializedRefresh(
+  check: () => Promise<void>,
+  isStopped: () => boolean,
+): (options?: RefreshOptions) => Promise<void> {
+  let inFlight: Promise<void> | undefined;
+  let followUp: Promise<void> | undefined;
+  const run = (): Promise<void> => {
+    inFlight = check().finally(() => {
+      inFlight = undefined;
+    });
+    return inFlight;
+  };
+  return (options) => {
+    if (isStopped()) return Promise.resolve();
+    if (!inFlight) return run();
+    if (!options?.fresh) return inFlight;
+    followUp ??= inFlight.then(() => {
+      followUp = undefined;
+      if (isStopped()) return undefined;
+      // Any read started after the older one settled is fresh enough to join.
+      return inFlight ?? run();
+    });
+    return followUp;
+  };
+}
+
+/**
  * Fixed-cadence poller: first check after `firstDelayMs`, then every
  * `intervalMs` after the previous check settles. `fetch` returning null (or
  * throwing) publishes nothing, so subscribers keep their last-known value.
@@ -106,7 +145,6 @@ export function startIntervalPoll<T>(opts: {
   intervalMs: number;
 }): Poller {
   let stopped = false;
-  let inFlight: Promise<void> | undefined;
   let timer: NodeJS.Timeout | undefined;
   const schedule = (delay: number): void => {
     clearTimeout(timer);
@@ -124,14 +162,7 @@ export function startIntervalPoll<T>(opts: {
       if (!stopped) schedule(opts.intervalMs);
     }
   };
-  const refresh = (): Promise<void> => {
-    if (stopped) return Promise.resolve();
-    // A check already in flight answers this request too.
-    inFlight ??= check().finally(() => {
-      inFlight = undefined;
-    });
-    return inFlight;
-  };
+  const refresh = serializedRefresh(check, () => stopped);
   schedule(opts.firstDelayMs);
   return {
     refresh,
@@ -144,14 +175,14 @@ export function startIntervalPoll<T>(opts: {
 
 /**
  * Poller with no timer: it reads only when asked (window focus, panel open,
- * after a run). Requests made while a read is running share that read.
+ * after a run). Requests made while a read is running share that read, unless
+ * they ask for a fresh one.
  */
 export function startOnDemandPoll<T>(opts: {
   fetch: () => Promise<T | null>;
   publish: (value: T) => void;
 }): Poller {
   let stopped = false;
-  let inFlight: Promise<void> | undefined;
   const check = async (): Promise<void> => {
     try {
       const value = await opts.fetch();
@@ -161,13 +192,7 @@ export function startOnDemandPoll<T>(opts: {
     }
   };
   return {
-    refresh() {
-      if (stopped) return Promise.resolve();
-      inFlight ??= check().finally(() => {
-        inFlight = undefined;
-      });
-      return inFlight;
-    },
+    refresh: serializedRefresh(check, () => stopped),
     stop() {
       stopped = true;
     },

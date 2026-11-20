@@ -223,3 +223,64 @@ describe("startIntervalPoll refresh", () => {
     poller.stop();
   });
 });
+
+describe("fresh refresh", () => {
+  function deferredFetch() {
+    const releases: ((n: number) => void)[] = [];
+    const fetch = vi.fn(
+      () =>
+        new Promise<number>((resolve) => {
+          releases.push(resolve);
+        }),
+    );
+    return { fetch, releases };
+  }
+
+  it.each([
+    [
+      "startOnDemandPoll",
+      (opts: { fetch: () => Promise<number>; publish: (n: number) => void }) =>
+        startOnDemandPoll(opts),
+    ],
+    [
+      "startIntervalPoll",
+      (opts: { fetch: () => Promise<number>; publish: (n: number) => void }) =>
+        startIntervalPoll({ ...opts, firstDelayMs: 60_000, intervalMs: 60_000 }),
+    ],
+  ])("%s re-reads after a read that started before the request", async (_name, start) => {
+    const { fetch, releases } = deferredFetch();
+    const polls = createSharedPolls<number>((_key, publish) => start({ fetch, publish }));
+    const seen: number[] = [];
+    const sub = polls.subscribe("/repo", (n) => seen.push(n));
+
+    // Read A starts (e.g. another window's focus) and sees the old branch.
+    const older = sub.refresh();
+    // The run switches branch, then asks for a fresh read while A is still running.
+    const fresh = sub.refresh({ fresh: true });
+    const freshAgain = sub.refresh({ fresh: true });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    releases[0]?.(1);
+    await older;
+    await vi.advanceTimersByTimeAsync(0);
+    // Exactly one follow-up read, shared by both fresh callers; never two at once.
+    expect(fetch).toHaveBeenCalledTimes(2);
+    releases[1]?.(2);
+    await Promise.all([fresh, freshAgain]);
+    expect(seen.at(-1)).toBe(2);
+    expect(fetch).toHaveBeenCalledTimes(2);
+    sub.unsubscribe();
+  });
+
+  it("skips the follow-up read once stopped", async () => {
+    const { fetch, releases } = deferredFetch();
+    const publish = vi.fn();
+    const poller = startOnDemandPoll({ fetch, publish });
+    void poller.refresh();
+    const fresh = poller.refresh({ fresh: true });
+    poller.stop();
+    releases[0]?.(1);
+    await fresh;
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(publish).not.toHaveBeenCalled();
+  });
+});

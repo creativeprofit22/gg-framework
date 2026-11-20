@@ -4701,9 +4701,12 @@ async function createSession(
       gitHubCounts,
       ci,
       health,
-      /** Re-read branch and uncommitted count; at most one read per folder at a time. */
+      /**
+       * Re-read branch and uncommitted count; at most one read per folder at a
+       * time. Fresh: a read already running may predate the run's last checkout.
+       */
       async refreshGit(): Promise<void> {
-        await Promise.all([gitHead.refresh(), dirtyFiles.refresh()]);
+        await Promise.all([gitHead.refresh({ fresh: true }), dirtyFiles.refresh({ fresh: true })]);
       },
       unsubscribe(): void {
         dirtyFiles.unsubscribe();

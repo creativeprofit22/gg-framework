@@ -20,6 +20,7 @@ export default defineConfig({
     "src/roadmap-phase-dependencies.ts",
     "src/roadmap-workflow.ts",
     "src/slash-command-contract.ts",
+    "src/git-branch-contract.ts",
     "src/progress-contract.ts",
     "src/verify-plan.ts",
   ],

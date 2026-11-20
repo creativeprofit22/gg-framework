@@ -121,6 +121,11 @@
       "import": "./dist/slash-command-contract.js",
       "require": "./dist/slash-command-contract.cjs"
     },
+    "./git-branch-contract": {
+      "types": "./dist/git-branch-contract.d.ts",
+      "import": "./dist/git-branch-contract.js",
+      "require": "./dist/git-branch-contract.cjs"
+    },
     "./verify-plan": {
       "types": "./dist/verify-plan.d.ts",
       "import": "./dist/verify-plan.js",

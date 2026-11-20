@@ -73,6 +73,8 @@ export interface GitHead {
   branch: string | null;
   /** null: git didn't answer (timeout, failed spawn); keep the last-known value. */
   isRepo: boolean | null;
+  /** origin's GitHub slug; null when unreadable or not GitHub, so keep the last-known one. */
+  gitHubSlug: string | null;
   gitHubBranch: GitHubBranch;
 }
 
@@ -85,5 +87,5 @@ export async function readGitHead(dir: string): Promise<GitHead | null> {
   ]);
   if (branch === null && isRepo === null) return null;
   const gitHubBranch = await getGitHubBranch(dir, gitHubSlug, branch);
-  return { branch, isRepo, gitHubBranch };
+  return { branch, isRepo, gitHubSlug, gitHubBranch };
 }

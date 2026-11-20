@@ -4656,6 +4656,15 @@ async function createSession(
     const gitHead = repoPolls.gitHead.subscribe(
       repoKey,
       (next) => {
+        // origin now points at another GitHub repo: counts, CI and links all follow it.
+        if (next.gitHubSlug !== null && next.gitHubSlug !== gitHubSlug) {
+          retargetGit({ reread: true }).catch((err: unknown) => {
+            log("WARN", "app-sidecar", "git remote retarget failed", {
+              message: err instanceof Error ? err.message : String(err),
+            });
+          });
+          return;
+        }
         const isRepo = next.isRepo ?? gitIsRepo;
         if (
           next.branch === gitBranch &&

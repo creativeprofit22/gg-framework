@@ -377,9 +377,6 @@ describe("transparent status leases", () => {
           broadcast: (event: string) => observed.push(event),
           broadcastError: vi.fn(),
           renewCurrentPhaseLease: renewCurrent,
-          getGitBranch: async () => null,
-          isGitRepo: async () => false,
-          getGitDirtyFileCount: async () => 0,
           gitBranch: null,
           gitIsRepo: false,
           gitDirtyFileCount: 0,
@@ -389,7 +386,7 @@ describe("transparent status leases", () => {
           gitHubCI: null,
           maybeNotifyCINotStarted: () => {},
           ciPoll: { refresh: async () => {} },
-          repoWatch: { ci: { refresh: async () => {} } },
+          repoWatch: { ci: { refresh: async () => {} }, refreshGit: async () => {} },
           finishOwnedGeneration: () => observed.push("cleanup"),
           runJournalPersistence: {
             then: (resolve: () => void) => {

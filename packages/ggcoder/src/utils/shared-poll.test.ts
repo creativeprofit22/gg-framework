@@ -1,5 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createSharedPolls, startIntervalPoll, type Poller } from "./shared-poll.js";
+import {
+  createSharedPolls,
+  startIntervalPoll,
+  startOnDemandPoll,
+  type Poller,
+} from "./shared-poll.js";
 
 beforeEach(() => {
   vi.useFakeTimers();
@@ -49,6 +54,18 @@ describe("createSharedPolls", () => {
     expect(late).not.toHaveBeenCalled();
     await Promise.resolve();
     expect(late).toHaveBeenCalledWith(7);
+  });
+
+  it("skips the last value when a subscriber opts out of the replay", async () => {
+    const { polls, started } = manualPolls();
+    polls.subscribe("/repo", vi.fn());
+    started[0]?.publish(7);
+    const fresh = vi.fn();
+    polls.subscribe("/repo", fresh, { replayLatest: false });
+    await Promise.resolve();
+    expect(fresh).not.toHaveBeenCalled();
+    started[0]?.publish(8);
+    expect(fresh).toHaveBeenCalledWith(8);
   });
 
   it("stops the poller only when the last subscriber leaves", () => {
@@ -121,5 +138,88 @@ describe("startIntervalPoll", () => {
     poller.stop();
     await vi.advanceTimersByTimeAsync(5000);
     expect(fetch).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("startOnDemandPoll", () => {
+  it("never reads on its own and shares one read between concurrent requests", async () => {
+    let release: (n: number | null) => void = () => undefined;
+    const fetch = vi.fn(
+      () =>
+        new Promise<number | null>((resolve) => {
+          release = resolve;
+        }),
+    );
+    const polls = createSharedPolls<number>((_key, publish) =>
+      startOnDemandPoll({ fetch, publish }),
+    );
+    const seenA: number[] = [];
+    const seenB: number[] = [];
+    const a = polls.subscribe("/repo", (n) => seenA.push(n));
+    const b = polls.subscribe("/repo", (n) => seenB.push(n));
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(fetch).not.toHaveBeenCalled();
+
+    const first = a.refresh();
+    const second = b.refresh();
+    expect(fetch).toHaveBeenCalledTimes(1);
+    release(9);
+    await Promise.all([first, second]);
+    expect(seenA).toEqual([9]);
+    expect(seenB).toEqual([9]);
+
+    // A finished read doesn't block the next request.
+    const third = a.refresh();
+    expect(fetch).toHaveBeenCalledTimes(2);
+    release(10);
+    await third;
+    expect(seenB).toEqual([9, 10]);
+  });
+
+  it("publishes nothing when a read fails or returns null", async () => {
+    const publish = vi.fn();
+    const fetch = vi.fn((): Promise<number> => {
+      throw new Error("git lock");
+    });
+    const failing = startOnDemandPoll({ fetch, publish });
+    await failing.refresh();
+    // A failed read doesn't leave the poller stuck.
+    await failing.refresh();
+    expect(fetch).toHaveBeenCalledTimes(2);
+    const empty = startOnDemandPoll({ fetch: async () => null, publish });
+    await empty.refresh();
+    expect(publish).not.toHaveBeenCalled();
+  });
+
+  it("does nothing after stop", async () => {
+    const fetch = vi.fn(async () => 1);
+    const publish = vi.fn();
+    const poller = startOnDemandPoll({ fetch, publish });
+    poller.stop();
+    await poller.refresh();
+    expect(fetch).not.toHaveBeenCalled();
+    expect(publish).not.toHaveBeenCalled();
+  });
+});
+
+describe("startIntervalPoll refresh", () => {
+  it("lets a caller await the check already in flight", async () => {
+    let release: (n: number) => void = () => undefined;
+    const fetch = vi.fn(
+      () =>
+        new Promise<number>((resolve) => {
+          release = resolve;
+        }),
+    );
+    const publish = vi.fn();
+    const poller = startIntervalPoll({ fetch, publish, firstDelayMs: 10, intervalMs: 1000 });
+    const first = poller.refresh();
+    const joined = poller.refresh();
+    expect(fetch).toHaveBeenCalledTimes(1);
+    release(5);
+    await joined;
+    expect(publish).toHaveBeenCalledWith(5);
+    await first;
+    poller.stop();
   });
 });

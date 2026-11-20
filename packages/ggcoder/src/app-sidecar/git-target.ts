@@ -67,3 +67,23 @@ export async function readGitState(dir: string, options: GitReadOptions = {}): P
     settled: isRepo === false || (isRepo === true && dirtyFileCount !== null),
   };
 }
+
+/** What the titlebar's branch key shows: re-read on focus, Git panel open and after runs. */
+export interface GitHead {
+  branch: string | null;
+  /** null: git didn't answer (timeout, failed spawn); keep the last-known value. */
+  isRepo: boolean | null;
+  gitHubBranch: GitHubBranch;
+}
+
+/** Local refs only. null when git answered nothing at all, so nothing is published. */
+export async function readGitHead(dir: string): Promise<GitHead | null> {
+  const [branch, isRepo, gitHubSlug] = await Promise.all([
+    getGitBranch(dir).catch(() => null),
+    isGitRepo(dir).catch(() => null),
+    getGitHubRepoSlug(dir).catch(() => null),
+  ]);
+  if (branch === null && isRepo === null) return null;
+  const gitHubBranch = await getGitHubBranch(dir, gitHubSlug, branch);
+  return { branch, isRepo, gitHubBranch };
+}

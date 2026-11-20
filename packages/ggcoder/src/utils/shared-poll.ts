@@ -16,13 +16,21 @@ export interface Poller {
 
 export interface SharedSubscription {
   /** Check now (e.g. after an agent run). Shared: one check serves every subscriber. */
-  refresh(): void;
+  refresh(): Promise<void>;
   /** Leave. The poller stops when its last subscriber leaves. */
   unsubscribe(): void;
 }
 
 export interface SharedPolls<T> {
-  subscribe(key: string, listener: (value: T) => void): SharedSubscription;
+  /**
+   * `replayLatest: false` skips handing over the last value: for state the
+   * subscriber just read itself, where another window's older read would be stale.
+   */
+  subscribe(
+    key: string,
+    listener: (value: T) => void,
+    options?: { replayLatest?: boolean },
+  ): SharedSubscription;
   /** Number of running pollers. */
   size(): number;
 }
@@ -57,11 +65,11 @@ export function createSharedPolls<T>(
   }
 
   return {
-    subscribe(key, fn) {
+    subscribe(key, fn, options) {
       const entry = entryFor(key);
       const listener: Listener<T> = { fn };
       entry.listeners.add(listener);
-      if (entry.latest) {
+      if (entry.latest && options?.replayLatest !== false) {
         // Async, so a subscriber can finish wiring up before its first value.
         queueMicrotask(() => {
           if (entry.latest && entry.listeners.has(listener)) fn(entry.latest.value);
@@ -69,8 +77,8 @@ export function createSharedPolls<T>(
       }
       let left = false;
       return {
-        refresh() {
-          if (!left) void entry.poller?.refresh();
+        async refresh() {
+          if (!left) await entry.poller?.refresh();
         },
         unsubscribe() {
           if (left) return;
@@ -98,17 +106,14 @@ export function startIntervalPoll<T>(opts: {
   intervalMs: number;
 }): Poller {
   let stopped = false;
-  let busy = false;
+  let inFlight: Promise<void> | undefined;
   let timer: NodeJS.Timeout | undefined;
   const schedule = (delay: number): void => {
     clearTimeout(timer);
     timer = setTimeout(() => void refresh(), delay);
     timer.unref?.();
   };
-  const refresh = async (): Promise<void> => {
-    // A check already in flight answers this request too.
-    if (stopped || busy) return;
-    busy = true;
+  const check = async (): Promise<void> => {
     clearTimeout(timer);
     try {
       const value = await opts.fetch();
@@ -116,9 +121,16 @@ export function startIntervalPoll<T>(opts: {
     } catch {
       // Transient (offline, timeout, git lock): keep the last-known value.
     } finally {
-      busy = false;
       if (!stopped) schedule(opts.intervalMs);
     }
+  };
+  const refresh = (): Promise<void> => {
+    if (stopped) return Promise.resolve();
+    // A check already in flight answers this request too.
+    inFlight ??= check().finally(() => {
+      inFlight = undefined;
+    });
+    return inFlight;
   };
   schedule(opts.firstDelayMs);
   return {
@@ -126,6 +138,38 @@ export function startIntervalPoll<T>(opts: {
     stop() {
       stopped = true;
       clearTimeout(timer);
+    },
+  };
+}
+
+/**
+ * Poller with no timer: it reads only when asked (window focus, panel open,
+ * after a run). Requests made while a read is running share that read.
+ */
+export function startOnDemandPoll<T>(opts: {
+  fetch: () => Promise<T | null>;
+  publish: (value: T) => void;
+}): Poller {
+  let stopped = false;
+  let inFlight: Promise<void> | undefined;
+  const check = async (): Promise<void> => {
+    try {
+      const value = await opts.fetch();
+      if (value !== null && !stopped) opts.publish(value);
+    } catch {
+      // Keep the last-known value.
+    }
+  };
+  return {
+    refresh() {
+      if (stopped) return Promise.resolve();
+      inFlight ??= check().finally(() => {
+        inFlight = undefined;
+      });
+      return inFlight;
+    },
+    stop() {
+      stopped = true;
     },
   };
 }

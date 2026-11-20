@@ -2,17 +2,24 @@ import { createProjectHealthScanner, type ProjectHealthScan } from "../core/proj
 import { getGitDirtyFileCount } from "../utils/git.js";
 import { getGitHubOpenCounts, type GitHubOpenCounts } from "../utils/github.js";
 import { startGitHubCIPoll, type GitHubCI } from "../utils/github-ci.js";
-import { createSharedPolls, startIntervalPoll, type SharedPolls } from "../utils/shared-poll.js";
+import {
+  createSharedPolls,
+  startIntervalPoll,
+  startOnDemandPoll,
+  type SharedPolls,
+} from "../utils/shared-poll.js";
+import { readGitHead, type GitHead } from "./git-target.js";
 
 /**
  * Daemon-wide repo pollers, shared by every window on the same repo so
  * opening a project twice doesn't double the git/`gh` processes.
- * Keys: `dirtyFiles`, `gitHubCI` and `projectHealth` by resolved cwd (a
+ * Keys: `dirtyFiles`, `gitHead`, `gitHubCI` and `projectHealth` by resolved cwd (a
  * worktree has its own files and HEAD); `gitHubCounts` by `owner/repo`
  * (counts are repo-wide).
  */
 export interface RepoPolls {
   readonly dirtyFiles: SharedPolls<number>;
+  readonly gitHead: SharedPolls<GitHead>;
   readonly gitHubCounts: SharedPolls<GitHubOpenCounts>;
   readonly gitHubCI: SharedPolls<GitHubCI | null>;
   readonly projectHealth: SharedPolls<ProjectHealthScan>;
@@ -28,6 +35,11 @@ export function createRepoPolls(): RepoPolls {
         firstDelayMs: 5000,
         intervalMs: 5000,
       }),
+    ),
+    // The branch can be switched in a terminal. No timer: read on window focus,
+    // Git panel open and after runs, one read at a time per folder.
+    gitHead: createSharedPolls((cwd, publish) =>
+      startOnDemandPoll({ fetch: () => readGitHead(cwd), publish }),
     ),
     // Issues/PRs change outside the app; network-bound, so a slow cadence well
     // under the search API's rate budget (2 calls per tick).

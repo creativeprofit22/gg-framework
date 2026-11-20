@@ -211,7 +211,7 @@ import {
   registerRuntimeModels,
 } from "./core/model-registry.js";
 import { resolveStartOrFallback } from "./core/resolve-start.js";
-import { getGitBranch, getGitDirtyFileCount, isGitRepo } from "./utils/git.js";
+import { isGitRepo } from "./utils/git.js";
 import { createCINotStartedNotify, type GitHubCI } from "./utils/github-ci.js";
 import type { ProjectHealthScan } from "./core/project-health-scan.js";
 import { scoreProjectHealth, type ProjectHealth } from "./core/project-health-score.js";
@@ -219,7 +219,7 @@ import { createRepoPolls, type RepoPolls } from "./app-sidecar/repo-polls.js";
 import { resolveThinkingRequest } from "./app-sidecar/thinking-request.js";
 import { KEN_ALLOWED_MCP_SERVERS, lastAssistantText } from "./app-sidecar/ken-context.js";
 import { prepareAttachments, type AppAttachment } from "./app-sidecar/attachments.js";
-import { getGitHubBranch, getGitHubRepoSlug, type GitHubBranch } from "./utils/github.js";
+import { getGitHubRepoSlug, type GitHubBranch } from "./utils/github.js";
 import { getGitOverview } from "./utils/git-overview.js";
 
 let daemonRepoPolls: RepoPolls | undefined;
@@ -2742,7 +2742,7 @@ async function createSession(
   // Refresh the GitHub counts and broadcast only on change. Transient failures
   // keep the last-known numbers so the chips don't flicker off on a timeout.
   function refreshGitHubCounts(): void {
-    repoWatch.gitHubCounts?.refresh();
+    void repoWatch.gitHubCounts?.refresh();
   }
 
   // tool_call_end carries no tool name (only the id), so remember each call's
@@ -3573,13 +3573,9 @@ async function createSession(
           .then(() => trophies.recordRun(runFacts, opts.id));
       }
       // A run may have switched branches, changed files, or spawned/finished
-      // background tasks. Refresh the workspace extras once it settles.
-      [gitBranch, gitIsRepo, gitDirtyFileCount] = await Promise.all([
-        getGitBranch(gitCwd).catch(() => gitBranch),
-        isGitRepo(gitCwd).catch(() => gitIsRepo),
-        getGitDirtyFileCount(gitCwd).catch(() => gitDirtyFileCount),
-      ]);
-      gitHubBranch = await getGitHubBranch(gitCwd, gitHubSlug, gitBranch);
+      // background tasks. Refresh the workspace extras once it settles; the
+      // shared read also updates every other window on this folder.
+      await repoWatch.refreshGit();
       // A run may have opened/closed issues or PRs — refresh fire-and-forget so
       // teardown isn't delayed by the network. Broadcasts itself on change.
       void refreshGitHubCounts();
@@ -4646,8 +4642,9 @@ async function createSession(
 
   // Keep the dirty count, GitHub issue/PR counts and CI current while idle
   // (they change outside the agent: editor saves, commits, teammates). Branch/
-  // repo state already refreshes after agent runs. The pollers are shared with
-  // every other window on the same repo; each window broadcasts only changes.
+  // repo state has no timer: it is read after runs, on window focus and when the
+  // Git panel opens (`refreshGit`). The pollers are shared with every other
+  // window on the same repo; each window broadcasts only changes.
   function watchRepo(dir: string) {
     const repoKey = path.resolve(dir);
     const dirtyFiles = repoPolls.dirtyFiles.subscribe(repoKey, (next) => {
@@ -4655,6 +4652,26 @@ async function createSession(
       gitDirtyFileCount = next;
       broadcast("extras", footerExtras());
     });
+    // No replay: another window's last read may be older than this window's own.
+    const gitHead = repoPolls.gitHead.subscribe(
+      repoKey,
+      (next) => {
+        const isRepo = next.isRepo ?? gitIsRepo;
+        if (
+          next.branch === gitBranch &&
+          isRepo === gitIsRepo &&
+          next.gitHubBranch.gitHubBranchUrl === gitHubBranch.gitHubBranchUrl &&
+          next.gitHubBranch.gitHubBranchOnGitHub === gitHubBranch.gitHubBranchOnGitHub
+        ) {
+          return;
+        }
+        gitBranch = next.branch;
+        gitIsRepo = isRepo;
+        gitHubBranch = next.gitHubBranch;
+        broadcast("extras", footerExtras());
+      },
+      { replayLatest: false },
+    );
     // Failed checks publish nothing, so the chips keep their last-known numbers
     // instead of flickering off on a timeout. None when origin isn't GitHub.
     const gitHubCounts = gitHubSlug
@@ -4684,8 +4701,13 @@ async function createSession(
       gitHubCounts,
       ci,
       health,
+      /** Re-read branch and uncommitted count; at most one read per folder at a time. */
+      async refreshGit(): Promise<void> {
+        await Promise.all([gitHead.refresh(), dirtyFiles.refresh()]);
+      },
       unsubscribe(): void {
         dirtyFiles.unsubscribe();
+        gitHead.unsubscribe();
         gitHubCounts?.unsubscribe();
         ci.unsubscribe();
         health?.unsubscribe();
@@ -6466,9 +6488,24 @@ async function createSession(
       return;
     }
 
+    // Re-read the branch and uncommitted count now (window focus). Shared with
+    // every window on this folder; changes arrive as `extras` events.
+    if (method === "POST" && url === "/git/refresh") {
+      void (async () => {
+        await repoWatch.refreshGit();
+        if (!res.destroyed) {
+          res.writeHead(204);
+          res.end();
+        }
+      })();
+      return;
+    }
+
     // The Git panel: open issues and PRs on the project's GitHub repo, and the
     // working tree's changed files with line counts (see utils/git-overview).
     if (method === "GET" && url === "/git/overview") {
+      // Opening the panel also refreshes the branch key; the panel doesn't wait.
+      void repoWatch.refreshGit();
       const controller = new AbortController();
       res.once("close", () => controller.abort());
       void (async () => {

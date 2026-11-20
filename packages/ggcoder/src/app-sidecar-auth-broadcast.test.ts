@@ -1054,3 +1054,55 @@ describe("a run started right at boot", () => {
     }
   }, 90_000);
 });
+
+describe("a branch switched outside the agent", () => {
+  function git(...args: string[]): void {
+    execFileSync("git", ["-c", "user.name=GG Test", "-c", "user.email=test@example.com", ...args], {
+      cwd: tmpProject,
+      stdio: "ignore",
+    });
+  }
+  function initRepo(): void {
+    git("-c", "init.defaultBranch=main", "init", "-q");
+    git("commit", "-q", "--allow-empty", "-m", "init");
+  }
+
+  it("reaches every window on the folder after one refresh", async () => {
+    initRepo();
+    const a = await createSession();
+    const b = await createSession();
+    const streamA = await openEventStream(a);
+    const streamB = await openEventStream(b);
+    await waitFor(() => streamA.types.includes("ready") && streamB.types.includes("ready"));
+    expect((await request("GET", "/state", { session: a })).json.gitBranch).toBe("main");
+    expect((await request("GET", "/state", { session: b })).json.gitBranch).toBe("main");
+
+    git("switch", "-q", "-c", "feature");
+    // Nothing re-reads the branch on its own.
+    expect((await request("GET", "/state", { session: b })).json.gitBranch).toBe("main");
+
+    const refreshed = await request("POST", "/git/refresh", { session: a });
+    expect(refreshed.status).toBe(204);
+    expect((await request("GET", "/state", { session: a })).json.gitBranch).toBe("feature");
+    expect((await request("GET", "/state", { session: b })).json.gitBranch).toBe("feature");
+    const sawFeature = (stream: Awaited<ReturnType<typeof openEventStream>>) =>
+      stream.events.some((e) => e.type === "extras" && e.data.gitBranch === "feature");
+    await waitFor(() => sawFeature(streamA) && sawFeature(streamB));
+  });
+
+  it("updates when the Git panel opens", async () => {
+    initRepo();
+    const session = await createSession();
+    expect((await request("GET", "/state", { session })).json.gitBranch).toBe("main");
+
+    git("switch", "-q", "-c", "panel-open");
+    const overview = await request("GET", "/git/overview", { session });
+    expect(overview.status).toBe(200);
+    let state = await request("GET", "/state", { session });
+    for (let i = 0; i < 40 && state.json.gitBranch !== "panel-open"; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      state = await request("GET", "/state", { session });
+    }
+    expect(state.json.gitBranch).toBe("panel-open");
+  });
+});

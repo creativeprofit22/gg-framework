@@ -1176,6 +1176,31 @@ pub(crate) async fn agent_git_overview(
     sidecar_json(res).await
 }
 
+/// Proxy: re-read this pane's branch and uncommitted count now (window focus).
+/// The daemon shares the read with every pane on the folder and pushes changes
+/// as `extras` events, so this returns nothing.
+#[tauri::command]
+pub(crate) async fn agent_git_refresh(
+    webview: WebviewWindow,
+    pane_id: String,
+    client: State<'_, reqwest::Client>,
+) -> Result<(), String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
+    let res = client
+        .post(format!("{}/git/refresh", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = res.status();
+    if status.is_success() {
+        return Ok(());
+    }
+    let body = res.json::<serde_json::Value>().await.ok();
+    Err(sidecar_error_message(status, body.as_ref()))
+}
+
 /// Proxy: the project health checklist (`.gg-checklist.json` joined with the
 /// built-in items and their current status). A corrupt record surfaces as Err.
 #[tauri::command]

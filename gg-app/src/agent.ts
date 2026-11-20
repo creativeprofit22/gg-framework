@@ -3298,6 +3298,8 @@ export interface PaneAgentClient extends NotesClient {
   enhancePrompt(text: string): Promise<EnhanceResult>;
   /** Best-effort prompt-cache prewarm for this pane; never throws. */
   prewarmCache(): Promise<void>;
+  /** Re-read branch and uncommitted count now; changes arrive as `extras` events. Never throws. */
+  refreshGitState?(): Promise<void>;
   sendPrompt(
     text: string,
     attachments?: Attachment[],
@@ -3717,6 +3719,14 @@ export function createPaneAgentClient(paneId: string): PaneAgentClient {
         await call("agent_prewarm");
       } catch (e) {
         await logError(`agent_prewarm failed: ${String(e)}`);
+      }
+    },
+    refreshGitState: async () => {
+      try {
+        await ready();
+        await call("agent_git_refresh");
+      } catch (e) {
+        await logError(`agent_git_refresh failed: ${String(e)}`);
       }
     },
     sendPrompt: async (text, attachments = [], meta) => {

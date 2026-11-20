@@ -306,6 +306,30 @@ describe("empty session starting points", () => {
   });
 });
 
+describe("git state refresh on window focus (mocked native transport)", () => {
+  it("asks every pane's session to re-read git once per focus, and never while unfocused", async () => {
+    const first = client("git-focus-a", 1);
+    const second = client("git-focus-b", 1);
+    first.refreshGitState = vi.fn(async () => undefined);
+    second.refreshGitState = vi.fn(async () => undefined);
+    render(
+      <>
+        <AgentPane client={first} target={target} />
+        <AgentPane client={second} target={target} />
+      </>,
+    );
+    await waitFor(() => expect(second.listCommands).toHaveBeenCalled());
+    expect(first.refreshGitState).not.toHaveBeenCalled();
+    expect(second.refreshGitState).not.toHaveBeenCalled();
+
+    await act(async () => {
+      fireEvent.focus(window);
+    });
+    expect(first.refreshGitState).toHaveBeenCalledTimes(1);
+    expect(second.refreshGitState).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("command refresh ordering (mocked native transport)", () => {
   it("does not apply a previous client's catalog after switching sessions", async () => {
     const oldPane = client("old-command-owner", 1);

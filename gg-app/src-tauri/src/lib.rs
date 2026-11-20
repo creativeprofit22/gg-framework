@@ -271,6 +271,7 @@ pub fn run() {
             commands::agent::agent_verify_plan_status,
             commands::agent::agent_approve_verify_plan,
             commands::agent::agent_git_overview,
+            commands::agent::agent_git_refresh,
             commands::agent::agent_run_tasks,
             commands::agent::agent_delete_task,
             commands::agent::agent_set_thinking,

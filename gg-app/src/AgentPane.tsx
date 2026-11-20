@@ -1013,13 +1013,15 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   useEffect(() => {
     const onFocus = () => {
       void refreshCommands();
+      // A branch switched in a terminal shows up when the user comes back.
+      void client.refreshGitState?.();
     };
     window.addEventListener("focus", onFocus);
     return () => {
       invalidateCommandRequests();
       window.removeEventListener("focus", onFocus);
     };
-  }, [refreshCommands, invalidateCommandRequests]);
+  }, [refreshCommands, invalidateCommandRequests, client]);
   const [slashIndex, setSlashIndex] = useState(0);
   // Escape hides the slash menu for this exact draft; any edit brings it back.
   const [slashDismissedFor, setSlashDismissedFor] = useState<string | null>(null);

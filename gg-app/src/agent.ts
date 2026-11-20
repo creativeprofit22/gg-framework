@@ -11,6 +11,11 @@ import { toast } from "./toast";
 import { PRODUCT_DISPLAY_NAME } from "./brand";
 import { isSlashCommandsResponse } from "@kenkaiiii/gg-core/slash-command-contract";
 import {
+  isGitBranchListResponse,
+  type GitBranchListOptions,
+  type GitBranchListResponse,
+} from "@kenkaiiii/gg-core/git-branch-contract";
+import {
   isProgrammaticChatRequest,
   isProgrammaticChatResponse,
   type ProgrammaticChatRequest,
@@ -2102,6 +2107,31 @@ export interface GitOverview {
 export async function getGitOverview(): Promise<GitOverview> {
   await waitForReady();
   return invoke<GitOverview>("agent_git_overview");
+}
+
+export type {
+  GitBranchListOk,
+  GitBranchListOptions,
+  GitBranchListResponse,
+  GitCurrentBranch,
+  GitDefaultBranch,
+  GitLocalBranch,
+  GitRemoteBranch,
+} from "@kenkaiiii/gg-core/git-branch-contract";
+
+/** The branch switcher's list: local branches by recent use plus origin-only ones. */
+export async function getGitBranches(
+  options: GitBranchListOptions & { paneId?: string } = {},
+): Promise<GitBranchListResponse> {
+  const paneId = options.paneId ?? "primary";
+  await waitForPaneReady(paneId);
+  const response = await invoke<unknown>("agent_git_branches", {
+    paneId,
+    query: options.query,
+    limit: options.limit,
+  });
+  if (!isGitBranchListResponse(response)) throw new Error("Invalid branch list response");
+  return response;
 }
 
 /** List workflow (prompt-template) slash commands the agent can run. */

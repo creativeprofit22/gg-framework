@@ -1176,6 +1176,55 @@ pub(crate) async fn agent_git_overview(
     sidecar_json(res).await
 }
 
+/// Fetch the branch switcher's list for one session. Split from the command so
+/// tests can drive it against a local listener.
+pub(crate) async fn get_git_branches(
+    client: &reqwest::Client,
+    base_url: &str,
+    session_id: &str,
+    query: Option<&str>,
+    limit: Option<u32>,
+) -> Result<serde_json::Value, String> {
+    let mut params: Vec<(&str, String)> = Vec::new();
+    if let Some(query) = query.filter(|query| !query.is_empty()) {
+        params.push(("q", query.to_string()));
+    }
+    if let Some(limit) = limit {
+        params.push(("limit", limit.to_string()));
+    }
+    let res = client
+        .get(format!("{base_url}/git/branches"))
+        .query(&params)
+        .header("x-gg-session", session_id)
+        .timeout(std::time::Duration::from_secs(30))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    sidecar_json(res).await
+}
+
+/// Proxy: local branches by recent use plus origin-only ones, for the switcher.
+#[tauri::command]
+pub(crate) async fn agent_git_branches(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+    pane_id: Option<String>,
+    query: Option<String>,
+    limit: Option<u32>,
+) -> Result<serde_json::Value, String> {
+    let pane_id = pane_id.as_deref().unwrap_or(PRIMARY_PANE_ID);
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = pane_session_for(&webview, pane_id).ok_or("session not ready")?;
+    get_git_branches(
+        &client,
+        &sidecar_base(port),
+        &gg_sid,
+        query.as_deref(),
+        limit,
+    )
+    .await
+}
+
 /// Proxy: re-read this pane's branch and uncommitted count now (window focus).
 /// The daemon shares the read with every pane on the folder and pushes changes
 /// as `extras` events, so this returns nothing.
@@ -2440,6 +2489,129 @@ mod tests {
                 Err("Invalid Autopilot response".into())
             );
         }
+    }
+
+    fn git_branches_proxy_result(
+        query: Option<&str>,
+        limit: Option<u32>,
+        expected_path: &'static str,
+        status: reqwest::StatusCode,
+        response_body: &'static str,
+    ) -> Result<serde_json::Value, String> {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            let mut request = Vec::new();
+            while !String::from_utf8_lossy(&request).contains("\r\n\r\n") {
+                let mut chunk = [0_u8; 4096];
+                let read = stream.read(&mut chunk).unwrap();
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..read]);
+            }
+            let request = String::from_utf8_lossy(&request);
+            let request_lower = request.to_ascii_lowercase();
+            assert!(
+                request.starts_with(&format!("GET {expected_path} HTTP/1.1")),
+                "unexpected request: {request}"
+            );
+            assert!(request_lower.contains("x-gg-session: pane-session"));
+            assert!(request_lower.contains("x-gg-token: daemon-token"));
+
+            let response = format!(
+                "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                status.as_u16(),
+                status.canonical_reason().unwrap_or("Unknown"),
+                response_body.len(),
+                response_body,
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("x-gg-token", "daemon-token".parse().unwrap());
+        let client = http_client_builder()
+            .default_headers(headers)
+            .build()
+            .unwrap();
+        let result = tauri::async_runtime::block_on(get_git_branches(
+            &client,
+            &format!("http://{address}"),
+            "pane-session",
+            query,
+            limit,
+        ));
+        server.join().unwrap();
+        result
+    }
+
+    #[test]
+    fn git_branches_sends_query_limit_and_session() {
+        let body = r#"{"status":"not-a-repo"}"#;
+        assert_eq!(
+            git_branches_proxy_result(
+                Some("feat/x y"),
+                Some(7),
+                "/git/branches?q=feat%2Fx+y&limit=7",
+                reqwest::StatusCode::OK,
+                body,
+            ),
+            Ok(serde_json::json!({ "status": "not-a-repo" }))
+        );
+        assert_eq!(
+            git_branches_proxy_result(None, None, "/git/branches", reqwest::StatusCode::OK, body),
+            Ok(serde_json::json!({ "status": "not-a-repo" }))
+        );
+        assert_eq!(
+            git_branches_proxy_result(
+                Some(""),
+                Some(50),
+                "/git/branches?limit=50",
+                reqwest::StatusCode::OK,
+                body,
+            ),
+            Ok(serde_json::json!({ "status": "not-a-repo" }))
+        );
+    }
+
+    #[test]
+    fn git_branches_passes_through_daemon_errors() {
+        assert_eq!(
+            git_branches_proxy_result(
+                None,
+                None,
+                "/git/branches",
+                reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+                r#"{"error":"Could not read this project's branches"}"#,
+            ),
+            Err("Could not read this project's branches".into())
+        );
+    }
+
+    #[test]
+    fn git_branches_propagates_transport_failure() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            drop(listener.accept().unwrap());
+        });
+        let client = http_client_builder().build().unwrap();
+        let result = tauri::async_runtime::block_on(get_git_branches(
+            &client,
+            &format!("http://{address}"),
+            "pane-session",
+            None,
+            None,
+        ));
+        server.join().unwrap();
+        assert!(result.is_err());
     }
 
     #[test]

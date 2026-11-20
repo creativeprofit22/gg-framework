@@ -68,6 +68,17 @@ describe("getGitBranches", () => {
     expect(call?.args).toMatchObject({ paneId: "primary" });
   });
 
+  it("clamps the limit to a whole number the Rust u32 accepts", async () => {
+    const calls = respond(OK);
+    await getGitBranches({ limit: 7.9 });
+    await getGitBranches({ limit: -3 });
+    await getGitBranches({});
+    const limits = calls
+      .filter((call) => call.command === "agent_git_branches")
+      .map((call) => (call.args as { limit?: number }).limit);
+    expect(limits).toEqual([7, 1, undefined]);
+  });
+
   it("does not ask for branches before the pane is ready", async () => {
     vi.useFakeTimers();
     try {

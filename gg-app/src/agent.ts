@@ -11,6 +11,7 @@ import { toast } from "./toast";
 import { PRODUCT_DISPLAY_NAME } from "./brand";
 import { isSlashCommandsResponse } from "@kenkaiiii/gg-core/slash-command-contract";
 import {
+  clampGitBranchListLimit,
   isGitBranchListResponse,
   type GitBranchListOptions,
   type GitBranchListResponse,
@@ -2128,7 +2129,8 @@ export async function getGitBranches(
   const response = await invoke<unknown>("agent_git_branches", {
     paneId,
     query: options.query,
-    limit: options.limit,
+    // Rust takes `Option<u32>`: a decimal or negative limit would fail deserialization before the daemon clamps it.
+    limit: options.limit === undefined ? undefined : clampGitBranchListLimit(options.limit),
   });
   if (!isGitBranchListResponse(response)) throw new Error("Invalid branch list response");
   return response;

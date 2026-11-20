@@ -60,7 +60,7 @@ export interface GitBranchListOptions {
   limit?: number;
 }
 
-/** Non-numbers fall back to the default; numbers are floored into 1..max. */
+/** Numbers and numeric strings (e.g. a ?limit= value) are floored into 1..max; anything else falls back to the default. */
 export function clampGitBranchListLimit(value: unknown): number {
   const numeric = typeof value === "string" && value.trim() !== "" ? Number(value) : value;
   if (typeof numeric !== "number" || !Number.isFinite(numeric)) {

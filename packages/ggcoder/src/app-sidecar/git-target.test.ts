@@ -6,7 +6,7 @@ import { promisify } from "node:util";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { slowRevParseGit } from "../test-support/slow-git.js";
-import { readGitState, resolveGitCwd } from "./git-target.js";
+import { readGitHead, readGitState, resolveGitCwd } from "./git-target.js";
 
 const execFileAsync = promisify(execFile);
 const tempDirs: string[] = [];
@@ -140,5 +140,20 @@ describe("readGitState", () => {
       gitHubBranch: { gitHubBranchUrl: null, gitHubBranchOnGitHub: null },
       settled: true,
     });
+  });
+});
+
+describe("readGitHead", () => {
+  it("tells a GitHub origin apart from a missing or non-GitHub one", async () => {
+    const cwd = await mkdtemp(path.join(tmpdir(), "gg-git-target-head-"));
+    tempDirs.push(cwd);
+    const git = (...args: string[]) => execFileAsync("git", args, { cwd });
+    await git("init", "-q", "-b", "main");
+
+    expect((await readGitHead(cwd))?.gitHubSlug).toBeNull();
+    await git("remote", "add", "origin", "https://github.com/o/r.git");
+    expect((await readGitHead(cwd))?.gitHubSlug).toBe("o/r");
+    await git("remote", "set-url", "origin", "https://gitlab.com/o/r.git");
+    expect((await readGitHead(cwd))?.gitHubSlug).toBeNull();
   });
 });

@@ -1127,5 +1127,15 @@ describe("a branch switched outside the agent", () => {
     expect(state.json.gitHubRepoUrl).toBe("https://github.com/example-org/new-repo");
     // Branch link and repo link name the same repo (the branch was never pushed).
     expect(String(state.json.gitHubBranchUrl ?? "")).not.toMatch(/old-repo/);
+
+    // Moved off GitHub: no GitHub links at all, rather than the last repo's.
+    git("remote", "set-url", "origin", "https://gitlab.com/example-org/new-repo.git");
+    expect((await request("POST", "/git/refresh", { session })).status).toBe(204);
+    for (let i = 0; i < 40 && state.json.gitHubRepoUrl !== null; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      state = await request("GET", "/state", { session });
+    }
+    expect(state.json.gitHubRepoUrl).toBeNull();
+    expect(state.json.gitHubBranchUrl ?? null).toBeNull();
   });
 });

@@ -4656,8 +4656,8 @@ async function createSession(
     const gitHead = repoPolls.gitHead.subscribe(
       repoKey,
       (next) => {
-        // origin now points at another GitHub repo: counts, CI and links all follow it.
-        if (next.gitHubSlug !== null && next.gitHubSlug !== gitHubSlug) {
+        // origin now points at another repo (or none on GitHub): counts, CI and links all follow it.
+        if (next.gitHubSlug !== undefined && next.gitHubSlug !== gitHubSlug) {
           retargetGit({ reread: true }).catch((err: unknown) => {
             log("WARN", "app-sidecar", "git remote retarget failed", {
               message: err instanceof Error ? err.message : String(err),

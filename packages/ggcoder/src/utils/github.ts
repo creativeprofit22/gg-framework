@@ -1,6 +1,6 @@
 import { withoutQwenRuntimeSecret } from "../tools/safe-env.js";
 import { execFile } from "node:child_process";
-import { runBackgroundGit, type GitReadOptions } from "./git.js";
+import { BackgroundGitError, runBackgroundGit, type GitReadOptions } from "./git.js";
 
 /**
  * Parse an `owner/repo` slug from a GitHub remote URL. Handles the three
@@ -20,14 +20,29 @@ export function parseGitHubSlug(remoteUrl: string): string | null {
 
 /** The `owner/repo` slug of the cwd's `origin` remote, or null when absent/non-GitHub. */
 export async function getGitHubRepoSlug(cwd: string): Promise<string | null> {
+  return readGitHubRepoSlug(cwd).catch(() => null);
+}
+
+/**
+ * Like {@link getGitHubRepoSlug}, but a timeout or failed spawn rejects instead
+ * of answering null, so a caller can keep the last-known repo.
+ */
+export async function readGitHubRepoSlug(
+  cwd: string,
+  options: GitReadOptions = {},
+): Promise<string | null> {
   try {
     const { stdout } = await runBackgroundGit(["remote", "get-url", "origin"], {
       cwd,
-      timeoutMs: 2000,
+      timeoutMs: options.timeoutMs ?? 2000,
     });
     return parseGitHubSlug(stdout);
-  } catch {
-    return null;
+  } catch (error) {
+    // Git ran and exited non-zero: no origin remote, or not a repo.
+    if (error instanceof BackgroundGitError && typeof error.code === "number" && !error.killed) {
+      return null;
+    }
+    throw error;
   }
 }
 

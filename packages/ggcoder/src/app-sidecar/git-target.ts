@@ -5,7 +5,12 @@ import {
   isGitRepo,
   type GitReadOptions,
 } from "../utils/git.js";
-import { getGitHubBranch, getGitHubRepoSlug, type GitHubBranch } from "../utils/github.js";
+import {
+  getGitHubBranch,
+  getGitHubRepoSlug,
+  readGitHubRepoSlug,
+  type GitHubBranch,
+} from "../utils/github.js";
 
 /**
  * The folder whose git state a window's titlebar shows (branch, uncommitted
@@ -73,8 +78,8 @@ export interface GitHead {
   branch: string | null;
   /** null: git didn't answer (timeout, failed spawn); keep the last-known value. */
   isRepo: boolean | null;
-  /** origin's GitHub slug; null when unreadable or not GitHub, so keep the last-known one. */
-  gitHubSlug: string | null;
+  /** origin's GitHub slug. null: none on GitHub; undefined: git didn't answer, keep the last one. */
+  gitHubSlug: string | null | undefined;
   gitHubBranch: GitHubBranch;
 }
 
@@ -83,9 +88,9 @@ export async function readGitHead(dir: string): Promise<GitHead | null> {
   const [branch, isRepo, gitHubSlug] = await Promise.all([
     getGitBranch(dir).catch(() => null),
     isGitRepo(dir).catch(() => null),
-    getGitHubRepoSlug(dir).catch(() => null),
+    readGitHubRepoSlug(dir).catch(() => undefined),
   ]);
   if (branch === null && isRepo === null) return null;
-  const gitHubBranch = await getGitHubBranch(dir, gitHubSlug, branch);
+  const gitHubBranch = await getGitHubBranch(dir, gitHubSlug ?? null, branch);
   return { branch, isRepo, gitHubSlug, gitHubBranch };
 }

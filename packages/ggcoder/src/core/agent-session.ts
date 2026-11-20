@@ -2600,6 +2600,8 @@ export class AgentSession {
             provider: this.provider,
             model: this.model,
             transport: "claude_code",
+            // One daemon logs many chats under one sid; this ties a line to its chat.
+            sessionId: this.sessionId,
           });
         } else if (event.type === "retry") {
           log("INFO", "stream", "retry", {

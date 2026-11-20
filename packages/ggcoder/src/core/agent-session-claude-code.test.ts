@@ -289,6 +289,7 @@ describe("AgentSession on a Claude subscription", () => {
       provider: "anthropic",
       model: expect.any(String),
       transport: "claude_code",
+      sessionId: session.getState().sessionId,
     });
     expect(logMock).toHaveBeenCalledWith("INFO", "stream", "retry", {
       reason: "overloaded",

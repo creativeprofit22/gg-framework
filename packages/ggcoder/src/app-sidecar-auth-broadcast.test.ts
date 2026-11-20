@@ -5,6 +5,7 @@ import path from "node:path";
 import { execFileSync, spawn, type ChildProcessByStdio } from "node:child_process";
 import type { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
+import { isGitBranchListResponse } from "@kenkaiiii/gg-core/git-branch-contract";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 /**
@@ -1104,6 +1105,41 @@ describe("a branch switched outside the agent", () => {
       state = await request("GET", "/state", { session });
     }
     expect(state.json.gitBranch).toBe("panel-open");
+  });
+
+  it("lists branches for the branch switcher", async () => {
+    const session = await createSession();
+    const outside = await request("GET", "/git/branches", { session });
+    expect(outside.status).toBe(200);
+    expect(outside.json).toEqual({ status: "not-a-repo" });
+
+    initRepo();
+    git("branch", "feature/one");
+    git("branch", "feature/two");
+    git("branch", "other");
+    const all = await request("GET", "/git/branches", { session });
+    expect(all.status).toBe(200);
+    expect(isGitBranchListResponse(all.json)).toBe(true);
+    expect(all.json).toMatchObject({
+      status: "ok",
+      current: { name: "main", detached: false },
+      hasCommits: true,
+      remote: null,
+      defaultBranch: { name: "main", source: "fallback" },
+      localTotal: 4,
+      remoteOnly: [],
+      truncated: false,
+    });
+    expect((all.json.local as Array<{ name: string }>)[0]!.name).toBe("main");
+
+    const searched = await request("GET", "/git/branches?q=%20FEATURE%20&limit=1", { session });
+    expect(searched.status).toBe(200);
+    expect(searched.json).toMatchObject({ localTotal: 2, truncated: true });
+    expect(searched.json.local as unknown[]).toHaveLength(1);
+
+    const junkLimit = await request("GET", "/git/branches?limit=abc", { session });
+    expect(junkLimit.json).toMatchObject({ localTotal: 4, truncated: false });
+    expect(junkLimit.json.local as unknown[]).toHaveLength(4);
   });
 
   it("follows origin to another GitHub repo for every link", async () => {

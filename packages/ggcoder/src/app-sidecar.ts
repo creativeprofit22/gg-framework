@@ -221,6 +221,7 @@ import { KEN_ALLOWED_MCP_SERVERS, lastAssistantText } from "./app-sidecar/ken-co
 import { prepareAttachments, type AppAttachment } from "./app-sidecar/attachments.js";
 import { getGitHubRepoSlug, type GitHubBranch } from "./utils/github.js";
 import { getGitOverview } from "./utils/git-overview.js";
+import { listGitBranches } from "./utils/git-branches.js";
 
 let daemonRepoPolls: RepoPolls | undefined;
 /** One set of repo pollers per daemon process, shared by every logical session. */
@@ -493,6 +494,10 @@ import {
 } from "./app-sidecar-session-mutation.js";
 import { AppSidecarContinuationSession } from "./app-sidecar-continuation-session.js";
 import type { AskUserAcknowledgement, KenState } from "@kenkaiiii/gg-core/desktop-session-ux";
+import {
+  clampGitBranchListLimit,
+  normalizeGitBranchQuery,
+} from "@kenkaiiii/gg-core/git-branch-contract";
 import { runContextProfileRequest } from "./app-sidecar-context-profile.js";
 import { runEnhancePromptRequest } from "./app-sidecar-enhance.js";
 import {
@@ -6528,6 +6533,28 @@ async function createSession(
         } catch (error) {
           log("WARN", "app-sidecar", "git overview failed", { error: String(error) });
           if (!res.destroyed) json(res, 500, { error: "Could not read this project's git status" });
+        }
+      })();
+      return;
+    }
+
+    // The branch switcher: local branches by recent use plus origin-only ones.
+    if (method === "GET" && (url === "/git/branches" || url.startsWith("/git/branches?"))) {
+      const params = new URL(url, `http://${host}`).searchParams;
+      const controller = new AbortController();
+      res.once("close", () => controller.abort());
+      void (async () => {
+        try {
+          const branches = await listGitBranches(cwd, {
+            query: normalizeGitBranchQuery(params.get("q")),
+            limit: clampGitBranchListLimit(params.get("limit")),
+            signal: controller.signal,
+          });
+          if (!res.destroyed) json(res, 200, branches);
+        } catch (error) {
+          if (res.destroyed) return;
+          log("WARN", "app-sidecar", "git branch list failed", { error: String(error) });
+          json(res, 500, { error: "Could not read this project's branches" });
         }
       })();
       return;

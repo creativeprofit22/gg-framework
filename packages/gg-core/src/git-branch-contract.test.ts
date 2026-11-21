@@ -7,6 +7,7 @@ import {
   GIT_BRANCH_SWITCH_MAX_FILES,
   GIT_BRANCH_SWITCH_MAX_PANES,
   GIT_BRANCH_SWITCH_REASON_MAX_LENGTH,
+  isGitBranchCreateResponse,
   isGitBranchListResponse,
   isGitBranchSwitchResponse,
   normalizeGitBranchQuery,
@@ -190,5 +191,43 @@ describe("isGitBranchSwitchResponse", () => {
       }),
     ).toBe(false);
     expect(isGitBranchSwitchResponse({ status: "not-found", reason: "" })).toBe(false);
+  });
+});
+
+describe("isGitBranchCreateResponse", () => {
+  it("accepts every status", () => {
+    for (const value of [
+      { status: "created", from: "main", to: "feature/x", carriedChanges: true },
+      { status: "created", from: null, to: "fix", carriedChanges: false },
+      { status: "available", branch: "feature/x" },
+      { status: "invalid", reason: "Bad name" },
+      { status: "taken", reason: "Already exists" },
+      { status: "busy", reason: "Busy", panes: ["Fix login"] },
+      { status: "conflict", reason: "Merge in progress", files: ["a.txt"], filesTruncated: false },
+      { status: "not-a-repo" },
+    ]) {
+      expect(isGitBranchCreateResponse(value)).toBe(true);
+    }
+  });
+
+  it("rejects malformed responses and switch-only statuses", () => {
+    expect(isGitBranchCreateResponse(null)).toBe(false);
+    expect(isGitBranchCreateResponse({ status: "switched", from: "a", to: "b" })).toBe(false);
+    expect(isGitBranchCreateResponse({ status: "unchanged", branch: "main" })).toBe(false);
+    expect(isGitBranchCreateResponse({ status: "not-found", reason: "No" })).toBe(false);
+    expect(isGitBranchCreateResponse({ status: "created", from: "main", to: "" })).toBe(false);
+    expect(
+      isGitBranchCreateResponse({ status: "created", from: "main", to: "x", carriedChanges: 1 }),
+    ).toBe(false);
+    expect(isGitBranchCreateResponse({ status: "available", branch: "" })).toBe(false);
+    expect(isGitBranchCreateResponse({ status: "invalid", reason: "" })).toBe(false);
+    expect(
+      isGitBranchCreateResponse({
+        status: "taken",
+        reason: "x".repeat(GIT_BRANCH_SWITCH_REASON_MAX_LENGTH + 1),
+      }),
+    ).toBe(false);
+    expect(isGitBranchCreateResponse({ status: "busy", reason: "Busy" })).toBe(false);
+    expect(isGitBranchCreateResponse({ status: "conflict", reason: "x", files: [] })).toBe(false);
   });
 });

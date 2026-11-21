@@ -222,6 +222,8 @@ import { prepareAttachments, type AppAttachment } from "./app-sidecar/attachment
 import { getGitHubRepoSlug, type GitHubBranch } from "./utils/github.js";
 import { getGitOverview } from "./utils/git-overview.js";
 import {
+  checkGitBranchName,
+  createGitBranch,
   InvalidGitBranchNameError,
   listGitBranches,
   switchGitBranch,
@@ -230,6 +232,7 @@ import {
   GIT_SWITCH_RUN_BLOCKED_MESSAGE,
   gitSwitchRunConflictBody,
   gitSwitchRunningAt,
+  runGitBranchCreate,
   runGitBranchSwitch,
   type GitSwitchPeer,
 } from "./app-sidecar-git-switch.js";
@@ -6658,6 +6661,56 @@ async function createSession(
           }
           log("WARN", "app-sidecar", "git branch switch failed", { error: String(error) });
           json(res, 500, { error: `Could not switch to ${branch}` });
+        }
+      });
+      return;
+    }
+
+    // New branch from HEAD (`git switch -c`), same guard as switching.
+    // `checkOnly` is the read-only name check used while typing.
+    if (method === "POST" && url === "/git/branches/create") {
+      void readBody(req, res).then(async (raw) => {
+        if (raw === null) return;
+        let body: { branch?: unknown; checkOnly?: unknown } | null;
+        try {
+          body = JSON.parse(raw) as { branch?: unknown; checkOnly?: unknown } | null;
+        } catch {
+          json(res, 400, { error: "invalid JSON body" });
+          return;
+        }
+        const branch = body?.branch;
+        if (typeof branch !== "string") {
+          json(res, 400, { error: "branch must be a string" });
+          return;
+        }
+        try {
+          if (body?.checkOnly === true) {
+            const checked = await checkGitBranchName(cwd, branch);
+            if (!res.destroyed) json(res, 200, checked);
+            return;
+          }
+          const result = await runGitBranchCreate({
+            cwd,
+            branch,
+            peers: gitPeersAt(cwd),
+            createBranch: createGitBranch,
+            refresh: () => repoWatch.refreshGit(),
+            inFlight: gitSwitchesInFlight,
+            onRefreshError: (error) =>
+              log("WARN", "app-sidecar", "git refresh after branch create failed", {
+                error: String(error),
+              }),
+          });
+          if (result.status === "created") {
+            log("INFO", "app-sidecar", "created git branch", {
+              carriedChanges: String(result.carriedChanges),
+            });
+          }
+          if (!res.destroyed) json(res, 200, result);
+        } catch (error) {
+          if (res.destroyed) return;
+          log("WARN", "app-sidecar", "git branch create failed", { error: String(error) });
+          json(res, 500, { error: `Could not create ${branch}` });
         }
       });
       return;

@@ -8,6 +8,7 @@ import { execFileSync, spawn, type ChildProcessByStdio } from "node:child_proces
 import type { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import {
+  isGitBranchCreateResponse,
   isGitBranchListResponse,
   isGitBranchSwitchResponse,
 } from "@kenkaiiii/gg-core/git-branch-contract";
@@ -1186,6 +1187,51 @@ describe("a branch switched outside the agent", () => {
       stream.events.some((e) => e.type === "extras" && e.data.gitBranch === "feature");
     await waitFor(() => sawFeature(streamA) && sawFeature(streamB));
     expect((await request("GET", "/state", { session: b })).json.gitBranch).toBe("feature");
+  });
+
+  it("creates a branch from the app, checks names first and tells every window", async () => {
+    initRepo();
+    git("branch", "taken");
+    const a = await createSession();
+    const b = await createSession();
+    const streamA = await openEventStream(a);
+    const streamB = await openEventStream(b);
+    await waitFor(() => streamA.types.includes("ready") && streamB.types.includes("ready"));
+    const create = (body: unknown) => request("POST", "/git/branches/create", { session: a, body });
+
+    expect((await create({})).status).toBe(400);
+    for (const [body, status] of [
+      [{ branch: "fresh", checkOnly: true }, "available"],
+      [{ branch: "a b", checkOnly: true }, "invalid"],
+      [{ branch: "taken", checkOnly: true }, "taken"],
+      [{ branch: "taken" }, "taken"],
+      [{ branch: "-x" }, "invalid"],
+    ] as const) {
+      const checked = await create(body);
+      expect(checked.status).toBe(200);
+      expect(isGitBranchCreateResponse(checked.json)).toBe(true);
+      expect(checked.json.status).toBe(status);
+    }
+    const headNow = () =>
+      execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], {
+        cwd: tmpProject,
+        encoding: "utf8",
+      }).trim();
+    expect(headNow()).toBe("main");
+
+    const created = await create({ branch: "fresh" });
+    expect(created.status).toBe(200);
+    expect(created.json).toEqual({
+      status: "created",
+      from: "main",
+      to: "fresh",
+      carriedChanges: false,
+    });
+    expect(headNow()).toBe("fresh");
+    const sawFresh = (stream: Awaited<ReturnType<typeof openEventStream>>) =>
+      stream.events.some((e) => e.type === "extras" && e.data.gitBranch === "fresh");
+    await waitFor(() => sawFresh(streamA) && sawFresh(streamB));
+    expect((await request("GET", "/state", { session: b })).json.gitBranch).toBe("fresh");
   });
 
   it("refuses a new prompt while a branch switch is still checking out", async () => {

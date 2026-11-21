@@ -1,6 +1,13 @@
-import type { GitBranchSwitchResponse } from "@kenkaiiii/gg-core/git-branch-contract";
+import type {
+  GitBranchCreateResponse,
+  GitBranchSwitchResponse,
+} from "@kenkaiiii/gg-core/git-branch-contract";
 import { describe, expect, it, vi, type Mock } from "vitest";
-import { runGitBranchSwitch, type GitSwitchPeer } from "./app-sidecar-git-switch.js";
+import {
+  runGitBranchCreate,
+  runGitBranchSwitch,
+  type GitSwitchPeer,
+} from "./app-sidecar-git-switch.js";
 
 const switched: GitBranchSwitchResponse = {
   status: "switched",
@@ -116,5 +123,84 @@ describe("runGitBranchSwitch", () => {
       runGitBranchSwitch({ cwd: "/p", branch: "feature", peers: [], ...deps }),
     ).rejects.toThrow("boom");
     expect(deps.inFlight.size).toBe(0);
+  });
+});
+
+describe("runGitBranchCreate", () => {
+  const created: GitBranchCreateResponse = {
+    status: "created",
+    from: "main",
+    to: "feature/new",
+    carriedChanges: true,
+  };
+
+  function createDeps(result: GitBranchCreateResponse = created) {
+    return {
+      createBranch: vi.fn(async () => result),
+      refresh: vi.fn(async () => {}),
+      inFlight: new Set<string>(),
+    };
+  }
+
+  it("refuses while an agent on the folder is busy and never runs git", async () => {
+    const deps = createDeps();
+    const peers = [peer("a", "Fix login", true), peer("b", "Idle")];
+    const result = await runGitBranchCreate({ cwd: "/p", branch: "feature/new", peers, ...deps });
+    expect(result).toMatchObject({ status: "busy", panes: ["Fix login"] });
+    if (result.status === "busy") expect(result.reason).toMatch(/^Can't create a branch while/);
+    expect(deps.createBranch).not.toHaveBeenCalled();
+    expect(deps.refresh).not.toHaveBeenCalled();
+    expect(peers[1]!.noteBranchChange).not.toHaveBeenCalled();
+    expect(deps.inFlight.size).toBe(0);
+  });
+
+  it("tells every pane on the folder, then refreshes", async () => {
+    const deps = createDeps();
+    const order: string[] = [];
+    const peers = [peer("a", "One"), peer("b", "Two")];
+    for (const p of peers) p.noteBranchChange.mockImplementation(() => order.push(`note:${p.id}`));
+    deps.refresh.mockImplementation(async () => {
+      order.push("refresh");
+    });
+    const result = await runGitBranchCreate({ cwd: "/p", branch: "feature/new", peers, ...deps });
+    expect(result).toEqual(created);
+    for (const p of peers) expect(p.noteBranchChange).toHaveBeenCalledWith("main", "feature/new");
+    expect(order).toEqual(["note:a", "note:b", "refresh"]);
+    expect(deps.inFlight.size).toBe(0);
+  });
+
+  it("shares the in-flight lock with a running switch", async () => {
+    let release: () => void = () => {};
+    const switchDeps = setup();
+    switchDeps.switchBranch.mockImplementationOnce(
+      () =>
+        new Promise<GitBranchSwitchResponse>((resolve) => {
+          release = () => resolve(switched);
+        }),
+    );
+    const deps = { ...createDeps(), inFlight: switchDeps.inFlight };
+    const running = runGitBranchSwitch({ cwd: "/p", branch: "feature", peers: [], ...switchDeps });
+    const result = await runGitBranchCreate({ cwd: "/p/", branch: "x", peers: [], ...deps });
+    expect(result).toMatchObject({ status: "busy", panes: [] });
+    expect(deps.createBranch).not.toHaveBeenCalled();
+    release();
+    await running;
+    expect(switchDeps.inFlight.size).toBe(0);
+  });
+
+  it("sends no note and no refresh for taken or invalid names", async () => {
+    const refusals: GitBranchCreateResponse[] = [
+      { status: "taken", reason: "Already exists" },
+      { status: "invalid", reason: "Bad name" },
+    ];
+    for (const refusal of refusals) {
+      const deps = createDeps(refusal);
+      const peers = [peer("a", "One")];
+      const result = await runGitBranchCreate({ cwd: "/p", branch: "x", peers, ...deps });
+      expect(result).toEqual(refusal);
+      expect(peers[0]!.noteBranchChange).not.toHaveBeenCalled();
+      expect(deps.refresh).not.toHaveBeenCalled();
+      expect(deps.inFlight.size).toBe(0);
+    }
   });
 });

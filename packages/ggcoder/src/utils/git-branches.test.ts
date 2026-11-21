@@ -3,11 +3,14 @@ import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promi
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
+  isGitBranchCreateResponse,
   isGitBranchListResponse,
   isGitBranchSwitchResponse,
 } from "@kenkaiiii/gg-core/git-branch-contract";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+  checkGitBranchName,
+  createGitBranch,
   InvalidGitBranchNameError,
   listGitBranches,
   orderLocalBranches,
@@ -435,5 +438,141 @@ describe("switchGitBranch", { timeout: 60_000 }, () => {
       await expect(switchGitBranch(repo, name)).rejects.toBeInstanceOf(InvalidGitBranchNameError);
     }
     expect(head()).toBe("main");
+  });
+});
+
+describe("createGitBranch", { timeout: 60_000 }, () => {
+  const head = (): string => git(repo, ["symbolic-ref", "--short", "HEAD"]);
+  const localBranches = (): string[] =>
+    git(repo, ["for-each-ref", "--format=%(refname:short)", "refs/heads"])
+      .split(/\r?\n/)
+      .filter(Boolean)
+      .sort();
+
+  async function create(name: string) {
+    const result = await createGitBranch(repo, name);
+    expect(isGitBranchCreateResponse(result)).toBe(true);
+    return result;
+  }
+
+  async function check(name: string) {
+    const result = await checkGitBranchName(repo, name);
+    expect(isGitBranchCreateResponse(result)).toBe(true);
+    return result;
+  }
+
+  it("creates from the current commit and switches to it", async () => {
+    commit("init", T0);
+    const tip = git(repo, ["rev-parse", "HEAD"]);
+    expect(await create("feature/new")).toEqual({
+      status: "created",
+      from: "main",
+      to: "feature/new",
+      carriedChanges: false,
+    });
+    expect(head()).toBe("feature/new");
+    expect(git(repo, ["rev-parse", "HEAD"])).toBe(tip);
+    expect(localBranches()).toEqual(["feature/new", "main"]);
+  });
+
+  it("carries uncommitted changes", async () => {
+    await writeFile(path.join(repo, "a.txt"), "base\n");
+    git(repo, ["add", "-A"]);
+    git(repo, ["commit", "-q", "-m", "init"], { at: T0 });
+    await writeFile(path.join(repo, "a.txt"), "edited\n");
+    await writeFile(path.join(repo, "scratch.txt"), "untracked\n");
+    expect(await create("wip")).toMatchObject({ status: "created", carriedChanges: true });
+    expect(head()).toBe("wip");
+    expect((await readFile(path.join(repo, "a.txt"), "utf8")).trim()).toBe("edited");
+    expect((await readFile(path.join(repo, "scratch.txt"), "utf8")).trim()).toBe("untracked");
+  });
+
+  it("never overwrites an existing local branch, including the current one", async () => {
+    commit("init", T0);
+    git(repo, ["branch", "taken"]);
+    commit("later", T0 + 1);
+    const takenTip = git(repo, ["rev-parse", "taken"]);
+    for (const name of ["taken", "main"]) {
+      const result = await create(name);
+      expect(result.status).toBe("taken");
+      if (result.status === "taken") expect(result.reason).toContain(`"${name}" already exists`);
+    }
+    expect(await check("Taken")).toMatchObject({ status: "taken" });
+    expect(head()).toBe("main");
+    expect(git(repo, ["rev-parse", "taken"])).toBe(takenTip);
+  });
+
+  it("treats the unborn current branch of an empty repo as taken", async () => {
+    expect(await check("main")).toMatchObject({ status: "taken" });
+    expect(await check("other")).toEqual({ status: "available", branch: "other" });
+  });
+
+  it("refuses folder/file clashes with an existing branch", async () => {
+    commit("init", T0);
+    git(repo, ["branch", "feature/x"]);
+    git(repo, ["branch", "solo"]);
+    for (const [name, clash] of [
+      ["feature", "feature/x"],
+      ["solo/sub", "solo"],
+    ] as const) {
+      const result = await create(name);
+      expect(result.status).toBe("taken");
+      if (result.status === "taken") expect(result.reason).toContain(`"${clash}"`);
+    }
+    expect(await check("feature/y")).toEqual({ status: "available", branch: "feature/y" });
+    expect(head()).toBe("main");
+    expect(localBranches()).toEqual(["feature/x", "main", "solo"]);
+  });
+
+  it("rejects invalid names with a plain reason and creates nothing", async () => {
+    commit("init", T0);
+    for (const name of ["a b", "bad..name", "-x", "--force", "HEAD", "@{-1}", "ends.lock", ""]) {
+      const result = await create(name);
+      expect(result.status).toBe("invalid");
+      if (result.status === "invalid") expect(result.reason.length).toBeGreaterThan(0);
+    }
+    expect(head()).toBe("main");
+    expect(localBranches()).toEqual(["main"]);
+  });
+
+  it("check-only creates nothing", async () => {
+    commit("init", T0);
+    expect(await check("fresh")).toEqual({ status: "available", branch: "fresh" });
+    expect(await check("a b")).toMatchObject({ status: "invalid" });
+    expect(head()).toBe("main");
+    expect(localBranches()).toEqual(["main"]);
+  });
+
+  it("allows a name that exists only on origin and doesn't track it", async () => {
+    commit("init", T0);
+    const sha = git(repo, ["rev-parse", "HEAD"]);
+    git(repo, ["remote", "add", "origin", path.join(base, "nowhere.git")]);
+    git(repo, ["update-ref", "refs/remotes/origin/shared", sha]);
+    expect(await check("shared")).toEqual({ status: "available", branch: "shared" });
+    expect(await create("shared")).toMatchObject({ status: "created", to: "shared" });
+    expect(() => git(repo, ["rev-parse", "--abbrev-ref", "shared@{upstream}"])).toThrow();
+  });
+
+  it("refuses mid-merge with nothing changed", async () => {
+    await writeFile(path.join(repo, "a.txt"), "base\n");
+    git(repo, ["add", "-A"]);
+    git(repo, ["commit", "-q", "-m", "init"], { at: T0 });
+    git(repo, ["checkout", "-q", "-b", "side"], { at: T0 + 1 });
+    await writeFile(path.join(repo, "a.txt"), "side\n");
+    git(repo, ["commit", "-q", "-am", "side"], { at: T0 + 2 });
+    git(repo, ["checkout", "-q", "main"], { at: T0 + 3 });
+    await writeFile(path.join(repo, "a.txt"), "main\n");
+    git(repo, ["commit", "-q", "-am", "main"], { at: T0 + 4 });
+    expect(() => git(repo, ["merge", "-q", "side"], { at: T0 + 5 })).toThrow();
+    const result = await create("escape");
+    expect(result).toMatchObject({ status: "conflict", files: ["a.txt"] });
+    expect(head()).toBe("main");
+    expect(localBranches()).toEqual(["main", "side"]);
+  });
+
+  it("reports a folder outside any repo", async () => {
+    const outside = path.join(base, "plain");
+    await mkdir(outside);
+    expect(await createGitBranch(outside, "x")).toEqual({ status: "not-a-repo" });
   });
 });

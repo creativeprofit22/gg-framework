@@ -2,6 +2,8 @@ import path from "node:path";
 import {
   GIT_BRANCH_SWITCH_MAX_PANES,
   GIT_BRANCH_SWITCH_PANE_LABEL_MAX_LENGTH,
+  type GitBranchCreateResponse,
+  type GitBranchSwitchBusy,
   type GitBranchSwitchResponse,
 } from "@kenkaiiii/gg-core/git-branch-contract";
 
@@ -14,17 +16,24 @@ export interface GitSwitchPeer {
   noteBranchChange: (from: string | null, to: string) => void;
 }
 
-export interface RunGitBranchSwitchOptions {
+interface GitBranchGuardOptions {
   cwd: string;
   branch: string;
   /** Every live pane on `cwd`, including the one asking. */
   peers: readonly GitSwitchPeer[];
-  switchBranch: (cwd: string, branch: string) => Promise<GitBranchSwitchResponse>;
   /** Re-read git state; the shared poller fans it out to every pane on the folder. */
   refresh: () => Promise<void>;
-  /** Daemon-wide folders with a switch running right now. */
+  /** Daemon-wide folders with a branch switch or create running right now. */
   inFlight: Set<string>;
   onRefreshError?: (error: unknown) => void;
+}
+
+export interface RunGitBranchSwitchOptions extends GitBranchGuardOptions {
+  switchBranch: (cwd: string, branch: string) => Promise<GitBranchSwitchResponse>;
+}
+
+export interface RunGitBranchCreateOptions extends GitBranchGuardOptions {
+  createBranch: (cwd: string, branch: string) => Promise<GitBranchCreateResponse>;
 }
 
 export const GIT_SWITCH_RUN_BLOCKED_MESSAGE =
@@ -47,23 +56,27 @@ function shorten(text: string, max: number): string {
   return text.length > max ? `${text.slice(0, max - 1)}…` : text;
 }
 
-function busyReason(labels: readonly string[]): string {
+function busyReason(action: string, labels: readonly string[]): string {
   const shown = labels.slice(0, 3).map((label) => `"${shorten(label, REASON_LABEL_LENGTH)}"`);
   const more = labels.length > 3 ? ` and ${labels.length - 3} more` : "";
   const subject = labels.length === 1 ? "an agent is" : "agents are";
   return (
-    `Can't switch branches while ${subject} working in this project (${shown.join(", ")}${more}). ` +
+    `Can't ${action} while ${subject} working in this project (${shown.join(", ")}${more}). ` +
     "Wait for it to finish or stop it first."
   );
 }
 
 /**
- * Switch the folder's branch unless an agent there is working or another
- * switch is running; afterwards tell every pane's agent and refresh git state.
+ * Run a branch change unless an agent on the folder is working or another
+ * switch/create is running there; once the branch moved, tell every pane's
+ * agent and refresh git state.
  */
-export async function runGitBranchSwitch(
-  options: RunGitBranchSwitchOptions,
-): Promise<GitBranchSwitchResponse> {
+async function guardBranchChange<T>(
+  options: GitBranchGuardOptions,
+  action: string,
+  run: () => Promise<T>,
+  moved: (result: T) => { from: string | null; to: string } | null,
+): Promise<T | GitBranchSwitchBusy> {
   const key = path.resolve(options.cwd);
   if (options.inFlight.has(key)) {
     return { status: "busy", reason: "A branch switch is already running here.", panes: [] };
@@ -75,18 +88,43 @@ export async function runGitBranchSwitch(
       .map((peer) =>
         shorten(peer.label.trim() || UNTITLED, GIT_BRANCH_SWITCH_PANE_LABEL_MAX_LENGTH),
       );
-    return { status: "busy", reason: busyReason(labels), panes: labels };
+    return { status: "busy", reason: busyReason(action, labels), panes: labels };
   }
 
   options.inFlight.add(key);
   try {
-    const result = await options.switchBranch(options.cwd, options.branch);
-    if (result.status === "switched") {
-      for (const peer of options.peers) peer.noteBranchChange(result.from, result.to);
+    const result = await run();
+    const change = moved(result);
+    if (change) {
+      for (const peer of options.peers) peer.noteBranchChange(change.from, change.to);
       await options.refresh().catch((error: unknown) => options.onRefreshError?.(error));
     }
     return result;
   } finally {
     options.inFlight.delete(key);
   }
+}
+
+/** Switch the folder's branch under the shared guard. */
+export function runGitBranchSwitch(
+  options: RunGitBranchSwitchOptions,
+): Promise<GitBranchSwitchResponse> {
+  return guardBranchChange(
+    options,
+    "switch branches",
+    () => options.switchBranch(options.cwd, options.branch),
+    (result) => (result.status === "switched" ? result : null),
+  );
+}
+
+/** Create a branch from HEAD and switch to it, under the same guard as switching. */
+export function runGitBranchCreate(
+  options: RunGitBranchCreateOptions,
+): Promise<GitBranchCreateResponse> {
+  return guardBranchChange(
+    options,
+    "create a branch",
+    () => options.createBranch(options.cwd, options.branch),
+    (result) => (result.status === "created" ? result : null),
+  );
 }

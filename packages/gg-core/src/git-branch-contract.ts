@@ -276,3 +276,71 @@ export function isGitBranchSwitchResponse(value: unknown): value is GitBranchSwi
       return false;
   }
 }
+
+// ── Branch create (`POST /git/branches/create`) ─────────────────────────────
+
+export interface GitBranchCreateRequest {
+  /** New local branch name, created from the current HEAD. */
+  branch: string;
+  /** Only check the name; nothing is created and no lock is taken. */
+  checkOnly?: boolean;
+}
+
+export interface GitBranchCreateCreated {
+  status: "created";
+  /** Null when HEAD was detached. */
+  from: string | null;
+  to: string;
+  /** Uncommitted changes existed and came along. */
+  carriedChanges: boolean;
+}
+
+/** Check-only answer: the name is valid and free. */
+export interface GitBranchCreateAvailable {
+  status: "available";
+  branch: string;
+}
+
+/** Git's naming rules reject the name. */
+export interface GitBranchCreateInvalid {
+  status: "invalid";
+  reason: string;
+}
+
+/** A local branch already uses the name, or clashes with it as a folder/file. */
+export interface GitBranchCreateTaken {
+  status: "taken";
+  reason: string;
+}
+
+export type GitBranchCreateResponse =
+  | GitBranchCreateCreated
+  | GitBranchCreateAvailable
+  | GitBranchCreateInvalid
+  | GitBranchCreateTaken
+  | GitBranchSwitchBusy
+  | GitBranchSwitchConflict
+  | GitBranchSwitchNotARepo;
+
+export function isGitBranchCreateResponse(value: unknown): value is GitBranchCreateResponse {
+  if (!isRecord(value)) return false;
+  switch (value.status) {
+    case "created":
+      return (
+        isNullableBranchName(value.from) &&
+        isBranchName(value.to) &&
+        typeof value.carriedChanges === "boolean"
+      );
+    case "available":
+      return isBranchName(value.branch);
+    case "invalid":
+    case "taken":
+      return isReason(value.reason);
+    case "busy":
+    case "conflict":
+    case "not-a-repo":
+      return isGitBranchSwitchResponse(value);
+    default:
+      return false;
+  }
+}

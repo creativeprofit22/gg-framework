@@ -4,7 +4,12 @@ import {
   GIT_BRANCH_SWITCH_MAX_FILES,
   GIT_BRANCH_SWITCH_MAX_PATH_LENGTH,
   normalizeGitBranchQuery,
+  type GitBranchCreateAvailable,
+  type GitBranchCreateInvalid,
+  type GitBranchCreateResponse,
+  type GitBranchCreateTaken,
   type GitBranchListResponse,
+  type GitBranchSwitchNotARepo,
   type GitBranchSwitchConflict,
   type GitBranchSwitchResponse,
   type GitDefaultBranch,
@@ -304,6 +309,34 @@ function quoteForReason(branch: string): string {
   return branch.length > 200 ? `"${branch.slice(0, 200)}…"` : `"${branch}"`;
 }
 
+/** Map git's "won't switch" stderr to a conflict answer; null for any other failure. */
+async function switchRefusalConflict(
+  stderr: string,
+  branch: string,
+  stay: string,
+  readOrNull: (args: readonly string[]) => Promise<string | null>,
+): Promise<GitBranchSwitchConflict | null> {
+  const clashing = parseCheckoutClashFiles(stderr);
+  if (clashing.length > 0) {
+    return conflictResponse(
+      `Your uncommitted changes would be overwritten by switching to ${quoteForReason(branch)}, so nothing was changed. Commit them first${stay}.`,
+      clashing,
+    );
+  }
+  const inProgress = /cannot switch branch while (\S+)/i.exec(stderr)?.[1]?.toLowerCase();
+  if (inProgress || /resolve your current index first/i.test(stderr)) {
+    const unmerged = await readOrNull(["diff", "--name-only", "--diff-filter=U"]);
+    const what = inProgress
+      ? `A ${IN_PROGRESS_LABELS[inProgress] ?? "git operation"} is still in progress`
+      : "This project has unfinished merge conflicts";
+    return conflictResponse(
+      `${what}, so nothing was changed. Finish or cancel it first${stay}.`,
+      (unmerged ?? "").split(/\r?\n/).filter(Boolean),
+    );
+  }
+  return null;
+}
+
 /**
  * Switch `cwd` to `branch` with plain `git switch` (never forced). A branch
  * that only exists on origin gets a local branch tracking it. When git refuses
@@ -369,25 +402,9 @@ export async function switchGitBranch(
   } catch (error) {
     if (!isGitExit(error)) throw error;
     const stderr = (error as BackgroundGitError).stderr;
-    const clashing = parseCheckoutClashFiles(stderr);
     const stay = current ? ` or stay on ${quoteForReason(current)}` : "";
-    if (clashing.length > 0) {
-      return conflictResponse(
-        `Your uncommitted changes would be overwritten by switching to ${quoteForReason(branch)}, so nothing was changed. Commit them first${stay}.`,
-        clashing,
-      );
-    }
-    const inProgress = /cannot switch branch while (\S+)/i.exec(stderr)?.[1]?.toLowerCase();
-    if (inProgress || /resolve your current index first/i.test(stderr)) {
-      const unmerged = await readOrNull(["diff", "--name-only", "--diff-filter=U"]);
-      const what = inProgress
-        ? `A ${IN_PROGRESS_LABELS[inProgress] ?? "git operation"} is still in progress`
-        : "This project has unfinished merge conflicts";
-      return conflictResponse(
-        `${what}, so nothing was changed. Finish or cancel it first${stay}.`,
-        (unmerged ?? "").split(/\r?\n/).filter(Boolean),
-      );
-    }
+    const refused = await switchRefusalConflict(stderr, branch, stay, readOrNull);
+    if (refused) return refused;
     throw new Error(`git switch failed: ${stderr.trim() || (error as Error).message}`, {
       cause: error,
     });
@@ -400,4 +417,123 @@ export async function switchGitBranch(
     trackedRemote,
     carriedChanges: dirtyBefore > 0,
   };
+}
+
+// ── Branch create ───────────────────────────────────────────────────────────
+
+const INVALID_NAME_HINT =
+  'Branch names can\'t contain spaces, "..", "~", "^", ":", "?", "*", "[", "\\" or "@{", and can\'t end with "/", "." or ".lock".';
+
+export type GitBranchNameCheck =
+  | GitBranchCreateAvailable
+  | GitBranchCreateInvalid
+  | GitBranchCreateTaken
+  | GitBranchSwitchNotARepo;
+
+function invalidName(reason: string): GitBranchCreateInvalid {
+  return { status: "invalid", reason };
+}
+
+function takenName(reason: string): GitBranchCreateTaken {
+  return { status: "taken", reason };
+}
+
+function gitReaders(cwd: string) {
+  const read = async (args: readonly string[]): Promise<string> =>
+    (await runBackgroundGit(args, { cwd, timeoutMs: GIT_TIMEOUT_MS, maxBuffer: GIT_MAX_BUFFER }))
+      .stdout;
+  const readOrNull = (args: readonly string[]): Promise<string | null> =>
+    read(args).catch((error: unknown) => {
+      if (isGitExit(error)) return null;
+      throw error;
+    });
+  return { read, readOrNull };
+}
+
+/**
+ * Read-only check that `name` could become a new local branch: git's own
+ * naming rules, no local branch with that name (or one differing only in
+ * capitals, which clash on Windows and macOS disks), and no folder/file clash
+ * such as `feature` next to `feature/x`. Names that exist only on origin are fine.
+ */
+export async function checkGitBranchName(cwd: string, name: string): Promise<GitBranchNameCheck> {
+  if (typeof name !== "string" || name.length === 0) {
+    return invalidName("Type a name for the new branch.");
+  }
+  if (name.length > GIT_BRANCH_NAME_MAX_LENGTH) return invalidName("That name is too long.");
+  if (name.startsWith("-")) return invalidName('Branch names can\'t start with "-".');
+  if (name === "HEAD") return invalidName('"HEAD" is reserved by git and can\'t be a branch name.');
+
+  const { read, readOrNull } = gitReaders(cwd);
+  // `--branch` also expands `@{-1}`-style shorthands, so the echo must match exactly.
+  const checked = await readOrNull(["check-ref-format", "--branch", name]);
+  if (checked?.trim() !== name) {
+    return invalidName(`${quoteForReason(name)} isn't a valid branch name. ${INVALID_NAME_HINT}`);
+  }
+
+  const inside = await readOrNull(["rev-parse", "--is-inside-work-tree"]);
+  if (inside?.trim() !== "true") return { status: "not-a-repo" };
+
+  const [refsOut, headName] = await Promise.all([
+    read(["for-each-ref", "--format=%(refname)", "refs/heads"]),
+    readOrNull(["symbolic-ref", "--quiet", "--short", "HEAD"]),
+  ]);
+  const existing = parseBranchRefs(refsOut, LOCAL_PREFIX).map((ref) => ref.name);
+  // An unborn current branch has no ref yet but still owns its name.
+  const current = headName?.trim();
+  if (current && !existing.includes(current)) existing.push(current);
+
+  const lower = name.toLowerCase();
+  for (const other of existing) {
+    const otherLower = other.toLowerCase();
+    if (other === name) {
+      return takenName(`A branch called ${quoteForReason(name)} already exists.`);
+    }
+    if (otherLower === lower) {
+      return takenName(
+        `A branch called ${quoteForReason(other)} already exists, and names that differ only in capitals clash.`,
+      );
+    }
+    if (lower.startsWith(`${otherLower}/`) || otherLower.startsWith(`${lower}/`)) {
+      return takenName(
+        `${quoteForReason(name)} clashes with the existing branch ${quoteForReason(other)}: a name can't be both a branch and a folder of branches.`,
+      );
+    }
+  }
+  return { status: "available", branch: name };
+}
+
+/**
+ * Create `name` from the current HEAD with `git switch -c` (never `-C`, so an
+ * existing branch is never overwritten) and switch to it; uncommitted changes
+ * come along. Bad or taken names come back as plain-reason statuses and an
+ * unfinished merge/rebase as a conflict. Anything unexpected throws a plain
+ * Error with git's output, for the log only.
+ */
+export async function createGitBranch(cwd: string, name: string): Promise<GitBranchCreateResponse> {
+  const check = await checkGitBranchName(cwd, name);
+  if (check.status !== "available") return check;
+
+  const { readOrNull } = gitReaders(cwd);
+  const current =
+    (await readOrNull(["symbolic-ref", "--quiet", "--short", "HEAD"]))?.trim() || null;
+  const dirtyBefore = await getGitDirtyFileCount(cwd, { timeoutMs: GIT_TIMEOUT_MS }).catch(() => 0);
+
+  try {
+    await runUserGit(["switch", "-c", name], { cwd, timeoutMs: SWITCH_TIMEOUT_MS });
+  } catch (error) {
+    if (!isGitExit(error)) throw error;
+    const stderr = (error as BackgroundGitError).stderr;
+    // Something else made the branch between the check and the switch.
+    if (/already exists/i.test(stderr)) {
+      return takenName(`A branch called ${quoteForReason(name)} already exists.`);
+    }
+    const refused = await switchRefusalConflict(stderr, name, "", readOrNull);
+    if (refused) return refused;
+    throw new Error(`git switch -c failed: ${stderr.trim() || (error as Error).message}`, {
+      cause: error,
+    });
+  }
+
+  return { status: "created", from: current, to: name, carriedChanges: dirtyBefore > 0 };
 }

@@ -1495,7 +1495,7 @@ function parseWorkspaceMode(value: unknown): WorkspaceMode {
 
 interface SessionContext {
   phaseDeletionSession: PhaseDeletionSession;
-  /** A run, autopilot step, or live worker holds this session. */
+  /** A run, task sweep, autopilot step, queue drain or live worker holds this session. */
   isBusy: () => boolean;
   id: string;
   mode: WorkspaceMode;
@@ -4510,6 +4510,15 @@ async function createSession(
     }
   }
 
+  // Every state in which this session does agent work. Idle wake and the
+  // branch switch share it so neither gate drifts from the other.
+  const sessionWorking = (): boolean =>
+    isAppSidecarSessionBusy(sessionBusyState()) ||
+    runStrandedQueue.active() ||
+    autopilotReviewing ||
+    scheduledRunActive ||
+    taskRunAll;
+
   // ── Idle wake for background alerts ────────────────────────
   // A background task that fails, or a child agent that finishes, after the
   // agent ended its turn would otherwise wait for the user's next message.
@@ -4521,12 +4530,7 @@ async function createSession(
       // the states it does not cover, rather than upstream's inline list. The
       // queue drain holds no run claim, so between queued turns only its own
       // flag (upstream's drainingStrandedQueue) keeps a wake from overlapping it.
-      isBusy: () =>
-        isAppSidecarSessionBusy(sessionBusyState()) ||
-        runStrandedQueue.active() ||
-        autopilotReviewing ||
-        scheduledRunActive ||
-        taskRunAll,
+      isBusy: sessionWorking,
       // A plan awaiting review or an active task turn blocks unprompted runs,
       // matching the stranded-queue drain.
       isBlocked: () => taskTurnActive || planGate.pending() !== null,
@@ -8440,10 +8444,9 @@ async function createSession(
       mutations: sessionMutations,
     },
     stopBackgroundProcesses,
+    // Includes a Run All sweep between tasks, when no provider run holds the session.
     isBusy: () =>
-      running ||
-      runClaim.active ||
-      autopilotActive ||
+      sessionWorking() ||
       session.listSubAgents().some((w) => w.state === "running" || w.state === "starting"),
   };
 }

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
@@ -1185,6 +1186,86 @@ describe("a branch switched outside the agent", () => {
     await waitFor(() => sawFeature(streamA) && sawFeature(streamB));
     expect((await request("GET", "/state", { session: b })).json.gitBranch).toBe("feature");
   });
+
+  it("refuses while a Run All sweep holds the folder outside a provider run", async () => {
+    initRepo();
+    git("branch", "feature");
+    // A held model scan parks the sweep's first task before its provider run
+    // starts, so only the sweep itself marks the window as working.
+    let releaseModels = (): void => {};
+    const modelsHeld = new Promise<void>((resolve) => (releaseModels = resolve));
+    let holdModels = false;
+    const gateway = http.createServer((req, res) => {
+      if (req.url === "/v1/models") {
+        void (holdModels ? modelsHeld : Promise.resolve()).then(() => {
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(JSON.stringify({ data: [{ id: "free-model" }] }));
+        });
+        return;
+      }
+      res.writeHead(404).end("{}");
+    });
+    await new Promise<void>((resolve) => gateway.listen(0, "127.0.0.1", resolve));
+    const gatewayPort = (gateway.address() as { port: number }).port;
+    try {
+      let session = await createSession();
+      const added = await request("POST", "/local/endpoints", {
+        session,
+        body: { baseUrl: `http://127.0.0.1:${gatewayPort}/v1`, label: "GW" },
+      });
+      const saved = `local/${(added.json.endpoint as { id: string }).id}/free-model`;
+      expect((await request("POST", "/model", { session, body: { model: saved } })).status).toBe(
+        200,
+      );
+      const running = daemon!;
+      await new Promise<void>((resolve) => {
+        running.once("close", () => resolve());
+        running.kill("SIGKILL");
+      });
+      holdModels = true;
+      await startDaemon();
+      session = await createSession();
+
+      const tasksDir = path.join(
+        tmpHome,
+        ".gg-tasks",
+        "projects",
+        createHash("sha256").update(tmpProject).digest("hex").slice(0, 16),
+      );
+      await fs.mkdir(tasksDir, { recursive: true });
+      await fs.writeFile(
+        path.join(tasksDir, "tasks.json"),
+        JSON.stringify([
+          {
+            id: "sweep-task-1",
+            title: "Sweep task",
+            prompt: "do the work",
+            status: "pending",
+            createdAt: new Date().toISOString(),
+          },
+        ]),
+      );
+      const ran = await request("POST", "/tasks/run", { session, body: { all: true } });
+      expect(ran.status).toBe(202);
+
+      const switched = await request("POST", "/git/switch", {
+        session,
+        body: { branch: "feature" },
+      });
+      expect(switched.status).toBe(200);
+      expect(isGitBranchSwitchResponse(switched.json)).toBe(true);
+      expect(switched.json.status).toBe("busy");
+      const head = execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], {
+        cwd: tmpProject,
+        encoding: "utf8",
+      }).trim();
+      expect(head).toBe("main");
+    } finally {
+      releaseModels();
+      gateway.closeAllConnections();
+      await new Promise<void>((resolve) => gateway.close(() => resolve()));
+    }
+  }, 90_000);
 
   it("follows origin to another GitHub repo for every link", async () => {
     initRepo();

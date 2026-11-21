@@ -4,7 +4,11 @@ import {
   GIT_BRANCH_LIST_DEFAULT_LIMIT,
   GIT_BRANCH_LIST_MAX_LIMIT,
   GIT_BRANCH_QUERY_MAX_LENGTH,
+  GIT_BRANCH_SWITCH_MAX_FILES,
+  GIT_BRANCH_SWITCH_MAX_PANES,
+  GIT_BRANCH_SWITCH_REASON_MAX_LENGTH,
   isGitBranchListResponse,
+  isGitBranchSwitchResponse,
   normalizeGitBranchQuery,
   type GitBranchListOk,
 } from "./git-branch-contract.js";
@@ -114,5 +118,77 @@ describe("isGitBranchListResponse", () => {
     expect(isGitBranchListResponse({ ...ok, local: tooMany, localTotal: tooMany.length })).toBe(
       false,
     );
+  });
+});
+
+describe("isGitBranchSwitchResponse", () => {
+  it("accepts every status", () => {
+    for (const value of [
+      {
+        status: "switched",
+        from: "main",
+        to: "feature/x",
+        trackedRemote: "origin/feature/x",
+        carriedChanges: true,
+      },
+      { status: "switched", from: null, to: "main", trackedRemote: null, carriedChanges: false },
+      { status: "unchanged", branch: "main" },
+      { status: "conflict", reason: "Clash", files: ["a.txt", "dir/b.txt"], filesTruncated: false },
+      { status: "conflict", reason: "Clash", files: [], filesTruncated: false },
+      { status: "busy", reason: "Busy", panes: ["Fix login"] },
+      { status: "not-found", reason: "No branch" },
+      { status: "not-a-repo" },
+    ]) {
+      expect(isGitBranchSwitchResponse(value)).toBe(true);
+    }
+  });
+
+  it("rejects malformed and oversized responses", () => {
+    expect(isGitBranchSwitchResponse(null)).toBe(false);
+    expect(isGitBranchSwitchResponse({ status: "ok" })).toBe(false);
+    expect(
+      isGitBranchSwitchResponse({
+        status: "switched",
+        from: "main",
+        to: "",
+        trackedRemote: null,
+        carriedChanges: false,
+      }),
+    ).toBe(false);
+    expect(
+      isGitBranchSwitchResponse({ status: "switched", from: "main", to: "x", trackedRemote: null }),
+    ).toBe(false);
+    expect(isGitBranchSwitchResponse({ status: "unchanged" })).toBe(false);
+    expect(
+      isGitBranchSwitchResponse({
+        status: "conflict",
+        reason: "Clash",
+        files: [""],
+        filesTruncated: false,
+      }),
+    ).toBe(false);
+    expect(
+      isGitBranchSwitchResponse({
+        status: "conflict",
+        reason: "Clash",
+        files: Array.from({ length: GIT_BRANCH_SWITCH_MAX_FILES + 1 }, (_, i) => `f${i}`),
+        filesTruncated: true,
+      }),
+    ).toBe(false);
+    expect(
+      isGitBranchSwitchResponse({
+        status: "busy",
+        reason: "x".repeat(GIT_BRANCH_SWITCH_REASON_MAX_LENGTH + 1),
+        panes: [],
+      }),
+    ).toBe(false);
+    expect(
+      isGitBranchSwitchResponse({
+        status: "busy",
+        reason: "Busy",
+        panes: Array.from({ length: GIT_BRANCH_SWITCH_MAX_PANES + 1 }, () => "p"),
+      }),
+    ).toBe(false);
+    expect(isGitBranchSwitchResponse({ status: "not-found", reason: "" })).toBe(false);
   });
 });

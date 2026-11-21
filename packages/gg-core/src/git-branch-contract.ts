@@ -155,3 +155,122 @@ export function isGitBranchListResponse(value: unknown): value is GitBranchListR
     typeof value.truncated === "boolean"
   );
 }
+
+// ── Branch switch (`POST /git/switch`) ──────────────────────────────────────
+
+/** Most clashing paths a conflict response lists. */
+export const GIT_BRANCH_SWITCH_MAX_FILES = 200;
+export const GIT_BRANCH_SWITCH_MAX_PATH_LENGTH = 4_096;
+export const GIT_BRANCH_SWITCH_REASON_MAX_LENGTH = 2_000;
+export const GIT_BRANCH_SWITCH_MAX_PANES = 100;
+export const GIT_BRANCH_SWITCH_PANE_LABEL_MAX_LENGTH = 500;
+
+export interface GitBranchSwitchRequest {
+  /** Local branch name, or the name of a branch that exists only on `origin`. */
+  branch: string;
+}
+
+export interface GitBranchSwitchSwitched {
+  status: "switched";
+  /** Null when HEAD was detached. */
+  from: string | null;
+  to: string;
+  /** `origin/<branch>` when a local branch was just created to track it. */
+  trackedRemote: string | null;
+  /** Uncommitted changes existed and came along. */
+  carriedChanges: boolean;
+}
+
+export interface GitBranchSwitchUnchanged {
+  status: "unchanged";
+  branch: string;
+}
+
+/** Git refused because uncommitted changes clash; nothing was changed. */
+export interface GitBranchSwitchConflict {
+  status: "conflict";
+  reason: string;
+  files: string[];
+  filesTruncated: boolean;
+}
+
+/** An agent session (or another switch) is running on this folder. */
+export interface GitBranchSwitchBusy {
+  status: "busy";
+  reason: string;
+  /** Titles of the busy panes. */
+  panes: string[];
+}
+
+export interface GitBranchSwitchNotFound {
+  status: "not-found";
+  reason: string;
+}
+
+export interface GitBranchSwitchNotARepo {
+  status: "not-a-repo";
+}
+
+export type GitBranchSwitchResponse =
+  | GitBranchSwitchSwitched
+  | GitBranchSwitchUnchanged
+  | GitBranchSwitchConflict
+  | GitBranchSwitchBusy
+  | GitBranchSwitchNotFound
+  | GitBranchSwitchNotARepo;
+
+function isReason(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= GIT_BRANCH_SWITCH_REASON_MAX_LENGTH
+  );
+}
+
+function isBoundedStringList(value: unknown, maxItems: number, maxLength: number): boolean {
+  return (
+    Array.isArray(value) &&
+    value.length <= maxItems &&
+    value.every((item) => typeof item === "string" && item.length > 0 && item.length <= maxLength)
+  );
+}
+
+export function isGitBranchSwitchResponse(value: unknown): value is GitBranchSwitchResponse {
+  if (!isRecord(value)) return false;
+  switch (value.status) {
+    case "switched":
+      return (
+        isNullableBranchName(value.from) &&
+        isBranchName(value.to) &&
+        isNullableBranchName(value.trackedRemote) &&
+        typeof value.carriedChanges === "boolean"
+      );
+    case "unchanged":
+      return isBranchName(value.branch);
+    case "conflict":
+      return (
+        isReason(value.reason) &&
+        isBoundedStringList(
+          value.files,
+          GIT_BRANCH_SWITCH_MAX_FILES,
+          GIT_BRANCH_SWITCH_MAX_PATH_LENGTH,
+        ) &&
+        typeof value.filesTruncated === "boolean"
+      );
+    case "busy":
+      return (
+        isReason(value.reason) &&
+        isBoundedStringList(
+          value.panes,
+          GIT_BRANCH_SWITCH_MAX_PANES,
+          GIT_BRANCH_SWITCH_PANE_LABEL_MAX_LENGTH,
+        )
+      );
+    case "not-found":
+      return isReason(value.reason);
+    case "not-a-repo":
+      return true;
+    default:
+      return false;
+  }
+}

@@ -3,6 +3,7 @@ import vm from "node:vm";
 import ts from "typescript";
 import { describe, expect, it, vi } from "vitest";
 import { formatSidecarError } from "./app-sidecar-error.js";
+import { gitSwitchRunConflictBody } from "./app-sidecar-git-switch.js";
 import { RunClaim } from "./core/run-claim.js";
 import {
   assertProviderExecutionAllowed,
@@ -92,6 +93,8 @@ async function harness(provider = "anthropic") {
     assertProviderExecutionAllowed,
     runUnattended,
     planGateConflict: () => null,
+    gitSwitchRunning: () => false,
+    gitSwitchRunConflictBody,
     readBody: async (req: { body: string }) => req.body,
     json: (
       res: { resolve: (value: number) => void; body?: unknown },

@@ -168,6 +168,7 @@ it.each(["cancelling", "cancel_failed", "new-question"] as const)(
         running: true,
         runClaim: { active: false },
         taskSweepClaim: { active: false },
+        gitSwitchRunning: () => false,
         autopilotActive: false,
         mode: "code",
         meta: undefined,

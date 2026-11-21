@@ -1,5 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { buildEnvDeltaMessage, fingerprintEnvironment } from "./env-delta.js";
+import {
+  buildBranchChangeMessage,
+  buildEnvDeltaMessage,
+  fingerprintEnvironment,
+} from "./env-delta.js";
 
 describe("buildEnvDeltaMessage", () => {
   it("says nothing when the environment has not moved", () => {
@@ -84,6 +88,27 @@ describe("fingerprintEnvironment", () => {
   it("ignores absent-vs-empty so a fresh session does not self-trigger", () => {
     expect(fingerprintEnvironment({})).toBe(
       fingerprintEnvironment({ additionalRoots: [], networkAllow: [] }),
+    );
+  });
+});
+
+describe("buildBranchChangeMessage", () => {
+  it("states the old and new branch as a hidden runtime note", () => {
+    const message = buildBranchChangeMessage("main", "feature/x");
+    expect(message.role).toBe("user");
+    expect(message.provenance).toEqual({
+      source: "runtime",
+      kind: "notification",
+      visibility: "hidden",
+    });
+    expect(message.content).toContain('changed from "main" to "feature/x"');
+    expect(message.content).toContain("switched by the user");
+    expect(message.content).toContain("Do not restate this note");
+  });
+
+  it("names a detached HEAD as the starting point", () => {
+    expect(buildBranchChangeMessage(null, "main").content).toContain(
+      'from a detached HEAD to "main"',
     );
   });
 });

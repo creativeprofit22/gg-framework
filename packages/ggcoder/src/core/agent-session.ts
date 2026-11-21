@@ -285,7 +285,11 @@ import {
   type SemanticCallDigest,
   type SemanticLoopVerdict,
 } from "./semantic-loop-check.js";
-import { buildEnvDeltaMessage, buildLanguageUpdateMessage } from "./env-delta.js";
+import {
+  buildBranchChangeMessage,
+  buildEnvDeltaMessage,
+  buildLanguageUpdateMessage,
+} from "./env-delta.js";
 import { buildUserShellContextText } from "./user-shell-context.js";
 import { buildPlanStateMessage, samePlanState, type PlanPromptState } from "./plan-delta.js";
 import { listProjectFiles, type ProjectFileList } from "./project-files.js";
@@ -1274,6 +1278,8 @@ export class AgentSession {
   private pendingUserShell: Array<{ runId: string; text: string }> = [];
   /** MCP servers the user added or removed mid-session, not yet told to the model. */
   private pendingMcpNotices: string[] = [];
+  /** A branch switch made from the app, not yet told to the model. */
+  private pendingBranchChange: { from: string | null; to: string } | null = null;
 
   private persistedTranscriptCount(): number {
     return this.messages.slice(0, this.lastPersistedIndex).filter((m) => m.role !== "system")
@@ -2228,6 +2234,23 @@ export class AgentSession {
         lines.join("\n") +
         "\nTrust this over anything earlier that disagrees. Do not restate this note; just proceed.",
     };
+  }
+
+  /**
+   * The user switched this project's git branch from the app. The model hears
+   * about it from a hidden note before its next turn, never from a re-rendered
+   * system prompt. Repeats collapse: A→B→C is told as A→C, A→B→A not at all.
+   */
+  noteBranchChange(from: string | null, to: string): void {
+    const start = this.pendingBranchChange ? this.pendingBranchChange.from : from;
+    this.pendingBranchChange = start === to ? null : { from: start, to };
+  }
+
+  private takeBranchNotice(): Message | null {
+    const change = this.pendingBranchChange;
+    if (!change) return null;
+    this.pendingBranchChange = null;
+    return buildBranchChangeMessage(change.from, change.to);
   }
 
   /** Persist explicit per-project trust for project-scope MCP servers. */
@@ -3694,6 +3717,7 @@ export class AgentSession {
       log("INFO", "session", "Injecting plan state update instead of rebuilding the prompt");
     }
     const mcpNotice = this.takeMcpNotice();
+    const branchNotice = this.takeBranchNotice();
     if (environmentDelta) {
       // The model has now been told; only a further change re-triggers this.
       this.renderedEnvironment = this.promptEnvironment();
@@ -3780,16 +3804,18 @@ export class AgentSession {
         ...(environmentDelta ? [environmentDelta] : []),
         ...(planNotice ? [planNotice] : []),
         ...(mcpNotice ? [mcpNotice] : []),
+        ...(branchNotice ? [branchNotice] : []),
         ...(userShell ? [userShell] : []),
         ...steeringMessages,
         ...(notificationMessage ? [notificationMessage] : []),
       ];
     }
-    if (environmentDelta || planNotice || mcpNotice || notificationMessage) {
+    if (environmentDelta || planNotice || mcpNotice || branchNotice || notificationMessage) {
       return [
         ...(environmentDelta ? [environmentDelta] : []),
         ...(planNotice ? [planNotice] : []),
         ...(mcpNotice ? [mcpNotice] : []),
+        ...(branchNotice ? [branchNotice] : []),
         ...(notificationMessage ? [notificationMessage] : []),
       ];
     }
@@ -6956,6 +6982,13 @@ export class AgentSession {
       this.messages.push(mcpNotice);
       await this.persistMessage(mcpNotice);
       this.lastPersistedIndex = this.messages.length;
+    }
+    const branchNotice = this.takeBranchNotice();
+    if (branchNotice) {
+      this.messages.push(branchNotice);
+      await this.persistMessage(branchNotice);
+      this.lastPersistedIndex = this.messages.length;
+      log("INFO", "session", "Appended a branch change instead of rebuilding the prompt");
     }
     const planNotice = this.takePlanNotice();
     if (planNotice) {

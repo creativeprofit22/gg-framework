@@ -100,3 +100,21 @@ export function buildLanguageUpdateMessage(
       "\n\nDo not restate this note; just proceed.",
   };
 }
+
+/**
+ * The user switched the project's git branch from the app. Files the model read
+ * earlier may now differ, and the prompt's git facts are stale; appended as a
+ * hidden note rather than a prompt re-render. `from` is null for detached HEAD.
+ */
+export function buildBranchChangeMessage(from: string | null, to: string): Message {
+  const previous = from === null ? "a detached HEAD" : `"${from}"`;
+  return {
+    role: "user",
+    provenance: { source: "runtime", kind: "notification", visibility: "hidden" },
+    content:
+      `Environment update. The git branch changed from ${previous} to "${to}" ` +
+      "(switched by the user). Files may differ from what you read before; re-read " +
+      "any you rely on. Trust this over anything earlier that disagrees. " +
+      "Do not restate this note; just proceed.",
+  };
+}

@@ -5407,11 +5407,21 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
 
           <Deck
             focused={props.focused !== false}
+            paneId={paneId}
             state={state}
             hydrated={hydrated}
             showGit={workspaceMode === "code"}
             panel={deckPanel}
             onPanelChange={setDeckPanel}
+            onCommitFirst={
+              commitCommand
+                ? () =>
+                    submitText(
+                      `/${commitCommand}`,
+                      hasCommit ? "Committing\u2026" : "Setting up commits\u2026",
+                    )
+                : undefined
+            }
             running={running}
             contextPct={contextPct}
             models={models}

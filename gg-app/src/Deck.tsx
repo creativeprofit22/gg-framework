@@ -17,6 +17,7 @@ import type { ActiveSchedule } from "./RunningSchedulesButton";
 import { RunningSchedulesButton } from "./RunningSchedulesButton";
 import { CIIndicator } from "./CIIndicator";
 import { PanelHead } from "./DeckPanelHead";
+import { BranchSwitcher } from "./BranchSwitcher";
 import { useDeckEscape } from "./deck-escape";
 import { EmbeddedModal } from "./modal-embed";
 import { Icon } from "./icons";
@@ -84,6 +85,8 @@ export interface DeckProps {
   /** This pane holds workspace focus. Split panes each render a deck, and
    * only the focused one's open panel answers Escape. Omitted means focused. */
   focused?: boolean;
+  /** The pane this deck belongs to; the Git panel's branch calls target its project. */
+  paneId: string;
   state: AgentState | null;
   hydrated: boolean;
   /** Code windows read out git; chat, motion and goals don't. */
@@ -116,6 +119,8 @@ export interface DeckProps {
   trophies: TrophySnapshot | null;
   /** Notes, Tasks and Brain: undefined where the workspace has no such tool. */
   tools: Partial<Record<DeckToolId, DeckTool>>;
+  /** Runs `/commit` in the chat; the Git panel offers it when a branch switch is blocked by changes. */
+  onCommitFirst?: () => void;
 }
 
 /**
@@ -395,7 +400,15 @@ function PanelBody(
         />
       );
     case "git":
-      return <GitPanel state={props.state} onClose={close} />;
+      return (
+        <GitPanel
+          paneId={props.paneId}
+          state={props.state}
+          running={props.running}
+          onCommitFirst={props.onCommitFirst}
+          onClose={close}
+        />
+      );
     case "usage":
       return (
         <UsagePanel
@@ -505,10 +518,16 @@ export function gitHubOpenTarget(
  * missing (not empty) when `gh` can't be asked.
  */
 function GitPanel({
+  paneId,
   state,
+  running,
+  onCommitFirst,
   onClose,
 }: {
+  paneId: string;
   state: AgentState | null;
+  running: boolean;
+  onCommitFirst?: () => void;
   onClose: () => void;
 }): React.ReactElement {
   const branch = state?.gitBranch ?? null;
@@ -519,6 +538,7 @@ function GitPanel({
   const [tab, setTab] = useState<GitTab>("changes");
   const [data, setData] = useState<GitOverview | null>(null);
   const [failed, setFailed] = useState(false);
+  const [reload, setReload] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -532,7 +552,8 @@ function GitPanel({
     return () => {
       cancelled = true;
     };
-  }, []);
+    // Re-read when the uncommitted count changes so the list can't lag the heading.
+  }, [reload, dirty]);
 
   const counts: Record<GitTab, number | null> = {
     changes: data ? data.changes.length : dirty,
@@ -551,6 +572,17 @@ function GitPanel({
     <div className="deck-panel tool-panel git-panel">
       <PanelHead
         title={branch ?? "Git"}
+        heading={
+          branch ? (
+            <BranchSwitcher
+              branch={branch}
+              paneId={paneId}
+              running={running}
+              onCommitFirst={onCommitFirst}
+              onSwitched={() => setReload((n) => n + 1)}
+            />
+          ) : undefined
+        }
         meta={dirty > 0 ? pluralize(dirty, "uncommitted file", "uncommitted files") : "Clean"}
         onClose={onClose}
       />

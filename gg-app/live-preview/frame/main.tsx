@@ -555,6 +555,7 @@ function LiveApp() {
             <MinusIcon size={13} weight="bold" aria-hidden />
           </button>
           <Deck
+            paneId="primary"
             state={state}
             hydrated={state !== null}
             showGit

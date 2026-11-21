@@ -67,7 +67,8 @@ export function SkillsOverlay({ cwd, onClose }: SkillsOverlayProps) {
   // and directory-layout (<dir>/SKILL.md) skills both show up.
   useEffect(() => {
     void discoverSkills({ globalSkillsDir: getAppPaths().skillsDir, projectDir: cwd }).then((s) => {
-      setSkills(s);
+      // Hidden skills (Checklist-only) aren't for routine use; don't offer them.
+      setSkills(s.filter((skill) => !skill.hidden));
       setLoaded(true);
     });
   }, [cwd]);
@@ -118,6 +119,7 @@ export function SkillsOverlay({ cwd, onClose }: SkillsOverlayProps) {
   const displayPath = home && cwd.startsWith(home) ? "~" + cwd.slice(home.length) : cwd;
   const projectCount = skills.filter((s) => s.source === "project").length;
   const globalCount = skills.filter((s) => s.source === "global").length;
+  const bundledCount = skills.filter((s) => s.source === "bundled").length;
 
   return (
     <Box flexDirection="column">
@@ -139,6 +141,8 @@ export function SkillsOverlay({ cwd, onClose }: SkillsOverlayProps) {
             <Text color="#a78bfa">{projectCount} project</Text>
             <Text color={theme.textDim}> · </Text>
             <Text color="#60a5fa">{globalCount} global</Text>
+            <Text color={theme.textDim}> · </Text>
+            <Text color={theme.success}>{bundledCount} built-in</Text>
             <Text color={theme.textDim}> · </Text>
             <Text color={theme.text}>{skills.length} total</Text>
           </Text>
@@ -167,6 +171,8 @@ export function SkillsOverlay({ cwd, onClose }: SkillsOverlayProps) {
               <Text color={theme.textDim}> · </Text>
               <Text color="#60a5fa">{globalCount} global</Text>
               <Text color={theme.textDim}> · </Text>
+              <Text color={theme.success}>{bundledCount} built-in</Text>
+              <Text color={theme.textDim}> · </Text>
               <Text color={theme.text}>{skills.length} total</Text>
             </Text>
           </Box>
@@ -192,8 +198,14 @@ export function SkillsOverlay({ cwd, onClose }: SkillsOverlayProps) {
         const realIdx = startIdx + vi;
         const selected = realIdx === selectedIndex;
         const prefix = selected ? "❯ " : "  ";
-        const sourceTag = skill.source === "project" ? "local" : "global";
-        const sourceColor = skill.source === "project" ? "#a78bfa" : "#60a5fa";
+        const sourceTag =
+          skill.source === "project" ? "local" : skill.source === "global" ? "global" : "built-in";
+        const sourceColor =
+          skill.source === "project"
+            ? "#a78bfa"
+            : skill.source === "global"
+              ? "#60a5fa"
+              : theme.success;
         const isExpanded = expandedSkill === skill.name;
 
         return (

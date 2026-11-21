@@ -1,0 +1,12 @@
+{
+  "id": "chat-thread",
+  "name": "Chat thread",
+  "kind": "ui",
+  "description": "A chat window where messages pop in one after another (sender bubbles in accent, replies in white), each reply preceded by a bouncing three-dot typing indicator. Good for AI assistants, support and messaging features.",
+  "tags": ["chat", "messages", "assistant", "ai", "typing", "bubbles", "conversation", "saas"],
+  "fonts": [],
+  "duration": 6,
+  "previewAt": 5.4,
+  "license": "original",
+  "previewLook": "soft-light-ad"
+}

@@ -14,6 +14,7 @@ const ALL: Provider[] = [
   "deepseek",
   "openrouter",
   "sakana",
+  "xai",
 ];
 
 /** Fake auth lookup: only the providers in `set` are "logged in". */
@@ -23,11 +24,44 @@ function auth(...connected: Provider[]): ProviderAuthLookup {
 }
 
 describe("resolveStartOrFallback", () => {
+  it("never automatically selects Token Plan or leaves an explicit selection", async () => {
+    const providers: Provider[] = ["qwen-cloud", ...ALL];
+    expect(
+      await resolveStartOrFallback(auth("qwen-cloud"), providers, "anthropic", undefined),
+    ).toEqual({ provider: "anthropic", model: getDefaultModel("anthropic").id, loggedIn: false });
+    expect(
+      await resolveStartOrFallback(auth("openai"), providers, "qwen-cloud", "qwen-cloud/glm-5.3"),
+    ).toEqual({ provider: "qwen-cloud", model: "qwen-cloud/glm-5.3", loggedIn: false });
+    expect(
+      await resolveStartOrFallback(auth("qwen-cloud"), providers, "qwen-cloud", undefined),
+    ).toEqual({ provider: "qwen-cloud", model: "qwen-cloud/qwen3.8-max", loggedIn: true });
+  });
   it("falls back to preferred + default model when no provider is logged in", async () => {
     const res = await resolveStartOrFallback(auth(), ALL, "anthropic", undefined);
     expect(res.loggedIn).toBe(false);
     expect(res.provider).toBe("anthropic");
     expect(res.model).toBe(getDefaultModel("anthropic").id);
+  });
+
+  it("skips Azure without a configured deployment instead of crashing", async () => {
+    // A saved Azure default with no deployment configured has no model to start on.
+    const loggedOut = await resolveStartOrFallback(auth(), ALL, "azure", "azure:gpt-5.6-sol");
+    expect(loggedOut).toEqual({
+      provider: "anthropic",
+      model: getDefaultModel("anthropic").id,
+      loggedIn: false,
+    });
+    const withAzureKey = await resolveStartOrFallback(
+      auth("azure", "openai"),
+      ["azure", ...ALL],
+      "azure",
+      "azure:gpt-5.6-sol",
+    );
+    expect(withAzureKey).toEqual({
+      provider: "openai",
+      model: getDefaultModel("openai").id,
+      loggedIn: true,
+    });
   });
 
   it("honors a non-anthropic preferred provider in the logged-out fallback", async () => {

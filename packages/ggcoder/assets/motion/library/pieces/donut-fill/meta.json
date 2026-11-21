@@ -1,0 +1,12 @@
+{
+  "id": "donut-fill",
+  "name": "Donut fill",
+  "kind": "data",
+  "description": "A ring fills clockwise to a percentage via stroke-dashoffset inside a quiet tick dial while the display number counts up in the center; a mono caption lands beneath. Edit VALUE and the caption for adoption rates, completion or share-of stats.",
+  "tags": ["donut", "ring", "percentage", "progress", "count-up", "gauge", "data", "stat", "explainer"],
+  "fonts": [],
+  "duration": 4,
+  "previewAt": 2.8,
+  "license": "original",
+  "previewLook": "duotone-broadcast"
+}

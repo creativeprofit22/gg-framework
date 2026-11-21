@@ -1,0 +1,112 @@
+import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { spawnSync } from "node:child_process";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+
+let root;
+let dist;
+let manifest;
+
+beforeEach(() => {
+  root = mkdtempSync(path.join(tmpdir(), "gg-frontend-size-"));
+  dist = path.join(root, "gg-app/dist");
+  mkdirSync(path.join(root, ".github/ci/baseline"), { recursive: true });
+  mkdirSync(path.join(dist, ".vite"), { recursive: true });
+  copyFileSync(
+    new URL("../../.github/ci/size-gate.mjs", import.meta.url),
+    path.join(root, ".github/ci/size-gate.mjs"),
+  );
+  writeFileSync(
+    path.join(root, ".github/ci/baseline/sizes.json"),
+    JSON.stringify({
+      artifacts: { "frontend:initial": { bytes: 35_000 } },
+    }),
+  );
+  manifest = {
+    "index.html": {
+      file: "entry.js",
+      isEntry: true,
+      imports: ["shared", "bridge"],
+      dynamicImports: ["notes"],
+    },
+    shared: { file: "shared.js", imports: ["index.html"] },
+    bridge: { file: "bridge.js", imports: ["shared"] },
+    notes: { file: "notes.js" },
+  };
+  for (const [file, bytes] of Object.entries({
+    "entry.js": 10_000,
+    "shared.js": 20_000,
+    "bridge.js": 5_000,
+    "notes.js": 99_000,
+  })) {
+    writeFileSync(path.join(dist, file), Buffer.alloc(bytes));
+  }
+});
+
+afterEach(() => rmSync(root, { recursive: true, force: true }));
+
+function runGate() {
+  writeFileSync(path.join(dist, ".vite/manifest.json"), JSON.stringify(manifest));
+  return spawnSync(
+    process.execPath,
+    [path.join(root, ".github/ci/size-gate.mjs"), "--only", "frontend:initial"],
+    {
+      encoding: "utf8",
+      // A timed-out child reports status null, not 1; allow for a loaded parallel run.
+      timeout: 30_000,
+    },
+  );
+}
+
+describe("bundle-size reporting", () => {
+  it("counts shared static chunks once, handles cycles, and excludes lazy notes", () => {
+    const result = runGate();
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("34.2KB");
+  });
+
+  it("reports eager bundle growth without failing CI", () => {
+    manifest["index.html"].imports.push("notes");
+    const result = runGate();
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("growth (informational)");
+    expect(result.stdout).toContain("+96.7KB");
+    expect(result.stderr).toBe("");
+  });
+
+  it.each(["dist:ggcoder", "sidecar"])("reports %s growth without failing CI", (artifact) => {
+    const target =
+      artifact === "dist:ggcoder"
+        ? path.join(root, "packages/ggcoder/dist/index.js")
+        : path.join(root, "gg-app/src-tauri/sidecar/app-sidecar.mjs");
+    mkdirSync(path.dirname(target), { recursive: true });
+    writeFileSync(target, Buffer.alloc(200_000));
+    if (artifact === "sidecar") {
+      mkdirSync(path.join(root, "gg-app/src-tauri/sidecar/skills"));
+    }
+    writeFileSync(
+      path.join(root, ".github/ci/baseline/sizes.json"),
+      JSON.stringify({ artifacts: { [artifact]: { bytes: 35_000 } } }),
+    );
+    const result = spawnSync(
+      process.execPath,
+      [path.join(root, ".github/ci/size-gate.mjs"), "--only", artifact],
+      { encoding: "utf8", timeout: 10_000 },
+    );
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("growth (informational)");
+    expect(result.stdout).toContain("+161.1KB");
+    expect(result.stderr).toBe("");
+  });
+
+  it("fails for an incomplete build instead of reporting a smaller bundle", () => {
+    rmSync(path.join(dist, "shared.js"));
+    expect(runGate().status).toBe(1);
+  });
+
+  it("fails if the manifest has no entry point", () => {
+    manifest["index.html"].isEntry = false;
+    expect(runGate().status).toBe(1);
+  });
+});

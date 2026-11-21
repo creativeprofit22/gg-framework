@@ -1,0 +1,11 @@
+<!doctype html>
+<!-- End card. Edit sign-off, action and destination in markup. No looping motion: leave a readable final hold. -->
+<html lang="en"><head><meta charset="UTF-8"><script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script></head><body>
+<div id="end-card-root" data-composition-id="end-card" data-start="0" data-duration="5" data-width="1920" data-height="1080">
+<style>
+[data-composition-id="end-card"]{position:absolute;inset:0;display:flex;flex-direction:column;justify-content:center;align-items:center;background:var(--field);color:var(--ink);font-family:var(--text);text-align:center}
+[data-composition-id="end-card"] h1{font-family:var(--display);font-size:160px;font-weight:var(--display-weight);font-stretch:var(--display-stretch);letter-spacing:var(--display-tracking);line-height:1.05;margin:0 0 50px;max-width:1680px}
+[data-composition-id="end-card"] .action{font-size:34px;line-height:1.35;margin:0 0 32px}
+[data-composition-id="end-card"] .destination{font:26px/1.4 var(--mono);color:var(--muted);border-top:2px solid var(--line);padding-top:30px}
+</style><!-- edit: closing headline, next action and destination --><h1>Make your move.</h1><p class="action">Start with one good idea.</p><div class="destination">YOUR NEXT CHAPTER</div></div>
+<script>(()=>{const root=document.querySelector('[data-composition-id="end-card"]');const tl=gsap.timeline({paused:true});tl.from(root.querySelector('h1'),{scale:.92,opacity:0,duration:.7,ease:'power3.out'},0).from(root.querySelector('.action'),{y:24,opacity:0,duration:.5},.4).from(root.querySelector('.destination'),{opacity:0,duration:.45},.8).to({},{duration:3.75});window.__timelines=window.__timelines||{};window.__timelines["end-card"]=tl;})();</script></body></html>

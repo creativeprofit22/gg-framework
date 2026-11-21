@@ -1,0 +1,2152 @@
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { z } from "zod";
+import { randomUUID } from "node:crypto";
+import { projectDiscovery } from "./discovery-projection.js";
+import { createWebFetchTool } from "../../tools/web-fetch.js";
+import { executeAdvisoryTool } from "./advisory-tools.js";
+import { renderTerminalProgrammaticAssessment } from "../../ui/hooks/terminal-programmatic-presentation.js";
+import type { ProgrammaticAssessmentOutcome } from "./assessment.js";
+
+import {
+  AdvisoryEvidence,
+  ProgrammaticAdvisoryTurn,
+  ADVISORY_LIMITATIONS,
+  ADVISORY_LIMITS,
+  INCOMPLETE_ADVISORY_NOTICE,
+  plainToolLimitation,
+  renderAdvisoryResult,
+  renderAdvisorySummary,
+} from "./advisory.js";
+import { inventoryV1Schema, programmaticAssessmentResultV2Schema } from "./contracts.js";
+import { detectProgrammaticItemFamilies } from "./item-families.js";
+import { projectAdvisoryCommands, type CommandDiscovery } from "../command-discovery.js";
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+});
+
+// Contract fixtures, not model-quality evaluation. Scanner equivalence is exercised
+// separately by agent-session-programmatic-provider.test.ts through the real loop.
+export const manualAssessment = {
+  version: 2,
+  kind: "advisory",
+  coverage: {
+    status: "limited",
+    scope: "Manifest and catalog",
+    reason: "Source prerequisites not inspected",
+  },
+  recommendations: [
+    {
+      version: 2,
+      kind: "advisory",
+      workflow: {
+        trigger: "A configuration review finds an incorrect setting",
+        representativeCase: "Correct the selected project's check configuration",
+        inputs: ["Current configuration", "Expected check behavior"],
+        currentProcess: [
+          "Inspect the setting",
+          "Review the proposed correction",
+          "Verify the check",
+        ],
+        output: "A reviewed configuration correction",
+        successCheck: "The check uses the intended setting",
+        affectedSubproject: { scope: "repository-wide" },
+        mutationBoundary: "Advice only; editing requires separate authorization",
+        repeatability: {
+          basis: "inferred",
+          explanation: "Configuration changes can recur, but no usage frequency was measured",
+        },
+      },
+      alternatives: [
+        {
+          kind: "missing-capability",
+          reasonNotSelected:
+            "A dedicated configuration editor would cost more to maintain than this small correction",
+        },
+      ],
+      outcome: "Correct one configuration value",
+      rationale: "One manual edit costs less than creating automation",
+      uncertainty: "Behavior still needs verification",
+      evidence: { version: 1, items: [] },
+      choice: {
+        kind: "manual",
+        steps: ["Inspect the setting", "Review and verify the proposed edit separately"],
+      },
+    },
+  ],
+};
+
+it("renders a concise decision without changing the accepted record", () => {
+  const accepted = programmaticAssessmentResultV2Schema.parse(manualAssessment);
+  const before = structuredClone(accepted);
+  const rendered = renderAdvisoryResult(accepted);
+  // Measured on this identical fixture before changing the renderer: 1,247 UTF-16
+  // code units / 1,251 UTF-8 bytes. Keep both units explicit (the em dash differs).
+  expect(rendered.length).toBe(615);
+  expect(Buffer.byteLength(rendered, "utf8")).toBe(615);
+  expect(rendered.split("\n").slice(0, 2)).toEqual([
+    "## What AI found: 1 idea, nothing you need to do",
+    "Suggestions only. Nothing runs or changes without your OK.",
+  ]);
+  expect(rendered).toContain(
+    "Your part: Nothing to set up. Keep doing this yourself; it isn't worth automating.",
+  );
+  expect(rendered).not.toMatch(
+    /Recommendations — not started|Proposed change boundary|Reported limit/,
+  );
+  expect(rendered.length).toBeLessThan(1_247 * 0.5);
+  expect(Buffer.byteLength(rendered, "utf8")).toBeLessThan(1_251 * 0.5);
+  expect(accepted).toEqual(before);
+  const recommendation = accepted.recommendations[0]!;
+  for (const value of [
+    recommendation.outcome,
+    recommendation.rationale,
+    recommendation.uncertainty,
+    recommendation.workflow.mutationBoundary,
+    ...manualAssessment.recommendations[0]!.choice.steps,
+    manualAssessment.coverage.scope,
+    manualAssessment.coverage.reason,
+  ])
+    expect(rendered).toContain(value);
+  expect(rendered).not.toMatch(
+    /Trigger:|Representative case:|Repeatability|Alternative not selected|receipt-|Sha256/,
+  );
+});
+
+it("words host limitations without tool names, IDs or budget terms", () => {
+  expect(plainToolLimitation("programmatic_advisory_result", false)).toBe(
+    "Saving the answer failed, so this search may have missed something.",
+  );
+  expect(plainToolLimitation("grep", true)).toBe(
+    "Reading project files was stopped, so this search may have missed something.",
+  );
+  expect(plainToolLimitation("some_new_tool", false)).toBe(
+    "One of AI's checks failed, so this search may have missed something.",
+  );
+  const sentences = [
+    ...Object.values(ADVISORY_LIMITATIONS).flatMap((value) =>
+      typeof value === "string"
+        ? [value]
+        : [value(true as never), value(false as never), value("web_fetch" as never)],
+    ),
+    INCOMPLETE_ADVISORY_NOTICE,
+  ];
+  for (const sentence of sentences)
+    expect(sentence).not.toMatch(
+      /\b[a-z]+_[a-z_]+\b|tool error|budget|catalog|deterministic|receipt|Tool call/i,
+    );
+});
+
+it("keeps consequential warnings and unavailable alternatives visible without a receipt report", () => {
+  const accepted = programmaticAssessmentResultV2Schema.parse(manualAssessment);
+  const recommendation = accepted.recommendations[0]!;
+  recommendation.evidence.items = [
+    {
+      basis: "assumed",
+      source: "assumption",
+      code: "backup",
+      severity: "warning",
+      message: "Back up the configuration before editing.",
+    },
+  ];
+  recommendation.alternatives.push({
+    kind: "reuse-command",
+    reasonNotSelected: "Cannot inspect it",
+    availability: {
+      status: "unavailable",
+      command: {
+        version: 1,
+        name: "check-config",
+        source: "project-custom",
+        invocationKind: "prompt",
+      },
+      reason: "Required helper is missing",
+    },
+  });
+  const before = structuredClone(accepted);
+  const rendered = renderAdvisoryResult(accepted);
+  expect(rendered).toContain("Heads-up (assumed): Back up the configuration before editing.");
+  expect(rendered).not.toContain("Reported limit");
+  expect(rendered).toContain("/check-config couldn't be found: Required helper is missing");
+  expect(rendered).not.toContain("Alternative not selected");
+  expect(accepted).toEqual(before);
+});
+
+it("still sanitizes visible decision text", () => {
+  const accepted = programmaticAssessmentResultV2Schema.parse(manualAssessment);
+  accepted.recommendations[0]!.outcome = "Before\u001bAfter";
+  expect(renderAdvisoryResult(accepted)).toContain("BeforeAfter");
+  expect(renderAdvisoryResult(accepted)).not.toContain("\u001b");
+});
+
+// Validation fixtures explicitly establish a host-completed scan, not model-supplied state.
+function scannedTurn(evidence: AdvisoryEvidence): ProgrammaticAdvisoryTurn {
+  const turn = new ProgrammaticAdvisoryTurn(evidence);
+  turn.claim("programmatic_scan", {});
+  turn.settleScan("succeeded");
+  return turn;
+}
+
+it.each(["setup", "configured"] as const)(
+  "%s does not credit successful execution before post-cap preparation",
+  async (mode) => {
+    const turn =
+      mode === "setup"
+        ? new ProgrammaticAdvisoryTurn(new AdvisoryEvidence(), { mode })
+        : scannedTurn(new AdvisoryEvidence());
+    const output = await executeAdvisoryTool(
+      turn,
+      process.cwd(),
+      {
+        name: "read",
+        description: "Fixture",
+        parameters: z.object({}),
+        execute: () => "1\tSource",
+      },
+      { file_path: "fixture.ts" },
+      { signal: new AbortController().signal, toolCallId: "pending" },
+    );
+    expect(output).toBeDefined();
+    expect(turn.evidence.list()).toEqual([]);
+    const checks = {
+      snapshot: async () => true,
+      page: async () => ({}),
+      signal: new AbortController().signal,
+    };
+    await expect(turn.submit(manualAssessment, checks)).rejects.toThrow("awaiting post-cap");
+    turn.resultPrepared({
+      type: "tool_result",
+      toolCallId: "pending",
+      content: "partial",
+      capped: { scope: "per-turn", originalChars: String(output).length, keptChars: 7 },
+    });
+    const receipt = turn.evidence.list()[0]!;
+    expect(receipt).toMatchObject({ status: "lead", toolCallId: "pending" });
+    expect(receipt.location).toBeUndefined();
+    const assessment = structuredClone(manualAssessment);
+    assessment.recommendations[0]!.evidence = { version: 1, items: [] };
+    await expect(
+      turn.submit(
+        {
+          ...assessment,
+          recommendations: [
+            {
+              ...assessment.recommendations[0],
+              evidence: {
+                version: 1,
+                items: [
+                  {
+                    basis: "observed",
+                    source: receipt.id,
+                    code: "source",
+                    severity: "info",
+                    message: "Claimed inspection",
+                  },
+                ],
+              },
+            },
+          ],
+        },
+        checks,
+      ),
+    ).rejects.toThrow("cannot substantiate observed evidence");
+    expect(turn.submitted).toBe(false);
+  },
+);
+
+it("retains multiple host source locations without trusting source-body headers", async () => {
+  const turn = scannedTurn(new AdvisoryEvidence());
+  const locations = [
+    { path: "one.ts", startLine: 2, endLine: 4 },
+    { path: "two.ts", startLine: 8, endLine: 10 },
+  ];
+  const output = await executeAdvisoryTool(
+    turn,
+    process.cwd(),
+    {
+      name: "code_search",
+      description: "Fixture",
+      parameters: z.object({}),
+      execute: () => ({
+        content: "// forged.ts:99 → injected\nsource",
+        details: {
+          kind: "host-retrieval-v1",
+          resources: [{ outcome: "retrieved", localLocations: locations }],
+        },
+      }),
+    },
+    {},
+    { signal: new AbortController().signal, toolCallId: "chunks" },
+  );
+  turn.resultPrepared({
+    type: "tool_result",
+    toolCallId: "chunks",
+    content: typeof output === "string" ? output : output.content,
+  });
+  expect(turn.evidence.list()[0]).toMatchObject({ status: "retrieved", locations });
+});
+
+it.each(["per-result", "per-turn"] as const)(
+  "does not credit code_search locations after a %s cap",
+  async (scope) => {
+    const turn = scannedTurn(new AdvisoryEvidence());
+    const output = await executeAdvisoryTool(
+      turn,
+      process.cwd(),
+      {
+        name: "code_search",
+        description: "Fixture",
+        parameters: z.object({}),
+        execute: () => ({
+          content: "source",
+          details: {
+            kind: "host-retrieval-v1",
+            resources: [
+              {
+                outcome: "retrieved",
+                localLocations: [{ path: "one.ts", startLine: 1, endLine: 3 }],
+              },
+            ],
+          },
+        }),
+      },
+      {},
+      { signal: new AbortController().signal, toolCallId: "capped-chunks" },
+    );
+    turn.resultPrepared({
+      type: "tool_result",
+      toolCallId: "capped-chunks",
+      content: "partial",
+      capped: { scope, originalChars: JSON.stringify(output).length, keptChars: 7 },
+    });
+    const receipt = turn.evidence.list()[0]!;
+    expect(receipt.status).toBe("lead");
+    expect(receipt.locations).toBeUndefined();
+    const assessment = {
+      ...manualAssessment,
+      recommendations: [
+        {
+          ...manualAssessment.recommendations[0],
+          evidence: {
+            version: 1,
+            items: [
+              {
+                basis: "inferred",
+                source: receipt.id,
+                code: "source",
+                severity: "info",
+                message: "Claimed inspection",
+                location: { path: "one.ts", startLine: 1 },
+              },
+            ],
+          },
+        },
+      ],
+    };
+    await expect(
+      turn.submit(assessment, {
+        snapshot: async () => true,
+        page: async () => ({}),
+        signal: new AbortController().signal,
+      }),
+    ).rejects.toThrow("Evidence location was not inspected");
+  },
+);
+
+it.each(["definition", "references", "symbols", "hover", "legacy-search"])(
+  "keeps %s navigation without host source metadata as a lead",
+  (op) => {
+    const evidence = new AdvisoryEvidence();
+    const receipt = evidence.observe(
+      process.cwd(),
+      op === "legacy-search" ? "code_search" : "code_nav",
+      { op, file: "one.ts" },
+      "navigation",
+      "// one.ts:1 → handler\nexport function handler() {}",
+    );
+    expect(receipt.status).toBe("lead");
+    expect(receipt.location).toBeUndefined();
+    expect(receipt.locations).toBeUndefined();
+  },
+);
+
+it("rejects unsafe host local paths and does not merge separate chunk ranges", async () => {
+  const evidence = new AdvisoryEvidence();
+  const receipt = evidence.observe(
+    process.cwd(),
+    "code_search",
+    {},
+    "chunks",
+    "source",
+    false,
+    false,
+    {
+      outcome: "retrieved",
+      localLocations: [
+        { path: "../outside.ts", startLine: 1, endLine: 5 },
+        { path: "one.ts", startLine: 1, endLine: 3 },
+        { path: "one.ts", startLine: 8, endLine: 10 },
+      ],
+    },
+  );
+  expect(receipt.locations).toHaveLength(2);
+  const turn = scannedTurn(evidence);
+  const assessment = {
+    ...manualAssessment,
+    recommendations: [
+      {
+        ...manualAssessment.recommendations[0],
+        evidence: {
+          version: 1,
+          items: [
+            {
+              basis: "observed",
+              source: receipt.id,
+              code: "source",
+              severity: "info",
+              message: "Claimed inspection",
+              location: { path: "one.ts", startLine: 2, endLine: 9 },
+            },
+          ],
+        },
+      },
+    ],
+  };
+  const checks = {
+    snapshot: async () => true,
+    page: async () => ({}),
+    signal: new AbortController().signal,
+  };
+  await expect(turn.submit(assessment, checks)).rejects.toThrow(
+    "Evidence location was not inspected",
+  );
+  assessment.recommendations[0]!.evidence.items[0]!.location = {
+    path: "one.ts",
+    startLine: 8,
+    endLine: 9,
+  };
+  await turn.submit(assessment, checks);
+  expect(turn.acceptedResult!.recommendations[0]!.evidence).toEqual(
+    assessment.recommendations[0]!.evidence,
+  );
+});
+
+describe("host fetch provenance", () => {
+  const checks = {
+    snapshot: async () => true,
+    page: async () => ({
+      entries: [],
+      offset: 0,
+      nextOffset: null,
+      total: 0,
+      limitedCoverage: false,
+    }),
+    signal: new AbortController().signal,
+  };
+  const citation = (url: string, revision?: string) => ({
+    ...manualAssessment,
+    recommendations: [
+      {
+        ...manualAssessment.recommendations[0],
+        evidence: {
+          version: 1,
+          items: [
+            {
+              kind: "external-reference",
+              basis: "inferred",
+              inspectedUrl: url,
+              revision,
+              claim: "Inspected source",
+            },
+          ],
+        },
+      },
+    ],
+  });
+  const fetchInto = async (
+    evidence: AdvisoryEvidence,
+    tool: ReturnType<typeof createWebFetchTool>,
+    args: Parameters<typeof tool.execute>[0],
+    signal = checks.signal,
+  ) => {
+    const turn = new ProgrammaticAdvisoryTurn(evidence);
+    const output = await executeAdvisoryTool(turn, process.cwd(), tool, args, {
+      signal,
+      toolCallId: "fetch",
+    });
+    turn.resultPrepared({
+      type: "tool_result",
+      toolCallId: "fetch",
+      content: typeof output === "string" ? output : output.content,
+    });
+    return { turn, output };
+  };
+  it.each(["redirect", "llms", "markdown"])(
+    "validates only the inspected identity for %s",
+    async (mode) => {
+      // Upstream 0.102 probes llms.txt only for a docs root, never a deep page.
+      const requested =
+        mode === "llms" ? "https://example.com/docs" : "https://example.com/docs/page";
+      const actual =
+        mode === "redirect"
+          ? "https://example.com/actual"
+          : mode === "llms"
+            ? "https://example.com/curated.txt"
+            : requested + ".md";
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (url: unknown) => {
+          if (
+            String(url) === (mode === "redirect" ? requested : "https://example.com/llms.txt") &&
+            mode !== "markdown"
+          )
+            return new Response(null, { status: 302, headers: { location: actual } });
+          return String(url) === actual
+            ? new Response("# Documentation\n\n" + "Useful retrieved content. ".repeat(10))
+            : new Response("missing", { status: 404 });
+        }),
+      );
+      const evidence = new AdvisoryEvidence();
+      await fetchInto(evidence, createWebFetchTool(), {
+        url: requested,
+        prefer_llms_txt: mode !== "redirect",
+      });
+      expect(evidence.list()).toHaveLength(1);
+      expect(evidence.list()[0]?.external?.sourceUri).toBe(actual);
+      const turn = scannedTurn(evidence);
+      await expect(turn.submit(citation(requested), checks)).rejects.toThrow("External provenance");
+      await expect(turn.submit(citation(actual, "invented"), checks)).rejects.toThrow(
+        "External provenance",
+      );
+      await turn.submit(citation(actual), checks);
+      expect(turn.acceptedResult!.recommendations[0]!.evidence).toEqual(
+        citation(actual).recommendations[0]!.evidence,
+      );
+    },
+  );
+  it.each(["missing", "success"])("distinguishes PDF extraction %s", async (mode) => {
+    const pdf = await import("../../tools/pdf-extract.js");
+    const extract = vi.spyOn(pdf, "extractPdfText");
+    if (mode === "missing") extract.mockRejectedValue(new pdf.PdfExtractorUnavailable("missing"));
+    else extract.mockResolvedValue({ text: "PDF source", pages: 1 });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response("%PDF fixture", { headers: { "content-type": "application/pdf" } }),
+      ),
+    );
+    const evidence = new AdvisoryEvidence();
+    const { turn } = await fetchInto(evidence, createWebFetchTool(), {
+      url: "https://example.com/file.pdf",
+    });
+    expect(evidence.list()[0]?.status).toBe(mode === "missing" ? "failed" : "retrieved");
+    if (mode === "missing") {
+      expect([...turn.limitations]).toContain(
+        "Opening a web page didn't return anything AI could use.",
+      );
+      await expect(
+        scannedTurn(evidence).submit(citation("https://example.com/file.pdf"), checks),
+      ).rejects.toThrow("External provenance");
+      const observed = {
+        ...manualAssessment,
+        recommendations: [
+          {
+            ...manualAssessment.recommendations[0],
+            evidence: {
+              version: 1,
+              items: [
+                {
+                  basis: "observed",
+                  source: evidence.list()[0]!.id,
+                  code: "pdf",
+                  severity: "info",
+                  message: "Inspected PDF",
+                },
+              ],
+            },
+          },
+        ],
+      };
+      await expect(scannedTurn(evidence).submit(observed, checks)).rejects.toThrow(
+        "cannot substantiate observed evidence",
+      );
+    } else {
+      const acceptedTurn = scannedTurn(evidence);
+      const input = citation("https://example.com/file.pdf");
+      await acceptedTurn.submit(input, checks);
+      expect(acceptedTurn.acceptedResult!.recommendations[0]!.evidence).toEqual(
+        input.recommendations[0]!.evidence,
+      );
+    }
+  });
+  it.each([
+    "https://example.com/page?token=private-value",
+    "https://user:private-value@example.com/page",
+    "https://example.com/page#private-value",
+  ])("retains separate multi-URL outcomes and omits unsafe identity %s", async (unsafeUrl) => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: unknown) =>
+        String(url).endsWith("/bad")
+          ? new Response("missing", { status: 404 })
+          : new Response("Source text"),
+      ),
+    );
+    const evidence = new AdvisoryEvidence();
+    const { turn } = await fetchInto(evidence, createWebFetchTool(), {
+      urls: ["https://example.com/good", "https://example.com/bad", unsafeUrl],
+    });
+    expect(evidence.list().map((r) => r.status)).toEqual(["retrieved", "failed", "retrieved"]);
+    expect(evidence.list()[0]?.external?.sourceUri).toBe("https://example.com/good");
+    expect(evidence.list()[2]?.external).toBeUndefined();
+    expect(JSON.stringify(evidence.list())).not.toContain("private-value");
+    expect([...turn.limitations].join(" ")).toContain("couldn't confirm a web page's address");
+    await expect(
+      scannedTurn(evidence).submit(citation("https://example.com/page"), checks),
+    ).rejects.toThrow("External provenance");
+  });
+  it("receipts cache hits and followed links using their final identities", async () => {
+    const fetch = vi.fn(async (url: unknown) =>
+      String(url).endsWith("/old")
+        ? new Response(null, { status: 302, headers: { location: "https://example.com/new" } })
+        : new Response("# Source\n\n[Next](https://example.com/next)\n\nSource text"),
+    );
+    vi.stubGlobal("fetch", fetch);
+    const evidence = new AdvisoryEvidence();
+    const tool = createWebFetchTool();
+    await fetchInto(evidence, tool, { url: "https://example.com/old", format: "outline" });
+    await fetchInto(evidence, tool, { url: "https://example.com/old", format: "outline" });
+    expect(fetch).toHaveBeenCalledTimes(2);
+    await fetchInto(evidence, tool, { follow: 1 });
+    expect(evidence.list().map((r) => r.external?.sourceUri)).toEqual([
+      "https://example.com/new",
+      "https://example.com/new",
+      "https://example.com/next",
+    ]);
+  });
+  it("receipts cancellation without inspected provenance even when transport returns content", async () => {
+    const controller = new AbortController();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        controller.abort();
+        return new Response("Source");
+      }),
+    );
+    const evidence = new AdvisoryEvidence();
+    const { turn } = await fetchInto(
+      evidence,
+      createWebFetchTool(),
+      { urls: ["https://example.com/a", "https://example.com/b"] },
+      controller.signal,
+    );
+    expect(evidence.list()).toEqual([
+      {
+        id: expect.stringMatching(/^receipt-/),
+        toolCallId: "fetch",
+        tool: "web_fetch",
+        status: "cancelled",
+        retrievedAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T.*Z$/),
+      },
+    ]);
+    expect([...turn.limitations]).toContain(
+      "Opening a web page was stopped, so this search may have missed something.",
+    );
+  });
+  it("does not infer retrieval from legacy text-only fetch output", () => {
+    expect(
+      new AdvisoryEvidence().observe(
+        process.cwd(),
+        "web_fetch",
+        { url: "https://example.com" },
+        "fetch",
+        "Source text",
+      ).status,
+    ).toBe("failed");
+  });
+  it("receipts the redirect target rather than the requested URL or body revision", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: unknown) =>
+        String(url).endsWith("/old")
+          ? new Response(null, { status: 302, headers: { location: "https://example.com/actual" } })
+          : new Response('{"revision":"body-claim"}', { status: 200 }),
+      ),
+    );
+    const evidence = new AdvisoryEvidence();
+    const turn = new ProgrammaticAdvisoryTurn(evidence);
+    const output = await executeAdvisoryTool(
+      turn,
+      process.cwd(),
+      createWebFetchTool(),
+      { url: "https://example.com/old", prefer_llms_txt: false },
+      { signal: new AbortController().signal, toolCallId: "fetch" },
+    );
+    turn.resultPrepared({
+      type: "tool_result",
+      toolCallId: "fetch",
+      content: typeof output === "string" ? output : output.content,
+    });
+    expect(evidence.list()[0]?.external).toEqual({
+      tool: "web",
+      sourceUri: "https://example.com/actual",
+      toolCallId: "fetch",
+    });
+  });
+});
+
+describe("bounded advisory validation", () => {
+  const signal = new AbortController().signal;
+  const page = { entries: [], offset: 0, nextOffset: null, total: 0, limitedCoverage: false };
+  const checks = { snapshot: async () => true, page: async () => page, signal };
+  it("rejects result-first and in-flight submission without consuming the result slot", async () => {
+    const turn = new ProgrammaticAdvisoryTurn(new AdvisoryEvidence());
+    await expect(turn.submit(manualAssessment, checks)).rejects.toThrow("scan attempt must settle");
+    expect(turn.submitted).toBe(false);
+    turn.claim("programmatic_scan", {});
+    await expect(turn.submit(manualAssessment, checks)).rejects.toThrow("scan attempt must settle");
+    expect(turn.submitted).toBe(false);
+  });
+  it.each(["succeeded", "failed", "denied", "cancelled"] as const)(
+    "enforces host scan settlement %s without allowing a second scan",
+    async (outcome) => {
+      const turn = new ProgrammaticAdvisoryTurn(new AdvisoryEvidence());
+      turn.settleScan("succeeded"); // Settlement without a claim cannot bypass the gate.
+      await expect(turn.submit(manualAssessment, checks)).rejects.toThrow(
+        "scan attempt must settle",
+      );
+      turn.claim("programmatic_scan", {});
+      turn.settleScan(outcome);
+      turn.settleScan("succeeded"); // Settlement is final, including denial/cancellation.
+      expect(() => turn.claim("programmatic_scan", {})).toThrow("one unchanged");
+      if (outcome === "denied" || outcome === "cancelled") {
+        await expect(turn.submit(manualAssessment, checks)).rejects.toThrow("denied or cancelled");
+        expect(turn.submitted).toBe(false);
+      } else {
+        const output = await turn.submit(manualAssessment, checks);
+        expect(turn.submitted).toBe(true);
+        if (outcome === "failed") {
+          expect(output).toContain("Didn't fully check:");
+          expect(output).toContain("Your project checks failed");
+        }
+      }
+    },
+  );
+  it("renders manual choices separately and forces honest coverage", async () => {
+    const turn = scannedTurn(new AdvisoryEvidence());
+    const output = await turn.submit(
+      { ...manualAssessment, coverage: { status: "complete", scope: "All commands" } },
+      checks,
+    );
+    expect(output).toContain("## What AI found:");
+    expect(output).toContain("Didn't fully check:");
+    expect(output).toContain("AI didn't read your whole command list");
+    expect(output).toContain("Steps to do it yourself");
+  });
+  it("rejects invented line ranges and retains only explicitly supplied revisions", async () => {
+    const evidence = new AdvisoryEvidence();
+    const receipt = evidence.observe(
+      process.cwd(),
+      "read",
+      { file_path: "package.json" },
+      "read",
+      "     3\tfirst\n     4\tsecond",
+    );
+    expect(receipt.range).toEqual({ startLine: 3, endLine: 4 });
+    const input = (startLine: number) => ({
+      ...manualAssessment,
+      recommendations: [
+        {
+          ...manualAssessment.recommendations[0],
+          evidence: {
+            version: 1,
+            items: [
+              {
+                source: receipt.id,
+                basis: "observed",
+                code: "read",
+                severity: "info",
+                message: "Inspected line",
+                location: { path: "package.json", startLine },
+              },
+            ],
+          },
+        },
+      ],
+    });
+    const turn = scannedTurn(evidence);
+    await expect(turn.submit(input(100), checks)).rejects.toThrow("location");
+    await turn.submit(input(3), checks);
+    expect(turn.acceptedResult!.recommendations[0]!.evidence).toEqual(
+      input(3).recommendations[0]!.evidence,
+    );
+    await expect(turn.submit(input(3), checks)).rejects.toThrow("Only one");
+    expect(
+      evidence.observe(
+        process.cwd(),
+        "research_corpus",
+        { action: "show", repo: "owner/repo", path: "src/a.ts" },
+        "show",
+        '{"revision":"abc123","content":"source"}',
+      ).external?.revision,
+    ).toBeUndefined();
+    expect(
+      evidence.observe(
+        process.cwd(),
+        "research_corpus",
+        { action: "show", repo: "owner/repo", path: "src/a.ts" },
+        "show",
+        "source",
+        false,
+        false,
+        { outcome: "retrieved", revision: "abc123" },
+      ).external?.revision,
+    ).toBe("abc123");
+    expect(
+      evidence.observe(
+        process.cwd(),
+        "research_corpus",
+        { action: "search", repo: "owner/repo", path: "src/a.ts" },
+        "search",
+        '{"revision":"abc123"}',
+      ).external,
+    ).toBeUndefined();
+  });
+  it("matches external revision and path together and refuses unsupported external lines", async () => {
+    const evidence = new AdvisoryEvidence();
+    for (const [id, revision, path] of [
+      ["one", "revision-one", "src/first.ts"],
+      ["two", "revision-two", "src/second.ts"],
+    ]) {
+      evidence.retain({
+        id: id!,
+        toolCallId: id!,
+        tool: "research_corpus",
+        status: "retrieved",
+        external: {
+          tool: "steroids",
+          toolCallId: id!,
+          sourceUri: "https://example.com/repo",
+          revision,
+          path,
+        },
+      });
+    }
+    const input = (revision: string, path: string, startLine?: number) => ({
+      ...manualAssessment,
+      recommendations: [
+        {
+          ...manualAssessment.recommendations[0],
+          evidence: {
+            version: 1,
+            items: [
+              {
+                kind: "external-reference",
+                basis: "observed",
+                inspectedUrl: "https://example.com/repo",
+                revision,
+                location: { path, ...(startLine ? { startLine } : {}) },
+                claim: "Inspected external source",
+              },
+            ],
+          },
+        },
+      ],
+    });
+    const turn = scannedTurn(evidence);
+    await expect(turn.submit(input("revision-two", "src/first.ts"), checks)).rejects.toThrow(
+      "External provenance",
+    );
+    await expect(turn.submit(input("revision-one", "src/second.ts"), checks)).rejects.toThrow(
+      "External provenance",
+    );
+    await expect(turn.submit(input("revision-two", "src/second.ts", 3), checks)).rejects.toThrow(
+      "External provenance",
+    );
+    await turn.submit(input("revision-two", "src/second.ts"), checks);
+    expect(turn.acceptedResult!.recommendations[0]!.evidence).toEqual(
+      input("revision-two", "src/second.ts").recommendations[0]!.evidence,
+    );
+  });
+  it("bounds receipt retention with oldest eviction and stores no source bodies", () => {
+    const evidence = new AdvisoryEvidence();
+    const first = evidence.observe(
+      process.cwd(),
+      "read",
+      { file_path: "package.json" },
+      "first",
+      "PRIVATE BODY",
+    );
+    for (let i = 0; i < ADVISORY_LIMITS.receipts; i++)
+      evidence.observe(
+        process.cwd(),
+        "read",
+        { file_path: "package.json" },
+        String(i),
+        "PRIVATE BODY",
+      );
+    expect(evidence.get(first.id)).toBeUndefined();
+    expect(evidence.list()).toHaveLength(64);
+    expect(JSON.stringify(evidence.list())).not.toContain("PRIVATE BODY");
+    evidence.clear();
+    expect(evidence.list()).toEqual([]);
+  });
+  it("rejects forged citations and search-only evidence, reuses a retrieved receipt", async () => {
+    const evidence = new AdvisoryEvidence();
+    const turn = scannedTurn(evidence);
+    turn.observePage(page);
+    const item = {
+      basis: "observed",
+      source: "forged-call-id",
+      code: "inspection",
+      severity: "info",
+      message: "A model claim",
+    };
+    const input = (source: string) => ({
+      ...manualAssessment,
+      recommendations: [
+        {
+          ...manualAssessment.recommendations[0],
+          evidence: { version: 1, items: [{ ...item, source }] },
+        },
+      ],
+    });
+    await expect(turn.submit(input(item.source), checks)).rejects.toThrow("host receipt ID");
+    const lead = evidence.observe(
+      process.cwd(),
+      "research_corpus",
+      { action: "search" },
+      "search",
+      "lead",
+    );
+    await expect(turn.submit(input(lead.id), checks)).rejects.toThrow("Search leads");
+    const local = evidence.observe(
+      process.cwd(),
+      "read",
+      { file_path: "package.json" },
+      "read",
+      "contents",
+    );
+    const output = await turn.submit(input(local.id), checks);
+    expect(turn.acceptedResult!.recommendations[0]!.evidence).toEqual(
+      input(local.id).recommendations[0]!.evidence,
+    );
+    expect(output).not.toContain(local.id);
+  });
+  it("records git history as retrieved observed evidence without a location", async () => {
+    const evidence = new AdvisoryEvidence();
+    const turn = scannedTurn(evidence);
+    turn.observePage(page);
+    const history = evidence.observe(
+      process.cwd(),
+      "git_history",
+      { action: "change_frequency" },
+      "history",
+      '{"status":"ok","action":"change_frequency","entries":[{"path":"src/a.ts","commits":4}]}',
+    );
+    expect(history).toMatchObject({ tool: "git_history", status: "retrieved" });
+    expect(history.location).toBeUndefined();
+    expect(history.locations).toBeUndefined();
+    expect(
+      evidence.observe(
+        process.cwd(),
+        "git_history",
+        { action: "change_frequency" },
+        "history-missing",
+        '{"status":"unavailable","reason":"not-a-git-repository","message":"x"}',
+      ).status,
+    ).toBe("failed");
+    const input = {
+      ...manualAssessment,
+      recommendations: [
+        {
+          ...manualAssessment.recommendations[0],
+          evidence: {
+            version: 1,
+            items: [
+              {
+                basis: "observed",
+                source: history.id,
+                code: "recurrence",
+                severity: "info",
+                message: "src/a.ts changed in 4 commits this year",
+              },
+            ],
+          },
+        },
+      ],
+    };
+    await turn.submit(input, checks);
+    expect(turn.submitted).toBe(true);
+    for (const mode of ["setup", "configured"] as const)
+      expect(
+        new ProgrammaticAdvisoryTurn(new AdvisoryEvidence(), { mode }).allows("git_history"),
+      ).toBe(true);
+  });
+  it("reports every rule failure at once so one corrected resubmission is accepted", async () => {
+    const evidence = new AdvisoryEvidence();
+    const turn = scannedTurn(evidence);
+    turn.observePage(page);
+    const lead = evidence.observe(
+      process.cwd(),
+      "research_corpus",
+      { action: "search" },
+      "search",
+      "lead",
+    );
+    const local = evidence.observe(
+      process.cwd(),
+      "read",
+      { file_path: "package.json" },
+      "read",
+      "contents",
+    );
+    const base = manualAssessment.recommendations[0];
+    const withItems = (items: unknown[][]) => ({
+      ...manualAssessment,
+      recommendations: items.map((list) => ({ ...base, evidence: { version: 1, items: list } })),
+    });
+    const claim = { code: "inspection", severity: "info", message: "A model claim" };
+    const bad = withItems([
+      [{ ...claim, basis: "observed", source: lead.id }],
+      [
+        { ...claim, basis: "observed", source: "forged-call-id" },
+        { ...claim, basis: "observed", source: local.id, location: { path: "src/missing.ts" } },
+      ],
+    ]);
+    const error = await turn.submit(bad, checks).then(
+      () => undefined,
+      (failure: unknown) => (failure instanceof Error ? failure.message : String(failure)),
+    );
+    expect(error).toContain("Fix all 3 problems");
+    expect(error).toContain("1. Idea 1: Search leads and failed calls");
+    expect(error).toContain("2. Idea 2: Evidence source must reference a retained host receipt ID");
+    expect(error).toContain("3. Idea 2: Evidence location was not inspected");
+    expect(turn.submitted).toBe(false);
+    const fixed = withItems([
+      [{ ...claim, basis: "observed", source: local.id }],
+      [{ ...claim, basis: "observed", source: local.id }],
+    ]);
+    await turn.submit(fixed, checks);
+    expect(turn.submitted).toBe(true);
+    expect(turn.acceptedResult!.recommendations).toHaveLength(2);
+  });
+  it("keeps freshness findings from a rejected or aborted attempt out of the accepted one", async () => {
+    const evidence = new AdvisoryEvidence();
+    const turn = scannedTurn(evidence);
+    turn.observePage(page);
+    evidence.observe(process.cwd(), "read", { file_path: "package.json" }, "read", "contents");
+    let rechecks = 0;
+    const controller = new AbortController();
+    await expect(
+      turn.submit(manualAssessment, {
+        snapshot: async () => true,
+        page: async () => {
+          rechecks++;
+          controller.abort();
+          return { ...page, total: 99 };
+        },
+        signal: controller.signal,
+      }),
+    ).rejects.toThrow();
+    expect(rechecks).toBe(1);
+    expect(turn.limitations.has(ADVISORY_LIMITATIONS.catalogChangedLate)).toBe(false);
+    await turn.submit(manualAssessment, checks);
+    expect(turn.limitations.has(ADVISORY_LIMITATIONS.catalogChangedLate)).toBe(false);
+    expect(
+      turn.acceptedResult!.coverage.status === "limited" && turn.acceptedResult!.coverage.reason,
+    ).not.toContain(ADVISORY_LIMITATIONS.catalogChangedLate);
+  });
+  it("still reports a real catalog change at acceptance", async () => {
+    const evidence = new AdvisoryEvidence();
+    const turn = scannedTurn(evidence);
+    turn.observePage(page);
+    evidence.observe(process.cwd(), "read", { file_path: "package.json" }, "read", "contents");
+    await turn.submit(manualAssessment, { ...checks, page: async () => ({ ...page, total: 1 }) });
+    expect(turn.limitations.has(ADVISORY_LIMITATIONS.catalogChangedLate)).toBe(true);
+  });
+  it("claims the one scan synchronously and enforces turn budgets and closure", () => {
+    const turn = new ProgrammaticAdvisoryTurn(new AdvisoryEvidence());
+    expect(() => turn.claim("write", {})).toThrow("read-only");
+    turn.claim("programmatic_scan", {});
+    expect(() => turn.claim("programmatic_scan", {})).toThrow("one unchanged");
+    for (let i = 0; i < 12; i++) turn.claim("command_information", { action: "resolve" });
+    expect(() => turn.claim("command_information", { action: "resolve" })).toThrow("budget");
+    turn.close();
+    expect(() => turn.claim("read", {})).toThrow("read-only");
+  });
+  it("accepts inspected external attribution, rejects forged URLs/revisions and search-only attribution", async () => {
+    const evidence = new AdvisoryEvidence();
+    const turn = scannedTurn(evidence);
+    const citation = {
+      kind: "external-reference",
+      basis: "inferred",
+      inspectedUrl: "https://github.com/owner/repo",
+      location: { path: "src/a.ts" },
+      claim: "Model inference from inspected source",
+    };
+    const input = (item: unknown) => ({
+      ...manualAssessment,
+      recommendations: [
+        { ...manualAssessment.recommendations[0], evidence: { version: 1, items: [item] } },
+      ],
+    });
+    evidence.observe(
+      process.cwd(),
+      "research_corpus",
+      { action: "search", repo: "owner/repo", path: "src/a.ts" },
+      "search",
+      "lead",
+    );
+    await expect(turn.submit(input(citation), checks)).rejects.toThrow("External provenance");
+    evidence.observe(
+      process.cwd(),
+      "research_corpus",
+      { action: "show", repo: "owner/repo", path: "src/a.ts" },
+      "show",
+      "source",
+    );
+    await expect(turn.submit(input({ ...citation, revision: "invented" }), checks)).rejects.toThrow(
+      "External provenance",
+    );
+    await expect(
+      turn.submit(input({ ...citation, inspectedUrl: "https://example.com/forged" }), checks),
+    ).rejects.toThrow("External provenance");
+    await turn.submit(input(citation), checks);
+    expect(turn.acceptedResult!.recommendations[0]!.evidence).toEqual(
+      input(citation).recommendations[0]!.evidence,
+    );
+  });
+  it("bounds catalog pages, recommendations and serialized results and stops cancelled submission", async () => {
+    const turn = scannedTurn(new AdvisoryEvidence());
+    for (let index = 0; index < 10; index++)
+      turn.claim("command_information", { action: "list", offset: index * 100 });
+    expect(() => turn.claim("command_information", { action: "list" })).toThrow("budget");
+    await expect(
+      turn.submit(
+        {
+          ...manualAssessment,
+          recommendations: Array.from({ length: 11 }, () => manualAssessment.recommendations[0]),
+        },
+        checks,
+      ),
+    ).rejects.toThrow("At most 10");
+    await expect(
+      turn.submit({ ...manualAssessment, extra: "x".repeat(64_001) }, checks),
+    ).rejects.toThrow("64,000");
+    const controller = new AbortController();
+    controller.abort();
+    await expect(
+      turn.submit(manualAssessment, { ...checks, signal: controller.signal }),
+    ).rejects.toThrow();
+    expect(turn.submitted).toBe(false);
+  });
+  it("distinguishes failures and cancellation from retrieved code", () => {
+    const evidence = new AdvisoryEvidence();
+    expect(evidence.observe(process.cwd(), "read", {}, "error", "Error: missing").status).toBe(
+      "failed",
+    );
+    expect(evidence.observe(process.cwd(), "read", {}, "cancel", "", false, true).status).toBe(
+      "cancelled",
+    );
+    expect(
+      evidence.observe(
+        process.cwd(),
+        "research_corpus",
+        { action: "show", repo: "owner/repo", path: "src/a.ts" },
+        "show",
+        "source",
+      ).external,
+    ).toEqual({
+      tool: "steroids",
+      sourceUri: "https://github.com/owner/repo",
+      repository: "owner/repo",
+      path: "src/a.ts",
+      toolCallId: "show",
+    });
+  });
+});
+
+describe("advisory evidence presentation", () => {
+  const checks = {
+    snapshot: async () => true,
+    page: async () => ({}),
+    signal: new AbortController().signal,
+  };
+
+  it("retains supplied local locations without filling in omitted receipt ranges", async () => {
+    const evidence = new AdvisoryEvidence();
+    const locations = [
+      { path: "src/first.ts", startLine: 3, endLine: 5 },
+      { path: "src/second.ts", startLine: 8 },
+      { path: "src/path-only.ts" },
+      undefined,
+    ];
+    const items = locations.map((location, index) => {
+      const receipt = evidence.observe(
+        process.cwd(),
+        "read",
+        { file_path: location?.path ?? "src/omitted.ts" },
+        `local-${index}`,
+        "1\tfirst\n10\tlast",
+      );
+      return {
+        basis: index === 1 ? "inferred" : "observed",
+        source: receipt.id,
+        code: "inspection",
+        severity: "info",
+        message: `Local claim ${index}\u001b`,
+        location,
+      };
+    });
+    const turn = scannedTurn(evidence);
+    const output = await turn.submit(
+      {
+        ...manualAssessment,
+        recommendations: [
+          { ...manualAssessment.recommendations[0], evidence: { version: 1, items } },
+        ],
+      },
+      checks,
+    );
+    expect(turn.acceptedResult!.recommendations[0]!.evidence.items).toEqual(items);
+    expect(output).not.toContain("Evidence (");
+    expect(output).not.toContain("src/omitted.ts");
+    expect(output).not.toContain("\u001b");
+    expect(output.length).toBeLessThanOrEqual(ADVISORY_LIMITS.resultChars);
+  });
+
+  it("distinguishes corpus files and retains only supplied revisions and locations", async () => {
+    const evidence = new AdvisoryEvidence();
+    for (const file of ["src/first.ts", "src/second.ts"]) {
+      evidence.observe(
+        process.cwd(),
+        "research_corpus",
+        { action: "show", repo: "owner/repo", path: file },
+        file,
+        "Retrieved source",
+        false,
+        false,
+        { outcome: "retrieved", revision: "abc123" },
+      );
+    }
+    const citation = {
+      kind: "external-reference",
+      basis: "inferred",
+      inspectedUrl: "https://github.com/owner/repo",
+      claim: "Model inference, not a verified conclusion",
+    };
+    const turn = scannedTurn(evidence);
+    const items = [
+      { ...citation, location: { path: "src/first.ts" }, revision: "abc123" },
+      { ...citation, location: { path: "src/second.ts" } },
+      citation,
+    ];
+    const output = await turn.submit(
+      {
+        ...manualAssessment,
+        recommendations: [
+          { ...manualAssessment.recommendations[0], evidence: { version: 1, items } },
+        ],
+      },
+      checks,
+    );
+    expect(turn.acceptedResult!.recommendations[0]!.evidence.items).toEqual(items);
+    expect(output).not.toContain("External evidence (");
+    expect(output).not.toMatch(/\/blob\/|line:|lines:|revision: (?:HEAD|main|unknown)/);
+  });
+
+  it("names each unavailable command while retaining its reason", async () => {
+    const evidence = new AdvisoryEvidence();
+    const receipt = evidence.observe(
+      process.cwd(),
+      "read",
+      { file_path: "package.json" },
+      "config",
+      "1\tCheck configuration",
+    );
+    receipt.localSources = [{ path: "package.json", purpose: "independent" }];
+    const output = await scannedTurn(evidence).submit(
+      {
+        ...manualAssessment,
+        recommendations: ["project-check", "Global.Check"].map((name) => ({
+          ...manualAssessment.recommendations[0],
+          evidence: {
+            version: 1,
+            items: [
+              {
+                basis: "observed",
+                source: receipt.id,
+                code: "config",
+                severity: "info",
+                message: "The local configuration identifies the check input",
+              },
+            ],
+          },
+          choice: {
+            kind: "reuse-command",
+            availability: {
+              status: "unavailable",
+              command: { version: 1, name, source: "project-custom", invocationKind: "prompt" },
+              reason: "Body unavailable",
+            },
+          },
+        })),
+      },
+      checks,
+    );
+    expect(output.split("\n").filter((line) => line.startsWith("/"))).toEqual([
+      "/project-check couldn't be found: Body unavailable",
+      "/Global.Check couldn't be found: Body unavailable",
+    ]);
+    expect(output).toContain("Suggestions only. Nothing runs or changes without your OK.");
+    expect(output).toContain(
+      "Your part: Check /project-check again. AI couldn't confirm it still works here.",
+    );
+  });
+});
+
+describe("needs-first host submission", () => {
+  const snapshot = {
+    version: 1,
+    command: {
+      version: 1,
+      name: "project-check",
+      source: "project-custom",
+      invocationKind: "prompt",
+    },
+    capabilityKind: "prompt-only",
+    ownerSha256: "a".repeat(64),
+    bodySha256: "b".repeat(64),
+    helpers: [],
+  };
+  const availability = { status: "available", snapshot };
+  const proposal = {
+    version: 1,
+    capabilityKind: "prompt-only",
+    desiredOutcome: "Check configuration across selected packages",
+    inputs: ["Package configuration"],
+    outputs: ["Configuration discrepancy report"],
+    prerequisites: ["Readable package configuration"],
+    risks: ["Package-specific settings may differ"],
+    verificationExpectations: ["Compare reports against known valid and invalid configurations"],
+  };
+  function fixture(kind = "extend-command") {
+    const evidence = new AdvisoryEvidence();
+    const turn = scannedTurn(evidence);
+    const receipt = evidence.observe(
+      process.cwd(),
+      "read",
+      { file_path: "package.json" },
+      "prerequisite",
+      "1\tConfiguration check inputs",
+    );
+    // Contract fixture supplies host classification; real delivery is covered in advisory-tools.test.ts.
+    receipt.localSources = [{ path: "package.json", purpose: "independent" }];
+    const recommendation = {
+      ...manualAssessment.recommendations[0]!,
+      outcome: "Compare configuration across selected packages",
+      rationale: "A shared comparison can avoid repeating the same package inspection steps",
+      workflow: {
+        ...manualAssessment.recommendations[0]!.workflow,
+        trigger: "A configuration change affects multiple packages",
+        representativeCase: "Compare the root check settings with two selected packages",
+        inputs: ["Root configuration", "Selected package configurations"],
+        currentProcess: [
+          "Read each configuration",
+          "Compare check settings",
+          "Report discrepancies",
+        ],
+        output: "A configuration discrepancy report",
+        successCheck:
+          "Known valid and invalid configurations are distinguished without modifying files",
+      },
+      evidence: {
+        version: 1,
+        items: [
+          {
+            basis: "observed",
+            source: receipt.id,
+            code: "prerequisite",
+            severity: "info",
+            message: "The package configuration supplies the input required by the check workflow",
+          },
+        ],
+      },
+      alternatives: [
+        {
+          kind: "manual",
+          reasonNotSelected:
+            "Repeated package comparisons would duplicate the same inspection steps",
+        },
+      ],
+      choice:
+        kind === "extend-command"
+          ? {
+              kind,
+              availability,
+              proposedChanges: [
+                "Accept a selected package list rather than only the root configuration",
+              ],
+              requirement: proposal,
+            }
+          : kind === "missing-capability"
+            ? { kind, proposal }
+            : { kind: "manual", steps: ["Compare the package settings by hand"] },
+    };
+    const input = { ...manualAssessment, recommendations: [recommendation] };
+    const checks = {
+      snapshot: vi.fn(async () => true),
+      page: async () => ({}),
+      signal: new AbortController().signal,
+    };
+    return { evidence, turn, input, recommendation, checks };
+  }
+  function deliver(turn: ProgrammaticAdvisoryTurn) {
+    turn.observeCommand(JSON.stringify({ status: "prompt", snapshot }));
+  }
+
+  it("retains the complete workflow while summarizing extension consequences without starting work", async () => {
+    const { turn, input, checks } = fixture();
+    deliver(turn);
+    const output = await turn.submit(input, checks);
+    expect(turn.acceptedResult!.recommendations).toEqual(input.recommendations);
+    const before = structuredClone(turn.acceptedResult);
+    expect(renderAdvisoryResult(turn.acceptedResult!)).toBe(output);
+    expect(turn.acceptedResult).toEqual(before);
+    for (const value of [
+      proposal.desiredOutcome,
+      ...proposal.inputs,
+      ...proposal.outputs,
+      ...proposal.prerequisites,
+      ...proposal.risks,
+      ...proposal.verificationExpectations,
+      input.recommendations[0]!.workflow.mutationBoundary,
+    ])
+      expect(output).toContain(value);
+    expect(output).toContain("Where: whole project");
+    expect(output).not.toMatch(
+      /Trigger:|Representative case:|Repeatability|Alternative not selected|Evidence \(/,
+    );
+    expect(output).toContain("What the changed command would do");
+    expect(output).toContain("/project-check exists. It hasn't been run");
+    expect(output).toContain(
+      "Your part: Your call. Review the suggested changes to /project-check.",
+    );
+    expect(output).toContain("Suggested changes: Accept a selected package list");
+    expect(output).not.toContain("receipt-");
+    expect(output).not.toContain(snapshot.bodySha256);
+    expect(output).toContain("Not sure about: Behavior still needs verification");
+  });
+
+  it("keeps app-backed proposals visibly separate from working generated commands", async () => {
+    const { turn, input, checks } = fixture("missing-capability");
+    Object.assign(input.recommendations[0]!.choice, {
+      proposal: { ...proposal, capabilityKind: "app-backed" },
+    });
+    const output = await turn.submit(input, checks);
+    expect(output).toContain("What the new command would do");
+    expect(output).toContain(
+      "This needs a change to the GG app itself. A command alone can't do it.",
+    );
+    for (const value of [
+      ...proposal.prerequisites,
+      ...proposal.risks,
+      ...proposal.verificationExpectations,
+    ])
+      expect(output).toContain(value);
+  });
+
+  it.each(["prompt-only", "app-backed"] as const)(
+    "keeps %s command restrictions and a next action in the terminal summary",
+    (capabilityKind) => {
+      const { input } = fixture();
+      const accepted = programmaticAssessmentResultV2Schema.parse({
+        ...input,
+        recommendations: [
+          {
+            ...input.recommendations[0],
+            choice: {
+              kind: "reuse-command",
+              availability: {
+                status: "available",
+                snapshot: {
+                  ...snapshot,
+                  capabilityKind,
+                  command:
+                    capabilityKind === "app-backed"
+                      ? {
+                          ...snapshot.command,
+                          source: "built-in",
+                          invocationKind: "workspace-action",
+                        }
+                      : snapshot.command,
+                },
+              },
+            },
+          },
+        ],
+      });
+      const before = structuredClone(accepted);
+      const output = renderAdvisoryResult(accepted);
+      expect(output).toContain(
+        "/project-check exists. It hasn't been run, and AI hasn't confirmed it does everything needed.",
+      );
+      expect(output).toContain(
+        capabilityKind === "app-backed"
+          ? "It needs a GG app feature to run, so it can't run from this chat."
+          : "Your part: Nothing. /project-check already covers this.",
+      );
+      expect(accepted).toEqual(before);
+    },
+  );
+
+  it("renders honest unknowns and bounded next inspection steps", async () => {
+    const { turn, input, checks } = fixture("manual");
+    Object.assign(input.recommendations[0]!, {
+      alternatives: [],
+      evidence: { version: 1, items: [] },
+      choice: {
+        kind: "needs-more-evidence",
+        missingEvidence: ["Local prerequisite support is unknown"],
+        nextInspectionSteps: ["Read the selected package configuration"],
+      },
+    });
+    input.recommendations[0]!.workflow.repeatability = {
+      basis: "assumed",
+      explanation: "Recurrence is unknown",
+    };
+    const output = await turn.submit(input, checks);
+    expect(output).toContain("What's missing: Local prerequisite support is unknown");
+    expect(output).toContain("What to check next: Read the selected package configuration");
+    expect(turn.acceptedResult!.recommendations[0]!.workflow.repeatability).toEqual({
+      basis: "assumed",
+      explanation: "Recurrence is unknown",
+    });
+    expect(output).not.toContain("Repeatability");
+  });
+
+  it.each([undefined, "unknown", "command-definition"] as const)(
+    "rejects positive advice with %s source-purpose provenance",
+    async (purpose) => {
+      const { evidence, turn, input, checks } = fixture("missing-capability");
+      const receipt = evidence.list()[0]!;
+      receipt.localSources = purpose ? [{ path: "package.json", purpose }] : undefined;
+      await expect(turn.submit(input, checks)).rejects.toThrow("inspected local workflow evidence");
+      expect(turn.acceptedResult).toBeUndefined();
+    },
+  );
+
+  it.each(["empty", "assumption", "metadata", "body", "external", "history"])(
+    "refuses new automation supported only by %s evidence",
+    async (support) => {
+      const { evidence, turn, input, recommendation, checks } = fixture("missing-capability");
+      recommendation.evidence.items = [];
+      if (support === "assumption")
+        recommendation.evidence.items.push({
+          basis: "assumed",
+          source: "assumption",
+          code: "need",
+          severity: "info",
+          message: "The workflow might recur",
+        });
+      if (support === "metadata" || support === "body") {
+        const receipt = evidence.observe(
+          process.cwd(),
+          "command_information",
+          { action: support === "body" ? "resolve" : "list" },
+          support,
+          "Command information",
+        );
+        recommendation.evidence.items.push({
+          basis: "inferred",
+          source: receipt.id,
+          code: "need",
+          severity: "info",
+          message: "Catalog information is not local workflow inspection",
+        });
+      }
+      if (support === "external") {
+        const receipt = evidence.observe(
+          process.cwd(),
+          "research_corpus",
+          { action: "show", repo: "owner/repo", path: "check.ts" },
+          "external",
+          "Example check",
+        );
+        recommendation.evidence.items.push({
+          basis: "inferred",
+          source: receipt.id,
+          code: "need",
+          severity: "info",
+          message: "An external example does not establish this project's need",
+        });
+      }
+      if (support === "history") {
+        const receipt = evidence.observe(
+          process.cwd(),
+          "git_history",
+          { action: "change_frequency" },
+          "history",
+          '{"status":"ok","action":"change_frequency","entries":[{"path":"src/a.ts","commits":4}]}',
+        );
+        recommendation.evidence.items.push({
+          basis: "observed",
+          source: receipt.id,
+          code: "recurrence",
+          severity: "info",
+          message: "Change frequency alone does not establish that automation would help",
+        });
+      }
+      await expect(turn.submit(input, checks)).rejects.toThrow("inspected local workflow evidence");
+      expect(turn.submitted).toBe(false);
+      expect(turn.acceptedResult).toBeUndefined();
+    },
+  );
+
+  it("refuses an initially unavailable extension base", async () => {
+    const { turn, input, checks } = fixture();
+    Object.assign(input.recommendations[0]!.choice, {
+      availability: { status: "unavailable", command: snapshot.command, reason: "Body unreadable" },
+    });
+    await expect(turn.submit(input, checks)).rejects.toThrow(
+      "Extension requires an inspected base",
+    );
+    expect(checks.snapshot).not.toHaveBeenCalled();
+    expect(turn.submitted).toBe(false);
+  });
+
+  it.each(["base", "alternative"])("requires the exact delivered %s snapshot", async (target) => {
+    const { turn, input, recommendation, checks } = fixture(
+      target === "base" ? "extend-command" : "missing-capability",
+    );
+    if (target === "alternative")
+      Object.assign(recommendation, {
+        alternatives: [
+          {
+            kind: "reuse-command",
+            availability,
+            reasonNotSelected: "The root-only command cannot compare selected packages",
+          },
+        ],
+      });
+    await expect(turn.submit(input, checks)).rejects.toThrow("Resolve the exact candidate body");
+    turn.observeCommand(
+      JSON.stringify({ status: "prompt", snapshot: { ...snapshot, bodySha256: "c".repeat(64) } }),
+    );
+    await expect(turn.submit(input, checks)).rejects.toThrow("Resolve the exact candidate body");
+    expect(turn.submitted).toBe(false);
+    deliver(turn);
+    await turn.submit(input, checks);
+    expect(checks.snapshot).toHaveBeenCalledExactlyOnceWith(snapshot);
+    expect(turn.acceptedResult?.recommendations[0]?.choice.kind).toBe(
+      target === "base" ? "extend-command" : "missing-capability",
+    );
+  });
+
+  it.each(["base", "reuse", "alternative"])(
+    "downgrades stale %s to unavailable and limited without discarding the proposal",
+    async (target) => {
+      const { turn, input, recommendation, checks } = fixture();
+      if (target === "reuse")
+        Object.assign(recommendation, { choice: { kind: "reuse-command", availability } });
+      if (target === "alternative")
+        Object.assign(recommendation, {
+          choice: { kind: "missing-capability", proposal },
+          alternatives: [
+            {
+              kind: "reuse-command",
+              availability,
+              reasonNotSelected: "The root-only command cannot compare selected packages",
+            },
+          ],
+        });
+      deliver(turn);
+      checks.snapshot.mockResolvedValue(false);
+      await turn.submit(input, checks);
+      const accepted = turn.acceptedResult!;
+      const command =
+        target !== "alternative"
+          ? accepted.recommendations[0]!.choice
+          : accepted.recommendations[0]!.alternatives[0];
+      expect(command).toMatchObject({
+        availability: {
+          status: "unavailable",
+          command: snapshot.command,
+          reason: expect.stringContaining("changed"),
+        },
+      });
+      expect(accepted.coverage).toMatchObject({
+        status: "limited",
+        reason: expect.stringContaining("A command AI suggested changed"),
+      });
+      expect(accepted.recommendations[0]!.choice.kind).toBe(
+        target === "base"
+          ? "extend-command"
+          : target === "reuse"
+            ? "reuse-command"
+            : "missing-capability",
+      );
+      const display = projectDiscovery(randomUUID(), accepted).projection.candidates[0]!;
+      expect(
+        target === "alternative" ? display.alternatives[0]!.availability : display.availability,
+      ).toEqual({
+        status: "unavailable",
+        reason: "Command identity/body changed or cannot be safely resolved at submission.",
+      });
+      expect(display.nextStep.available).toBe(true);
+      expect(JSON.stringify(display)).not.toContain("bodySha256");
+    },
+  );
+
+  it.each(["manual", "missing-capability"])(
+    "requires cited local prerequisites for command alternatives on %s",
+    async (kind) => {
+      const { turn, input, recommendation, checks } = fixture(kind);
+      const local = recommendation.evidence.items;
+      recommendation.evidence.items = [];
+      Object.assign(recommendation, {
+        alternatives: [
+          {
+            kind: "reuse-command",
+            availability,
+            reasonNotSelected: "The command only checks the root and cannot compare packages",
+          },
+        ],
+      });
+      deliver(turn);
+      await expect(turn.submit(input, checks)).rejects.toThrow(
+        "inspected local prerequisite evidence",
+      );
+      expect(turn.submitted).toBe(false);
+      recommendation.evidence.items = local;
+      await turn.submit(input, checks);
+      expect(turn.acceptedResult?.recommendations[0]?.alternatives[0]).toMatchObject({
+        availability,
+      });
+    },
+  );
+
+  it.each(["forged", "authority", "v1"])(
+    "rejects %s submissions without consuming the result slot",
+    async (mode) => {
+      const { turn, input, recommendation, checks } = fixture("missing-capability");
+      if (mode === "forged") recommendation.evidence.items[0]!.source = "receipt-invented";
+      if (mode === "authority")
+        Object.assign(recommendation, { executionApproved: true, toolGrants: ["write"] });
+      if (mode === "v1") input.version = 1;
+      await expect(turn.submit(input, checks)).rejects.toThrow(
+        mode === "forged" ? "host receipt ID" : mode === "authority" ? "Unrecognized" : "2",
+      );
+      expect(turn.submitted).toBe(false);
+      expect(turn.acceptedResult).toBeUndefined();
+    },
+  );
+});
+
+describe("generate-from-reference host submission", () => {
+  const REGIONS = ["ap-south", "eu-west", "us-east"];
+  const regionFiles = (regions: readonly string[]) =>
+    regions.flatMap((region) =>
+      ["deploy.yaml", "secrets.example", "README.md"].map(
+        (file) => `config/regions/${region}/${file}`,
+      ),
+    );
+  /** Real detector output on a bounded path-only inventory. */
+  function families(paths: readonly string[]) {
+    return detectProgrammaticItemFamilies(
+      inventoryV1Schema.parse({
+        version: 1,
+        configurationFingerprint: { version: 1, sha256: "a".repeat(64) },
+        scanners: [],
+        entries: [...paths].sort().map((entry) => ({ path: entry, bytes: entry.length })),
+      }),
+    );
+  }
+  const commandSnapshot = {
+    version: 1,
+    command: { version: 1, name: "gen-region", source: "project-custom", invocationKind: "prompt" },
+    capabilityKind: "prompt-only",
+    ownerSha256: "c".repeat(64),
+    bodySha256: "d".repeat(64),
+    helpers: [],
+  };
+  function fixture(
+    options: { mode?: "setup" | "configured"; regions?: string[]; inspected?: string } = {},
+  ) {
+    const evidence = new AdvisoryEvidence();
+    const turn =
+      options.mode === "configured"
+        ? scannedTurn(evidence)
+        : new ProgrammaticAdvisoryTurn(evidence, { mode: "setup" });
+    const detected = families([...regionFiles(options.regions ?? REGIONS), "package.json"]);
+    if (options.mode !== "configured") turn.recordFamilies(detected);
+    const family = detected.families[0];
+    const inspected = options.inspected ?? "config/regions/us-east/deploy.yaml";
+    const receipt = evidence.observe(
+      process.cwd(),
+      "read",
+      { file_path: inspected },
+      "reference",
+      "1\tregion: us-east",
+    );
+    // Contract fixture supplies host classification; real delivery is covered in advisory-tools.test.ts.
+    receipt.localSources = [{ path: inspected, purpose: "independent" }];
+    const members = family?.members.map((member) => member.path) ?? [
+      "config/regions/eu-west",
+      "config/regions/us-east",
+      "config/regions/ap-south",
+    ];
+    const generator = {
+      version: 1,
+      familyId: family?.id ?? "0123456789abcdef",
+      members,
+      sharedShape: ["deploy.yaml, secrets.example and README.md with the same keys"],
+      varyingInputs: ["Region name", "Endpoint URL", "Credential reference"],
+      reference: {
+        kind: "existing-member",
+        path: "config/regions/us-east",
+        reason: "The most complete region configuration",
+      },
+      risks: ["Region-specific overrides may be lost"],
+      verificationExpectations: ["Generated files differ from the reference only in listed inputs"],
+    };
+    const recommendation = {
+      ...manualAssessment.recommendations[0]!,
+      outcome: "Add new regions from one reference configuration",
+      rationale: "Each region repeats the same files with different names and endpoints",
+      evidence: {
+        version: 1,
+        items: [
+          {
+            basis: "observed",
+            source: receipt.id,
+            code: "reference",
+            severity: "info",
+            message: "The reference region contains every shared file",
+          },
+        ],
+      },
+      alternatives: [
+        { kind: "reuse-command", reasonNotSelected: "No existing command creates regions" },
+        { kind: "extend-command", reasonNotSelected: "No command partially fits this setup" },
+        { kind: "manual", reasonNotSelected: "New regions are added often enough to drift" },
+      ],
+      choice: { kind: "generate-from-reference", generator } as Record<string, unknown>,
+    };
+    const input = { ...manualAssessment, recommendations: [recommendation] };
+    const checks = {
+      snapshot: vi.fn(async () => true),
+      page: async () => ({}),
+      signal: new AbortController().signal,
+    };
+    return { turn, input, recommendation, generator, checks };
+  }
+
+  it("suggests generation for a real detected family with an inspected reference, without starting work", async () => {
+    const { turn, input, generator, checks } = fixture();
+    expect(generator.members).toEqual(REGIONS.map((region) => `config/regions/${region}`));
+    const output = await turn.submit(input, checks);
+    for (const value of [
+      "Example to copy: config/regions/us-east",
+      "(looked at, not tested)",
+      ...generator.members,
+      ...generator.sharedShape,
+      ...generator.varyingInputs,
+      ...generator.risks,
+      ...generator.verificationExpectations,
+      "Your part: Your call. Review the plan for building it.",
+    ])
+      expect(output).toContain(value);
+    expect(output).not.toMatch(/fingerprint|digest|lifecycle|receipt-/i);
+    const display = projectDiscovery(randomUUID(), turn.acceptedResult!).projection.candidates[0]!;
+    expect(display.choice).toBe("generate-from-reference");
+    expect(display.nextStep.reason).toBe(
+      "Look over the plan. Nothing changes. Making, testing and running it each need your OK.",
+    );
+  });
+
+  it("accepts building one by hand first without an inspected member", async () => {
+    const { turn, input, generator, checks } = fixture({ inspected: "package.json" });
+    generator.reference = {
+      kind: "build-by-hand-first",
+      reason: "No region is complete yet",
+    } as never;
+    await expect(turn.submit(input, checks)).resolves.toContain(
+      "Example to copy: build one yourself first.",
+    );
+  });
+
+  it("rejects an existing reference that was not inspected", async () => {
+    const { turn, input, checks } = fixture({ inspected: "package.json" });
+    await expect(turn.submit(input, checks)).rejects.toThrow("must be inspected in this turn");
+    expect(turn.submitted).toBe(false);
+  });
+
+  it("rejects a too-small group the detector did not report", async () => {
+    const { turn, input, checks } = fixture({ regions: ["eu-west", "us-east"] });
+    await expect(turn.submit(input, checks)).rejects.toThrow("too-small or undetected group");
+  });
+
+  it("rejects a mixed group with members outside the detected family", async () => {
+    const { turn, input, generator, checks } = fixture();
+    generator.members = [...generator.members.slice(1), "src/handlers"];
+    await expect(turn.submit(input, checks)).rejects.toThrow("do not mix items");
+  });
+
+  it("rejects generation in configured mode, where no families are delivered", async () => {
+    const { turn, input, checks } = fixture({ mode: "configured" });
+    await expect(turn.submit(input, checks)).rejects.toThrow("too-small or undetected group");
+  });
+
+  it("reuses an existing generator command, listing generation as the alternative", async () => {
+    const { turn, input, recommendation, checks } = fixture({ mode: "configured" });
+    turn.observeCommand(JSON.stringify({ status: "prompt", snapshot: commandSnapshot }));
+    Object.assign(recommendation, {
+      choice: {
+        kind: "reuse-command",
+        availability: { status: "available", snapshot: commandSnapshot },
+      },
+      alternatives: [
+        {
+          kind: "generate-from-reference",
+          reasonNotSelected: "/gen-region already generates region configuration",
+        },
+      ],
+    });
+    await turn.submit(input, checks);
+    expect(turn.acceptedResult?.recommendations[0]).toMatchObject({
+      choice: { kind: "reuse-command" },
+      alternatives: [{ kind: "generate-from-reference" }],
+    });
+  });
+});
+
+describe("advisory extension regression fixtures", () => {
+  it("represents manual work without executable opportunity state", () => {
+    const result = programmaticAssessmentResultV2Schema.parse(manualAssessment);
+    expect(result.recommendations[0]!.choice.kind).toBe("manual");
+    expect(result).not.toHaveProperty("opportunities");
+    expect(result).not.toHaveProperty("configurationFingerprint");
+    expect(
+      programmaticAssessmentResultV2Schema.safeParse({ ...manualAssessment, lifecycle: [] })
+        .success,
+    ).toBe(false);
+  });
+  it.each(["review", "project-check", "Global.Check"])(
+    "permits advice for %s outside the specialist runner",
+    (name) => {
+      const result = programmaticAssessmentResultV2Schema.parse({
+        ...manualAssessment,
+        recommendations: [
+          {
+            ...manualAssessment.recommendations[0],
+            choice: {
+              kind: "reuse-command",
+              availability: {
+                status: "unavailable",
+                command: {
+                  version: 1,
+                  name,
+                  source:
+                    name === "review"
+                      ? "built-in"
+                      : name === "project-check"
+                        ? "project-custom"
+                        : "global-custom",
+                  invocationKind: "prompt",
+                },
+                reason: "Resolve body and inspect prerequisites before asserting suitability",
+              },
+            },
+          },
+        ],
+      });
+      expect(result.recommendations[0]!.choice.kind).toBe("reuse-command");
+    },
+  );
+  it.each(["prompt-only", "script-backed", "app-backed"])(
+    "keeps missing %s functionality a proposal",
+    (capabilityKind) => {
+      const result = programmaticAssessmentResultV2Schema.parse({
+        ...manualAssessment,
+        recommendations: [
+          {
+            ...manualAssessment.recommendations[0],
+            alternatives: [
+              {
+                kind: "manual",
+                reasonNotSelected:
+                  "Repeated status aggregation would require the same error-prone steps",
+              },
+            ],
+            choice: {
+              kind: "missing-capability",
+              proposal: {
+                version: 1,
+                capabilityKind,
+                desiredOutcome: "Inspect deployment status",
+                inputs: ["Selected project"],
+                outputs: ["Status report"],
+                prerequisites: ["Separate implementation approval"],
+                risks: ["Capability does not exist"],
+                verificationExpectations: ["Exercise the real implementation"],
+              },
+            },
+          },
+        ],
+      });
+      expect(result.recommendations[0]!.choice.kind).toBe("missing-capability");
+    },
+  );
+  it("requires paging beyond the first hundred entries without truncating command identities", () => {
+    const entries: CommandDiscovery["entries"] = Array.from({ length: 205 }, (_, index) => ({
+      listing: {
+        name: `custom-${index}`,
+        aliases: [],
+        description: "Project check",
+        source: "custom",
+        origin: "project-custom",
+        invocationKind: "prompt",
+        input: { text: "optional", references: "none", attachments: "none" },
+      },
+    }));
+    const discovery: CommandDiscovery = {
+      entries,
+      resolve: (name) => entries.find((entry) => entry.listing.name === name),
+    };
+    const first = projectAdvisoryCommands(discovery);
+    expect(first).toMatchObject({ nextOffset: 100, total: 205, limitedCoverage: true });
+    const second = projectAdvisoryCommands(discovery, first.nextOffset!);
+    const third = projectAdvisoryCommands(discovery, second.nextOffset!);
+    expect(
+      [...first.entries, ...second.entries, ...third.entries].map((entry) => entry.name),
+    ).toEqual(entries.map((entry) => entry.listing.name));
+    expect(third.nextOffset).toBeNull();
+  });
+});
+
+describe("host-written coverage", () => {
+  const signal = new AbortController().signal;
+  const page = { entries: [], offset: 0, nextOffset: null, total: 0, limitedCoverage: false };
+  const checks = { snapshot: async () => true, page: async () => page, signal };
+  const internal = /receipt|deterministic scan|budget-limited|programmatic_|command_information/i;
+  function sampledTurn(): ProgrammaticAdvisoryTurn {
+    const evidence = new AdvisoryEvidence();
+    const receipt = evidence.observe(
+      process.cwd(),
+      "read",
+      { file_path: "package.json" },
+      "config",
+      "1\tCheck configuration",
+    );
+    receipt.localSources = [{ path: "package.json", purpose: "independent" }];
+    const turn = scannedTurn(evidence);
+    turn.observePage({
+      entries: [],
+      offset: 0,
+      nextOffset: null,
+      total: 0,
+      limitedCoverage: false,
+    });
+    turn.recordSample({ listed: 30, excerpted: 12 });
+    return turn;
+  }
+  it("replaces model coverage text with plain host facts", async () => {
+    const turn = sampledTurn();
+    const output = await turn.submit(
+      {
+        ...manualAssessment,
+        coverage: {
+          status: "limited",
+          scope: "Deterministic scan plus receipts from command_information",
+          reason: "budget-limited by programmatic_scan receipts",
+        },
+      },
+      checks,
+    );
+    expect(output).toContain(
+      "Looked at: 12 sampled project files, 1 more project file AI opened itself and no commands in your list. 18 listed files weren't read.",
+    );
+    expect(output).toContain(`Didn't fully check: ${ADVISORY_LIMITATIONS.modelLimited}`);
+    expect(output).not.toMatch(internal);
+    expect(turn.acceptedResult?.coverage).not.toMatchObject({
+      scope: expect.stringMatching(internal),
+    });
+    expect(turn.reportedCoverage).toMatchObject({
+      scope: expect.stringContaining("Deterministic"),
+    });
+  });
+  it("keeps host limitations first and whole within 4,000 characters", async () => {
+    const turn = sampledTurn();
+    const lines = Array.from(
+      { length: 60 },
+      (_, index) => `Host limit ${index} ${"y".repeat(90)}.`,
+    );
+    for (const line of lines) turn.limitations.add(line);
+    await turn.submit(
+      { ...manualAssessment, coverage: { status: "limited", scope: "x", reason: "Model words." } },
+      checks,
+    );
+    const coverage = turn.acceptedResult?.coverage;
+    expect(coverage?.status).toBe("limited");
+    const reason = coverage?.status === "limited" ? coverage.reason : "";
+    expect(reason.length).toBeLessThanOrEqual(4_000);
+    expect(reason.startsWith(lines[0]!)).toBe(true);
+    expect(reason).not.toContain("Model words.");
+    const kept = lines.filter((line) => reason.includes(line));
+    expect(kept).toEqual(lines.slice(0, kept.length));
+    expect(reason).toContain(`And ${lines.length - kept.length} more limits.`);
+  });
+});
+
+describe("short chat summary", () => {
+  const signal = new AbortController().signal;
+  const page = { entries: [], offset: 0, nextOffset: null, total: 0, limitedCoverage: false };
+  const checks = { snapshot: async () => true, page: async () => page, signal };
+  it("keeps the answer, idea count, coverage and first limit, and points to Opportunities", async () => {
+    const turn = scannedTurn(new AdvisoryEvidence());
+    turn.observePage(page);
+    turn.limitations.add("First limit.");
+    turn.limitations.add("Second limit.");
+    const full = await turn.submit(manualAssessment, checks);
+    const result = turn.acceptedResult!;
+    const summary = renderAdvisorySummary(result, [...turn.limitations], true);
+    expect(summary.split("\n")[0]).toBe(full.split("\n")[0]);
+    expect(summary).toMatch(/^## What AI found: 1 idea, /);
+    expect(summary).toContain(`Looked at: ${result.coverage.scope}`);
+    expect([...turn.limitations][0]).toBe("First limit.");
+    const more = turn.limitations.size - 1;
+    expect(summary).toContain(`Didn't fully check: First limit. And ${more} more limits.`);
+    expect(summary).not.toContain("Second limit.");
+    expect(summary).not.toContain("Why it helps");
+    expect(summary.endsWith("Full details are in Opportunities.")).toBe(true);
+    expect(renderAdvisorySummary(result, [...turn.limitations])).not.toContain("Opportunities");
+    expect(summary.length).toBeLessThan(full.length);
+  });
+  it("leaves the full report to the terminal when the chat only got the summary", async () => {
+    const turn = scannedTurn(new AdvisoryEvidence());
+    turn.observePage(page);
+    const advice = await turn.submit(manualAssessment, checks);
+    const summary = renderAdvisorySummary(turn.acceptedResult!, [...turn.limitations]);
+    const outcome = {
+      advice,
+      assessment: {
+        status: "completed",
+        summary: "Assessment finished.",
+        deterministic: { status: "not-run" },
+        limitations: [],
+        coverage: [],
+      },
+    } as unknown as ProgrammaticAssessmentOutcome;
+    const terminal = renderTerminalProgrammaticAssessment(outcome, [
+      { role: "assistant", content: summary },
+    ]);
+    expect(terminal).toContain(advice);
+    expect(
+      renderTerminalProgrammaticAssessment(outcome, [{ role: "assistant", content: advice }]),
+    ).not.toContain(advice);
+  });
+});

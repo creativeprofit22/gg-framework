@@ -264,15 +264,15 @@ interface ActivityIndicatorProps {
   planTotal?: number;
   /**
    * Override the default phrase library per-phase. Pass any subset — phases
-   * not provided fall back to ggcoder's contextual selectPhrases. gg-boss
-   * uses this to swap in orchestration-themed phrases ("Coordinating workers"
-   * vs "Cogitating") so the activity bar reads as a manager, not a coder.
+   * not provided fall back to ggcoder's contextual selectPhrases. A downstream
+   * UI can swap in its own phrases (e.g. "Coordinating workers" vs
+   * "Cogitating") so the activity bar matches its role.
    */
   phrases?: Partial<Record<ActivityPhase, string[]>>;
   /**
    * Override the spinner pulse-color cycle. Defaults to the cool blue/violet
-   * cycle ggcoder uses; gg-boss passes its crimson→fuchsia palette so the
-   * spinner reads as Boss, not Coder.
+   * cycle ggcoder uses; a downstream UI can pass its own palette so the
+   * spinner matches its branding.
    */
   pulseColors?: readonly string[];
   /** Disable decorative per-tick animation so terminal scrollback remains usable. */
@@ -287,6 +287,8 @@ const RETRY_REASON_LABELS: Record<RetryInfo["reason"], string> = {
   stream_stall: "Provider stream stalled",
   overflow_compact: "Context overflow — compacting",
   tool_argument_glitch: "Provider dropped tool call args — auto-continuing",
+  runaway_toolcall: "Provider tool call stream glitched — retrying",
+  stream_rule: "Stream rule caught the reply — retrying",
 };
 
 export function ActivityIndicator({

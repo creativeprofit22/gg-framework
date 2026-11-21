@@ -278,7 +278,7 @@ describe("terminal history", () => {
           task: "Inspect widgets",
           status: "done",
           toolUseCount: 2,
-          tokenUsage: { input: 1200, output: 300 },
+          tokenUsage: { input: 1200, output: 300, cacheRead: 2400, cacheWrite: 500 },
           durationMs: 1800,
         },
       ],
@@ -288,7 +288,7 @@ describe("terminal history", () => {
 
     expect(rendered).toMatch(/^ [⏺●] 1 agent completed/);
     expect(rendered).toContain("   └─ ✓ Inspect widgets");
-    expect(rendered).toContain("      ⎿ 1.5k tokens · 2s");
+    expect(rendered).toContain("      ⎿ 2.0k tokens · 2.4k cached · 2s");
   });
 
   it("keeps compaction and update notices bordered with spacing after final flush", () => {
@@ -584,6 +584,45 @@ describe("terminal history", () => {
       // kitty APC graphics sequence with the base64 payload, height-constrained
       // (r=…) with cursor ownership kept by the printer (C=1).
       expect(output).toContain("\u001b_Gf=100,a=T,r=12,C=1,m=0;QUJD\u001b\\");
+    } finally {
+      if (prevKitty === undefined) delete process.env.KITTY_WINDOW_ID;
+      else process.env.KITTY_WINDOW_ID = prevKitty;
+      if (prevTmux === undefined) delete process.env.TMUX;
+      else process.env.TMUX = prevTmux;
+      if (ttyDescriptor) Object.defineProperty(process.stdout, "isTTY", ttyDescriptor);
+    }
+  });
+
+  it("skips a GIF preview on kitty, whose graphics protocol takes only PNG", () => {
+    const prevKitty = process.env.KITTY_WINDOW_ID;
+    const prevTmux = process.env.TMUX;
+    process.env.KITTY_WINDOW_ID = "1";
+    delete process.env.TMUX;
+    const ttyDescriptor = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
+    Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true });
+    try {
+      let output = "";
+      const stream = {
+        write(chunk: string) {
+          output += chunk;
+          return true;
+        },
+      } as NodeJS.WriteStream;
+      const printer = createTerminalHistoryPrinter({ stream });
+      const item: CompletedItem = {
+        kind: "tool_done",
+        id: "tool-gif-1",
+        name: "generate_image",
+        args: { prompt: "loop" },
+        result: "Generated image → /tmp/loop.gif",
+        isError: false,
+        durationMs: 1,
+        imagePreviews: [{ base64: "R0lGODlh", mediaType: "image/gif", path: "/tmp/loop.gif" }],
+      };
+
+      printer.print([item], context);
+
+      expect(output).not.toContain("\u001b_G");
     } finally {
       if (prevKitty === undefined) delete process.env.KITTY_WINDOW_ID;
       else process.env.KITTY_WINDOW_ID = prevKitty;

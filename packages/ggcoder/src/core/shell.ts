@@ -36,6 +36,34 @@ export interface ShellResolution {
   args: string[];
   /** True when `file` is a cmd.exe fallback (non-POSIX semantics). */
   isCmdFallback: boolean;
+  /** Variables the launch needs; spawn with `shellSpawnEnv` so they land on top. */
+  env?: Readonly<Record<string, string>>;
+}
+
+/** Carries the command into Windows bash; dropped before the command runs. */
+export const SHELL_COMMAND_ENV = "GG_SHELL_COMMAND";
+
+// MSYS/Cygwin bash re-parses its Windows command line (quotes, globs, `@file`)
+// and collapses `\\` to `\`, so the command can't travel as an argument. The
+// wrapper has no backslashes; `${X?}` fails loudly if a caller drops the env.
+const WINDOWS_BASH_WRAPPER =
+  'eval "unset ' + SHELL_COMMAND_ENV + "; ${" + SHELL_COMMAND_ENV + '?}"';
+
+function windowsBash(file: string, command: string): ShellResolution {
+  return {
+    file,
+    args: ["-o", "pipefail", "-c", WINDOWS_BASH_WRAPPER],
+    isCmdFallback: false,
+    env: { [SHELL_COMMAND_ENV]: command },
+  };
+}
+
+/** Spawn environment for `shell`: `base` plus whatever the launch itself needs. */
+export function shellSpawnEnv<T extends Record<string, string | undefined>>(
+  shell: Pick<ShellResolution, "env">,
+  base: T,
+): T {
+  return shell.env ? { ...base, ...shell.env } : base;
 }
 
 export interface ResolveShellOpts {
@@ -43,6 +71,24 @@ export interface ResolveShellOpts {
   env?: NodeJS.ProcessEnv;
   /** Injected for testability; defaults to fs.existsSync. */
   exists?: (p: string) => boolean;
+  /** Settings `bashPath`: `auto` (default, `bash` from PATH), `system`
+   *  (/bin/bash on macOS — ~2ms spawn vs ~11ms for Homebrew bash 5), or an
+   *  explicit path. Ignored on Windows; a missing path falls back to auto. */
+  bashPath?: string;
+}
+
+/** The bash executable for a non-Windows platform under a `bashPath` setting. */
+function posixBash(
+  platform: NodeJS.Platform,
+  bashPath: string | undefined,
+  exists: (p: string) => boolean,
+): string {
+  const choice = bashPath?.trim();
+  if (!choice || choice === "auto") return "bash";
+  if (choice === "system") {
+    return platform === "darwin" && exists("/bin/bash") ? "/bin/bash" : "bash";
+  }
+  return exists(choice) ? choice : "bash";
 }
 
 /**
@@ -109,17 +155,23 @@ export function resolveShell(command: string, opts: ResolveShellOpts = {}): Shel
   // Explicit override (power users / tests): treat as a POSIX bash.
   const override = env.GG_BASH?.trim();
   if (override) {
-    return { file: override, args: ["-c", command], isCmdFallback: false };
+    if (platform === "win32") return windowsBash(override, command);
+    return { file: override, args: ["-o", "pipefail", "-c", command], isCmdFallback: false };
   }
 
   if (platform !== "win32") {
-    return { file: "bash", args: ["-c", command], isCmdFallback: false };
+    // pipefail: a pipeline exits with the failing stage's status, never the
+    // limiter's. Without it `tests | tail -20` reports tail's 0 and a red
+    // suite reads green — both to the agent and to the verification gate.
+    return {
+      file: posixBash(platform, opts.bashPath, exists),
+      args: ["-o", "pipefail", "-c", command],
+      isCmdFallback: false,
+    };
   }
 
   const gitBash = findGitBash(env, exists);
-  if (gitBash) {
-    return { file: gitBash, args: ["-c", command], isCmdFallback: false };
-  }
+  if (gitBash) return windowsBash(gitBash, command);
 
   // Last resort: cmd.exe. `/d` skips AutoRun, `/s` + `/c` runs the rest as a
   // single command verbatim (correct quoting for an arbitrary command string).

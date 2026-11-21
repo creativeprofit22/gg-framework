@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import fs from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
+import { prettifyError } from "zod";
 import { createReadTool, BINARY_EXTENSIONS } from "./read.js";
 import { lineHash } from "../core/hashline.js";
 import type { ReadTracker } from "./read-tracker.js";
@@ -192,5 +193,35 @@ describe("BINARY_EXTENSIONS", () => {
     expect(BINARY_EXTENSIONS.has(".png")).toBe(false);
     expect(BINARY_EXTENSIONS.has(".jpg")).toBe(false);
     expect(BINARY_EXTENSIONS.has(".webp")).toBe(false);
+  });
+});
+
+describe("read argument errors", () => {
+  /** The text the agent loop hands back to the model for rejected arguments. */
+  function argumentError(args: Record<string, unknown>): string {
+    const result = createReadTool(os.tmpdir()).parameters.safeParse({
+      file_path: "/tmp/a.ts",
+      ...args,
+    });
+    return result.success ? "" : prettifyError(result.error);
+  }
+
+  it.each([
+    ["a range string as offset", { offset: "[98, 242]" }, "offset must be ONE line number"],
+    ["an array as offset", { offset: [98, 242] }, "offset must be ONE line number"],
+    ["offset 0", { offset: 0 }, "offset must be ONE line number"],
+    ["a range string as limit", { limit: "100-200" }, "limit must be ONE line count"],
+  ])("shows the fix for %s", (_label, args, expected) => {
+    expect(argumentError(args)).toContain(expected);
+  });
+
+  it("shows how to express a line range", () => {
+    // Haiku repeated "[98, 242]" after a bare "expected number" until the
+    // three-strike stop ended the whole sub-agent run.
+    expect(argumentError({ offset: "[98, 242]" })).toContain("pass offset: 98 and limit: 145");
+  });
+
+  it("still accepts a single line number and count", () => {
+    expect(argumentError({ offset: 98, limit: 145 })).toBe("");
   });
 });

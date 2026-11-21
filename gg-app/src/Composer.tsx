@@ -1,0 +1,447 @@
+// Serves only the live-preview frame; the fork's pane composer is inline in AgentPane.tsx.
+import type { Dispatch, MutableRefObject, ReactNode, RefObject, SetStateAction } from "react";
+import { ArrowUpIcon, PaperclipIcon, SquareIcon } from "./phosphor-icons";
+import { ShellCommandMenu } from "./ShellCommandMenu";
+import type { ShellSuggestion } from "./agent";
+import {
+  openImageDataUrl,
+  primaryPaneAgentClient,
+  sendPrompt,
+  type AgentState,
+  type FileHit,
+  type SlashCommand,
+  type WorkspaceMode,
+} from "./agent";
+import { AttachmentBar } from "./AttachmentBar";
+import type { PendingAttachment } from "./attachments";
+import { CacheExpiryNotice } from "./CacheExpiryNotice";
+import { EnhanceDissolve } from "./EnhanceDissolve";
+import { FileMentionMenu } from "./FileMentionMenu";
+import { FloatingSurface } from "./FloatingSurface";
+import { type DraftEnhancement, followDraftEdit } from "./PromptEnhancement";
+import { ReferencedFiles } from "./ReferencedFiles";
+import { ScheduleHint } from "./ScheduleHint";
+import { ShimmerText } from "./ShimmerText";
+import { SlashMenu } from "./SlashMenu";
+import { theme } from "./theme";
+import { toast } from "./toast";
+import { WorkingBeam } from "./WorkingBeam";
+import { sendKeyAction } from "./send-key";
+
+export interface ComposerProps {
+  workspaceMode: WorkspaceMode;
+  state: AgentState | null;
+  composerRef: RefObject<HTMLDivElement | null>;
+  isFileDragOver: boolean;
+  scheduleInvalid: boolean;
+  scheduleDraft: boolean;
+  running: boolean;
+  kenRunning: boolean;
+  autopilotReviewing: boolean;
+  cancelling: boolean;
+  sendDisabled: boolean;
+  input: string;
+  setInput: Dispatch<SetStateAction<string>>;
+  caret: number;
+  setCaret: Dispatch<SetStateAction<number>>;
+  fillScheduleInterval: (preset: string) => void;
+  slashOpen: boolean;
+  slashMatches: SlashCommand[];
+  clampedSlashIndex: number;
+  pickSlashCommand: (cmd: SlashCommand) => void;
+  setSlashIndex: Dispatch<SetStateAction<number>>;
+  mentionOpen: boolean;
+  fileMatches: FileHit[];
+  clampedFileIndex: number;
+  mention: { query: string; start: number } | null;
+  setMention: Dispatch<SetStateAction<{ query: string; start: number } | null>>;
+  pickMentionFile: (file: FileHit) => void;
+  setFileIndex: Dispatch<SetStateAction<number>>;
+  updateMention: (text: string, caret: number) => void;
+  attachments: PendingAttachment[];
+  attachmentsLoading: boolean;
+  removeAttachment: (id: number) => void;
+  addFiles: (files: FileList | File[]) => Promise<void>;
+  fileInputRef: RefObject<HTMLInputElement | null>;
+  mentionedPaths: string[];
+  removeMentionChip: (p: string) => void;
+  /** Bumped by every send; the strips a send clears leave in that same commit. */
+  sendCount: number;
+  enhanceAnim: { oldText: string; newText: string | null } | null;
+  onEnhanceAnimDone: () => void;
+  enhancement: DraftEnhancement | null;
+  setEnhancement: Dispatch<SetStateAction<DraftEnhancement | null>>;
+  enhancing: boolean;
+  enhanceHintVisible: boolean;
+  runEnhance: () => Promise<void>;
+  kenActive: boolean;
+  /** The input starts with `!`: it runs a command instead of messaging GG. */
+  shellMode: boolean;
+  /** The `!` picker, when it has commands to offer. */
+  shellMenu: ShellMenu | null;
+  kenInputParts: { lead: string; token: string; rest: string } | null;
+  attachInput: (el: HTMLTextAreaElement | null) => void;
+  displayPlaceholder: string;
+  lastKeystrokeAtRef: MutableRefObject<number>;
+  historyIndex: number | null;
+  setHistoryIndex: Dispatch<SetStateAction<number | null>>;
+  navigateHistory: (dir: -1 | 1, el: HTMLTextAreaElement) => boolean;
+  submit: () => void;
+  requestCancel: () => void;
+  // Replaces the attach button (the live preview puts its element picker here).
+  leadAction?: ReactNode;
+}
+
+/** The `!` command picker's state; App owns it, the composer drives it. */
+export interface ShellMenu {
+  matches: readonly ShellSuggestion[];
+  activeIndex: number;
+  setActiveIndex: (index: number) => void;
+  /** ↑/↓: move the highlight. */
+  navigate: (delta: 1 | -1) => void;
+  /** Enter fills the highlighted command (bare `!`, or after ↑/↓) instead of running the typed one. */
+  enterPicks: boolean;
+  /** Put the command in the input (Enter/Tab/click). */
+  pick: (s: ShellSuggestion) => void;
+  /** Esc: close until the input changes. */
+  dismiss: () => void;
+  trusted: boolean;
+  revokeTrust: () => void;
+}
+
+/**
+ * The chat composer box: menus, attachment/reference bars, the textarea with
+ * its keyboard handling, send/stop and the Enhance pill. State lives in App;
+ * this is a pure render of it. Extracted from App.tsx.
+ */
+export function Composer({
+  workspaceMode,
+  state,
+  composerRef,
+  isFileDragOver,
+  scheduleInvalid,
+  scheduleDraft,
+  running,
+  kenRunning,
+  autopilotReviewing,
+  cancelling,
+  sendDisabled,
+  input,
+  setInput,
+  caret,
+  setCaret,
+  fillScheduleInterval,
+  slashOpen,
+  slashMatches,
+  clampedSlashIndex,
+  pickSlashCommand,
+  setSlashIndex,
+  mentionOpen,
+  fileMatches,
+  clampedFileIndex,
+  mention,
+  setMention,
+  pickMentionFile,
+  setFileIndex,
+  updateMention,
+  attachments,
+  attachmentsLoading,
+  removeAttachment,
+  addFiles,
+  fileInputRef,
+  mentionedPaths,
+  removeMentionChip,
+  sendCount,
+  enhanceAnim,
+  onEnhanceAnimDone,
+  enhancement,
+  setEnhancement,
+  enhancing,
+  enhanceHintVisible,
+  runEnhance,
+  kenActive,
+  shellMode,
+  shellMenu,
+  kenInputParts,
+  attachInput,
+  displayPlaceholder,
+  lastKeystrokeAtRef,
+  historyIndex,
+  setHistoryIndex,
+  navigateHistory,
+  submit,
+  requestCancel,
+  leadAction,
+}: ComposerProps): React.ReactElement {
+  const keyAction = sendKeyAction({ shellMode, running, kenRunning, autopilotReviewing });
+  const stopping = keyAction !== "send";
+  return (
+    <div
+      ref={composerRef}
+      className={`inputwrap${isFileDragOver ? " dragover" : ""}${
+        scheduleInvalid ? " schedule-invalid" : ""
+      }${shellMode ? " shell-mode" : ""}`}
+    >
+      <WorkingBeam active={running || kenRunning || autopilotReviewing} />
+      {scheduleDraft && (
+        <ScheduleHint input={input} caret={caret} onPickInterval={fillScheduleInterval} />
+      )}
+      <FloatingSurface>
+        {!scheduleDraft && slashOpen && (
+          <SlashMenu
+            id="live-preview-slash-menu"
+            commands={slashMatches}
+            activeIndex={clampedSlashIndex}
+            onSelect={pickSlashCommand}
+            onHover={setSlashIndex}
+          />
+        )}
+      </FloatingSurface>
+      <FloatingSurface>
+        {shellMenu && (
+          <ShellCommandMenu
+            suggestions={shellMenu.matches}
+            activeIndex={shellMenu.activeIndex}
+            trusted={shellMenu.trusted}
+            onRevokeTrust={shellMenu.revokeTrust}
+            onSelect={shellMenu.pick}
+            onHover={shellMenu.setActiveIndex}
+          />
+        )}
+      </FloatingSurface>
+      <FloatingSurface>
+        {mentionOpen && (
+          <FileMentionMenu
+            files={fileMatches}
+            activeIndex={clampedFileIndex}
+            isRecent={mention?.query === ""}
+            onSelect={pickMentionFile}
+            onHover={setFileIndex}
+          />
+        )}
+      </FloatingSurface>
+      <AttachmentBar
+        attachments={attachments}
+        onRemove={removeAttachment}
+        onOpenImage={(src) => void openImageDataUrl(src)}
+        sendCount={sendCount}
+      />
+      <ReferencedFiles paths={mentionedPaths} onRemove={removeMentionChip} sendCount={sendCount} />
+      <CacheExpiryNotice
+        expiry={state?.cacheExpiry}
+        running={running}
+        sendCount={sendCount}
+        onCompact={() =>
+          void sendPrompt("/compact").catch(() =>
+            toast("Couldn't start compaction. Try again.", "error"),
+          )
+        }
+      />
+      <div className="inputrow">
+        {leadAction ?? (
+          <>
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              style={{ display: "none" }}
+              onChange={(e) => {
+                if (e.target.files) void addFiles(e.target.files);
+                e.target.value = "";
+              }}
+            />
+            <button
+              className="icon-circle"
+              title="Attach files"
+              onClick={() => fileInputRef.current?.click()}
+            >
+              <PaperclipIcon size={15} />
+            </button>
+          </>
+        )}
+        <div className="input-stack">
+          {enhanceAnim && (
+            <EnhanceDissolve
+              oldText={enhanceAnim.oldText}
+              newText={enhanceAnim.newText}
+              onDone={onEnhanceAnimDone}
+            />
+          )}
+          {/* `@Ken` active: a textarea can't color just one token, so we mirror
+            the input in an aligned overlay where the leading `@Ken` shimmers
+            in Ken's color. The textarea text below is made transparent (caret
+            stays visible) so only this styled copy shows. Metrics match
+            `.input` 1:1 so wrapping/caret line up. */}
+          {kenActive && kenInputParts && (
+            <div className="ken-input-highlight" aria-hidden="true">
+              {kenInputParts.lead}
+              <ShimmerText base={theme.ken}>{kenInputParts.token}</ShimmerText>
+              {kenInputParts.rest}
+            </div>
+          )}
+          <textarea
+            ref={attachInput}
+            // AskBand's number keys still pick an option while this is empty.
+            data-composer-input=""
+            className={`input${enhanceAnim ? " input-anim" : ""}${kenActive ? " input-ken" : ""}${
+              shellMode ? " input-shell" : ""
+            }`}
+            rows={1}
+            // Lock the input while the dissolve→decode animation plays: the caret
+            // is invisible, so typing would be silently discarded and Enter would
+            // submit the un-enhanced draft mid-animation.
+            readOnly={enhanceAnim !== null}
+            value={input}
+            placeholder={
+              workspaceMode === "chat"
+                ? "Ask anything\u2026"
+                : workspaceMode === "motion"
+                  ? "Describe a video, paste a link, or drop a PDF\u2026"
+                  : displayPlaceholder
+            }
+            onPaste={(e) => {
+              const files = Array.from(e.clipboardData.files);
+              if (files.length > 0) {
+                e.preventDefault();
+                void addFiles(files);
+              }
+            }}
+            onChange={(e) => {
+              const now = Date.now();
+              if (!running && now - lastKeystrokeAtRef.current > 4 * 60_000) {
+                void primaryPaneAgentClient.prewarmCache();
+              }
+              lastKeystrokeAtRef.current = now;
+              setInput(e.target.value);
+              setSlashIndex(0);
+              setCaret(e.target.selectionStart ?? e.target.value.length);
+              // Typing exits history-recall mode so ↑/↓ start fresh next time.
+              if (historyIndex !== null) setHistoryIndex(null);
+              // Re-anchor the corrected terms onto the edited text so their
+              // highlights survive edits; terms the edit touched are dropped.
+              if (enhancement && e.target.value !== enhancement.plain)
+                setEnhancement(followDraftEdit(enhancement, input, e.target.value));
+              updateMention(e.target.value, e.target.selectionStart ?? e.target.value.length);
+            }}
+            onClick={(e) => {
+              const el = e.currentTarget;
+              setCaret(el.selectionStart ?? el.value.length);
+              updateMention(el.value, el.selectionStart ?? el.value.length);
+            }}
+            onKeyUp={(e) => {
+              const el = e.currentTarget;
+              setCaret(el.selectionStart ?? el.value.length);
+              if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+                updateMention(el.value, el.selectionStart ?? el.value.length);
+              }
+            }}
+            onKeyDown={(e) => {
+              // While the dissolve→decode animation plays the input is locked;
+              // swallow keys so Enter can't submit the un-enhanced draft.
+              if (enhanceAnim) {
+                e.preventDefault();
+                return;
+              }
+              if (shellMenu && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
+                e.preventDefault();
+                shellMenu.navigate(e.key === "ArrowDown" ? 1 : -1);
+              } else if (
+                shellMenu &&
+                (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey && shellMenu.enterPicks))
+              ) {
+                e.preventDefault();
+                const picked = shellMenu.matches[shellMenu.activeIndex];
+                if (picked) shellMenu.pick(picked);
+              } else if (shellMenu && e.key === "Escape") {
+                e.preventDefault();
+                shellMenu.dismiss();
+              } else if (mentionOpen && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
+                e.preventDefault();
+                const delta = e.key === "ArrowDown" ? 1 : -1;
+                setFileIndex((i) => (i + delta + fileMatches.length) % fileMatches.length);
+              } else if (mentionOpen && (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey))) {
+                e.preventDefault();
+                const file = fileMatches[clampedFileIndex];
+                if (file) pickMentionFile(file);
+              } else if (mentionOpen && e.key === "Escape") {
+                e.preventDefault();
+                setMention(null);
+              } else if (slashOpen && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
+                e.preventDefault();
+                const delta = e.key === "ArrowDown" ? 1 : -1;
+                setSlashIndex((i) => (i + delta + slashMatches.length) % slashMatches.length);
+              } else if (slashOpen && (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey))) {
+                e.preventDefault();
+                const cmd = slashMatches[clampedSlashIndex];
+                if (cmd) pickSlashCommand(cmd);
+              } else if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+                // Menus are closed here (handled above), so arrows recall sent
+                // prompts shell-style — unless the caret is mid-text in a
+                // multi-line draft, where navigateHistory declines and the
+                // cursor moves normally.
+                if (navigateHistory(e.key === "ArrowUp" ? -1 : 1, e.currentTarget)) {
+                  e.preventDefault();
+                }
+              } else if (e.key === "Enter" && !e.shiftKey) {
+                // Enter sends; Shift+Enter inserts a newline (textarea default).
+                e.preventDefault();
+                submit();
+              } else if (e.key === "Escape") {
+                // Escape stops whatever the send key would stop.
+                if (slashOpen) setInput("");
+                else if (keyAction === "stop-run" && !cancelling) requestCancel();
+              }
+            }}
+            autoFocus
+          />
+        </div>
+        {/* Send doubles as the stop control mid-run, so the primary action
+          never moves. It stays on the text's line while the draft fits one
+          line, and drops below with the field once the text wraps. */}
+        <div className="inputactions-trailing">
+          {/* Enhance sits beside send, in the row, once there's a draft to
+            improve: no floating pill over the box's edge. */}
+          {!enhanceAnim && (
+            <button
+              type="button"
+              className={`key key-sm enhance-key${enhancing ? " enhancing" : ""}`}
+              data-visible={enhanceHintVisible || undefined}
+              title="Rewrite your prompt with clearer wording and the right terms"
+              disabled={enhancing || !enhanceHintVisible}
+              aria-hidden={!enhanceHintVisible}
+              tabIndex={enhanceHintVisible ? undefined : -1}
+              onClick={() => void runEnhance()}
+            >
+              {enhancing ? "Enhancing\u2026" : "Enhance"}
+            </button>
+          )}
+          {/* A command runs alongside the agent, so mid-run this is Run, not Stop. */}
+          <button
+            className={`icon-circle icon-circle-primary${stopping ? " icon-circle-stop" : ""}`}
+            title={
+              shellMode
+                ? "Run command"
+                : keyAction === "stop-run"
+                  ? "Stop the run"
+                  : keyAction === "stop-ken"
+                    ? "Stop Ken"
+                    : attachmentsLoading
+                      ? "Loading attachments…"
+                      : "Send"
+            }
+            aria-label={shellMode ? "Run command" : undefined}
+            disabled={shellMode ? sendDisabled : cancelling || (!stopping && sendDisabled)}
+            onClick={() => {
+              if (keyAction === "stop-run") requestCancel();
+              else if (keyAction === "stop-ken")
+                return; // the frame never runs Ken
+              else submit();
+            }}
+          >
+            {stopping ? <SquareIcon size={12} weight="fill" /> : <ArrowUpIcon size={16} />}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}

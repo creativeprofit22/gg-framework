@@ -1,0 +1,16 @@
+/* Acid Poster: acid lime and black, Anybody pushed to its extreme widths. */
+.look-acid-poster {
+  --field: #d4ff00;
+  --field-2: #0a0a0a;
+  --ink: #0a0a0a;
+  --accent: #0a0a0a;
+  --muted: rgba(10, 10, 10, 0.66);
+  --line: rgba(10, 10, 10, 0.9);
+  --display: "Anybody", sans-serif;
+  --display-weight: 900;
+  --display-stretch: 150%;
+  --display-tracking: -0.04em;
+  --text: "Anybody", sans-serif;
+  --mono: "Martian Mono", monospace;
+  --radius: 0px;
+}

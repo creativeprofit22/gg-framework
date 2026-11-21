@@ -1,0 +1,12 @@
+<!doctype html>
+<!-- Chapter card. Edit chapter number, title and summary; keep headline to two short lines. -->
+<html lang="en"><head><meta charset="UTF-8"><script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script></head><body>
+<div id="chapter-card-root" data-composition-id="chapter-card" data-start="0" data-duration="4" data-width="1920" data-height="1080">
+<style>
+[data-composition-id="chapter-card"]{position:absolute;inset:0;background:var(--field);color:var(--ink);font-family:var(--text);padding:96px;box-sizing:border-box}
+[data-composition-id="chapter-card"] .eyebrow{font:24px/1.4 var(--mono);letter-spacing:.08em;color:var(--muted)}
+[data-composition-id="chapter-card"] .rule{height:3px;background:var(--ink);color:var(--field);margin-top:30px;transform-origin:left}
+[data-composition-id="chapter-card"] h1{font-family:var(--display);font-weight:var(--display-weight);font-stretch:var(--display-stretch);letter-spacing:var(--display-tracking);font-size:170px;line-height:1;margin:120px 0 40px}
+[data-composition-id="chapter-card"] .summary{font:32px/1.5 var(--text);max-width:1050px;margin:0;color:var(--muted)}
+</style><!-- edit: section identity and copy --><div class="eyebrow">02 / THE PRINCIPLE</div><div class="rule"></div><h1>Make room<br>for the idea.</h1><p class="summary">Less on screen. More that stays with you.</p></div>
+<script>(()=>{const root=document.querySelector('[data-composition-id="chapter-card"]');const tl=gsap.timeline({paused:true});tl.from(root.querySelector('.rule'),{scaleX:0,duration:.65,ease:'power3.inOut'},0).from(root.querySelector('.eyebrow'),{opacity:0,duration:.3},.2).from(root.querySelector('h1'),{clipPath:'inset(0 0 100% 0)',y:40,duration:.8,ease:'power3.out'},.3).from(root.querySelector('.summary'),{opacity:0,y:18,duration:.45},.9).to({},{duration:2.65});window.__timelines=window.__timelines||{};window.__timelines["chapter-card"]=tl;})();</script></body></html>

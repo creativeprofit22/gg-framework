@@ -1,0 +1,16 @@
+/* Blueprint: cobalt drafting field, white line drawings, one signal yellow for the key dimension. */
+.look-blueprint {
+  --field: #1d49b5;
+  --field-2: #102f7e;
+  --ink: #ffffff;
+  --accent: #ffd84a;
+  --muted: rgba(255, 255, 255, 0.78);
+  --line: rgba(255, 255, 255, 0.16);
+  --display: "Hubot Sans", sans-serif;
+  --display-weight: 700;
+  --display-stretch: 116%;
+  --display-tracking: -0.025em;
+  --text: "Hubot Sans", sans-serif;
+  --mono: "Martian Mono", monospace;
+  --radius: 0px;
+}

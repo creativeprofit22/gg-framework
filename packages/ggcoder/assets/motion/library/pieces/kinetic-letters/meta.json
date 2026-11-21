@@ -1,0 +1,12 @@
+{
+  "id": "kinetic-letters",
+  "name": "Kinetic letters",
+  "kind": "type",
+  "description": "A big uppercase word whose letters drop in one by one from above with a springy back.out overshoot and a slight tilt that settles to zero, finishing with a tiny collective squash. Playful, energetic headline or brand-name reveal. Deterministic splitter, no randomness. Transparent.",
+  "tags": ["kinetic", "letters", "per-letter", "bounce", "spring", "drop", "playful", "headline", "brand-name", "split-text"],
+  "fonts": [],
+  "duration": 3,
+  "previewAt": 0.75,
+  "license": "original",
+  "previewLook": "duotone-broadcast"
+}

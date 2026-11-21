@@ -1,15 +1,15 @@
 import type { Provider } from "@kenkaiiii/gg-ai";
 import type { MCPServerConfig } from "./types.js";
 import { loadServers } from "./store.js";
+import { getAppPaths, loadSavedSettings } from "../../config.js";
+import { log } from "../logger.js";
+import { withBuiltinServers, type BuiltinLookupDeps } from "./builtin.js";
+import type { BuiltinMcpSettings } from "./builtin-settings.js";
 
-export const DEFAULT_MCP_SERVERS: MCPServerConfig[] = [
-  // kencode-search ships as a ggcoder dependency, so `connectServer` rewrites
-  // this `npx -y` form to a direct `node <binScript>` invocation at connect
-  // time (see core/mcp/resolve-stdio.ts) — skipping the ~100 MB npx wrapper
-  // process. The `npx` form is kept here so it still works if the dependency
-  // is ever unavailable (graceful fallback to npx resolution).
-  { name: "kencode-search", command: "npx", args: ["-y", "@kenkaiiii/kencode-search"] },
-];
+/** Servers every provider gets. Real-code research is the native `steroids`
+ *  tool now, so nothing ships here by default; provider-specific servers are
+ *  added in `getMCPServers`. */
+export const DEFAULT_MCP_SERVERS: MCPServerConfig[] = [];
 
 /**
  * Get MCP servers for a specific provider.
@@ -21,7 +21,10 @@ export function getMCPServers(provider: Provider, apiKey?: string): MCPServerCon
   if (provider === "glm" && apiKey) {
     const zaiAuth = { Authorization: `Bearer ${apiKey}` };
 
-    // Vision (image support via stdio MCP server)
+    // Vision (image support via stdio MCP server). Timeout is 180s, not the
+    // 60s the quick HTTP zai calls use: GLM-4.6V analysis of a large screenshot
+    // legitimately runs 20-60s+ (observed 52s successes and 60s-cap kills in
+    // the sidecar logs), and client.ts applies this per tool CALL.
     servers.push({
       name: "zai_vision",
       command: "npx",
@@ -30,7 +33,7 @@ export function getMCPServers(provider: Provider, apiKey?: string): MCPServerCon
         Z_AI_API_KEY: apiKey,
         Z_AI_MODE: "ZAI",
       },
-      timeout: 60_000,
+      timeout: 180_000,
     });
 
     // Web search
@@ -61,20 +64,93 @@ export function getMCPServers(provider: Provider, apiKey?: string): MCPServerCon
   return servers;
 }
 
+export interface McpServerSelectionOptions {
+  allowProjectScope?: boolean;
+  /**
+   * Caller-owned record of untrusted-project skips already reported. Pass one
+   * Set per session so reconnects don't repeat the warning; omit it to warn on
+   * every call.
+   */
+  reportedProjectSkips?: Set<string>;
+  /** Built-in server state; read from the settings file when omitted. */
+  builtinSettings?: BuiltinMcpSettings;
+  builtinDeps?: BuiltinLookupDeps;
+}
+
+/** Missing-program reasons already logged, so reconnects don't repeat them. */
+const reportedMissingBuiltins = new Set<string>();
+
+/** Repo-controlled names go into a log line; keep them on one line. */
+function printableServerName(name: string): string {
+  return name.replace(/\p{Cc}/gu, "?");
+}
+
 /**
  * Full startup set: provider defaults + user-configured servers from
- * ~/.gg/mcp.json and ./.gg/mcp.json. Provider defaults stay authoritative —
- * a user server can only ADD a new name, never override a default like
- * `kencode-search`.
+ * ~/.gg/mcp.json and ./.gg/mcp.json, then built-ins (Supa Drivah) whose name
+ * no loaded user server uses. Provider defaults stay authoritative — a user
+ * server can only ADD a new name, never override a default. A built-in whose
+ * program is missing is skipped, never spawned.
  */
 export async function getAllMcpServers(
   provider: Provider,
   apiKey: string | undefined,
   cwd: string,
+  opts?: McpServerSelectionOptions,
 ): Promise<MCPServerConfig[]> {
   const defaults = getMCPServers(provider, apiKey);
   const defaultNames = new Set(defaults.map((s) => s.name));
   const scoped = await loadServers(cwd);
-  const userServers = scoped.map((s) => s.config).filter((c) => !defaultNames.has(c.name));
-  return [...defaults, ...userServers];
+  const allowProjectScope = opts?.allowProjectScope === true;
+  // Project scope (<repo>/.gg/mcp.json) is repo-controlled: a malicious repo
+  // can declare a stdio `command` that would execute the moment the project
+  // opens. Only include those when explicitly trusted (trustProjectMcpServers);
+  // global ~/.gg/mcp.json is the user's own file and always connects.
+  const userServers = scoped
+    .filter((s) => allowProjectScope || s.scope !== "project")
+    .map((s) => s.config)
+    .filter((c) => !defaultNames.has(c.name));
+
+  if (!allowProjectScope) {
+    // Only servers that trusting the project would actually start.
+    const skipped = scoped
+      .filter((s) => s.scope === "project" && s.config.enabled !== false)
+      .filter((s) => !defaultNames.has(s.config.name))
+      .map((s) => printableServerName(s.config.name))
+      .sort();
+    if (skipped.length > 0) {
+      const key = `${cwd}\u0000${skipped.join("\u0000")}`;
+      if (!opts?.reportedProjectSkips?.has(key)) {
+        opts?.reportedProjectSkips?.add(key);
+        // Names and paths only: configs may carry env values or tokens.
+        const settingsFile = getAppPaths().settingsFile;
+        log(
+          "WARN",
+          "mcp",
+          `Skipped untrusted project-scope MCP server(s) [${skipped.join(", ")}] for ${cwd}; ` +
+            `trust it in ${settingsFile} (trustedProjects) or via the MCP panel`,
+        );
+      }
+    }
+  }
+
+  const builtinSettings =
+    opts?.builtinSettings ?? loadSavedSettings(getAppPaths().settingsFile).builtinMcpServers;
+  const builtins: MCPServerConfig[] = [];
+  for (const s of withBuiltinServers(scoped, builtinSettings, {
+    allowProjectScope,
+    deps: opts?.builtinDeps,
+  })) {
+    if (!s.builtin || defaultNames.has(s.config.name)) continue;
+    if (s.unavailableReason) {
+      if (!reportedMissingBuiltins.has(s.unavailableReason)) {
+        reportedMissingBuiltins.add(s.unavailableReason);
+        log("INFO", "mcp", `Skipped built-in MCP server ${s.config.name}: ${s.unavailableReason}`);
+      }
+      continue;
+    }
+    builtins.push(s.config);
+  }
+
+  return [...defaults, ...userServers, ...builtins];
 }

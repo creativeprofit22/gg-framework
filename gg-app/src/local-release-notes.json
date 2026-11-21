@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-11-18",
+  "label": "Supa Drivah comes built in",
+  "sections": [
+    {
+      "title": "New in your Local Fork",
+      "items": [
+        "`Supa Drivah` now comes built in, so your agent can drive desktop windows and browsers without you adding anything. GG starts it in every project as long as the program is on your computer. Find it under Settings → `MCP`, where its row has a `Built-in` label and a `Use` switch to turn it off and back on.",
+        "If Supa Drivah isn't on your computer, its row says so and tells you where to point GG at it instead of failing quietly. The `x` on its row hides it for good, and your own server with the same name can take its place."
+      ]
+    }
+  ]
+}

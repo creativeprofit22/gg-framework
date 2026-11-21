@@ -7,13 +7,9 @@
  *
  * Two branches share one loop:
  *  - PLAN branch (planPending): GG Coder submitted a plan via exit_plan. Ken
- *    reviews the PLAN itself — approve (auto-accept + implement, then the next
- *    round work-reviews the implementation), send revision feedback, or hand a
- *    genuine user-level decision to the human. Verdict mapping for plans:
- *    `all_clear` ⇒ approve, and `ignore` ALSO maps to approve — "nothing to
- *    object to" on a plan means it's sound (autopilot has no user blocker for
- *    plans by design). Unparseable output still stops as HUMAN upstream (the
- *    verdict parser returns HUMAN for garbage) — never a blind loop.
+ *    reviews the PLAN itself — mark it ready for explicit human approval, send
+ *    revision feedback through the durable plan gate, or hand a genuine
+ *    user-level decision to the human. Ken never has approval authority.
  *  - WORK branch: the classic review of a finished turn (ALL_CLEAR / IGNORE /
  *    HUMAN / PROMPT), unchanged.
  *
@@ -21,7 +17,7 @@
  * plan) still halts as HUMAN — Ken must never prompt into a read-only
  * plan-mode session.
  */
-import type { AutopilotVerdict } from "./autopilot-verdict.js";
+import { CORPUS_UNVERIFIED_REASON, type AutopilotVerdict } from "./autopilot-verdict.js";
 
 /** Reason shown in the Ken bubble when the build session is still INSIDE plan
  *  mode (enter_plan without exit_plan) when the cycle checks in — there is no
@@ -29,6 +25,11 @@ import type { AutopilotVerdict } from "./autopilot-verdict.js";
  *  and hands control to the user. */
 export const AUTOPILOT_PLAN_DRAFTING_REASON =
   "GG Coder is still drafting a plan (plan mode is active with nothing submitted). Finish or cancel the plan yourself; autopilot can't prompt a read-only session.";
+
+/** Injected when Autopilot finds the work unchecked before its review. */
+export const AUTOPILOT_VERIFY_PROMPT =
+  "Run the project's checks for your changes (see Verification), standalone and unpiped, " +
+  "and fix any failures.";
 
 /** Situational-awareness preamble prepended to EVERY build-session run that
  *  Autopilot Ken injects (fix prompts, plan-revision prompts, the post-approval
@@ -73,18 +74,35 @@ export function buildPlanRevisionPrompt(feedback: string): string {
   );
 }
 
+/** Identity of the exact persisted plan generation reviewed by Ken. */
+export interface AutopilotPlanReviewIdentity {
+  checkpointId: string;
+  generation: number;
+}
+
 /** SSE frame types the cycle can emit (matched by the webview). */
 export type AutopilotCycleEmit =
-  | { type: "autopilot_done"; data: Record<string, never> }
+  | { type: "autopilot_done"; data: { reason?: string } }
+  // The cycle emits an empty frame; the sidecar also sends richer
+  // `autopilot_ignored` frames ({ reason } / { planPending }) outside the cycle.
   | { type: "autopilot_ignored"; data: Record<string, never> }
   | { type: "autopilot_human"; data: { reason: string } }
   | { type: "autopilot_capped"; data: { rounds: number } }
-  | { type: "autopilot_plan_accepted"; data: Record<string, never> };
+  | { type: "autopilot_plan_ready"; data: AutopilotPlanReviewIdentity & { reason?: string } };
+
+/** Only work all-clear/ignore authorize automatic task advancement. */
+export type AutopilotCycleOutcome =
+  | "all-clear"
+  | "ignored"
+  | "human"
+  | "capped"
+  | "review-failed"
+  | "plan-pending"
+  | "cancelled"
+  | "run-failed";
 
 export interface AutopilotCycleDeps {
-  /** Hard cap on review→prompt rounds per user turn (loop safety). The sidecar
-   *  widens this by +2 when the cycle starts plan-pending (approve+implement
-   *  and the post-implement review each consume a round). */
+  /** Hard cap on review→prompt rounds per user turn (loop safety). */
   maxRounds: number;
   /** True once /cancel fires — checked between every step. */
   isCancelled: () => boolean;
@@ -99,21 +117,24 @@ export interface AutopilotCycleDeps {
    *  (failure is already surfaced by the sidecar as autopilot_error). */
   review: () => Promise<AutopilotVerdict | null>;
   /** Run one PLAN review (plan digest, not work digest); null on failure OR
-   *  when the review went stale (user acted mid-review) — both stop silently. */
+   *  when the review went stale because a human acted mid-review. */
   reviewPlan: () => Promise<AutopilotVerdict | null>;
-  /** Auto-accept the pending plan (fresh session + approved-plan prompt).
-   *  Resolves false when the plan generation went stale (a user Accept/Reject
-   *  raced the review and won) — the cycle stops silently. */
-  acceptPlan: () => Promise<boolean>;
-  /** Run the "plan approved — implement it now" prompt on the fresh session. */
-  runImplement: () => Promise<void>;
-  /** Feed a PROMPT verdict's body to GG Coder as an injected run. */
-  runPrompt: (body: string) => Promise<void>;
+  /** Persist Ken's all-clear as readiness and return the committed identity. */
+  markPlanReady: (reason?: string) => Promise<AutopilotPlanReviewIdentity | null>;
+  /** Compare-and-swap the reviewed generation into revision-requested. */
+  requestPlanRevision: (feedback: string) => Promise<boolean>;
+  /** Feed a PROMPT verdict to GG Coder; true only when the injected work completes. */
+  /** `planRevision` marks a plan-feedback run: the host puts the session back
+   *  in read-only plan mode first, so revising can't start editing code. */
+  runPrompt: (body: string, opts?: { planRevision?: boolean }) => Promise<boolean>;
   /** Called BEFORE runPrompt: record the injected body (digest labeling) and
    *  broadcast the autopilot_prompted marker. */
   onInjected: (body: string, round: number) => void;
   /** Broadcast one of the cycle's terminal SSE frames. */
   emit: (event: AutopilotCycleEmit) => void;
+  /** Why current code changes are unproven (upstream 0.86.0 rule), or null.
+   *  Absent: treated as no problem. */
+  verificationProblem?: () => string | null;
 }
 
 /**
@@ -121,68 +142,119 @@ export interface AutopilotCycleDeps {
  * explicit:
  *  - cancelled                 → silent stop (the /cancel path already broadcast)
  *  - plan mode, no submission  → autopilot_human with the drafting reason
- *  - review failed (null)     → silent stop (autopilot_error already broadcast)
- *  - plan approve, stale accept→ silent stop (user's manual action won)
+ *  - review failed (null)       → silent stop (autopilot_error already broadcast)
+ *  - stale plan transition      → silent stop (a newer gate or human action won)
  *  - ALL_CLEAR                 → autopilot_done
  *  - IGNORE (work)             → autopilot_ignored (renders nothing)
  *  - HUMAN                     → autopilot_human
  *  - rounds exhausted          → autopilot_capped
  */
-export async function driveAutopilotCycle(deps: AutopilotCycleDeps): Promise<void> {
-  if (deps.isCancelled()) return;
+export async function driveAutopilotCycle(
+  deps: AutopilotCycleDeps,
+): Promise<AutopilotCycleOutcome> {
+  const stopIfUnverified = (): boolean => {
+    const reason = deps.verificationProblem?.() ?? null;
+    if (!reason) return false;
+    deps.emit({ type: "autopilot_human", data: { reason } });
+    return true;
+  };
+  // Upstream 0.86.0: plain replies leave checks to /commit, so a turn often
+  // ends unchecked. Autopilot asks for the checks once before reviewing; only
+  // work still unchecked after that goes back to the human.
+  const ensureVerified = async (round: number): Promise<boolean> => {
+    if (!deps.verificationProblem?.()) return true;
+    // A pending plan is reviewed in plan mode, where checks cannot run.
+    if (deps.planPending()) {
+      stopIfUnverified();
+      return false;
+    }
+    deps.onInjected(AUTOPILOT_VERIFY_PROMPT, round);
+    await deps.runPrompt(AUTOPILOT_VERIFY_PROMPT);
+    return !deps.isCancelled() && !stopIfUnverified();
+  };
+  if (deps.isCancelled()) return "cancelled";
+  if (!(await ensureVerified(1))) return deps.isCancelled() ? "cancelled" : "human";
   await deps.resetReviewer();
-  for (let round = 1; round <= deps.maxRounds; round++) {
-    if (deps.isCancelled()) return;
+  let remediationRounds = 0;
+  for (;;) {
+    if (deps.isCancelled()) return "cancelled";
+    if (!(await ensureVerified(remediationRounds + 1))) {
+      return deps.isCancelled() ? "cancelled" : "human";
+    }
     if (deps.planPending()) {
       const verdict = await deps.reviewPlan();
-      if (!verdict || deps.isCancelled()) return;
+      if (deps.isCancelled()) return "cancelled";
+      if (!verdict) return "review-failed";
+      if (stopIfUnverified()) return "human";
       if (verdict.kind === "human") {
         deps.emit({ type: "autopilot_human", data: { reason: verdict.reason } });
-        return;
+        return "human";
       }
       if (verdict.kind === "prompt") {
-        // Rejection with feedback: inject a revision prompt. The sidecar's
-        // acceptPlan-side state clears pendingPlanPath on injection; if the
-        // run resubmits (exit_plan), planPending() is true again next round;
-        // if not, the loop falls through to a normal work review of whatever
-        // the run actually did.
+        if (remediationRounds >= deps.maxRounds) {
+          deps.emit({ type: "autopilot_capped", data: { rounds: deps.maxRounds } });
+          return "capped";
+        }
+        const revisionRequested = await deps.requestPlanRevision(verdict.body);
+        if (!revisionRequested) return "plan-pending";
+        remediationRounds += 1;
         const body = buildPlanRevisionPrompt(verdict.body);
-        deps.onInjected(body, round);
-        await deps.runPrompt(body);
+        deps.onInjected(body, remediationRounds);
+        if ((await deps.runPrompt(body, { planRevision: true })) !== true) {
+          return deps.isCancelled() ? "cancelled" : "run-failed";
+        }
         continue;
       }
-      // all_clear — and ignore mapped to approve ("nothing to object to" on a
-      // plan means it's sound; plans never get a silent-ignore user blocker).
-      const ok = await deps.acceptPlan();
-      if (!ok) return; // generation went stale — the user's manual action won
-      await deps.runImplement();
-      // Next round: normal work review of the implementation.
-      continue;
+      // ALL_CLEAR and IGNORE mean Ken found no objection. Persist readiness,
+      // keep the human gate pending, and stop without implementation.
+      const reason =
+        verdict.kind === "all_clear" && verdict.evidenceLimitation
+          ? CORPUS_UNVERIFIED_REASON
+          : undefined;
+      const readyIdentity = await deps.markPlanReady(reason);
+      if (deps.isCancelled()) return "cancelled";
+      if (!readyIdentity) return "plan-pending";
+      deps.emit({
+        type: "autopilot_plan_ready",
+        data: { ...readyIdentity, ...(reason ? { reason } : {}) },
+      });
+      return "plan-pending";
     }
     // The gate blocks a still-in-plan-mode turn up front, so hitting this
     // means an injected run entered plan mode mid-cycle WITHOUT submitting a
     // plan: halt — Ken can't prompt a read-only session.
     if (deps.isPlanMode()) {
       deps.emit({ type: "autopilot_human", data: { reason: AUTOPILOT_PLAN_DRAFTING_REASON } });
-      return;
+      return "plan-pending";
     }
     const verdict = await deps.review();
-    if (!verdict || deps.isCancelled()) return;
+    if (deps.isCancelled()) return "cancelled";
+    if (!verdict) return "review-failed";
+    if (stopIfUnverified()) return "human";
     if (verdict.kind === "all_clear") {
-      deps.emit({ type: "autopilot_done", data: {} });
-      return;
+      deps.emit({
+        type: "autopilot_done",
+        data: verdict.evidenceLimitation ? { reason: CORPUS_UNVERIFIED_REASON } : {},
+      });
+      return "all-clear";
     }
     if (verdict.kind === "ignore") {
       deps.emit({ type: "autopilot_ignored", data: {} });
-      return;
+      return "ignored";
     }
     if (verdict.kind === "human") {
       deps.emit({ type: "autopilot_human", data: { reason: verdict.reason } });
-      return;
+      return "human";
     }
-    deps.onInjected(verdict.body, round);
-    await deps.runPrompt(verdict.body);
-    if (deps.isCancelled()) return;
+    if (remediationRounds >= deps.maxRounds) {
+      deps.emit({ type: "autopilot_capped", data: { rounds: deps.maxRounds } });
+      return "capped";
+    }
+    remediationRounds += 1;
+    deps.onInjected(verdict.body, remediationRounds);
+    if ((await deps.runPrompt(verdict.body)) !== true) {
+      return deps.isCancelled() ? "cancelled" : "run-failed";
+    }
+    if (deps.isCancelled()) return "cancelled";
   }
-  deps.emit({ type: "autopilot_capped", data: { rounds: deps.maxRounds } });
 }

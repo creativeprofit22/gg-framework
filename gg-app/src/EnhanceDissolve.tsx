@@ -27,7 +27,7 @@ const GLYPHS =
   "\u30A2\u30AB\u30B5\u30BF\u30CA\u30CF\u30DE\u30E4\u30E9\u30EF\u30F30123456789<>[]{}=+*";
 const randGlyph = (): string => GLYPHS[(Math.random() * GLYPHS.length) | 0];
 
-// Dissolve transition duration — must match the CSS `.enh-diss-fade` transition.
+// The `.enh-diss-fade` transition: equal to `--dur-enhance-dissolve` in App.css; scripts/motion-tokens.test.mjs enforces it.
 const DISSOLVE_MS = 460;
 const GLYPH_SWAP_MS = 40; // how often the decode lead glyph re-rolls
 // Decode duration scales with length so short prompts snap and long ones still
@@ -70,7 +70,11 @@ export function EnhanceDissolve({
       return;
     }
     // Lock the current (multi-line) height so it can transition down to one line.
-    const lineH = parseFloat(getComputedStyle(el).lineHeight) || 21;
+    // The box is border-box with the composer's block padding, so the one-line
+    // target includes that padding (matching an empty input's height).
+    const cs = getComputedStyle(el);
+    const pad = (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.paddingBottom) || 0);
+    const lineH = (parseFloat(cs.lineHeight) || 22.5) + pad;
     el.style.height = `${el.offsetHeight}px`;
     // Force a reflow so the start height is committed before the change below,
     // otherwise the browser collapses both into a single non-animated step.

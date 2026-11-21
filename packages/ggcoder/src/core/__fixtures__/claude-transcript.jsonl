@@ -1,0 +1,10 @@
+{"type":"last-prompt","leafUuid":"u2","sessionId":"s1"}
+{"type":"mode","mode":"normal","sessionId":"s1"}
+{"parentUuid":null,"isSidechain":false,"type":"system","subtype":"local_command","content":"<command-name>/model</command-name>","timestamp":"2026-07-20T10:00:00.000Z","uuid":"sys1"}
+{"parentUuid":null,"isSidechain":false,"type":"user","uuid":"u1","timestamp":"2026-07-20T10:00:05.000Z","cwd":"/Users/dev/widgets","message":{"role":"user","content":"Add a retry to the fetch helper."}}
+{"parentUuid":"u1","isSidechain":false,"type":"assistant","uuid":"a1","timestamp":"2026-07-20T10:00:07.000Z","cwd":"/Users/dev/widgets","message":{"role":"assistant","content":[{"type":"thinking","thinking":"The helper lives in src/fetch.ts.","signature":"sig"},{"type":"text","text":"I'll read the helper first."},{"type":"tool_use","id":"toolu_1","name":"Read","input":{"file_path":"src/fetch.ts"}}]}}
+{"parentUuid":"a1","isSidechain":false,"type":"user","uuid":"u2","timestamp":"2026-07-20T10:00:08.000Z","cwd":"/Users/dev/widgets","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"export async function get(url) { return fetch(url); }"}]}}
+{"parentUuid":"u2","isSidechain":true,"type":"assistant","uuid":"side1","timestamp":"2026-07-20T10:00:09.000Z","message":{"role":"assistant","content":[{"type":"text","text":"subagent chatter that must not be imported"}]}}
+{"parentUuid":"u2","isSidechain":false,"type":"assistant","uuid":"a2","timestamp":"2026-07-20T10:00:10.000Z","cwd":"/Users/dev/widgets","message":{"role":"assistant","content":[{"type":"text","text":"Added three retries with backoff."}]}}
+not json at all
+{"parentUuid":"a2","isSidechain":false,"type":"user","uuid":"u3","timestamp":"2026-07-20T10:00:20.000Z","cwd":"/Users/dev/widgets","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_orphan","content":"result with no matching call"}]}}

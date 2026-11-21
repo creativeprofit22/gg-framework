@@ -60,10 +60,16 @@ export class EventStream<T = StreamEvent> implements AsyncIterable<T> {
  *   const msg = await stream({...})          // awaits response
  *   for await (const e of stream({...})) {}  // iterates events
  *
- * The generator is pumped eagerly — events flow into an internal
- * buffer regardless of whether a consumer is iterating. This avoids
- * the push-based EventStream's stall bugs (lost wakeups, single
- * resolve field, iterator starvation).
+ * While the result is being read or awaited, the generator is pumped
+ * eagerly — events flow into an internal buffer regardless of whether
+ * a consumer is iterating. This avoids the push-based EventStream's
+ * stall bugs (lost wakeups, single resolve field, iterator starvation).
+ *
+ * Leaving a `for await` loop before the stream ends (break, return or
+ * throw) cancels the provider request, drops buffered events, and makes
+ * `response` reject with an `AbortError`; to get the final response,
+ * read to the end or `await` the result instead. A stream paused by
+ * backpressure also rejects with an `AbortError` when `signal` fires.
  */
 export class StreamResult implements AsyncIterable<StreamEvent> {
   readonly response: Promise<StreamResponse>;
@@ -85,13 +91,38 @@ export class StreamResult implements AsyncIterable<StreamEvent> {
   private iterating = false;
   private paused = false;
   private resolveDrain: (() => void) | null = null;
+  private readonly generator: AsyncGenerator<StreamEvent, StreamResponse>;
+  private readerStopped = false;
 
   constructor(generator: AsyncGenerator<StreamEvent, StreamResponse>, signal?: AbortSignal) {
+    this.generator = generator;
     this.response = new Promise<StreamResponse>((resolve, reject) => {
       this.resolveResponse = resolve;
       this.rejectResponse = reject;
     });
     this.pump(generator, signal);
+  }
+
+  private throwIfReaderStopped(): void {
+    if (this.readerStopped) throw new DOMException("Stream reader stopped", "AbortError");
+  }
+
+  private waitForDrain(signal?: AbortSignal): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      if (signal?.aborted) {
+        reject(new DOMException("Aborted", "AbortError"));
+        return;
+      }
+      const onAbort = () => {
+        this.resolveDrain = null;
+        reject(new DOMException("Aborted", "AbortError"));
+      };
+      signal?.addEventListener("abort", onAbort, { once: true });
+      this.resolveDrain = () => {
+        signal?.removeEventListener("abort", onAbort);
+        resolve();
+      };
+    });
   }
 
   private async pump(
@@ -100,6 +131,8 @@ export class StreamResult implements AsyncIterable<StreamEvent> {
   ): Promise<void> {
     try {
       let next = await this._nextWithAbort(generator, signal);
+      // A returned generator reports done with no value; never resolve with that.
+      this.throwIfReaderStopped();
       while (!next.done) {
         this.buffer.push(next.value);
         this.resolveWait?.();
@@ -111,19 +144,25 @@ export class StreamResult implements AsyncIterable<StreamEvent> {
         // response promise resolves.
         if (this.iterating && this.buffer.length > StreamResult.HIGH_WATER) {
           this.paused = true;
-          await new Promise<void>((r) => {
-            this.resolveDrain = r;
-          });
-          this.paused = false;
+          try {
+            await this.waitForDrain(signal);
+          } finally {
+            this.paused = false;
+            this.resolveDrain = null;
+          }
+          this.throwIfReaderStopped();
         }
 
         next = await this._nextWithAbort(generator, signal);
+        this.throwIfReaderStopped();
       }
       this.done = true;
       this.resolveResponse(next.value);
       this.resolveWait?.();
       this.resolveWait = null;
     } catch (err) {
+      // Stop the producer (open HTTP body) after abort-while-paused or reader stop.
+      generator.return?.(undefined as unknown as StreamResponse).catch(() => {});
       const error = err instanceof Error ? err : new Error(String(err));
       this.error = error;
       this.done = true;
@@ -141,6 +180,7 @@ export class StreamResult implements AsyncIterable<StreamEvent> {
       return generator.next();
     }
     if (signal.aborted) {
+      generator.return?.(undefined as unknown as StreamResponse).catch(() => {});
       return Promise.reject(new DOMException("Aborted", "AbortError"));
     }
     let onAbort: (() => void) | undefined;
@@ -160,32 +200,46 @@ export class StreamResult implements AsyncIterable<StreamEvent> {
 
   async *[Symbol.asyncIterator](): AsyncIterator<StreamEvent> {
     this.iterating = true;
-    let index = 0;
-    while (true) {
-      while (index < this.buffer.length) {
-        yield this.buffer[index++]!;
-      }
-      // If the pump is paused waiting for us to drain, signal it.
-      if (this.paused && index > StreamResult.LOW_WATER) {
-        this.resolveDrain?.();
-        this.resolveDrain = null;
-      }
-      // Trim already-yielded events to free memory (they're consumed).
-      if (index > 0 && !this.paused) {
-        this.buffer.splice(0, index);
-        index = 0;
-      }
-      if (this.error) throw this.error;
-      if (this.done) return;
-      await new Promise<void>((r) => {
-        this.resolveWait = r;
-        // Guard against race: pump may have advanced between the while-check
-        // and this promise registration. Re-check and resolve immediately.
-        if (this.buffer.length > index || this.done || this.error) {
-          this.resolveWait = null;
-          r();
+    try {
+      let index = 0;
+      while (true) {
+        while (index < this.buffer.length) {
+          yield this.buffer[index++]!;
         }
-      });
+        // If the pump is paused waiting for us to drain, signal it.
+        if (this.paused && index > StreamResult.LOW_WATER) {
+          this.resolveDrain?.();
+          this.resolveDrain = null;
+        }
+        // Trim already-yielded events to free memory (they're consumed).
+        if (index > 0 && !this.paused) {
+          this.buffer.splice(0, index);
+          index = 0;
+        }
+        if (this.error) throw this.error;
+        if (this.done) return;
+        await new Promise<void>((r) => {
+          this.resolveWait = r;
+          // Guard against race: pump may have advanced between the while-check
+          // and this promise registration. Re-check and resolve immediately.
+          if (this.buffer.length > index || this.done || this.error) {
+            this.resolveWait = null;
+            r();
+          }
+        });
+      }
+    } finally {
+      // Reader left early (break/return/throw): release the pause and stop the producer.
+      if (!this.done) {
+        this.readerStopped = true;
+        if (this.paused) {
+          this.paused = false;
+          this.resolveDrain?.();
+          this.resolveDrain = null;
+        }
+        this.generator.return?.(undefined as unknown as StreamResponse).catch(() => {});
+      }
+      this.buffer = [];
     }
   }
 

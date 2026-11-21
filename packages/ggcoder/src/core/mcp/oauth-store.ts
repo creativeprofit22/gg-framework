@@ -1,9 +1,6 @@
 import fs from "node:fs/promises";
 import { getAppPaths } from "@kenkaiiii/gg-core";
-import type {
-  OAuthClientInformationFull,
-  OAuthTokens,
-} from "@modelcontextprotocol/sdk/shared/auth.js";
+import type { OAuthClientInformationFull, OAuthTokens } from "@modelcontextprotocol/client";
 import { log } from "../logger.js";
 
 /**
@@ -72,6 +69,21 @@ export class McpOAuthStore {
     const all = await this.readAll();
     all.servers[name] = { ...(all.servers[name] ?? {}), ...patch };
     await this.writeAll(all);
+  }
+
+  /**
+   * Remember a pre-registered client (`--client-id`, optional secret) so
+   * sign-in uses it instead of registering one. Old tokens belonged to a
+   * different client, so they go.
+   */
+  async setClient(name: string, clientId: string, clientSecret?: string): Promise<void> {
+    await this.patch(name, {
+      clientInformation: {
+        client_id: clientId,
+        ...(clientSecret ? { client_secret: clientSecret } : {}),
+      } as OAuthClientInformationFull,
+      tokens: undefined,
+    });
   }
 
   /** Drop a server's whole OAuth record (used on logout / removal). */

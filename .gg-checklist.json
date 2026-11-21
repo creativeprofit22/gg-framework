@@ -1,0 +1,95 @@
+{
+  "version": 1,
+  "items": {
+    "agent-setup": {
+      "checkedAt": "2026-11-06T02:40:56.765Z",
+      "commit": "02615370",
+      "uncommittedChanges": true,
+      "result": "pass",
+      "summary": "AGENTS.md generated block rebuilt and checked against the current code, CI and scripts; recurring work is covered by .gg/commands.",
+      "findings": [],
+      "evidence": [
+        "Rewrote AGENTS.md gg:init block (6.7KB); prettier --check AGENTS.md passes",
+        "Three read-only sub-agents checked claims against manifests, ci.yml/release.yml, tauri configs, auth-storage.ts, provider-fetch.ts, file-lock.ts, size-gate.mjs, smoke launchers",
+        "Fixed stale claims: gg-agent scope, size-gate artifacts, smoke window rules, rustls builder, third identity, Linux release exclusion",
+        "Read machine-profile.ts, verify-plan.ts, git log fix commits; .gg/commands has polish/release/upstream-pr/sweep/cleanup",
+        "Scope: root AGENTS.md generated block and the project's .gg/commands and .gg/skills folders",
+        "Not checked: text outside the fence (Check scope/Polish sections); root CLAUDE.md, which holds an older gg:init block but isn't loaded while AGENTS.md exists"
+      ]
+    },
+    "docs": {
+      "checkedAt": "2026-11-06T02:48:43.079Z",
+      "commit": "02615370",
+      "uncommittedChanges": true,
+      "result": "pass",
+      "summary": "Re-check of the 3 docs findings from today: all fixed in README.md and gg-app/README.md (dev setup step, Linux downloads, Qwen key row).",
+      "findings": [],
+      "evidence": [
+        "README.md and gg-app/README.md dev steps now run `pnpm --filter gg-app prebundle` (stage:node + bundle:sidecar, gg-app/package.json:29) before `tauri dev`",
+        "gg-app/README.md:7 now lists Linux .deb/.rpm, matching upstream release v0.103.1 assets (gh release view)",
+        "README.md optional settings table now has QWEN_CLOUD_TOKEN_PLAN_KEY (read in gg-ai/src/stream.ts:77; CLI-only per ggcoder/src/cli/auth.ts:60)",
+        "pnpm exec prettier --check README.md gg-app/README.md: all files pass",
+        "Scope: re-check of the 3 findings recorded earlier today only, not a new review",
+        "Not checked: did not run prebundle or tauri dev from a fresh clone to prove the documented steps work"
+      ]
+    },
+    "git-github": {
+      "checkedAt": "2026-11-06T03:31:10.358Z",
+      "commit": "02615370",
+      "uncommittedChanges": true,
+      "result": "pass",
+      "summary": "Re-check of the 3 recorded findings: .gitignore conflict fixed (and the format-check fallout it caused); ruleset and video findings accepted by owner.",
+      "findings": [],
+      "accepted": [
+        "Main ruleset 22430634 blocks only deletion/force-push; no required PR or CI checks. Accepted by owner, left as is.",
+        "docs/art/ggcoder.mp4 (11.9MB README video) committed. Accepted by owner, left as is."
+      ],
+      "evidence": [
+        ".gitignore: /scripts/ -> /scripts/* + !/scripts/*.mjs + /scripts/test_*.mjs; added !/CLAUDE.md",
+        "git ls-files -ci --exclude-standard: scripts/* and CLAUDE.md no longer listed",
+        "Un-ignoring exposed 4 unformatted files to Prettier; ran prettier --write on CLAUDE.md + 3 scripts/*.mjs",
+        "pnpm format:check: exit 0 (initially failed on those 4 files)",
+        "node --test scripts/verify-release-ci.test.mjs 21/21; audit-generated.test.mjs 12/12; audit --inspect exit 0",
+        "Scope: re-check of the three findings recorded earlier today only; not a new review",
+        "Not checked: GitHub settings (unchanged); pnpm lint/check/test (no TS/package code changed; eslint config skips scripts/)"
+      ]
+    },
+    "naming": {
+      "checkedAt": "2026-11-06T02:55:18.002Z",
+      "commit": "02615370",
+      "uncommittedChanges": true,
+      "result": "pass",
+      "summary": "All 5 earlier findings fixed: glossary now covers core app terms and Local Fork aliases, three ADRs added, 'slice' log text changed to 'phase'.",
+      "findings": [],
+      "evidence": [
+        "CONTEXT.md: added Project Notes, Roadmap phase, Daemon/Sidecar, Pane, Local Fork (with local-patched/local-hotfix/local fixes aliases), Upstream sync/Decisions, Verify plan, Programmatic execution",
+        "Added docs/adr/0006 (Local Fork identity), 0007 (one daemon behind Rust), 0008 (shared auth.json)",
+        "roadmap-phase-detail-evidence.mjs:658 log now says 'Roadmap phase detail evidence'; git grep 'roadmap slice' finds no source hits",
+        "pnpm exec prettier --check on the 5 changed files: all pass",
+        "pnpm exec eslint on the changed script: file is in eslint's ignore list, so not linted",
+        "Scope: re-check of the 5 findings from the earlier review only; not a new review",
+        "Not checked: other naming beyond those findings; ADR content checked against code and AGENTS.md, not against the original authors"
+      ]
+    },
+    "secrets": {
+      "checkedAt": "2026-11-06T03:37:33.166Z",
+      "commit": "02615370",
+      "uncommittedChanges": true,
+      "result": "pass",
+      "summary": "Pattern scans of tracked files and all 3,212 commits found no real keys; env files are ignored; CI uses GitHub secrets. Scope limited to regex-based scanning (no gitleaks/trufflehog installed).",
+      "findings": [],
+      "evidence": [
+        "Skill loaded: bulletproof (secure-defaults.md Secrets, verification.md scanner rows read)",
+        "RUNTIME git ls-files + git log --all --diff-filter=A: no .env/.pem/.key/.p12/id_rsa/auth.json/.npmrc/.mcp.json ever tracked",
+        "RUNTIME git check-ignore: .env and .env.* ignored at root, gg-app, src-tauri, ggcoder, Matey (.gitignore:10-11)",
+        "RUNTIME git grep provider-key + generic key= patterns in tracked files: ~40 hits, all fixtures/canaries/redaction tests",
+        "RUNTIME git log --all -p -G over 3,212 commits: 54 unique values; 2 unmarked reviewed (files.rs:428 PEM header test, gemini.ts:17)",
+        "CODE gg-core/src/oauth/gemini.ts:9-17,154: documented public Gemini CLI installed-app secret, env override; dropped",
+        "CODE .github/workflows/release.yml: signing/Apple/Tauri keys come from GitHub secrets",
+        "RUNTIME gh api: secret scanning + push protection enabled on public repo; secret-scanning alerts = 0",
+        "Scope: tracked files at 02615370, full history all refs, .gitignore, CI secret usage, GitHub scanning status",
+        "Not checked: built bundles/installers, CI logs, untracked local files; no gitleaks/trufflehog, so regex+heuristic only"
+      ]
+    }
+  }
+}

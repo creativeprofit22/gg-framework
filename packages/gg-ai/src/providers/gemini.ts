@@ -15,28 +15,14 @@ import { downgradeUnsupportedImages, downgradeUnsupportedVideos } from "./transf
 import { resolveToolSchema } from "../utils/zod-to-json-schema.js";
 import { isJsonObject } from "../utils/json.js";
 import { readSseStream } from "../utils/sse.js";
-import { getEnvironment } from "../utils/env.js";
+import { providerFetch } from "../utils/provider-fetch.js";
+import { mergeProviderOptions } from "../utils/provider-options.js";
 
-const DEFAULT_CODE_ASSIST_BASE_URL = "https://cloudcode-pa.googleapis.com";
-const CODE_ASSIST_API_VERSION = "v1internal";
-const GEMINI_CLI_USER_AGENT = "google-gemini-cli";
-const GEMINI_CLI_API_CLIENT = "gemini-cli/0.0.0";
-const CODE_ASSIST_NON_STREAMING_RETRIES = 3;
-const CODE_ASSIST_NON_STREAMING_RETRY_DELAY_MS = 1_000;
+/** The public Gemini API, reached with a Google AI Studio key. */
+const DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com/v1beta";
+const NON_STREAMING_RETRIES = 3;
+const NON_STREAMING_RETRY_DELAY_MS = 1_000;
 const SYNTHETIC_THOUGHT_SIGNATURE = "skip_thought_signature_validator";
-const CODE_ASSIST_SUPPORTED_MODELS = new Set([
-  "gemini-3-pro-preview",
-  "gemini-3.1-pro-preview",
-  "gemini-3.1-pro-preview-customtools",
-  "gemini-3-flash-preview",
-  "gemini-3.1-flash-lite-preview",
-  "gemini-2.5-pro",
-  "gemini-2.5-flash",
-  "gemini-2.5-flash-lite",
-  "gemma-4-31b-it",
-  "gemma-4-26b-a4b-it",
-]);
-
 interface GeminiTextPart {
   text: string;
   thought?: boolean;
@@ -68,10 +54,7 @@ interface GeminiFunctionResponsePart {
 }
 
 type GeminiPart =
-  | GeminiTextPart
-  | GeminiInlineDataPart
-  | GeminiFunctionCallPart
-  | GeminiFunctionResponsePart;
+  GeminiTextPart | GeminiInlineDataPart | GeminiFunctionCallPart | GeminiFunctionResponsePart;
 
 interface GeminiContent {
   role?: "user" | "model";
@@ -112,17 +95,10 @@ interface GeminiGenerateContentRequest {
   session_id?: string;
 }
 
-interface GeminiCodeAssistRequest {
-  model: string;
-  project?: string;
-  user_prompt_id: string;
-  request: GeminiGenerateContentRequest;
-}
-
 interface GeminiRequestPlan {
   url: URL;
   headers: Record<string, string>;
-  body: GeminiCodeAssistRequest;
+  body: GeminiGenerateContentRequest;
 }
 
 interface GeminiCandidate {
@@ -139,35 +115,24 @@ interface GeminiUsageMetadata {
 }
 
 interface GeminiGenerateResponse {
-  traceId?: string;
-  response?: {
-    candidates?: GeminiCandidate[];
-    usageMetadata?: GeminiUsageMetadata;
-  };
   candidates?: GeminiCandidate[];
   usageMetadata?: GeminiUsageMetadata;
 }
 
-function getGoogleProject(options: StreamOptions): string | undefined {
-  const env = getEnvironment();
-  return options.projectId ?? env?.GOOGLE_CLOUD_PROJECT ?? env?.GOOGLE_CLOUD_PROJECT_ID;
+/**
+ * Google rejects a bad AI Studio key with 400 INVALID_ARGUMENT and reason
+ * API_KEY_INVALID (verified live, 2026-10-16). Detected by the structured reason.
+ */
+function isInvalidGeminiApiKey(status: number, body: string): boolean {
+  if (status !== 400 && status !== 401 && status !== 403) return false;
+  return /"reason"\s*:\s*"API_KEY_INVALID"/.test(body) || /API key not valid/i.test(body);
 }
 
-function getCodeAssistEndpoint(method: string): URL {
-  const env = getEnvironment();
-  const endpoint = env?.CODE_ASSIST_ENDPOINT ?? DEFAULT_CODE_ASSIST_BASE_URL;
-  const version = env?.CODE_ASSIST_API_VERSION || CODE_ASSIST_API_VERSION;
-  return new URL(`${endpoint}/${version}:${method}`);
-}
+const INVALID_API_KEY_MESSAGE = "Google rejected the Gemini API key: it is not valid.";
+const INVALID_API_KEY_HINT =
+  "Create a key at aistudio.google.com/apikey and add it again under Gemini in Providers (or `ggcoder login`).";
 
-function formatUnsupportedModelMessage(model: string): string {
-  return `Gemini OAuth is configured to use the Gemini Code Assist subscription endpoint only. That endpoint does not currently expose model "${model}".`;
-}
-
-function formatErrorMessage(status: number, body: string, model: string): string {
-  if (status === 404 && !CODE_ASSIST_SUPPORTED_MODELS.has(model)) {
-    return `Gemini API error (404): ${body}\n\n${formatUnsupportedModelMessage(model)}`;
-  }
+function formatErrorMessage(status: number, body: string): string {
   return `Gemini API error (${status}): ${body}`;
 }
 
@@ -343,6 +308,21 @@ function stripUnsupportedSchemaFields(value: unknown): void {
 
   delete value.$schema;
   delete value.additionalProperties;
+  // Gemini's schema subset has inclusive minimum/maximum only; an exclusive
+  // bound (zod .positive()/.lt()) 400s the whole request. Integers keep the
+  // exact bound (n+1 / n-1); numbers widen to inclusive, and the tool's own
+  // zod schema still rejects the boundary value at execution.
+  for (const [key, target, step] of [
+    ["exclusiveMinimum", "minimum", 1],
+    ["exclusiveMaximum", "maximum", -1],
+  ] as const) {
+    const bound = value[key];
+    if (bound === undefined) continue;
+    delete value[key];
+    if (typeof bound === "number" && value[target] === undefined) {
+      value[target] = value.type === "integer" ? bound + step : bound;
+    }
+  }
 
   for (const item of Object.values(value)) {
     if (isJsonObject(item) || Array.isArray(item)) {
@@ -377,6 +357,7 @@ function toGemini3ThinkingLevel(
     case "high":
     case "xhigh":
     case "max":
+    case "ultra":
       return "HIGH";
   }
 }
@@ -390,6 +371,7 @@ function toThinkingBudget(level: NonNullable<StreamOptions["thinking"]>): number
     case "high":
     case "xhigh":
     case "max":
+    case "ultra":
       return 8_192;
   }
 }
@@ -434,40 +416,26 @@ function buildGenerateRequest(options: StreamOptions): GeminiGenerateContentRequ
     ...(tools ? { tools } : {}),
     ...(toolConfig ? { toolConfig } : {}),
     ...(Object.keys(generationConfig).length > 0 ? { generationConfig } : {}),
-    ...(options.promptCacheKey ? { session_id: options.promptCacheKey } : {}),
   };
 }
 
-function buildCodeAssistRequest(
-  options: StreamOptions,
-  request: GeminiGenerateContentRequest,
-  projectId?: string,
-): GeminiCodeAssistRequest {
-  return {
-    model: options.model,
-    ...(projectId ? { project: projectId } : {}),
-    user_prompt_id: crypto.randomUUID(),
-    request,
-  };
-}
+/** The registry keeps the `gemini-3-flash` id for 3.5 Flash; the public API calls it `gemini-3.5-flash`. */
+const API_KEY_MODEL_IDS: Readonly<Record<string, string>> = {
+  "gemini-3-flash": "gemini-3.5-flash",
+};
 
 function buildRequestPlan(options: StreamOptions, method: string): GeminiRequestPlan {
-  if (!CODE_ASSIST_SUPPORTED_MODELS.has(options.model)) {
-    throw new ProviderError("gemini", formatUnsupportedModelMessage(options.model));
-  }
-
-  const projectId = getGoogleProject(options);
-  const request = buildGenerateRequest(options);
-
+  const request = mergeProviderOptions(buildGenerateRequest(options), options.providerOptions);
+  const base = (options.baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, "");
   return {
-    url: getCodeAssistEndpoint(method),
+    url: new URL(
+      `${base}/models/${encodeURIComponent(API_KEY_MODEL_IDS[options.model] ?? options.model)}:${method}`,
+    ),
     headers: {
-      Authorization: `Bearer ${options.apiKey}`,
       "Content-Type": "application/json",
-      "User-Agent": GEMINI_CLI_USER_AGENT,
-      "X-Goog-Api-Client": GEMINI_CLI_API_CLIENT,
+      "x-goog-api-key": options.apiKey ?? "",
     },
-    body: buildCodeAssistRequest(options, request, projectId),
+    body: request,
   };
 }
 
@@ -497,11 +465,11 @@ async function* streamSse(response: Response): AsyncGenerator<GeminiGenerateResp
 }
 
 function candidatesFromResponse(response: GeminiGenerateResponse): GeminiCandidate[] | undefined {
-  return response.response?.candidates ?? response.candidates;
+  return response.candidates;
 }
 
 function usageFromResponse(response: GeminiGenerateResponse): GeminiUsageMetadata | undefined {
-  return response.response?.usageMetadata ?? response.usageMetadata;
+  return response.usageMetadata;
 }
 
 function partsFromResponse(response: GeminiGenerateResponse): GeminiPart[] {
@@ -531,7 +499,7 @@ function makeToolCallId(index: number, providerId?: string): string {
   return providerId ?? `gemini_call_${index}_${crypto.randomUUID().replace(/-/g, "")}`;
 }
 
-function shouldRetryCodeAssistStatus(status: number): boolean {
+function shouldRetryStatus(status: number): boolean {
   return status === 429 || status === 499 || (status >= 500 && status <= 599);
 }
 
@@ -557,9 +525,12 @@ async function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
-async function fetchCodeAssist(plan: GeminiRequestPlan, options: StreamOptions): Promise<Response> {
+async function fetchGemini(plan: GeminiRequestPlan, options: StreamOptions): Promise<Response> {
   try {
-    const response = await fetch(plan.url, {
+    // An injected fetch (tests, custom runtimes) still wins; the default is
+    // upstream's providerFetch, which lifts undici's 300s header/body caps.
+    const fetchImpl = options.fetch ?? providerFetch;
+    const response = await fetchImpl(plan.url, {
       method: "POST",
       headers: plan.headers,
       body: JSON.stringify(plan.body),
@@ -569,7 +540,10 @@ async function fetchCodeAssist(plan: GeminiRequestPlan, options: StreamOptions):
     if (!response.ok) {
       const text = await response.text().catch(() => "");
       const quota = parseGeminiQuota(response.status, text);
-      let message = formatErrorMessage(response.status, text, options.model);
+      const invalidKey = isInvalidGeminiApiKey(response.status, text);
+      let message = invalidKey
+        ? INVALID_API_KEY_MESSAGE
+        : formatErrorMessage(response.status, text);
       let resetsAt: number | undefined;
       if (quota?.exhausted) {
         // Stamp the canonical phrase the agent loop matches on so this hard
@@ -581,6 +555,7 @@ async function fetchCodeAssist(plan: GeminiRequestPlan, options: StreamOptions):
       throw new ProviderError("gemini", message, {
         statusCode: response.status,
         ...(resetsAt !== undefined ? { resetsAt } : {}),
+        ...(invalidKey ? { hint: INVALID_API_KEY_HINT, source: "auth" as const } : {}),
       });
     }
 
@@ -590,23 +565,23 @@ async function fetchCodeAssist(plan: GeminiRequestPlan, options: StreamOptions):
   }
 }
 
-async function fetchCodeAssistWithRetry(
+async function fetchGeminiWithRetry(
   plan: GeminiRequestPlan,
   options: StreamOptions,
 ): Promise<Response> {
   let lastError: Error | undefined;
 
-  for (let attempt = 0; attempt <= CODE_ASSIST_NON_STREAMING_RETRIES; attempt++) {
+  for (let attempt = 0; attempt <= NON_STREAMING_RETRIES; attempt++) {
     try {
-      return await fetchCodeAssist(plan, options);
+      return await fetchGemini(plan, options);
     } catch (err) {
       const error = toError(err);
       const statusCode = error instanceof ProviderError ? error.statusCode : undefined;
       if (
         options.signal?.aborted ||
         isAbortError(error) ||
-        attempt === CODE_ASSIST_NON_STREAMING_RETRIES ||
-        (statusCode != null && !shouldRetryCodeAssistStatus(statusCode))
+        attempt === NON_STREAMING_RETRIES ||
+        (statusCode != null && !shouldRetryStatus(statusCode))
       ) {
         throw error;
       }
@@ -614,13 +589,13 @@ async function fetchCodeAssistWithRetry(
     }
 
     try {
-      await sleep(CODE_ASSIST_NON_STREAMING_RETRY_DELAY_MS, options.signal);
+      await sleep(NON_STREAMING_RETRY_DELAY_MS, options.signal);
     } catch (err) {
       throw toError(err);
     }
   }
 
-  throw lastError ?? new ProviderError("gemini", "Gemini Code Assist request failed.");
+  throw lastError ?? new ProviderError("gemini", "Gemini request failed.");
 }
 
 export function streamGemini(options: StreamOptions): StreamResult {
@@ -634,8 +609,8 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
   if (useStreaming) plan.url.searchParams.set("alt", "sse");
 
   const response = useStreaming
-    ? await fetchCodeAssist(plan, options)
-    : await fetchCodeAssistWithRetry(plan, options);
+    ? await fetchGemini(plan, options)
+    : await fetchGeminiWithRetry(plan, options);
 
   const contentParts: ContentPart[] = [];
   const pendingToolCalls: ToolCall[] = [];
@@ -643,7 +618,8 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
   let thinkingAccum = "";
   let stopReason: StreamResponse["stopReason"] = "end_turn";
   let inputTokens = 0;
-  let outputTokens = 0;
+  let candidateTokens = 0;
+  let reasoningTokens = 0;
   let cacheRead = 0;
   let toolIndex = 0;
 
@@ -651,7 +627,8 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
     const usage = usageFromResponse(chunk);
     if (usage) {
       inputTokens = usage.promptTokenCount ?? inputTokens;
-      outputTokens = usage.candidatesTokenCount ?? outputTokens;
+      candidateTokens = usage.candidatesTokenCount ?? candidateTokens;
+      reasoningTokens = usage.thoughtsTokenCount ?? reasoningTokens;
       cacheRead = usage.cachedContentTokenCount ?? cacheRead;
     }
 
@@ -715,6 +692,9 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
   if (pendingToolCalls.length > 0) stopReason = "tool_use";
 
   const adjustedInputTokens = Math.max(0, inputTokens - cacheRead);
+  // Gemini reports thoughts separately from candidate output, but both are billed
+  // output. Keep the subset for diagnostics while making outputTokens the cost-safe total.
+  const outputTokens = candidateTokens + reasoningTokens;
   const streamResponse: StreamResponse = {
     message: {
       role: "assistant",
@@ -724,6 +704,7 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
     usage: {
       inputTokens: adjustedInputTokens,
       outputTokens,
+      ...(reasoningTokens > 0 ? { reasoningTokens } : {}),
       ...(cacheRead > 0 ? { cacheRead } : {}),
     },
   };

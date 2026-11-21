@@ -1,0 +1,12 @@
+{
+  "id": "light-leak-soft",
+  "name": "Soft light leak",
+  "kind": "texture",
+  "description": "Transparent soft light leak: a warm bloom and a hot core, tinted from the look, swell and drift along one edge, then fade (screen blend). A gentle transition accent or warm lift over a hold.",
+  "tags": ["light-leak", "glow", "bloom", "flare", "film", "warm", "overlay", "texture", "transition", "transparent"],
+  "fonts": [],
+  "duration": 5,
+  "previewAt": 2.2,
+  "license": "original",
+  "previewLook": "duotone-broadcast"
+}

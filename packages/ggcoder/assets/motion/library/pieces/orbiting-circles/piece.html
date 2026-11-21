@@ -1,0 +1,185 @@
+<!doctype html>
+<!--
+  orbiting-circles: icon chips orbit a central accent badge on two rings,
+  the outer ring turning the other way. The rings draw on, chips pop in,
+  and every chip's angle is a pure function of timeline time
+  (angle = start + direction * 360 * t / period), so it seeks cleanly.
+  Converted from Magic UI's Orbiting Circles (MIT, see LICENSE and
+  meta.json source): same evenly spaced start angles (360 / count * index),
+  optional reverse, upright icons; the CSS keyframe loop is replaced by the
+  piece's paused GSAP timeline. Icons are inline SVG, no images.
+  Params (top of script):
+    ORBITS  [{ radius, period, reverse, size, icons }] — icons are names from
+            ICONS (doc, chat, db, cloud, app, code, user, bell, lock, mail,
+            chart, bolt)
+    CENTER  icon name for the centre badge
+  CSS: --oc-x / --oc-y (centre of the system).
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+  </head>
+  <body>
+    <div
+      id="orbiting-circles-root"
+      data-composition-id="orbiting-circles"
+      data-start="0"
+      data-duration="6"
+      data-width="1920"
+      data-height="1080"
+    >
+      <style>
+        [data-composition-id="orbiting-circles"] {
+          --oc-x: 960px;
+          --oc-y: 540px;
+          position: absolute;
+          inset: 0;
+          color: var(--ink, #111);
+        }
+        [data-composition-id="orbiting-circles"] .oc-rings {
+          position: absolute;
+          left: 0;
+          top: 0;
+          overflow: visible;
+        }
+        [data-composition-id="orbiting-circles"] .oc-ring {
+          fill: none;
+          stroke: var(--ink, #111);
+          stroke-opacity: 0.22;
+          stroke-width: 2.5;
+        }
+        [data-composition-id="orbiting-circles"] .oc-chip {
+          position: absolute;
+          box-sizing: border-box;
+          border-radius: 50%;
+          border: 3px solid var(--ink, #111);
+          background: var(--field, #fff);
+          box-shadow: 0 16px 36px -16px color-mix(in srgb, var(--ink, #111) 45%, transparent);
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          color: var(--ink, #111);
+        }
+        [data-composition-id="orbiting-circles"] .oc-chip svg {
+          width: 50%;
+          height: 50%;
+          fill: none;
+          stroke: currentColor;
+          stroke-width: 3.4;
+          stroke-linecap: round;
+          stroke-linejoin: round;
+        }
+        [data-composition-id="orbiting-circles"] .oc-chip.is-center {
+          border: 0;
+          background: var(--accent, #111);
+          color: var(--field, #fff);
+        }
+        [data-composition-id="orbiting-circles"] .oc-chip.is-center svg {
+          stroke-width: 3.6;
+        }
+      </style>
+      <svg class="oc-rings" id="oc-rings" width="1920" height="1080" viewBox="0 0 1920 1080"></svg>
+      <div id="oc-chips"></div>
+    </div>
+    <script>
+      (function () {
+        // edit: rings (inner first) and the centre icon
+        const ORBITS = [
+          { radius: 215, period: 16, reverse: false, size: 92, icons: ["chat", "db", "code"] },
+          { radius: 395, period: 26, reverse: true, size: 112, icons: ["doc", "cloud", "user", "chart", "lock"] },
+        ];
+        const CENTER = "bolt";
+        const CENTER_SIZE = 196;
+        const DURATION = 6;
+
+        const ICONS = {
+          doc: '<path d="M16 6h22l12 12v36a4 4 0 0 1-4 4H16a4 4 0 0 1-4-4V10a4 4 0 0 1 4-4z"/><path d="M38 6v12h12M21 32h22M21 42h16"/>',
+          chat: '<path d="M10 14a6 6 0 0 1 6-6h32a6 6 0 0 1 6 6v22a6 6 0 0 1-6 6H28l-12 10v-10h0a6 6 0 0 1-6-6z"/><path d="M22 25h20"/>',
+          db: '<ellipse cx="32" cy="14" rx="20" ry="7"/><path d="M12 14v36c0 3.9 9 7 20 7s20-3.1 20-7V14M12 32c0 3.9 9 7 20 7s20-3.1 20-7"/>',
+          cloud: '<path d="M20 48h26a11 11 0 0 0 1-22 15 15 0 0 0-29-2 12 12 0 0 0 2 24z"/>',
+          app: '<rect x="8" y="12" width="48" height="40" rx="5"/><path d="M8 22h48M15 17h2M21 17h2"/>',
+          code: '<path d="M22 18 8 32l14 14M42 18l14 14-14 14M36 12 28 52"/>',
+          user: '<circle cx="32" cy="22" r="10"/><path d="M12 54c2-10 10-16 20-16s18 6 20 16"/>',
+          bell: '<path d="M18 44V28a14 14 0 0 1 28 0v16l4 4H14zM27 54h10"/>',
+          lock: '<rect x="12" y="28" width="40" height="28" rx="5"/><path d="M20 28v-8a12 12 0 0 1 24 0v8M32 38v8"/>',
+          mail: '<rect x="8" y="14" width="48" height="36" rx="5"/><path d="m10 18 22 16 22-16"/>',
+          chart: '<path d="M10 54h44M18 46V32M30 46V18M42 46V26"/>',
+          bolt: '<path d="M36 6 14 36h16l-4 22 22-30H32z"/>',
+        };
+
+        const root = document.querySelector('[data-composition-id="orbiting-circles"]');
+        const cs = getComputedStyle(root);
+        const CX = parseFloat(cs.getPropertyValue("--oc-x")) || 960;
+        const CY = parseFloat(cs.getPropertyValue("--oc-y")) || 540;
+        const NS = "http://www.w3.org/2000/svg";
+        const rings = document.getElementById("oc-rings");
+        const chipsEl = document.getElementById("oc-chips");
+
+        function chip(icon, size, center) {
+          const el = document.createElement("div");
+          el.className = "oc-chip" + (center ? " is-center" : "");
+          el.style.width = size + "px";
+          el.style.height = size + "px";
+          el.innerHTML = `<svg viewBox="0 0 64 64">${ICONS[icon] || ICONS.doc}</svg>`;
+          chipsEl.appendChild(el);
+          return el;
+        }
+
+        const orbiters = [];
+        const ringEls = ORBITS.map((o, ri) => {
+          const c = document.createElementNS(NS, "circle");
+          c.setAttribute("class", "oc-ring");
+          c.setAttribute("cx", CX);
+          c.setAttribute("cy", CY);
+          c.setAttribute("r", o.radius);
+          // Start the draw-on at 12 o'clock.
+          c.setAttribute("transform", `rotate(-90 ${CX} ${CY})`);
+          const len = 2 * Math.PI * o.radius;
+          c.style.strokeDasharray = `${len} ${len + 10}`;
+          c.style.strokeDashoffset = len;
+          rings.appendChild(c);
+          o.icons.forEach((icon, i) => {
+            // Upstream: angle = 360 / count * index; offset rings so chips interleave.
+            const start = (360 / o.icons.length) * i - 90 + ri * 18;
+            orbiters.push({ el: chip(icon, o.size, false), o, start, ring: ri, i });
+          });
+          return { c, len };
+        });
+        const centerEl = chip(CENTER, CENTER_SIZE, true);
+        centerEl.style.left = CX - CENTER_SIZE / 2 + "px";
+        centerEl.style.top = CY - CENTER_SIZE / 2 + "px";
+
+        const clock = { t: 0 };
+        function place() {
+          for (const b of orbiters) {
+            const dir = b.o.reverse ? -1 : 1;
+            const a = ((b.start + (dir * 360 * clock.t) / b.o.period) * Math.PI) / 180;
+            const x = CX + Math.cos(a) * b.o.radius - b.o.size / 2;
+            const y = CY + Math.sin(a) * b.o.radius - b.o.size / 2;
+            b.el.style.left = x.toFixed(2) + "px";
+            b.el.style.top = y.toFixed(2) + "px";
+          }
+        }
+
+        const tl = gsap.timeline({ paused: true });
+        tl.fromTo(centerEl, { scale: 0.4, opacity: 0 }, { scale: 1, opacity: 1, duration: 0.8, ease: "back.out(1.7)" }, 0.1);
+        ringEls.forEach((r, i) => {
+          tl.fromTo(r.c, { strokeDashoffset: r.len }, { strokeDashoffset: 0, duration: 1.1, ease: "power3.inOut" }, 0.2 + i * 0.2);
+        });
+        orbiters.forEach((b, k) => {
+          tl.fromTo(
+            b.el,
+            { scale: 0, opacity: 0 },
+            { scale: 1, opacity: 1, duration: 0.55, ease: "back.out(1.8)" },
+            0.55 + b.ring * 0.25 + b.i * 0.09,
+          );
+        });
+        tl.fromTo(clock, { t: 0 }, { t: DURATION, duration: DURATION, ease: "none", onUpdate: place }, 0);
+        place();
+        window.__timelines = window.__timelines || {};
+        window.__timelines["orbiting-circles"] = tl;
+      })();
+    </script>
+  </body>
+</html>

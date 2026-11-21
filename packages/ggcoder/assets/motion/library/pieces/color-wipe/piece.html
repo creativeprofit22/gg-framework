@@ -1,0 +1,10 @@
+<!doctype html>
+<!-- Color wipe. Edit HOLD and duration to place the cut; the alternate field covers the frame at 1s. -->
+<html lang="en"><head><meta charset="UTF-8"><script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script></head><body>
+<div id="color-wipe-root" data-composition-id="color-wipe" data-start="0" data-duration="2" data-width="1920" data-height="1080">
+<style>
+[data-composition-id="color-wipe"]{position:absolute;inset:0;overflow:hidden}
+[data-composition-id="color-wipe"] .panel{position:absolute;inset:0;background:var(--field-2);color:var(--field)}
+[data-composition-id="color-wipe"] .edge{position:absolute;inset:0;background:var(--accent);color:var(--field)}
+</style><div class="edge"></div><div class="panel"></div></div>
+<script>(()=>{const HOLD=.25;const root=document.querySelector('[data-composition-id="color-wipe"]');const tl=gsap.timeline({paused:true});gsap.set(root.querySelectorAll('.panel,.edge'),{xPercent:-100});tl.to(root.querySelector('.edge'),{xPercent:0,duration:.55,ease:'power3.inOut'},0).to(root.querySelector('.panel'),{xPercent:0,duration:.55,ease:'power3.inOut'},.1).to(root.querySelectorAll('.panel,.edge'),{xPercent:100,duration:.65,ease:'power3.inOut'},.65+HOLD).to({},{duration:.45});window.__timelines=window.__timelines||{};window.__timelines["color-wipe"]=tl;})();</script></body></html>

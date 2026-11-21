@@ -1,0 +1,192 @@
+// @vitest-environment jsdom
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { SlashMenu } from "./SlashMenu";
+import type { SlashCommand } from "./agent";
+
+// jsdom has no layout engine, so scrollIntoView is undefined. The component
+// calls it to keep the active row visible; stub it rather than guard the call.
+beforeAll(() => {
+  Element.prototype.scrollIntoView = vi.fn();
+});
+
+afterEach(cleanup);
+
+const COMMANDS: SlashCommand[] = [
+  {
+    name: "schedule",
+    aliases: ["sched"],
+    description: "Run a prompt on a repeating schedule",
+    input: { text: "optional", references: "optional", attachments: "optional" },
+    source: "built-in",
+  },
+  {
+    name: "plan",
+    aliases: [],
+    description: "Plan before building",
+    input: { text: "optional", references: "optional", attachments: "optional" },
+    source: "built-in",
+  },
+  {
+    name: "programmatic",
+    aliases: [],
+    description: "Scan programmatic opportunities",
+    input: { text: "none", references: "none", attachments: "none" },
+    source: "built-in",
+  },
+];
+
+describe("SlashMenu", () => {
+  it("is titled 'plays'", () => {
+    render(
+      <SlashMenu
+        id="slash-list"
+        commands={COMMANDS}
+        activeIndex={0}
+        onSelect={vi.fn()}
+        onHover={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("plays")).toBeTruthy();
+  });
+
+  it("lists argument and no-input commands", () => {
+    render(
+      <SlashMenu
+        id="slash-list"
+        commands={COMMANDS}
+        activeIndex={0}
+        onSelect={vi.fn()}
+        onHover={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("/schedule")).toBeTruthy();
+    expect(screen.getByText("Run a prompt on a repeating schedule")).toBeTruthy();
+    expect(screen.getByText("/programmatic")).toBeTruthy();
+  });
+
+  it("selects a command on click", () => {
+    const onSelect = vi.fn();
+    render(
+      <SlashMenu
+        id="slash-list"
+        commands={COMMANDS}
+        activeIndex={0}
+        onSelect={onSelect}
+        onHover={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByText("/schedule"));
+    expect(onSelect).toHaveBeenCalledWith(COMMANDS[0]);
+  });
+
+  it("marks the active row", () => {
+    render(
+      <SlashMenu
+        id="slash-list"
+        commands={COMMANDS}
+        activeIndex={1}
+        onSelect={vi.fn()}
+        onHover={vi.fn()}
+      />,
+    );
+    const active = document.querySelectorAll(".slash-item")[1];
+    expect(active?.className).toContain("active");
+  });
+
+  it("shows a custom command's argument hint on the highlighted row only", () => {
+    const hinted: SlashCommand[] = [
+      {
+        ...COMMANDS[1],
+        name: "contract",
+        source: "custom",
+        argumentHint: "[path or recent — optional]",
+      },
+      { ...COMMANDS[1], name: "flow", source: "custom", argumentHint: "[feature area — optional]" },
+    ];
+    render(
+      <SlashMenu
+        id="slash-list"
+        commands={hinted}
+        activeIndex={0}
+        onSelect={vi.fn()}
+        onHover={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("[path or recent — optional]")).toBeTruthy();
+    expect(screen.queryByText("[feature area — optional]")).toBeNull();
+  });
+
+  it("exposes a listbox of options with the active one selected", () => {
+    render(
+      <SlashMenu
+        id="slash-list"
+        commands={COMMANDS}
+        activeIndex={1}
+        onSelect={vi.fn()}
+        onHover={vi.fn()}
+      />,
+    );
+    const list = screen.getByRole("listbox", { name: "plays" });
+    expect(list.id).toBe("slash-list");
+    const options = screen.getAllByRole("option");
+    expect(options).toHaveLength(3);
+    expect(options.map((o) => o.getAttribute("aria-selected"))).toEqual(["false", "true", "false"]);
+    expect(options.map((o) => o.id)).toEqual([
+      "slash-list-option-0",
+      "slash-list-option-1",
+      "slash-list-option-2",
+    ]);
+    expect(options[1]?.getAttribute("tabindex")).toBe("-1");
+  });
+
+  it("scrolls the active row of its own menu when two menus are open", () => {
+    const scrolled: Element[] = [];
+    const spy = vi.spyOn(Element.prototype, "scrollIntoView").mockImplementation(function (
+      this: Element,
+    ) {
+      scrolled.push(this);
+    });
+    const menus = (second: number): React.ReactElement => (
+      <>
+        <SlashMenu
+          id="pane-a"
+          commands={COMMANDS}
+          activeIndex={0}
+          onSelect={vi.fn()}
+          onHover={vi.fn()}
+        />
+        <SlashMenu
+          id="pane-b"
+          commands={COMMANDS}
+          activeIndex={second}
+          onSelect={vi.fn()}
+          onHover={vi.fn()}
+        />
+      </>
+    );
+    try {
+      const { rerender } = render(menus(0));
+      scrolled.length = 0;
+      rerender(menus(2));
+      expect(scrolled.map((el) => el.id)).toEqual(["pane-b-option-2"]);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("keeps focus in the composer when a row is pressed", () => {
+    render(
+      <SlashMenu
+        id="slash-list"
+        commands={COMMANDS}
+        activeIndex={0}
+        onSelect={vi.fn()}
+        onHover={vi.fn()}
+      />,
+    );
+    const option = screen.getAllByRole("option")[0];
+    if (!option) throw new Error("no option");
+    expect(fireEvent.mouseDown(option)).toBe(false);
+  });
+});

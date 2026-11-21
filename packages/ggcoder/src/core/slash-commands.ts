@@ -1,9 +1,17 @@
+import { isGgApp } from "./runtime-mode.js";
+
 // ── Types ──────────────────────────────────────────────────
 
 export interface SlashCommandContext {
   // These will be wired by AgentSession
-  switchModel: (provider: string, model: string) => Promise<void>;
-  compact: () => Promise<void>;
+  switchModel: (
+    provider: string,
+    model: string,
+    options?: { confirmPaid?: boolean },
+  ) => Promise<void>;
+  /** Compact now. `focus` is the user's `/compact <focus>` text: a short
+   * description of what must survive the summary verbatim. */
+  compact: (focus?: string) => Promise<void>;
   newSession: () => Promise<void>;
   listSessions: () => Promise<string>;
   getSettings: () => Record<string, unknown>;
@@ -14,6 +22,14 @@ export interface SlashCommandContext {
   branch: (stepsBack?: number) => Promise<string>;
   /** List all branches in the current session. */
   listBranches: () => Promise<string>;
+  /** Add another workspace root (tools + write guard + system prompt). */
+  addDirectory: (dir: string) => Promise<{ ok: true; root: string } | { ok: false; error: string }>;
+  /** Remove an exact workspace root previously added this session. */
+  removeDirectory: (
+    dir: string,
+  ) => Promise<{ ok: true; root: string } | { ok: false; error: string }>;
+  /** Extra workspace roots added this session. */
+  getAdditionalRoots: () => string[];
 }
 
 export interface SlashCommand {
@@ -22,6 +38,17 @@ export interface SlashCommand {
   description: string;
   usage: string;
   execute: (args: string, context: SlashCommandContext) => Promise<string> | string;
+}
+
+/** Split a slash token on whitespace, preserving case and internal argument text. */
+export function parseSlashCommandInput(input: string): { name: string; args: string } | null {
+  const trimmed = input.trim();
+  if (!trimmed.startsWith("/")) return null;
+  const commandText = trimmed.slice(1);
+  const separatorIndex = commandText.search(/\s/);
+  const name = separatorIndex === -1 ? commandText : commandText.slice(0, separatorIndex);
+  const args = separatorIndex === -1 ? "" : commandText.slice(separatorIndex + 1).trim();
+  return { name, args };
 }
 
 // ── Registry ───────────────────────────────────────────────
@@ -63,12 +90,7 @@ export class SlashCommandRegistry {
   }
 
   parse(input: string): { name: string; args: string } | null {
-    const trimmed = input.trim();
-    if (!trimmed.startsWith("/")) return null;
-    const spaceIndex = trimmed.indexOf(" ");
-    const name = spaceIndex === -1 ? trimmed.slice(1) : trimmed.slice(1, spaceIndex);
-    const args = spaceIndex === -1 ? "" : trimmed.slice(spaceIndex + 1).trim();
-    return { name, args };
+    return parseSlashCommandInput(input);
   }
 
   async execute(input: string, context: SlashCommandContext): Promise<string | null> {
@@ -84,35 +106,51 @@ export class SlashCommandRegistry {
 
 // ── Built-in Commands ──────────────────────────────────────
 
+/** Typed confirmation for switching to a model that spends real money. */
+export const CONFIRM_PAID_FLAG = "--confirm-paid";
+
 export function createBuiltinCommands(): SlashCommand[] {
   return [
     {
       name: "model",
       aliases: ["m", "models"],
       description: "Switch model or list available models",
-      usage: "/model [provider:model]",
-      async execute(args, ctx) {
-        if (!args) {
+      usage: "/model [provider:model] [--confirm-paid]",
+      async execute(rawArgs, ctx) {
+        if (!rawArgs) {
           return ctx.getModelList();
         }
+        // A model that spends real money (Claude fast mode) needs the user to
+        // type their yes; without it the session refuses and we say why.
+        const tokens = rawArgs.split(/\s+/).filter(Boolean);
+        const confirmPaid = tokens.includes(CONFIRM_PAID_FLAG);
+        const args = tokens.filter((token) => token !== CONFIRM_PAID_FLAG).join(" ");
+        if (!args) return ctx.getModelList();
         const parts = args.split(":");
-        if (parts.length === 2) {
-          await ctx.switchModel(parts[0], parts[1]);
-          return `Switched to ${parts[0]}:${parts[1]}`;
+        const [provider, model] = parts.length === 2 ? [parts[0], parts[1]] : ["", args];
+        try {
+          await ctx.switchModel(provider, model, { confirmPaid });
+        } catch (err) {
+          if (err instanceof Error && err.name === "PaidModelConfirmationError") {
+            return `${err.message}\nIt stays on for this session only. To use it, run: /model ${args} ${CONFIRM_PAID_FLAG}`;
+          }
+          throw err;
         }
-        // Assume it's just a model name with current provider
-        await ctx.switchModel("", args);
-        return `Switched to model: ${args}`;
+        return parts.length === 2
+          ? `Switched to ${provider}:${model}`
+          : `Switched to model: ${args}`;
       },
     },
     {
       name: "compact",
       aliases: ["c"],
       description: "Compact conversation to reduce context usage",
-      usage: "/compact",
-      async execute(_args, ctx) {
-        await ctx.compact();
-        return "Conversation compacted.";
+      usage: "/compact [focus]",
+      async execute(args, ctx) {
+        await ctx.compact(args.trim() || undefined);
+        return args.trim()
+          ? `Conversation compacted (focus: ${args.trim()}).`
+          : "Conversation compacted.";
       },
     },
     {
@@ -147,13 +185,9 @@ export function createBuiltinCommands(): SlashCommand[] {
     {
       name: "session",
       aliases: ["s"],
-      description: "List sessions or create new",
-      usage: "/session [list|new]",
-      async execute(args, ctx) {
-        if (args === "new" || args === "n") {
-          await ctx.newSession();
-          return "New session created.";
-        }
+      description: "List sessions (use /new for a new session)",
+      usage: "/session",
+      async execute(_args, ctx) {
         return ctx.listSessions();
       },
     },
@@ -190,13 +224,49 @@ export function createBuiltinCommands(): SlashCommand[] {
       },
     },
     {
+      name: "add-dir",
+      aliases: ["adddir"],
+      description: "Add another project folder to this workspace",
+      usage: "/add-dir [path] — no path lists the current roots",
+      async execute(args, ctx) {
+        const roots = ctx.getAdditionalRoots();
+        if (!args) {
+          return roots.length === 0
+            ? "No additional roots. Use /add-dir <path> to add one."
+            : `Additional roots:\n${roots.map((r) => `  ${r}`).join("\n")}`;
+        }
+        const result = await ctx.addDirectory(args);
+        return result.ok ? `Added workspace root: ${result.root}` : result.error;
+      },
+    },
+    {
+      name: "remove-dir",
+      aliases: ["removedir"],
+      description: "Remove an added project folder from this workspace",
+      usage: "/remove-dir [path] — no path lists roots available to remove",
+      async execute(args, ctx) {
+        const roots = ctx.getAdditionalRoots();
+        if (!args) {
+          return roots.length === 0
+            ? "No additional roots to remove."
+            : `Choose a root to remove:\n${roots.map((r) => `  ${r}`).join("\n")}`;
+        }
+        const result = await ctx.removeDirectory(args);
+        return result.ok ? `Removed workspace root: ${result.root}` : result.error;
+      },
+    },
+    {
       name: "rewind",
       aliases: [],
       description: "Restore files/conversation to an earlier checkpoint",
       usage: "/rewind — pick a checkpoint, then code / conversation / both",
       execute() {
-        // Handled in App.tsx (needs React state); listed here for /help.
-        return "Use /rewind to open the checkpoint picker.";
+        // The real implementation lives in App.tsx (it needs React state to
+        // drive the picker) and intercepts before the registry, so this only
+        // runs where no picker exists — today that's the gg-app sidecar.
+        return isGgApp()
+          ? "/rewind is only available in the ggcoder terminal app — the desktop app has no checkpoint picker yet."
+          : "Checkpoint picker unavailable in this context.";
       },
     },
     {

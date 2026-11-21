@@ -1,0 +1,234 @@
+<!doctype html>
+<!--
+  dock-magnify: a glassy macOS-style dock. A cursor glides along it; each
+  frame, every icon's size is computed from the distance between the cursor
+  and the icon's centre (smoothstep falloff), the row is re-laid out around
+  the dock centre, then the cursor clicks one app: it bounces twice, a label
+  shows above it and a running dot appears. Transparent background.
+  Converted from Magic UI "Dock" (MIT, (c) Magic UI — see LICENSE):
+  (upstream URL in meta.json)
+  React motion values + springs became a pure layout function of the
+  cursor position, driven by a paused GSAP timeline.
+  Params: DOCK_X / DOCK_BOTTOM (dock centre x, bottom edge y), BASE / MAG
+  (icon size at rest / under the cursor, px), DIST (magnification reach,
+  px), GAP, PAD, TARGET (index of the clicked icon), ENTER_AT / CLICK_AT.
+  Icons: edit the .dm-icon list (tint via --dm-tint, glyph = inline SVG).
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+  </head>
+  <body>
+    <div
+      id="dock-magnify-root"
+      data-composition-id="dock-magnify"
+      data-start="0"
+      data-duration="5"
+      data-width="1920"
+      data-height="1080"
+    >
+      <style>
+        [data-composition-id="dock-magnify"] {
+          position: absolute;
+          inset: 0;
+          color: var(--ink, #111);
+          font-family: var(--text, sans-serif);
+        }
+        [data-composition-id="dock-magnify"] .dm-bar {
+          position: absolute;
+          left: 0;
+          top: 0;
+          border-radius: 40px;
+          background: color-mix(in srgb, #fff 62%, transparent);
+          -webkit-backdrop-filter: blur(24px) saturate(1.4);
+          backdrop-filter: blur(24px) saturate(1.4);
+          box-shadow:
+            inset 0 1px 0 rgba(255, 255, 255, 0.9),
+            0 0 0 1px color-mix(in srgb, var(--ink, #111) 8%, transparent),
+            0 2px 4px rgba(0, 0, 0, 0.05),
+            0 24px 60px -12px color-mix(in srgb, var(--ink, #111) 30%, transparent);
+        }
+        [data-composition-id="dock-magnify"] .dm-icon {
+          position: absolute;
+          left: 0;
+          top: 0;
+          width: 100px;
+          height: 100px;
+        }
+        [data-composition-id="dock-magnify"] .dm-face {
+          position: absolute;
+          inset: 0;
+          border-radius: 24%;
+          background-color: var(--dm-tint, var(--accent, #2f5bff));
+          background-image: linear-gradient(180deg, rgba(255, 255, 255, 0.26), rgba(255, 255, 255, 0) 58%);
+          color: #fff;
+          display: grid;
+          place-items: center;
+          box-shadow:
+            inset 0 1px 0 rgba(255, 255, 255, 0.35),
+            0 1px 2px rgba(0, 0, 0, 0.1),
+            0 8px 18px -6px color-mix(in srgb, var(--ink, #111) 45%, transparent);
+        }
+        [data-composition-id="dock-magnify"] .dm-face svg {
+          width: 50%;
+          height: 50%;
+        }
+        [data-composition-id="dock-magnify"] .dm-dot {
+          position: absolute;
+          width: 10px;
+          height: 10px;
+          margin-left: -5px;
+          border-radius: 50%;
+          background: var(--ink, #111);
+          opacity: 0;
+        }
+        [data-composition-id="dock-magnify"] .dm-tip {
+          position: absolute;
+          left: 0;
+          top: 0;
+          padding: 12px 24px;
+          border-radius: 16px;
+          background: var(--ink, #111);
+          color: #fff;
+          font-size: 28px;
+          font-weight: 500;
+          white-space: nowrap;
+          opacity: 0;
+          box-shadow: 0 10px 24px -8px rgba(0, 0, 0, 0.35);
+        }
+        [data-composition-id="dock-magnify"] .dm-cursor {
+          position: absolute;
+          left: 0;
+          top: 0;
+          width: 56px;
+          height: 56px;
+          filter: drop-shadow(0 4px 8px rgba(0, 0, 0, 0.22));
+          transform-origin: 6px 4px;
+        }
+      </style>
+      <div class="dm-bar" id="dm-bar"></div>
+      <!-- edit: icons (tint + glyph); the label for the clicked one is .dm-tip -->
+      <div class="dm-icon" style="--dm-tint: var(--accent, #2f5bff)"><div class="dm-face"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" /></svg></div></div>
+      <div class="dm-icon" style="--dm-tint: color-mix(in oklab, var(--accent, #2f5bff) 62%, #fff)"><div class="dm-face"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2" /><path d="M3 7l9 6 9-6" /></svg></div></div>
+      <div class="dm-icon" style="--dm-tint: var(--field-2, #0b2a8f)"><div class="dm-face"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="16" rx="2" /><path d="M3 10h18M8 3v4M16 3v4" /></svg></div></div>
+      <div class="dm-icon" style="--dm-tint: var(--ink, #3a4150)"><div class="dm-face"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 17l6-6-6-6M12 19h8" /></svg></div></div>
+      <div class="dm-icon" style="--dm-tint: color-mix(in oklab, var(--accent, #2f5bff) 80%, var(--field-2, #0b2a8f))"><div class="dm-face"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12z" /></svg></div></div>
+      <div class="dm-icon" style="--dm-tint: color-mix(in oklab, var(--accent, #2f5bff) 40%, #fff)"><div class="dm-face"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" /><circle cx="9" cy="9" r="2" /><path d="M21 15l-5-5L5 21" /></svg></div></div>
+      <div class="dm-icon" style="--dm-tint: color-mix(in oklab, var(--ink, #3a4150) 70%, #fff)"><div class="dm-face"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z" /></svg></div></div>
+      <div class="dm-dot" id="dm-dot"></div>
+      <div class="dm-tip" id="dm-tip">Messages</div>
+      <svg class="dm-cursor" id="dm-cursor" viewBox="0 0 28 28">
+        <path d="M5 3.2v19.6c0 .8 1 1.2 1.5.6l4.6-5.1 3.4 7.6c.3.6 1 .9 1.6.6l2.3-1c.6-.3.9-1 .6-1.6l-3.4-7.5h6.8c.8 0 1.2-1 .6-1.6L6.5 2.6C6 2.1 5 2.4 5 3.2z" fill="var(--ink, #111)" stroke="#fff" stroke-width="1.6" stroke-linejoin="round" />
+      </svg>
+    </div>
+    <script>
+      (function () {
+        const DOCK_X = 960;
+        const DOCK_BOTTOM = 760;
+        const BASE = 112;
+        const MAG = 190;
+        const DIST = 380;
+        const GAP = 20;
+        const PAD = 18;
+        const TARGET = 4;
+        const ENTER_AT = 0.5;
+        const CLICK_AT = 2.9;
+
+        const root = document.querySelector('[data-composition-id="dock-magnify"]');
+        const icons = Array.from(root.querySelectorAll(".dm-icon"));
+        const faces = icons.map((el) => el.querySelector(".dm-face"));
+        const bar = root.querySelector("#dm-bar");
+        const dot = root.querySelector("#dm-dot");
+        const tip = root.querySelector("#dm-tip");
+        const cursor = root.querySelector("#dm-cursor");
+        const N = icons.length;
+        const BAR_H = BASE + PAD * 2;
+        const ICON_BOTTOM = DOCK_BOTTOM - PAD;
+
+        const smooth = (t) => t * t * (3 - 2 * t);
+        // Sizes + centres for a cursor at x with hover amount h (0..1). The
+        // centres depend on the sizes, so iterate to a fixed point.
+        function layout(x, h) {
+          let sizes = new Array(N).fill(BASE);
+          let centers = [];
+          for (let pass = 0; pass < 5; pass++) {
+            const total = sizes.reduce((a, b) => a + b, 0) + GAP * (N - 1);
+            let left = DOCK_X - total / 2;
+            centers = sizes.map((s) => {
+              const c = left + s / 2;
+              left += s + GAP;
+              return c;
+            });
+            sizes = centers.map((c) => BASE + (MAG - BASE) * h * smooth(Math.max(0, 1 - Math.abs(x - c) / DIST)));
+          }
+          return { sizes, centers };
+        }
+
+        const state = { x: 0, y: 0, h: 0, bounce: 0 };
+        function draw() {
+          const { sizes, centers } = layout(state.x, state.h);
+          icons.forEach((el, i) => {
+            const s = sizes[i];
+            el.style.width = `${s}px`;
+            el.style.height = `${s}px`;
+            el.style.left = `${centers[i] - s / 2}px`;
+            el.style.top = `${ICON_BOTTOM - s}px`;
+          });
+          const w = sizes.reduce((a, b) => a + b, 0) + GAP * (N - 1) + PAD * 2;
+          bar.style.width = `${w}px`;
+          bar.style.height = `${BAR_H}px`;
+          bar.style.left = `${DOCK_X - w / 2}px`;
+          bar.style.top = `${DOCK_BOTTOM - BAR_H}px`;
+          faces[TARGET].style.transform = `translateY(${-state.bounce}px)`;
+          dot.style.left = `${centers[TARGET]}px`;
+          dot.style.top = `${DOCK_BOTTOM - 13}px`;
+          tip.style.left = `${centers[TARGET] - tip.offsetWidth / 2}px`;
+          tip.style.top = `${ICON_BOTTOM - sizes[TARGET] - 78 - state.bounce}px`;
+          cursor.style.left = `${state.x - 6}px`;
+          cursor.style.top = `${state.y - 4}px`;
+        }
+
+        // Where the cursor must sit to be centred on the target icon.
+        let tx = layout(0, 0).centers[TARGET];
+        for (let i = 0; i < 8; i++) tx = layout(tx, 1).centers[TARGET];
+        const base = layout(0, 0).centers;
+        const HOVER_Y = DOCK_BOTTOM - BAR_H / 2 - 10;
+
+        const tl = gsap.timeline({ paused: true, onUpdate: draw });
+        state.x = base[0] - 260;
+        state.y = HOVER_Y + 260;
+        draw();
+
+        tl.fromTo([bar, ...icons], { opacity: 0, y: 60 }, { opacity: 1, y: 0, duration: 0.8, ease: "expo.out", stagger: 0.03 }, 0);
+        tl.fromTo(cursor, { opacity: 0 }, { opacity: 1, duration: 0.3 }, ENTER_AT - 0.1);
+        // Enter from below-left onto the first icon, sweep right, come back to the target.
+        tl.to(state, { x: base[0], y: HOVER_Y, duration: 0.6, ease: "power2.out" }, ENTER_AT);
+        tl.to(state, { h: 1, duration: 0.45, ease: "power2.out" }, ENTER_AT + 0.3);
+        tl.to(state, { x: base[N - 1] + 30, duration: 1.1, ease: "power1.inOut" }, ENTER_AT + 0.6);
+        tl.to(state, { x: tx, duration: 0.6, ease: "power3.inOut" }, ENTER_AT + 1.72);
+        tl.fromTo(tip, { opacity: 0, scale: 0.9 }, { opacity: 1, scale: 1, duration: 0.3, ease: "back.out(2)" }, CLICK_AT - 0.6);
+
+        // Click + bounce.
+        tl.to(cursor, { scale: 0.86, duration: 0.1, ease: "power2.out" }, CLICK_AT);
+        tl.to(cursor, { scale: 1, duration: 0.3, ease: "back.out(3)" }, CLICK_AT + 0.12);
+        const B = CLICK_AT + 0.1;
+        tl.to(state, { bounce: 64, duration: 0.24, ease: "power2.out" }, B);
+        tl.to(state, { bounce: 0, duration: 0.22, ease: "power2.in" }, B + 0.24);
+        tl.to(state, { bounce: 30, duration: 0.18, ease: "power2.out" }, B + 0.46);
+        tl.to(state, { bounce: 0, duration: 0.16, ease: "power2.in" }, B + 0.64);
+        tl.to(dot, { opacity: 1, duration: 0.3 }, B + 0.5);
+
+        // Leave: cursor drops away, magnification relaxes.
+        tl.to(tip, { opacity: 0, duration: 0.25 }, 4.0);
+        tl.to(state, { y: HOVER_Y + 240, x: tx + 160, duration: 0.8, ease: "power2.in" }, 4.0);
+        tl.to(state, { h: 0, duration: 0.6, ease: "power2.inOut" }, 4.15);
+        tl.to(cursor, { opacity: 0, duration: 0.3 }, 4.5);
+        tl.to({}, { duration: 5 - tl.duration() });
+
+        window.__timelines = window.__timelines || {};
+        window.__timelines["dock-magnify"] = tl;
+      })();
+    </script>
+  </body>
+</html>

@@ -1,0 +1,9 @@
+{
+  "id": "sunlit-consumer", "name": "Sunlit consumer",
+  "description": "Warm paper, chestnut ink and low afternoon shadows. Expressive serif copy sits beside a tangible product moment rather than a wall of floating cards.",
+  "tags": ["warm", "consumer", "serif", "daylight", "product"],
+  "fonts": ["Fraunces", "Host Grotesk", "Martian Mono"],
+  "bestFor": ["consumer app launches", "everyday products", "calm brand stories"],
+  "pieces": ["phone-frame", "serif-quote", "light-leak-soft", "end-card"],
+  "samplePieces": [], "previewAt": 3
+}

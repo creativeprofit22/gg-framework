@@ -221,7 +221,12 @@ import { KEN_ALLOWED_MCP_SERVERS, lastAssistantText } from "./app-sidecar/ken-co
 import { prepareAttachments, type AppAttachment } from "./app-sidecar/attachments.js";
 import { getGitHubRepoSlug, type GitHubBranch } from "./utils/github.js";
 import { getGitOverview } from "./utils/git-overview.js";
-import { listGitBranches } from "./utils/git-branches.js";
+import {
+  InvalidGitBranchNameError,
+  listGitBranches,
+  switchGitBranch,
+} from "./utils/git-branches.js";
+import { runGitBranchSwitch, type GitSwitchPeer } from "./app-sidecar-git-switch.js";
 
 let daemonRepoPolls: RepoPolls | undefined;
 /** One set of repo pollers per daemon process, shared by every logical session. */
@@ -880,6 +885,20 @@ async function main(): Promise<void> {
     const target = path.resolve(cwd);
     return [...sessions.values()].some((ctx) => path.resolve(ctx.cwd) === target && ctx.isBusy());
   };
+  /** Every live window session in `cwd`, as a branch switch sees it. */
+  const gitPeersAt = (cwd: string): GitSwitchPeer[] => {
+    const target = path.resolve(cwd);
+    return [...sessions.values()]
+      .filter((ctx) => path.resolve(ctx.cwd) === target)
+      .map((ctx) => ({
+        id: ctx.id,
+        label: ctx.session.getSessionPreview(),
+        isBusy: () => ctx.isBusy(),
+        noteBranchChange: (from, to) => ctx.session.noteBranchChange(from, to),
+      }));
+  };
+  /** Folders with a branch switch running; one at a time per folder. */
+  const gitSwitchesInFlight = new Set<string>();
   /**
    * Rename a conversation in every pane persisting to `sessionPath`, saving it
    * to the file once. A pane carries its name into later checkpoints, so an
@@ -1000,6 +1019,8 @@ async function main(): Promise<void> {
         repoPolls: getDaemonRepoPolls(),
         sessionIdsAt,
         busyAt,
+        gitPeersAt,
+        gitSwitchesInFlight,
         renameLiveSession,
         syncMcpServer,
         // The preview's own session has no window to preview from.
@@ -1550,6 +1571,10 @@ async function createSession(
     sessionIdsAt: (cwd: string) => string[];
     /** Whether any live window session in `cwd` is working right now. */
     busyAt: (cwd: string) => boolean;
+    /** Every live window session in `cwd` (resolved), for a branch switch. */
+    gitPeersAt: (cwd: string) => GitSwitchPeer[];
+    /** Daemon-wide folders with a branch switch running. */
+    gitSwitchesInFlight: Set<string>;
     /** Rename an open conversation in every pane; false when none has it open. */
     renameLiveSession: (sessionPath: string, title: string) => Promise<boolean>;
     syncMcpServer: SessionRouteContext["syncMcpServer"];
@@ -1593,6 +1618,8 @@ async function createSession(
     repoPolls,
     sessionIdsAt,
     busyAt,
+    gitPeersAt,
+    gitSwitchesInFlight,
     renameLiveSession,
     syncMcpServer,
   } = deps;
@@ -6557,6 +6584,55 @@ async function createSession(
           json(res, 500, { error: "Could not read this project's branches" });
         }
       })();
+      return;
+    }
+
+    // The branch switcher: plain `git switch`, refused while an agent on this
+    // folder is working. Every pane on the folder hears about it.
+    if (method === "POST" && url === "/git/switch") {
+      void readBody(req, res).then(async (raw) => {
+        if (raw === null) return;
+        let branch: unknown;
+        try {
+          branch = (JSON.parse(raw) as { branch?: unknown } | null)?.branch;
+        } catch {
+          json(res, 400, { error: "invalid JSON body" });
+          return;
+        }
+        if (typeof branch !== "string" || branch.length === 0) {
+          json(res, 400, { error: "branch must be a non-empty string" });
+          return;
+        }
+        try {
+          const result = await runGitBranchSwitch({
+            cwd,
+            branch,
+            peers: gitPeersAt(cwd),
+            switchBranch: switchGitBranch,
+            refresh: () => repoWatch.refreshGit(),
+            inFlight: gitSwitchesInFlight,
+            onRefreshError: (error) =>
+              log("WARN", "app-sidecar", "git refresh after branch switch failed", {
+                error: String(error),
+              }),
+          });
+          if (result.status === "switched") {
+            log("INFO", "app-sidecar", "switched git branch", {
+              trackedRemote: String(result.trackedRemote !== null),
+              carriedChanges: String(result.carriedChanges),
+            });
+          }
+          if (!res.destroyed) json(res, 200, result);
+        } catch (error) {
+          if (res.destroyed) return;
+          if (error instanceof InvalidGitBranchNameError) {
+            json(res, 400, { error: error.message });
+            return;
+          }
+          log("WARN", "app-sidecar", "git branch switch failed", { error: String(error) });
+          json(res, 500, { error: `Could not switch to ${branch}` });
+        }
+      });
       return;
     }
 

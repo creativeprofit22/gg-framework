@@ -5,7 +5,10 @@ import path from "node:path";
 import { execFileSync, spawn, type ChildProcessByStdio } from "node:child_process";
 import type { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
-import { isGitBranchListResponse } from "@kenkaiiii/gg-core/git-branch-contract";
+import {
+  isGitBranchListResponse,
+  isGitBranchSwitchResponse,
+} from "@kenkaiiii/gg-core/git-branch-contract";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 /**
@@ -1140,6 +1143,47 @@ describe("a branch switched outside the agent", () => {
     const junkLimit = await request("GET", "/git/branches?limit=abc", { session });
     expect(junkLimit.json).toMatchObject({ localTotal: 4, truncated: false });
     expect(junkLimit.json.local as unknown[]).toHaveLength(4);
+  });
+
+  it("switches the branch from the app and tells every window on the folder", async () => {
+    const outsider = await createSession();
+    const outside = await request("POST", "/git/switch", {
+      session: outsider,
+      body: { branch: "main" },
+    });
+    expect(outside.status).toBe(200);
+    expect(outside.json).toEqual({ status: "not-a-repo" });
+
+    initRepo();
+    git("branch", "feature");
+    const a = await createSession();
+    const b = await createSession();
+    const streamA = await openEventStream(a);
+    const streamB = await openEventStream(b);
+    await waitFor(() => streamA.types.includes("ready") && streamB.types.includes("ready"));
+
+    const badName = await request("POST", "/git/switch", { session: a, body: { branch: "-x" } });
+    expect(badName.status).toBe(400);
+    expect(typeof badName.json.error).toBe("string");
+    expect((await request("POST", "/git/switch", { session: a, body: {} })).status).toBe(400);
+
+    const switched = await request("POST", "/git/switch", {
+      session: a,
+      body: { branch: "feature" },
+    });
+    expect(switched.status).toBe(200);
+    expect(isGitBranchSwitchResponse(switched.json)).toBe(true);
+    expect(switched.json).toEqual({
+      status: "switched",
+      from: "main",
+      to: "feature",
+      trackedRemote: null,
+      carriedChanges: false,
+    });
+    const sawFeature = (stream: Awaited<ReturnType<typeof openEventStream>>) =>
+      stream.events.some((e) => e.type === "extras" && e.data.gitBranch === "feature");
+    await waitFor(() => sawFeature(streamA) && sawFeature(streamB));
+    expect((await request("GET", "/state", { session: b })).json.gitBranch).toBe("feature");
   });
 
   it("follows origin to another GitHub repo for every link", async () => {

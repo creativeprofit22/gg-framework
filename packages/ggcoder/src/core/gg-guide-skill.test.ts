@@ -178,6 +178,7 @@ const COVERAGE: Record<string, string> = {
   NotesModal: "code-mode.md",
   CIIndicator: "code-mode.md",
   InitGitModal: "code-mode.md",
+  BranchSwitcher: "code-mode.md",
   HookNotice: "code-mode.md",
   ActivityBar: "code-mode.md",
   WorkingBeam: "code-mode.md",

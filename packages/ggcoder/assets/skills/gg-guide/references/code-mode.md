@@ -162,6 +162,10 @@ Custom commands: each Markdown file in the project's `.gg/commands/` folder beco
 - When there is nothing to commit it shows **Clean** (tooltip **Nothing to commit**).
 - These buttons are disabled while GG is running.
 - The deck's **Git** panel shows the branch, uncommitted files, and pull requests and issues for GitHub projects.
+- Click the branch name in the **Git** panel heading to switch branches. The list shows the **Default** branch and up to 5 **Recent** ones; type in **Search branches** to find any branch, including ones that exist **On GitHub only**.
+  - Uncommitted changes come with you when git allows it. If they would be overwritten, or a merge or rebase is unfinished, GG says **Couldn't switch to** the branch, lists the files and changes nothing. Pick **Stay on** the current branch or **Commit first**.
+  - Switching is paused while an agent works in this project. If another chat on the same folder is working, wait for it and use **Back to branches**.
+  - Every chat on the folder is told about the switch, so the agent knows which branch it is on.
 
 ## CI indicator
 
@@ -238,3 +242,5 @@ Q: How do I work on two folders at once?
 A: Click **Add folder** in the **More** panel (the ⋯ key on the bottom bar) and pick the folder. To drop it, click **Remove folder** and then **Remove** next to it.
 Q: Where can I keep private notes?
 A: Open **Notes** in the deck. GG never sees them.
+Q: How do I switch branches?
+A: Click the branch name in the **Git** panel heading, then pick a branch or type to search. It's paused while an agent works in that project.

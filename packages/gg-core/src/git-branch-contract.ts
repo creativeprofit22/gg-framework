@@ -186,7 +186,9 @@ export interface GitBranchSwitchUnchanged {
   branch: string;
 }
 
-/** Git refused because uncommitted changes clash; nothing was changed. */
+/**
+ * Git refused the switch and nothing changed: uncommitted changes would be overwritten, or an unfinished merge/rebase/cherry-pick or unmerged conflicts block it. `files` lists the clashing paths, or the unmerged paths in the second case.
+ */
 export interface GitBranchSwitchConflict {
   status: "conflict";
   reason: string;

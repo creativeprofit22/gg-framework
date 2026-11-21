@@ -12,8 +12,10 @@ import { PRODUCT_DISPLAY_NAME } from "./brand";
 import { isSlashCommandsResponse } from "@kenkaiiii/gg-core/slash-command-contract";
 import {
   clampGitBranchListLimit,
+  isGitBranchCreateResponse,
   isGitBranchListResponse,
   isGitBranchSwitchResponse,
+  type GitBranchCreateResponse,
   type GitBranchListOptions,
   type GitBranchListResponse,
   type GitBranchSwitchResponse,
@@ -2113,6 +2115,12 @@ export async function getGitOverview(): Promise<GitOverview> {
 }
 
 export type {
+  GitBranchCreateAvailable,
+  GitBranchCreateCreated,
+  GitBranchCreateInvalid,
+  GitBranchCreateRequest,
+  GitBranchCreateResponse,
+  GitBranchCreateTaken,
   GitBranchListOk,
   GitBranchListOptions,
   GitBranchListResponse,
@@ -2163,6 +2171,45 @@ export async function switchGitBranch(options: {
   });
   if (!isGitBranchSwitchResponse(response)) throw new Error("Invalid branch switch response");
   return response;
+}
+
+async function postGitBranchCreate(options: {
+  branch: string;
+  paneId?: string;
+  checkOnly: boolean;
+}): Promise<GitBranchCreateResponse> {
+  const paneId = options.paneId ?? "primary";
+  await waitForPaneReady(paneId);
+  const response = await invoke<unknown>("agent_git_create_branch", {
+    paneId,
+    branch: options.branch,
+    checkOnly: options.checkOnly,
+  });
+  if (!isGitBranchCreateResponse(response)) throw new Error("Invalid branch create response");
+  return response;
+}
+
+/**
+ * Check a new branch name while the user types; creates nothing. Answers
+ * `available`, or `invalid`/`taken` with a plain reason.
+ */
+export function checkGitBranchName(options: {
+  branch: string;
+  paneId?: string;
+}): Promise<GitBranchCreateResponse> {
+  return postGitBranchCreate({ ...options, checkOnly: true });
+}
+
+/**
+ * Create `branch` from the pane's current branch and switch to it (never
+ * overwriting an existing one). Refusals come back as statuses; an unexpected
+ * git failure rejects with the daemon's message.
+ */
+export function createGitBranch(options: {
+  branch: string;
+  paneId?: string;
+}): Promise<GitBranchCreateResponse> {
+  return postGitBranchCreate({ ...options, checkOnly: false });
 }
 
 /** List workflow (prompt-template) slash commands the agent can run. */

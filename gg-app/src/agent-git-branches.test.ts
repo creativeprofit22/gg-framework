@@ -11,7 +11,13 @@ vi.mock("@tauri-apps/api/webviewWindow", () => ({
   }),
 }));
 
-import { getGitBranches, switchGitBranch, type GitBranchListResponse } from "./agent";
+import {
+  checkGitBranchName,
+  createGitBranch,
+  getGitBranches,
+  switchGitBranch,
+  type GitBranchListResponse,
+} from "./agent";
 
 afterEach(() => clearMocks());
 
@@ -42,7 +48,13 @@ function respond(payload: unknown, paneReady = true) {
     if (command === "agent_pane_status") {
       return { ready: paneReady, error: null, generation: 1, sessionId: "session-1" };
     }
-    if (command === "agent_git_branches" || command === "agent_git_switch_branch") return payload;
+    if (
+      command === "agent_git_branches" ||
+      command === "agent_git_switch_branch" ||
+      command === "agent_git_create_branch"
+    ) {
+      return payload;
+    }
     return null;
   });
   return calls;
@@ -151,6 +163,60 @@ describe("switchGitBranch", () => {
     respond(payload);
     await expect(switchGitBranch({ branch: "main" })).rejects.toThrow(
       "Invalid branch switch response",
+    );
+  });
+});
+
+describe("createGitBranch and checkGitBranchName", () => {
+  const CREATED = { status: "created", from: "main", to: "feature/new", carriedChanges: false };
+
+  it("waits for the pane, then creates with checkOnly off", async () => {
+    const calls = respond(CREATED);
+    expect(await createGitBranch({ branch: "feature/new", paneId: "pane-2" })).toEqual(CREATED);
+    const names = calls.map((call) => call.command);
+    const status = names.indexOf("agent_pane_status");
+    const created = names.indexOf("agent_git_create_branch");
+    expect(status).toBeGreaterThanOrEqual(0);
+    expect(created).toBeGreaterThan(status);
+    expect(calls[created]!.args).toEqual({
+      paneId: "pane-2",
+      branch: "feature/new",
+      checkOnly: false,
+    });
+  });
+
+  it("checks names with checkOnly on and returns plain-reason statuses", async () => {
+    const taken = { status: "taken", reason: 'A branch called "main" already exists.' };
+    const calls = respond(taken);
+    expect(await checkGitBranchName({ branch: "main" })).toEqual(taken);
+    const call = calls.find((entry) => entry.command === "agent_git_create_branch");
+    expect(call?.args).toEqual({ paneId: "primary", branch: "main", checkOnly: true });
+  });
+
+  it("does not create before the pane is ready", async () => {
+    vi.useFakeTimers();
+    try {
+      const calls = respond(CREATED, false);
+      void createGitBranch({ branch: "x" }).catch(() => {});
+      await vi.advanceTimersByTimeAsync(1_500);
+      expect(calls.some((call) => call.command === "agent_git_create_branch")).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    null,
+    { status: "switched", from: "main", to: "x", trackedRemote: null, carriedChanges: false },
+    { ...CREATED, to: "" },
+    { status: "invalid", reason: "" },
+  ])("rejects an off-shape response %#", async (payload) => {
+    respond(payload);
+    await expect(createGitBranch({ branch: "x" })).rejects.toThrow(
+      "Invalid branch create response",
+    );
+    await expect(checkGitBranchName({ branch: "x" })).rejects.toThrow(
+      "Invalid branch create response",
     );
   });
 });

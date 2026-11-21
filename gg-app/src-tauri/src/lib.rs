@@ -273,6 +273,7 @@ pub fn run() {
             commands::agent::agent_git_overview,
             commands::agent::agent_git_branches,
             commands::agent::agent_git_switch_branch,
+            commands::agent::agent_git_create_branch,
             commands::agent::agent_git_refresh,
             commands::agent::agent_run_tasks,
             commands::agent::agent_delete_task,

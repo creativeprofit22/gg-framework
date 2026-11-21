@@ -1260,6 +1260,52 @@ pub(crate) async fn agent_git_switch_branch(
     post_git_switch(&client, &sidecar_base(port), &gg_sid, &branch).await
 }
 
+/// Ask the daemon to create `branch` from the session's current HEAD and switch
+/// to it, or with `check_only` just check the name. Split from the command so
+/// tests can drive it against a local listener.
+pub(crate) async fn post_git_create_branch(
+    client: &reqwest::Client,
+    base_url: &str,
+    session_id: &str,
+    branch: &str,
+    check_only: bool,
+) -> Result<serde_json::Value, String> {
+    let res = client
+        .post(format!("{base_url}/git/branches/create"))
+        .header("x-gg-session", session_id)
+        .json(&serde_json::json!({ "branch": branch, "checkOnly": check_only }))
+        // git itself may take up to 60 s on a large repo.
+        .timeout(std::time::Duration::from_secs(90))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    sidecar_json(res).await
+}
+
+/// Proxy: create a branch for the pane's project (never overwriting one), or
+/// check a name while the user types. The daemon refuses while an agent on
+/// that folder is working.
+#[tauri::command]
+pub(crate) async fn agent_git_create_branch(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+    pane_id: Option<String>,
+    branch: String,
+    check_only: Option<bool>,
+) -> Result<serde_json::Value, String> {
+    let pane_id = pane_id.as_deref().unwrap_or(PRIMARY_PANE_ID);
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = pane_session_for(&webview, pane_id).ok_or("session not ready")?;
+    post_git_create_branch(
+        &client,
+        &sidecar_base(port),
+        &gg_sid,
+        &branch,
+        check_only.unwrap_or(false),
+    )
+    .await
+}
+
 /// Proxy: re-read this pane's branch and uncommitted count now (window focus).
 /// The daemon shares the read with every pane on the folder and pushes changes
 /// as `extras` events, so this returns nothing.
@@ -2655,6 +2701,51 @@ mod tests {
         status: reqwest::StatusCode,
         response_body: &'static str,
     ) -> (Result<serde_json::Value, String>, String) {
+        let (address, server) = one_shot_json_listener(status, response_body);
+        let result = tauri::async_runtime::block_on(post_git_switch(
+            &token_client(),
+            &format!("http://{address}"),
+            "pane-session",
+            "feature/x",
+        ));
+        let request = server.join().unwrap();
+        (result, request)
+    }
+
+    /// Run `post_git_create_branch` against a one-shot listener; returns the
+    /// result and the raw request it received.
+    fn git_create_proxy_result(
+        status: reqwest::StatusCode,
+        response_body: &'static str,
+        check_only: bool,
+    ) -> (Result<serde_json::Value, String>, String) {
+        let (address, server) = one_shot_json_listener(status, response_body);
+        let result = tauri::async_runtime::block_on(post_git_create_branch(
+            &token_client(),
+            &format!("http://{address}"),
+            "pane-session",
+            "feature/new",
+            check_only,
+        ));
+        let request = server.join().unwrap();
+        (result, request)
+    }
+
+    fn token_client() -> reqwest::Client {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("x-gg-token", "daemon-token".parse().unwrap());
+        http_client_builder()
+            .default_headers(headers)
+            .build()
+            .unwrap()
+    }
+
+    /// Answer one request with `status`/`response_body`; the handle yields the
+    /// raw request text.
+    fn one_shot_json_listener(
+        status: reqwest::StatusCode,
+        response_body: &'static str,
+    ) -> (std::net::SocketAddr, std::thread::JoinHandle<String>) {
         use std::io::{Read, Write};
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -2699,21 +2790,7 @@ mod tests {
             stream.write_all(response.as_bytes()).unwrap();
             String::from_utf8_lossy(&request).to_string()
         });
-
-        let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert("x-gg-token", "daemon-token".parse().unwrap());
-        let client = http_client_builder()
-            .default_headers(headers)
-            .build()
-            .unwrap();
-        let result = tauri::async_runtime::block_on(post_git_switch(
-            &client,
-            &format!("http://{address}"),
-            "pane-session",
-            "feature/x",
-        ));
-        let request = server.join().unwrap();
-        (result, request)
+        (address, server)
     }
 
     #[test]
@@ -2786,6 +2863,90 @@ mod tests {
             &format!("http://{address}"),
             "pane-session",
             "main",
+        ));
+        server.join().unwrap();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn git_create_sends_branch_and_flag_with_session_and_token() {
+        let body = r#"{"status":"created","from":"main","to":"feature/new","carriedChanges":true}"#;
+        let (result, request) = git_create_proxy_result(reqwest::StatusCode::OK, body, false);
+        assert_eq!(
+            result,
+            Ok(serde_json::json!({
+                "status": "created",
+                "from": "main",
+                "to": "feature/new",
+                "carriedChanges": true
+            }))
+        );
+        let lower = request.to_ascii_lowercase();
+        assert!(
+            request.starts_with("POST /git/branches/create HTTP/1.1"),
+            "unexpected request: {request}"
+        );
+        assert!(lower.contains("x-gg-session: pane-session"));
+        assert!(lower.contains("x-gg-token: daemon-token"));
+        assert!(lower.contains("content-type: application/json"));
+        assert!(
+            request.ends_with(r#"{"branch":"feature/new","checkOnly":false}"#),
+            "unexpected body: {request}"
+        );
+
+        let available = r#"{"status":"available","branch":"feature/new"}"#;
+        let (result, request) = git_create_proxy_result(reqwest::StatusCode::OK, available, true);
+        assert_eq!(
+            result,
+            Ok(serde_json::json!({ "status": "available", "branch": "feature/new" }))
+        );
+        assert!(
+            request.ends_with(r#"{"branch":"feature/new","checkOnly":true}"#),
+            "unexpected body: {request}"
+        );
+    }
+
+    #[test]
+    fn git_create_passes_through_refusals_and_daemon_errors() {
+        let busy = r#"{"status":"busy","reason":"An agent is working","panes":["Fix login"]}"#;
+        assert_eq!(
+            git_create_proxy_result(reqwest::StatusCode::OK, busy, false).0,
+            Ok(serde_json::json!({
+                "status": "busy",
+                "reason": "An agent is working",
+                "panes": ["Fix login"]
+            }))
+        );
+        let taken = r#"{"status":"taken","reason":"That name is taken."}"#;
+        assert_eq!(
+            git_create_proxy_result(reqwest::StatusCode::OK, taken, false).0,
+            Ok(serde_json::json!({ "status": "taken", "reason": "That name is taken." }))
+        );
+        assert_eq!(
+            git_create_proxy_result(
+                reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+                r#"{"error":"Could not create feature/new"}"#,
+                false,
+            )
+            .0,
+            Err("Could not create feature/new".into())
+        );
+    }
+
+    #[test]
+    fn git_create_propagates_transport_failure() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            drop(listener.accept().unwrap());
+        });
+        let client = http_client_builder().build().unwrap();
+        let result = tauri::async_runtime::block_on(post_git_create_branch(
+            &client,
+            &format!("http://{address}"),
+            "pane-session",
+            "fresh",
+            false,
         ));
         server.join().unwrap();
         assert!(result.is_err());

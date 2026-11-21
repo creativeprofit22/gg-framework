@@ -80,9 +80,27 @@ export async function assertControlReachable(control, label) {
   // A dismissing modal's view transition (~160ms, unchanged since before
   // upstream 0.91) overlays the whole page and takes every hit test. Measure
   // the settled layout: nobody can click through that fade either.
-  await control.page().waitForFunction(() => !document.activeViewTransition, null, {
+  const page = control.page();
+  await page.waitForFunction(() => !document.activeViewTransition, null, {
     timeout: 3_000,
   });
+  // A live tooltip is position:fixed at its anchor's spot when it opened (e.g.
+  // Copy's own hint, shown the instant Tab lands on it). Scrolling below moves
+  // the control, but the layer only hides the hint on the next frame's scroll
+  // event, so sampling could race into a stale hint. Dismiss it first; any hint
+  // re-shown by focus() is then placed after the scroll, and still counts.
+  if ((await page.locator(".gg-tooltip:not([data-leaving])").count()) > 0) {
+    await page.evaluate(() => {
+      if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+    });
+    // A hint that blur can't dismiss (another control's hover) is a real
+    // occluder: fall through and let the sampling below report it by name.
+    await page
+      .waitForFunction(() => !document.querySelector(".gg-tooltip:not([data-leaving])"), null, {
+        timeout: 3_000,
+      })
+      .catch(() => {});
+  }
   await control.scrollIntoViewIfNeeded({ timeout: 3_000 });
   // Center the target instead of leaving it fractionally outside an edge after
   // Chromium rounds nested scroll offsets. The containment gate remains exact.

@@ -226,7 +226,13 @@ import {
   listGitBranches,
   switchGitBranch,
 } from "./utils/git-branches.js";
-import { runGitBranchSwitch, type GitSwitchPeer } from "./app-sidecar-git-switch.js";
+import {
+  GIT_SWITCH_RUN_BLOCKED_MESSAGE,
+  gitSwitchRunConflictBody,
+  gitSwitchRunningAt,
+  runGitBranchSwitch,
+  type GitSwitchPeer,
+} from "./app-sidecar-git-switch.js";
 
 let daemonRepoPolls: RepoPolls | undefined;
 /** One set of repo pollers per daemon process, shared by every logical session. */
@@ -3056,9 +3062,11 @@ async function createSession(
   // Closes the window between `/prompt` deciding to start a run and `runAgent`
   // flipping `running` — that stretch awaits, so Node yields inside it. See
   // RunClaim.
-  const runClaim = new RunClaim();
+  // No run may start on files a branch switch is rewriting; every claim refuses meanwhile.
+  const gitSwitchRunning = () => gitSwitchRunningAt(gitSwitchesInFlight, cwd);
+  const runClaim = new RunClaim(gitSwitchRunning);
   // Separate from provider claims: held across task resets, reviews, cadence and queue drain.
-  const taskSweepClaim = new RunClaim();
+  const taskSweepClaim = new RunClaim(gitSwitchRunning);
   let runJournalPersistence: Promise<void> = Promise.resolve();
   const runLifecycle = new RunLifecycle(
     (runState) => {
@@ -3839,7 +3847,13 @@ async function createSession(
       };
     },
     launchImplementation: async (consumption) => {
-      if (!runClaim.claim()) throw new Error("Another provider run already owns the session.");
+      if (!runClaim.claim()) {
+        throw new Error(
+          gitSwitchRunning()
+            ? GIT_SWITCH_RUN_BLOCKED_MESSAGE
+            : "Another provider run already owns the session.",
+        );
+      }
       try {
         await runAgent(IMPLEMENT_PLAN_PROMPT, async () => {
           await commitActivePhaseImplementationStart();
@@ -4311,7 +4325,7 @@ async function createSession(
   // run in flight; any of those left over after the run's last steering drain
   // are picked up here too, rather than stranding until an unrelated prompt.
   const runStrandedQueue = createStrandedQueueDrain(
-    () => taskTurnActive || planGate.pending() !== null,
+    () => taskTurnActive || planGate.pending() !== null || gitSwitchRunning(),
     async () => {
       for (;;) {
         if (running || autopilotActive) return;
@@ -4533,7 +4547,7 @@ async function createSession(
       isBusy: sessionWorking,
       // A plan awaiting review or an active task turn blocks unprompted runs,
       // matching the stranded-queue drain.
-      isBlocked: () => taskTurnActive || planGate.pending() !== null,
+      isBlocked: () => taskTurnActive || planGate.pending() !== null || gitSwitchRunning(),
       hasPendingAlert: () => session.hasPendingBackgroundAlert(),
       humanPromptSeq: () => session.getHumanPromptSeq(),
       onSkip: (reason) =>
@@ -6066,6 +6080,10 @@ async function createSession(
                   });
                 }
               };
+              if (gitSwitchRunning()) {
+                json(res, 409, gitSwitchRunConflictBody());
+                return;
+              }
               if (programmaticExecutionActive) {
                 json(res, 409, {
                   error: "programmatic_execution_busy",
@@ -6246,6 +6264,11 @@ async function createSession(
               // Claim the run NOW, synchronously. Everything below this line may
               // yield, and `running` does not flip until runAgent begins.
               claimedStart = runClaim.claim();
+              // Only a branch switch that began during the awaits above refuses here.
+              if (!claimedStart) {
+                json(res, 409, gitSwitchRunConflictBody());
+                return;
+              }
               scheduledRunActive = scheduled;
               // Fail preparation before runAgent can swallow errors or record user hints.
               const prepared =
@@ -6737,6 +6760,10 @@ async function createSession(
           }
           if (sessionMutations.owner) {
             json(res, 409, { ...sessionMutations.conflictBody(), message: TASK_RUN_BUSY_MESSAGE });
+            return;
+          }
+          if (gitSwitchRunning()) {
+            json(res, 409, gitSwitchRunConflictBody());
             return;
           }
           // The conditions runTaskById would otherwise refuse silently after a 202.

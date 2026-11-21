@@ -123,3 +123,14 @@ describe("concurrent POST /prompt", () => {
     expect(h.maxConcurrent).toBe(2);
   });
 });
+
+describe("RunClaim blocked predicate", () => {
+  it("refuses every claim while blocked and grants again once unblocked", () => {
+    let blocked = true;
+    const claim = new RunClaim(() => blocked);
+    expect(claim.claim()).toBe(false);
+    expect(claim.active).toBe(false);
+    blocked = false;
+    expect(claim.claim()).toBe(true);
+  });
+});

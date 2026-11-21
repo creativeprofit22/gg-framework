@@ -19,6 +19,12 @@
  */
 export class RunClaim {
   #claimed = false;
+  readonly #blocked: () => boolean;
+
+  // While `blocked` returns true every claim is refused (e.g. a branch switch is running).
+  constructor(blocked: () => boolean = () => false) {
+    this.#blocked = blocked;
+  }
 
   /** True while a run is starting or in flight. */
   get active(): boolean {
@@ -32,7 +38,7 @@ export class RunClaim {
    *   already starting or running and the caller should queue instead.
    */
   claim(): boolean {
-    if (this.#claimed) return false;
+    if (this.#claimed || this.#blocked()) return false;
     this.#claimed = true;
     return true;
   }

@@ -27,6 +27,19 @@ export interface RunGitBranchSwitchOptions {
   onRefreshError?: (error: unknown) => void;
 }
 
+export const GIT_SWITCH_RUN_BLOCKED_MESSAGE =
+  "A branch switch is running in this project. Try again when it finishes.";
+
+/** 409 body for a run refused because its folder is mid-switch. */
+export function gitSwitchRunConflictBody(): { error: string; message: string } {
+  return { error: "git_switch_running", message: GIT_SWITCH_RUN_BLOCKED_MESSAGE };
+}
+
+/** Whether a branch switch is running in `cwd` right now. */
+export function gitSwitchRunningAt(inFlight: ReadonlySet<string>, cwd: string): boolean {
+  return inFlight.has(path.resolve(cwd));
+}
+
 const UNTITLED = "Untitled chat";
 const REASON_LABEL_LENGTH = 60;
 

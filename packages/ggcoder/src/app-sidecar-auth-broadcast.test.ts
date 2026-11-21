@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
 import fs from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
@@ -1186,6 +1187,41 @@ describe("a branch switched outside the agent", () => {
     await waitFor(() => sawFeature(streamA) && sawFeature(streamB));
     expect((await request("GET", "/state", { session: b })).json.gitBranch).toBe("feature");
   });
+
+  it("refuses a new prompt while a branch switch is still checking out", async () => {
+    initRepo();
+    git("branch", "feature");
+    const gitDir = path.join(tmpProject, ".git");
+    const started = path.join(gitDir, "switch-started");
+    const release = path.join(gitDir, "switch-release");
+    // A slow post-checkout hook holds the switch open, like a large checkout or LFS.
+    await fs.writeFile(
+      path.join(gitDir, "hooks", "post-checkout"),
+      "#!/bin/sh\n: > .git/switch-started\nwhile [ ! -f .git/switch-release ]; do sleep 0.1; done\n",
+      { mode: 0o755 },
+    );
+    const a = await createSession();
+    const b = await createSession();
+    const streamB = await openEventStream(b);
+    await waitFor(() => streamB.types.includes("ready"));
+
+    const switching = request("POST", "/git/switch", { session: a, body: { branch: "feature" } });
+    try {
+      await waitFor(() => existsSync(started), 30_000);
+      const prompt = await request("POST", "/prompt", { session: b, body: { text: "hello" } });
+      expect(prompt.status).toBe(409);
+      expect(prompt.json).toEqual({
+        error: "git_switch_running",
+        message: "A branch switch is running in this project. Try again when it finishes.",
+      });
+      expect(streamB.types).not.toContain("run_start");
+    } finally {
+      await fs.writeFile(release, "");
+    }
+    const switched = await switching;
+    expect(switched.status).toBe(200);
+    expect(switched.json.status).toBe("switched");
+  }, 90_000);
 
   it("refuses while a Run All sweep holds the folder outside a provider run", async () => {
     initRepo();

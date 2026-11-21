@@ -1,12 +1,17 @@
 import {
   clampGitBranchListLimit,
+  GIT_BRANCH_NAME_MAX_LENGTH,
+  GIT_BRANCH_SWITCH_MAX_FILES,
+  GIT_BRANCH_SWITCH_MAX_PATH_LENGTH,
   normalizeGitBranchQuery,
   type GitBranchListResponse,
+  type GitBranchSwitchConflict,
+  type GitBranchSwitchResponse,
   type GitDefaultBranch,
   type GitLocalBranch,
   type GitRemoteBranch,
 } from "@kenkaiiii/gg-core/git-branch-contract";
-import { BackgroundGitError, runBackgroundGit } from "./git.js";
+import { BackgroundGitError, getGitDirtyFileCount, runBackgroundGit, runUserGit } from "./git.js";
 
 const GIT_TIMEOUT_MS = 5_000;
 const GIT_MAX_BUFFER = 8 * 1024 * 1024;
@@ -213,5 +218,186 @@ export async function listGitBranches(
     localTotal: localMatches.length,
     remoteOnlyTotal: remoteMatches.length,
     truncated: local.length < localMatches.length || remoteOnly.length < remoteMatches.length,
+  };
+}
+
+// ── Branch switch ───────────────────────────────────────────────────────────
+
+const SWITCH_TIMEOUT_MS = 60_000;
+/** Words git uses in "cannot switch branch while <word>". */
+const IN_PROGRESS_LABELS: Record<string, string> = {
+  merging: "merge",
+  rebasing: "rebase",
+  "cherry-picking": "cherry-pick",
+  reverting: "revert",
+  bisecting: "bisect",
+};
+
+/** The requested name is not a valid branch name; the daemon answers 400. */
+export class InvalidGitBranchNameError extends Error {
+  constructor() {
+    super("That isn't a valid branch name.");
+    this.name = "InvalidGitBranchNameError";
+  }
+}
+
+/** Undo git's C-style quoting of a path (`"caf\303\251.txt"`). */
+export function unquoteGitPath(raw: string): string {
+  if (!(raw.length >= 2 && raw.startsWith('"') && raw.endsWith('"'))) return raw;
+  const bytes: number[] = [];
+  const body = raw.slice(1, -1);
+  const simple: Record<string, number> = { n: 10, t: 9, r: 13, b: 8, f: 12, v: 11, a: 7 };
+  for (let i = 0; i < body.length; i++) {
+    const char = body[i]!;
+    if (char !== "\\" || i + 1 >= body.length) {
+      bytes.push(...Buffer.from(char, "utf8"));
+      continue;
+    }
+    const next = body[i + 1]!;
+    const octal = /^[0-7]{3}/.exec(body.slice(i + 1));
+    if (octal) {
+      bytes.push(parseInt(octal[0], 8));
+      i += 3;
+    } else {
+      bytes.push(simple[next] ?? next.charCodeAt(0));
+      i += 1;
+    }
+  }
+  return Buffer.from(bytes).toString("utf8");
+}
+
+/**
+ * Paths git lists under "…would be overwritten by checkout:" or "…would be
+ * removed by checkout:" blocks (tab-indented). Empty when stderr has none.
+ */
+export function parseCheckoutClashFiles(stderr: string): string[] {
+  const files: string[] = [];
+  let inBlock = false;
+  for (const line of stderr.split(/\r?\n/)) {
+    if (/would be (?:overwritten|removed) by checkout:\s*$/.test(line)) {
+      inBlock = true;
+      continue;
+    }
+    if (inBlock && line.startsWith("\t")) {
+      const file = unquoteGitPath(line.slice(1).trimEnd());
+      if (file && !files.includes(file)) files.push(file);
+      continue;
+    }
+    inBlock = false;
+  }
+  return files;
+}
+
+function conflictResponse(reason: string, files: readonly string[]): GitBranchSwitchConflict {
+  const usable = files.filter(
+    (file) => file.length > 0 && file.length <= GIT_BRANCH_SWITCH_MAX_PATH_LENGTH,
+  );
+  return {
+    status: "conflict",
+    reason,
+    files: usable.slice(0, GIT_BRANCH_SWITCH_MAX_FILES),
+    filesTruncated: usable.length > GIT_BRANCH_SWITCH_MAX_FILES,
+  };
+}
+
+function quoteForReason(branch: string): string {
+  return branch.length > 200 ? `"${branch.slice(0, 200)}…"` : `"${branch}"`;
+}
+
+/**
+ * Switch `cwd` to `branch` with plain `git switch` (never forced). A branch
+ * that only exists on origin gets a local branch tracking it. When git refuses
+ * because uncommitted changes clash, nothing changes and the clashing paths
+ * come back. Throws {@link InvalidGitBranchNameError} for a bad name and a
+ * plain Error (with git's output, for the log only) for anything unexpected.
+ */
+export async function switchGitBranch(
+  cwd: string,
+  branch: string,
+): Promise<GitBranchSwitchResponse> {
+  const read = async (args: readonly string[]): Promise<string> =>
+    (await runBackgroundGit(args, { cwd, timeoutMs: GIT_TIMEOUT_MS, maxBuffer: GIT_MAX_BUFFER }))
+      .stdout;
+  const readOrNull = (args: readonly string[]): Promise<string | null> =>
+    read(args).catch((error: unknown) => {
+      if (isGitExit(error)) return null;
+      throw error;
+    });
+
+  if (
+    typeof branch !== "string" ||
+    branch.length === 0 ||
+    branch.length > GIT_BRANCH_NAME_MAX_LENGTH ||
+    branch.startsWith("-") ||
+    branch === "HEAD"
+  ) {
+    throw new InvalidGitBranchNameError();
+  }
+  // `--branch` also expands `@{-1}`-style shorthands, so the echo must match exactly.
+  const checked = await readOrNull(["check-ref-format", "--branch", branch]);
+  if (checked?.trim() !== branch) throw new InvalidGitBranchNameError();
+
+  const inside = await readOrNull(["rev-parse", "--is-inside-work-tree"]);
+  if (inside?.trim() !== "true") return { status: "not-a-repo" };
+
+  const current =
+    (await readOrNull(["symbolic-ref", "--quiet", "--short", "HEAD"]))?.trim() || null;
+  if (current === branch) return { status: "unchanged", branch };
+
+  const [localRef, remoteRef] = await Promise.all([
+    readOrNull(["rev-parse", "--verify", "--quiet", `${LOCAL_PREFIX}${branch}`]),
+    readOrNull(["rev-parse", "--verify", "--quiet", `${REMOTE_PREFIX}${branch}`]),
+  ]);
+  let args: string[];
+  let trackedRemote: string | null = null;
+  if (localRef !== null) {
+    args = ["switch", "--no-guess", branch];
+  } else if (remoteRef !== null) {
+    args = ["switch", "--no-guess", "--track", "-c", branch, `${REMOTE_PREFIX}${branch}`];
+    trackedRemote = `${REMOTE}/${branch}`;
+  } else {
+    return {
+      status: "not-found",
+      reason: `There's no branch called ${quoteForReason(branch)} in this project or on ${REMOTE}.`,
+    };
+  }
+
+  const dirtyBefore = await getGitDirtyFileCount(cwd, { timeoutMs: GIT_TIMEOUT_MS }).catch(() => 0);
+
+  try {
+    await runUserGit(args, { cwd, timeoutMs: SWITCH_TIMEOUT_MS });
+  } catch (error) {
+    if (!isGitExit(error)) throw error;
+    const stderr = (error as BackgroundGitError).stderr;
+    const clashing = parseCheckoutClashFiles(stderr);
+    const stay = current ? ` or stay on ${quoteForReason(current)}` : "";
+    if (clashing.length > 0) {
+      return conflictResponse(
+        `Your uncommitted changes would be overwritten by switching to ${quoteForReason(branch)}, so nothing was changed. Commit them first${stay}.`,
+        clashing,
+      );
+    }
+    const inProgress = /cannot switch branch while (\S+)/i.exec(stderr)?.[1]?.toLowerCase();
+    if (inProgress || /resolve your current index first/i.test(stderr)) {
+      const unmerged = await readOrNull(["diff", "--name-only", "--diff-filter=U"]);
+      const what = inProgress
+        ? `A ${IN_PROGRESS_LABELS[inProgress] ?? "git operation"} is still in progress`
+        : "This project has unfinished merge conflicts";
+      return conflictResponse(
+        `${what}, so nothing was changed. Finish or cancel it first${stay}.`,
+        (unmerged ?? "").split(/\r?\n/).filter(Boolean),
+      );
+    }
+    throw new Error(`git switch failed: ${stderr.trim() || (error as Error).message}`, {
+      cause: error,
+    });
+  }
+
+  return {
+    status: "switched",
+    from: current,
+    to: branch,
+    trackedRemote,
+    carriedChanges: dirtyBefore > 0,
   };
 }

@@ -374,6 +374,34 @@ export async function runBackgroundGit(
   return spawnGit(await hardenedGitArgs(args, options), options);
 }
 
+export interface UserGitOptions {
+  cwd: string;
+  timeoutMs?: number;
+  maxBuffer?: number;
+  signal?: AbortSignal;
+}
+
+/**
+ * Run git for an explicit user action (like typing it in a terminal). Unlike
+ * {@link runBackgroundGit} it keeps the repo's own hooks and filter drivers:
+ * blanking a checkout's smudge filter (git-crypt, LFS) would write wrong file
+ * contents. It still never prompts, never lazy-fetches, ignores env that
+ * redirects git to another repo, and forces English messages for parsing.
+ */
+export function runUserGit(
+  args: readonly string[],
+  options: UserGitOptions,
+): Promise<BackgroundGitResult> {
+  return spawnGit(args, {
+    cwd: options.cwd,
+    timeoutMs: options.timeoutMs ?? 60_000,
+    maxBuffer: options.maxBuffer ?? 8 * 1024 * 1024,
+    signal: options.signal,
+    env: { LC_ALL: "C", LANGUAGE: "C" },
+    isolateRepository: true,
+  });
+}
+
 // ── Background helpers ──────────────────────────────────────────────────────
 
 /** Options for GG's read-only git status helpers. */

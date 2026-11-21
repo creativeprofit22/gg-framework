@@ -1,14 +1,21 @@
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { isGitBranchListResponse } from "@kenkaiiii/gg-core/git-branch-contract";
+import {
+  isGitBranchListResponse,
+  isGitBranchSwitchResponse,
+} from "@kenkaiiii/gg-core/git-branch-contract";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+  InvalidGitBranchNameError,
   listGitBranches,
   orderLocalBranches,
   parseBranchRefs,
+  parseCheckoutClashFiles,
   parseReflogCheckouts,
+  switchGitBranch,
+  unquoteGitPath,
 } from "./git-branches.js";
 
 const baseEnv = {
@@ -249,5 +256,184 @@ describe("listGitBranches", { timeout: 60_000 }, () => {
     const controller = new AbortController();
     controller.abort();
     await expect(listGitBranches(repo, { signal: controller.signal })).rejects.toThrow();
+  });
+});
+
+describe("switch parsers", () => {
+  it("parseCheckoutClashFiles reads tracked, untracked and removed blocks", () => {
+    const stderr = [
+      "error: Your local changes to the following files would be overwritten by checkout:",
+      "\ta.txt",
+      "\tdir/b.txt",
+      "Please commit your changes or stash them before you switch branches.",
+      "error: The following untracked working tree files would be overwritten by checkout:",
+      "\t" + String.raw`"caf\303\251.txt"`,
+      "error: The following untracked working tree files would be removed by checkout:",
+      "\told.txt",
+      "Aborting",
+    ].join("\n");
+    expect(parseCheckoutClashFiles(stderr)).toEqual(["a.txt", "dir/b.txt", "café.txt", "old.txt"]);
+    expect(parseCheckoutClashFiles("fatal: something else\n")).toEqual([]);
+  });
+
+  it("unquoteGitPath decodes C-style quoting and leaves plain paths alone", () => {
+    expect(unquoteGitPath("plain.txt")).toBe("plain.txt");
+    expect(unquoteGitPath(String.raw`"tab\there \"q\" \\"`)).toBe('tab\there "q" \\');
+  });
+});
+
+describe("switchGitBranch", { timeout: 60_000 }, () => {
+  async function put(file: string, content: string, cwd = repo): Promise<void> {
+    await mkdir(path.dirname(path.join(cwd, file)), { recursive: true });
+    await writeFile(path.join(cwd, file), content);
+  }
+  const read = (file: string): Promise<string> => readFile(path.join(repo, file), "utf8");
+  const head = (): string => git(repo, ["symbolic-ref", "--short", "HEAD"]);
+  const porcelain = (): string => git(repo, ["status", "--porcelain=v1", "--untracked-files=all"]);
+
+  async function commitAll(message: string, at: number): Promise<void> {
+    git(repo, ["add", "-A"]);
+    git(repo, ["commit", "-q", "-m", message], { at });
+  }
+
+  /** main: a.txt=base, shared.txt; feature: a.txt=feature, adds only-feature.txt. */
+  async function twoBranches(): Promise<void> {
+    await put("a.txt", "base\n");
+    await put("shared.txt", "shared\n");
+    await commitAll("init", T0);
+    git(repo, ["checkout", "-q", "-b", "feature"], { at: T0 + 1 });
+    await put("a.txt", "feature\n");
+    await put("only-feature.txt", "new\n");
+    await commitAll("feature work", T0 + 2);
+    git(repo, ["checkout", "-q", "main"], { at: T0 + 3 });
+  }
+
+  async function switchTo(branch: string) {
+    const result = await switchGitBranch(repo, branch);
+    expect(isGitBranchSwitchResponse(result)).toBe(true);
+    return result;
+  }
+
+  it("switches cleanly to a local branch", async () => {
+    await twoBranches();
+    expect(await switchTo("feature")).toEqual({
+      status: "switched",
+      from: "main",
+      to: "feature",
+      trackedRemote: null,
+      carriedChanges: false,
+    });
+    expect(head()).toBe("feature");
+    expect((await read("a.txt")).trim()).toBe("feature");
+  });
+
+  it("carries uncommitted changes that don't clash", async () => {
+    await twoBranches();
+    await put("shared.txt", "edited\n");
+    await put("scratch.txt", "untracked\n");
+    const result = await switchTo("feature");
+    expect(result).toMatchObject({ status: "switched", carriedChanges: true });
+    expect(head()).toBe("feature");
+    expect((await read("shared.txt")).trim()).toBe("edited");
+    expect((await read("scratch.txt")).trim()).toBe("untracked");
+  });
+
+  it("refuses a clash with nothing changed and lists the files", async () => {
+    await twoBranches();
+    await put("a.txt", "local edit\n");
+    const statusBefore = porcelain();
+    const contentBefore = await read("a.txt");
+    const result = await switchTo("feature");
+    expect(result).toMatchObject({ status: "conflict", files: ["a.txt"], filesTruncated: false });
+    if (result.status === "conflict") expect(result.reason).toContain('stay on "main"');
+    expect(head()).toBe("main");
+    expect(porcelain()).toBe(statusBefore);
+    expect(await read("a.txt")).toBe(contentBefore);
+  });
+
+  it("refuses when an untracked file would be overwritten", async () => {
+    await twoBranches();
+    await put("only-feature.txt", "mine\n");
+    const result = await switchTo("feature");
+    expect(result).toMatchObject({ status: "conflict", files: ["only-feature.txt"] });
+    expect(head()).toBe("main");
+    expect((await read("only-feature.txt")).trim()).toBe("mine");
+  });
+
+  it("lists unresolved merge conflicts", async () => {
+    await twoBranches();
+    git(repo, ["checkout", "-q", "-b", "other"], { at: T0 + 4 });
+    await put("a.txt", "other\n");
+    await commitAll("other", T0 + 5);
+    expect(() => git(repo, ["merge", "-q", "feature"], { at: T0 + 6 })).toThrow();
+    const midMerge = await switchTo("main");
+    expect(midMerge).toMatchObject({ status: "conflict", files: ["a.txt"] });
+    if (midMerge.status === "conflict") expect(midMerge.reason).toContain("merge is still");
+    expect(head()).toBe("other");
+    // Conflicts left in the index without a merge in progress.
+    git(repo, ["merge", "--quit"]);
+    const unresolved = await switchTo("main");
+    expect(unresolved).toMatchObject({ status: "conflict", files: ["a.txt"] });
+    if (unresolved.status === "conflict") {
+      expect(unresolved.reason).toContain("unfinished merge conflicts");
+    }
+    expect(head()).toBe("other");
+  });
+
+  async function withOrigin(): Promise<void> {
+    await twoBranches();
+    const origin = path.join(base, "origin.git");
+    execFileSync("git", ["init", "-q", "--bare", origin], { env: baseEnv });
+    git(repo, ["remote", "add", "origin", origin]);
+    git(repo, ["checkout", "-q", "-b", "remote-only"], { at: T0 + 10 });
+    await put("a.txt", "remote\n");
+    await commitAll("remote work", T0 + 11);
+    git(repo, ["checkout", "-q", "main"], { at: T0 + 12 });
+    git(repo, ["push", "-q", "origin", "main", "remote-only"]);
+    git(repo, ["branch", "-q", "-D", "remote-only"]);
+    git(repo, ["fetch", "-q", "origin"]);
+  }
+
+  it("creates a local branch tracking a GitHub-only branch", async () => {
+    await withOrigin();
+    expect(await switchTo("remote-only")).toEqual({
+      status: "switched",
+      from: "main",
+      to: "remote-only",
+      trackedRemote: "origin/remote-only",
+      carriedChanges: false,
+    });
+    expect(head()).toBe("remote-only");
+    expect(git(repo, ["rev-parse", "--abbrev-ref", "remote-only@{upstream}"])).toBe(
+      "origin/remote-only",
+    );
+    expect((await read("a.txt")).trim()).toBe("remote");
+  });
+
+  it("creates no local branch when a GitHub-only switch clashes", async () => {
+    await withOrigin();
+    await put("a.txt", "local edit\n");
+    expect(await switchTo("remote-only")).toMatchObject({ status: "conflict", files: ["a.txt"] });
+    expect(head()).toBe("main");
+    expect(() =>
+      git(repo, ["rev-parse", "--verify", "--quiet", "refs/heads/remote-only"]),
+    ).toThrow();
+  });
+
+  it("reports unknown branches, already-current branches and non-repos", async () => {
+    await twoBranches();
+    expect(await switchTo("nope")).toMatchObject({ status: "not-found" });
+    expect(await switchTo("main")).toEqual({ status: "unchanged", branch: "main" });
+    const outside = path.join(base, "plain");
+    await mkdir(outside);
+    expect(await switchGitBranch(outside, "main")).toEqual({ status: "not-a-repo" });
+  });
+
+  it("rejects invalid names without touching the repo", async () => {
+    await twoBranches();
+    for (const name of ["-x", "--force", "bad..name", "@{-1}", "HEAD", "a b", ""]) {
+      await expect(switchGitBranch(repo, name)).rejects.toBeInstanceOf(InvalidGitBranchNameError);
+    }
+    expect(head()).toBe("main");
   });
 });

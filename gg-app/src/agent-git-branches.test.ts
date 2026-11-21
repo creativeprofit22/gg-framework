@@ -11,7 +11,7 @@ vi.mock("@tauri-apps/api/webviewWindow", () => ({
   }),
 }));
 
-import { getGitBranches, type GitBranchListResponse } from "./agent";
+import { getGitBranches, switchGitBranch, type GitBranchListResponse } from "./agent";
 
 afterEach(() => clearMocks());
 
@@ -42,7 +42,7 @@ function respond(payload: unknown, paneReady = true) {
     if (command === "agent_pane_status") {
       return { ready: paneReady, error: null, generation: 1, sessionId: "session-1" };
     }
-    if (command === "agent_git_branches") return payload;
+    if (command === "agent_git_branches" || command === "agent_git_switch_branch") return payload;
     return null;
   });
   return calls;
@@ -101,5 +101,56 @@ describe("getGitBranches", () => {
   ])("rejects an off-shape response %#", async (payload) => {
     respond(payload);
     await expect(getGitBranches()).rejects.toThrow("Invalid branch list response");
+  });
+});
+
+describe("switchGitBranch", () => {
+  const SWITCHED = {
+    status: "switched",
+    from: "main",
+    to: "feature/x",
+    trackedRemote: null,
+    carriedChanges: true,
+  };
+
+  it("waits for the pane, then sends the pane and branch", async () => {
+    const calls = respond(SWITCHED);
+    expect(await switchGitBranch({ branch: "feature/x", paneId: "pane-2" })).toEqual(SWITCHED);
+    const names = calls.map((call) => call.command);
+    const status = names.indexOf("agent_pane_status");
+    const switched = names.indexOf("agent_git_switch_branch");
+    expect(status).toBeGreaterThanOrEqual(0);
+    expect(switched).toBeGreaterThan(status);
+    expect(calls[switched]!.args).toEqual({ paneId: "pane-2", branch: "feature/x" });
+  });
+
+  it("returns refusals as statuses", async () => {
+    const busy = { status: "busy", reason: "An agent is working", panes: ["Fix login"] };
+    respond(busy);
+    expect(await switchGitBranch({ branch: "main" })).toEqual(busy);
+  });
+
+  it("does not switch before the pane is ready", async () => {
+    vi.useFakeTimers();
+    try {
+      const calls = respond(SWITCHED, false);
+      void switchGitBranch({ branch: "main" }).catch(() => {});
+      await vi.advanceTimersByTimeAsync(1_500);
+      expect(calls.some((call) => call.command === "agent_git_switch_branch")).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    null,
+    { status: "ok" },
+    { ...SWITCHED, to: "" },
+    { status: "conflict", reason: "Clash", files: "a.txt", filesTruncated: false },
+  ])("rejects an off-shape response %#", async (payload) => {
+    respond(payload);
+    await expect(switchGitBranch({ branch: "main" })).rejects.toThrow(
+      "Invalid branch switch response",
+    );
   });
 });

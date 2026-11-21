@@ -1225,6 +1225,41 @@ pub(crate) async fn agent_git_branches(
     .await
 }
 
+/// Ask the daemon to switch one session's project folder to `branch`. Split
+/// from the command so tests can drive it against a local listener.
+pub(crate) async fn post_git_switch(
+    client: &reqwest::Client,
+    base_url: &str,
+    session_id: &str,
+    branch: &str,
+) -> Result<serde_json::Value, String> {
+    let res = client
+        .post(format!("{base_url}/git/switch"))
+        .header("x-gg-session", session_id)
+        .json(&serde_json::json!({ "branch": branch }))
+        // git itself may take up to 60 s on a large checkout.
+        .timeout(std::time::Duration::from_secs(90))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    sidecar_json(res).await
+}
+
+/// Proxy: switch the pane's project to another branch (never forced). The
+/// daemon refuses while an agent on that folder is working.
+#[tauri::command]
+pub(crate) async fn agent_git_switch_branch(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+    pane_id: Option<String>,
+    branch: String,
+) -> Result<serde_json::Value, String> {
+    let pane_id = pane_id.as_deref().unwrap_or(PRIMARY_PANE_ID);
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = pane_session_for(&webview, pane_id).ok_or("session not ready")?;
+    post_git_switch(&client, &sidecar_base(port), &gg_sid, &branch).await
+}
+
 /// Proxy: re-read this pane's branch and uncommitted count now (window focus).
 /// The daemon shares the read with every pane on the folder and pushes changes
 /// as `extras` events, so this returns nothing.
@@ -2609,6 +2644,148 @@ mod tests {
             "pane-session",
             None,
             None,
+        ));
+        server.join().unwrap();
+        assert!(result.is_err());
+    }
+
+    /// Run `post_git_switch` against a one-shot listener; returns the result
+    /// and the raw request it received.
+    fn git_switch_proxy_result(
+        status: reqwest::StatusCode,
+        response_body: &'static str,
+    ) -> (Result<serde_json::Value, String>, String) {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            let mut request = Vec::new();
+            loop {
+                let text = String::from_utf8_lossy(&request).to_string();
+                if let Some(end) = text.find("\r\n\r\n") {
+                    let length = text
+                        .to_ascii_lowercase()
+                        .lines()
+                        .find_map(|line| {
+                            line.strip_prefix("content-length:")
+                                .map(str::trim)
+                                .map(String::from)
+                        })
+                        .and_then(|value| value.parse::<usize>().ok())
+                        .unwrap_or(0);
+                    if request.len() >= end + 4 + length {
+                        break;
+                    }
+                }
+                let mut chunk = [0_u8; 4096];
+                let read = stream.read(&mut chunk).unwrap();
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..read]);
+            }
+            let response = format!(
+                "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                status.as_u16(),
+                status.canonical_reason().unwrap_or("Unknown"),
+                response_body.len(),
+                response_body,
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+            String::from_utf8_lossy(&request).to_string()
+        });
+
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("x-gg-token", "daemon-token".parse().unwrap());
+        let client = http_client_builder()
+            .default_headers(headers)
+            .build()
+            .unwrap();
+        let result = tauri::async_runtime::block_on(post_git_switch(
+            &client,
+            &format!("http://{address}"),
+            "pane-session",
+            "feature/x",
+        ));
+        let request = server.join().unwrap();
+        (result, request)
+    }
+
+    #[test]
+    fn git_switch_sends_branch_with_session_and_token() {
+        let body = r#"{"status":"switched","from":"main","to":"feature/x","trackedRemote":null,"carriedChanges":false}"#;
+        let (result, request) = git_switch_proxy_result(reqwest::StatusCode::OK, body);
+        assert_eq!(
+            result,
+            Ok(serde_json::json!({
+                "status": "switched",
+                "from": "main",
+                "to": "feature/x",
+                "trackedRemote": null,
+                "carriedChanges": false
+            }))
+        );
+        let lower = request.to_ascii_lowercase();
+        assert!(
+            request.starts_with("POST /git/switch HTTP/1.1"),
+            "unexpected request: {request}"
+        );
+        assert!(lower.contains("x-gg-session: pane-session"));
+        assert!(lower.contains("x-gg-token: daemon-token"));
+        assert!(lower.contains("content-type: application/json"));
+        assert!(
+            request.ends_with(r#"{"branch":"feature/x"}"#),
+            "unexpected body: {request}"
+        );
+    }
+
+    #[test]
+    fn git_switch_passes_through_refusals_and_daemon_errors() {
+        let busy = r#"{"status":"busy","reason":"An agent is working","panes":["Fix login"]}"#;
+        assert_eq!(
+            git_switch_proxy_result(reqwest::StatusCode::OK, busy).0,
+            Ok(serde_json::json!({
+                "status": "busy",
+                "reason": "An agent is working",
+                "panes": ["Fix login"]
+            }))
+        );
+        assert_eq!(
+            git_switch_proxy_result(
+                reqwest::StatusCode::BAD_REQUEST,
+                r#"{"error":"That isn't a valid branch name."}"#,
+            )
+            .0,
+            Err("That isn't a valid branch name.".into())
+        );
+        assert_eq!(
+            git_switch_proxy_result(
+                reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+                r#"{"error":"Could not switch to feature/x"}"#,
+            )
+            .0,
+            Err("Could not switch to feature/x".into())
+        );
+    }
+
+    #[test]
+    fn git_switch_propagates_transport_failure() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            drop(listener.accept().unwrap());
+        });
+        let client = http_client_builder().build().unwrap();
+        let result = tauri::async_runtime::block_on(post_git_switch(
+            &client,
+            &format!("http://{address}"),
+            "pane-session",
+            "main",
         ));
         server.join().unwrap();
         assert!(result.is_err());

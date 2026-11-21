@@ -13,8 +13,10 @@ import { isSlashCommandsResponse } from "@kenkaiiii/gg-core/slash-command-contra
 import {
   clampGitBranchListLimit,
   isGitBranchListResponse,
+  isGitBranchSwitchResponse,
   type GitBranchListOptions,
   type GitBranchListResponse,
+  type GitBranchSwitchResponse,
 } from "@kenkaiiii/gg-core/git-branch-contract";
 import {
   isProgrammaticChatRequest,
@@ -2114,6 +2116,14 @@ export type {
   GitBranchListOk,
   GitBranchListOptions,
   GitBranchListResponse,
+  GitBranchSwitchBusy,
+  GitBranchSwitchConflict,
+  GitBranchSwitchNotARepo,
+  GitBranchSwitchNotFound,
+  GitBranchSwitchRequest,
+  GitBranchSwitchResponse,
+  GitBranchSwitchSwitched,
+  GitBranchSwitchUnchanged,
   GitCurrentBranch,
   GitDefaultBranch,
   GitLocalBranch,
@@ -2133,6 +2143,25 @@ export async function getGitBranches(
     limit: options.limit === undefined ? undefined : clampGitBranchListLimit(options.limit),
   });
   if (!isGitBranchListResponse(response)) throw new Error("Invalid branch list response");
+  return response;
+}
+
+/**
+ * Switch the pane's project to `branch` with a plain, never-forced git switch.
+ * Refusals (busy agent, clashing changes, unknown branch) come back as statuses;
+ * a bad name or unexpected git failure rejects with the daemon's message.
+ */
+export async function switchGitBranch(options: {
+  branch: string;
+  paneId?: string;
+}): Promise<GitBranchSwitchResponse> {
+  const paneId = options.paneId ?? "primary";
+  await waitForPaneReady(paneId);
+  const response = await invoke<unknown>("agent_git_switch_branch", {
+    paneId,
+    branch: options.branch,
+  });
+  if (!isGitBranchSwitchResponse(response)) throw new Error("Invalid branch switch response");
   return response;
 }
 

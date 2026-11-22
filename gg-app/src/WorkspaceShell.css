@@ -1362,6 +1362,9 @@
   text-align: left;
   cursor: pointer;
 }
+.branch-switch-option[aria-disabled="true"] {
+  cursor: not-allowed;
+}
 .branch-switch-option:focus-visible {
   outline: 2px solid var(--primary);
   outline-offset: -2px;
@@ -1466,9 +1469,11 @@
   .branch-switch-option,
   .branch-switch-action {
     min-height: 44px;
+    touch-action: manipulation;
   }
   .branch-switch-input {
     min-height: 44px;
+    touch-action: manipulation;
     font-size: var(--fs-xl);
   }
 }

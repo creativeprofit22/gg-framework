@@ -319,7 +319,10 @@ describe("BranchSwitcher option rows and state marker", () => {
   it("marks the menu with its state for probes", async () => {
     const { trigger } = renderSwitcher();
     await openSwitcher(trigger);
-    expect(document.querySelector(".branch-switch-menu")?.getAttribute("data-state")).toBe("ready");
+    const menu = document.querySelector(".branch-switch-menu");
+    expect(menu?.getAttribute("data-state")).toBe("ready");
+    // Busy only while loading, switching or creating, not when idle.
+    expect(menu?.getAttribute("aria-busy")).toBeNull();
   });
 });
 
@@ -574,6 +577,7 @@ describe("BranchSwitcher create row", () => {
     expect(document.querySelector(".branch-switch-menu")?.getAttribute("data-state")).toBe(
       "creating",
     );
+    expect(document.querySelector(".branch-switch-menu")?.getAttribute("aria-busy")).toBe("true");
     expect(createOption()?.getAttribute("aria-disabled")).toBe("true");
   });
 

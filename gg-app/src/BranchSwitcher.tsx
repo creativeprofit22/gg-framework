@@ -519,7 +519,17 @@ export function BranchSwitcher({
       </h2>
       <FloatingSurface>
         {open && (
-          <div className="branch-switch-menu" data-state={menuState} onKeyDown={onMenuKeyDown}>
+          <div
+            className="branch-switch-menu"
+            data-state={menuState}
+            aria-busy={
+              listing.status === "loading" ||
+              outcome.kind === "switching" ||
+              outcome.kind === "creating" ||
+              undefined
+            }
+            onKeyDown={onMenuKeyDown}
+          >
             {showOutcome ? (
               <div className="branch-switch-outcome" ref={outcomeRef} role="alert">
                 {outcome.kind === "conflict" && (

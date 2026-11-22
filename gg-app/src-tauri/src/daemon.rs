@@ -967,8 +967,31 @@ pub(crate) fn start_window_session(
 /// Invalidate every daemon-owned runtime identity immediately after a crash so
 /// stale bridges and proxy calls retire while the replacement daemon starts.
 pub(crate) fn clear_runtime_pane_sessions(app: &tauri::AppHandle) {
-    let windows: State<Windows> = app.state();
-    let mut registry = windows.map.lock_or_recover();
+    let bumped = {
+        let windows: State<Windows> = app.state();
+        let mut registry = windows.map.lock_or_recover();
+        bump_runtime_pane_generations(&mut registry)
+    };
+    // Tell each webview its pane's new generation now: the next ready/error
+    // event can be minutes away, or never come if the daemon gives up.
+    for (label, pane_id, generation) in bumped {
+        let _ = app.emit_to(
+            EventTarget::webview_window(label),
+            "agent-pane-generation",
+            serde_json::json!({
+                "paneId": pane_id,
+                "generation": generation,
+            }),
+        );
+    }
+}
+
+/// Retire every pane's runtime session under a fresh generation and return the
+/// `(window_label, pane_id, generation)` each pane now carries.
+pub(crate) fn bump_runtime_pane_generations(
+    registry: &mut PaneRegistry,
+) -> Vec<(String, String, u64)> {
+    let mut bumped = Vec::new();
     let labels: Vec<String> = registry.keys().cloned().collect();
     for label in labels {
         let pane_ids: Vec<String> = registry
@@ -985,9 +1008,11 @@ pub(crate) fn clear_runtime_pane_sessions(app: &tauri::AppHandle) {
                 pane.session_id = None;
                 pane.startup_error = None;
                 pane.generation = generation;
+                bumped.push((label.clone(), pane_id, generation));
             }
         }
     }
+    bumped
 }
 
 /// After a daemon respawn, re-create a session for every live pane from its
@@ -1189,6 +1214,50 @@ mod tests {
     // stale_create_or_select_bind_cannot_overwrite_newer_generation, the pane_selection_* tests,
     // window_close_drains_only_its_panes, generation_mismatched_disposal_cannot_remove_replacement and
     // replacing_secondary_preserves_primary_identity_and_recovery_target.
+
+    #[test]
+    fn clear_runtime_pane_generations_reports_every_bumped_pane() {
+        let mut registry = PaneRegistry::default();
+        for (label, pane_id) in [("main", "primary"), ("main", "right"), ("w2", "primary")] {
+            record_pane_target(
+                &mut registry,
+                label,
+                pane_id,
+                WorkspaceMode::Code,
+                ChatAgent::General,
+                PathBuf::from("/work"),
+                None,
+            );
+            registry
+                .get_mut(label)
+                .unwrap()
+                .get_mut(pane_id)
+                .unwrap()
+                .session_id = Some(format!("{label}-{pane_id}"));
+        }
+        let before = registry.next_generation;
+
+        let mut bumped = bump_runtime_pane_generations(&mut registry);
+        bumped.sort();
+
+        assert_eq!(bumped.len(), 3);
+        let mut seen: Vec<u64> = bumped.iter().map(|(_, _, g)| *g).collect();
+        seen.sort();
+        assert_eq!(seen, vec![before + 1, before + 2, before + 3]);
+        for (label, pane_id, generation) in &bumped {
+            let pane = resolve_owned_pane(&registry, label, pane_id).unwrap();
+            assert_eq!(pane.generation, *generation);
+            assert_eq!(pane.session_id, None);
+            assert_eq!(pane.startup_error, None);
+        }
+        assert_eq!(
+            bumped
+                .iter()
+                .map(|(l, p, _)| (l.as_str(), p.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("main", "primary"), ("main", "right"), ("w2", "primary")]
+        );
+    }
 
     #[test]
     fn daemon_port_wait_outlasts_slow_daemon_boot() {

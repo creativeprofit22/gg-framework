@@ -3597,8 +3597,9 @@ export function createPaneAgentClient(paneId: string): PaneAgentClient {
       const handler = (event: { payload: PaneLifecycleEvent }): void => {
         if (!disposed && event.payload.paneId === paneId) onGeneration(event.payload.generation);
       };
-      const unlistens = ["agent-pane-ready", "agent-pane-error"].map((name) =>
-        listenAppWindow<PaneLifecycleEvent>(name, handler).catch(() => null),
+      // `agent-pane-generation` arrives as soon as native retires a crashed daemon's sessions.
+      const unlistens = ["agent-pane-ready", "agent-pane-error", "agent-pane-generation"].map(
+        (name) => listenAppWindow<PaneLifecycleEvent>(name, handler).catch(() => null),
       );
       return () => {
         disposed = true;

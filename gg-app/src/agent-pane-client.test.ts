@@ -947,6 +947,7 @@ describe("pane agent client", () => {
     await vi.waitFor(() => {
       expect(listeners.has("agent-pane-ready")).toBe(true);
       expect(listeners.has("agent-pane-error")).toBe(true);
+      expect(listeners.has("agent-pane-generation")).toBe(true);
     });
 
     listeners.get("agent-pane-ready")!({ payload: { paneId: "left", generation: 4 } });
@@ -954,12 +955,16 @@ describe("pane agent client", () => {
     listeners.get("agent-pane-error")!({
       payload: { paneId: "right", generation: 6, error: "respawn failed" },
     });
-    expect(onGeneration.mock.calls).toEqual([[5], [6]]);
+    // Native bumps generations on daemon exit before any ready/error event.
+    listeners.get("agent-pane-generation")!({ payload: { paneId: "left", generation: 7 } });
+    listeners.get("agent-pane-generation")!({ payload: { paneId: "right", generation: 8 } });
+    expect(onGeneration.mock.calls).toEqual([[5], [6], [8]]);
 
     stop();
     await vi.waitFor(() => {
       expect(listeners.has("agent-pane-ready")).toBe(false);
       expect(listeners.has("agent-pane-error")).toBe(false);
+      expect(listeners.has("agent-pane-generation")).toBe(false);
     });
   });
 

@@ -164,7 +164,8 @@ Custom commands: each Markdown file in the project's `.gg/commands/` folder beco
 - The deck's **Git** panel shows the branch, uncommitted files, and pull requests and issues for GitHub projects.
 - Click the branch name in the **Git** panel heading to switch branches. The list shows the **Default** branch and up to 5 **Recent** ones; type in **Search branches** to find any branch, including ones that exist **On GitHub only**.
   - Uncommitted changes come with you when git allows it. If they would be overwritten, or a merge or rebase is unfinished, GG says **Couldn't switch to** the branch, lists the files and changes nothing. Pick **Stay on** the current branch or **Commit first**.
-  - Switching is paused while an agent works in this project. If another chat on the same folder is working, wait for it and use **Back to branches**.
+  - To make a new branch, type its name in **Search branches** and pick **Create branch** at the bottom of the list. It starts from the current branch and your uncommitted changes come along. If the name isn't allowed or already exists, the row says why. If it matches a branch except for capital letters, the row offers **Switch to** that branch instead. If creating fails, use **Retry** or **Back to branches**, which keeps the name you typed.
+  - Switching and creating branches are paused while an agent works in this project. If another chat on the same folder is working, wait for it and use **Back to branches**.
   - Every chat on the folder is told about the switch, so the agent knows which branch it is on.
 
 ## CI indicator
@@ -244,3 +245,5 @@ Q: Where can I keep private notes?
 A: Open **Notes** in the deck. GG never sees them.
 Q: How do I switch branches?
 A: Click the branch name in the **Git** panel heading, then pick a branch or type to search. It's paused while an agent works in that project.
+Q: How do I create a branch?
+A: Click the branch name in the **Git** panel heading, type the new name, then pick **Create branch**. It's paused while an agent works in that project.

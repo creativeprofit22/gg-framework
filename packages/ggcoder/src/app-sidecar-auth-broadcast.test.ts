@@ -1234,6 +1234,23 @@ describe("a branch switched outside the agent", () => {
     expect((await request("GET", "/state", { session: b })).json.gitBranch).toBe("fresh");
   });
 
+  it("explains an unexpected branch-create failure without git's own output", async () => {
+    initRepo();
+    // A stale ref lock makes `git switch -c` fail in a way the daemon doesn't recognise.
+    await fs.writeFile(path.join(tmpProject, ".git", "refs", "heads", "fresh.lock"), "");
+    const a = await createSession();
+    const failed = await request("POST", "/git/branches/create", {
+      session: a,
+      body: { branch: "fresh" },
+    });
+    expect(failed.status).toBe(500);
+    expect(failed.json).toEqual({
+      error:
+        "Git couldn't make the branch. Check that the project folder is writable and no other program is using it, then retry.",
+    });
+    expect(String(failed.json.error)).not.toMatch(/fresh|lock|fatal|git switch/i);
+  });
+
   it("refuses a new prompt while a branch switch is still checking out", async () => {
     initRepo();
     git("branch", "feature");

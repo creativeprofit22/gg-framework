@@ -6710,7 +6710,10 @@ async function createSession(
         } catch (error) {
           if (res.destroyed) return;
           log("WARN", "app-sidecar", "git branch create failed", { error: String(error) });
-          json(res, 500, { error: `Could not create ${branch}` });
+          json(res, 500, {
+            error:
+              "Git couldn't make the branch. Check that the project folder is writable and no other program is using it, then retry.",
+          });
         }
       });
       return;

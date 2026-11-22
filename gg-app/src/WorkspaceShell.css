@@ -1378,6 +1378,27 @@
   color: var(--text-muted);
   font-size: var(--fs-sm);
 }
+/* Create row: "Create branch" in the UI font, the typed name in mono, then a wrapping hint line. */
+.branch-switch-option .branch-switch-create-label {
+  font-family: var(--sans);
+  font-size: var(--fs-md);
+}
+.branch-switch-create-name {
+  font-family: var(--mono);
+  font-size: var(--fs-sm);
+}
+.branch-switch-create-hint {
+  display: block;
+  margin-top: var(--space-1);
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+  overflow-wrap: anywhere;
+}
+/* Red only when the name can't be used; "Switch to" is a valid choice and keeps the muted hint. */
+.branch-switch-create[aria-disabled="true"]:is([data-check="invalid"], [data-check="taken"])
+  .branch-switch-create-hint {
+  color: var(--error);
+}
 .branch-switch-notice,
 .branch-switch-empty {
   margin: 0;

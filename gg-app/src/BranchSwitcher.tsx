@@ -1,17 +1,19 @@
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import {
   GIT_BRANCH_LIST_DEFAULT_LIMIT,
+  type GitBranchCreateResponse,
   type GitBranchListOk,
   type GitBranchSwitchResponse,
   type GitLocalBranch,
 } from "@kenkaiiii/gg-core/git-branch-contract";
-import { getGitBranches, switchGitBranch } from "./agent";
+import { checkGitBranchName, createGitBranch, getGitBranches, switchGitBranch } from "./agent";
 import { FloatingSurface } from "./FloatingSurface";
 import { CaretDownIcon, CheckIcon } from "./phosphor-icons";
 
 /** Recent branches shown without searching; the default branch is pinned above them. */
 export const RECENT_BRANCH_LIMIT = 5;
 const SEARCH_DELAY_MS = 150;
+const NAME_CHECK_DELAY_MS = 250;
 
 export interface SwitcherRow {
   key: string;
@@ -61,29 +63,105 @@ export function buildBranchSections(list: GitBranchListOk, searching: boolean): 
   ].filter((section) => section.rows.length > 0);
 }
 
-type Listing =
+export type Listing =
   | { status: "loading" }
   | { status: "ready"; data: GitBranchListOk }
   | { status: "not-a-repo" }
   | { status: "failed" };
 
+/** The daemon's live answer for a typed name; `unknown` means the check call itself failed. */
+export type NameCheck =
+  | { status: "checking" }
+  | { status: "available" }
+  | { status: "invalid"; reason: string }
+  | { status: "taken"; reason: string }
+  | { status: "unknown" };
+
+/** The last row while searching: create the typed name, or switch to the branch it collides with. */
+export type CreateRow =
+  | {
+      kind: "create";
+      key: string;
+      name: string;
+      check: "checking" | "available" | "invalid" | "taken";
+      hint: string | null;
+      disabled: boolean;
+    }
+  | { kind: "switch-to"; key: string; name: string; target: SwitcherRow; hint: string };
+
+/** Null unless `listing` is the loaded search for `text` and no branch in it is named exactly `text`. */
+export function createRowFor(listing: Listing, text: string, check: NameCheck): CreateRow | null {
+  const name = text.trim();
+  if (!name || listing.status !== "ready") return null;
+  const { data } = listing;
+  if (data.local.some((b) => b.name === name) || data.remoteOnly.some((b) => b.name === name)) {
+    return null;
+  }
+  const key = `create:${name}`;
+  switch (check.status) {
+    case "invalid":
+      return { kind: "create", key, name, check: "invalid", hint: check.reason, disabled: true };
+    case "taken": {
+      // Case-insensitive filesystems refuse "Main" beside "main": offer the existing branch instead.
+      const lower = name.toLowerCase();
+      const match = data.local.find((b) => b.name.toLowerCase() === lower);
+      if (!match) {
+        return { kind: "create", key, name, check: "taken", hint: check.reason, disabled: true };
+      }
+      return {
+        kind: "switch-to",
+        key,
+        name: match.name,
+        target: {
+          key: `local:${match.name}`,
+          name: match.name,
+          remote: false,
+          current: match.name === data.current.name,
+        },
+        hint: check.reason,
+      };
+    }
+    case "checking":
+      return {
+        kind: "create",
+        key,
+        name,
+        check: "checking",
+        hint: "Checking name…",
+        disabled: false,
+      };
+    default:
+      // Available, or the check itself failed: the daemon checks again on create.
+      return { kind: "create", key, name, check: "available", hint: null, disabled: false };
+  }
+}
+
 type Outcome =
   | { kind: "none" }
   | { kind: "switching"; name: string }
-  | { kind: "conflict"; name: string; reason: string; files: string[]; filesTruncated: boolean }
-  | { kind: "busy"; name: string; reason: string }
-  | { kind: "error"; name: string; message: string };
+  | { kind: "creating"; name: string }
+  | {
+      kind: "conflict";
+      action: "switch" | "create";
+      name: string;
+      reason: string;
+      files: string[];
+      filesTruncated: boolean;
+    }
+  | { kind: "busy"; action: "switch" | "create"; name: string; reason: string }
+  | { kind: "error"; name: string; message: string }
+  | { kind: "create-failed"; name: string; message: string };
 
 interface Props {
   /** The checked-out branch; shown on the trigger and marked in the list. */
   branch: string;
   /** The pane whose project is listed and switched; each pane may open its own folder. */
   paneId: string;
-  /** An agent is working in this project: switching is paused. */
+  /** An agent is working in this project: switching and creating are paused. */
   running: boolean;
   /** Runs `/commit` in the chat; offered from the clash error when present. */
   onCommitFirst?: () => void;
-  /** A switch succeeded: the Git panel should re-read its changes. */
+  /** A switch or create succeeded: the Git panel should re-read its changes. */
   onSwitched: () => void;
 }
 
@@ -93,7 +171,7 @@ interface Props {
  * pattern: focus stays in the search box and arrows move the highlight through
  * `aria-activedescendant`. Escape closes and returns focus to the trigger.
  * Switching is a plain, never-forced switch in the daemon; a clash is shown,
- * never overwritten.
+ * never overwritten. A typed name that matches no branch can be created.
  */
 export function BranchSwitcher({
   branch,
@@ -105,18 +183,22 @@ export function BranchSwitcher({
   const baseId = useId();
   const listId = `${baseId}-list`;
   const noticeId = `${baseId}-notice`;
+  const createGroupId = `${baseId}-create`;
+  const createHintId = `${baseId}-create-hint`;
   const optionId = (index: number): string => `${baseId}-option-${index}`;
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [activeIndex, setActiveIndex] = useState(0);
   const [attempt, setAttempt] = useState(0);
   const [loaded, setLoaded] = useState<{ key: string; listing: Listing } | null>(null);
+  const [checked, setChecked] = useState<{ key: string; check: NameCheck } | null>(null);
   const [outcome, setOutcome] = useState<Outcome>({ kind: "none" });
   const rootRef = useRef<HTMLSpanElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const outcomeRef = useRef<HTMLDivElement>(null);
   const requestId = useRef(0);
+  const checkRequestId = useRef(0);
 
   const key = query.trim();
   const searching = key.length > 0;
@@ -152,12 +234,49 @@ export function BranchSwitcher({
     return () => window.clearTimeout(timer);
   }, [open, key, attempt, paneId]);
 
+  // The typed name is checked separately from the list; only the newest answer counts.
+  useEffect(() => {
+    if (!open || !key) return;
+    const id = ++checkRequestId.current;
+    const timer = window.setTimeout(() => {
+      checkGitBranchName({ branch: key, paneId }).then(
+        (response) => {
+          if (id !== checkRequestId.current) return;
+          const check: NameCheck =
+            response.status === "invalid" || response.status === "taken"
+              ? { status: response.status, reason: response.reason }
+              : response.status === "available"
+                ? { status: "available" }
+                : { status: "unknown" };
+          setChecked({ key, check });
+        },
+        () => {
+          if (id === checkRequestId.current) setChecked({ key, check: { status: "unknown" } });
+        },
+      );
+    }, NAME_CHECK_DELAY_MS);
+    return () => window.clearTimeout(timer);
+  }, [open, key, paneId]);
+
   const sections = useMemo(
     () => (listing.status === "ready" ? buildBranchSections(listing.data, searching) : []),
     [listing, searching],
   );
-  const options = useMemo(() => sections.flatMap((section) => section.rows), [sections]);
-  const rowsPaused = running || outcome.kind === "switching";
+  const branchRows = useMemo(() => sections.flatMap((section) => section.rows), [sections]);
+  const nameCheck = useMemo<NameCheck>(
+    () => (checked && checked.key === key ? checked.check : { status: "checking" }),
+    [checked, key],
+  );
+  const createRow = useMemo(
+    () => (searching ? createRowFor(listing, key, nameCheck) : null),
+    [searching, listing, key, nameCheck],
+  );
+  const options = useMemo<(SwitcherRow | CreateRow)[]>(
+    () => (createRow ? [...branchRows, createRow] : branchRows),
+    [branchRows, createRow],
+  );
+  const createIndex = createRow ? options.length - 1 : -1;
+  const rowsPaused = running || outcome.kind === "switching" || outcome.kind === "creating";
   // The state the menu is showing, exposed as data-state for probes and tests.
   const menuState =
     outcome.kind !== "none"
@@ -193,8 +312,16 @@ export function BranchSwitcher({
   }, [open]);
 
   useEffect(() => {
-    if (outcome.kind === "conflict" || outcome.kind === "busy" || outcome.kind === "error") {
+    if (
+      outcome.kind === "conflict" ||
+      outcome.kind === "busy" ||
+      outcome.kind === "error" ||
+      outcome.kind === "create-failed"
+    ) {
       outcomeRef.current?.querySelector<HTMLButtonElement>("button")?.focus();
+    } else if (outcome.kind === "none") {
+      // Back from a panel: the search box, still holding the typed text, takes focus again.
+      inputRef.current?.focus();
     }
   }, [outcome.kind]);
 
@@ -207,6 +334,7 @@ export function BranchSwitcher({
     setQuery("");
     setActiveIndex(0);
     setLoaded(null);
+    setChecked(null);
     setOutcome({ kind: "none" });
     setOpen(true);
   }
@@ -245,6 +373,7 @@ export function BranchSwitcher({
       case "conflict":
         setOutcome({
           kind: "conflict",
+          action: "switch",
           name: row.name,
           reason: response.reason,
           files: response.files,
@@ -252,7 +381,7 @@ export function BranchSwitcher({
         });
         return;
       case "busy":
-        setOutcome({ kind: "busy", name: row.name, reason: response.reason });
+        setOutcome({ kind: "busy", action: "switch", name: row.name, reason: response.reason });
         return;
       case "not-found":
         // The branch vanished since the list was read: show the reason and re-read the list.
@@ -271,7 +400,61 @@ export function BranchSwitcher({
     }
   }
 
-  // Arrows wrap; rows are either all choosable or all paused, so none need skipping.
+  async function create(name: string): Promise<void> {
+    if (running) return;
+    setOutcome({ kind: "creating", name });
+    let response: GitBranchCreateResponse;
+    try {
+      response = await createGitBranch({ branch: name, paneId });
+    } catch (error) {
+      setOutcome({
+        kind: "create-failed",
+        name,
+        message: error instanceof Error ? error.message : String(error),
+      });
+      return;
+    }
+    switch (response.status) {
+      case "created":
+        onSwitched();
+        closeMenu();
+        return;
+      case "invalid":
+      case "taken":
+        // Back to the list with the reason on the row; a check still in flight can't undo it.
+        checkRequestId.current += 1;
+        setChecked({ key: name, check: { status: response.status, reason: response.reason } });
+        setOutcome({ kind: "none" });
+        return;
+      case "conflict":
+        setOutcome({
+          kind: "conflict",
+          action: "create",
+          name,
+          reason: response.reason,
+          files: response.files,
+          filesTruncated: response.filesTruncated,
+        });
+        return;
+      case "busy":
+        setOutcome({ kind: "busy", action: "create", name, reason: response.reason });
+        return;
+      case "not-a-repo":
+        setOutcome({ kind: "create-failed", name, message: "This folder isn't a git repository." });
+        return;
+      default:
+        setOutcome({ kind: "create-failed", name, message: "The app gave an unexpected answer." });
+    }
+  }
+
+  function chooseOption(option: SwitcherRow | CreateRow): void {
+    if (rowsPaused) return;
+    if (!("kind" in option)) void choose(option);
+    else if (option.kind === "switch-to") void choose(option.target);
+    else if (!option.disabled) void create(option.name);
+  }
+
+  // Arrows wrap. A disabled create row stays reachable so its reason is read out.
   function step(from: number, direction: 1 | -1): number {
     const count = options.length;
     return (from + direction + count) % count;
@@ -288,7 +471,7 @@ export function BranchSwitcher({
       case "Enter": {
         event.preventDefault();
         const row = options[active];
-        if (row) void choose(row);
+        if (row) chooseOption(row);
         return;
       }
       case "Tab":
@@ -307,9 +490,15 @@ export function BranchSwitcher({
     closeMenu();
   }
 
-  const notice = running ? "Switching is paused while an agent works in this project." : null;
+  const notice = running
+    ? "Switching and creating branches are paused while an agent works in this project."
+    : null;
   const showOutcome =
-    outcome.kind === "conflict" || outcome.kind === "busy" || outcome.kind === "error";
+    outcome.kind === "conflict" ||
+    outcome.kind === "busy" ||
+    outcome.kind === "error" ||
+    outcome.kind === "create-failed";
+  const createDisabled = rowsPaused || (createRow?.kind === "create" && createRow.disabled);
 
   return (
     <span className="branch-switch" ref={rootRef}>
@@ -337,7 +526,9 @@ export function BranchSwitcher({
                   <>
                     {/* `conflict` also covers an unfinished merge or rebase, so the daemon's reason names the cause. */}
                     <p className="branch-switch-outcome-title">
-                      Couldn&apos;t switch to {outcome.name}. Nothing was changed.
+                      {outcome.action === "create"
+                        ? `Couldn't create ${outcome.name}. Nothing was changed.`
+                        : `Couldn't switch to ${outcome.name}. Nothing was changed.`}
                     </p>
                     <p className="branch-switch-outcome-note">{outcome.reason}</p>
                     {outcome.files.length > 0 && (
@@ -353,13 +544,24 @@ export function BranchSwitcher({
                       <p className="branch-switch-outcome-note">And more files.</p>
                     )}
                     <div className="branch-switch-actions">
-                      <button
-                        type="button"
-                        className="btn-ghost branch-switch-action"
-                        onClick={() => closeMenu()}
-                      >
-                        Stay on {branch}
-                      </button>
+                      {outcome.action === "create" ? (
+                        // A refused create switched nothing, so going back keeps the typed name.
+                        <button
+                          type="button"
+                          className="btn-ghost branch-switch-action"
+                          onClick={() => setOutcome({ kind: "none" })}
+                        >
+                          Back to branches
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          className="btn-ghost branch-switch-action"
+                          onClick={() => closeMenu()}
+                        >
+                          Stay on {branch}
+                        </button>
+                      )}
                       {onCommitFirst && (
                         <button
                           type="button"
@@ -378,7 +580,9 @@ export function BranchSwitcher({
                 {outcome.kind === "busy" && (
                   <>
                     <p className="branch-switch-outcome-title">
-                      Another chat on this folder is working.
+                      {outcome.action === "create"
+                        ? `Couldn't create ${outcome.name}. Nothing was changed.`
+                        : "Another chat on this folder is working."}
                     </p>
                     <p className="branch-switch-outcome-note">{outcome.reason}</p>
                     <div className="branch-switch-actions">
@@ -399,6 +603,30 @@ export function BranchSwitcher({
                     </p>
                     <p className="branch-switch-outcome-note">{outcome.message}</p>
                     <div className="branch-switch-actions">
+                      <button
+                        type="button"
+                        className="btn-ghost branch-switch-action"
+                        onClick={() => setOutcome({ kind: "none" })}
+                      >
+                        Back to branches
+                      </button>
+                    </div>
+                  </>
+                )}
+                {outcome.kind === "create-failed" && (
+                  <>
+                    <p className="branch-switch-outcome-title">
+                      Couldn&apos;t create {outcome.name}.
+                    </p>
+                    <p className="branch-switch-outcome-note">{outcome.message}</p>
+                    <div className="branch-switch-actions">
+                      <button
+                        type="button"
+                        className="btn-primary branch-switch-action"
+                        onClick={() => void create(outcome.name)}
+                      >
+                        Retry
+                      </button>
                       <button
                         type="button"
                         className="btn-ghost branch-switch-action"
@@ -445,6 +673,11 @@ export function BranchSwitcher({
                     Switching to {outcome.name}&hellip;
                   </p>
                 )}
+                {outcome.kind === "creating" && (
+                  <p className="branch-switch-notice" role="status">
+                    Creating {outcome.name}&hellip;
+                  </p>
+                )}
                 {listing.status === "loading" && (
                   <p className="branch-switch-empty" role="status">
                     {searching ? "Searching…" : "Loading branches…"}
@@ -468,7 +701,7 @@ export function BranchSwitcher({
                 {listing.status === "not-a-repo" && (
                   <p className="branch-switch-empty">This folder isn&apos;t a git repository.</p>
                 )}
-                {listing.status === "ready" && options.length === 0 && (
+                {listing.status === "ready" && branchRows.length === 0 && (
                   <p className="branch-switch-empty">No branches match &ldquo;{key}&rdquo;.</p>
                 )}
                 {listing.status === "ready" && options.length > 0 && (
@@ -500,7 +733,7 @@ export function BranchSwitcher({
                                 aria-disabled={rowsPaused || undefined}
                                 onMouseDown={(event) => event.preventDefault()}
                                 onMouseEnter={() => !rowsPaused && setActiveIndex(index)}
-                                onClick={() => void choose(row)}
+                                onClick={() => chooseOption(row)}
                               >
                                 <span className="dropdown-option-text">
                                   <span className="dropdown-option-label">{row.name}</span>
@@ -521,6 +754,42 @@ export function BranchSwitcher({
                         </div>
                       );
                     })}
+                    {createRow && (
+                      <div role="group" aria-labelledby={createGroupId}>
+                        <div id={createGroupId} className="branch-switch-group">
+                          New branch
+                        </div>
+                        <button
+                          key={createRow.key}
+                          type="button"
+                          tabIndex={-1}
+                          id={optionId(createIndex)}
+                          className={`dropdown-option branch-switch-option branch-switch-create${createIndex === active ? " active" : ""}`}
+                          role="option"
+                          aria-selected={false}
+                          aria-disabled={createDisabled || undefined}
+                          aria-describedby={createRow.hint ? createHintId : undefined}
+                          data-check={createRow.kind === "create" ? createRow.check : "taken"}
+                          onMouseDown={(event) => event.preventDefault()}
+                          onMouseEnter={() => !rowsPaused && setActiveIndex(createIndex)}
+                          onClick={() => chooseOption(createRow)}
+                        >
+                          <span className="dropdown-option-text">
+                            <span className="dropdown-option-label branch-switch-create-label">
+                              {createRow.kind === "create" ? "Create branch " : "Switch to "}
+                              <span className="branch-switch-create-name">
+                                &lsquo;{createRow.name}&rsquo;
+                              </span>
+                            </span>
+                            {createRow.hint && (
+                              <span id={createHintId} className="branch-switch-create-hint">
+                                {createRow.hint}
+                              </span>
+                            )}
+                          </span>
+                        </button>
+                      </div>
+                    )}
                   </div>
                 )}
                 {listing.status === "ready" && searching && listing.data.truncated && (

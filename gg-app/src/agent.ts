@@ -3384,6 +3384,8 @@ export interface PaneAgentClient extends NotesClient {
   restore(target: PaneSessionTarget): Promise<number>;
   dispose(generation: number): Promise<void>;
   selectWorkspace(target: PaneSessionTarget, expectedGeneration: number): Promise<number>;
+  /** Report every generation native announces for this pane, including ones it starts on its own. */
+  watchGeneration?(onGeneration: (generation: number) => void): () => void;
   subscribe(onEvent: (event: SidecarEvent) => void): () => void;
   getState(): Promise<AgentState>;
   startPhase(phaseId: string, options?: PhaseStartOptions): Promise<PhaseStartResult>;
@@ -3589,6 +3591,19 @@ export function createPaneAgentClient(paneId: string): PaneAgentClient {
         expectedGeneration: expectedGeneration > 0 ? expectedGeneration : status.generation,
       });
       return awaitReadyGeneration(nextGeneration);
+    },
+    watchGeneration(onGeneration) {
+      let disposed = false;
+      const handler = (event: { payload: PaneLifecycleEvent }): void => {
+        if (!disposed && event.payload.paneId === paneId) onGeneration(event.payload.generation);
+      };
+      const unlistens = ["agent-pane-ready", "agent-pane-error"].map((name) =>
+        listenAppWindow<PaneLifecycleEvent>(name, handler).catch(() => null),
+      );
+      return () => {
+        disposed = true;
+        for (const pending of unlistens) void pending.then((unlisten) => unlisten?.());
+      };
     },
     subscribe(onEvent) {
       let activeSessionId: string | null = null;

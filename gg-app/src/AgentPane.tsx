@@ -2617,6 +2617,20 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     if (!needsProject) void hydrate();
   }, [needsProject, hydrate, hydrateNonce]);
 
+  // Native restarts a pane's session on its own (daemon respawn, Try again). Follow it, or
+  // the next session pick sends the old generation and native refuses it as stale.
+  useEffect(() => {
+    if (!client.watchGeneration) return;
+    return client.watchGeneration((generation) => {
+      const current = generationRef.current;
+      if (current == null || generation <= current) return;
+      const hydrating = hydrationEventsRef.current !== null;
+      adoptGeneration(generation);
+      // The newer generation retires an in-flight hydration; restart it instead of stalling.
+      if (hydrating) setHydrateNonce((nonce) => nonce + 1);
+    });
+  }, [adoptGeneration, client]);
+
   // Open Tasks in the deck, refreshing the list from the sidecar first so it
   // reflects any tasks the agent just added.
   const openTasks = useCallback(() => {

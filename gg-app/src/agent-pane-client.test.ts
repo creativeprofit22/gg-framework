@@ -940,6 +940,29 @@ describe("pane agent client", () => {
     expect(invoke).not.toHaveBeenCalledWith("agent_pane_create", expect.anything());
   });
 
+  it("reports only this pane's native generations until unwatched", async () => {
+    const c = createPaneAgentClient("right");
+    const onGeneration = vi.fn();
+    const stop = c.watchGeneration!(onGeneration);
+    await vi.waitFor(() => {
+      expect(listeners.has("agent-pane-ready")).toBe(true);
+      expect(listeners.has("agent-pane-error")).toBe(true);
+    });
+
+    listeners.get("agent-pane-ready")!({ payload: { paneId: "left", generation: 4 } });
+    listeners.get("agent-pane-ready")!({ payload: { paneId: "right", generation: 5 } });
+    listeners.get("agent-pane-error")!({
+      payload: { paneId: "right", generation: 6, error: "respawn failed" },
+    });
+    expect(onGeneration.mock.calls).toEqual([[5], [6]]);
+
+    stop();
+    await vi.waitFor(() => {
+      expect(listeners.has("agent-pane-ready")).toBe(false);
+      expect(listeners.has("agent-pane-error")).toBe(false);
+    });
+  });
+
   it("preserves lifecycle generations and rejects stale pane events", async () => {
     const c = createPaneAgentClient("right");
     let status = { ready: true, error: null, generation: 7, sessionId: "created" };

@@ -550,6 +550,61 @@ describe("AgentPane lifecycle", () => {
     expect(onUserTargetChange).toHaveBeenCalledTimes(2);
   });
 
+  it("picks a session with the generation native started on its own, not the stale one", async () => {
+    const pane = client("pane-1", 3);
+    let announce: ((generation: number) => void) | undefined;
+    pane.watchGeneration = vi.fn((onGeneration: (generation: number) => void) => {
+      announce = onGeneration;
+      return vi.fn();
+    });
+    vi.mocked(pane.selectWorkspace).mockResolvedValueOnce(4).mockResolvedValueOnce(8);
+    vi.mocked(pane.waitForReady).mockResolvedValue({
+      ready: true,
+      error: null,
+      generation: 4,
+      sessionId: "pane-1",
+    });
+    const onGenerationChange = vi.fn();
+    render(
+      <AgentPane
+        client={pane}
+        paneId="pane-1"
+        kind="auxiliary"
+        initialTarget={null}
+        workspaceOwnsSessionLifecycle
+        onGenerationChange={onGenerationChange}
+      />,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
+    await waitFor(() => expect(pane.listHistory).toHaveBeenCalled());
+    await waitFor(() => expect(onGenerationChange).toHaveBeenCalledWith(4));
+
+    // A daemon respawn restarts the pane natively as generation 7; a late older event is ignored.
+    vi.mocked(pane.waitForReady).mockResolvedValue({
+      ready: true,
+      error: null,
+      generation: 7,
+      sessionId: "pane-1",
+    });
+    act(() => {
+      announce!(7);
+      announce!(6);
+    });
+    expect(onGenerationChange).toHaveBeenLastCalledWith(7);
+
+    fireEvent.click(await screen.findByRole("button", { name: /Back to this project's sessions/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
+
+    await waitFor(() =>
+      expect(pane.selectWorkspace).toHaveBeenLastCalledWith(
+        { mode: "code", cwd: "/chosen", sessionPath: "/chosen.jsonl" },
+        7,
+      ),
+    );
+    await waitFor(() => expect(onGenerationChange).toHaveBeenCalledWith(8));
+  });
+
   it("reloads and replaces the pane model catalog after a native refresh", async () => {
     const pane = client("pane-1", 1);
     vi.mocked(pane.listModels).mockResolvedValue([

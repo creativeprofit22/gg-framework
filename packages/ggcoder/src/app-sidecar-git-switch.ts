@@ -6,6 +6,7 @@ import {
   type GitBranchSwitchBusy,
   type GitBranchSwitchResponse,
 } from "@kenkaiiii/gg-core/git-branch-contract";
+import type { GitBranchSnapshot } from "./utils/git-branches.js";
 
 /** One live pane whose working folder is the project being switched. */
 export interface GitSwitchPeer {
@@ -127,4 +128,36 @@ export function runGitBranchCreate(
     () => options.createBranch(options.cwd, options.branch),
     (result) => (result.status === "created" ? result : null),
   );
+}
+
+const BRANCH_SNAPSHOT_TTL_MS = 30_000;
+
+/**
+ * The branch list read when the switcher opens, reused while the user types a
+ * search so each keystroke doesn't re-run git. Opening always reads fresh.
+ */
+export class GitBranchSnapshotCache {
+  private readonly entries = new Map<string, { at: number; snapshot: GitBranchSnapshot | null }>();
+
+  constructor(
+    private readonly ttlMs = BRANCH_SNAPSHOT_TTL_MS,
+    private readonly now: () => number = Date.now,
+  ) {}
+
+  async get(
+    cwd: string,
+    options: { fresh: boolean },
+    read: () => Promise<GitBranchSnapshot | null>,
+  ): Promise<GitBranchSnapshot | null> {
+    const key = path.resolve(cwd);
+    const hit = this.entries.get(key);
+    if (!options.fresh && hit && this.now() - hit.at < this.ttlMs) return hit.snapshot;
+    const snapshot = await read();
+    this.entries.set(key, { at: this.now(), snapshot });
+    return snapshot;
+  }
+
+  invalidate(cwd: string): void {
+    this.entries.delete(path.resolve(cwd));
+  }
 }

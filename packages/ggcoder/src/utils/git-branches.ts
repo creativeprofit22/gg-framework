@@ -31,6 +31,20 @@ export interface ListGitBranchesOptions {
   query?: string;
   limit?: number;
   signal?: AbortSignal;
+  /** Called when the optional recent-use read fails; the list still loads. */
+  onReflogError?: (error: unknown) => void;
+}
+
+/** Everything the branch list needs, read once and filtered per search. */
+export interface GitBranchSnapshot {
+  currentName: string | null;
+  commit: string | null;
+  hasRemote: boolean;
+  defaultBranch: GitDefaultBranch | null;
+  /** Current first, then most recently used. */
+  local: GitLocalBranch[];
+  /** Newest commit first. */
+  remoteOnly: GitRemoteBranch[];
 }
 
 export interface ParsedBranchRef {
@@ -125,13 +139,12 @@ function isGitExit(error: unknown): boolean {
   return error instanceof BackgroundGitError && typeof error.code === "number" && !error.killed;
 }
 
-export async function listGitBranches(
+/** Read the full branch list once; null outside a work tree. */
+export async function readGitBranchSnapshot(
   cwd: string,
-  options: ListGitBranchesOptions = {},
-): Promise<GitBranchListResponse> {
+  options: Pick<ListGitBranchesOptions, "signal" | "onReflogError"> = {},
+): Promise<GitBranchSnapshot | null> {
   const { signal } = options;
-  const limit = clampGitBranchListLimit(options.limit);
-  const query = normalizeGitBranchQuery(options.query);
   const git = async (args: readonly string[]): Promise<string> =>
     (
       await runBackgroundGit(args, {
@@ -149,44 +162,47 @@ export async function listGitBranches(
     });
 
   const inside = await gitOrNull(["rev-parse", "--is-inside-work-tree"]);
-  if (inside?.trim() !== "true") return { status: "not-a-repo" };
+  if (inside?.trim() !== "true") return null;
 
-  const [headName, headCommit, remotes, localOut, reflogOut, remoteOut, remoteHead] =
-    await Promise.all([
-      // symbolic-ref answers even before the first commit; exit 1 means detached.
-      gitOrNull(["symbolic-ref", "--quiet", "--short", "HEAD"]),
-      gitOrNull(["rev-parse", "--verify", "--quiet", "--short", "HEAD"]),
-      git(["remote"]),
-      git(["for-each-ref", REF_FORMAT, "refs/heads"]),
-      gitOrNull([
-        "reflog",
-        "show",
-        "--date=unix",
-        "--format=%gd%x00%gs",
-        "-n",
-        String(REFLOG_ENTRY_LIMIT),
-        "HEAD",
-      ]),
-      git(["for-each-ref", REF_FORMAT, `refs/remotes/${REMOTE}`]),
-      gitOrNull(["symbolic-ref", "--quiet", "--short", `refs/remotes/${REMOTE}/HEAD`]),
-    ]);
+  const [headName, headCommit, remotes, refsOut, reflogOut, remoteHead] = await Promise.all([
+    // symbolic-ref answers even before the first commit; exit 1 means detached.
+    gitOrNull(["symbolic-ref", "--quiet", "--short", "HEAD"]),
+    gitOrNull(["rev-parse", "--verify", "--quiet", "--short", "HEAD"]),
+    git(["remote"]),
+    git(["for-each-ref", REF_FORMAT, "refs/heads", `refs/remotes/${REMOTE}`]),
+    // Only orders branches by recent use, so any failure (even a timeout) just skips it.
+    git([
+      "reflog",
+      "show",
+      "--date=unix",
+      "--format=%gd%x00%gs",
+      "-n",
+      String(REFLOG_ENTRY_LIMIT),
+      "HEAD",
+    ]).catch((error: unknown) => {
+      if (signal?.aborted) throw error;
+      if (!isGitExit(error)) options.onReflogError?.(error);
+      return null;
+    }),
+    gitOrNull(["symbolic-ref", "--quiet", "--short", `refs/remotes/${REMOTE}/HEAD`]),
+  ]);
 
   const currentName = headName?.trim() || null;
   const commit = headCommit?.trim() || null;
   const hasRemote = remotes.split(/\r?\n/).some((line) => line.trim() === REMOTE);
 
-  const localRefs = parseBranchRefs(localOut, LOCAL_PREFIX);
+  const localRefs = parseBranchRefs(refsOut, LOCAL_PREFIX);
   // An unborn branch (empty repo or orphan checkout) has no ref yet but is still current.
   if (currentName && !localRefs.some((ref) => ref.name === currentName)) {
     localRefs.push({ name: currentName, commitTime: null, upstream: null });
   }
   const localNames = new Set(localRefs.map((ref) => ref.name));
-  const ordered = orderLocalBranches(localRefs, parseReflogCheckouts(reflogOut ?? ""), currentName);
+  const local = orderLocalBranches(localRefs, parseReflogCheckouts(reflogOut ?? ""), currentName);
 
   const remoteRefs = hasRemote
-    ? parseBranchRefs(remoteOut, REMOTE_PREFIX).filter((ref) => ref.name !== "HEAD")
+    ? parseBranchRefs(refsOut, REMOTE_PREFIX).filter((ref) => ref.name !== "HEAD")
     : [];
-  const remoteOnlyAll: GitRemoteBranch[] = remoteRefs
+  const remoteOnly: GitRemoteBranch[] = remoteRefs
     .filter((ref) => !localNames.has(ref.name))
     .sort((a, b) => (b.commitTime ?? 0) - (a.commitTime ?? 0) || compareNames(a.name, b.name))
     .map((ref) => ({
@@ -207,23 +223,44 @@ export async function listGitBranches(
     if (fallback) defaultBranch = { name: fallback, source: "fallback" };
   }
 
-  const localMatches = ordered.filter((branch) => matches(branch.name, query));
-  const remoteMatches = remoteOnlyAll.filter((branch) => matches(branch.name, query));
+  return { currentName, commit, hasRemote, defaultBranch, local, remoteOnly };
+}
+
+/** The list response for one search over a snapshot (no git calls). */
+export function filterGitBranchSnapshot(
+  snapshot: GitBranchSnapshot | null,
+  options: Pick<ListGitBranchesOptions, "query" | "limit"> = {},
+): GitBranchListResponse {
+  if (!snapshot) return { status: "not-a-repo" };
+  const limit = clampGitBranchListLimit(options.limit);
+  const query = normalizeGitBranchQuery(options.query);
+  const localMatches = snapshot.local.filter((branch) => matches(branch.name, query));
+  const remoteMatches = snapshot.remoteOnly.filter((branch) => matches(branch.name, query));
   const local = localMatches.slice(0, limit);
   const remoteOnly = remoteMatches.slice(0, limit);
-
   return {
     status: "ok",
-    current: { name: currentName, detached: currentName === null, commit },
-    hasCommits: commit !== null,
-    remote: hasRemote ? REMOTE : null,
-    defaultBranch,
+    current: {
+      name: snapshot.currentName,
+      detached: snapshot.currentName === null,
+      commit: snapshot.commit,
+    },
+    hasCommits: snapshot.commit !== null,
+    remote: snapshot.hasRemote ? REMOTE : null,
+    defaultBranch: snapshot.defaultBranch,
     local,
     remoteOnly,
     localTotal: localMatches.length,
     remoteOnlyTotal: remoteMatches.length,
     truncated: local.length < localMatches.length || remoteOnly.length < remoteMatches.length,
   };
+}
+
+export async function listGitBranches(
+  cwd: string,
+  options: ListGitBranchesOptions = {},
+): Promise<GitBranchListResponse> {
+  return filterGitBranchSnapshot(await readGitBranchSnapshot(cwd, options), options);
 }
 
 // ── Branch switch ───────────────────────────────────────────────────────────

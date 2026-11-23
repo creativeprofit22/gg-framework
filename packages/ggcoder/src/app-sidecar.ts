@@ -224,12 +224,14 @@ import { getGitOverview } from "./utils/git-overview.js";
 import {
   checkGitBranchName,
   createGitBranch,
+  filterGitBranchSnapshot,
   InvalidGitBranchNameError,
-  listGitBranches,
+  readGitBranchSnapshot,
   switchGitBranch,
 } from "./utils/git-branches.js";
 import {
   GIT_SWITCH_RUN_BLOCKED_MESSAGE,
+  GitBranchSnapshotCache,
   gitSwitchRunConflictBody,
   gitSwitchRunningAt,
   runGitBranchCreate,
@@ -910,6 +912,7 @@ async function main(): Promise<void> {
   };
   /** Folders with a branch switch running; one at a time per folder. */
   const gitSwitchesInFlight = new Set<string>();
+  const gitBranchSnapshots = new GitBranchSnapshotCache();
   /**
    * Rename a conversation in every pane persisting to `sessionPath`, saving it
    * to the file once. A pane carries its name into later checkpoints, so an
@@ -1032,6 +1035,7 @@ async function main(): Promise<void> {
         busyAt,
         gitPeersAt,
         gitSwitchesInFlight,
+        gitBranchSnapshots,
         renameLiveSession,
         syncMcpServer,
         // The preview's own session has no window to preview from.
@@ -1586,6 +1590,8 @@ async function createSession(
     gitPeersAt: (cwd: string) => GitSwitchPeer[];
     /** Daemon-wide folders with a branch switch running. */
     gitSwitchesInFlight: Set<string>;
+    /** Daemon-wide branch lists, reused while the switcher searches. */
+    gitBranchSnapshots: GitBranchSnapshotCache;
     /** Rename an open conversation in every pane; false when none has it open. */
     renameLiveSession: (sessionPath: string, title: string) => Promise<boolean>;
     syncMcpServer: SessionRouteContext["syncMcpServer"];
@@ -1631,6 +1637,7 @@ async function createSession(
     busyAt,
     gitPeersAt,
     gitSwitchesInFlight,
+    gitBranchSnapshots,
     renameLiveSession,
     syncMcpServer,
   } = deps;
@@ -6632,10 +6639,20 @@ async function createSession(
       res.once("close", () => controller.abort());
       void (async () => {
         try {
-          const branches = await listGitBranches(cwd, {
-            query: normalizeGitBranchQuery(params.get("q")),
+          const query = normalizeGitBranchQuery(params.get("q"));
+          // Opening the switcher (no search) reads fresh; typing reuses that read.
+          const snapshot = await gitBranchSnapshots.get(cwd, { fresh: query === undefined }, () =>
+            readGitBranchSnapshot(cwd, {
+              signal: controller.signal,
+              onReflogError: (error) =>
+                log("WARN", "app-sidecar", "git reflog read failed; listing without recent use", {
+                  error: String(error),
+                }),
+            }),
+          );
+          const branches = filterGitBranchSnapshot(snapshot, {
+            query,
             limit: clampGitBranchListLimit(params.get("limit")),
-            signal: controller.signal,
           });
           if (!res.destroyed) json(res, 200, branches);
         } catch (error) {
@@ -6669,13 +6686,18 @@ async function createSession(
             branch,
             peers: gitPeersAt(cwd),
             switchBranch: switchGitBranch,
-            refresh: () => repoWatch.refreshGit(),
+            refresh: () => {
+              gitBranchSnapshots.invalidate(cwd);
+              return repoWatch.refreshGit();
+            },
             inFlight: gitSwitchesInFlight,
             onRefreshError: (error) =>
               log("WARN", "app-sidecar", "git refresh after branch switch failed", {
                 error: String(error),
               }),
           });
+          // Any other outcome (gone, busy, conflict) means the list may be stale; the switcher re-reads next.
+          gitBranchSnapshots.invalidate(cwd);
           if (result.status === "switched") {
             log("INFO", "app-sidecar", "switched git branch", {
               trackedRemote: String(result.trackedRemote !== null),
@@ -6724,13 +6746,18 @@ async function createSession(
             branch,
             peers: gitPeersAt(cwd),
             createBranch: createGitBranch,
-            refresh: () => repoWatch.refreshGit(),
+            refresh: () => {
+              gitBranchSnapshots.invalidate(cwd);
+              return repoWatch.refreshGit();
+            },
             inFlight: gitSwitchesInFlight,
             onRefreshError: (error) =>
               log("WARN", "app-sidecar", "git refresh after branch create failed", {
                 error: String(error),
               }),
           });
+          // A "taken" name means a branch appeared since the list was read.
+          gitBranchSnapshots.invalidate(cwd);
           if (result.status === "created") {
             log("INFO", "app-sidecar", "created git branch", {
               carriedChanges: String(result.carriedChanges),

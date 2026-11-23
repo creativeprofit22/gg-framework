@@ -4,6 +4,7 @@ import type {
 } from "@kenkaiiii/gg-core/git-branch-contract";
 import { describe, expect, it, vi, type Mock } from "vitest";
 import {
+  GitBranchSnapshotCache,
   runGitBranchCreate,
   runGitBranchSwitch,
   type GitSwitchPeer,
@@ -202,5 +203,43 @@ describe("runGitBranchCreate", () => {
       expect(deps.refresh).not.toHaveBeenCalled();
       expect(deps.inFlight.size).toBe(0);
     }
+  });
+});
+
+describe("GitBranchSnapshotCache", () => {
+  const snap = (name: string) => ({
+    currentName: name,
+    commit: "abc",
+    hasRemote: false,
+    defaultBranch: null,
+    local: [],
+    remoteOnly: [],
+  });
+
+  it("reads fresh on open, reuses the read for searches until it expires or is invalidated", async () => {
+    let now = 0;
+    const cache = new GitBranchSnapshotCache(1_000, () => now);
+    const read = vi.fn().mockResolvedValueOnce(snap("a")).mockResolvedValue(snap("b"));
+
+    expect((await cache.get("/p", { fresh: true }, read))?.currentName).toBe("a");
+    expect((await cache.get("/p", { fresh: false }, read))?.currentName).toBe("a");
+    expect(read).toHaveBeenCalledTimes(1);
+
+    now = 1_000;
+    expect((await cache.get("/p", { fresh: false }, read))?.currentName).toBe("b");
+    expect(read).toHaveBeenCalledTimes(2);
+
+    cache.invalidate("/p");
+    await cache.get("/p", { fresh: false }, read);
+    expect(read).toHaveBeenCalledTimes(3);
+    await cache.get("/p", { fresh: true }, read);
+    expect(read).toHaveBeenCalledTimes(4);
+  });
+
+  it("caches nothing when the read fails", async () => {
+    const cache = new GitBranchSnapshotCache();
+    const read = vi.fn().mockRejectedValueOnce(new Error("aborted")).mockResolvedValue(snap("a"));
+    await expect(cache.get("/p", { fresh: true }, read)).rejects.toThrow("aborted");
+    expect((await cache.get("/p", { fresh: false }, read))?.currentName).toBe("a");
   });
 });

@@ -7,7 +7,31 @@ import {
   isGitBranchListResponse,
   isGitBranchSwitchResponse,
 } from "@kenkaiiii/gg-core/git-branch-contract";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { BackgroundGitError } from "./git.js";
+import type * as GitModule from "./git.js";
+
+const failReflog = vi.hoisted(() => ({ on: false }));
+vi.mock("./git.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof GitModule>();
+  return {
+    ...actual,
+    runBackgroundGit: (
+      args: readonly string[],
+      options: Parameters<typeof actual.runBackgroundGit>[1],
+    ) =>
+      failReflog.on && args[0] === "reflog"
+        ? Promise.reject(
+            new actual.BackgroundGitError("Command failed: git reflog", {
+              code: null,
+              killed: true,
+              stdout: "",
+              stderr: "",
+            }),
+          )
+        : actual.runBackgroundGit(args, options),
+  };
+});
 import {
   checkGitBranchName,
   createGitBranch,
@@ -60,6 +84,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  failReflog.on = false;
   await rm(base, { recursive: true, force: true });
 });
 
@@ -574,5 +599,19 @@ describe("createGitBranch", { timeout: 60_000 }, () => {
     const outside = path.join(base, "plain");
     await mkdir(outside);
     expect(await createGitBranch(outside, "x")).toEqual({ status: "not-a-repo" });
+  });
+});
+
+// Regression: a timed-out reflog read (only used for recent-use order) failed the whole list.
+describe("listGitBranches when the reflog read fails", { timeout: 60_000 }, () => {
+  it("still lists branches and reports the failure", async () => {
+    commit("init", T0);
+    git(repo, ["branch", "feature"], { at: T0 + 10 });
+    failReflog.on = true;
+    const errors: unknown[] = [];
+    const result = await listOk({ onReflogError: (error) => errors.push(error) });
+    expect(result.local.map((branch) => branch.name)).toEqual(["main", "feature"]);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toBeInstanceOf(BackgroundGitError);
   });
 });

@@ -1148,6 +1148,34 @@ describe("a branch switched outside the agent", () => {
     expect(junkLimit.json.local as unknown[]).toHaveLength(4);
   });
 
+  it("re-reads searched branches after a switch or create finds the list stale", async () => {
+    initRepo();
+    git("branch", "gone");
+    const session = await createSession();
+    const search = async (q: string) =>
+      (
+        (await request("GET", `/git/branches?q=${q}`, { session })).json.local as Array<{
+          name: string;
+        }>
+      ).map((b) => b.name);
+    await request("GET", "/git/branches", { session });
+    git("branch", "-D", "gone");
+    expect(await search("gone")).toEqual(["gone"]); // searches reuse the opening read
+    const missing = await request("POST", "/git/switch", { session, body: { branch: "gone" } });
+    expect(missing.json.status).toBe("not-found");
+    expect(await search("gone")).toEqual([]);
+
+    await request("GET", "/git/branches", { session });
+    git("branch", "later");
+    expect(await search("later")).toEqual([]);
+    const taken = await request("POST", "/git/branches/create", {
+      session,
+      body: { branch: "later" },
+    });
+    expect(taken.json.status).toBe("taken");
+    expect(await search("later")).toEqual(["later"]);
+  });
+
   it("switches the branch from the app and tells every window on the folder", async () => {
     const outsider = await createSession();
     const outside = await request("POST", "/git/switch", {

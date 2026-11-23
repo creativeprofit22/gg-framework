@@ -294,6 +294,56 @@ describe("roadmap phase lease repository", () => {
     ).toMatchObject({ status: "phase-lease-lost", leaseRevision: 4 });
   });
 
+  it("reports a lost lease, not a plan mismatch, when a stale planning token renews after approval moved the lease", async () => {
+    const leases = repository();
+    const planning = { ...context, planId: null };
+    const acquired = await leases.execute({
+      cwd,
+      request: { ...request("acquire", "planning-acquire"), planId: null },
+      holder: holderA,
+      context: planning,
+    });
+    if (acquired.status !== "acquired" || !acquired.lease) throw new Error("expected lease");
+    const stale = { leaseId: acquired.lease.leaseId, fence: acquired.lease.fence };
+    // Approval saves plan-1 and the fresh implementation session takes the lease over.
+    const moved = await leases.execute({
+      cwd,
+      request: request("takeover", "fresh-session", stale),
+      holder: { ...holderA, sessionId: "session-fresh", sessionPath: "/sessions/fresh.jsonl" },
+      context,
+    });
+    expect(moved).toMatchObject({ status: "acquired", lease: { fence: stale.fence + 1 } });
+    const staleRenew = { ...request("renew", "orphan-renew", stale), planId: null };
+    await expect(
+      leases.execute({ cwd, request: staleRenew, holder: holderA, context }),
+    ).resolves.toMatchObject({ status: "phase-lease-lost" });
+    await expect(
+      leases.execute({
+        cwd,
+        request: staleRenew,
+        holder: holderA,
+        context,
+        loadCurrentContext: async () => context,
+      }),
+    ).resolves.toMatchObject({ status: "phase-lease-lost" });
+    if (moved.status !== "acquired" || !moved.lease) throw new Error("expected lease");
+    // The current holder with an outdated plan id still gets a plan mismatch.
+    await expect(
+      leases.execute({
+        cwd,
+        request: {
+          ...request("renew", "owner-old-plan", {
+            leaseId: moved.lease.leaseId,
+            fence: moved.lease.fence,
+          }),
+          planId: null,
+        },
+        holder: { ...holderA, sessionId: "session-fresh", sessionPath: "/sessions/fresh.jsonl" },
+        context,
+      }),
+    ).resolves.toEqual({ status: "plan-mismatch" });
+  });
+
   it("executes mutations only for the current unexpired fence", async () => {
     const leases = repository();
     const acquired = await leases.execute({

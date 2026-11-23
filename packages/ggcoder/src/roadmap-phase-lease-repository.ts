@@ -291,7 +291,12 @@ export class RoadmapPhaseLeaseRepository {
     }
     // Runner admission rejects terminal phases in the binding service. The lease
     // itself also fences explicit status updates and idempotent retries on Done.
-    if (request.action !== "release" && request.planId !== context.planId) {
+    // Renewals check the plan under the lock, after lease ownership.
+    if (
+      request.action !== "release" &&
+      request.action !== "renew" &&
+      request.planId !== context.planId
+    ) {
       return { status: "plan-mismatch" };
     }
 
@@ -304,6 +309,17 @@ export class RoadmapPhaseLeaseRepository {
         return { status: "corrupt", primary: loaded.primary, backup: loaded.backup };
       }
       const state = loaded.state;
+      // A stale token means the lease moved on; say so rather than blame the plan.
+      const planMismatch = (): PhaseLeaseOutcome => {
+        const current = state.leases[request.phaseId] ?? null;
+        if (
+          request.action === "renew" &&
+          (!current || !tokenMatches(request, current) || !sameHolder(current.holder, input.holder))
+        ) {
+          return leaseFailure("phase-lease-lost", context, state, current);
+        }
+        return { status: "plan-mismatch" };
+      };
       if (input.loadCurrentContext && request.action !== "release") {
         const fresh = await input.loadCurrentContext();
         if (!fresh || fresh.phaseId !== request.phaseId) return { status: "phase-not-found" };
@@ -313,7 +329,7 @@ export class RoadmapPhaseLeaseRepository {
             roadmapRevision: fresh.roadmapRevision,
             currentProjectKey: fresh.projectKey,
           };
-        if (fresh.planId !== request.planId) return { status: "plan-mismatch" };
+        if (fresh.planId !== request.planId) return planMismatch();
         if (request.expectedRevision < (fresh.lastDeletionRevision ?? 0))
           return {
             status: "stale-revision",
@@ -322,6 +338,7 @@ export class RoadmapPhaseLeaseRepository {
           };
         context = fresh;
       }
+      if (request.action === "renew" && request.planId !== context.planId) return planMismatch();
       if (request.action === "inspect") {
         if (request.expectedRevision !== context.roadmapRevision) {
           return {

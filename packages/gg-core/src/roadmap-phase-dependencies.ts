@@ -202,6 +202,23 @@ export function validateRoadmapEditDependencies(
   );
 }
 
+/** Validates the graph after several phases' links change together, so joint cycles are caught. */
+export function validateRoadmapEditBatchDependencies(
+  currentPhases: readonly DependencyPhase[],
+  changes: readonly { phaseId: string; dependsOn: readonly string[] }[],
+): NotesValidationError | null {
+  const byId = new Map(changes.map((change) => [change.phaseId, change.dependsOn]));
+  return validateRoadmapPhaseDependencies(
+    currentPhases.map((phase) => {
+      const dependsOn = byId.get(phase.id);
+      if (dependsOn === undefined) return phase;
+      const next: DependencyPhase = { ...phase, dependsOn: [...dependsOn] };
+      if (dependsOn.length === 0) delete next.dependsOn;
+      return next;
+    }),
+  );
+}
+
 /** Plain warnings when a reorder puts a phase above a prerequisite or below a dependent. */
 export function roadmapOrderDependencyWarnings(
   phases: readonly DependencyPhase[],

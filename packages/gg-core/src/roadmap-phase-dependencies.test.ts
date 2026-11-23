@@ -6,6 +6,7 @@ import {
   roadmapOrderDependencyWarnings,
   validateRoadmapDraftDependencies,
   validateRoadmapEditDependencies,
+  validateRoadmapEditBatchDependencies,
   hasRoadmapPhaseDependencyLinks,
   isPhaseDeletionOutcome,
   listUnfinishedPrerequisites,
@@ -419,6 +420,31 @@ describe("draft, edit and move dependency checks", () => {
     expect(validateRoadmapEditDependencies(doc.phases, "b", [])).toBeNull();
     expect(validateRoadmapEditDependencies(doc.phases, "a", ["b"])?.message).toMatch(/circular/);
     expect(validateRoadmapEditDependencies(doc.phases, "a", ["a"])?.message).toMatch(/itself/);
+  });
+
+  it("rejects a cycle that two batch edits only form together", async () => {
+    const doc = await document();
+    phase(doc, "b").dependsOn = ["a"];
+    // Each edit alone is valid; together a → c → a is circular.
+    expect(validateRoadmapEditDependencies(doc.phases, "a", ["c"])).toBeNull();
+    expect(validateRoadmapEditDependencies(doc.phases, "c", ["a"])).toBeNull();
+    expect(
+      validateRoadmapEditBatchDependencies(doc.phases, [
+        { phaseId: "a", dependsOn: ["c"] },
+        { phaseId: "c", dependsOn: ["a"] },
+      ])?.message,
+    ).toMatch(/circular/);
+    // Removing one link in the same batch breaks the cycle it would otherwise close.
+    expect(
+      validateRoadmapEditBatchDependencies(doc.phases, [
+        { phaseId: "b", dependsOn: [] },
+        { phaseId: "a", dependsOn: ["b"] },
+      ]),
+    ).toBeNull();
+    expect(
+      validateRoadmapEditBatchDependencies(doc.phases, [{ phaseId: "c", dependsOn: ["ghost"] }])
+        ?.message,
+    ).toMatch(/missing phase ghost/);
   });
 
   it("warns when a move puts a phase above a prerequisite or below a dependent", async () => {

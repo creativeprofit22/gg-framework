@@ -257,8 +257,64 @@ export interface RoadmapPhaseMoveDraft {
   status: "pending" | "stale";
 }
 
+/** Batch proposals hold 2..this many edits or moves; one item is proposed as a single draft. */
+export const ROADMAP_PHASE_BATCH_MAX_ITEMS = ROADMAP_PROPOSED_PHASES_MAX_ITEMS;
+
+/** One phase's part of an edit batch; same rules as a single edit draft. */
+export interface RoadmapPhaseEditBatchItem {
+  phaseId: string;
+  phaseTitle: string;
+  basedOnUpdatedAt: string;
+  changes: RoadmapPhaseFieldChange[];
+}
+
+/** A pending proposal to change fields of several existing phases, saved all-or-nothing. */
+export interface RoadmapPhaseEditBatchDraft {
+  kind: "edit-batch";
+  id: string;
+  projectKey: string;
+  basedOnRevision: number;
+  createdAt: string;
+  createdBySessionId: string;
+  summary: string;
+  /** 2..ROADMAP_PHASE_BATCH_MAX_ITEMS edits with unique phase IDs. */
+  edits: RoadmapPhaseEditBatchItem[];
+  /** Phases named by any `dependsOn` change; present exactly when such a change lists a link. */
+  dependencyPhases?: RoadmapDependencyPhaseEntry[];
+  status: "pending" | "stale";
+}
+
+/** One step of a move batch, applied to the order left by the previous step. */
+export interface RoadmapPhaseMoveBatchStep {
+  phaseId: string;
+  phaseTitle: string;
+  position: RoadmapPhaseMovePosition;
+  targetPhaseId: string;
+  targetPhaseTitle: string;
+}
+
+/** A pending proposal to move several existing phases in listed order, saved all-or-nothing. */
+export interface RoadmapPhaseMoveBatchDraft {
+  kind: "move-batch";
+  id: string;
+  projectKey: string;
+  basedOnRevision: number;
+  createdAt: string;
+  createdBySessionId: string;
+  summary: string;
+  /** 2..ROADMAP_PHASE_BATCH_MAX_ITEMS steps, each moving a different phase. */
+  moves: RoadmapPhaseMoveBatchStep[];
+  /** `after` is `before` with every step replayed; any order change since makes it stale. */
+  orderPreview: RoadmapPhaseOrderPreview;
+  status: "pending" | "stale";
+}
+
 export type RoadmapPhaseDraft =
-  RoadmapPhaseCreateDraft | RoadmapPhaseEditDraft | RoadmapPhaseMoveDraft;
+  | RoadmapPhaseCreateDraft
+  | RoadmapPhaseEditDraft
+  | RoadmapPhaseMoveDraft
+  | RoadmapPhaseEditBatchDraft
+  | RoadmapPhaseMoveBatchDraft;
 
 export interface RoadmapPhaseMoveRequest {
   expectedRevision: number;
@@ -286,6 +342,30 @@ export interface RoadmapPhaseEditRequest {
   dependsOn?: string[];
 }
 
+export type RoadmapPhaseEditBatchItemRequest = Omit<
+  RoadmapPhaseEditRequest,
+  "expectedRevision" | "summary"
+>;
+
+export interface RoadmapPhaseEditBatchRequest {
+  expectedRevision: number;
+  summary: string;
+  /** 1..ROADMAP_PHASE_BATCH_MAX_ITEMS edits with unique phase IDs. */
+  edits: RoadmapPhaseEditBatchItemRequest[];
+}
+
+export type RoadmapPhaseMoveBatchStepRequest = Omit<
+  RoadmapPhaseMoveRequest,
+  "expectedRevision" | "summary"
+>;
+
+export interface RoadmapPhaseMoveBatchRequest {
+  expectedRevision: number;
+  summary: string;
+  /** 1..ROADMAP_PHASE_BATCH_MAX_ITEMS steps, each moving a different phase. */
+  moves: RoadmapPhaseMoveBatchStepRequest[];
+}
+
 export type RoadmapPhaseNotEditableReason = "missing" | "deleted" | "done" | "archived";
 
 export type RoadmapPhaseEditApplication =
@@ -295,8 +375,9 @@ export type RoadmapPhaseEditApplication =
 
 export type RoadmapPhaseDraftApprovalResult =
   | { status: "created"; revision: number; phaseIds: string[] }
-  | { status: "edited"; revision: number; phaseId: string }
-  | { status: "moved"; revision: number; phaseId: string }
+  /** Batch approvals add `phaseIds` (every changed phase, `phaseId` first). */
+  | { status: "edited"; revision: number; phaseId: string; phaseIds?: string[] }
+  | { status: "moved"; revision: number; phaseId: string; phaseIds?: string[] }
   | { status: "phase-changed"; phaseId: string }
   | { status: "phase-not-editable"; phaseId: string; reason: RoadmapPhaseNotEditableReason }
   | { status: "already-decided"; decision: "approved" | "rejected" }
@@ -410,6 +491,28 @@ const MOVE_DRAFT_KEYS = [
   "orderPreview",
   "status",
 ] as const;
+const BATCH_DRAFT_BASE_KEYS = [
+  "kind",
+  "id",
+  "projectKey",
+  "basedOnRevision",
+  "createdAt",
+  "createdBySessionId",
+  "summary",
+  "status",
+] as const;
+const EDIT_BATCH_REQUEST_KEYS = ["expectedRevision", "summary", "edits"] as const;
+const EDIT_BATCH_ITEM_KEYS = ["phaseId", "phaseTitle", "basedOnUpdatedAt", "changes"] as const;
+const EDIT_BATCH_DRAFT_KEYS = [...BATCH_DRAFT_BASE_KEYS, "edits"] as const;
+const MOVE_BATCH_REQUEST_KEYS = ["expectedRevision", "summary", "moves"] as const;
+const MOVE_BATCH_STEP_KEYS = [
+  "phaseId",
+  "phaseTitle",
+  "position",
+  "targetPhaseId",
+  "targetPhaseTitle",
+] as const;
+const MOVE_BATCH_DRAFT_KEYS = [...BATCH_DRAFT_BASE_KEYS, "moves", "orderPreview"] as const;
 const ORDER_PREVIEW_KEYS = ["before", "after"] as const;
 const ORDER_ENTRY_KEYS = ["phaseId", "title"] as const;
 const DEPENDENCY_PHASE_ENTRY_KEYS = ["phaseId", "title", "archived"] as const;
@@ -492,13 +595,31 @@ export function isRoadmapPhaseDraftRequest(value: unknown): value is RoadmapPhas
   return validateRoadmapPhaseDraftRequest(value).ok;
 }
 
-/** Validates either draft kind; drafts without `kind: "edit"` are create drafts. */
+/** Validates any draft kind; drafts without `kind` are create drafts. */
 export function validateRoadmapPhaseDraft(
   value: unknown,
 ): RoadmapWorkflowValidationResult<RoadmapPhaseDraft> {
   if (isRecord(value) && value.kind === "edit") return validateRoadmapPhaseEditDraft(value);
   if (isRecord(value) && value.kind === "move") return validateRoadmapPhaseMoveDraft(value);
+  if (isRecord(value) && value.kind === "edit-batch") {
+    return validateRoadmapPhaseEditBatchDraft(value);
+  }
+  if (isRecord(value) && value.kind === "move-batch") {
+    return validateRoadmapPhaseMoveBatchDraft(value);
+  }
   return validateRoadmapPhaseCreateDraft(value);
+}
+
+export function isRoadmapPhaseEditBatchDraft(
+  value: RoadmapPhaseDraft,
+): value is RoadmapPhaseEditBatchDraft {
+  return "kind" in value && value.kind === "edit-batch";
+}
+
+export function isRoadmapPhaseMoveBatchDraft(
+  value: RoadmapPhaseDraft,
+): value is RoadmapPhaseMoveBatchDraft {
+  return "kind" in value && value.kind === "move-batch";
 }
 
 export function isRoadmapPhaseMoveDraft(value: RoadmapPhaseDraft): value is RoadmapPhaseMoveDraft {
@@ -611,32 +732,10 @@ export function validateRoadmapPhaseEditDraft(
   if (value.status !== "pending" && value.status !== "stale") {
     return invalid("status", 'expected "pending" or "stale"');
   }
-  if (
-    !Array.isArray(value.changes) ||
-    value.changes.length < 1 ||
-    value.changes.length > ROADMAP_PHASE_EDIT_FIELDS.length
-  ) {
-    return invalid("changes", `expected 1..${ROADMAP_PHASE_EDIT_FIELDS.length} field changes`);
-  }
-  const changes: RoadmapPhaseFieldChange[] = [];
-  let previousFieldIndex = -1;
-  for (let index = 0; index < value.changes.length; index += 1) {
-    const change = validateFieldChange(value.changes[index], `changes[${index}]`);
-    if (!change.ok) return change;
-    const fieldIndex = ROADMAP_PHASE_EDIT_FIELDS.indexOf(change.value.field);
-    if (fieldIndex <= previousFieldIndex) {
-      return invalid(`changes[${index}].field`, "expected unique fields in canonical order");
-    }
-    previousFieldIndex = fieldIndex;
-    if (change.value.field === "dependsOn" && change.value.after.includes(phaseId.value)) {
-      return invalid(`changes[${index}].after`, "a phase cannot depend on itself");
-    }
-    changes.push(change.value);
-  }
-  const dependencyChange = changes.find((change) => change.field === "dependsOn");
-  const listsLinks =
-    dependencyChange !== undefined &&
-    dependencyChange.before.length + dependencyChange.after.length > 0;
+  const validatedChanges = validateEditChanges(value.changes, "changes", phaseId.value);
+  if (!validatedChanges.ok) return validatedChanges;
+  const changes = validatedChanges.value;
+  const listsLinks = changesListLinks(changes);
   const dependencyPhases = validateOptionalDependencyPhases(
     value.dependencyPhases,
     listsLinks,
@@ -659,6 +758,216 @@ export function validateRoadmapPhaseEditDraft(
       changes,
       ...(dependencyPhases.value ? { dependencyPhases: dependencyPhases.value } : {}),
       status: value.status,
+    },
+  };
+}
+
+/** 1..5 field changes with unique fields in canonical order; a phase never depends on itself. */
+function validateEditChanges(
+  value: unknown,
+  path: string,
+  phaseId: string,
+): RoadmapWorkflowValidationResult<RoadmapPhaseFieldChange[]> {
+  if (
+    !Array.isArray(value) ||
+    value.length < 1 ||
+    value.length > ROADMAP_PHASE_EDIT_FIELDS.length
+  ) {
+    return invalid(path, `expected 1..${ROADMAP_PHASE_EDIT_FIELDS.length} field changes`);
+  }
+  const changes: RoadmapPhaseFieldChange[] = [];
+  let previousFieldIndex = -1;
+  for (let index = 0; index < value.length; index += 1) {
+    const change = validateFieldChange(value[index], `${path}[${index}]`);
+    if (!change.ok) return change;
+    const fieldIndex = ROADMAP_PHASE_EDIT_FIELDS.indexOf(change.value.field);
+    if (fieldIndex <= previousFieldIndex) {
+      return invalid(`${path}[${index}].field`, "expected unique fields in canonical order");
+    }
+    previousFieldIndex = fieldIndex;
+    if (change.value.field === "dependsOn" && change.value.after.includes(phaseId)) {
+      return invalid(`${path}[${index}].after`, "a phase cannot depend on itself");
+    }
+    changes.push(change.value);
+  }
+  return { ok: true, value: changes };
+}
+
+function changesListLinks(changes: readonly RoadmapPhaseFieldChange[]): boolean {
+  const dependencyChange = changes.find((change) => change.field === "dependsOn");
+  return (
+    dependencyChange !== undefined &&
+    dependencyChange.before.length + dependencyChange.after.length > 0
+  );
+}
+
+/** Prefixes an item's error path; `$` becomes the item itself. */
+function prefixedPath(prefix: string, path: string): string {
+  return path === "$" ? prefix : `${prefix}.${path}`;
+}
+
+export function validateRoadmapPhaseEditBatchRequest(
+  value: unknown,
+): RoadmapWorkflowValidationResult<RoadmapPhaseEditBatchRequest> {
+  if (!isRecordWithExactKeys(value, EDIT_BATCH_REQUEST_KEYS)) {
+    return invalid("$", `expected exactly: ${EDIT_BATCH_REQUEST_KEYS.join(", ")}`);
+  }
+  if (!isNonNegativeInteger(value.expectedRevision)) {
+    return invalid("expectedRevision", "expected a non-negative integer");
+  }
+  const summary = normalizedBoundedString(
+    value.summary,
+    ROADMAP_PHASE_DRAFT_SUMMARY_MAX_LENGTH,
+    "summary",
+  );
+  if (!summary.ok) return summary;
+  if (
+    !Array.isArray(value.edits) ||
+    value.edits.length < 1 ||
+    value.edits.length > ROADMAP_PHASE_BATCH_MAX_ITEMS
+  ) {
+    return invalid("edits", `expected 1..${ROADMAP_PHASE_BATCH_MAX_ITEMS} edits`);
+  }
+  const seen = new Set<string>();
+  const edits: RoadmapPhaseEditBatchItemRequest[] = [];
+  for (let index = 0; index < value.edits.length; index += 1) {
+    const path = `edits[${index}]`;
+    const item: unknown = value.edits[index];
+    if (!isRecordWithKeys(item, ["phaseId"], ROADMAP_PHASE_EDIT_FIELDS)) {
+      return invalid(
+        path,
+        `expected phaseId and optionally ${ROADMAP_PHASE_EDIT_FIELDS.join(", ")}`,
+      );
+    }
+    const validated = validateRoadmapPhaseEditRequest({
+      ...item,
+      expectedRevision: value.expectedRevision,
+      summary: summary.value,
+    });
+    if (!validated.ok) {
+      return invalid(prefixedPath(path, validated.error.path), validated.error.message);
+    }
+    const { expectedRevision: _revision, summary: _summary, ...edit } = validated.value;
+    if (seen.has(edit.phaseId)) {
+      return invalid(`${path}.phaseId`, "expected each phase at most once");
+    }
+    seen.add(edit.phaseId);
+    edits.push(edit);
+  }
+  return {
+    ok: true,
+    value: { expectedRevision: value.expectedRevision, summary: summary.value, edits },
+  };
+}
+
+interface BatchDraftHeader {
+  id: string;
+  projectKey: string;
+  basedOnRevision: number;
+  createdAt: string;
+  createdBySessionId: string;
+  summary: string;
+  status: "pending" | "stale";
+}
+
+function validateBatchDraftHeader(
+  value: Record<string, unknown>,
+): RoadmapWorkflowValidationResult<BatchDraftHeader> {
+  const id = boundedIdentifier(value.id, "id");
+  if (!id.ok) return id;
+  const projectKey = normalizedBoundedString(value.projectKey, 4_096, "projectKey");
+  if (!projectKey.ok) return projectKey;
+  if (!isNonNegativeInteger(value.basedOnRevision)) {
+    return invalid("basedOnRevision", "expected a non-negative integer");
+  }
+  if (!isIsoTimestamp(value.createdAt)) return invalid("createdAt", "expected an ISO timestamp");
+  const sessionId = boundedIdentifier(value.createdBySessionId, "createdBySessionId");
+  if (!sessionId.ok) return sessionId;
+  const summary = normalizedBoundedString(
+    value.summary,
+    ROADMAP_PHASE_DRAFT_SUMMARY_MAX_LENGTH,
+    "summary",
+  );
+  if (!summary.ok) return summary;
+  if (value.status !== "pending" && value.status !== "stale") {
+    return invalid("status", 'expected "pending" or "stale"');
+  }
+  return {
+    ok: true,
+    value: {
+      id: id.value,
+      projectKey: projectKey.value,
+      basedOnRevision: value.basedOnRevision,
+      createdAt: value.createdAt,
+      createdBySessionId: sessionId.value,
+      summary: summary.value,
+      status: value.status,
+    },
+  };
+}
+
+export function validateRoadmapPhaseEditBatchDraft(
+  value: unknown,
+): RoadmapWorkflowValidationResult<RoadmapPhaseEditBatchDraft> {
+  if (!isRecordWithKeys(value, EDIT_BATCH_DRAFT_KEYS, EDIT_DRAFT_OPTIONAL_KEYS)) {
+    return invalid(
+      "$",
+      `expected ${EDIT_BATCH_DRAFT_KEYS.join(", ")} and optionally ${EDIT_DRAFT_OPTIONAL_KEYS.join(", ")}`,
+    );
+  }
+  if (value.kind !== "edit-batch") return invalid("kind", 'expected "edit-batch"');
+  const header = validateBatchDraftHeader(value);
+  if (!header.ok) return header;
+  if (
+    !Array.isArray(value.edits) ||
+    value.edits.length < 2 ||
+    value.edits.length > ROADMAP_PHASE_BATCH_MAX_ITEMS
+  ) {
+    return invalid("edits", `expected 2..${ROADMAP_PHASE_BATCH_MAX_ITEMS} edits`);
+  }
+  const seen = new Set<string>();
+  const edits: RoadmapPhaseEditBatchItem[] = [];
+  for (let index = 0; index < value.edits.length; index += 1) {
+    const path = `edits[${index}]`;
+    const item: unknown = value.edits[index];
+    if (!isRecordWithExactKeys(item, EDIT_BATCH_ITEM_KEYS)) {
+      return invalid(path, `expected exactly: ${EDIT_BATCH_ITEM_KEYS.join(", ")}`);
+    }
+    const phaseId = boundedIdentifier(item.phaseId, `${path}.phaseId`);
+    if (!phaseId.ok) return phaseId;
+    if (seen.has(phaseId.value)) {
+      return invalid(`${path}.phaseId`, "expected each phase at most once");
+    }
+    seen.add(phaseId.value);
+    const phaseTitle = looseBeforeString(item.phaseTitle, `${path}.phaseTitle`);
+    if (!phaseTitle.ok) return phaseTitle;
+    if (!isIsoTimestamp(item.basedOnUpdatedAt)) {
+      return invalid(`${path}.basedOnUpdatedAt`, "expected an ISO timestamp");
+    }
+    const changes = validateEditChanges(item.changes, `${path}.changes`, phaseId.value);
+    if (!changes.ok) return changes;
+    edits.push({
+      phaseId: phaseId.value,
+      phaseTitle: phaseTitle.value,
+      basedOnUpdatedAt: item.basedOnUpdatedAt,
+      changes: changes.value,
+    });
+  }
+  const dependencyPhases = validateOptionalDependencyPhases(
+    value.dependencyPhases,
+    edits.some((edit) => changesListLinks(edit.changes)),
+    "a dependsOn change lists links",
+  );
+  if (!dependencyPhases.ok) return dependencyPhases;
+  const { status, ...fields } = header.value;
+  return {
+    ok: true,
+    value: {
+      kind: "edit-batch",
+      ...fields,
+      edits,
+      ...(dependencyPhases.value ? { dependencyPhases: dependencyPhases.value } : {}),
+      status,
     },
   };
 }
@@ -719,29 +1028,74 @@ export function applyRoadmapPhaseEdit(
   if (reason !== null || !phase) {
     return { status: "phase-not-editable", phaseId: draft.phaseId, reason: reason ?? "missing" };
   }
-  const unchanged =
-    phase.updatedAt === draft.basedOnUpdatedAt &&
-    draft.changes.every((change) =>
+  if (!editItemUnchanged(phase, draft)) return { status: "phase-changed", phaseId: draft.phaseId };
+
+  const updatedAt = strictlyLaterTimestamp(timestamp, phase.updatedAt);
+  const phases = [...document.phases];
+  phases[index] = withEditChanges(phase, draft.changes, updatedAt);
+  return { status: "ok", document: { ...document, phases, updatedAt } };
+}
+
+/**
+ * Applies an approved edit batch all-or-nothing: every phase must still be editable and
+ * unchanged since the proposal. All edited phases share one strictly later `updatedAt`.
+ */
+export function applyRoadmapPhaseEditBatch(
+  document: NotesDocumentV3,
+  draft: RoadmapPhaseEditBatchDraft,
+  timestamp: string,
+): RoadmapPhaseEditApplication {
+  const indexes: number[] = [];
+  let updatedAt = timestamp;
+  for (const edit of draft.edits) {
+    const index = document.phases.findIndex((candidate) => candidate.id === edit.phaseId);
+    const phase = document.phases[index];
+    const reason = classifyRoadmapPhaseEditability(phase);
+    if (reason !== null || !phase) {
+      return { status: "phase-not-editable", phaseId: edit.phaseId, reason: reason ?? "missing" };
+    }
+    if (!editItemUnchanged(phase, edit)) return { status: "phase-changed", phaseId: edit.phaseId };
+    indexes.push(index);
+    updatedAt = strictlyLaterTimestamp(updatedAt, phase.updatedAt);
+  }
+  const phases = [...document.phases];
+  draft.edits.forEach((edit, position) => {
+    const index = indexes[position]!;
+    phases[index] = withEditChanges(phases[index]!, edit.changes, updatedAt);
+  });
+  return { status: "ok", document: { ...document, phases, updatedAt } };
+}
+
+function editItemUnchanged(
+  phase: NotesPhase,
+  edit: Pick<RoadmapPhaseEditBatchItem, "basedOnUpdatedAt" | "changes">,
+): boolean {
+  return (
+    phase.updatedAt === edit.basedOnUpdatedAt &&
+    edit.changes.every((change) =>
       change.field === "doneWhen"
         ? stringArraysEqual(phase.doneWhen, change.before)
         : change.field === "dependsOn"
           ? stringArraysEqual(phase.dependsOn ?? [], change.before)
           : phase[change.field] === change.before,
-    );
-  if (!unchanged) return { status: "phase-changed", phaseId: draft.phaseId };
+    )
+  );
+}
 
-  const updatedAt = strictlyLaterTimestamp(timestamp, phase.updatedAt);
+function withEditChanges(
+  phase: NotesPhase,
+  changes: readonly RoadmapPhaseFieldChange[],
+  updatedAt: string,
+): NotesPhase {
   const nextPhase: NotesPhase = { ...phase, updatedAt };
-  for (const change of draft.changes) {
+  for (const change of changes) {
     if (change.field === "doneWhen") nextPhase.doneWhen = [...change.after];
     else if (change.field === "dependsOn") {
       if (change.after.length === 0) delete nextPhase.dependsOn;
       else nextPhase.dependsOn = [...change.after];
     } else nextPhase[change.field] = change.after;
   }
-  const phases = [...document.phases];
-  phases[index] = nextPhase;
-  return { status: "ok", document: { ...document, phases, updatedAt } };
+  return nextPhase;
 }
 
 /** On the Roadmap: present (not deleted) and not archived. */
@@ -910,6 +1264,54 @@ export function moveRoadmapPhaseOrderEntry(
   return remaining.map((entry) => ({ ...entry }));
 }
 
+export interface RoadmapPhaseMoveStep {
+  phaseId: string;
+  placement: RoadmapPhasePlacement;
+}
+
+/**
+ * Plans several moves in order, each checked with the single-move rules against the order
+ * left by the previous step. Steps that cancel each other out are refused as `no-change`.
+ */
+export function planRoadmapPhaseMoves<
+  T extends Pick<NotesPhase, "id" | "status" | "deletion" | "archivedAt" | "order">,
+>(
+  phases: readonly T[],
+  steps: readonly RoadmapPhaseMoveStep[],
+): { ok: true; phases: T[] } | { ok: false; refusal: RoadmapPhaseOrderRefusal; index: number } {
+  let current: T[] = [...phases];
+  for (let index = 0; index < steps.length; index += 1) {
+    const step = steps[index]!;
+    const planned = planRoadmapPhaseMove(current, step.phaseId, step.placement);
+    if (!planned.ok) return { ok: false, refusal: planned.refusal, index };
+    current = planned.phases;
+  }
+  const roadmapIds = (list: readonly T[]) =>
+    list.filter(isRoadmapPhaseOnRoadmap).map((phase) => phase.id);
+  if (steps.length > 0 && stringArraysEqual(roadmapIds(phases), roadmapIds(current))) {
+    return {
+      ok: false,
+      refusal: { reason: "no-change", phaseId: steps[0]!.phaseId },
+      index: steps.length - 1,
+    };
+  }
+  return { ok: true, phases: current };
+}
+
+/** Replays move steps on an order list; null when a step is impossible or changes nothing. */
+export function replayRoadmapPhaseOrderMoves(
+  entries: readonly RoadmapPhaseOrderEntry[],
+  steps: readonly RoadmapPhaseMoveStep[],
+): RoadmapPhaseOrderEntry[] | null {
+  let current = entries.map((entry) => ({ ...entry }));
+  for (const step of steps) {
+    const next = moveRoadmapPhaseOrderEntry(current, step.phaseId, step.placement);
+    if (!next || orderEntriesEqual(next, current)) return null;
+    current = next;
+  }
+  return current;
+}
+
 export function roadmapPhaseMovePlacement(
   request: Pick<RoadmapPhaseMoveRequest, "beforePhaseId" | "afterPhaseId">,
 ): RoadmapPhasePlacement {
@@ -1067,6 +1469,189 @@ export function applyRoadmapPhaseMove(
   const approvedOrder = draft.orderPreview.after.map((entry) => entry.phaseId);
   if (!stringArraysEqual(nextOrder, approvedOrder)) {
     return { status: "phase-changed", phaseId: draft.phaseId };
+  }
+  return {
+    status: "ok",
+    document: {
+      ...document,
+      phases: planned.phases,
+      updatedAt: strictlyLaterTimestamp(timestamp, document.updatedAt),
+    },
+  };
+}
+
+export function validateRoadmapPhaseMoveBatchRequest(
+  value: unknown,
+): RoadmapWorkflowValidationResult<RoadmapPhaseMoveBatchRequest> {
+  if (!isRecordWithExactKeys(value, MOVE_BATCH_REQUEST_KEYS)) {
+    return invalid("$", `expected exactly: ${MOVE_BATCH_REQUEST_KEYS.join(", ")}`);
+  }
+  if (!isNonNegativeInteger(value.expectedRevision)) {
+    return invalid("expectedRevision", "expected a non-negative integer");
+  }
+  const summary = normalizedBoundedString(
+    value.summary,
+    ROADMAP_PHASE_DRAFT_SUMMARY_MAX_LENGTH,
+    "summary",
+  );
+  if (!summary.ok) return summary;
+  if (
+    !Array.isArray(value.moves) ||
+    value.moves.length < 1 ||
+    value.moves.length > ROADMAP_PHASE_BATCH_MAX_ITEMS
+  ) {
+    return invalid("moves", `expected 1..${ROADMAP_PHASE_BATCH_MAX_ITEMS} moves`);
+  }
+  const seen = new Set<string>();
+  const moves: RoadmapPhaseMoveBatchStepRequest[] = [];
+  for (let index = 0; index < value.moves.length; index += 1) {
+    const path = `moves[${index}]`;
+    const item: unknown = value.moves[index];
+    if (!isRecordWithKeys(item, ["phaseId"], MOVE_REQUEST_PLACEMENT_KEYS)) {
+      return invalid(
+        path,
+        `expected phaseId and exactly one of ${MOVE_REQUEST_PLACEMENT_KEYS.join(", ")}`,
+      );
+    }
+    const validated = validateRoadmapPhaseMoveRequest({
+      ...item,
+      expectedRevision: value.expectedRevision,
+      summary: summary.value,
+    });
+    if (!validated.ok) {
+      return invalid(prefixedPath(path, validated.error.path), validated.error.message);
+    }
+    const { expectedRevision: _revision, summary: _summary, ...move } = validated.value;
+    if (seen.has(move.phaseId)) {
+      return invalid(`${path}.phaseId`, "expected each phase to move at most once");
+    }
+    seen.add(move.phaseId);
+    moves.push(move);
+  }
+  return {
+    ok: true,
+    value: { expectedRevision: value.expectedRevision, summary: summary.value, moves },
+  };
+}
+
+export function validateRoadmapPhaseMoveBatchDraft(
+  value: unknown,
+): RoadmapWorkflowValidationResult<RoadmapPhaseMoveBatchDraft> {
+  if (!isRecordWithExactKeys(value, MOVE_BATCH_DRAFT_KEYS)) {
+    return invalid("$", `expected exactly: ${MOVE_BATCH_DRAFT_KEYS.join(", ")}`);
+  }
+  if (value.kind !== "move-batch") return invalid("kind", 'expected "move-batch"');
+  const header = validateBatchDraftHeader(value);
+  if (!header.ok) return header;
+  if (
+    !Array.isArray(value.moves) ||
+    value.moves.length < 2 ||
+    value.moves.length > ROADMAP_PHASE_BATCH_MAX_ITEMS
+  ) {
+    return invalid("moves", `expected 2..${ROADMAP_PHASE_BATCH_MAX_ITEMS} moves`);
+  }
+  const seen = new Set<string>();
+  const moves: RoadmapPhaseMoveBatchStep[] = [];
+  for (let index = 0; index < value.moves.length; index += 1) {
+    const path = `moves[${index}]`;
+    const step: unknown = value.moves[index];
+    if (!isRecordWithExactKeys(step, MOVE_BATCH_STEP_KEYS)) {
+      return invalid(path, `expected exactly: ${MOVE_BATCH_STEP_KEYS.join(", ")}`);
+    }
+    const phaseId = boundedIdentifier(step.phaseId, `${path}.phaseId`);
+    if (!phaseId.ok) return phaseId;
+    if (seen.has(phaseId.value)) {
+      return invalid(`${path}.phaseId`, "expected each phase to move at most once");
+    }
+    seen.add(phaseId.value);
+    const phaseTitle = looseBeforeString(step.phaseTitle, `${path}.phaseTitle`);
+    if (!phaseTitle.ok) return phaseTitle;
+    if (step.position !== "before" && step.position !== "after") {
+      return invalid(`${path}.position`, 'expected "before" or "after"');
+    }
+    const targetPhaseId = boundedIdentifier(step.targetPhaseId, `${path}.targetPhaseId`);
+    if (!targetPhaseId.ok) return targetPhaseId;
+    if (targetPhaseId.value === phaseId.value) {
+      return invalid(`${path}.targetPhaseId`, "a phase cannot be moved next to itself");
+    }
+    const targetPhaseTitle = looseBeforeString(step.targetPhaseTitle, `${path}.targetPhaseTitle`);
+    if (!targetPhaseTitle.ok) return targetPhaseTitle;
+    moves.push({
+      phaseId: phaseId.value,
+      phaseTitle: phaseTitle.value,
+      position: step.position,
+      targetPhaseId: targetPhaseId.value,
+      targetPhaseTitle: targetPhaseTitle.value,
+    });
+  }
+  const preview = validateOrderPreview(value.orderPreview, "orderPreview");
+  if (!preview.ok) return preview;
+  const expectedAfter = replayRoadmapPhaseOrderMoves(
+    preview.value.before,
+    moves.map(roadmapPhaseMoveBatchStep),
+  );
+  if (!expectedAfter || !orderEntriesEqual(expectedAfter, preview.value.after)) {
+    return invalid("orderPreview.after", "expected the before order with every move replayed");
+  }
+  if (orderEntriesEqual(preview.value.before, preview.value.after)) {
+    return invalid("orderPreview.after", "expected an order different from before");
+  }
+  const { status, ...fields } = header.value;
+  return {
+    ok: true,
+    value: { kind: "move-batch", ...fields, moves, orderPreview: preview.value, status },
+  };
+}
+
+export function roadmapPhaseMoveBatchStep(
+  step: Pick<RoadmapPhaseMoveBatchStep, "phaseId" | "position" | "targetPhaseId">,
+): RoadmapPhaseMoveStep {
+  return {
+    phaseId: step.phaseId,
+    placement: { position: step.position, targetPhaseId: step.targetPhaseId },
+  };
+}
+
+/**
+ * Applies an approved move batch all-or-nothing when the Roadmap order still matches the
+ * proposal and every step still satisfies the placement rules.
+ */
+export function applyRoadmapPhaseMoveBatch(
+  document: NotesDocumentV3,
+  draft: RoadmapPhaseMoveBatchDraft,
+  timestamp: string,
+): RoadmapPhaseMoveApplication {
+  for (const step of draft.moves) {
+    const notMovable = classifyRoadmapPhaseEditability(
+      document.phases.find((phase) => phase.id === step.phaseId),
+    );
+    if (notMovable !== null) {
+      return { status: "phase-not-editable", phaseId: step.phaseId, reason: notMovable };
+    }
+  }
+  const firstPhaseId = draft.moves[0]!.phaseId;
+  const currentOrder = roadmapPhaseOrderEntries(document.phases).map((entry) => entry.phaseId);
+  const proposedOrder = draft.orderPreview.before.map((entry) => entry.phaseId);
+  if (!stringArraysEqual(currentOrder, proposedOrder)) {
+    return { status: "phase-changed", phaseId: firstPhaseId };
+  }
+  const planned = planRoadmapPhaseMoves(
+    document.phases,
+    draft.moves.map(roadmapPhaseMoveBatchStep),
+  );
+  if (!planned.ok) {
+    return planned.refusal.reason === "phase-not-movable"
+      ? {
+          status: "phase-not-editable",
+          phaseId: planned.refusal.phaseId,
+          reason: planned.refusal.notMovable,
+        }
+      : { status: "phase-changed", phaseId: draft.moves[planned.index]!.phaseId };
+  }
+  const nextOrder = roadmapPhaseOrderEntries(planned.phases).map((entry) => entry.phaseId);
+  const approvedOrder = draft.orderPreview.after.map((entry) => entry.phaseId);
+  if (!stringArraysEqual(nextOrder, approvedOrder)) {
+    return { status: "phase-changed", phaseId: firstPhaseId };
   }
   return {
     status: "ok",
@@ -1363,9 +1948,14 @@ export function isRoadmapPhaseDraftApprovalResult(
     case "edited":
     case "moved":
       return (
-        isRecordWithExactKeys(value, ["status", "revision", "phaseId"]) &&
+        isRecordWithKeys(value, ["status", "revision", "phaseId"], ["phaseIds"]) &&
         isNonNegativeInteger(value.revision) &&
-        isNonEmptyString(value.phaseId)
+        isNonEmptyString(value.phaseId) &&
+        (value.phaseIds === undefined ||
+          (Array.isArray(value.phaseIds) &&
+            value.phaseIds[0] === value.phaseId &&
+            value.phaseIds.every(isNonEmptyString) &&
+            new Set(value.phaseIds).size === value.phaseIds.length))
       );
     case "phase-changed":
       return isRecordWithExactKeys(value, ["status", "phaseId"]) && isNonEmptyString(value.phaseId);

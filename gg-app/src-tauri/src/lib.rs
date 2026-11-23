@@ -197,6 +197,8 @@ pub fn run() {
             commands::agent::agent_pane_copy_startup,
             commands::agent::agent_pane_copy_restore,
             commands::agent::agent_pane_copy_rollback,
+            commands::update::update_installs_rpm,
+            commands::update::install_rpm_update,
             commands::files::dropped_path_info,
             paths::permissions_status,
             paths::open_permissions_settings,

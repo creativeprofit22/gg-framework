@@ -1,5 +1,32 @@
 # Working in a Code-mode window
 
+## Contents
+
+- The composer
+- Mentioning files with @
+- Attaching images and files
+- Sending while GG is busy
+- Stopping a run
+- Running your own commands with !
+- Working across more than one folder
+- Live preview
+- Testing in a real browser
+- Slash commands
+- Schedules
+- Prompt enhancement
+- Plan mode and plan review
+- Autopilot
+- Tasks
+- Notes
+- Checklist and project health
+- Git in the title bar
+- CI indicator
+- Activity bar and working beam
+- Sub-agents
+- Notices in the transcript
+- Moving around the transcript
+- Common questions
+
 A Code-mode window is one session on one project folder. You type in the composer at the bottom. GG works in the transcript above it, and the deck holds the tools.
 
 ## The composer
@@ -62,7 +89,13 @@ A Code-mode window is one session on one project folder. You type in the compose
 - Each window previews only its own project, so several projects can each have a preview open at once. When a project runs more than one server, such as a site and its API, GG picks the one that serves a web page.
 - On the page, click the pointer key next to the message box, then click any element, or just right-click it (Shift+right-click keeps the browser's menu). Your message goes to GG with that element. Esc drops the picked element and lets you pick another; Esc again leaves pick mode. The minus key tucks the chat away.
 - The preview has its own chat, separate from the window's conversation. The panel shows the link with **Open** and **Stop**. Closing the window stops it.
+- You can also just ask GG to open the live preview.
 - The preview runs on its own port, so sign-in redirects and saved browser data from your dev server's port don't carry over.
+
+## Testing in a real browser
+
+- Ask GG to test your web app in the browser (for example "check the signup flow works"). It opens pages in its own browser, clicks, fills in forms and takes screenshots, and reports console errors and failed or slow requests.
+- It runs on this computer, so it can only reach pages this computer can reach, such as your local dev server.
 
 ## Slash commands
 
@@ -177,6 +210,8 @@ Custom commands: each Markdown file in the project's `.gg/commands/` folder beco
 ## Activity bar and working beam
 
 - The activity bar above the composer shows what GG is doing. Idle, it shows lines like **Ready for work** or **Your move**. During a run it shows lines like **Working…** and a timer, then a short summary when it finishes.
+- A small pixel icon at the start of the bar shows the kind of step: thinking, writing, reading code, editing, running a command, running checks, agents and so on. A tick appears only when checks passed; a finished answer, edit or tool run shows its own icon instead.
+- On the right, the bar shows the elapsed time and the exact number of output tokens. The count rolls up each time the model reports a new total.
 - While GG, Ken or an Autopilot review is running, a light beam moves around the composer. It is decorative only.
 
 ## Sub-agents
@@ -186,7 +221,6 @@ Custom commands: each Markdown file in the project's `.gg/commands/` folder beco
 ## Notices in the transcript
 
 - Compaction: when the context is compacted, a critter line shows it working and then done.
-- Cache expiry: in a large chat that has been idle, a strip warns that the next message will re-read the whole context at full price. **Compact first** shrinks the history before you send, and **Dismiss** hides the warning.
 - Hooks: when a project hook steps in, a shimmering pink critter line says what it's doing, for example "A critter is running the project's checks…". Others cover reviewing the work, re-checking new edits, checking that tests weren't weakened, breaking out of a loop, or re-reading the request after compaction. They are informational; no action is needed.
 
 ## Moving around the transcript

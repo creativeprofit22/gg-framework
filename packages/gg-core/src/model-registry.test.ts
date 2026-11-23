@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { FAST_MODE_SUFFIX, resolveFastModeModel } from "@kenkaiiii/gg-ai";
-import { XIAOMI_CREDITS_KEY } from "./auth-storage.js";
+import { GLM_CODING_PLAN_KEY, XIAOMI_CREDITS_KEY } from "./auth-storage.js";
 import {
   MODELS,
   type ModelInfo,
@@ -130,8 +130,8 @@ describe("model registry invariants", () => {
     expect(getSummaryModel("anthropic", "claude-opus-5-5-fast").id).toBe("claude-sonnet-5-5");
   });
 
-  it("treats MiMo UltraSpeed as real money and strips it back to MiMo-V2.6-Pro", () => {
-    // UltraSpeed only runs on pay-per-token API Credits, never the Token Plan.
+  it("treats MiMo UltraSpeed as a paid tier and strips it back to MiMo-V2.6-Pro", () => {
+    // 10x Token Plan credits, or per-token API Credits: never carried silently.
     expect(isPaidModel("mimo-v2.6-pro-ultraspeed")).toBe(true);
     expect(withoutPaidTier("mimo-v2.6-pro-ultraspeed")).toBe("mimo-v2.6-pro");
     expect(isPaidModel("mimo-v2.6-pro")).toBe(false);
@@ -508,10 +508,10 @@ describe("model registry context windows", () => {
     expect(getModel("gpt-6-luna")?.maxThinkingLevel).toBe("max");
   });
 
-  it("pairs GLM-5.3 with its Flash sibling, both at a max thinking ceiling", () => {
+  it("defaults GLM to 5.4, keeping 5.3 and its Flash sibling, all at a max thinking ceiling", () => {
     expect(getDefaultModel("glm")).toMatchObject({
-      id: "glm-5.3",
-      name: "GLM-5.3",
+      id: "glm-5.4",
+      name: "GLM-5.4",
       provider: "glm",
       contextWindow: 1_000_000,
       maxOutputTokens: 131_072,
@@ -529,11 +529,12 @@ describe("model registry context windows", () => {
       costTier: "low",
       maxThinkingLevel: "max",
     });
-    // Only the 5.3 pair ships: the older ids route to strictly worse coding for
+    // GLM-5.4 joins the 5.3 pair; the older ids route to strictly worse coding for
     // the same plan quota, and the coding endpoint already answers glm-5.2
     // requests as glm-5.3. Saved sessions on any of them fall back to the
     // provider default.
     expect(getModelsForProvider("glm").map((model) => model.id)).toEqual([
+      "glm-5.4",
       "glm-5.3",
       "glm-5.3-flash",
     ]);
@@ -543,6 +544,22 @@ describe("model registry context windows", () => {
     // Flash is the cheap sibling, so summary routing drops to it instead of
     // paying 5.3 rates for compaction.
     expect(getSummaryModel("glm", "glm-5.3").id).toBe("glm-5.3-flash");
+    expect(getSummaryModel("glm", "glm-5.4").id).toBe("glm-5.3-flash");
+  });
+
+  it("runs GLM-5.4 on a Coding Plan key only, natively multimodal", () => {
+    expect(getModel("glm-5.4")).toMatchObject({
+      name: "GLM-5.4",
+      contextWindow: 1_000_000,
+      supportsImages: true,
+      maxThinkingLevel: "max",
+    });
+    expect(getDefaultThinkingLevel("glm-5.4")).toBe("max");
+    // Each endpoint serves a different flagship: 5.4 only on the plan, 5.3
+    // only pay-per-token. Flash runs on either, plan first.
+    expect(getAuthStorageKeys("glm", "glm-5.4")).toEqual([GLM_CODING_PLAN_KEY]);
+    expect(getAuthStorageKeys("glm", "glm-5.3")).toEqual(["glm"]);
+    expect(getAuthStorageKeys("glm", "glm-5.3-flash")).toEqual([GLM_CODING_PLAN_KEY, "glm"]);
   });
 
   it("defaults xAI to Grok 4.7 alone, retiring the superseded 4.6/4.5 ids", () => {
@@ -621,9 +638,12 @@ describe("model registry context windows", () => {
     expect(getAuthStorageKey("xiaomi", "mimo-v2.6-pro")).toBe("xiaomi");
   });
 
-  it("mimo-v2.6-pro-ultraspeed is API-Credits only, with no Token Plan fallback", () => {
-    expect(getAuthStorageKeys("xiaomi", "mimo-v2.6-pro-ultraspeed")).toEqual([XIAOMI_CREDITS_KEY]);
-    expect(getAuthStorageKey("xiaomi", "mimo-v2.6-pro-ultraspeed")).toBe(XIAOMI_CREDITS_KEY);
+  it("mimo-v2.6-pro-ultraspeed runs on the Token Plan, falling back to API Credits", () => {
+    expect(getAuthStorageKeys("xiaomi", "mimo-v2.6-pro-ultraspeed")).toEqual([
+      "xiaomi",
+      XIAOMI_CREDITS_KEY,
+    ]);
+    expect(getAuthStorageKey("xiaomi", "mimo-v2.6-pro-ultraspeed")).toBe("xiaomi");
   });
 
   it("registers a Code Assist-supported Gemini default", () => {
@@ -635,12 +655,23 @@ describe("model registry context windows", () => {
     // New public GA releases are opt-in: retain the working OAuth default.
     expect(getModelsForProvider("gemini").map((model) => model.id)).toEqual([
       "gemini-3.1-flash-lite",
+      "gemini-4-hydrogen",
+      "gemini-4-argon",
+      "gemini-4-carbon",
       "gemini-3.8-flash",
+      "gemini-3.6-flash",
       "gemini-3.5-flash-lite",
       "gemini-3-flash",
       "gemini-3.1-pro-preview",
     ]);
-    for (const id of ["gemini-3.8-flash", "gemini-3.5-flash-lite"]) {
+    for (const id of [
+      "gemini-4-hydrogen",
+      "gemini-4-argon",
+      "gemini-4-carbon",
+      "gemini-3.8-flash",
+      "gemini-3.6-flash",
+      "gemini-3.5-flash-lite",
+    ]) {
       expect(getModel(id)).toMatchObject({
         contextWindow: 1_048_576,
         maxOutputTokens: 65_536,

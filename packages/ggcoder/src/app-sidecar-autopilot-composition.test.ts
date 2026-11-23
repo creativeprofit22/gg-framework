@@ -7,7 +7,6 @@ import { describe, expect, it, vi } from "vitest";
 import { AppSidecarProjectAutopilotState } from "./app-sidecar-autopilot-state.js";
 import { runUserTurn, type UserTurnDeps } from "./app-sidecar-user-turn.js";
 import { AppSidecarPlanGate } from "./app-sidecar-plan-gate.js";
-import type { CacheExpiryStatus } from "./core/cache-expiry.js";
 
 // Execute production session wiring and routes, without booting providers or native services.
 async function pane(
@@ -76,7 +75,6 @@ async function pane(
     getMessages: () => messages,
     getPlanMode: () => false,
     getRoadmapPhaseLeaseMarker: () => null,
-    getCacheExpiryStatus: (_now?: number): CacheExpiryStatus | null => null,
     // Upstream gg-safe state fields read by the state snapshot.
     getBlockedSkills: () => [],
     getInstalledThreats: () => [],
@@ -183,7 +181,7 @@ async function pane(
     context,
   )) as {
     userTurnDeps: UserTurnDeps;
-    stateSnapshot: () => { autopilot: boolean; cacheExpiry: CacheExpiryStatus | null };
+    stateSnapshot: () => { autopilot: boolean };
     dispose: () => Promise<void>;
     runTaskById: (id: string) => Promise<boolean>;
     request: (req: { body: string }, res: { resolve: (body: unknown) => void }) => void;
@@ -219,7 +217,7 @@ describe("live project Autopilot session composition", () => {
     for (const enabled of [true, false]) {
       expect(await a.toggle(enabled)).toEqual({ autopilot: enabled });
       for (const current of [a, b]) {
-        expect(current.stateSnapshot()).toMatchObject({ autopilot: enabled, cacheExpiry: null });
+        expect(current.stateSnapshot()).toMatchObject({ autopilot: enabled });
         expect(current.userTurnDeps.gateState().enabled).toBe(enabled);
         expect(current.queuedEnabled()).toBe(enabled);
         expect(await current.turn()).toBe(enabled ? "all-clear" : "no-review");
@@ -252,24 +250,10 @@ describe("live project Autopilot session composition", () => {
     const late = await pane(shared, cwd);
     expect(late.stateSnapshot().autopilot).toBe(true);
     // A replaced live session still receives the fan-out through its snapshot.
-    const coldCache: CacheExpiryStatus = {
-      provider: "test",
-      ttlMs: 300_000,
-      confidence: "expired",
-      ttlSource: "test",
-      lastRequestAt: 1,
-      expiresAt: 300_001,
-      expired: true,
-      reason: "idle",
-      prefixTokens: 50_000,
-      minTokens: 40_000,
-      notable: true,
-      estimatedExtraCostUsd: null,
-    };
-    a.replace({ ...a.session, getCacheExpiryStatus: () => coldCache });
-    expect(a.stateSnapshot()).toMatchObject({ autopilot: true, cacheExpiry: coldCache });
+    a.replace({ ...a.session });
+    expect(a.stateSnapshot()).toMatchObject({ autopilot: true });
     await late.toggle(false);
-    expect(a.stateSnapshot()).toMatchObject({ autopilot: false, cacheExpiry: coldCache });
+    expect(a.stateSnapshot()).toMatchObject({ autopilot: false });
     await Promise.all([a.dispose(), other.dispose(), chat.dispose(), late.dispose()]);
     for (const current of [a, b, other, chat, late]) {
       expect(current.programmaticChat.dispose).toHaveBeenCalledExactlyOnceWith();

@@ -46,6 +46,16 @@ export const OPENAI_CHATGPT_KEY = "openai-chatgpt";
 export const KIMI_CODE_KEY = "kimi-code";
 
 /**
+ * Storage key for a GLM Coding Plan key, served by {@link GLM_CODING_PLAN_BASE_URL}.
+ * Kept distinct from the `glm` entry, which holds a pay-per-token Z.AI key on
+ * the standard endpoint.
+ */
+export const GLM_CODING_PLAN_KEY = "glm-coding";
+
+/** Z.AI's Coding Plan endpoint (OpenAI-compatible). */
+export const GLM_CODING_PLAN_BASE_URL = "https://api.z.ai/api/coding/paas/v4";
+
+/**
  * A sign-in GG Coder no longer uses, because it posed as another vendor's app
  * (Codex CLI, Kimi Code CLI, Grok CLI, Gemini CLI) or its token stopped
  * working. The entry is never served; the user is asked once to reconnect.
@@ -121,6 +131,7 @@ function usableEntry(data: AuthData, storageKey: string): OAuthCredentials | und
 export function storageKeyProvider(storageKey: string): string {
   if (storageKey === OPENAI_CHATGPT_KEY) return "openai";
   if (storageKey === KIMI_CODE_KEY) return "moonshot";
+  if (storageKey === GLM_CODING_PLAN_KEY) return "glm";
   if (storageKey === XIAOMI_CREDITS_KEY) return "xiaomi";
   if (storageKey === GEMINI_API_KEY) return "gemini";
   return storageKey;
@@ -132,6 +143,7 @@ export function storageKeyProvider(storageKey: string): string {
  */
 export function apiKeyStorageKeys(provider: string): string[] {
   if (provider === "moonshot") return [KIMI_CODE_KEY, "moonshot"];
+  if (provider === "glm") return [GLM_CODING_PLAN_KEY, "glm"];
   if (provider === "xiaomi") return ["xiaomi", XIAOMI_CREDITS_KEY];
   if (provider === "gemini") return [GEMINI_API_KEY];
   return [provider];
@@ -208,9 +220,8 @@ export function providerStorageKeys(provider: string): string[] {
 /**
  * Storage key for the Xiaomi API Credits credential (`https://api.xiaomimimo.com/v1`).
  * Kept distinct from the `xiaomi` Token Plan entry (`token-plan-sgp.xiaomimimo.com`)
- * so a user can configure BOTH — `mimo-v2.6-pro-ultraspeed` is API Credits-only,
- * while `mimo-v2.6-pro`/`mimo-v2.6-flash` prefer the Token Plan but fall back to API
- * Credits when only that's configured. Which key(s) a model tries, and in what
+ * so a user can configure BOTH — every MiMo model prefers the Token Plan but falls
+ * back to API Credits when only that's configured. Which key(s) a model tries, and in what
  * order, is decided per-model via `getAuthStorageKeys()` in model-registry.ts.
  */
 export const XIAOMI_CREDITS_KEY = "xiaomi-credits";

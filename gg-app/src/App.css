@@ -203,14 +203,16 @@
   --text-muted: #4f5761;
   --text-dim: #59616b;
 
-  --primary: #2848d8;
-  --primary-hi: #3a5af0;
+  /* Racing Red, as in dark. Accent text deepens the red to 4.75:1 on every
+     light surface; hover deepens it further (5.77:1). */
+  --primary: #c0122c;
+  --primary-hi: #a8102a;
   --on-primary: #ffffff;
-  --primary-fill: #8fa3ff;
-  --primary-fill-hi: #a9b8ff;
-  --on-primary-fill: #050a2e;
-  /* A light theme's links and accent text: the dark cobalt. */
-  --link: #2848d8;
+  /* Filled accent controls: the same Racing Red and ink as dark. */
+  --primary-fill: #ef233c;
+  --primary-fill-hi: #d61f36;
+  --on-primary-fill: #fffafa;
+  --link: #c0122c;
 
   --success: #1a6c33;
   --on-success: #ffffff;
@@ -221,10 +223,10 @@
   --stop-fill-hi: #cc2f22;
   --caution: #9c4700;
   --on-error: #ffffff;
-  --secondary: #2848d8;
+  --secondary: #14171b;
   --info: #0b6b62;
 
-  --glow: #8ea2e6;
+  --glow: #a9b0ba;
 
   --ken: #0b6b74;
   --ken-fill: #0b6b74;
@@ -245,7 +247,7 @@
   --well-shadow: rgba(30, 45, 70, 0.28);
   --led-off: #bfc6cf;
   --deck-shadow: 0 1px 0 rgba(10, 20, 40, 0.08), 0 14px 28px -16px rgba(30, 45, 70, 0.45);
-  --mark: rgba(40, 72, 216, 0.16);
+  --mark: rgba(239, 35, 60, 0.16);
 
   --shadow-sm: 0 2px 6px rgba(30, 45, 70, 0.18);
   --shadow-md: 0 8px 28px rgba(30, 45, 70, 0.2);
@@ -352,9 +354,9 @@
   /* Things that resolve out of a blur (transcript rows, swapped labels, the
      tool panel): long enough that the blur reads as a dissolve, not a flicker. */
   --dur-dissolve: 340ms;
-  /* Composer strips and chip bars (attachments, mentions, cache notice)
+  /* Composer strips and chip bars (attachments, mentions)
      growing open and folding shut. --dur-strip-out is mirrored by
-     EXIT_MS in AttachmentBar, ReferencedFiles and CacheExpiryNotice,
+     EXIT_MS in AttachmentBar and ReferencedFiles,
      and also times an answered ask_user card dissolving out (AskBand's EXIT_MS),
      so everything in the chat column leaves at one speed. */
   --dur-strip-in: 260ms;
@@ -565,7 +567,7 @@
 }
 
 /* ── Button system (shared) ───────────────────────────────────────────────
-   .btn is the base; pair with .btn-primary (cobalt key) or .btn-ghost (alloy
+   .btn is the base; pair with .btn-primary (accent key) or .btn-ghost (alloy
    key). Alloy keys: a lit top edge and a dark lip below, so a control reads
    as raised off the surface it sits on. Hover changes the fill only — no
    movement. */
@@ -4480,7 +4482,7 @@ select {
   transform: scale(1.08);
   box-shadow: var(--meter-thumb-shadow-active);
 }
-/* Modal actions are Alloy keys: neutral by default, .primary = cobalt. */
+/* Modal actions are Alloy keys: neutral by default, .primary = accent. */
 .modal-btn {
   display: inline-flex;
   align-items: center;
@@ -11033,10 +11035,59 @@ select {
   flex: 0 0 auto;
   white-space: nowrap;
 }
+/* Lead: the step's pixel glyph in a sunk well (.well, Deck.css). While work
+   runs, one pixel marches along the well's floor. */
+.well.activity-glyph {
+  position: relative;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  overflow: hidden;
+}
+.activity-glyph-art {
+  display: block;
+  animation: fade-in var(--dur-row) var(--ease-out) backwards;
+}
+.activity-glyph[data-live]::after {
+  content: "";
+  position: absolute;
+  left: 3px;
+  bottom: 2px;
+  width: 2px;
+  height: 2px;
+  background: currentColor;
+  opacity: 0.8;
+  animation: activity-glyph-march 1.6s steps(8) infinite;
+  animation-play-state: var(--loop-play-state, running);
+}
+@keyframes activity-glyph-march {
+  to {
+    transform: translateX(16px);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .activity-glyph-art {
+    animation: none;
+  }
+  .activity-glyph[data-live]::after {
+    display: none;
+  }
+}
+/* Pinned right. Each well grows (never shrinks) to its widest value this
+   run, set inline by ActivityMeta, with the value kept to its right edge. */
 .activity-meta {
   flex: 0 0 auto;
-  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-left: auto;
   white-space: nowrap;
+}
+.activity-meta .well {
+  text-align: right;
 }
 @container (max-width: 480px) {
   .activity-token-count,
@@ -14749,7 +14800,7 @@ select {
 /* Collapsed state: no height, padding or border, and a bottom margin that also
    soaks up the composer's 8px flex gap, so the composer moves smoothly instead
    of snapping by the gap at the start of the enter / end of the exit. A strip
-   that pins its real size (pinSize → --pin-h; CacheExpiryNotice does) grows to
+   that pins its real size (pinSize → --pin-h) grows to
    and folds from it; otherwise the 220px cap is the fallback. --pin-h on mount
    is measured with padding and border already at 0, hence the +14px slack. */
 @keyframes ggqueuedin {

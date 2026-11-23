@@ -75,8 +75,10 @@ describe("ask_user", () => {
   it("states optional offers plainly and keeps every real question on the card", async () => {
     const { description } = createAskUserTool(vi.fn());
     expect(description).toContain("instead of a prose question");
-    // Chat and Goals see only this description, so the short lead-in rule lives here too.
+    // Chat and Goals see only this description, so the lead-in rule lives here too.
+    // Local Fork: keeps its short lead-in plus "answer, never a question" rule.
     expect(description).toContain("First write one to three sentences answering what they asked");
+    expect(description).toContain("NEVER answer the user's question with a question");
     // The routing rule now lives in the system prompt (rendered whenever this
     // tool is registered) rather than repeated in the schema.
     const prompt = await buildSystemPrompt(os.tmpdir(), undefined, false, undefined, ["ask_user"]);

@@ -580,7 +580,6 @@ function LiveApp() {
             composer={
               <Composer
                 workspaceMode="code"
-                state={state}
                 composerRef={composerRef}
                 isFileDragOver={false}
                 scheduleInvalid={false}

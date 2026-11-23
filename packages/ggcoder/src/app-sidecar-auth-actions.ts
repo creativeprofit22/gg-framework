@@ -18,13 +18,20 @@ export async function runProviderSignIn(
   provider: string,
   auth: AuthStorage,
   cb: OAuthLoginCallbacks,
+  options: { newAccount?: boolean; signal?: AbortSignal } = {},
 ): Promise<void> {
   if (provider === "anthropic") {
     await signInWithClaudeCode(auth, cb);
   } else if (provider === "openai") {
-    // The current sign-in's ID token skips the account picker.
-    const previous = await auth.getCredentials(OPENAI_CHATGPT_KEY);
-    const creds = await loginChatGPT(cb, previous ? { previous } : {});
+    // The current sign-in's ID token skips the account picker; another account
+    // or workspace registers afresh instead.
+    const { newAccount, signal } = options;
+    const previous = newAccount ? undefined : await auth.getCredentials(OPENAI_CHATGPT_KEY);
+    const creds = await loginChatGPT(cb, {
+      ...(previous ? { previous } : {}),
+      ...(newAccount ? { newAccount } : {}),
+      ...(signal ? { signal } : {}),
+    });
     await auth.setCredentials(OPENAI_CHATGPT_KEY, creds);
   } else {
     throw new Error(`Sign-in not implemented for ${provider}`);

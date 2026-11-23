@@ -134,6 +134,7 @@ describe("buildSystemPrompt", () => {
   it("asks for one check after the edits and never a claimed one", async () => {
     const prompt = await buildSystemPrompt(await makeProject());
     expect(prompt).toContain("then run the relevant check once");
+    expect(prompt).toContain("run the slow original at most once");
     // The command shape is the host's job now (it re-runs a check whose exit
     // status could not count), so the prompt no longer teaches shell syntax,
     // and no longer defers checks to /commit, which left turns unverified.
@@ -235,12 +236,12 @@ describe("buildSystemPrompt", () => {
       undefined,
       undefined,
       undefined,
-      ["source_path", "screenshot", "web_search", "not_a_tool"],
+      ["source_path", "browser", "web_search", "not_a_tool"],
     );
     const renderedTools = toolsSection(prompt);
     expect(renderedTools.match(/^- \*\*([^*]+)\*\*:/gm)).toEqual([
       "- **source_path**:",
-      "- **screenshot**:",
+      "- **browser**:",
     ]);
     expect(renderedTools).toContain("On demand (call by name;");
     expect(renderedTools).not.toContain("not_a_tool");
@@ -699,11 +700,12 @@ describe("buildSystemPrompt", () => {
     // one-liner, ADHD reply style, plain-language and when-to-ask reply rules; see
     // .gg/local-fixes) add ~1,200 chars over upstream. Upstream 0.115 then added the
     // new-skills line (+~200), the plan-mode refresh (+300), "fix broken things
-    // without asking" (+~100, #152) and the card lead-in. Caps are measured merged
-    // sizes (4,624 / 5,378 / 5,172) rounded up to the next 100.
-    expect(measurements.normal.characters).toBeLessThan(4_700);
-    expect(measurements.planMode.characters).toBeLessThan(5_400);
-    expect(measurements.typescriptProjectContextToolsSkills.characters).toBeLessThan(5_200);
+    // without asking" (+~100, #152) and the card lead-in; upstream 0.120 added the
+    // speed-up checking line (+155 each). Caps are measured merged sizes
+    // (4,779 / 5,532 / 5,327) rounded up to the next 100.
+    expect(measurements.normal.characters).toBeLessThan(4_800);
+    expect(measurements.planMode.characters).toBeLessThan(5_600);
+    expect(measurements.typescriptProjectContextToolsSkills.characters).toBeLessThan(5_400);
     expect(measurements.planMode.characters).toBeGreaterThan(measurements.normal.characters);
     expect(measurements.typescriptProjectContextToolsSkills.characters).toBeGreaterThan(
       measurements.normal.characters,

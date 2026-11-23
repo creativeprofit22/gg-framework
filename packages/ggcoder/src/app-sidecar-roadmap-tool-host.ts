@@ -36,7 +36,7 @@ export const APP_SIDECAR_KEN_ALLOWED_TOOL_NAMES = [
   "source_path",
   "web_fetch",
   "web_search",
-  "screenshot",
+  "browser",
 ] as const;
 
 export interface AppSidecarRoadmapToolSession {

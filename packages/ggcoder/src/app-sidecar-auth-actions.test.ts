@@ -130,3 +130,16 @@ describe("Continue with ChatGPT", () => {
     await expect(runProviderSignIn("xai", storage, cb)).rejects.toThrow(/not implemented/);
   });
 });
+
+describe("Continue with ChatGPT for another account", () => {
+  it("registers afresh without the current sign-in and passes the abort signal", async () => {
+    const creds = { accessToken: "plan2", refreshToken: "r", expiresAt: 1, clientId: "oaiapp_y" };
+    loginChatGPT.mockResolvedValue(creds);
+    const { auth, storage } = fakeAuth();
+    auth.stored["openai-chatgpt"] = { ...creds, idToken: "old-id-token" };
+    const abort = new AbortController();
+    await runProviderSignIn("openai", storage, cb, { newAccount: true, signal: abort.signal });
+    expect(loginChatGPT).toHaveBeenLastCalledWith(cb, { newAccount: true, signal: abort.signal });
+    expect(auth.setCredentials).toHaveBeenCalledWith("openai-chatgpt", creds);
+  });
+});

@@ -875,19 +875,25 @@ pub(crate) async fn agent_new_session(
 
 /// Proxy: begin an OAuth login. Progress streams back via `agent-event`
 /// (`auth_url`, `auth_status`, `auth_need_code`, `auth_done`, `auth_error`).
+/// `account: "new"` registers another ChatGPT account or workspace.
 #[tauri::command]
 pub(crate) async fn agent_auth_oauth_start(
     webview: WebviewWindow,
     pane_id: String,
     client: tauri::State<'_, reqwest::Client>,
     provider: String,
+    account: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
     let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
+    let mut body = serde_json::json!({ "provider": provider });
+    if let Some(account) = account {
+        body["account"] = serde_json::Value::String(account);
+    }
     let res = client
         .post(format!("{}/auth/oauth/start", sidecar_base(port)))
         .header("x-gg-session", &gg_sid)
-        .json(&serde_json::json!({ "provider": provider }))
+        .json(&body)
         .send()
         .await
         .map_err(|e| e.to_string())?;

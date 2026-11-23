@@ -105,6 +105,17 @@ interface IdleState {
   restarting?: Promise<void>;
 }
 
+/** An MCP tool as an agent tool, keeping the server's behaviour hints. */
+export type McpAgentTool = AgentTool & {
+  annotations?: {
+    title?: string;
+    readOnlyHint?: boolean;
+    destructiveHint?: boolean;
+    idempotentHint?: boolean;
+    openWorldHint?: boolean;
+  };
+};
+
 /** Per-server connection outcome for the dashboard / non-interactive list. */
 export interface MCPConnectResult {
   name: string;
@@ -1030,7 +1041,7 @@ export class MCPClientManager {
       callTimeout,
     );
 
-    const freshTools = identifiedTools.map(({ tool, identity }): AgentTool => {
+    const freshTools = identifiedTools.map(({ tool, identity }): McpAgentTool => {
       const staleError = () =>
         new McpToolError(
           `MCP tool error: stale tool wrapper for disconnected server "${config.name}"`,
@@ -1120,6 +1131,8 @@ export class MCPClientManager {
         description: tool.description ?? "",
         parameters: z.record(z.string(), z.unknown()),
         rawInputSchema: tool.inputSchema as Record<string, unknown>,
+        // Hosts that gate calls on read-only / destructive hints need these.
+        ...(tool.annotations ? { annotations: tool.annotations } : {}),
         // The agent loop's own per-tool deadline (5 min by default) would
         // otherwise preempt a long tool that is legitimately reporting
         // progress, so declare the real worst case.

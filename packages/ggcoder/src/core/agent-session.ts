@@ -84,6 +84,7 @@ import { expandPromptCommand } from "./prompt-command-expansion.js";
 import { SettingsManager } from "./settings-manager.js";
 import { AuthStorage } from "./auth-storage.js";
 import {
+  apiKeyStorageKeys,
   claudeCodeConfigDir,
   dualAuthProvider,
   OPENAI_CHATGPT_KEY,
@@ -174,6 +175,7 @@ import type { DirectCommandExecutor } from "./programmatic/execution.js";
 import type { BackgroundProcess } from "./process-manager.js";
 import type { DebugManager } from "../tools/debug.js";
 import type { DevAppManager } from "../tools/dev-app.js";
+import type { BrowserManager } from "../tools/browser.js";
 import { buildProcessCompletionFollowUp, mergeCompletionGateFollowUps } from "./process-gate.js";
 import { PLAN_SUBMISSION_NUDGE, shouldNudgePlanSubmission } from "./plan-submission-gate.js";
 import { canonicalProjectKey } from "../project-notes-repository.js";
@@ -187,7 +189,7 @@ import { applyAsyncSubagentPolicy } from "./subagent-policy.js";
 import { resolveStrictTools, type CodexShapeSetting } from "./codex-request-shape.js";
 import { subAgentDescription } from "../tools/subagent.js";
 import { z } from "zod";
-import { MCPClientManager, getAllMcpServers } from "./mcp/index.js";
+import { MCPClientManager, getAllMcpServers, usesZaiMcpServers } from "./mcp/index.js";
 import type { MCPElicitHandler } from "./mcp/index.js";
 import type { MCPServerConfig } from "./mcp/types.js";
 import type { SharedMcpClientLease, SharedMcpClientPool } from "./mcp/shared-client-pool.js";
@@ -1123,6 +1125,7 @@ export class AgentSession {
   private setupInspection?: ProgrammaticSetupInspection;
   private debugManager?: DebugManager;
   private devAppManager?: DevAppManager;
+  private browserManager?: BrowserManager;
   private subAgentManager?: SubAgentManager;
   /**
    * Out-of-band push notifications (finished children, background-process
@@ -1427,6 +1430,7 @@ export class AgentSession {
       lspManager,
       debugManager,
       devAppManager,
+      browserManager,
       subAgentManager,
       commandCreation,
       programmaticProfile,
@@ -1621,7 +1625,8 @@ export class AgentSession {
           (tool) => !ADVISORY_ONLY_TOOL_NAMES.has(tool.name),
         );
         this.mcpCatalog ??= new DeferredToolCatalog(this.contextLimits);
-        this.mcpCatalog.add(deferred);
+        // Built-in descriptions are pinned by the catalog test; only MCP ones get clamped.
+        this.mcpCatalog.add(deferred, { clamp: false });
         this.ensureToolSearchTool();
         this.promoteCapabilityAllowedDeferredBuiltins();
         this.reconcileRegisteredTools();
@@ -1642,6 +1647,7 @@ export class AgentSession {
     this.programmaticProfile = programmaticProfile;
     this.debugManager = debugManager;
     this.devAppManager = devAppManager;
+    this.browserManager = browserManager;
     this.subAgentManager = subAgentManager;
     this.bindManagerCancellation(this.opts.signal);
 
@@ -1932,9 +1938,11 @@ export class AgentSession {
     if (this.mcpBlockedByAllowList()) return [];
     const mcpWhitelist = this.opts.allowedMcpServers;
     let apiKey: string | undefined;
-    if (this.provider === "glm") {
+    if (usesZaiMcpServers(this.provider, this.model)) {
       try {
-        const glmCreds = await this.authStorage.resolveCredentials("glm");
+        const glmCreds = await this.authStorage.resolveCredentials("glm", {
+          storageKeys: apiKeyStorageKeys("glm"),
+        });
         apiKey = glmCreds.accessToken;
       } catch {
         // GLM not configured — skip Z.AI MCP servers
@@ -4982,44 +4990,45 @@ export class AgentSession {
           ),
         );
       }
+    }
 
-      // Reconnect MCP servers ONLY when GLM is involved on either side — GLM
-      // is the only provider with a different server set (Z.AI tools), so a
-      // non-GLM switch keeps the identical set. Skipping the dispose/reconnect
-      // there avoids tearing down a live stdio child and
-      // gambling on a `npx` re-spawn that could fail and drop the tools.
-      const glmInvolved = this.provider === "glm" || prevProvider === "glm";
-      if (this.mcpManager && glmInvolved) {
-        // Remove only identity-bearing MCP tools. Ordinary tools whose valid
-        // host-owned names happen to begin with `mcp__` must survive.
-        this.unregisterTools(
-          (toolName, tool) =>
-            getMcpToolIdentity(tool) !== undefined || this.mcpToolIdentities.has(toolName),
-        );
+    // Reconnect MCP servers ONLY when the Z.AI server set flips on or off
+    // (GLM-5.3 ↔ anything else) — every other switch keeps the identical set.
+    // Skipping the dispose/reconnect there avoids tearing down a live stdio
+    // child and gambling on a `npx` re-spawn that could fail and drop the tools.
+    const zaiChanged =
+      usesZaiMcpServers(prevProvider as Provider, prevModel) !==
+      usesZaiMcpServers(this.provider, this.model);
+    if (this.mcpManager && zaiChanged) {
+      // Remove only identity-bearing MCP tools. Ordinary tools whose valid
+      // host-owned names happen to begin with `mcp__` must survive.
+      this.unregisterTools(
+        (toolName, tool) =>
+          getMcpToolIdentity(tool) !== undefined || this.mcpToolIdentities.has(toolName),
+      );
 
-        // A disposed manager is terminal: detach it and invalidate its async
-        // discovery before any teardown await can yield, then give the new
-        // provider a fresh close-reporting lifecycle.
-        const oldManager = this.mcpManager;
-        const oldLeases = [...this.sharedMcpLeases.values()];
-        this.sharedMcpLeases.clear();
-        const generation = ++this.mcpConnectionGeneration;
-        const newManager = this.createMcpManager();
-        this.mcpManager = newManager;
-        await this.disposeMcpResources(oldManager, oldLeases);
-        if (!this.isCurrentMcpConnection(generation, newManager)) return;
+      // A disposed manager is terminal: detach it and invalidate its async
+      // discovery before any teardown await can yield, then give the new
+      // provider a fresh close-reporting lifecycle.
+      const oldManager = this.mcpManager;
+      const oldLeases = [...this.sharedMcpLeases.values()];
+      this.sharedMcpLeases.clear();
+      const generation = ++this.mcpConnectionGeneration;
+      const newManager = this.createMcpManager();
+      this.mcpManager = newManager;
+      await this.disposeMcpResources(oldManager, oldLeases);
+      if (!this.isCurrentMcpConnection(generation, newManager)) return;
 
-        // Drop stale identity-bearing MCP tools, then reconnect through the same
-        // trust-gated shared/private ownership path used during initialization.
-        this.unregisterTools(
-          (toolName, tool) =>
-            getMcpToolIdentity(tool) !== undefined || this.mcpToolIdentities.has(toolName),
-        );
-        this.mcpCatalog?.removeWhere((name) => this.mcpToolIdentities.has(name));
-        this.liveMcpTools.clear();
-        this.mcpToolIdentities.clear();
-        await this.connectMcpServers();
-      }
+      // Drop stale identity-bearing MCP tools, then reconnect through the same
+      // trust-gated shared/private ownership path used during initialization.
+      this.unregisterTools(
+        (toolName, tool) =>
+          getMcpToolIdentity(tool) !== undefined || this.mcpToolIdentities.has(toolName),
+      );
+      this.mcpCatalog?.removeWhere((name) => this.mcpToolIdentities.has(name));
+      this.liveMcpTools.clear();
+      this.mcpToolIdentities.clear();
+      await this.connectMcpServers();
     }
   }
 
@@ -7831,8 +7840,7 @@ export class AgentSession {
    * Ordered auth-storage keys the current (provider, model) pair tries, first
    * match wins. Almost always just the provider id; Xiaomi models can prefer
    * one endpoint and fall back to another the user configured instead (e.g.
-   * `mimo-v2.6-pro` prefers the Token Plan, falls back to API Credits; the
-   * API-only `mimo-v2.6-pro-ultraspeed` has no fallback).
+   * every MiMo model prefers the Token Plan, falls back to API Credits).
    */
   private currentAuthStorageKeys(): string[] {
     return getAuthStorageKeys(this.provider, this.model);
@@ -7976,6 +7984,7 @@ export class AgentSession {
     await Promise.all([
       ...processes,
       this.devAppManager?.shutdown(),
+      this.browserManager?.shutdown(),
       this.subAgentManager?.shutdownAll(),
       this.disposeMcpConnections(),
     ]);

@@ -1,5 +1,25 @@
 # Sessions, history and the transcript
 
+## Contents
+
+- Starting a new session
+- Resuming an earlier session
+- Claude Code and Codex conversations
+- Hiding and deleting
+- Undo, checkpoints and rewind
+- Exporting a chat
+- The workspace header
+- The More panel
+- Context usage and compaction
+- The transcript
+- Images in the transcript
+- Answering GG's questions
+- MCP server input requests
+- Error notices
+- Toasts and confirmations
+- Moving around the transcript
+- Common questions
+
 A session is one conversation with GG in one window. This page covers starting, resuming and saving sessions, how much context they use, and everything that shows up in the transcript. For the composer, `!` commands and `/` commands see `code-mode.md`. For Chat, Motion and Goals windows see `chat-motion-goals.md`. For where saved sessions live on disk see `troubleshooting-and-data.md`.
 
 ## Starting a new session
@@ -70,6 +90,8 @@ The deck runs along the bottom of the window. Its **More** key (shown as ⋯) op
 - **Project Health** (Code, once a score exists): scores for file size, hygiene, safety and debt.
 - **Notes**: your notes.
 - **Tasks** (Code): the project's tasks, with a count of pending ones.
+- **Live preview** (Code): open your running app in the browser with GG's chat on it. See `code-mode.md`.
+- **Add folder** / **Remove folder** (Code and Chat): let GG work in another folder too, or drop one. See `code-mode.md`.
 - **Brain** (Chat): memories and Jiwa. See `chat-motion-goals.md`.
 - **Goal settings** (Goals).
 - **Radio**: internet radio.
@@ -85,14 +107,6 @@ The deck runs along the bottom of the window. Its **More** key (shown as ⋯) op
 - To compact by hand, send `/compact`. Add a focus to say what the summary should keep, for example `/compact the database migration decisions`.
 - While it works, a critter line appears in the transcript (for example "A critter is munching on the context…"), then a done line saying how many messages became how many.
 - Session titles survive compaction.
-
-## Cache expiry notice
-
-- Providers cache the start of a long conversation so it is cheaper to re-send. The cache lapses after the chat sits idle.
-- In a large chat whose cache has (or may have) expired, a strip above the composer says your next message re-reads that many tokens at full price.
-- **Compact first** summarises older history before you send, so the next message re-reads less.
-- **Dismiss** hides the strip; your next message sends as is.
-- If compaction can't start, a toast says "Couldn't start compaction. Try again."
 
 ## The transcript
 
@@ -117,6 +131,7 @@ When GG needs a decision, a question card appears at the bottom of the transcrip
 - For questions that accept free text, just start typing to answer in your own words. Text questions show **Type your answer** and an **Answer** button; once sent it shows **Answered**.
 - Multi-choice questions let you pick several, then confirm. With several questions in one card, the button says how many are left, then **Send answers**.
 - If the question is no longer needed, the card says it was cancelled. If GG carried on without you, the card says it continued with its best guess and your answer will still be sent.
+- With Autopilot on, Ken may answer for you: the card shows **Ken:** and his answer, or **Ken left this one for you** with his reason when it's your call. See `ken-and-autopilot.md`.
 - There is no skip button; to skip, send a normal message instead, or answer in your own words.
 - If a question is scrolled off screen, **You have a new question** jumps to it.
 
@@ -170,9 +185,6 @@ A: Look at the ring in the deck, or click it to open **Usage** and read the **Co
 
 Q: How do I compact the conversation?
 A: Send `/compact`, optionally with a focus such as `/compact keep the API decisions`. It also happens automatically when the context is nearly full.
-
-Q: What does "This chat's cache expired" mean?
-A: The chat sat idle so the provider's cache lapsed, and the next message re-reads the whole history at full price. Click **Compact first** to shrink it, or **Dismiss** to send as is.
 
 Q: How do I answer GG's question?
 A: Click an option or press its number, or start typing to answer in your own words. For multi-choice, pick several and confirm.

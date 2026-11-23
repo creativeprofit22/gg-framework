@@ -117,6 +117,7 @@ beforeEach(async () => {
     "gemini",
     "moonshot",
     "glm",
+    "glm-coding",
     "minimax",
     "xiaomi",
     "xiaomi-credits",

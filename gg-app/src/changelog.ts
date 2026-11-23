@@ -22,6 +22,60 @@ export interface ChangelogEntry {
 /** Newest first. Prepended by the `/release` flow. */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.120.0",
+    date: "2026-11-23",
+    items: [
+      "`GLM-5.4` just landed and it is now your default GLM. Connect a `GLM Coding Plan` key and it runs on your plan, writing about half again as fast as 5.3 and reading your screenshots by itself. Pay-per-token Z.AI keys still work too, and the picker greys out whichever model your key can't run, so nothing fails by surprise.",
+      "GLM sessions start lighter. On GLM-5.4 and 5.3-Flash I skip the extra Z.AI helper servers entirely and use my own web search and fetch tools, so there is less to launch and less clutter for the model.",
+      "GLM-5.3 keeps working after Z.AI changed it under the hood. It now only takes `low`, `high` or `max` thinking, so I offer exactly those and quietly fix any older setting instead of letting it error.",
+      "The browser tool fixes itself after updates. If its Chromium build goes missing, I download the right one the first time you need it instead of failing.",
+    ],
+  },
+  {
+    version: "0.119.0",
+    date: "2026-11-22",
+    items: [
+      "Your chat input is calm again. I removed the `cache may have expired` strip that kept nagging you after every restart and model switch. Compacting early never actually saved you anything there, so I now quietly trim old tool output on my own and leave your input alone.",
+      "Skills from your other coding agents now just work. I read the shared `.agents/skills` folders that Codex, Amp and friends use, and a skill marked manual-only stays put until you ask for it by name. Your own `.gg/skills` still win if two share a name.",
+      "My built-in safety skills got a fresh brain for December. They know the newest privacy and AI rules landing in the next few weeks, the new `OWASP 2026` AI security list and `Postgres 19`, so the guardrails I build into your app match today, not last month.",
+    ],
+  },
+  {
+    version: "0.118.0",
+    date: "2026-11-21",
+    items: [
+      '`Continue with ChatGPT` now works with every ChatGPT account and workspace you have. Pick `Use a different account or workspace` and I set GG Coder up for it, instead of hitting the old "only available to members of its workspace" wall.',
+      "The activity bar got a glow-up. Every step now has its own pixel glyph, from thinking to editing to running checks, and your token count is exact and rolls up live, like `25,734 tok`. The timer and token boxes never jump around, and a tick only shows when checks actually passed.",
+      "Speed-up jobs finish way sooner. When you ask me to make slow code fast, I now prove the new version matches on thousands of small inputs instead of re-running your slow original for minutes. My speed-up benchmark task usually took `150s` and now mostly wraps in under a minute.",
+      "`MiMo UltraSpeed` now runs on your Xiaomi Token Plan. Pro and Max plans use it at `10x` credits, and API Credits still work as a fallback.",
+      "Light mode now wears `Racing Red` to match dark mode, with deeper red text that stays easy to read on every surface.",
+      "Linux updates on Fedora and other `.rpm` installs just work again. I install them myself now, so newer RPM versions stop refusing the update.",
+    ],
+  },
+  {
+    version: "0.117.1",
+    date: "2026-11-20",
+    items: [
+      "The helpers GG Coder sends off now think as hard as you set it to. They used to drop to the `lowest` thinking level whatever you picked, so research, reviews and side tasks now get the same brainpower as your main chat.",
+      "`/commit` reviews are the real deal now. The reviewer reads every line of your changes and has to list each file it checked before it can call things clear. I put it through a change that used to sail through in `6 seconds`, and it caught a real bug.",
+      "Ask me a question and you get the full answer first. If I need to ask you something back, it comes after the answer, so you always have what you need to pick.",
+    ],
+  },
+  {
+    version: "0.117.0",
+    date: "2026-11-19",
+    items: [
+      "GG Coder now tests your app in a real `browser`. It opens your dev server, clicks through, fills in forms, checks the results and grabs screenshots in a single go, and any console errors or failed requests get flagged automatically. I tuned it so a whole flow takes about `half the turns` it used to, so you get a checked, working UI back faster.",
+    ],
+  },
+  {
+    version: "0.116.0",
+    date: "2026-11-18",
+    items: [
+      "Google's Gemini 4 family is here. `Gemini 4 Hydrogen` is the fast everyday one (free tier too), `Gemini 4 Argon` and `Gemini 4 Carbon` bring the heavy reasoning, and all three read a `1M` token window with images and video. `Gemini 3.6 Flash` joins them as the new Flash, so add your Gemini key and pick one.",
+    ],
+  },
+  {
     version: "0.115.0",
     date: "2026-11-18",
     items: [

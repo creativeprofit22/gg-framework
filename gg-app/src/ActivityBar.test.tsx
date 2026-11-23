@@ -1,25 +1,11 @@
 // @vitest-environment jsdom
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
 import { theme } from "./theme";
 import { INITIAL_ACTIVITY, type TaskActivity, type TaskPhase } from "./task-activity";
-import { beforeAll, describe, expect, it, vi } from "vitest";
-import { ActivityBar, plainState } from "./ActivityBar";
+import { describe, expect, it, vi } from "vitest";
+import { ActivityBar, plainState, ActivityMeta } from "./ActivityBar";
 import { reduceTaskActivity } from "./task-activity";
 import type { SidecarEvent } from "./agent";
-
-const restoredPlan = {
-  checkpointId: "checkpoint-1",
-  generation: 1,
-  planPath: ".gg/plans/plan.md",
-  content: "# Plan",
-  contentHash: "hash-1",
-  state: "pending-review",
-  reviewStatus: "ready",
-  feedback: null,
-};
-const restoredAsks = [
-  { id: "ask-1", questions: [{ id: "q1", question: "Proceed?", kind: "confirm" }] },
-];
 
 const baseProps = {
   running: true,
@@ -29,12 +15,6 @@ const baseProps = {
   thinkingStartTs: null,
   thinkingAccumMs: 0,
 };
-
-beforeAll(async () => {
-  const { container, unmount } = render(<ActivityBar {...baseProps} />);
-  await waitFor(() => expect(container.querySelector("canvas")).toBeTruthy());
-  unmount();
-});
 
 describe("ActivityBar plan progress", () => {
   it("shows approved-plan progress only while a run is active", () => {
@@ -51,14 +31,49 @@ describe("ActivityBar plan progress", () => {
   });
 });
 
-describe("ActivityBar orb", () => {
-  it("keeps the listening orb during reasoning and disappears when idle", () => {
+const glyphOf = (container: HTMLElement): HTMLElement | null =>
+  container.querySelector<HTMLElement>(".activity-glyph");
+
+describe("ActivityBar glyph", () => {
+  it("leads with a live work glyph while running and a still idle glyph when ready", () => {
     const { container, rerender } = render(<ActivityBar {...baseProps} isThinking />);
-    expect(container.querySelector("canvas")?.getAttribute("aria-label")).toBe("Listening…");
+    expect(glyphOf(container)?.dataset.glyph).toBe("work");
+    expect(glyphOf(container)?.hasAttribute("data-live")).toBe(true);
+    expect(glyphOf(container)?.getAttribute("aria-hidden")).toBe("true");
     expect(screen.getByText("Working…").classList.contains("shimmer-text")).toBe(true);
 
     rerender(<ActivityBar {...baseProps} running={false} />);
-    expect(container.querySelector("canvas")).toBeNull();
+    expect(glyphOf(container)?.dataset.glyph).toBe("idle");
+    expect(glyphOf(container)?.hasAttribute("data-live")).toBe(false);
+  });
+
+  it.each([
+    ["Thinking…", "think"],
+    ["Writing a response…", "write"],
+    ["Reading the relevant code…", "read"],
+    ["Editing the code…", "edit"],
+    ["Consulting reference material…", "web"],
+    ["Executing a command…", "run"],
+    ["Running verification…", "check"],
+    ["Agents working…", "agents"],
+    ["Keeping the task context…", "context"],
+  ] as const)("shows %s as the %s glyph", (label, glyph) => {
+    const { container } = render(
+      <ActivityBar {...baseProps} activity={{ ...INITIAL_ACTIVITY, phase: "working", label }} />,
+    );
+    expect(glyphOf(container)?.dataset.glyph).toBe(glyph);
+  });
+
+  it("keeps elapsed and token wells in place before the first token arrives", () => {
+    const { container } = render(
+      <ActivityBar
+        {...baseProps}
+        activity={{ ...INITIAL_ACTIVITY, phase: "working", label: "Thinking…", startedAt: 1 }}
+      />,
+    );
+    const tokens = container.querySelector<HTMLElement>(".activity-token-count");
+    expect(container.querySelector(".activity-elapsed")).toBeTruthy();
+    expect(tokens?.style.visibility).toBe("hidden");
   });
 });
 
@@ -100,7 +115,7 @@ describe("ActivityBar task outcomes", () => {
     );
     expect(screen.getByText("Starting…")).toBeTruthy();
     expect(screen.queryByText("Checks passed")).toBeNull();
-    expect(container.querySelector("canvas")).toBeTruthy();
+    expect(glyphOf(container)?.dataset.glyph).toBe("start");
     expect(container.querySelector(".activity-meta")).toBeNull();
   });
 
@@ -118,12 +133,13 @@ describe("ActivityBar task outcomes", () => {
     expect(screen.getByText("Stop failed").style.getPropertyValue("--shimmer-base")).toBe(
       theme.error,
     );
-    expect(container.querySelector("canvas")).toBeTruthy();
+    expect(glyphOf(container)?.dataset.glyph).toBe("warn");
+    expect(glyphOf(container)?.style.color).toBe(theme.error);
   });
 
   it.each([
     ["done", "Done · checks passed", "Checks passed. Nice.", theme.success],
-    ["failed", "Checks failed", "Checks hit a snag", theme.error],
+    ["failed", "Checks failed", "A check failed", theme.error],
     ["failed", "Task failed", "Run hit a snag", theme.error],
     ["unverified", "Changed · verification incomplete", "Checks still needed", theme.warning],
     ["attention", "Your decision needed", "Your call from here", theme.warning],
@@ -142,15 +158,16 @@ describe("ActivityBar task outcomes", () => {
     expect(screen.getByText(compact).style.color).toBe(expected.style.color);
   });
 
-  it("reveals changed labels without restarting the orb or replaying on usage updates", () => {
+  it("reveals changed labels without remounting the glyph well or replaying on usage updates", () => {
     const activity = { ...INITIAL_ACTIVITY, phase: "working" as const, label: "Thinking…" };
     const { container, rerender } = render(<ActivityBar {...baseProps} activity={activity} />);
     const region = screen.getByRole("status");
-    const orb = container.querySelector("canvas");
+    const well = glyphOf(container);
+    const art = container.querySelector(".activity-glyph-art");
     const thinking = container.querySelector(".activity-label-reveal");
     rerender(<ActivityBar {...baseProps} activity={{ ...activity, tokens: 100 }} />);
     expect(container.querySelector(".activity-label-reveal")).toBe(thinking);
-    expect(container.querySelector("canvas")).toBe(orb);
+    expect(container.querySelector(".activity-glyph-art")).toBe(art);
 
     rerender(
       <ActivityBar {...baseProps} activity={{ ...activity, label: "Writing a response…" }} />,
@@ -158,7 +175,8 @@ describe("ActivityBar task outcomes", () => {
     const writing = container.querySelector(".activity-label-reveal");
     expect(writing).not.toBe(thinking);
     expect(writing?.textContent).toBe("Writing…");
-    expect(container.querySelector("canvas")).toBe(orb);
+    expect(glyphOf(container)).toBe(well);
+    expect(well?.dataset.glyph).toBe("write");
     expect(screen.getByRole("status")).toBe(region);
 
     rerender(
@@ -171,10 +189,11 @@ describe("ActivityBar task outcomes", () => {
     expect(container.querySelector(".activity-label-reveal")).not.toBe(writing);
     expect(region.textContent).toContain("Checks passed");
     expect(region.getAttribute("aria-live")).toBe("polite");
-    expect(container.querySelector("canvas")).toBeNull();
+    expect(glyphOf(container)?.dataset.glyph).toBe("done");
+    expect(glyphOf(container)?.hasAttribute("data-live")).toBe(false);
   });
 
-  it("keeps the orb and shimmer while Ken reviews without an active builder", () => {
+  it("keeps the live glyph and shimmer while Ken reviews without an active builder", () => {
     const { container } = render(
       <ActivityBar
         {...baseProps}
@@ -187,7 +206,8 @@ describe("ActivityBar task outcomes", () => {
         }}
       />,
     );
-    expect(container.querySelector("canvas")).toBeTruthy();
+    expect(glyphOf(container)?.dataset.glyph).toBe("review");
+    expect(glyphOf(container)?.hasAttribute("data-live")).toBe(true);
     expect(screen.getByText("Ken reviewing…").classList.contains("shimmer-text")).toBe(true);
     expect(screen.queryByText("Response ready")).toBeNull();
   });
@@ -209,10 +229,11 @@ describe("ActivityBar task outcomes", () => {
       />,
     );
     expect(screen.queryByText(/Brewed/)).toBeNull();
-    expect(screen.getByRole("status").textContent).toContain("Checks need another look");
+    expect(screen.getByRole("status").textContent).toContain("No passing check yet");
     expect(screen.getByRole("status").textContent).not.toContain("tokens");
-    expect(container.querySelector(".activity-meta")?.textContent).toBe("32s · 1.3k tok");
-    expect(container.querySelector("canvas")).toBeNull();
+    expect(container.querySelector(".activity-elapsed")?.textContent).toBe("32s");
+    expect(screen.getByTitle("Output tokens").textContent).toBe("1,300 tok");
+    expect(glyphOf(container)?.dataset.glyph).toBe("check");
     expect(screen.queryByRole("button", { name: "Details" })).toBeNull();
     expect(screen.queryByText("Run the missing tests before using the changes.")).toBeNull();
     expect(container.querySelector(".activity-details")).toBeNull();
@@ -229,10 +250,195 @@ describe("ActivityBar task outcomes", () => {
         }}
       />,
     );
-    expect(container.querySelector("canvas")).toBeNull();
+    expect(glyphOf(container)?.dataset.glyph).toBe("ask");
+    expect(glyphOf(container)?.hasAttribute("data-live")).toBe(false);
     expect(screen.getByRole("status").textContent).toContain("Your call from here");
   });
 });
+
+describe("ActivityBar cancellation state", () => {
+  it("has no Stop of its own: the composer's send key stops runs and reviews", () => {
+    const { rerender } = render(<ActivityBar {...baseProps} />);
+    expect(screen.queryByRole("button", { name: /cancel/i })).toBeNull();
+    const well = screen.getByRole("status").querySelector(".activity-glyph");
+    expect(well?.getAttribute("aria-hidden")).toBe("true");
+    rerender(
+      <ActivityBar
+        {...baseProps}
+        running={false}
+        activity={{
+          ...INITIAL_ACTIVITY,
+          phase: "reviewing",
+          label: "Ken is reviewing",
+          startedAt: 1,
+        }}
+      />,
+    );
+    expect(screen.queryByRole("button", { name: /cancel/i })).toBeNull();
+  });
+
+  it("says the task is stopping while cancellation settles", () => {
+    render(<ActivityBar {...baseProps} cancelling />);
+    expect(screen.getByRole("status")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /cancel/i })).toBeNull();
+  });
+});
+
+describe("ActivityBar outcome glyphs", () => {
+  const settled = (
+    phase: TaskPhase,
+    label: string,
+    extra: Partial<TaskActivity> = {},
+  ): TaskActivity => ({
+    ...INITIAL_ACTIVITY,
+    phase,
+    label,
+    startedAt: 1,
+    endedAt: 2,
+    ...extra,
+  });
+
+  it.each([
+    ["done", settled("done", "Done · checks passed"), "done", theme.success],
+    ["stopped", settled("stopped", "Stopped · unfinished"), "stop", theme.warning],
+    ["needs you", settled("attention", "Your decision needed"), "ask", theme.warning],
+    ["checks failed", settled("failed", "Checks failed"), "check", theme.error],
+    ["run failed", settled("failed", "Task failed"), "fail", theme.error],
+    ["unchecked edits", settled("done", "Changes saved"), "edit", theme.success],
+  ] as const)("%s says so in its colour, led by its glyph", (_name, activity, glyph, colour) => {
+    const { container } = render(
+      <ActivityBar {...baseProps} running={false} activity={activity} />,
+    );
+    const left = container.querySelector(".statusrow-left");
+    const lead = left?.firstElementChild as HTMLElement | null;
+    expect(lead?.dataset.glyph).toBe(glyph);
+    expect(lead?.style.color).toBe(colour);
+    const words = left?.querySelector<HTMLElement>(".activity-label-reveal > span");
+    expect(words?.style.color).toBe(colour);
+  });
+});
+
+describe("ActivityBar check count", () => {
+  it("says how many checks passed", () => {
+    render(
+      <ActivityBar
+        {...baseProps}
+        running={false}
+        activity={{
+          ...INITIAL_ACTIVITY,
+          phase: "done",
+          label: "Done · checks passed",
+          verification: "passed",
+          verifiedChecks: 3,
+          startedAt: 6,
+          endedAt: 9,
+        }}
+      />,
+    );
+    expect(screen.getByRole("status").textContent).toContain("3 checks passed. Nice.");
+  });
+});
+
+describe("ActivityMeta token count", () => {
+  const frames: FrameRequestCallback[] = [];
+  const runFrame = (at: number): void => {
+    for (const cb of frames.splice(0)) cb(at);
+  };
+  const setup = (focused: boolean) => {
+    vi.spyOn(document, "hasFocus").mockReturnValue(focused);
+    vi.spyOn(performance, "now").mockReturnValue(0);
+    vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => frames.push(cb));
+    vi.stubGlobal("cancelAnimationFrame", () => {});
+  };
+  const teardown = (): void => {
+    frames.length = 0;
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  };
+
+  it("shows the exact total and rolls up to a new one", async () => {
+    const { act } = await import("@testing-library/react");
+    setup(true);
+    try {
+      const { rerender } = render(<ActivityMeta elapsedMs={1000} tokens={1000} />);
+      const count = (): string | null => screen.getByTitle("Output tokens").textContent;
+      expect(count()).toBe("1,000 tok");
+      rerender(<ActivityMeta elapsedMs={2000} tokens={25734} />);
+      act(() => runFrame(300));
+      const mid = Number(count()?.replace(/\D/g, ""));
+      expect(mid).toBeGreaterThan(1000);
+      expect(mid).toBeLessThan(25734);
+      // A clock tick mid-roll must not snap the count to its target.
+      rerender(<ActivityMeta elapsedMs={3000} tokens={25734} />);
+      expect(count()).not.toBe("25,734 tok");
+      act(() => runFrame(5000));
+      expect(count()).toBe("25,734 tok");
+    } finally {
+      teardown();
+    }
+  });
+
+  it("goes straight to the new total when the window isn't focused", () => {
+    setup(false);
+    try {
+      const { rerender } = render(<ActivityMeta elapsedMs={1000} tokens={1000} />);
+      rerender(<ActivityMeta elapsedMs={2000} tokens={25734} />);
+      expect(frames).toHaveLength(0);
+      expect(screen.getByTitle("Output tokens").textContent).toBe("25,734 tok");
+    } finally {
+      teardown();
+    }
+  });
+});
+
+describe("ActivityBar timer", () => {
+  it("keeps counting from the run's start when the chat is hidden and shown again", async () => {
+    // Regression: going to a goal's Workers view and back restarted the timer
+    // at 0s, because the bar took a fresh start when its effects re-ran.
+    const { Activity } = await import("react");
+    const { act } = await import("@testing-library/react");
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(100_000);
+      const startedAt = 100_000;
+      const view = (shown: boolean) => (
+        <Activity mode={shown ? "visible" : "hidden"}>
+          <ActivityBar {...baseProps} runStartedAt={startedAt} />
+        </Activity>
+      );
+      const { rerender, container } = render(view(true));
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(24_000);
+      });
+      expect(container.textContent).toContain("24s");
+      rerender(view(false));
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_000);
+      });
+      rerender(view(true));
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_000);
+      });
+      expect(container.textContent).toContain("30s");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+const restoredPlan = {
+  checkpointId: "checkpoint-1",
+  generation: 1,
+  planPath: ".gg/plans/plan.md",
+  content: "# Plan",
+  contentHash: "hash-1",
+  state: "pending-review",
+  reviewStatus: "ready",
+  feedback: null,
+};
+const restoredAsks = [
+  { id: "ask-1", questions: [{ id: "q1", question: "Proceed?", kind: "confirm" }] },
+];
 
 /** Text a screen reader announces: skips aria-hidden subtrees. */
 function accessibleText(node: Node): string {
@@ -371,102 +577,5 @@ describe("ActivityBar plain state", () => {
     );
     expect(announced()).toBe("Working · Running verification…");
     expect(screen.getByText("Verifying…")).toBeTruthy();
-  });
-});
-
-describe("ActivityBar cancellation state", () => {
-  it("has no Stop of its own: the composer's send key stops runs and reviews", () => {
-    const { rerender } = render(<ActivityBar {...baseProps} />);
-    expect(screen.queryByRole("button", { name: /cancel/i })).toBeNull();
-    const orb = screen.getByRole("status").querySelector("canvas");
-    expect(orb?.getAttribute("aria-hidden")).toBe("true");
-    expect(orb?.getAttribute("aria-label")).toBe("Listening…");
-    expect(orb?.style.width).toBe("20px");
-    rerender(
-      <ActivityBar
-        {...baseProps}
-        running={false}
-        activity={{
-          ...INITIAL_ACTIVITY,
-          phase: "reviewing",
-          label: "Ken is reviewing",
-          startedAt: 1,
-        }}
-      />,
-    );
-    expect(screen.queryByRole("button", { name: /cancel/i })).toBeNull();
-  });
-
-  it("says the task is stopping while cancellation settles", () => {
-    render(<ActivityBar {...baseProps} cancelling />);
-    expect(screen.getByRole("status")).toBeTruthy();
-    expect(screen.queryByRole("button", { name: /cancel/i })).toBeNull();
-  });
-});
-
-describe("ActivityBar robot face", () => {
-  const settled = (
-    phase: TaskPhase,
-    label: string,
-    extra: Partial<TaskActivity> = {},
-  ): TaskActivity => ({
-    ...INITIAL_ACTIVITY,
-    phase,
-    label,
-    startedAt: 1,
-    endedAt: 2,
-    ...extra,
-  });
-
-  it.each([
-    ["done", settled("done", "Done · checks passed"), theme.success],
-    ["stopped", settled("stopped", "Stopped · unfinished"), theme.warning],
-    ["needs you", settled("attention", "Your decision needed"), theme.warning],
-    ["checks failed", settled("failed", "Checks failed"), theme.error],
-  ] as const)("%s says so in its colour, with no lead marker", (_name, activity, colour) => {
-    const { container } = render(
-      <ActivityBar {...baseProps} running={false} activity={activity} />,
-    );
-    const left = container.querySelector(".statusrow-left");
-    // No face or orb leads a settled status; the Fork's spoken state word comes first.
-    expect(left?.firstElementChild?.classList.contains("statusrow-state")).toBe(true);
-    expect(left?.querySelector("svg, canvas, .gg-face, .statusrow-icon")).toBeNull();
-    const words = left?.querySelector<HTMLElement>(".activity-label-reveal > span");
-    expect(words?.style.color).toBe(colour);
-  });
-});
-
-describe("ActivityBar timer", () => {
-  it("keeps counting from the run's start when the chat is hidden and shown again", async () => {
-    // Regression: going to a goal's Workers view and back restarted the timer
-    // at 0s, because the bar took a fresh start when its effects re-ran.
-    const { Activity } = await import("react");
-    const { act } = await import("@testing-library/react");
-    vi.useFakeTimers();
-    try {
-      vi.setSystemTime(100_000);
-      const startedAt = 100_000;
-      const view = (shown: boolean) => (
-        <Activity mode={shown ? "visible" : "hidden"}>
-          <ActivityBar {...baseProps} runStartedAt={startedAt} />
-        </Activity>
-      );
-      const { rerender, container } = render(view(true));
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(24_000);
-      });
-      expect(container.textContent).toContain("24s");
-      rerender(view(false));
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(5_000);
-      });
-      rerender(view(true));
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(1_000);
-      });
-      expect(container.textContent).toContain("30s");
-    } finally {
-      vi.useRealTimers();
-    }
   });
 });

@@ -70,7 +70,7 @@ describe("tool tiers", () => {
       "programmatic_profile",
       "tauri_package",
       "edit",
-      "screenshot",
+      "browser",
       "bash",
     ].map(stub);
     const { core, deferred } = partitionToolsByTier(tools);
@@ -79,7 +79,7 @@ describe("tool tiers", () => {
       "source_path",
       "programmatic_profile",
       "tauri_package",
-      "screenshot",
+      "browser",
     ]);
   });
 

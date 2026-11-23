@@ -16,6 +16,7 @@ import { toolText } from "../../test-support/tool-text.js";
 import type { ToolExecuteResult } from "@kenkaiiii/gg-agent";
 
 vi.mock("./defaults.js", () => ({
+  usesZaiMcpServers: () => false,
   getAllMcpServers: async (): Promise<MCPServerConfig[]> => [
     {
       name: "kencode-search",

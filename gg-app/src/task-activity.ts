@@ -69,7 +69,7 @@ export const INITIAL_ACTIVITY: TaskActivity = {
 
 // Rotate on a new activity span, never on each streamed token. Each pool
 // describes the same observed activity; outcomes deliberately keep fixed wording.
-const PROGRESS_PHRASES: Record<string, readonly string[]> = {
+export const PROGRESS_PHRASES: Record<string, readonly string[]> = {
   "Thinking…": ["Thinking…", "Thinking it through…", "Reasoning through the next step…"],
   "Working on your request…": [
     "Working on your request…",
@@ -193,7 +193,7 @@ function toolPhase(name: string, args: Record<string, unknown>): string {
   if (["edit", "write"].includes(name)) return "Making the changes…";
   if (["web_search", "web_fetch", "steroids"].includes(name)) return "Checking references…";
   if (["subagent", "spawn_agent", "wait_agent"].includes(name)) return "Coordinating agent work…";
-  if (name === "screenshot") return "Inspecting the app…";
+  if (name === "browser" || name === "screenshot") return "Inspecting the app…";
   if (name === "debug") return "Stepping through the code…";
   if (name === "bash")
     return typeof args.command === "string" &&

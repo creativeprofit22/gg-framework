@@ -1,7 +1,9 @@
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { TaskActivity } from "./task-activity";
-import { ThinkingOrb } from "./ActivityOrb";
 import { theme } from "./theme";
+import { ActivityGlyph } from "./ActivityGlyph";
+import { activityGlyph } from "./activity-glyphs";
+import type { ActivityGlyphName } from "./pixel-glyphs";
 import { ShimmerText } from "./ShimmerText";
 import { outcomePhrase } from "./activity-copy";
 import { useMotionLevel } from "./window-motion";
@@ -62,6 +64,117 @@ export function formatTokenCount(n: number): string {
     return k % 1 === 0 ? `${k}k` : `${k.toFixed(1)}k`;
   }
   return String(n);
+}
+
+const TOKEN_TOTAL = new Intl.NumberFormat("en-US");
+
+/** An exact output-token total: "25,734 tok". */
+export function formatTokenTotal(n: number): string {
+  return `${TOKEN_TOTAL.format(Math.max(0, Math.round(n)))} tok`;
+}
+
+/** Keep a well at least as wide as the widest value it has shown this run. */
+function growWell(el: HTMLElement | null, widest: { current: number }): void {
+  if (!el) return;
+  el.style.minWidth = "";
+  const natural = Math.ceil(el.getBoundingClientRect().width);
+  // A hidden well (narrow window) measures 0; keep what it already had.
+  if (natural === 0) {
+    if (widest.current > 0) el.style.minWidth = `${widest.current}px`;
+    return;
+  }
+  widest.current = Math.max(widest.current, natural);
+  el.style.minWidth = `${widest.current}px`;
+}
+
+/**
+ * Elapsed time and output tokens, each in a sunk well pinned right. A well
+ * starts snug and only widens when its value needs more room, never shrinking
+ * back mid-run ("10m" after "9m 59s" would otherwise jump), so the row's right
+ * edge never moves. Tokens are exact and roll up to each new total, since
+ * they arrive a whole turn at a time.
+ */
+export function ActivityMeta({
+  elapsedMs,
+  tokens,
+}: {
+  elapsedMs: number;
+  tokens: number;
+}): React.ReactElement {
+  const motion = useMotionLevel();
+  const timeRef = useRef<HTMLSpanElement>(null);
+  const tokRef = useRef<HTMLSpanElement>(null);
+  const tokText = useRef<HTMLSpanElement>(null);
+  const timeWidest = useRef(0);
+  const tokWidest = useRef(0);
+  const lastElapsed = useRef(elapsedMs);
+  const shown = useRef(tokens);
+  const shownLength = useRef(0);
+  // The count's text is written directly while it rolls; React only sets the
+  // first value, so a clock tick mid-roll never snaps it to the target.
+  const [initialTokens] = useState(() => formatTokenTotal(tokens));
+
+  useLayoutEffect(() => {
+    // A clock that went backwards is a new run: let both wells start snug again.
+    if (elapsedMs < lastElapsed.current) {
+      timeWidest.current = 0;
+      tokWidest.current = 0;
+      shownLength.current = 0;
+    }
+    lastElapsed.current = elapsedMs;
+    growWell(timeRef.current, timeWidest);
+    growWell(tokRef.current, tokWidest);
+  }, [elapsedMs]);
+
+  useEffect(() => {
+    const paint = (n: number): void => {
+      shown.current = n;
+      const text = formatTokenTotal(n);
+      if (tokText.current) tokText.current.textContent = text;
+      if (text.length !== shownLength.current) {
+        shownLength.current = text.length;
+        growWell(tokRef.current, tokWidest);
+      }
+    };
+    const from = shown.current;
+    const animate =
+      motion === "full" &&
+      tokens > from &&
+      !(typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches);
+    if (!animate) {
+      if (tokens < from) tokWidest.current = 0;
+      paint(tokens);
+      return;
+    }
+    // Bigger jumps roll a little longer, never past 1.6s.
+    const duration = Math.min(1600, 450 + Math.log10(tokens - from + 1) * 260);
+    const start = performance.now();
+    let frame = 0;
+    const step = (now: number): void => {
+      const t = Math.min(1, (now - start) / duration);
+      paint(from + (tokens - from) * (1 - Math.pow(1 - t, 3)));
+      if (t < 1) frame = requestAnimationFrame(step);
+    };
+    frame = requestAnimationFrame(step);
+    return () => cancelAnimationFrame(frame);
+  }, [tokens, motion]);
+
+  return (
+    <span className="activity-meta dissolve-in">
+      <span ref={timeRef} className="well activity-elapsed" title="Elapsed time">
+        {formatElapsed(elapsedMs)}
+      </span>
+      {/* Held in place before the first count, so its arrival moves nothing. */}
+      <span
+        ref={tokRef}
+        className="well activity-token-count"
+        title="Output tokens"
+        style={tokens > 0 ? undefined : { visibility: "hidden" }}
+      >
+        <span ref={tokText}>{initialTokens}</span>
+      </span>
+    </span>
+  );
 }
 
 interface Props {
@@ -164,6 +277,7 @@ const SHORT_LABELS: Record<string, string> = {
   "Your decision needed": "Needs you",
   "Plan needs your decision": "Approve plan",
   "Plan ready for review…": "Plan ready",
+  "Plan approved · preparing implementation…": "Starting plan…",
   "Changed · verification incomplete": "Not verified",
   "Verification incomplete": "Not verified",
   "Done · checks passed": "Checks passed",
@@ -283,9 +397,20 @@ export function ActivityBar({
             ? "Response ready"
             : readyPhrase;
   const label =
-    (!active && outcomePhrase(fullLabel, activity?.startedAt ?? 0)) ||
+    (!active && outcomePhrase(fullLabel, activity?.startedAt ?? 0, activity?.verifiedChecks)) ||
     SHORT_LABELS[fullLabel] ||
     fullLabel;
+  const glyph: ActivityGlyphName = cancelling
+    ? "stop"
+    : starting
+      ? "start"
+      : hasActivity
+        ? activityGlyph(activity.label, activity.phase)
+        : active
+          ? "work"
+          : doneStatus
+            ? "write"
+            : "idle";
   const state = plainState({ activity, running, cancelling, doneStatus });
   // Idle phrases are pure decoration, so idle announces only the state word.
   // Otherwise announce the plain event label, hiding a playful visible label.
@@ -303,18 +428,8 @@ export function ActivityBar({
             aria-atomic="true"
             title={activity?.detail || undefined}
           >
-            {/* Only work in progress gets a lead: the orb's motion. A settled
-                status is its words alone, coloured by outcome. */}
-            {active && (
-              <ThinkingOrb
-                state="listening"
-                size={20}
-                theme="auto"
-                paused={motion !== "full"}
-                aria-hidden="true"
-                style={{ flexShrink: 0 }}
-              />
-            )}
+            {/* Every state leads with its step's glyph, in the status colour. */}
+            <ActivityGlyph glyph={glyph} color={tone} live={active && motion === "full"} />
             <span className="statusrow-state" style={{ color: bareIdle ? theme.textMuted : tone }}>
               {state}
               <span className="statusrow-sep" aria-hidden={announcedDetail ? undefined : "true"}>
@@ -325,7 +440,7 @@ export function ActivityBar({
               <span className="sr-only">{announcedDetail}</span>
             )}
             {/* Remount only the label when its meaning changes. Timer/token
-                updates must not restart the reveal or the running orb. */}
+                updates must not restart the reveal or the running glyph. */}
             <span
               key={`${active}:${label}`}
               className="activity-label-reveal"
@@ -347,14 +462,7 @@ export function ActivityBar({
             )}
           </span>
           {(active || hasActivity) && !starting && (
-            <span className="activity-meta dissolve-in">
-              {formatElapsed(elapsed)}
-              {totalTokens > 0 && (
-                <span className="activity-token-count" title="Output tokens">
-                  {` · ${formatTokenCount(totalTokens)} tok`}
-                </span>
-              )}
-            </span>
+            <ActivityMeta elapsedMs={elapsed} tokens={totalTokens} />
           )}
         </div>
         {active && planTotal > 0 && planDone < planTotal && (

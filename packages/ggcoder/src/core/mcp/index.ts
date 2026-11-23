@@ -4,6 +4,7 @@ export type {
   MCPElicitation,
   MCPElicitHandler,
   MCPLoginResult,
+  McpAgentTool,
 } from "./client.js";
 export { createElicitationBridge, MCP_ELICIT_TIMEOUT_MS } from "./elicitation-bridge.js";
 export type { ElicitationBridge, ElicitationPrompt } from "./elicitation-bridge.js";
@@ -13,7 +14,12 @@ export {
   mcpOAuthRedirectUrl,
   MCP_OAUTH_CALLBACK_PORT,
 } from "./oauth-provider.js";
-export { DEFAULT_MCP_SERVERS, getMCPServers, getAllMcpServers } from "./defaults.js";
+export {
+  DEFAULT_MCP_SERVERS,
+  getMCPServers,
+  getAllMcpServers,
+  usesZaiMcpServers,
+} from "./defaults.js";
 export { isShareableServer, SharedMcpPool, sharedMcpPool } from "./shared-pool.js";
 export type { SharedConnector, SharedServerHandle } from "./shared-pool.js";
 export type { MCPServerConfig } from "./types.js";

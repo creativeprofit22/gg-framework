@@ -3061,12 +3061,6 @@ async function createSession(
     target.eventBus.on("compaction_end", (data) => {
       if (data.compacted) void trophies.count("compactions", opts.id);
     });
-    // Cold-prompt-cache notice: push the fresh TTL anchor + context size whenever
-    // a run or compaction settles. Expiry itself is time-based, so the webview
-    // also re-reads `cacheExpiry` from /state when the user returns or types.
-    for (const ev of ["agent_done", "compaction_end", "model_change"] as const) {
-      target.eventBus.on(ev, () => broadcast("cache_expiry", target.getCacheExpiryStatus()));
-    }
   }
   bindSessionEvents(session);
 
@@ -4617,6 +4611,9 @@ async function createSession(
   // resolves when the webview POSTs /auth/oauth/code.
   let oauthInFlight = false;
   let pendingCode: ((code: string) => void) | null = null;
+  /** This window's sign-in in progress: aborting it ends the wait for the browser. */
+  let oauthAttempt: { readonly abort: AbortController; readonly done: Promise<void> } | null =
+    null;
 
   function authCallbacks(): OAuthLoginCallbacks {
     return {
@@ -5071,7 +5068,6 @@ async function createSession(
       supportedThinkingLevels: getSupportedThinkingLevels(state.provider, state.model),
       supportsVideo: getModel(state.model)?.supportsVideo ?? false,
       autopilot: isAutopilotEnabled(),
-      cacheExpiry: session.getCacheExpiryStatus(),
       ...kenStatePayload(),
       ...footerExtras(),
       pendingPlanReview: planGate.pending(),
@@ -7728,11 +7724,14 @@ async function createSession(
     }
 
     if (method === "POST" && url === "/auth/oauth/start") {
-      void readBody(req, res).then((raw) => {
+      void readBody(req, res).then(async (raw) => {
         if (raw === null) return;
         let provider = "";
+        let account: string | undefined;
         try {
-          provider = (JSON.parse(raw) as { provider?: string }).provider ?? "";
+          const body = JSON.parse(raw) as { provider?: string; account?: string };
+          provider = body.provider ?? "";
+          account = body.account;
         } catch {
           json(res, 400, { error: "invalid JSON body" });
           return;
@@ -7741,6 +7740,14 @@ async function createSession(
         if (!meta || !meta.methods.includes("oauth")) {
           json(res, 400, { error: "provider does not support OAuth" });
           return;
+        }
+        // Another ChatGPT account or workspace, asked for while this window is
+        // still waiting on the browser (OpenAI's page may be a dead end saying
+        // the app is only for another workspace): end that wait and start over.
+        const newAccount = provider === "openai" && account === "new";
+        if (oauthInFlight && newAccount && oauthAttempt) {
+          oauthAttempt.abort.abort();
+          await oauthAttempt.done;
         }
         if (oauthInFlight) {
           json(res, 409, { error: "a login is already in progress" });
@@ -7758,11 +7765,17 @@ async function createSession(
         }
         oauthInFlight = true;
         oauthInFlightProviders.add(provider);
+        const abort = new AbortController();
+        let settle = (): void => {};
+        oauthAttempt = { abort, done: new Promise<void>((resolve) => (settle = resolve)) };
         json(res, 202, { accepted: true });
         void (async () => {
           const cb = authCallbacks();
           try {
-            await runProviderSignIn(provider, auth, cb);
+            await runProviderSignIn(provider, auth, cb, {
+              ...(newAccount ? { newAccount } : {}),
+              signal: abort.signal,
+            });
             if (provider === "openai") await refreshOpenAIAuthSessions();
             // Terminal outcome of a GLOBAL change: every window's login modal
             // should close and its provider list refresh, not just the one
@@ -7772,6 +7785,8 @@ async function createSession(
             // The OAuth provider's models just became selectable everywhere.
             broadcastAll("models_change", {});
           } catch (err) {
+            // Replaced by a new attempt from this window: that one reports for both.
+            if (abort.signal.aborted) return;
             // Deliberately session-scoped: this is the outcome of ONE window's
             // attempt. Another window that never pressed Connect has nothing to
             // show an error about, and its modal correctly still offers login.
@@ -7787,6 +7802,8 @@ async function createSession(
             oauthInFlight = false;
             oauthInFlightProviders.delete(provider);
             pendingCode = null;
+            oauthAttempt = null;
+            settle();
           }
         })();
       });

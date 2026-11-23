@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => ({
   closeLogger: vi.fn(),
   openBrowser: vi.fn(),
   loginChatGPT: vi.fn(),
+  savedChatGPTAccounts: vi.fn(),
   signInWithClaudeCode: vi.fn(),
 }));
 
@@ -35,6 +36,7 @@ vi.mock("../core/oauth/openai.js", () => ({
   ChatGPTPlanNotEnabledError: class extends Error {},
   loginChatGPT: mocks.loginChatGPT,
   revokeChatGPTSignIn: vi.fn(),
+  savedChatGPTAccounts: mocks.savedChatGPTAccounts,
 }));
 vi.mock("@kenkaiiii/gg-core", async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
@@ -67,6 +69,7 @@ describe("runLogin", () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
     mocks.createInterface.mockReturnValue({ question: mocks.question, close: mocks.close });
     mocks.getCredentials.mockResolvedValue(undefined);
+    mocks.savedChatGPTAccounts.mockResolvedValue([]);
     mocks.loginChatGPT.mockImplementation(async (callbacks: OAuthLoginCallbacks) => {
       callbacks.onOpenUrl("https://example.invalid/oauth");
       return credentials;
@@ -152,6 +155,19 @@ describe("runLogin", () => {
     expect(mocks.setCredentials).toHaveBeenCalledExactlyOnceWith(OPENAI_CHATGPT_KEY, credentials);
     expect(mocks.close).toHaveBeenCalledOnce();
     expect(mocks.closeLogger).toHaveBeenCalledOnce();
+  });
+
+  it("registers afresh for a different ChatGPT account or workspace when asked", async () => {
+    mocks.selector.mockResolvedValue("openai");
+    mocks.savedChatGPTAccounts.mockResolvedValue(["me@example.invalid"]);
+    answers("", "2");
+
+    await runLogin();
+
+    expect(mocks.loginChatGPT).toHaveBeenCalledExactlyOnceWith(expect.anything(), {
+      newAccount: true,
+    });
+    expect(mocks.getCredentials).not.toHaveBeenCalledWith(OPENAI_CHATGPT_KEY);
   });
 
   it("stores an OpenAI API key under openai without starting a sign-in", async () => {

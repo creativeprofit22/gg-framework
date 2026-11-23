@@ -28,7 +28,7 @@ vi.mock("../../config.js", async () => {
 
 vi.mock("../logger.js", () => ({ log: vi.fn() }));
 
-import { getAllMcpServers, getMCPServers } from "./defaults.js";
+import { getAllMcpServers, getMCPServers, usesZaiMcpServers } from "./defaults.js";
 import { getAppPaths } from "../../config.js";
 import { log } from "../logger.js";
 import { addServer } from "./store.js";
@@ -206,5 +206,14 @@ describe("getAllMcpServers built-in Supa Drivah", () => {
     expect(
       await names({ builtinDeps: found, builtinSettings: { drivah: { removed: true } } }),
     ).toEqual([]);
+  });
+});
+
+describe("usesZaiMcpServers", () => {
+  it("is true only for GLM models without native image input", () => {
+    expect(usesZaiMcpServers("glm", "glm-5.3")).toBe(true);
+    expect(usesZaiMcpServers("glm", "glm-5.4")).toBe(false);
+    expect(usesZaiMcpServers("glm", "glm-5.3-flash")).toBe(false);
+    expect(usesZaiMcpServers("anthropic", "claude-opus-5-5")).toBe(false);
   });
 });

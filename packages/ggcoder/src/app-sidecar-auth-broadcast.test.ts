@@ -648,6 +648,58 @@ describe("OAuth login across windows", () => {
     expect(streamB.types).not.toContain("auth_error");
   }, 90_000);
 
+  // GitHub #156: OpenAI's "only available to members of its workspace" page
+  // never comes back, so the waiting attempt must give way to a new account.
+  it("replaces a waiting sign-in with another ChatGPT account or workspace", async () => {
+    const windowA = await createSession();
+    const streamA = await startParkedLogin(windowA);
+    const count = (type: string): number => streamA.types.filter((t) => t === type).length;
+    expect(count("auth_url")).toBe(1);
+
+    const replaced = await request("POST", "/auth/oauth/start", {
+      session: windowA,
+      body: { provider: "openai", account: "new" },
+    });
+    expect(replaced.status).toBe(202);
+    await waitFor(() => count("auth_url") === 2 && count("auth_need_code") === 2);
+    // The replaced attempt reports nothing; only the new one is shown.
+    expect(streamA.types).not.toContain("auth_error");
+
+    // The fresh attempt holds the guards again: a plain start still waits its turn.
+    const plain = await request("POST", "/auth/oauth/start", {
+      session: windowA,
+      body: { provider: "openai" },
+    });
+    expect(plain.status).toBe(409);
+  }, 90_000);
+
+  it("still refuses a second plain sign-in while one is waiting", async () => {
+    const windowA = await createSession();
+    const streamA = await startParkedLogin(windowA);
+    const second = await request("POST", "/auth/oauth/start", {
+      session: windowA,
+      body: { provider: "openai" },
+    });
+    expect(second.status).toBe(409);
+    expect(String(second.json.error)).toContain("a login is already in progress");
+    // The waiting attempt was left alone.
+    expect(streamA.types.filter((t) => t === "auth_url")).toHaveLength(1);
+    expect(streamA.types).not.toContain("auth_error");
+  }, 90_000);
+
+  it("only lets a new account replace a waiting ChatGPT sign-in", async () => {
+    const windowA = await createSession();
+    const streamA = await startParkedLogin(windowA);
+    const other = await request("POST", "/auth/oauth/start", {
+      session: windowA,
+      body: { provider: "anthropic", account: "new" },
+    });
+    expect(other.status).toBe(409);
+    expect(String(other.json.error)).toContain("a login is already in progress");
+    expect(streamA.types.filter((t) => t === "auth_url")).toHaveLength(1);
+    expect(streamA.types).not.toContain("auth_error");
+  }, 90_000);
+
   it("frees the provider again after a failed login", async () => {
     const windowA = await createSession();
     const windowB = await createSession();
@@ -805,8 +857,8 @@ describe("dual-auth providers (OAuth + API key)", () => {
     const reason = (id: string) => models.find((m) => m.id === id)?.unavailable;
     // K2.8 Preview is served on the Kimi Code plan endpoint only.
     expect(reason("kimi-for-coding")).toBe("Needs a Kimi Code plan key");
-    // UltraSpeed runs on API Credits only.
-    expect(reason("mimo-v2.6-pro-ultraspeed")).toBe("Needs an API Credits key");
+    // UltraSpeed runs on the Token Plan too, so a plan key is enough.
+    expect(reason("mimo-v2.6-pro-ultraspeed")).toBeUndefined();
     // Models any connected key runs carry no reason.
     expect(reason("kimi-k3")).toBeUndefined();
     expect(reason("mimo-v2.6-flash")).toBeUndefined();

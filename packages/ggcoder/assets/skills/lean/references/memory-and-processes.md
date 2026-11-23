@@ -2,6 +2,11 @@
 
 The deep reference for two of the six sweep areas: memory (leaks and hogging) and process lifecycle (zombies, orphans, shutdown). Read for any finding in those areas.
 
+## Contents
+
+- Part 1 — Memory
+- Part 2 — Processes & lifecycle
+
 ## Part 1 — Memory
 
 ### The leak taxonomy

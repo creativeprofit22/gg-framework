@@ -277,11 +277,12 @@ ${CLAUDE_MD_RESTART_NOTICE}`,
     description: "Run checks, review, commit with AI message, and push if tracking a remote",
     prompt: `# Commit: check, review, commit and push
 
-1. If \`.gg/commands/commit.md\` exists, read it and follow it instead of these steps: it is this project's own commit procedure.
+1. If \`.gg/commands/commit.md\` exists, read it and follow it instead of these steps: it is this project's own commit procedure. If it runs no tests while the project has some, also run the tests covering the changed files. If its review step does not make the reviewer read the whole diff (for example it says "be fast"), run step 4 and its check in step 5 in place of that step.
 2. Run the project's checks, scoped to what changed. Take the commands from Verification in your instructions, else the project's own scripts (package.json \`check\`/\`typecheck\`, \`lint\`, \`format:check\`, \`test\`; pyproject, go.mod or Cargo.toml equivalents); never invent commands. Lint, format-check and typecheck the changed files where the tool accepts paths, else the narrowest package holding them. Run only tests covering the changed files (e.g. \`vitest related\`, \`jest --findRelatedTests\`, the changed package's tests); docs and other non-code changes need none. Run the full suite only when asked or when the change touches shared config, lockfiles, build or CI files, or widely used code, and say why. Skip install steps unless a check cannot start without them. Run each standalone, unpiped. Fix failures the change caused (auto-fix formatting/lint on the changed files where the project has a fix script), then re-run only what failed; do not clean up unrelated failures.
 3. Review changes: run \`git status\`, \`git diff --staged\` and \`git diff\`.
-4. Fast review gate: spawn ONE subagent with the full diff. Instructions: review ONLY the diff for real bugs, regressions, leftover debug code and unintended changes. Score each issue 0-100 confidence (pre-existing issues and stylistic nitpicks are false positives, score low). Report ONLY issues with confidence >= 80, with file:line and a one-line fix. If none, reply "CLEAR". This is a last check, not a deep audit - be fast.
-5. If CLEAR: continue to step 6 without asking anything.
+4. Review gate: write the full diff to a temp file (staged, unstaged, and each new file via \`git diff --no-index /dev/null <file>\`), then spawn ONE subagent. Brief it with the file path and the list of changed files only, never a summary of the changes. Instructions: read the WHOLE diff file, paging through it if long, and open the changed source where a hunk needs context. Review it for real bugs, regressions, leftover debug code and unintended changes. Score each issue 0-100 confidence (pre-existing issues and stylistic nitpicks are false positives, score low). Report ONLY issues with confidence >= 80, with file:line and a one-line fix. End with a \`Read:\` line naming every changed file you reviewed. If no issues, reply "CLEAR" plus that line.
+5. A CLEAR counts only if its \`Read:\` line names every changed file and its receipt shows it read the diff. Otherwise no review happened: read the diff yourself and judge it by the same bar before going on.
+   If CLEAR: continue to step 6 without asking anything.
    If issues >= 80 were reported: show them and ask with \`ask_user\` (one \`choice\` question, \`id: "land"\`) offering exactly:
    - "Fix it first, then commit & push" (recommended, hint: keeps the branch green)
    - "Commit & push anyway" (hint: issue stays open in the log)
@@ -322,8 +323,8 @@ Scope comes from git, not this conversation: handle every uncommitted change in 
 2. Leave out and report anything that must not be committed: secrets or credentials, build output, logs, scratch files, or clearly unfinished edits. Never delete, revert, or discard them.
 3. Group obvious changes by purpose, splitting exact hunks only when a file spans independent purposes. Keep uncertain or coupled changes together and order foundations before dependents.
 4. Run [PROJECT-SPECIFIC QUALITY COMMANDS] once, scoped to what changed: lint, format-check and typecheck the changed files (or the narrowest package holding them), run only tests covering them, and run the full suite only when asked or when shared config, lockfiles, build/CI files, or widely used code change. Skip install steps unless a check cannot start without them. If a required check fails, stop and report it; do not clean up unrelated failures or rerun passing checks without file changes.
-5. Spawn ONE subagent with the full diff for a fast review of real bugs, regressions, debug leftovers, and unintended changes. Require confidence scores and report only findings at least 80; pre-existing issues and style nitpicks score low.
-6. If review is CLEAR, continue. Otherwise show the findings and use one \`ask_user\` choice with a \`detail\` of one plain sentence naming which review findings are blocking: fix first (recommended) or commit anyway. On fix-first, fix and rerun affected checks without another review. If \`ask_user\` is unavailable, ask the same choice in prose.
+5. Write the full diff to a temp file (staged, unstaged, and each new file via \`git diff --no-index /dev/null <file>\`) and spawn ONE subagent briefed with that path and the changed-file list only, never a summary. Instructions: read the WHOLE diff file, review it for real bugs, regressions, debug leftovers, and unintended changes, requires confidence scores and reports only findings at least 80 (pre-existing issues and style nitpicks score low), and end with a \`Read:\` line naming every changed file reviewed.
+6. A CLEAR counts only if its \`Read:\` line names every changed file; otherwise review the diff yourself by the same bar. If review is CLEAR, continue. Otherwise show the findings and use one \`ask_user\` choice with a \`detail\` of one plain sentence naming which review findings are blocking: fix first (recommended) or commit anyway. On fix-first, fix and rerun affected checks without another review. If \`ask_user\` is unavailable, ask the same choice in prose.
 7. For each group, stage exact paths or hunks, never \`git add -A\` or interactive \`git add -p\` (stage a hunk with \`git apply --cached\`). The index must hold only that group, including anything staged before the run; inspect its staged diff before committing.
 8. Create ordered commits with concise Add/Update/Fix/Remove/Refactor messages. Never use \`--no-verify\`; if a hook fails, fix the cause, restage that group, and commit again. Then push exactly once after all commits if the branch tracks a remote; if it has none, say so instead of pushing. Never force-push.
 
@@ -334,7 +335,7 @@ Replace [PROJECT-SPECIFIC QUALITY COMMANDS] with the project's actual lint/typec
 
 If the project has no quality commands, write step 4 as: \`No project quality checks are configured; say so and continue.\` Never leave the placeholder or describe missing files inside the recipe.
 
-Keep the command file under 30 lines.
+Keep the command file under 40 lines.
 
 ## Step 3: Update the checklist
 

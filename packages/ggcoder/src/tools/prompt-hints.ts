@@ -22,7 +22,9 @@ export const TOOL_PROMPT_HINTS: Record<string, string> = {
   web_fetch: "Fetch URLs/PDFs.",
   task_output: "Process output.",
   task_stop: "Stop a process.",
-  screenshot: "Screenshot/click UI.",
+  // Names the cues a request gives ("test", "click", "screenshot") so tool_search finds it.
+  browser:
+    "Real browser: test a web app by script (open, click, fill, check, screenshot) with console and network errors reported.",
   debug: "Node debugger.",
   dev_app: "Drive the running dev app.",
   send_message: "Steer a child.",
@@ -143,6 +145,7 @@ export function buildToolSteering(activeTools: readonly string[], posixShell = t
 export const BUILTIN_TOOL_NAMES: readonly string[] = [
   "ask_user",
   "bash",
+  "browser",
   "checklist",
   "debug",
   "dev_app",
@@ -161,7 +164,6 @@ export const BUILTIN_TOOL_NAMES: readonly string[] = [
   "programmatic_command",
   "command_information",
   "read",
-  "screenshot",
   "send_message",
   "skill",
   "source_path",

@@ -70,6 +70,7 @@ import { formatUserError } from "./utils/error-handler.js";
 import type { Message, Provider, ThinkingLevel } from "@kenkaiiii/gg-ai";
 import type { ThemeName } from "./ui/theme/theme.js";
 import { AuthStorage, readStoredBaseUrlSync } from "./core/auth-storage.js";
+import { apiKeyStorageKeys } from "@kenkaiiii/gg-core";
 import { SessionManager, type TurnMetricPayload } from "./core/session-manager.js";
 import {
   ensureAppDirs,
@@ -114,7 +115,7 @@ import {
   isPaidModel,
   type OpenAICodexContextProfile,
 } from "./core/model-registry.js";
-import { MCPClientManager, getAllMcpServers } from "./core/mcp/index.js";
+import { MCPClientManager, getAllMcpServers, usesZaiMcpServers } from "./core/mcp/index.js";
 import { runLogin, runLogout, runDoctor } from "./cli/auth.js";
 import { runMcp } from "./cli/mcp.js";
 import {
@@ -587,8 +588,8 @@ async function runInkTUI(opts: {
   // refresh token (preferredProvider expired) doesn't crash startup — we
   // fall back to whichever other provider actually resolved. Keyed by
   // auth-storage key (not always the provider id) — e.g. Xiaomi splits into
-  // "xiaomi" (Token Plan) and "xiaomi-credits" (API Credits, required for
-  // mimo-v2.6-pro-ultraspeed) since a user may hold either or both.
+  // "xiaomi" (Token Plan) and "xiaomi-credits" (API Credits) since a user may
+  // hold either or both.
   const credentialsByProvider: Record<
     string,
     { accessToken: string; accountId?: string; baseUrl?: string }
@@ -758,6 +759,7 @@ async function runInkTUI(opts: {
     lspManager,
     debugManager,
     devAppManager,
+    browserManager,
     subAgentManager,
   } = await createTools(cwd, {
     commandDiscovery: { workspaceActions: UI_SLASH_COMMANDS },
@@ -794,8 +796,11 @@ async function runInkTUI(opts: {
   let initialMcpConnectPromise: Promise<AgentTool[]> | undefined;
   const connectInitialMcpTools = async (): Promise<AgentTool[]> => {
     initialMcpConnectPromise ??= (async () => {
-      const providerApiKey =
-        provider === "glm" ? credentialsByProvider["glm"]?.accessToken : undefined;
+      const providerApiKey = usesZaiMcpServers(provider, model)
+        ? apiKeyStorageKeys("glm")
+            .map((key) => credentialsByProvider[key]?.accessToken)
+            .find(Boolean)
+        : undefined;
       const servers = await getAllMcpServers(provider, providerApiKey, cwd, {
         allowProjectScope: projectScopeAllowed(
           savedSettings.trustProjectMcpServers,
@@ -834,6 +839,8 @@ async function runInkTUI(opts: {
     lspManager?.shutdownAll();
     debugManager?.shutdown();
     devAppManager?.shutdownNow();
+    // Playwright also kills its browsers on exit; this covers a normal close.
+    void browserManager?.shutdown();
     mcpManager.dispose().catch(() => {});
     verifyPlanLoader.dispose();
   });

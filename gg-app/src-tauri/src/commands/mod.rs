@@ -7,3 +7,4 @@ pub(crate) mod live_preview;
 pub(crate) mod local_update;
 pub(crate) mod notes;
 pub(crate) mod poll;
+pub(crate) mod update;

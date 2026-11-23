@@ -470,28 +470,6 @@ export interface AgentState extends DesktopContextSnapshot, DesktopSessionUXStat
   openAskPrompts?: unknown;
   /** The user's `!` commands whose output hasn't reached the agent yet. */
   pendingShellRuns?: string[];
-  /** Cold-prompt-cache status (sidecar /state + `cache_expiry` event). Null when
-   *  the route has no known cache TTL or the chat is empty; absent on older sidecars. */
-  cacheExpiry?: CacheExpiryStatus | null;
-}
-
-/** Mirrors ggcoder `core/cache-expiry.ts` CacheExpiryStatus. */
-export interface CacheExpiryStatus {
-  sessionId?: string;
-  provider: string;
-  ttlMs: number;
-  confidence: "expired" | "may_be_cold";
-  ttlSource: string;
-  lastRequestAt: number | null;
-  expiresAt: number | null;
-  expired: boolean;
-  reason: "idle" | "age_unknown" | "identity_changed" | null;
-  /** Tokens the next request re-reads at full price. */
-  prefixTokens: number;
-  minTokens: number;
-  /** expired AND prefixTokens >= minTokens. */
-  notable: boolean;
-  estimatedExtraCostUsd: number | null;
 }
 
 /** A project task from the ~/.gg-tasks store (the agent's `tasks` tool). */
@@ -1872,9 +1850,16 @@ export async function openRouterCatalog(
  * login hub the sidecar may still be booting, and invoking early throws the
  * "sidecar not ready" error users hit when clicking Continue.
  */
-export async function authOAuthStart(provider: string): Promise<void> {
+export async function authOAuthStart(
+  provider: string,
+  options: { account?: "new" } = {},
+): Promise<void> {
   await waitForReady();
-  await invoke("agent_auth_oauth_start", { paneId: "primary", provider });
+  await invoke("agent_auth_oauth_start", {
+    paneId: "primary",
+    provider,
+    ...(options.account ? { account: options.account } : {}),
+  });
 }
 
 /** Submit a pasted OAuth code to an in-flight login. Sidecar-proxied like start. */
@@ -3443,7 +3428,7 @@ export interface PaneAgentClient extends NotesClient {
   cancelQueued(id: string): Promise<boolean | null>;
   exportTranscriptName(): Promise<string | null>;
   saveTranscript(path: string): Promise<{ path: string; bytes: number }>;
-  authOAuthStart(provider: string): Promise<void>;
+  authOAuthStart(provider: string, options?: { account?: "new" }): Promise<void>;
   authOAuthCode(code: string): Promise<void>;
   newSession(): Promise<NewSessionResult>;
   getRadioState(): Promise<RadioState>;
@@ -3974,9 +3959,12 @@ export function createPaneAgentClient(paneId: string): PaneAgentClient {
       await ready();
       return call("agent_export_transcript", { path });
     },
-    authOAuthStart: async (provider) => {
+    authOAuthStart: async (provider, options = {}) => {
       await ready();
-      await call("agent_auth_oauth_start", { provider });
+      await call("agent_auth_oauth_start", {
+        provider,
+        ...(options.account ? { account: options.account } : {}),
+      });
     },
     authOAuthCode: async (code) => {
       await ready();

@@ -7,7 +7,12 @@ import {
   getQwenCloudThinkingLevels,
 } from "@kenkaiiii/gg-ai/qwen-cloud-policy";
 import { isKimiCodingEndpoint } from "./kimi-region.js";
-import { GEMINI_API_KEY, KIMI_CODE_KEY, XIAOMI_CREDITS_KEY } from "./auth-storage.js";
+import {
+  GEMINI_API_KEY,
+  GLM_CODING_PLAN_KEY,
+  KIMI_CODE_KEY,
+  XIAOMI_CREDITS_KEY,
+} from "./auth-storage.js";
 import { isHiddenProvider } from "./hidden-providers.js";
 
 export { HIDDEN_PROVIDERS, isHiddenProvider } from "./hidden-providers.js";
@@ -80,11 +85,9 @@ export interface ModelInfo {
    * endpoints/keys (a plan key vs. a pay-per-token key). The first key with stored credentials wins, so a
    * model can both prefer one endpoint AND fall back to another the user has
    * configured instead:
-   *   - `mimo-v2.6-pro` / `mimo-v2.6-flash`: `["xiaomi", XIAOMI_CREDITS_KEY]` —
-   *     prefer the Token Plan, fall back to API Credits (API Credits serves
-   *     every MiMo model, so a Credits-only user still reaches these).
-   *   - `mimo-v2.6-pro-ultraspeed`: `[XIAOMI_CREDITS_KEY]` only — not served
-   *     over the Token Plan endpoint, so there's no fallback to it.
+   *   - every MiMo model: `["xiaomi", XIAOMI_CREDITS_KEY]` — prefer the Token
+   *     Plan, fall back to API Credits (API Credits serves every MiMo model, so
+   *     a Credits-only user still reaches these).
    *   - Kimi: `[KIMI_CODE_KEY, "moonshot"]` — the Kimi Code plan key first;
    *     K2.8 Preview is `[KIMI_CODE_KEY]` only (the plan endpoint serves it).
    *   - every Gemini model: `[GEMINI_API_KEY]` — the AI Studio key.
@@ -135,11 +138,11 @@ const CLAUDE_FABLE_FAST_BILLING: ModelBilling = {
   standardModel: "claude-fable-5-2",
 };
 
-/** MiMo UltraSpeed: API Credits only, billed per token, never the Token Plan. */
+// Kept `paid` even on the Token Plan: 10x credits drains a plan too fast to carry silently into helpers.
 const XIAOMI_ULTRASPEED_BILLING: ModelBilling = {
-  label: "bills API Credits",
+  label: "10x credits",
   detail:
-    "UltraSpeed runs only on your Xiaomi API Credits, billed per token at a higher rate than MiMo-V2.6-Pro, never on the Token Plan.",
+    "UltraSpeed uses your Token Plan credits at 10x MiMo-V2.6-Pro's rate (Pro and Max plans only), or bills your API Credits per token at a higher rate.",
   paid: true,
   standardModel: "mimo-v2.6-pro",
 };
@@ -159,6 +162,9 @@ const GEMINI_AUTH_KEYS = [GEMINI_API_KEY];
 
 /** Kimi credential order: a Kimi Code plan key first, then a Moonshot key. */
 const KIMI_AUTH_KEYS = [KIMI_CODE_KEY, "moonshot"];
+
+/** GLM credential order: a GLM Coding Plan key first, then a pay-per-token Z.AI key. */
+const GLM_AUTH_KEYS = [GLM_CODING_PLAN_KEY, "glm"];
 
 export const MODELS: ModelInfo[] = [
   ...QWEN_CLOUD_MODEL_CAPABILITIES.map((model): ModelInfo => ({
@@ -566,6 +572,54 @@ export const MODELS: ModelInfo[] = [
     authStorageKeys: GEMINI_AUTH_KEYS,
   },
   // Keep 3.1 Flash Lite first for the default and fast-model routing.
+  // Gemini 4 (GA Nov 2026, ai.google.dev/gemini-api/docs/changelog): a unified 1M window and
+  // 64K synchronous output. Hydrogen also takes an `xhigh` thinking level; the ladder here
+  // stops at `high` like the other Gemini models.
+  {
+    // The fast everyday model, on the free tier too ($1.50 / $7.50 per 1M paid).
+    id: "gemini-4-hydrogen",
+    name: "Gemini 4 Hydrogen",
+    provider: "gemini",
+    contextWindow: 1_048_576,
+    maxOutputTokens: 65_536,
+    supportsThinking: true,
+    supportsImages: true,
+    supportsVideo: true,
+    maxVideoBytes: 20 * 1024 * 1024,
+    costTier: "medium",
+    maxThinkingLevel: "high",
+    authStorageKeys: GEMINI_AUTH_KEYS,
+  },
+  {
+    // Paid tier only ($4 / $20 per 1M from Dec 1, 2026).
+    id: "gemini-4-argon",
+    name: "Gemini 4 Argon",
+    provider: "gemini",
+    contextWindow: 1_048_576,
+    maxOutputTokens: 65_536,
+    supportsThinking: true,
+    supportsImages: true,
+    supportsVideo: true,
+    maxVideoBytes: 20 * 1024 * 1024,
+    costTier: "high",
+    maxThinkingLevel: "high",
+    authStorageKeys: GEMINI_AUTH_KEYS,
+  },
+  {
+    // The strongest Gemini 4 reasoning model; paid tier only.
+    id: "gemini-4-carbon",
+    name: "Gemini 4 Carbon",
+    provider: "gemini",
+    contextWindow: 1_048_576,
+    maxOutputTokens: 65_536,
+    supportsThinking: true,
+    supportsImages: true,
+    supportsVideo: true,
+    maxVideoBytes: 20 * 1024 * 1024,
+    costTier: "high",
+    maxThinkingLevel: "high",
+    authStorageKeys: GEMINI_AUTH_KEYS,
+  },
   // Gemini 3.7
   // Flash is retired: Google deprecated it on 2026-10-08 and routes every
   // `gemini-3.7-flash` request to 3.8 Flash (ai.google.dev/gemini-api/docs/
@@ -573,6 +627,21 @@ export const MODELS: ModelInfo[] = [
   {
     id: "gemini-3.8-flash",
     name: "Gemini 3.8 Flash",
+    provider: "gemini",
+    contextWindow: 1_048_576,
+    maxOutputTokens: 65_536,
+    supportsThinking: true,
+    supportsImages: true,
+    supportsVideo: true,
+    maxVideoBytes: 20 * 1024 * 1024,
+    costTier: "low",
+    maxThinkingLevel: "high",
+    authStorageKeys: GEMINI_AUTH_KEYS,
+  },
+  {
+    // Replaced 3.5 Flash, which Google now routes here (changelog).
+    id: "gemini-3.6-flash",
+    name: "Gemini 3.6 Flash",
     provider: "gemini",
     contextWindow: 1_048_576,
     maxOutputTokens: 65_536,
@@ -705,12 +774,29 @@ export const MODELS: ModelInfo[] = [
     authStorageKeys: KIMI_AUTH_KEYS,
   },
   // ── Z.AI (GLM) ─────────────────────────────────────────
-  // Two GLM entries, both live on the coding endpoint (verified against its
+  // All GLM entries are live on the coding endpoint (verified against its
   // /models list). The pre-5.3 ids stay retired: they routed to strictly worse
   // coding for the same plan quota, and the endpoint already answers `glm-5.2`
   // requests as glm-5.3.
   // `max` is both the ceiling and Z.AI's own default — the rungs below it live
   // in thinking-level.ts.
+  // GLM-5.4 (released 2026-11) runs on a Coding Plan key only: the standard
+  // endpoint answers "You do not have permission to access glm-5.4". Images
+  // are native (verified: base64 PNG read back exactly), so its attachments go
+  // inline rather than through the zai_vision MCP that 5.3 still needs.
+  {
+    id: "glm-5.4",
+    name: "GLM-5.4",
+    provider: "glm",
+    contextWindow: 1_000_000,
+    maxOutputTokens: 131_072,
+    supportsThinking: true,
+    supportsImages: true,
+    supportsVideo: false,
+    costTier: "medium",
+    maxThinkingLevel: "max",
+    authStorageKeys: [GLM_CODING_PLAN_KEY],
+  },
   {
     id: "glm-5.3",
     name: "GLM-5.3",
@@ -722,6 +808,12 @@ export const MODELS: ModelInfo[] = [
     supportsVideo: false,
     costTier: "medium",
     maxThinkingLevel: "max",
+    // The Coding Plan endpoint stopped serving 5.3 when 5.4 landed ("Invalid
+    // API parameter" on a bare request, 2026-11-23); the standard endpoint still does.
+    authStorageKeys: ["glm"],
+    // Same day, 5.3's ladder shrank: medium/xhigh and thinking-off now 400 with
+    // "always engages in thinking … please use low, high, or max".
+    thinkingLevels: ["low", "high", "max"],
   },
   // GLM-5.3-Flash (released 2026-08-26): 320B-A18B natively multimodal sibling
   // at ~1/20th of 5.3's API price with 3× the coding-plan quota, so it is the
@@ -746,6 +838,7 @@ export const MODELS: ModelInfo[] = [
     supportsVideo: false,
     costTier: "low",
     maxThinkingLevel: "max",
+    authStorageKeys: GLM_AUTH_KEYS,
   },
   // ── MiniMax ────────────────────────────────────────────
   {
@@ -820,9 +913,8 @@ export const MODELS: ModelInfo[] = [
     authStorageKeys: ["xiaomi", XIAOMI_CREDITS_KEY],
   },
   // UltraSpeed: lower-latency sibling of the Pro flagship, same full-modal
-  // capability surface, premium-priced for the throughput gain. API-only —
-  // not served over the Token Plan endpoint, so credentials resolve from the
-  // distinct API Credits key only (see authStorageKeys doc).
+  // capability surface, premium-priced for the throughput gain. On the Token
+  // Plan (Pro and Max tiers) since 2026-11 at 10x Pro's credit rate.
   {
     id: "mimo-v2.6-pro-ultraspeed",
     name: "MiMo-V2.6-Pro-UltraSpeed",
@@ -835,7 +927,7 @@ export const MODELS: ModelInfo[] = [
     maxVideoBytes: 36 * 1024 * 1024,
     costTier: "high",
     maxThinkingLevel: "high",
-    authStorageKeys: [XIAOMI_CREDITS_KEY],
+    authStorageKeys: ["xiaomi", XIAOMI_CREDITS_KEY],
     billing: XIAOMI_ULTRASPEED_BILLING,
   },
   // ── DeepSeek ───────────────────────────────────────────
@@ -1179,8 +1271,8 @@ export function withoutPaidTier(modelId: string): string {
  * `(provider, model)`, first match wins. Almost every model just uses its
  * provider id (one credential per provider). Models with `authStorageKeys`
  * set (currently only Xiaomi) can prefer one endpoint and fall back to
- * another — e.g. `mimo-v2.6-pro` prefers the Token Plan but falls back to API
- * Credits, while the API-only `mimo-v2.6-pro-ultraspeed` has no fallback.
+ * another — e.g. every MiMo model prefers the Token Plan but falls back to API
+ * Credits.
  */
 export function getAuthStorageKeys(provider: Provider, modelId: string): string[] {
   const model = getAllModels().find((m) => m.id === modelId && m.provider === provider);
@@ -1213,7 +1305,7 @@ const DEFAULT_MODEL_IDS: Partial<Record<Provider, string>> = {
   // OpenAI default; upstream defaults to GPT-6.2 Sol.
   openai: "gpt-6.2-astra",
   gemini: "gemini-3.1-flash-lite",
-  glm: "glm-5.3",
+  glm: "glm-5.4",
   moonshot: "kimi-k3",
   minimax: "MiniMax-M3.1-Flash",
   deepseek: "deepseek-v4-pro",

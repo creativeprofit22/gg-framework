@@ -50,7 +50,7 @@ import { createTasksTool } from "./tasks.js";
 import { createChecklistTool } from "./checklist.js";
 
 import { createSkillTool } from "./skill.js";
-import { createScreenshotTool } from "./screenshot.js";
+import { BrowserManager, createBrowserTool } from "./browser.js";
 import { createGenerateImageTool, type GenerateImageAuth } from "./generate-image.js";
 import { createEnterPlanTool } from "./enter-plan.js";
 import { createExitPlanTool } from "./exit-plan.js";
@@ -274,6 +274,8 @@ export interface CreateToolsResult {
   debugManager?: DebugManager;
   /** Owner of the live `dev_app` connection; callers `shutdown()` it on exit. Local only. */
   devAppManager?: DevAppManager;
+  /** The `browser` tool's Chromium; callers `shutdown()` it on exit. Local only. */
+  browserManager?: BrowserManager;
   subAgentManager?: SubAgentManager;
   commandCreation?: ReturnType<typeof createProgrammaticCommandTool>;
 }
@@ -317,6 +319,8 @@ export async function createTools(
     (opts?.editImpact ?? true) && ops === localOperations ? new TestImpactIndex(cwd) : undefined;
   const debugManager = ops === localOperations ? new DebugManager() : undefined;
   const devAppManager = ops === localOperations ? new DevAppManager() : undefined;
+  // The browser runs on this machine, so it can only test pages this machine can reach.
+  const browserManager = ops === localOperations ? new BrowserManager() : undefined;
   const getDiagnostics =
     lspDiagnostics || testImpact
       ? async (filePath: string, content: string, source?: EditSource): Promise<string> => {
@@ -432,7 +436,7 @@ export async function createTools(
     createTaskStopTool(processManager),
     createTasksTool(cwd, opts?.onTasksChanged),
     createChecklistTool(cwd),
-    createScreenshotTool(cwd),
+    ...(browserManager ? [createBrowserTool(cwd, browserManager)] : []),
     // The debugger connects to a loopback inspector port, so the program must
     // run on this machine: local operations only, like LSP.
     ...(debugManager
@@ -609,6 +613,7 @@ export async function createTools(
     ...(testImpact && { testImpact }),
     ...(debugManager && { debugManager }),
     ...(devAppManager && { devAppManager }),
+    ...(browserManager && { browserManager }),
     subAgentManager,
     commandCreation,
     programmaticProfile,
@@ -632,7 +637,7 @@ export { createTaskStopTool } from "./task-stop.js";
 export { createTasksTool } from "./tasks.js";
 export { createChecklistTool } from "./checklist.js";
 export { createSkillTool } from "./skill.js";
-export { createScreenshotTool } from "./screenshot.js";
+export { BrowserManager, createBrowserTool } from "./browser.js";
 export { createGenerateImageTool, type GenerateImageAuth } from "./generate-image.js";
 export { createEnterPlanTool } from "./enter-plan.js";
 export { createExitPlanTool } from "./exit-plan.js";

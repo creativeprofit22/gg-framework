@@ -7449,6 +7449,11 @@ async function createSession(
           void trophies.count("plansApproved", opts.id);
         } catch (err) {
           captureSidecarError(err, "app-sidecar.plan.accept");
+          log("ERROR", "app-sidecar", "plan approval failed", {
+            code: err instanceof PhaseCheckpointError ? err.code : undefined,
+            message: err instanceof Error ? err.message : String(err),
+            cause: err instanceof Error && err.cause !== undefined ? String(err.cause) : undefined,
+          });
           const activePhase = session.getActivePhaseContext();
           if (err instanceof PhaseCheckpointError) {
             json(res, 409, {

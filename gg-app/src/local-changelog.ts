@@ -53,10 +53,19 @@ export const CURRENT_LOCAL_RELEASE_NOTES = requireCurrentReleaseNotes(releaseNot
 /** Newest first. Maintained only by the Local Fork release flow. */
 export const LOCAL_CHANGELOG: LocalChangelogEntry[] = [
   {
-    id: "local-2026-11-18-supa-drivah-built-in",
+    id: "local-2026-11-22-branch-switcher",
     label: CURRENT_LOCAL_RELEASE_NOTES.label,
     date: CURRENT_LOCAL_RELEASE_NOTES.date,
     items: CURRENT_LOCAL_RELEASE_NOTES.sections.flatMap(({ items }) => items),
+  },
+  {
+    id: "local-2026-11-18-supa-drivah-built-in",
+    label: "Supa Drivah comes built in",
+    date: "2026-11-18",
+    items: [
+      "`Supa Drivah` now comes built in, so your agent can drive desktop windows and browsers without you adding anything. GG starts it in every project as long as the program is on your computer. Find it under Settings → `MCP`, where its row has a `Built-in` label and a `Use` switch to turn it off and back on.",
+      "If Supa Drivah isn't on your computer, its row says so and tells you where to point GG at it instead of failing quietly. The `x` on its row hides it for good, and your own server with the same name can take its place.",
+    ],
   },
   {
     id: "local-2026-11-18-upstream-01150-official-sign-ins-live-preview",

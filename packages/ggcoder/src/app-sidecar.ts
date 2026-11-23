@@ -441,6 +441,7 @@ import {
 import {
   abandonFreshSessionApproval,
   moveApprovedPhaseLeaseToFreshSession,
+  returnPhaseLeaseToPreviousSession,
   persistApprovedPlanSnapshot,
 } from "./app-sidecar-approved-plan.js";
 import {
@@ -3842,10 +3843,27 @@ async function createSession(
                   message: error instanceof Error ? error.message : String(error),
                 });
               });
+              const freshLeaseMarker = session.getRoadmapPhaseLeaseMarker();
               await session.loadSessionCheckpoint(
                 previousPhaseSessionPath,
                 previousPhaseConversationId,
               );
+              // The reloaded session holds its old lease token; take the moved lease back.
+              if (previousActivePhase && durablePlan) {
+                await returnPhaseLeaseToPreviousSession({
+                  binding: phaseBinding,
+                  repository: notesRepository,
+                  session,
+                  phaseId: previousActivePhase.phase.id,
+                  checkpoint,
+                  freshLease: freshLeaseMarker,
+                  previousLease: previousLeaseMarker,
+                }).catch((error: unknown) => {
+                  log("WARN", "app-sidecar", "phase lease return after failed hand-off failed", {
+                    message: error instanceof Error ? error.message : String(error),
+                  });
+                });
+              }
               deactivateApprovedPlan();
             }
           : undefined,

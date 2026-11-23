@@ -1,6 +1,8 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import vm from "node:vm";
+import ts from "typescript";
 import type { Message } from "@kenkaiiii/gg-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
@@ -12,8 +14,10 @@ import { RoadmapPhaseLeaseRepository } from "./roadmap-phase-lease-repository.js
 import type { RoadmapPhaseLeaseMarkerV1 } from "./phase-context.js";
 import { AppSidecarPlanGate } from "./app-sidecar-plan-gate.js";
 import {
+  abandonFreshSessionApproval,
   moveApprovedPhaseLeaseToFreshSession,
   persistApprovedPlanSnapshot,
+  returnPhaseLeaseToPreviousSession,
 } from "./app-sidecar-approved-plan.js";
 import { createApprovedPlan } from "./roadmap-phase-execution.js";
 import { commitPlanApprovalCheckpoint } from "./app-sidecar-phase-checkpoint.js";
@@ -97,6 +101,29 @@ function document(): NotesDocumentV3 {
       },
     ],
   };
+}
+
+// Runs the real restorePreviousSession closure from app-sidecar.ts without starting
+// the HTTP server; bindings stand in for the closure's captured locals.
+async function sidecarRestorePreviousSession(
+  bindings: Record<string, unknown>,
+): Promise<(() => Promise<void>) | undefined> {
+  const source = await fs.readFile(new URL("./app-sidecar.ts", import.meta.url), "utf8");
+  const file = ts.createSourceFile("app-sidecar.ts", source, ts.ScriptTarget.Latest, true);
+  let restore: string | undefined;
+  function visit(node: ts.Node): void {
+    if (ts.isPropertyAssignment(node) && node.name.getText(file) === "restorePreviousSession") {
+      expect(restore).toBeUndefined();
+      restore = node.initializer.getText(file);
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(file);
+  expect(restore).toBeDefined();
+  const compiled = ts.transpileModule(`(${restore})`, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None },
+  });
+  return vm.runInNewContext(compiled.outputText, bindings) as (() => Promise<void>) | undefined;
 }
 
 interface ResponseRecord {
@@ -819,6 +846,238 @@ describe("production launchBoundPhase orchestration", () => {
       checkpoint.checkpointId,
     );
   });
+
+  // Prepares a launched phase whose plan is approved, and wires the real sidecar
+  // rollback closure (restorePreviousSession) to the fixture session.
+  async function approvedHandoff() {
+    const { repository, cwd } = await setup();
+    const fixture = new ProductionPhaseFixture(repository, cwd);
+    await fixture.start();
+    await fixture.promptSettled;
+    const session = fixture.currentSession;
+    const gate = new AppSidecarPlanGate([], async () => {});
+    const submitted = await gate.submit(
+      path.join(cwd, "plan.md"),
+      "# Plan\n\n## Steps\n\n1. Verify rollback ownership.\n",
+    );
+    await session.updateActivePhaseStage("awaiting-approval");
+    const approved = await gate.approve(submitted.checkpointId, submitted.generation);
+    if (approved.status !== "committed") throw new Error(approved.status);
+    const checkpoint = gate.current()!;
+    const approvedPath = await persistApprovedPlanSnapshot(cwd, checkpoint);
+    const loaded = await repository.load(cwd);
+    if (loaded.status !== "ok") throw new Error(loaded.status);
+    const plan = createApprovedPlan({
+      planId: checkpoint.checkpointId,
+      content: await fs.readFile(approvedPath, "utf8"),
+      snapshotPath: path.relative(cwd, approvedPath).split(path.sep).join("/"),
+      approvedAt: checkpoint.timestamp,
+      approvedRevision: loaded.snapshot.revision + 1,
+      baseCommit: "b".repeat(40),
+    });
+    const previousLease = session.getRoadmapPhaseLeaseMarker()!;
+    const previousContext = session.getActivePhaseContext()!;
+    const previousState = { ...session.state };
+    // Mirrors AgentSession.loadSessionCheckpoint: the planning session's saved marker comes back.
+    const loadSessionCheckpoint = vi.fn(async (_sessionPath: string, _conversationId: string) => {
+      Object.assign(session.state, previousState);
+      session.leaseMarker = previousLease;
+      session.activeContext = structuredClone(previousContext);
+    });
+    Object.assign(session, {
+      loadSessionCheckpoint,
+      getApprovedPlanConsumption: () => undefined,
+      completeApprovedPlanConsumption: async () => {},
+    });
+    const log = vi.fn();
+    const deactivateApprovedPlan = vi.fn();
+    const restorePreviousSession = await sidecarRestorePreviousSession({
+      previousPhaseSessionPath: previousState.sessionPath,
+      previousPhaseConversationId: "conversation-0",
+      session,
+      checkpoint,
+      previousActivePhase: previousContext,
+      durablePlan: { request: { phaseId: "phase-21" } },
+      previousLeaseMarker: previousLease,
+      phaseBinding: fixture.binding,
+      notesRepository: repository,
+      log,
+      deactivateApprovedPlan,
+      abandonFreshSessionApproval,
+      returnPhaseLeaseToPreviousSession,
+      Error,
+      String,
+    });
+    return {
+      repository,
+      cwd,
+      fixture,
+      session,
+      checkpoint,
+      plan,
+      approvedPath,
+      loaded: loaded.snapshot,
+      previousLease,
+      previousContext,
+      previousState,
+      loadSessionCheckpoint,
+      log,
+      deactivateApprovedPlan,
+      restorePreviousSession,
+    };
+  }
+
+  it("returns the moved lease to the planning session when the hand-off fails after the move", async () => {
+    const handoff = await approvedHandoff();
+    const { repository, cwd, fixture, session, checkpoint, plan, previousLease } = handoff;
+    await expect(
+      commitPlanApprovalCheckpoint({
+        session,
+        repository,
+        cwd,
+        planPath: handoff.approvedPath,
+        durablePlan: {
+          request: {
+            operationId: checkpoint.checkpointId,
+            phaseId: "phase-21",
+            expectedRevision: handoff.loaded.revision,
+            repository: {
+              projectKey: handoff.loaded.projectKey,
+              identityHash: "a".repeat(64),
+              rootCommit: "b".repeat(40),
+            },
+            plan,
+            lastSession: handoff.previousContext.session,
+          },
+          mutateWithLeaseFence: (operation) => fixture.binding.withLeaseFence(session, operation),
+          moveLeaseToFreshSession: (snapshot) =>
+            moveApprovedPhaseLeaseToFreshSession({
+              binding: fixture.binding,
+              repository,
+              session,
+              snapshot,
+              phaseId: "phase-21",
+              checkpoint,
+              previousLease,
+            }),
+        },
+        prepareFreshSession: async () => {
+          await session.newSession(true);
+          // The stage save fails only after the lease has moved to the fresh session.
+          vi.spyOn(session, "updateActivePhaseStage").mockRejectedValueOnce(
+            new Error("session storage failed"),
+          );
+          return plan.steps.length;
+        },
+        restorePreviousSession: handoff.restorePreviousSession,
+      }),
+    ).rejects.toMatchObject({ code: "phase-stage-persistence-failed" });
+
+    expect(handoff.loadSessionCheckpoint).toHaveBeenCalledWith(
+      handoff.previousState.sessionPath,
+      "conversation-0",
+    );
+    expect(handoff.log).not.toHaveBeenCalled();
+    expect(handoff.deactivateApprovedPlan).toHaveBeenCalledOnce();
+    expect(session.getState().sessionId).toBe(handoff.previousState.sessionId);
+    const marker = session.getRoadmapPhaseLeaseMarker()!;
+    expect(marker.fence).toBeGreaterThan(previousLease.fence + 1);
+    expect(marker.planId).toBe(checkpoint.checkpointId);
+    expect(session.getActivePhaseContext()?.executionStage).toBe("awaiting-approval");
+    const latest = await repository.load(cwd);
+    if (latest.status !== "ok") throw new Error(latest.status);
+    expect(latest.snapshot.document.phases[0]?.session?.sessionId).toBe(
+      handoff.previousState.sessionId,
+    );
+    expect(
+      await fixture.binding.lease(
+        {
+          version: 2,
+          action: "renew",
+          phaseId: marker.phaseId,
+          expectedProjectKey: latest.snapshot.projectKey,
+          expectedRevision: latest.snapshot.revision,
+          planId: marker.planId,
+          operationId: "after-rollback",
+          lease: { leaseId: marker.leaseId, fence: marker.fence },
+          confirmTakeover: false,
+          takeoverReason: null,
+          predecessorProof: null,
+        },
+        session,
+      ),
+    ).toMatchObject({ status: "renewed" });
+  });
+
+  it("leaves the lease alone when the hand-off failed before the lease moved", async () => {
+    const { fixture, session, repository, checkpoint, previousLease } = await approvedHandoff();
+    const lease = vi.spyOn(fixture.binding, "lease");
+    for (const freshLease of [undefined, { ...previousLease }]) {
+      expect(
+        await returnPhaseLeaseToPreviousSession({
+          binding: fixture.binding,
+          repository,
+          session,
+          phaseId: "phase-21",
+          checkpoint,
+          freshLease,
+          previousLease,
+        }),
+      ).toBe("unchanged");
+    }
+    expect(lease).not.toHaveBeenCalled();
+    expect(session.getRoadmapPhaseLeaseMarker()).toEqual(previousLease);
+    expect(await fixture.binding.withLeaseFence(session, async () => "still owned")).toEqual({
+      status: "executed",
+      value: "still owned",
+    });
+  });
+
+  it.each(["rejected", "thrown"])(
+    "still restores the planning session when the lease take-back is %s",
+    async (failure) => {
+      const handoff = await approvedHandoff();
+      const { fixture, session, checkpoint, previousLease } = handoff;
+      const lease = vi.spyOn(fixture.binding, "lease");
+      if (failure === "rejected") {
+        lease.mockResolvedValueOnce({
+          status: "phase-lease-held",
+          roadmapRevision: handoff.loaded.revision,
+          leaseRevision: 1,
+          currentLease: null,
+        } as never);
+      } else {
+        lease.mockRejectedValueOnce(new Error("lease store unavailable"));
+      }
+      // The fresh session holds a newer lease token when the rollback starts.
+      await session.newSession(true);
+      session.leaseMarker = { ...previousLease, leaseId: "fresh-lease", fence: 99 };
+
+      await expect(handoff.restorePreviousSession!()).resolves.toBeUndefined();
+
+      expect(handoff.loadSessionCheckpoint).toHaveBeenCalledOnce();
+      expect(lease).toHaveBeenCalledOnce();
+      expect(lease.mock.calls[0]![0]).toMatchObject({
+        action: "takeover",
+        planId: checkpoint.checkpointId,
+        operationId: `${checkpoint.checkpointId}:restore-previous`,
+        lease: { leaseId: "fresh-lease", fence: 99 },
+      });
+      expect(handoff.log).toHaveBeenCalledWith(
+        "WARN",
+        "app-sidecar",
+        "phase lease return after failed hand-off failed",
+        {
+          message:
+            failure === "rejected"
+              ? "Phase lease return failed: phase-lease-held"
+              : "lease store unavailable",
+        },
+      );
+      expect(handoff.deactivateApprovedPlan).toHaveBeenCalledOnce();
+      expect(session.getState().sessionId).toBe(handoff.previousState.sessionId);
+    },
+  );
 
   it.each(["marker", "plan-mode"])(
     "releases the real launch lease after %s persistence fails",

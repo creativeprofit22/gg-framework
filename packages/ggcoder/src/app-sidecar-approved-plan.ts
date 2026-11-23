@@ -47,6 +47,50 @@ export async function moveApprovedPhaseLeaseToFreshSession(input: {
   return latest.snapshot;
 }
 
+export async function returnPhaseLeaseToPreviousSession(input: {
+  binding: AppSidecarPhaseBindingService;
+  repository: Pick<ProjectNotesRepository, "load">;
+  session: PhaseBindingSession;
+  phaseId: string;
+  checkpoint: Pick<PersistedPlanReviewCheckpoint, "checkpointId">;
+  freshLease: RoadmapPhaseLeaseMarkerV1 | undefined;
+  previousLease: RoadmapPhaseLeaseMarkerV1 | undefined;
+}): Promise<"returned" | "unchanged"> {
+  const { freshLease, previousLease } = input;
+  if (
+    !freshLease ||
+    freshLease.phaseId !== input.phaseId ||
+    (previousLease &&
+      freshLease.leaseId === previousLease.leaseId &&
+      freshLease.fence === previousLease.fence)
+  ) {
+    return "unchanged";
+  }
+  const loaded = await input.repository.load(input.session.getState().cwd);
+  if (loaded.status !== "ok") throw new Error("Project Notes unavailable for lease return.");
+  // The durable plan is already saved, so the lease store expects the checkpoint's plan id.
+  const outcome = await input.binding.lease(
+    {
+      version: 2,
+      action: "takeover",
+      phaseId: input.phaseId,
+      expectedProjectKey: loaded.snapshot.projectKey,
+      expectedRevision: loaded.snapshot.revision,
+      planId: input.checkpoint.checkpointId,
+      operationId: `${input.checkpoint.checkpointId}:restore-previous`,
+      lease: { leaseId: freshLease.leaseId, fence: freshLease.fence },
+      confirmTakeover: true,
+      takeoverReason: "Return the phase to its session after a failed plan hand-off",
+      predecessorProof: null,
+    },
+    input.session,
+  );
+  if (outcome.status !== "acquired" && outcome.status !== "duplicate") {
+    throw new Error(`Phase lease return failed: ${outcome.status}`);
+  }
+  return "returned";
+}
+
 /**
  * A failed approval hand-off returns to the previous session. Mark the fresh
  * session's "approval-committed" record complete first so reopening that

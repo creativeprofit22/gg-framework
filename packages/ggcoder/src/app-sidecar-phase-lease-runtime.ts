@@ -43,6 +43,9 @@ export function createAppSidecarPhaseLeaseRuntime(
   const { cwd, getSession, phaseBinding, notesRepository, durableRoadmapExecution, broadcast } =
     deps;
   let deferredPhaseLeaseReleaseOperationId: string | null = null;
+  // Run numbers restart with every runtime while leases and their operation
+  // log outlive it, so "run:1:running" would collide with an older payload.
+  const runtimeId = randomUUID();
   let phaseLeaseHeartbeat: ReturnType<typeof setInterval> | null = null;
   async function releaseCurrentPhaseLease(operationId: string): Promise<void> {
     if (!getSession().getRoadmapPhaseLeaseMarker()) return;
@@ -50,7 +53,7 @@ export function createAppSidecarPhaseLeaseRuntime(
       deferredPhaseLeaseReleaseOperationId = operationId;
       throw new Error("Phase lease release deferred until the provider run settles.");
     }
-    const outcome = await phaseBinding.releaseCurrent(operationId, getSession());
+    const outcome = await phaseBinding.releaseCurrent(`${operationId}:${runtimeId}`, getSession());
     if (
       outcome.status === "released" ||
       (outcome.status === "duplicate" && outcome.lease === null)
@@ -102,7 +105,7 @@ export function createAppSidecarPhaseLeaseRuntime(
         expectedProjectKey: loaded.snapshot.projectKey,
         expectedRevision: loaded.snapshot.revision,
         planId: marker.planId,
-        operationId: `${operationId}:${marker.leaseId}`,
+        operationId: `${operationId}:${runtimeId}:${marker.leaseId}`,
         lease: { leaseId: marker.leaseId, fence: marker.fence },
         confirmTakeover: false,
         takeoverReason: null,
@@ -114,6 +117,9 @@ export function createAppSidecarPhaseLeaseRuntime(
     if (outcome.status === "phase-lease-lost") {
       recordRoadmapDurabilityDiagnostic("phase-lease-lost");
       await getSession().clearActivePhaseContext("phase-rebound");
+      throw new Error(
+        "Phase lease renewal failed: phase-lease-lost. Another session now owns this Roadmap phase; open the phase from the Roadmap to continue it.",
+      );
     }
     throw new Error(`Phase lease renewal failed: ${outcome.status}`);
   }

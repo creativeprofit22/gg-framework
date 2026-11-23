@@ -22,11 +22,11 @@ const marker: RoadmapPhaseLeaseMarkerV1 = {
  * phase context, so a session whose dispose-time release was deferred (run
  * still "running") keeps both. This stub models exactly that survivor.
  */
-function setup(durableRoadmapExecution = true) {
+function setup(durableRoadmapExecution = true, runState: "running" | "idle" = "running") {
   const session = {
     getRoadmapPhaseLeaseMarker: () => marker,
     getActivePhaseContext: () => ({ phase: { id: marker.phaseId } }),
-    getPhaseLeaseRunState: () => "running",
+    getPhaseLeaseRunState: () => runState,
     clearActivePhaseContext: async () => {},
   } as unknown as AgentSession;
   const lease = vi.fn(async () => ({ status: "renewed" }));
@@ -94,5 +94,25 @@ describe("phase lease heartbeat lifecycle", () => {
     runtime.startHeartbeat();
     expect(vi.getTimerCount()).toBe(0);
     runtime.stopHeartbeat();
+  });
+});
+
+describe("phase lease operation ids", () => {
+  it("never reuses a run's operation id when a new runtime renews or releases the same lease", async () => {
+    const first = setup(true, "idle");
+    const second = setup(true, "idle");
+    const ids = async (runtime: typeof first) => {
+      await runtime.runtime.renewCurrentPhaseLease("run:1:running");
+      await runtime.runtime.releaseCurrentPhaseLease("run:1:release");
+      const renew = runtime.lease.mock.calls[0] as unknown as [{ operationId: string }];
+      const release = runtime.releaseCurrent.mock.calls[0] as unknown as [string];
+      return { renew: renew[0].operationId, release: release[0] };
+    };
+    const a = await ids(first);
+    const b = await ids(second);
+    expect(a.renew).toMatch(/^run:1:running:.+:lease-1$/);
+    expect(a.release).toMatch(/^run:1:release:.+$/);
+    expect(b.renew).not.toBe(a.renew);
+    expect(b.release).not.toBe(a.release);
   });
 });

@@ -277,6 +277,10 @@ describe("hardened argv", () => {
     expect(show.slice(-4)).toEqual(["show", "--no-ext-diff", "--no-textconv", "HEAD"]);
     // Read-only plumbing that never touches work-tree content skips the probe.
     expect(show.some((arg) => arg.startsWith("filter."))).toBe(false);
+    const refs = await hardenedGitArgs(["for-each-ref", "refs/heads"], { cwd: repo });
+    expect(refs.some((arg) => arg.startsWith("filter."))).toBe(false);
+    const refName = await hardenedGitArgs(["check-ref-format", "--branch", "x"], { cwd: repo });
+    expect(refName.some((arg) => arg.startsWith("filter."))).toBe(false);
   });
 
   it("refuses driver names an `-c` override cannot express", () => {

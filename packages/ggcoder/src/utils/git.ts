@@ -86,7 +86,18 @@ export const GIT_STATUS_SUBMODULE_ARGS: readonly string[] = ["--ignore-submodule
  * Subcommands that never hash or check out work-tree content, so no
  * clean/smudge/process filter can run — the per-driver probe is skipped.
  */
-const NO_FILTER_SUBCOMMANDS = new Set(["rev-parse", "remote", "rev-list", "patch-id", "show"]);
+const NO_FILTER_SUBCOMMANDS = new Set([
+  "rev-parse",
+  "remote",
+  "rev-list",
+  "patch-id",
+  "show",
+  // Ref-only reads; they never open work-tree files, so no filter can run.
+  "for-each-ref",
+  "symbolic-ref",
+  // Validates a name string only; it never opens work-tree files, so no filter can run.
+  "check-ref-format",
+]);
 
 const PROBE_TIMEOUT_MS = 2_000;
 

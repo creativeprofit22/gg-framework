@@ -1,7 +1,9 @@
 import type { ProjectNotesSnapshot } from "@kenkaiiii/gg-core/project-notes";
 import {
   ROADMAP_DRAFT_FEEDBACK_MAX_LENGTH,
+  isRoadmapPhaseEditBatchDraft,
   isRoadmapPhaseEditDraft,
+  isRoadmapPhaseMoveBatchDraft,
   isRoadmapPhaseMoveDraft,
   normalizeRoadmapWorkflowText,
   type RoadmapPhaseDraftApprovalResult,
@@ -15,7 +17,12 @@ export interface AppSidecarRoadmapDraftDecisionServiceDependencies {
   drafts: AppSidecarRoadmapDraftCoordinator;
   repository: Pick<
     ProjectNotesRepository,
-    "applyApprovedPhaseEdit" | "applyApprovedPhaseMove" | "createApprovedPhases" | "load"
+    | "applyApprovedPhaseEdit"
+    | "applyApprovedPhaseEditBatch"
+    | "applyApprovedPhaseMove"
+    | "applyApprovedPhaseMoveBatch"
+    | "createApprovedPhases"
+    | "load"
   >;
   reconciliations: AppSidecarRoadmapReconciliationCoordinator;
   onCommittedSnapshot: (snapshot: ProjectNotesSnapshot) => void;
@@ -32,19 +39,25 @@ export class AppSidecarRoadmapDraftDecisionService {
   async approve(cwd: string, draftId: string): Promise<RoadmapPhaseDraftApprovalResult> {
     let committedSnapshot: ProjectNotesSnapshot | null = null;
     const result = await this.dependencies.drafts.approve(cwd, draftId, async (draft) => {
-      const kind = isRoadmapPhaseEditDraft(draft)
-        ? "phase-edit"
-        : isRoadmapPhaseMoveDraft(draft)
-          ? "phase-move"
-          : "phase-create";
+      const kind =
+        isRoadmapPhaseEditDraft(draft) || isRoadmapPhaseEditBatchDraft(draft)
+          ? "phase-edit"
+          : isRoadmapPhaseMoveDraft(draft) || isRoadmapPhaseMoveBatchDraft(draft)
+            ? "phase-move"
+            : "phase-create";
       const lease = this.dependencies.reconciliations.tryAcquire(cwd, kind);
       if (!lease) return { status: "reconciliation-in-progress" };
+      const repository = this.dependencies.repository;
       try {
         const outcome = isRoadmapPhaseEditDraft(draft)
-          ? await this.dependencies.repository.applyApprovedPhaseEdit(cwd, draft)
-          : isRoadmapPhaseMoveDraft(draft)
-            ? await this.dependencies.repository.applyApprovedPhaseMove(cwd, draft)
-            : await this.dependencies.repository.createApprovedPhases(cwd, draft);
+          ? await repository.applyApprovedPhaseEdit(cwd, draft)
+          : isRoadmapPhaseEditBatchDraft(draft)
+            ? await repository.applyApprovedPhaseEditBatch(cwd, draft)
+            : isRoadmapPhaseMoveDraft(draft)
+              ? await repository.applyApprovedPhaseMove(cwd, draft)
+              : isRoadmapPhaseMoveBatchDraft(draft)
+                ? await repository.applyApprovedPhaseMoveBatch(cwd, draft)
+                : await repository.createApprovedPhases(cwd, draft);
         if (
           outcome.status === "created" ||
           outcome.status === "edited" ||

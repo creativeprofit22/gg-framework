@@ -739,7 +739,9 @@ describe("roadmap_phase_edit proposals", () => {
     const first = await value.proposeEdit(editRequest);
     if (first.status !== "drafted") throw new Error("expected a drafted edit");
     const revised = await value.proposeEdit({ ...editRequest, title: "Renamed phase" });
-    if (revised.status !== "drafted") throw new Error("expected a revised edit");
+    if (revised.status !== "drafted" || revised.draft.kind !== "edit") {
+      throw new Error("expected a revised edit");
+    }
     expect(revised.draft.id).not.toBe(first.draft.id);
     expect(revised.draft.changes).toContainEqual(
       expect.objectContaining({ field: "title", after: "Renamed phase" }),

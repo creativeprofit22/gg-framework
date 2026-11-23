@@ -83,17 +83,25 @@ import {
 export * from "@kenkaiiii/gg-core/project-notes";
 import {
   applyRoadmapPhaseEdit,
+  applyRoadmapPhaseEditBatch,
   applyRoadmapPhaseMove,
+  applyRoadmapPhaseMoveBatch,
   describeRoadmapPhaseOrderRefusal,
   insertRoadmapPhases,
   reindexRoadmapPhaseOrder,
   validateRoadmapPhaseCreateDraft,
+  validateRoadmapPhaseEditBatchDraft,
   validateRoadmapPhaseEditDraft,
   validateRoadmapPhaseInsertionTarget,
+  validateRoadmapPhaseMoveBatchDraft,
   validateRoadmapPhaseMoveDraft,
   type RoadmapPhaseCreateDraft,
   type RoadmapPhaseDraftApprovalResult,
+  type RoadmapPhaseEditApplication,
+  type RoadmapPhaseEditBatchDraft,
   type RoadmapPhaseEditDraft,
+  type RoadmapPhaseMoveApplication,
+  type RoadmapPhaseMoveBatchDraft,
   type RoadmapPhaseMoveDraft,
 } from "@kenkaiiii/gg-core/roadmap-workflow";
 
@@ -1793,6 +1801,112 @@ export class ProjectNotesRepository {
         context: "Approved phase move commit",
       });
       return { status: "moved", revision: next.revision, phaseId: draft.phaseId };
+    });
+
+    if (outcome.status === "missing") return { status: "notes-missing" };
+    if (outcome.status === "corrupt") return { status: "notes-corrupt" };
+    if (outcome.status === "unsupported")
+      return { status: "storage-failed", message: outcome.message };
+    return outcome;
+  }
+
+  /**
+   * Commits a user-approved edit batch all-or-nothing as one atomic write (one revision bump).
+   * Any changed or no-longer-editable phase refuses the whole batch and nothing is saved.
+   */
+  async applyApprovedPhaseEditBatch(
+    cwd: string,
+    request: RoadmapPhaseEditBatchDraft,
+    timestamp = new Date().toISOString(),
+  ): Promise<RoadmapPhaseDraftApprovalResult> {
+    const validated = validateRoadmapPhaseEditBatchDraft(request);
+    if (!validated.ok) {
+      return {
+        status: "invalid-proposal",
+        message: `${validated.error.path}: ${validated.error.message}`,
+      };
+    }
+    const draft = validated.value;
+    const phaseIds = draft.edits.map((edit) => edit.phaseId);
+    return this.commitApprovedBatch(
+      cwd,
+      draft.projectKey,
+      (document) => applyRoadmapPhaseEditBatch(document, draft, timestamp),
+      "Approved phase edit batch commit",
+      (revision) => ({ status: "edited", revision, phaseId: phaseIds[0]!, phaseIds }),
+    );
+  }
+
+  /**
+   * Commits a user-approved move batch all-or-nothing as one atomic write (one revision bump).
+   * Any Roadmap order change since the proposal refuses the whole batch.
+   */
+  async applyApprovedPhaseMoveBatch(
+    cwd: string,
+    request: RoadmapPhaseMoveBatchDraft,
+    timestamp = new Date().toISOString(),
+  ): Promise<RoadmapPhaseDraftApprovalResult> {
+    const validated = validateRoadmapPhaseMoveBatchDraft(request);
+    if (!validated.ok) {
+      return {
+        status: "invalid-proposal",
+        message: `${validated.error.path}: ${validated.error.message}`,
+      };
+    }
+    const draft = validated.value;
+    const phaseIds = draft.moves.map((move) => move.phaseId);
+    return this.commitApprovedBatch(
+      cwd,
+      draft.projectKey,
+      (document) => applyRoadmapPhaseMoveBatch(document, draft, timestamp),
+      "Approved phase move batch commit",
+      (revision) => ({ status: "moved", revision, phaseId: phaseIds[0]!, phaseIds }),
+    );
+  }
+
+  private async commitApprovedBatch(
+    cwd: string,
+    projectKey: string,
+    apply: (document: NotesDocumentV3) => RoadmapPhaseEditApplication | RoadmapPhaseMoveApplication,
+    context: string,
+    success: (
+      revision: number,
+    ) => Extract<RoadmapPhaseDraftApprovalResult, { status: "edited" | "moved" }>,
+  ): Promise<RoadmapPhaseDraftApprovalResult> {
+    if (canonicalProjectKey(projectKey) !== canonicalProjectKey(cwd)) {
+      return { status: "proposal-project-mismatch" };
+    }
+    const outcome = await this.withLockedCurrent<
+      | Extract<RoadmapPhaseDraftApprovalResult, { status: "edited" | "moved" }>
+      | Extract<RoadmapPhaseDraftApprovalResult, { status: "phase-changed" }>
+      | Extract<RoadmapPhaseDraftApprovalResult, { status: "phase-not-editable" }>
+      | Extract<RoadmapPhaseDraftApprovalResult, { status: "invalid-proposal" }>
+    >(cwd, async (paths, current) => {
+      // Re-check every item under the lock; a refusal returns before anything is written.
+      const applied = apply(current.document);
+      if (applied.status !== "ok") return applied;
+      const validatedDocument = coerceNotesDocumentV3(applied.document);
+      if (!validatedDocument.ok) {
+        return {
+          status: "invalid-proposal",
+          message: `${validatedDocument.error.path}: ${validatedDocument.error.message}`,
+        };
+      }
+      const transitionError = validateGenericSaveTransition(
+        current.document,
+        validatedDocument.document,
+      );
+      if (transitionError) {
+        return {
+          status: "invalid-proposal",
+          message: `${transitionError.path}: ${transitionError.message}`,
+        };
+      }
+      const next = await this.commitDocument(paths, current, validatedDocument.document, {
+        validationMode: "trusted",
+        context,
+      });
+      return success(next.revision);
     });
 
     if (outcome.status === "missing") return { status: "notes-missing" };

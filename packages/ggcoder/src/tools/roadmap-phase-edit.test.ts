@@ -1,15 +1,19 @@
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import {
+  ROADMAP_PHASE_BATCH_MAX_ITEMS,
   ROADMAP_PHASE_DONE_WHEN_ITEM_MAX_LENGTH,
   ROADMAP_PHASE_DONE_WHEN_MAX_ITEMS,
   ROADMAP_PHASE_DRAFT_SUMMARY_MAX_LENGTH,
   ROADMAP_PHASE_GOAL_MAX_LENGTH,
   ROADMAP_PHASE_SOURCE_PROMPT_MAX_LENGTH,
   ROADMAP_PHASE_TITLE_MAX_LENGTH,
-  type RoadmapPhaseEditRequest,
 } from "@kenkaiiii/gg-core/roadmap-workflow";
-import { RoadmapPhaseEditParams, createRoadmapPhaseEditTool } from "./roadmap-phase-edit.js";
+import {
+  RoadmapPhaseEditParams,
+  createRoadmapPhaseEditTool,
+  type RoadmapPhaseEditToolRequest,
+} from "./roadmap-phase-edit.js";
 
 const input = {
   expected_revision: 4,
@@ -19,7 +23,7 @@ const input = {
 };
 
 function pendingEdit() {
-  return vi.fn(async (_request: RoadmapPhaseEditRequest) => ({
+  return vi.fn(async (_request: RoadmapPhaseEditToolRequest) => ({
     status: "proposal-pending" as const,
     draftId: "proposal-1",
   }));
@@ -119,8 +123,19 @@ describe("createRoadmapPhaseEditTool", () => {
         doneWhen: { minItems: 1, maxItems: ROADMAP_PHASE_DONE_WHEN_MAX_ITEMS },
         sourcePrompt: { maxLength: ROADMAP_PHASE_SOURCE_PROMPT_MAX_LENGTH },
       },
-      required: ["expected_revision", "phase_id", "summary"],
+      // phase_id is required by the single form only; `edits` replaces it for batches.
+      required: ["expected_revision", "summary"],
       additionalProperties: false,
+    });
+    expect(exportedSchema()).toMatchObject({
+      properties: {
+        edits: {
+          type: "array",
+          minItems: 1,
+          maxItems: ROADMAP_PHASE_BATCH_MAX_ITEMS,
+          items: { required: ["phase_id"], additionalProperties: false },
+        },
+      },
     });
   });
 
@@ -144,7 +159,9 @@ describe("roadmap_phase_edit dependency links", () => {
       const { goal: _goal, ...rest } = input;
       await tool.execute(tool.parameters.parse({ ...rest, depends_on: links }), {} as never);
     }
-    expect(edit.mock.calls.map((call) => call[0].dependsOn)).toEqual([["phase-a"], []]);
+    expect(
+      edit.mock.calls.map((call) => ("dependsOn" in call[0] ? call[0].dependsOn : null)),
+    ).toEqual([["phase-a"], []]);
   });
 
   it("rejects a self link and duplicates, and documents clearing", () => {

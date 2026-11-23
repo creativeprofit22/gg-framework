@@ -66,6 +66,26 @@ function setup() {
       return { status: "moved", revision, phaseId: draft.phaseId };
     },
   );
+  const applyApprovedPhaseEditBatch = vi.fn(
+    async (
+      _cwd: string,
+      draft: { edits: { phaseId: string }[] },
+    ): Promise<RoadmapPhaseDraftApprovalResult> => {
+      revision += 1;
+      const phaseIds = draft.edits.map((edit) => edit.phaseId);
+      return { status: "edited", revision, phaseId: phaseIds[0]!, phaseIds };
+    },
+  );
+  const applyApprovedPhaseMoveBatch = vi.fn(
+    async (
+      _cwd: string,
+      draft: { moves: { phaseId: string }[] },
+    ): Promise<RoadmapPhaseDraftApprovalResult> => {
+      revision += 1;
+      const phaseIds = draft.moves.map((move) => move.phaseId);
+      return { status: "moved", revision, phaseId: phaseIds[0]!, phaseIds };
+    },
+  );
   const load = vi.fn(async (cwd: string) => ({
     status: "ok" as const,
     recoveredFromBackup: false,
@@ -84,7 +104,9 @@ function setup() {
     drafts,
     repository: {
       applyApprovedPhaseEdit,
+      applyApprovedPhaseEditBatch,
       applyApprovedPhaseMove,
+      applyApprovedPhaseMoveBatch,
       createApprovedPhases,
       load,
     } as never,
@@ -95,7 +117,9 @@ function setup() {
     drafts,
     service,
     applyApprovedPhaseEdit,
+    applyApprovedPhaseEditBatch,
     applyApprovedPhaseMove,
+    applyApprovedPhaseMoveBatch,
     createApprovedPhases,
     load,
     reconciliations,
@@ -169,6 +193,30 @@ function publishMove(drafts: AppSidecarRoadmapDraftCoordinator, cwd = "/work/app
   });
   if (result.status !== "drafted") throw new Error("expected move draft");
   return result.draft;
+}
+
+function batchPhase(id: string, order: number): NotesPhase {
+  return {
+    id,
+    title: `Phase ${id}`,
+    goal: "Goal",
+    doneWhen: ["Done"],
+    order,
+    status: "not-started",
+    sourcePrompt: "Prompt",
+    referenceIds: [],
+    session: null,
+    reminder: null,
+    attentionReason: null,
+    createdAt: "2026-08-01T12:00:00.000Z",
+    updatedAt: "2026-08-02T12:00:00.000Z",
+    completedAt: null,
+    archivedAt: null,
+    overrides: { status: null, referenceIds: null },
+    pendingAutomaticLifecycleTransition: null,
+    lifecycleEvents: [],
+    roadmapEvents: [],
+  };
 }
 
 function publish(drafts: AppSidecarRoadmapDraftCoordinator, cwd = "/work/app") {
@@ -388,6 +436,98 @@ describe("AppSidecarRoadmapDraftDecisionService", () => {
       phaseId: "b",
     });
     expect(context.service.pending("/work/app")).toMatchObject({ kind: "move", status: "stale" });
+    expect(context.snapshots).not.toHaveBeenCalled();
+  });
+
+  it("applies edit and move batches through their batch paths under the matching leases", async () => {
+    const context = setup();
+    const phases = ["a", "b", "c"].map((id, order) => batchPhase(id, order));
+    const edit = context.drafts.createEditBatch({
+      cwd: "/work/app",
+      sessionId: "session-1",
+      request: {
+        expectedRevision: 3,
+        summary: "Rename two phases",
+        edits: [
+          { phaseId: "a", title: "Phase A" },
+          { phaseId: "c", title: "Phase C" },
+        ],
+      },
+      currentPhases: phases,
+    });
+    if (edit.status !== "drafted") throw new Error("expected an edit batch");
+    const commitEdit = context.applyApprovedPhaseEditBatch.getMockImplementation()!;
+    const leases: (string | undefined)[] = [];
+    context.applyApprovedPhaseEditBatch.mockImplementationOnce(async (cwd, proposal) => {
+      leases.push(context.reconciliations.owner(cwd)?.kind);
+      return commitEdit(cwd, proposal);
+    });
+    await expect(context.service.approve("/work/app", edit.draft.id)).resolves.toEqual({
+      status: "edited",
+      revision: 4,
+      phaseId: "a",
+      phaseIds: ["a", "c"],
+    });
+
+    const move = context.drafts.createMoveBatch({
+      cwd: "/work/app",
+      sessionId: "session-1",
+      request: {
+        expectedRevision: 4,
+        summary: "Reorder",
+        moves: [
+          { phaseId: "c", beforePhaseId: "a" },
+          { phaseId: "b", afterPhaseId: "c" },
+        ],
+      },
+      currentPhases: phases,
+    });
+    if (move.status !== "drafted") throw new Error("expected a move batch");
+    const commitMove = context.applyApprovedPhaseMoveBatch.getMockImplementation()!;
+    context.applyApprovedPhaseMoveBatch.mockImplementationOnce(async (cwd, proposal) => {
+      leases.push(context.reconciliations.owner(cwd)?.kind);
+      return commitMove(cwd, proposal);
+    });
+    await expect(context.service.approve("/work/app", move.draft.id)).resolves.toEqual({
+      status: "moved",
+      revision: 5,
+      phaseId: "c",
+      phaseIds: ["c", "b"],
+    });
+    expect(leases).toEqual(["phase-edit", "phase-move"]);
+    expect(context.applyApprovedPhaseEdit).not.toHaveBeenCalled();
+    expect(context.applyApprovedPhaseMove).not.toHaveBeenCalled();
+    expect(context.snapshots).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps a batch whose phase changed visible as stale without a refresh", async () => {
+    const context = setup();
+    const edit = context.drafts.createEditBatch({
+      cwd: "/work/app",
+      sessionId: "session-1",
+      request: {
+        expectedRevision: 3,
+        summary: "Rename two phases",
+        edits: [
+          { phaseId: "a", title: "Phase A" },
+          { phaseId: "b", title: "Phase B" },
+        ],
+      },
+      currentPhases: ["a", "b"].map((id, order) => batchPhase(id, order)),
+    });
+    if (edit.status !== "drafted") throw new Error("expected an edit batch");
+    context.applyApprovedPhaseEditBatch.mockResolvedValueOnce({
+      status: "phase-changed",
+      phaseId: "b",
+    });
+    await expect(context.service.approve("/work/app", edit.draft.id)).resolves.toEqual({
+      status: "phase-changed",
+      phaseId: "b",
+    });
+    expect(context.service.pending("/work/app")).toMatchObject({
+      kind: "edit-batch",
+      status: "stale",
+    });
     expect(context.snapshots).not.toHaveBeenCalled();
   });
 

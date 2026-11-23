@@ -6,9 +6,13 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   buildRoadmapPhaseInsertionPreview,
   moveRoadmapPhaseOrderEntry,
+  replayRoadmapPhaseOrderMoves,
+  roadmapPhaseMoveBatchStep,
   roadmapPhaseOrderEntries,
   type RoadmapPhaseCreateDraft,
+  type RoadmapPhaseEditBatchDraft,
   type RoadmapPhaseEditDraft,
+  type RoadmapPhaseMoveBatchDraft,
   type RoadmapPhaseMoveDraft,
   type RoadmapPhasePlacement,
 } from "@kenkaiiii/gg-core/roadmap-workflow";
@@ -4929,5 +4933,174 @@ describe("ProjectNotesRepository old phase advancement records", () => {
     if (loaded.status !== "ok") throw new Error(loaded.status);
     expect(validateNotesDocumentV3(loaded.snapshot.document)).toMatchObject({ ok: true });
     expect(eventsById(loaded.snapshot.document)).toEqual(eventsById(document));
+  });
+});
+
+describe("ProjectNotesRepository approved phase batches", () => {
+  function editBatchDraft(cwd: string, document: NotesDocumentV3): RoadmapPhaseEditBatchDraft {
+    const byId = new Map(document.phases.map((phase) => [phase.id, phase]));
+    return {
+      kind: "edit-batch",
+      id: "edit-batch-1",
+      projectKey: canonicalProjectKey(cwd),
+      basedOnRevision: 1,
+      createdAt: NOW,
+      createdBySessionId: "session-draft",
+      summary: "Tighten two phases",
+      edits: [
+        {
+          phaseId: "a",
+          phaseTitle: "Phase a",
+          basedOnUpdatedAt: byId.get("a")!.updatedAt,
+          changes: [{ field: "title", before: "Phase a", after: "Phase A" }],
+        },
+        {
+          phaseId: "c",
+          phaseTitle: "Phase c",
+          basedOnUpdatedAt: byId.get("c")!.updatedAt,
+          changes: [{ field: "goal", before: byId.get("c")!.goal, after: "A sharper goal" }],
+        },
+      ],
+      status: "pending",
+    };
+  }
+
+  function moveBatchDraft(cwd: string, document: NotesDocumentV3): RoadmapPhaseMoveBatchDraft {
+    const moves = [
+      {
+        phaseId: "c",
+        phaseTitle: "Phase c",
+        position: "before" as const,
+        targetPhaseId: "a",
+        targetPhaseTitle: "Phase a",
+      },
+      {
+        phaseId: "b",
+        phaseTitle: "Phase b",
+        position: "after" as const,
+        targetPhaseId: "c",
+        targetPhaseTitle: "Phase c",
+      },
+    ];
+    const before = roadmapPhaseOrderEntries(document.phases);
+    return {
+      kind: "move-batch",
+      id: "move-batch-1",
+      projectKey: canonicalProjectKey(cwd),
+      basedOnRevision: 1,
+      createdAt: NOW,
+      createdBySessionId: "session-draft",
+      summary: "Do c and b first",
+      moves,
+      orderPreview: {
+        before,
+        after: replayRoadmapPhaseOrderMoves(before, moves.map(roadmapPhaseMoveBatchStep)) ?? [],
+      },
+      status: "pending",
+    };
+  }
+
+  it("commits an edit batch in one revision with every phase ID", async () => {
+    const cwd = "/work/approved-edit-batch";
+    const repository = new ProjectNotesRepository(await tempAgentDir());
+    const initial = roadmapNotes("edit batch baseline");
+    await repository.migrate(cwd, initial);
+
+    await expect(
+      repository.applyApprovedPhaseEditBatch(cwd, editBatchDraft(cwd, initial), EDIT_LATER),
+    ).resolves.toEqual({ status: "edited", revision: 2, phaseId: "a", phaseIds: ["a", "c"] });
+    const loaded = await repository.load(cwd);
+    if (loaded.status !== "ok") throw new Error("expected Notes to load");
+    expect(loaded.snapshot.revision).toBe(2);
+    const byId = new Map(loaded.snapshot.document.phases.map((phase) => [phase.id, phase]));
+    expect(byId.get("a")).toMatchObject({ title: "Phase A", updatedAt: EDIT_LATER });
+    expect(byId.get("c")).toMatchObject({ goal: "A sharper goal", updatedAt: EDIT_LATER });
+    expect(byId.get("b")).toEqual(initial.phases.find((phase) => phase.id === "b"));
+  });
+
+  it("saves nothing when any phase in an edit batch changed or is locked", async () => {
+    const cwd = "/work/approved-edit-batch-stale";
+    const repository = new ProjectNotesRepository(await tempAgentDir());
+    const initial = roadmapNotes("edit batch stale baseline");
+    await repository.migrate(cwd, initial);
+    const draft = editBatchDraft(cwd, initial);
+    const changed = structuredClone(initial);
+    changed.phases.find((phase) => phase.id === "c")!.goal = "Edited in the app";
+    await expect(repository.save(cwd, 1, changed)).resolves.toMatchObject({ status: "ok" });
+    const paths = repository.paths(cwd);
+    const filesBefore = await readNotesFiles(paths);
+
+    await expect(repository.applyApprovedPhaseEditBatch(cwd, draft, EDIT_LATER)).resolves.toEqual({
+      status: "phase-changed",
+      phaseId: "c",
+    });
+    expect(await readNotesFiles(paths)).toEqual(filesBefore);
+    const loaded = await repository.load(cwd);
+    expect(loaded.status === "ok" && loaded.snapshot.revision).toBe(2);
+    // The untouched first phase was not saved on its own either.
+    expect(
+      loaded.status === "ok" && loaded.snapshot.document.phases.find((p) => p.id === "a")?.title,
+    ).toBe("Phase a");
+  });
+
+  it("commits a move batch in one revision and refuses it after an order change", async () => {
+    const cwd = "/work/approved-move-batch";
+    const repository = new ProjectNotesRepository(await tempAgentDir());
+    const initial = roadmapNotes("move batch baseline");
+    await repository.migrate(cwd, initial);
+    const draft = moveBatchDraft(cwd, initial);
+    expect(draft.orderPreview.after.map((entry) => entry.phaseId)).toEqual([
+      "phase-1",
+      "c",
+      "b",
+      "a",
+    ]);
+
+    await expect(repository.applyApprovedPhaseMoveBatch(cwd, draft, EDIT_LATER)).resolves.toEqual({
+      status: "moved",
+      revision: 2,
+      phaseId: "c",
+      phaseIds: ["c", "b"],
+    });
+    const loaded = await repository.load(cwd);
+    if (loaded.status !== "ok") throw new Error("expected Notes to load");
+    expect(loaded.snapshot.revision).toBe(2);
+    expect(loaded.snapshot.document.phases.map((phase) => [phase.id, phase.order])).toEqual([
+      ["phase-1", 0],
+      ["c", 1],
+      ["b", 2],
+      ["a", 3],
+    ]);
+
+    const paths = repository.paths(cwd);
+    const filesBefore = await readNotesFiles(paths);
+    await expect(repository.applyApprovedPhaseMoveBatch(cwd, draft, EDIT_LATER)).resolves.toEqual({
+      status: "phase-changed",
+      phaseId: "c",
+    });
+    expect(await readNotesFiles(paths)).toEqual(filesBefore);
+  });
+
+  it("rejects malformed and foreign-project batches without writing", async () => {
+    const cwd = "/work/approved-batch-invalid";
+    const repository = new ProjectNotesRepository(await tempAgentDir());
+    const initial = roadmapNotes("batch invalid baseline");
+    await repository.migrate(cwd, initial);
+    const paths = repository.paths(cwd);
+    const filesBefore = await readNotesFiles(paths);
+    const single = editBatchDraft(cwd, initial);
+    single.edits = single.edits.slice(0, 1);
+
+    await expect(
+      repository.applyApprovedPhaseEditBatch(cwd, single, EDIT_LATER),
+    ).resolves.toMatchObject({ status: "invalid-proposal" });
+    await expect(
+      repository.applyApprovedPhaseMoveBatch(
+        cwd,
+        moveBatchDraft("/work/elsewhere", initial),
+        EDIT_LATER,
+      ),
+    ).resolves.toEqual({ status: "proposal-project-mismatch" });
+    expect(await readNotesFiles(paths)).toEqual(filesBefore);
   });
 });

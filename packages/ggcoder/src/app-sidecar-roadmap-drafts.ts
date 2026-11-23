@@ -5,10 +5,23 @@ import {
   buildRoadmapPhaseInsertionPreview,
   classifyRoadmapPhaseEditability,
   describeRoadmapPhaseOrderRefusal,
+  isRoadmapPhaseEditBatchDraft,
   isRoadmapPhaseEditDraft,
+  isRoadmapPhaseMoveBatchDraft,
   isRoadmapPhaseMoveDraft,
   moveRoadmapPhaseOrderEntry,
   planRoadmapPhaseMove,
+  planRoadmapPhaseMoves,
+  validateRoadmapPhaseEditBatchDraft,
+  validateRoadmapPhaseEditBatchRequest,
+  validateRoadmapPhaseMoveBatchDraft,
+  validateRoadmapPhaseMoveBatchRequest,
+  type RoadmapPhaseEditBatchDraft,
+  type RoadmapPhaseEditBatchItem,
+  type RoadmapPhaseEditBatchRequest,
+  type RoadmapPhaseFieldChange,
+  type RoadmapPhaseMoveBatchDraft,
+  type RoadmapPhaseMoveBatchRequest,
   roadmapPhaseMovePlacement,
   roadmapPhaseOrderEntries,
   validateRoadmapPhaseCreateDraft,
@@ -35,6 +48,7 @@ import {
 import {
   roadmapOrderDependencyWarnings,
   validateRoadmapDraftDependencies,
+  validateRoadmapEditBatchDependencies,
   validateRoadmapEditDependencies,
 } from "@kenkaiiii/gg-core/roadmap-phase-dependencies";
 
@@ -79,6 +93,33 @@ export type RoadmapPhaseEditDraftCreateResult =
   | Exclude<RoadmapPhaseDraftCreateResult, { status: "drafted" }>
   | { status: "phase-not-editable"; phaseId: string; reason: RoadmapPhaseNotEditableReason }
   | { status: "no-changes"; phaseId: string };
+
+export interface RoadmapPhaseEditBatchDraftCreateRequest {
+  cwd: string;
+  sessionId: string;
+  /** Two or more edits; a single edit goes through `createEdit`. */
+  request: RoadmapPhaseEditBatchRequest;
+  /** Phases at the inspected revision. */
+  currentPhases: readonly NotesPhase[];
+}
+
+export type RoadmapPhaseEditBatchDraftCreateResult =
+  | { status: "drafted"; draft: RoadmapPhaseEditBatchDraft }
+  | Exclude<RoadmapPhaseEditDraftCreateResult, { status: "drafted" }>;
+
+export interface RoadmapPhaseMoveBatchDraftCreateRequest {
+  cwd: string;
+  sessionId: string;
+  /** Two or more moves; a single move goes through `createMove`. */
+  request: RoadmapPhaseMoveBatchRequest;
+  /** Phases at the inspected revision. */
+  currentPhases: readonly NotesPhase[];
+}
+
+export type RoadmapPhaseMoveBatchDraftCreateResult =
+  | { status: "drafted"; draft: RoadmapPhaseMoveBatchDraft; dependencyWarnings?: string[] }
+  | Exclude<RoadmapPhaseDraftCreateResult, { status: "drafted" }>
+  | { status: "order-refused"; refusal: RoadmapPhaseOrderRefusal; moveIndex: number };
 
 export interface AppSidecarRoadmapDraftCoordinatorOptions {
   createId?: () => string;
@@ -387,6 +428,154 @@ export class AppSidecarRoadmapDraftCoordinator {
     return { status: "drafted", draft: cloneEditDraft(checked.value) };
   }
 
+  /** Proposes changes to 2+ phases as one all-or-nothing draft; shares the pending slot. */
+  createEditBatch(
+    input: RoadmapPhaseEditBatchDraftCreateRequest,
+  ): RoadmapPhaseEditBatchDraftCreateResult {
+    const validated = validateRoadmapPhaseEditBatchRequest(input.request);
+    if (!validated.ok) {
+      return {
+        status: "invalid-proposal",
+        path: validated.error.path,
+        message: validated.error.message,
+      };
+    }
+    const request = validated.value;
+    const projectKey = canonicalProjectKey(input.cwd);
+    const blocking = this.blockingProposal(projectKey, input.sessionId);
+    if (blocking) return { status: "proposal-pending", draft: blocking };
+
+    const edits: RoadmapPhaseEditBatchItem[] = [];
+    for (const item of request.edits) {
+      const phase = input.currentPhases.find((candidate) => candidate.id === item.phaseId);
+      const reason = classifyRoadmapPhaseEditability(phase);
+      if (reason !== null || !phase) {
+        return { status: "phase-not-editable", phaseId: item.phaseId, reason: reason ?? "missing" };
+      }
+      const changes = buildRoadmapPhaseEditChanges(phase, {
+        ...item,
+        expectedRevision: request.expectedRevision,
+        summary: request.summary,
+      });
+      if (changes.length === 0) return { status: "no-changes", phaseId: item.phaseId };
+      edits.push({
+        phaseId: item.phaseId,
+        phaseTitle: phase.title,
+        basedOnUpdatedAt: phase.updatedAt,
+        changes,
+      });
+    }
+    const dependencyChanges = edits.flatMap((edit) =>
+      edit.changes.flatMap((change) =>
+        change.field === "dependsOn"
+          ? [{ phaseId: edit.phaseId, before: change.before, after: change.after }]
+          : [],
+      ),
+    );
+    let dependencyPhases: RoadmapDependencyPhaseEntry[] | undefined;
+    if (dependencyChanges.length > 0) {
+      const error = validateRoadmapEditBatchDependencies(
+        input.currentPhases,
+        dependencyChanges.map((change) => ({ phaseId: change.phaseId, dependsOn: change.after })),
+      );
+      if (error) return { status: "invalid-proposal", path: error.path, message: error.message };
+      const listed = dependencyChanges.flatMap((change) => [...change.before, ...change.after]);
+      if (listed.length > 0) dependencyPhases = dependencyPhaseEntries(input.currentPhases, listed);
+    }
+    const candidate: RoadmapPhaseEditBatchDraft = {
+      kind: "edit-batch",
+      id: this.createId(),
+      projectKey,
+      basedOnRevision: request.expectedRevision,
+      createdAt: this.now(),
+      createdBySessionId: input.sessionId,
+      summary: request.summary,
+      edits,
+      ...(dependencyPhases ? { dependencyPhases } : {}),
+      status: "pending",
+    };
+    const checked = validateRoadmapPhaseEditBatchDraft(candidate);
+    if (!checked.ok) {
+      return {
+        status: "invalid-proposal",
+        path: checked.error.path,
+        message: checked.error.message,
+      };
+    }
+    this.store(projectKey, checked.value);
+    return { status: "drafted", draft: cloneEditBatchDraft(checked.value) };
+  }
+
+  /** Proposes moving 2+ phases in listed order as one all-or-nothing draft; shares the slot. */
+  createMoveBatch(
+    input: RoadmapPhaseMoveBatchDraftCreateRequest,
+  ): RoadmapPhaseMoveBatchDraftCreateResult {
+    const validated = validateRoadmapPhaseMoveBatchRequest(input.request);
+    if (!validated.ok) {
+      return {
+        status: "invalid-proposal",
+        path: validated.error.path,
+        message: validated.error.message,
+      };
+    }
+    const request = validated.value;
+    const projectKey = canonicalProjectKey(input.cwd);
+    const blocking = this.blockingProposal(projectKey, input.sessionId);
+    if (blocking) return { status: "proposal-pending", draft: blocking };
+    const steps = request.moves.map((move) => ({
+      phaseId: move.phaseId,
+      placement: roadmapPhaseMovePlacement(move),
+    }));
+    const planned = planRoadmapPhaseMoves(input.currentPhases, steps);
+    if (!planned.ok) {
+      return { status: "order-refused", refusal: planned.refusal, moveIndex: planned.index };
+    }
+    const titleOf = (phaseId: string) =>
+      input.currentPhases.find((candidate) => candidate.id === phaseId)?.title ?? "";
+    const before = roadmapPhaseOrderEntries(input.currentPhases);
+    const after = roadmapPhaseOrderEntries(planned.phases);
+    const candidate: RoadmapPhaseMoveBatchDraft = {
+      kind: "move-batch",
+      id: this.createId(),
+      projectKey,
+      basedOnRevision: request.expectedRevision,
+      createdAt: this.now(),
+      createdBySessionId: input.sessionId,
+      summary: request.summary,
+      moves: steps.map((step) => ({
+        phaseId: step.phaseId,
+        phaseTitle: titleOf(step.phaseId),
+        position: step.placement.position,
+        targetPhaseId: step.placement.targetPhaseId,
+        targetPhaseTitle: titleOf(step.placement.targetPhaseId),
+      })),
+      orderPreview: { before, after },
+      status: "pending",
+    };
+    const checked = validateRoadmapPhaseMoveBatchDraft(candidate);
+    if (!checked.ok) {
+      return {
+        status: "invalid-proposal",
+        path: checked.error.path,
+        message: checked.error.message,
+      };
+    }
+    this.store(projectKey, checked.value);
+    const finalOrder = after.map((entry) => entry.phaseId);
+    const dependencyWarnings = [
+      ...new Set(
+        steps.flatMap((step) =>
+          roadmapOrderDependencyWarnings(input.currentPhases, finalOrder, step.phaseId),
+        ),
+      ),
+    ];
+    return {
+      status: "drafted",
+      draft: cloneMoveBatchDraft(checked.value),
+      ...(dependencyWarnings.length > 0 ? { dependencyWarnings } : {}),
+    };
+  }
+
   /**
    * The pending proposal that keeps a new one out, re-announced for a missed
    * notification. The creating session may revise its own proposal in place
@@ -549,9 +738,8 @@ function alreadyDecidedApproval(
 ): RoadmapPhaseDraftApprovalResult {
   if (decision.projectKey !== projectKey) return { status: "proposal-project-mismatch" };
   if (decision.decision !== "approved") return { status: "already-decided", decision: "rejected" };
-  return decision.result.status === "created"
-    ? { ...decision.result, phaseIds: [...decision.result.phaseIds] }
-    : { ...decision.result };
+  const result = decision.result;
+  return result.phaseIds ? { ...result, phaseIds: [...result.phaseIds] } : { ...result };
 }
 
 function alreadyDecidedRejection(
@@ -567,7 +755,35 @@ function alreadyDecidedRejection(
 function cloneDraft(draft: RoadmapPhaseDraft | null): RoadmapPhaseDraft | null {
   if (!draft) return null;
   if (isRoadmapPhaseEditDraft(draft)) return cloneEditDraft(draft);
+  if (isRoadmapPhaseEditBatchDraft(draft)) return cloneEditBatchDraft(draft);
+  if (isRoadmapPhaseMoveBatchDraft(draft)) return cloneMoveBatchDraft(draft);
   return isRoadmapPhaseMoveDraft(draft) ? cloneMoveDraft(draft) : cloneCreateDraft(draft);
+}
+
+function cloneFieldChanges(changes: readonly RoadmapPhaseFieldChange[]): RoadmapPhaseFieldChange[] {
+  return changes.map((change) =>
+    change.field === "doneWhen" || change.field === "dependsOn"
+      ? { ...change, before: [...change.before], after: [...change.after] }
+      : { ...change },
+  );
+}
+
+function cloneEditBatchDraft(draft: RoadmapPhaseEditBatchDraft): RoadmapPhaseEditBatchDraft {
+  return {
+    ...draft,
+    edits: draft.edits.map((edit) => ({ ...edit, changes: cloneFieldChanges(edit.changes) })),
+    ...(draft.dependencyPhases
+      ? { dependencyPhases: draft.dependencyPhases.map((entry) => ({ ...entry })) }
+      : {}),
+  };
+}
+
+function cloneMoveBatchDraft(draft: RoadmapPhaseMoveBatchDraft): RoadmapPhaseMoveBatchDraft {
+  return {
+    ...draft,
+    moves: draft.moves.map((move) => ({ ...move })),
+    orderPreview: cloneOrderPreview(draft.orderPreview),
+  };
 }
 
 function cloneOrderPreview(preview: RoadmapPhaseOrderPreview): RoadmapPhaseOrderPreview {
@@ -584,11 +800,7 @@ function cloneMoveDraft(draft: RoadmapPhaseMoveDraft): RoadmapPhaseMoveDraft {
 function cloneEditDraft(draft: RoadmapPhaseEditDraft): RoadmapPhaseEditDraft {
   return {
     ...draft,
-    changes: draft.changes.map((change) =>
-      change.field === "doneWhen" || change.field === "dependsOn"
-        ? { ...change, before: [...change.before], after: [...change.after] }
-        : { ...change },
-    ),
+    changes: cloneFieldChanges(draft.changes),
     ...(draft.dependencyPhases
       ? { dependencyPhases: draft.dependencyPhases.map((entry) => ({ ...entry })) }
       : {}),

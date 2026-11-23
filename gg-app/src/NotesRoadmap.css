@@ -3361,6 +3361,22 @@ button.notes-btn-quiet.notes-btn-danger:is(:hover, :focus-visible):not(:disabled
 .roadmap-order-placement strong {
   color: var(--text);
 }
+/* Move batches list each step in apply order above the one order comparison. */
+.roadmap-move-steps {
+  display: grid;
+  gap: var(--space-3);
+  margin: var(--space-5) 0 0;
+  padding-left: var(--space-10);
+  color: var(--text-secondary);
+  font-size: var(--fs-md);
+  line-height: 1.5;
+}
+.roadmap-move-steps li {
+  overflow-wrap: anywhere;
+}
+.roadmap-move-steps strong {
+  color: var(--text);
+}
 .roadmap-draft-order {
   margin-block: var(--space-10) 0;
 }

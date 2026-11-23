@@ -132,7 +132,7 @@ Custom commands: each Markdown file in the project's `.gg/commands/` folder beco
 - Open a phase to see **Overview**, **References**, **Completion** and **Activity**. Phases can depend on other phases; starting one with unfinished prerequisites asks you to confirm first.
 - You can drag phases to reorder them. Done phases can't be moved.
 - **Delete phase** moves a phase to deleted phases; deleted phases are kept and **Recover** brings one back.
-- When GG drafts phases from your notes, a review opens: **Create phases with references** accepts them and **Reject draft** discards them. Edits and moves GG proposes are shown for your review the same way.
+- When GG drafts phases from your notes, a review opens: **Create phases with references** accepts them and **Reject draft** discards them. Edits and moves GG proposes are shown for your review the same way. When GG changes or reorders several phases at once, one review lists them all and they are saved together or not at all; **Reject edits** or **Reject moves** discards the whole set.
 - A due reminder shows **Roadmap reminder due** with **Open phase** and **Resume**.
 
 ## Opportunities and Post-check

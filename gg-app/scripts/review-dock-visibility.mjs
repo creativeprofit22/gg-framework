@@ -101,6 +101,84 @@ const roadmapEditDraft = {
   status: "pending",
 };
 
+// Two phases in one proposal: the card stacks one before/after block per phase.
+const roadmapEditBatchDraft = {
+  kind: "edit-batch",
+  id: "fixture-edit-batch",
+  projectKey: CWD,
+  basedOnRevision: 3,
+  createdAt: "2026-10-14T12:00:00.000Z",
+  createdBySessionId: "fixture-session",
+  summary: "Narrow the fictional retry phase and clarify the receipts phase in one go.",
+  edits: [
+    {
+      phaseId: "fixture-phase",
+      phaseTitle: "Ship fictional checkout retry",
+      basedOnUpdatedAt: "2026-10-14T11:00:00.000Z",
+      changes: [
+        {
+          field: "title",
+          before: "Ship fictional checkout retry",
+          after: "Ship fictional payment retry",
+        },
+      ],
+    },
+    {
+      phaseId: "fixture-receipts",
+      phaseTitle: "Email fictional receipts",
+      basedOnUpdatedAt: "2026-10-14T11:00:00.000Z",
+      changes: [
+        {
+          field: "goal",
+          before: "Send receipts.",
+          after: "Send one fictional receipt per paid order, including retried payments.",
+        },
+        {
+          field: "doneWhen",
+          before: ["Receipts send"],
+          after: ["Receipts send", "A retried payment sends exactly one receipt"],
+        },
+      ],
+    },
+  ],
+  status: "pending",
+};
+
+const fixtureOrder = (titles) =>
+  titles.map((title) => ({ phaseId: `fixture-${title.toLowerCase()}`, title }));
+
+// Two steps; the second is placed relative to the order left by the first.
+const roadmapMoveBatchDraft = {
+  kind: "move-batch",
+  id: "fixture-move-batch",
+  projectKey: CWD,
+  basedOnRevision: 3,
+  createdAt: "2026-10-14T12:00:00.000Z",
+  createdBySessionId: "fixture-session",
+  summary: "Do the fictional payment work before the storefront polish.",
+  moves: [
+    {
+      phaseId: "fixture-payments",
+      phaseTitle: "Payments",
+      position: "before",
+      targetPhaseId: "fixture-storefront",
+      targetPhaseTitle: "Storefront",
+    },
+    {
+      phaseId: "fixture-receipts",
+      phaseTitle: "Receipts",
+      position: "after",
+      targetPhaseId: "fixture-payments",
+      targetPhaseTitle: "Payments",
+    },
+  ],
+  orderPreview: {
+    before: fixtureOrder(["Storefront", "Search", "Payments", "Receipts"]),
+    after: fixtureOrder(["Payments", "Receipts", "Storefront", "Search"]),
+  },
+  status: "pending",
+};
+
 const updateMetadata = {
   rid: 1,
   currentVersion: "0.91.1",
@@ -120,6 +198,16 @@ export const scenarios = [
   {
     name: "pending-roadmap-edit",
     roadmap: { status: "ok", draft: roadmapEditDraft },
+    update: false,
+  },
+  {
+    name: "pending-roadmap-edit-batch",
+    roadmap: { status: "ok", draft: roadmapEditBatchDraft },
+    update: false,
+  },
+  {
+    name: "pending-roadmap-move-batch",
+    roadmap: { status: "ok", draft: roadmapMoveBatchDraft },
     update: false,
   },
   {
@@ -360,6 +448,48 @@ async function verifyPendingRoadmapEdit(page, prefix, evidence) {
   await review.locator(".roadmap-edit-field").last().scrollIntoViewIfNeeded();
 }
 
+async function verifyPendingRoadmapBatch(page, prefix, evidence, kind) {
+  const roadmapTrigger = page.locator('.review-dock [data-review-trigger="roadmap"]');
+  await check(evidence, `${prefix} ${kind} trigger`, () =>
+    assertControlReachable(roadmapTrigger, `${prefix} ${kind} trigger`),
+  );
+  await roadmapTrigger.click({ timeout: 3_000 }).catch(() => roadmapTrigger.press("Enter"));
+  const review = page.locator(".review-dock .roadmap-edit-review");
+  await review.waitFor({ state: "visible", timeout: 3_000 }).catch(() => {});
+  await settleReviews(page);
+  await check(evidence, `${prefix} ${kind} content`, async () => {
+    const headings = await review.locator(".roadmap-edit-phase h3").allTextContents();
+    if (kind === "edit-batch") {
+      assert.deepEqual(headings, ["Ship fictional checkout retry", "Email fictional receipts"]);
+      const tags = await review.locator(".roadmap-edit-tag").allTextContents();
+      assert.deepEqual(tags, ["Added"]);
+    } else {
+      assert.deepEqual(headings, ["Moves, in order"]);
+      const steps = await review.locator(".roadmap-move-steps li").allTextContents();
+      assert.deepEqual(steps, [
+        "Payments moves before Storefront",
+        "Receipts moves after Payments",
+      ]);
+      const tags = await review.locator(".roadmap-edit-tag").allTextContents();
+      assert.deepEqual(tags, ["Moved", "Moved"]);
+    }
+  });
+  const approveName = kind === "edit-batch" ? "Apply 2 edits" : "Move 2 phases";
+  await check(evidence, `${prefix} ${kind} reject`, () =>
+    assertControlReachable(review.locator(".roadmap-draft-reject"), `${prefix} ${kind} reject`),
+  );
+  await check(evidence, `${prefix} ${approveName}`, async () => {
+    const approve = review.locator(".roadmap-draft-create");
+    assert.equal((await approve.textContent())?.trim(), approveName);
+    await assertControlReachable(approve, `${prefix} ${approveName}`);
+  });
+  await check(evidence, `${prefix} expanded ${kind} vs deck`, () =>
+    assertNoOverlap(page, ".review-dock", ".dock .deck", `${prefix} ${kind} expanded`),
+  );
+  // Leave the last block in view so screenshots show the second phase or the order.
+  await review.locator(".roadmap-edit-field").last().scrollIntoViewIfNeeded();
+}
+
 async function verifyRefreshError(page, prefix, evidence) {
   const retry = page.getByRole("button", { name: "Retry Roadmap review", exact: true });
   await retry.waitFor({ state: "attached", timeout: 5_000 }).catch(() => {});
@@ -390,6 +520,10 @@ export async function runReviewDockVisibilityFixture({
             await verifyPendingReviews(page, prefix, evidence);
           else if (scenario.name === "pending-roadmap-edit")
             await verifyPendingRoadmapEdit(page, prefix, evidence);
+          else if (scenario.name === "pending-roadmap-edit-batch")
+            await verifyPendingRoadmapBatch(page, prefix, evidence, "edit-batch");
+          else if (scenario.name === "pending-roadmap-move-batch")
+            await verifyPendingRoadmapBatch(page, prefix, evidence, "move-batch");
           else await verifyRefreshError(page, prefix, evidence);
           if (screenshot) {
             const output = resolve(outputDir, `review-dock-${scenario.name}-${viewport.name}.png`);

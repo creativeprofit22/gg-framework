@@ -819,8 +819,12 @@ pub(crate) const ROADMAP_PHASE_DRAFT_KEYS: [&str; 8] = [
 ];
 
 // Mirrors gg-core DRAFT_OPTIONAL_KEYS; legacy drafts omit these.
-pub(crate) const ROADMAP_PHASE_DRAFT_OPTIONAL_KEYS: [&str; 3] =
-    ["references", "sourcesNotCited", "orderPreview"];
+pub(crate) const ROADMAP_PHASE_DRAFT_OPTIONAL_KEYS: [&str; 4] = [
+    "references",
+    "sourcesNotCited",
+    "orderPreview",
+    "dependencyPhases",
+];
 
 pub(crate) const ROADMAP_PHASE_DRAFT_SOURCES_NOT_CITED_MAX_LENGTH: usize = 1_024;
 
@@ -828,8 +832,8 @@ pub(crate) const ROADMAP_DRAFT_PHASE_KEYS: [&str; 5] =
     ["phaseId", "title", "goal", "doneWhen", "sourcePrompt"];
 
 // Mirrors gg-core DRAFT_PHASE_OPTIONAL_KEYS; legacy draft phases omit these.
-pub(crate) const ROADMAP_DRAFT_PHASE_OPTIONAL_KEYS: [&str; 2] =
-    ["referenceIds", "insertBeforePhaseId"];
+pub(crate) const ROADMAP_DRAFT_PHASE_OPTIONAL_KEYS: [&str; 3] =
+    ["referenceIds", "insertBeforePhaseId", "dependsOn"];
 
 pub(crate) const ROADMAP_PROPOSED_PHASES_MAX_ITEMS: usize = 20;
 
@@ -1017,10 +1021,10 @@ pub(crate) fn roadmap_draft_reference(value: &serde_json::Value) -> Option<(Stri
     ))
 }
 
-/// Returns the phase ID and its optional `insertBeforePhaseId` target.
+/// Returns the phase ID, its optional `insertBeforePhaseId` target and its `dependsOn` links.
 pub(crate) fn is_roadmap_draft_phase(
     value: &serde_json::Value,
-) -> Option<(String, Option<String>)> {
+) -> Option<(String, Option<String>, Vec<String>)> {
     let object = value.as_object()?;
     if !has_required_and_optional_keys(
         object,
@@ -1034,6 +1038,11 @@ pub(crate) fn is_roadmap_draft_phase(
     let insert_before = match object.get("insertBeforePhaseId") {
         None => None,
         value => Some(normalized_bounded_code_points(value, 512)?),
+    };
+    // Mirrors gg-core create drafts: when present, dependsOn lists at least one link.
+    let depends_on = match object.get("dependsOn") {
+        None => Vec::new(),
+        value => roadmap_edit_depends_on(value, &phase_id).filter(|ids| !ids.is_empty())?,
     };
     normalized_bounded_code_points(object.get("title"), 200)?;
     normalized_bounded_code_points(object.get("goal"), 4_096)?;
@@ -1051,7 +1060,7 @@ pub(crate) fn is_roadmap_draft_phase(
         }
     }
 
-    Some((phase_id, insert_before))
+    Some((phase_id, insert_before, depends_on))
 }
 
 pub(crate) const ROADMAP_PHASE_EDIT_DRAFT_KEYS: [&str; 12] = [
@@ -1070,8 +1079,13 @@ pub(crate) const ROADMAP_PHASE_EDIT_DRAFT_KEYS: [&str; 12] = [
 ];
 
 /// Canonical field order shared with gg-core `ROADMAP_PHASE_EDIT_FIELDS`.
-pub(crate) const ROADMAP_PHASE_EDIT_FIELDS: [&str; 4] =
-    ["title", "goal", "doneWhen", "sourcePrompt"];
+pub(crate) const ROADMAP_PHASE_EDIT_FIELDS: [&str; 5] =
+    ["title", "goal", "doneWhen", "sourcePrompt", "dependsOn"];
+
+pub(crate) const ROADMAP_PHASE_DEPENDS_ON_MAX_ITEMS: usize = 200;
+
+/// Mirrors gg-core `ROADMAP_PHASE_BATCH_MAX_ITEMS`; batch drafts hold 2..this many items.
+pub(crate) const ROADMAP_PHASE_BATCH_MAX_ITEMS: usize = 20;
 
 pub(crate) const ROADMAP_PHASE_EDIT_BEFORE_MAX_LENGTH: usize = 65_536;
 
@@ -1113,8 +1127,34 @@ pub(crate) fn roadmap_edit_done_when(value: Option<&serde_json::Value>) -> Optio
     Some(criteria)
 }
 
-/// Returns the canonical index of a valid field change, mirroring gg-core `validateFieldChange`.
-pub(crate) fn roadmap_edit_field_change(value: &serde_json::Value) -> Option<usize> {
+/// Mirrors gg-core `validateDependsOnIds` (empty allowed): exact, unique, bounded, never self.
+pub(crate) fn roadmap_edit_depends_on(
+    value: Option<&serde_json::Value>,
+    phase_id: &str,
+) -> Option<Vec<String>> {
+    let items = value?.as_array()?;
+    if items.len() > ROADMAP_PHASE_DEPENDS_ON_MAX_ITEMS {
+        return None;
+    }
+    let mut seen = HashSet::new();
+    let mut ids = Vec::with_capacity(items.len());
+    for item in items {
+        let raw = item.as_str()?;
+        let id = normalized_bounded_code_points(Some(item), 512)?;
+        if id != raw || id == phase_id || !seen.insert(id.clone()) {
+            return None;
+        }
+        ids.push(id);
+    }
+    Some(ids)
+}
+
+/// Mirrors gg-core `validateFieldChange`: the canonical index of a valid change, and whether
+/// it is a `dependsOn` change that lists any link.
+pub(crate) fn roadmap_edit_field_change(
+    value: &serde_json::Value,
+    phase_id: &str,
+) -> Option<(usize, bool)> {
     let object = value.as_object()?;
     if !has_exact_keys(object, &["field", "before", "after"]) {
         return None;
@@ -1123,15 +1163,20 @@ pub(crate) fn roadmap_edit_field_change(value: &serde_json::Value) -> Option<usi
     let index = ROADMAP_PHASE_EDIT_FIELDS
         .iter()
         .position(|candidate| *candidate == field)?;
-    if field == "doneWhen" {
+    if field == "doneWhen" || field == "dependsOn" {
         let before = roadmap_edit_before_list(object.get("before"))?;
-        let after = roadmap_edit_done_when(object.get("after"))?;
+        let after = if field == "doneWhen" {
+            roadmap_edit_done_when(object.get("after"))?
+        } else {
+            roadmap_edit_depends_on(object.get("after"), phase_id)?
+        };
         let unchanged = before.len() == after.len()
             && before
                 .iter()
                 .zip(after.iter())
                 .all(|(left, right)| *left == right);
-        return (!unchanged).then_some(index);
+        let lists_links = field == "dependsOn" && before.len() + after.len() > 0;
+        return (!unchanged).then_some((index, lists_links));
     }
     let before = roadmap_edit_before_string(object.get("before"))?;
     let max_length = match field {
@@ -1140,47 +1185,152 @@ pub(crate) fn roadmap_edit_field_change(value: &serde_json::Value) -> Option<usi
         _ => 16_384,
     };
     let after = normalized_bounded_code_points(object.get("after"), max_length)?;
-    (before != after).then_some(index)
+    (before != after).then_some((index, false))
+}
+
+/// Mirrors gg-core `validateEditChanges`: 1..5 unique changes in canonical order. Returns
+/// whether a `dependsOn` change lists any link.
+pub(crate) fn roadmap_edit_changes(
+    value: Option<&serde_json::Value>,
+    phase_id: &str,
+) -> Option<bool> {
+    let changes = value?.as_array()?;
+    if !(1..=ROADMAP_PHASE_EDIT_FIELDS.len()).contains(&changes.len()) {
+        return None;
+    }
+    let mut previous: Option<usize> = None;
+    let mut lists_links = false;
+    for change in changes {
+        let (index, links) = roadmap_edit_field_change(change, phase_id)?;
+        if previous.is_some_and(|previous| index <= previous) {
+            return None;
+        }
+        previous = Some(index);
+        lists_links |= links;
+    }
+    Some(lists_links)
+}
+
+/// Mirrors gg-core `validateOptionalDependencyPhases`: present exactly when `required`.
+pub(crate) fn is_roadmap_dependency_phases(
+    value: Option<&serde_json::Value>,
+    required: bool,
+) -> bool {
+    let Some(value) = value else {
+        return !required;
+    };
+    let Some(entries) = value.as_array().filter(|_| required) else {
+        return false;
+    };
+    if !(1..=ROADMAP_PHASE_ORDER_PREVIEW_MAX_ITEMS).contains(&entries.len()) {
+        return false;
+    }
+    let mut seen = HashSet::new();
+    entries.iter().all(|entry| {
+        entry.as_object().is_some_and(|object| {
+            has_exact_keys(object, &["phaseId", "title", "archived"])
+                && normalized_bounded_code_points(object.get("phaseId"), 512)
+                    .is_some_and(|id| seen.insert(id))
+                && roadmap_edit_before_string(object.get("title")).is_some()
+                && object
+                    .get("archived")
+                    .is_some_and(serde_json::Value::is_boolean)
+        })
+    })
+}
+
+/// Fields every edit, move and batch draft shares besides `kind` and its payload.
+pub(crate) fn is_roadmap_draft_header(object: &serde_json::Map<String, serde_json::Value>) -> bool {
+    matches!(
+        object.get("status").and_then(serde_json::Value::as_str),
+        Some("pending" | "stale")
+    ) && normalized_bounded_code_points(object.get("id"), 512).is_some()
+        && normalized_bounded_code_points(object.get("projectKey"), 4_096).is_some()
+        && is_non_negative_integer(object.get("basedOnRevision"))
+        && is_roadmap_timestamp(object.get("createdAt"))
+        && normalized_bounded_code_points(object.get("createdBySessionId"), 512).is_some()
+        && normalized_bounded_code_points(object.get("summary"), 4_096).is_some()
 }
 
 pub(crate) fn is_roadmap_phase_edit_draft(
     object: &serde_json::Map<String, serde_json::Value>,
 ) -> bool {
-    if !has_exact_keys(object, &ROADMAP_PHASE_EDIT_DRAFT_KEYS)
-        || object.get("kind").and_then(serde_json::Value::as_str) != Some("edit")
-        || !matches!(
-            object.get("status").and_then(serde_json::Value::as_str),
-            Some("pending" | "stale")
-        )
-        || normalized_bounded_code_points(object.get("id"), 512).is_none()
-        || normalized_bounded_code_points(object.get("projectKey"), 4_096).is_none()
-        || !is_non_negative_integer(object.get("basedOnRevision"))
-        || !is_roadmap_timestamp(object.get("createdAt"))
-        || normalized_bounded_code_points(object.get("createdBySessionId"), 512).is_none()
-        || normalized_bounded_code_points(object.get("summary"), 4_096).is_none()
-        || normalized_bounded_code_points(object.get("phaseId"), 512).is_none()
+    if !has_required_and_optional_keys(
+        object,
+        &ROADMAP_PHASE_EDIT_DRAFT_KEYS,
+        &["dependencyPhases"],
+    ) || object.get("kind").and_then(serde_json::Value::as_str) != Some("edit")
+        || !is_roadmap_draft_header(object)
         || roadmap_edit_before_string(object.get("phaseTitle")).is_none()
         || !is_roadmap_timestamp(object.get("basedOnUpdatedAt"))
     {
         return false;
     }
-    let Some(changes) = object.get("changes").and_then(serde_json::Value::as_array) else {
+    let Some(phase_id) = normalized_bounded_code_points(object.get("phaseId"), 512) else {
         return false;
     };
-    if !(1..=ROADMAP_PHASE_EDIT_FIELDS.len()).contains(&changes.len()) {
+    roadmap_edit_changes(object.get("changes"), &phase_id).is_some_and(|lists_links| {
+        is_roadmap_dependency_phases(object.get("dependencyPhases"), lists_links)
+    })
+}
+
+pub(crate) const ROADMAP_PHASE_EDIT_BATCH_DRAFT_KEYS: [&str; 9] = [
+    "kind",
+    "id",
+    "projectKey",
+    "basedOnRevision",
+    "createdAt",
+    "createdBySessionId",
+    "summary",
+    "edits",
+    "status",
+];
+
+/// Mirrors gg-core `validateRoadmapPhaseEditBatchDraft`.
+pub(crate) fn is_roadmap_phase_edit_batch_draft(
+    object: &serde_json::Map<String, serde_json::Value>,
+) -> bool {
+    if !has_required_and_optional_keys(
+        object,
+        &ROADMAP_PHASE_EDIT_BATCH_DRAFT_KEYS,
+        &["dependencyPhases"],
+    ) || object.get("kind").and_then(serde_json::Value::as_str) != Some("edit-batch")
+        || !is_roadmap_draft_header(object)
+    {
         return false;
     }
-    let mut previous: Option<usize> = None;
-    for change in changes {
-        let Some(index) = roadmap_edit_field_change(change) else {
+    let Some(edits) = object.get("edits").and_then(serde_json::Value::as_array) else {
+        return false;
+    };
+    if !(2..=ROADMAP_PHASE_BATCH_MAX_ITEMS).contains(&edits.len()) {
+        return false;
+    }
+    let mut seen = HashSet::new();
+    let mut lists_links = false;
+    for edit in edits {
+        let Some(item) = edit.as_object() else {
             return false;
         };
-        if previous.is_some_and(|previous| index <= previous) {
+        if !has_exact_keys(
+            item,
+            &["phaseId", "phaseTitle", "basedOnUpdatedAt", "changes"],
+        ) || roadmap_edit_before_string(item.get("phaseTitle")).is_none()
+            || !is_roadmap_timestamp(item.get("basedOnUpdatedAt"))
+        {
             return false;
         }
-        previous = Some(index);
+        let Some(phase_id) = normalized_bounded_code_points(item.get("phaseId"), 512) else {
+            return false;
+        };
+        if !seen.insert(phase_id.clone()) {
+            return false;
+        }
+        let Some(links) = roadmap_edit_changes(item.get("changes"), &phase_id) else {
+            return false;
+        };
+        lists_links |= links;
     }
-    true
+    is_roadmap_dependency_phases(object.get("dependencyPhases"), lists_links)
 }
 
 pub(crate) fn is_roadmap_phase_draft(value: &serde_json::Value) -> bool {
@@ -1189,8 +1339,11 @@ pub(crate) fn is_roadmap_phase_draft(value: &serde_json::Value) -> bool {
     };
     if object.contains_key("kind") {
         return match object.get("kind").and_then(serde_json::Value::as_str) {
+            Some("edit") => is_roadmap_phase_edit_draft(object),
             Some("move") => is_roadmap_phase_move_draft(object),
-            _ => is_roadmap_phase_edit_draft(object),
+            Some("edit-batch") => is_roadmap_phase_edit_batch_draft(object),
+            Some("move-batch") => is_roadmap_phase_move_batch_draft(object),
+            _ => false,
         };
     }
     if !has_required_and_optional_keys(
@@ -1252,14 +1405,16 @@ pub(crate) fn is_roadmap_phase_draft(value: &serde_json::Value) -> bool {
     let mut phase_ids = HashSet::new();
     let mut linked_ids = HashSet::new();
     let mut placements: Vec<(String, Option<String>)> = Vec::with_capacity(phases.len());
+    let mut dependency_links = Vec::new();
     for phase in phases {
-        let Some((phase_id, insert_before)) = is_roadmap_draft_phase(phase) else {
+        let Some((phase_id, insert_before, depends_on)) = is_roadmap_draft_phase(phase) else {
             return false;
         };
         if !phase_ids.insert(phase_id.clone()) {
             return false;
         }
         placements.push((phase_id, insert_before));
+        dependency_links.extend(depends_on);
         let Some(links) = roadmap_reference_array(phase.get("referenceIds")) else {
             return false;
         };
@@ -1277,7 +1432,12 @@ pub(crate) fn is_roadmap_phase_draft(value: &serde_json::Value) -> bool {
             linked_ids.insert(id);
         }
     }
+    // Display entries are required exactly when a phase links outside this draft.
+    let links_existing = dependency_links
+        .iter()
+        .any(|link| !phase_ids.contains(link));
     linked_ids == reference_ids
+        && is_roadmap_dependency_phases(object.get("dependencyPhases"), links_existing)
         && is_roadmap_insertion_preview(object.get("orderPreview"), &placements)
 }
 
@@ -1379,64 +1539,128 @@ pub(crate) const ROADMAP_PHASE_MOVE_DRAFT_KEYS: [&str; 14] = [
     "status",
 ];
 
+/// One move step: the phase ID, `before`/`after`, and the target ID. Mirrors gg-core's
+/// per-step checks (bounded IDs, a valid position, loose titles, never next to itself).
+pub(crate) fn roadmap_move_step(
+    object: &serde_json::Map<String, serde_json::Value>,
+) -> Option<(String, &str, String)> {
+    roadmap_edit_before_string(object.get("phaseTitle"))?;
+    roadmap_edit_before_string(object.get("targetPhaseTitle"))?;
+    let position = object
+        .get("position")
+        .and_then(serde_json::Value::as_str)
+        .filter(|position| matches!(*position, "before" | "after"))?;
+    let phase_id = normalized_bounded_code_points(object.get("phaseId"), 512)?;
+    let target_id = normalized_bounded_code_points(object.get("targetPhaseId"), 512)?;
+    (phase_id != target_id).then_some((phase_id, position, target_id))
+}
+
+/// Mirrors gg-core `moveRoadmapPhaseOrderEntry` on IDs; None when either phase is missing.
+pub(crate) fn roadmap_order_after_move(
+    order: &[String],
+    phase_id: &str,
+    position: &str,
+    target_id: &str,
+) -> Option<Vec<String>> {
+    if phase_id == target_id || !order.iter().any(|id| id == phase_id) {
+        return None;
+    }
+    let mut next: Vec<String> = order.iter().filter(|id| *id != phase_id).cloned().collect();
+    let target_index = next.iter().position(|id| id == target_id)?;
+    let insert_at = if position == "before" {
+        target_index
+    } else {
+        target_index + 1
+    };
+    next.insert(insert_at, phase_id.to_string());
+    Some(next)
+}
+
 /// Mirrors gg-core `validateRoadmapPhaseMoveDraft`.
 pub(crate) fn is_roadmap_phase_move_draft(
     object: &serde_json::Map<String, serde_json::Value>,
 ) -> bool {
     if !has_exact_keys(object, &ROADMAP_PHASE_MOVE_DRAFT_KEYS)
         || object.get("kind").and_then(serde_json::Value::as_str) != Some("move")
-        || !matches!(
-            object.get("status").and_then(serde_json::Value::as_str),
-            Some("pending" | "stale")
-        )
-        || normalized_bounded_code_points(object.get("id"), 512).is_none()
-        || normalized_bounded_code_points(object.get("projectKey"), 4_096).is_none()
-        || !is_non_negative_integer(object.get("basedOnRevision"))
-        || !is_roadmap_timestamp(object.get("createdAt"))
-        || normalized_bounded_code_points(object.get("createdBySessionId"), 512).is_none()
-        || normalized_bounded_code_points(object.get("summary"), 4_096).is_none()
-        || roadmap_edit_before_string(object.get("phaseTitle")).is_none()
-        || roadmap_edit_before_string(object.get("targetPhaseTitle")).is_none()
+        || !is_roadmap_draft_header(object)
     {
         return false;
     }
-    let Some(position) = object
-        .get("position")
-        .and_then(serde_json::Value::as_str)
-        .filter(|position| matches!(*position, "before" | "after"))
-    else {
+    let Some((phase_id, position, target_id)) = roadmap_move_step(object) else {
         return false;
     };
-    let (Some(phase_id), Some(target_id)) = (
-        normalized_bounded_code_points(object.get("phaseId"), 512),
-        normalized_bounded_code_points(object.get("targetPhaseId"), 512),
-    ) else {
+    let Some((before, after)) = roadmap_order_preview_ids(object.get("orderPreview")) else {
         return false;
     };
-    if phase_id == target_id {
+    roadmap_order_after_move(&before, &phase_id, position, &target_id)
+        .is_some_and(|expected| expected == after && after != before)
+}
+
+pub(crate) const ROADMAP_PHASE_MOVE_BATCH_DRAFT_KEYS: [&str; 10] = [
+    "kind",
+    "id",
+    "projectKey",
+    "basedOnRevision",
+    "createdAt",
+    "createdBySessionId",
+    "summary",
+    "moves",
+    "orderPreview",
+    "status",
+];
+
+/// Mirrors gg-core `validateRoadmapPhaseMoveBatchDraft`: replays every step on `before`; each
+/// step must change the order, each phase moves once, and the result must equal `after`.
+pub(crate) fn is_roadmap_phase_move_batch_draft(
+    object: &serde_json::Map<String, serde_json::Value>,
+) -> bool {
+    if !has_exact_keys(object, &ROADMAP_PHASE_MOVE_BATCH_DRAFT_KEYS)
+        || object.get("kind").and_then(serde_json::Value::as_str) != Some("move-batch")
+        || !is_roadmap_draft_header(object)
+    {
+        return false;
+    }
+    let Some(moves) = object.get("moves").and_then(serde_json::Value::as_array) else {
+        return false;
+    };
+    if !(2..=ROADMAP_PHASE_BATCH_MAX_ITEMS).contains(&moves.len()) {
         return false;
     }
     let Some((before, after)) = roadmap_order_preview_ids(object.get("orderPreview")) else {
         return false;
     };
-    let mut expected: Vec<String> = before
-        .iter()
-        .filter(|id| **id != phase_id)
-        .cloned()
-        .collect();
-    if expected.len() + 1 != before.len() {
-        return false;
+    let mut seen = HashSet::new();
+    let mut order = before.clone();
+    for step in moves {
+        let Some(item) = step.as_object().filter(|item| {
+            has_exact_keys(
+                item,
+                &[
+                    "phaseId",
+                    "phaseTitle",
+                    "position",
+                    "targetPhaseId",
+                    "targetPhaseTitle",
+                ],
+            )
+        }) else {
+            return false;
+        };
+        let Some((phase_id, position, target_id)) = roadmap_move_step(item) else {
+            return false;
+        };
+        if !seen.insert(phase_id.clone()) {
+            return false;
+        }
+        let Some(next) = roadmap_order_after_move(&order, &phase_id, position, &target_id) else {
+            return false;
+        };
+        if next == order {
+            return false;
+        }
+        order = next;
     }
-    let Some(target_index) = expected.iter().position(|id| *id == target_id) else {
-        return false;
-    };
-    let insert_at = if position == "before" {
-        target_index
-    } else {
-        target_index + 1
-    };
-    expected.insert(insert_at, phase_id);
-    expected == after && after != before
+    order == after && after != before
 }
 
 pub(crate) fn is_roadmap_phase_draft_get_outcome(value: &serde_json::Value, outcome: &str) -> bool {
@@ -1478,6 +1702,7 @@ pub(crate) fn is_roadmap_phase_draft_approval_outcome(
         "edited" | "moved" => {
             is_non_negative_integer(value.get("revision"))
                 && is_non_empty_string(value.get("phaseId"))
+                && is_roadmap_batch_phase_ids(value.get("phaseIds"), value.get("phaseId"))
         }
         "phase-changed" => is_non_empty_string(value.get("phaseId")),
         "phase-not-editable" => {
@@ -1500,6 +1725,25 @@ pub(crate) fn is_roadmap_phase_draft_approval_outcome(
         | "notes-corrupt" => true,
         _ => false,
     }
+}
+
+/// Batch approvals list every changed phase, `phaseId` first; single approvals omit the list.
+pub(crate) fn is_roadmap_batch_phase_ids(
+    value: Option<&serde_json::Value>,
+    phase_id: Option<&serde_json::Value>,
+) -> bool {
+    let Some(value) = value else {
+        return true;
+    };
+    let Some(ids) = value.as_array() else {
+        return false;
+    };
+    let mut seen = HashSet::new();
+    ids.first() == phase_id
+        && ids.iter().all(|id| {
+            id.as_str()
+                .is_some_and(|id| !id.is_empty() && seen.insert(id.to_string()))
+        })
 }
 
 pub(crate) fn is_roadmap_phase_draft_rejection_outcome(
@@ -2783,6 +3027,239 @@ mod tests {
         .is_err());
     }
 
+    fn pending_roadmap_edit_batch_draft() -> serde_json::Value {
+        serde_json::json!({
+            "status": "ok",
+            "draft": {
+                "kind": "edit-batch",
+                "id": "draft-edit-batch",
+                "projectKey": "/work/project",
+                "basedOnRevision": 4,
+                "createdAt": "2026-01-01T00:00:00.000Z",
+                "createdBySessionId": "session-1",
+                "summary": "Tighten two phases",
+                "edits": [
+                    {
+                        "phaseId": "a",
+                        "phaseTitle": "Phase a",
+                        "basedOnUpdatedAt": "2025-12-31T00:00:00.000Z",
+                        "changes": [{ "field": "title", "before": "Phase a", "after": "Phase A" }],
+                    },
+                    {
+                        "phaseId": "c",
+                        "phaseTitle": "Phase c",
+                        "basedOnUpdatedAt": "2025-12-31T00:00:00.000Z",
+                        "changes": [{ "field": "goal", "before": "", "after": "Ship it." }],
+                    },
+                ],
+                "status": "pending",
+            },
+        })
+    }
+
+    fn pending_roadmap_move_batch_draft() -> serde_json::Value {
+        let step = |id: &str, position: &str, target: &str| {
+            serde_json::json!({
+                "phaseId": id,
+                "phaseTitle": format!("Phase {id}"),
+                "position": position,
+                "targetPhaseId": target,
+                "targetPhaseTitle": format!("Phase {target}"),
+            })
+        };
+        serde_json::json!({
+            "status": "ok",
+            "draft": {
+                "kind": "move-batch",
+                "id": "draft-move-batch",
+                "projectKey": "project-1",
+                "basedOnRevision": 4,
+                "createdAt": "2026-01-01T00:00:00.000Z",
+                "createdBySessionId": "session-1",
+                "summary": "Do d and c first",
+                // Step 2 applies to the order left by step 1: d, a, b, c.
+                "moves": [step("d", "before", "a"), step("c", "after", "d")],
+                "orderPreview": {
+                    "before": order_entries(&["a", "b", "c", "d"]),
+                    "after": order_entries(&["d", "c", "a", "b"]),
+                },
+                "status": "pending",
+            },
+        })
+    }
+
+    #[test]
+    fn roadmap_phase_edit_drafts_accept_dependency_link_changes_like_gg_core() {
+        let mut linked = pending_roadmap_edit_draft();
+        linked["draft"]["changes"] = serde_json::json!([
+            { "field": "goal", "before": "", "after": "Keep the native boundary aligned." },
+            { "field": "dependsOn", "before": [], "after": ["phase-0"] },
+        ]);
+        linked["draft"]["dependencyPhases"] =
+            serde_json::json!([{ "phaseId": "phase-0", "title": "First", "archived": false }]);
+        assert!(get_draft(&linked).is_ok());
+        let mut cleared = pending_roadmap_edit_draft();
+        cleared["draft"]["changes"] =
+            serde_json::json!([{ "field": "dependsOn", "before": ["phase-0"], "after": [] }]);
+        cleared["draft"]["dependencyPhases"] =
+            serde_json::json!([{ "phaseId": "phase-0", "title": "First", "archived": true }]);
+        assert!(get_draft(&cleared).is_ok());
+
+        let mutate = |apply: &dyn Fn(&mut serde_json::Value)| {
+            let mut draft = linked.clone();
+            apply(&mut draft["draft"]);
+            draft
+        };
+        for malformed in [
+            // Entries are required exactly when a dependsOn change lists links.
+            mutate(&|draft| {
+                draft.as_object_mut().unwrap().remove("dependencyPhases");
+            }),
+            mutate(&|draft| draft["changes"][1]["after"] = serde_json::json!(["phase-1"])),
+            mutate(&|draft| draft["changes"][1]["after"] = serde_json::json!(["x", "x"])),
+            mutate(&|draft| draft["changes"][1]["after"] = serde_json::json!([" phase-0 "])),
+            mutate(&|draft| draft["changes"][1]["after"] = serde_json::json!([])),
+            mutate(&|draft| draft["dependencyPhases"][0]["archived"] = serde_json::json!("no")),
+        ] {
+            assert!(
+                get_draft(&malformed).is_err(),
+                "accepted malformed dependency edit: {malformed}"
+            );
+        }
+    }
+
+    #[test]
+    fn roadmap_phase_edit_batch_drafts_match_gg_core_validation() {
+        let pending = pending_roadmap_edit_batch_draft();
+        assert!(get_draft(&pending).is_ok());
+        let mut linked = pending.clone();
+        linked["draft"]["edits"][1]["changes"] =
+            serde_json::json!([{ "field": "dependsOn", "before": [], "after": ["a"] }]);
+        linked["draft"]["dependencyPhases"] =
+            serde_json::json!([{ "phaseId": "a", "title": "Phase a", "archived": false }]);
+        assert!(get_draft(&linked).is_ok());
+
+        let mutate = |apply: &dyn Fn(&mut serde_json::Value)| {
+            let mut draft = pending.clone();
+            apply(&mut draft["draft"]);
+            draft
+        };
+        for malformed in [
+            mutate(&|draft| {
+                draft["edits"].as_array_mut().unwrap().pop();
+            }),
+            mutate(&|draft| draft["edits"][1]["phaseId"] = serde_json::json!("a")),
+            mutate(&|draft| draft["edits"][1]["changes"] = serde_json::json!([])),
+            mutate(&|draft| draft["edits"][1]["basedOnUpdatedAt"] = serde_json::json!("soon")),
+            mutate(&|draft| draft["edits"][1]["extra"] = serde_json::json!(true)),
+            mutate(&|draft| {
+                draft["edits"][1]["changes"] =
+                    serde_json::json!([{ "field": "dependsOn", "before": [], "after": ["c"] }]);
+            }),
+            mutate(&|draft| {
+                draft["edits"][1]["changes"] =
+                    serde_json::json!([{ "field": "dependsOn", "before": [], "after": ["a"] }]);
+            }),
+            mutate(&|draft| {
+                draft["dependencyPhases"] =
+                    serde_json::json!([{ "phaseId": "a", "title": "Phase a", "archived": false }]);
+            }),
+            mutate(&|draft| draft["phaseId"] = serde_json::json!("a")),
+            mutate(&|draft| draft["status"] = serde_json::json!("approved")),
+            mutate(&|draft| draft["kind"] = serde_json::json!("edit-batches")),
+        ] {
+            assert!(
+                get_draft(&malformed).is_err(),
+                "accepted malformed edit batch: {malformed}"
+            );
+        }
+        let too_many: Vec<serde_json::Value> = (0..=ROADMAP_PHASE_BATCH_MAX_ITEMS)
+            .map(|index| {
+                let mut edit = pending["draft"]["edits"][0].clone();
+                edit["phaseId"] = serde_json::json!(format!("p{index}"));
+                edit
+            })
+            .collect();
+        let mut oversized = pending.clone();
+        oversized["draft"]["edits"] = serde_json::Value::Array(too_many);
+        assert!(get_draft(&oversized).is_err());
+    }
+
+    #[test]
+    fn roadmap_phase_move_batch_drafts_replay_every_step_like_gg_core() {
+        let pending = pending_roadmap_move_batch_draft();
+        assert!(get_draft(&pending).is_ok());
+        let mutate = |apply: &dyn Fn(&mut serde_json::Value)| {
+            let mut draft = pending.clone();
+            apply(&mut draft["draft"]);
+            draft
+        };
+        for malformed in [
+            mutate(&|draft| {
+                draft["moves"].as_array_mut().unwrap().pop();
+            }),
+            // `after` must be the sequential replay, not each step applied to `before`.
+            mutate(&|draft| {
+                draft["orderPreview"]["after"] = order_entries(&["d", "a", "b", "c"]);
+            }),
+            mutate(&|draft| draft["orderPreview"]["after"] = order_entries(&["a", "b", "c", "d"])),
+            mutate(&|draft| draft["moves"][1]["phaseId"] = serde_json::json!("d")),
+            mutate(&|draft| draft["moves"][1]["targetPhaseId"] = serde_json::json!("c")),
+            mutate(&|draft| draft["moves"][1]["targetPhaseId"] = serde_json::json!("zz")),
+            mutate(&|draft| draft["moves"][1]["position"] = serde_json::json!("above")),
+            mutate(&|draft| draft["moves"][1]["extra"] = serde_json::json!(1)),
+            mutate(&|draft| draft["phaseId"] = serde_json::json!("d")),
+            // A step that changes nothing after the previous one.
+            mutate(&|draft| {
+                draft["moves"][1] = serde_json::json!({
+                    "phaseId": "a",
+                    "phaseTitle": "Phase a",
+                    "position": "after",
+                    "targetPhaseId": "d",
+                    "targetPhaseTitle": "Phase d",
+                });
+                draft["orderPreview"]["after"] = order_entries(&["d", "a", "b", "c"]);
+            }),
+        ] {
+            assert!(
+                get_draft(&malformed).is_err(),
+                "accepted malformed move batch: {malformed}"
+            );
+        }
+    }
+
+    #[test]
+    fn roadmap_phase_batch_approvals_carry_every_phase_id() {
+        let approve = |body: &str| {
+            normalize_roadmap_phase_draft_response(
+                reqwest::StatusCode::OK,
+                body,
+                RoadmapPhaseDraftResponseKind::Approve,
+            )
+        };
+        assert!(
+            approve(r#"{"status":"edited","revision":5,"phaseId":"a","phaseIds":["a","c"]}"#)
+                .is_ok()
+        );
+        assert!(
+            approve(r#"{"status":"moved","revision":5,"phaseId":"d","phaseIds":["d","c"]}"#)
+                .is_ok()
+        );
+        assert!(approve(r#"{"status":"moved","revision":5,"phaseId":"d"}"#).is_ok());
+        for body in [
+            r#"{"status":"edited","revision":5,"phaseId":"a","phaseIds":["c","a"]}"#,
+            r#"{"status":"edited","revision":5,"phaseId":"a","phaseIds":["a","a"]}"#,
+            r#"{"status":"edited","revision":5,"phaseId":"a","phaseIds":["a",""]}"#,
+            r#"{"status":"edited","revision":5,"phaseId":"a","phaseIds":[]}"#,
+            r#"{"status":"edited","revision":5,"phaseId":"a","phaseIds":"a"}"#,
+        ] {
+            assert!(
+                approve(body).is_err(),
+                "accepted malformed batch outcome: {body}"
+            );
+        }
+    }
+
     #[test]
     fn roadmap_phase_create_draft_proxy_validates_inserted_phase_positions() {
         let phase = |id: &str, target: Option<&str>| {
@@ -2844,6 +3321,64 @@ mod tests {
             assert!(
                 get_draft(&malformed).is_err(),
                 "accepted malformed insert: {malformed}"
+            );
+        }
+    }
+
+    #[test]
+    fn roadmap_phase_create_drafts_accept_dependency_links_like_gg_core() {
+        let phase = |id: &str, depends_on: Option<serde_json::Value>| {
+            let mut phase = serde_json::json!({
+                "phaseId": id, "title": "Phase", "goal": "Goal",
+                "doneWhen": ["Done"], "sourcePrompt": "Prompt", "referenceIds": [],
+            });
+            if let Some(depends_on) = depends_on {
+                phase["dependsOn"] = depends_on;
+            }
+            phase
+        };
+        let draft = |first: Option<serde_json::Value>, entries: Option<serde_json::Value>| {
+            let mut value = serde_json::json!({
+                "status": "ok",
+                "draft": {
+                    "id": "draft-1", "projectKey": "c:/work", "basedOnRevision": 7,
+                    "createdAt": "2026-08-05T12:00:00.000Z", "createdBySessionId": "session-1",
+                    "summary": "Link phases", "references": [],
+                    "phases": [
+                        phase("new-1", first),
+                        phase("new-2", Some(serde_json::json!(["new-1"]))),
+                    ],
+                    "status": "pending",
+                },
+            });
+            if let Some(entries) = entries {
+                value["draft"]["dependencyPhases"] = entries;
+            }
+            value
+        };
+        let entries = serde_json::json!([{ "phaseId": "old-1", "title": "Old", "archived": true }]);
+        let old = Some(serde_json::json!(["old-1"]));
+        // Same-draft links need no display entries; links to existing phases do.
+        assert!(get_draft(&draft(None, None)).is_ok());
+        assert!(get_draft(&draft(old.clone(), Some(entries.clone()))).is_ok());
+        for malformed in [
+            draft(old.clone(), None),
+            draft(None, Some(entries.clone())),
+            draft(
+                old,
+                Some(serde_json::json!([{ "phaseId": "old-1", "title": "Old" }])),
+            ),
+            draft(Some(serde_json::json!(["new-1"])), None),
+            draft(
+                Some(serde_json::json!(["old-1", "old-1"])),
+                Some(entries.clone()),
+            ),
+            draft(Some(serde_json::json!([])), None),
+            draft(Some(serde_json::json!([" old-1 "])), Some(entries)),
+        ] {
+            assert!(
+                get_draft(&malformed).is_err(),
+                "accepted malformed dependency links: {malformed}"
             );
         }
     }

@@ -8,13 +8,17 @@ import {
   XIcon,
 } from "./phosphor-icons";
 import {
+  isRoadmapPhaseEditBatchDraft,
   isRoadmapPhaseEditDraft,
+  isRoadmapPhaseMoveBatchDraft,
   isRoadmapPhaseMoveDraft,
   type RoadmapPhaseDraft,
 } from "@kenkaiiii/gg-core/roadmap-workflow";
 import { openReferenceUrl } from "./notes-open-source";
 import { RoadmapDependencyList } from "./RoadmapDependencyList";
+import { RoadmapPhaseEditBatchReview } from "./RoadmapPhaseEditBatchReview";
 import { RoadmapPhaseEditReview } from "./RoadmapPhaseEditReview";
+import { RoadmapPhaseMoveBatchReview } from "./RoadmapPhaseMoveBatchReview";
 import { RoadmapPhaseMoveReview } from "./RoadmapPhaseMoveReview";
 import { RoadmapPhaseOrderComparison } from "./RoadmapPhaseOrderComparison";
 
@@ -38,6 +42,30 @@ export function RoadmapPhaseDraftReviewModal({
   onReject,
 }: RoadmapPhaseDraftReviewModalProps) {
   if (!draft || !open) return null;
+  if (isRoadmapPhaseEditBatchDraft(draft)) {
+    return (
+      <RoadmapPhaseEditBatchReview
+        draft={draft}
+        decision={decision}
+        error={error}
+        announcement={announcement}
+        onApprove={onApprove}
+        onReject={onReject}
+      />
+    );
+  }
+  if (isRoadmapPhaseMoveBatchDraft(draft)) {
+    return (
+      <RoadmapPhaseMoveBatchReview
+        draft={draft}
+        decision={decision}
+        error={error}
+        announcement={announcement}
+        onApprove={onApprove}
+        onReject={onReject}
+      />
+    );
+  }
   if (isRoadmapPhaseMoveDraft(draft)) {
     return (
       <RoadmapPhaseMoveReview

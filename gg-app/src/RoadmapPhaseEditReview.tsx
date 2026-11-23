@@ -1,10 +1,6 @@
 import { CheckIcon, PencilSimpleIcon, XIcon } from "./phosphor-icons";
-import { RoadmapDependencyList } from "./RoadmapDependencyList";
-import type {
-  RoadmapDependencyPhaseEntry,
-  RoadmapPhaseEditDraft,
-  RoadmapPhaseFieldChange,
-} from "@kenkaiiii/gg-core/roadmap-workflow";
+import { RoadmapPhaseEditChanges } from "./RoadmapPhaseEditChanges";
+import type { RoadmapPhaseEditDraft } from "@kenkaiiii/gg-core/roadmap-workflow";
 
 interface RoadmapPhaseEditReviewProps {
   draft: RoadmapPhaseEditDraft;
@@ -13,77 +9,6 @@ interface RoadmapPhaseEditReviewProps {
   announcement: string;
   onApprove: () => void;
   onReject: () => void;
-}
-
-const FIELD_LABELS: Record<RoadmapPhaseFieldChange["field"], string> = {
-  title: "Title",
-  goal: "Goal",
-  doneWhen: "Done when",
-  sourcePrompt: "Saved phase prompt",
-  dependsOn: "Depends on",
-};
-
-function EmptyValue() {
-  return <span className="roadmap-edit-empty">Empty</span>;
-}
-
-function TextValue({ value, prompt }: { value: string; prompt: boolean }) {
-  if (value.length === 0) return <EmptyValue />;
-  return <p className={prompt ? "roadmap-edit-text is-prompt" : "roadmap-edit-text"}>{value}</p>;
-}
-
-function CriteriaValue({
-  items,
-  other,
-  tag,
-}: {
-  items: readonly string[];
-  other: readonly string[];
-  tag: "Added" | "Removed";
-}) {
-  if (items.length === 0) return <EmptyValue />;
-  const otherItems = new Set(other);
-  return (
-    <ul className="roadmap-edit-criteria">
-      {items.map((item, index) => (
-        <li key={`${index}:${item}`}>
-          <span>{item}</span>
-          {!otherItems.has(item) && <span className="roadmap-edit-tag">{tag}</span>}
-        </li>
-      ))}
-    </ul>
-  );
-}
-
-function ChangeValues({
-  change,
-  side,
-  dependencyPhases,
-}: {
-  change: RoadmapPhaseFieldChange;
-  side: "before" | "after";
-  dependencyPhases: readonly RoadmapDependencyPhaseEntry[] | undefined;
-}) {
-  if (change.field === "dependsOn") {
-    const items = change[side];
-    if (items.length === 0) return <EmptyValue />;
-    return (
-      <RoadmapDependencyList
-        phaseIds={items}
-        knownPhases={dependencyPhases}
-        compareWith={side === "before" ? change.after : change.before}
-        changeTag={side === "before" ? "Removed" : "Added"}
-      />
-    );
-  }
-  if (change.field === "doneWhen") {
-    return side === "before" ? (
-      <CriteriaValue items={change.before} other={change.after} tag="Removed" />
-    ) : (
-      <CriteriaValue items={change.after} other={change.before} tag="Added" />
-    );
-  }
-  return <TextValue value={change[side]} prompt={change.field === "sourcePrompt"} />;
 }
 
 export function RoadmapPhaseEditReview({
@@ -133,32 +58,13 @@ export function RoadmapPhaseEditReview({
             </div>
           )}
 
-          <article className="roadmap-edit-phase" aria-labelledby={`roadmap-edit-${draft.id}`}>
-            <h3 id={`roadmap-edit-${draft.id}`}>{draft.phaseTitle}</h3>
-            <ul className="roadmap-edit-changes" aria-label="Changed fields">
-              {draft.changes.map((change) => (
-                <li className="roadmap-edit-field" key={change.field}>
-                  <h4>{FIELD_LABELS[change.field]}</h4>
-                  <div className="roadmap-edit-value is-before">
-                    <span className="roadmap-edit-value-label">Before</span>
-                    <ChangeValues
-                      change={change}
-                      side="before"
-                      dependencyPhases={draft.dependencyPhases}
-                    />
-                  </div>
-                  <div className="roadmap-edit-value is-after">
-                    <span className="roadmap-edit-value-label">After</span>
-                    <ChangeValues
-                      change={change}
-                      side="after"
-                      dependencyPhases={draft.dependencyPhases}
-                    />
-                  </div>
-                </li>
-              ))}
-            </ul>
-          </article>
+          <RoadmapPhaseEditChanges
+            headingId={`roadmap-edit-${draft.id}`}
+            phaseTitle={draft.phaseTitle}
+            changes={draft.changes}
+            dependencyPhases={draft.dependencyPhases}
+            listLabel="Changed fields"
+          />
 
           {error && (
             <div className="roadmap-draft-error" role="alert">

@@ -1,6 +1,8 @@
 import {
   isRoadmapPhaseDraft,
+  isRoadmapPhaseEditBatchDraft,
   isRoadmapPhaseEditDraft,
+  isRoadmapPhaseMoveBatchDraft,
   isRoadmapPhaseMoveDraft,
   type RoadmapPhaseNotEditableReason,
   type RoadmapPhaseDraft,
@@ -11,8 +13,8 @@ import {
 export function normalizeRoadmapPhaseDraft(value: unknown): RoadmapPhaseDraft | null {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
   const candidate = value as Record<string, unknown>;
-  // Edit and move drafts have no legacy wire forms to fill in.
-  if (candidate.kind === "edit" || candidate.kind === "move") {
+  // Only create drafts have legacy wire forms to fill in; every other kind is strict.
+  if (candidate.kind !== undefined) {
     return isRoadmapPhaseDraft(candidate) ? candidate : null;
   }
   if (!Array.isArray(candidate.phases)) return null;
@@ -46,6 +48,25 @@ export interface RoadmapDraftDescription {
 /** Shared wording for the review dock item and header trigger of either draft kind. */
 export function describeRoadmapDraft(draft: RoadmapPhaseDraft): RoadmapDraftDescription {
   const status = draft.status === "stale" ? "Out of date" : "Approval required";
+  if (isRoadmapPhaseEditBatchDraft(draft)) {
+    const phases = draft.edits.length;
+    const fields = draft.edits.reduce((total, edit) => total + edit.changes.length, 0);
+    return {
+      label: "Roadmap phase edits",
+      summary: `${phases} phases · ${fields} changed ${fields === 1 ? "field" : "fields"} · ${status}`,
+      triggerLabel: `Review Roadmap edits to ${phases} phases`,
+      count: phases,
+    };
+  }
+  if (isRoadmapPhaseMoveBatchDraft(draft)) {
+    const phases = draft.moves.length;
+    return {
+      label: "Roadmap phase moves",
+      summary: `Move ${phases} phases · ${status}`,
+      triggerLabel: `Review Roadmap moves for ${phases} phases`,
+      count: phases,
+    };
+  }
   if (isRoadmapPhaseEditDraft(draft)) {
     const fields = draft.changes.length;
     const changed = `${fields} changed ${fields === 1 ? "field" : "fields"}`;
@@ -177,24 +198,65 @@ function receiveDraft(
         ? "Roadmap draft decision recorded."
         : draft.status === "stale"
           ? staleAnnouncement(draft)
-          : isRoadmapPhaseEditDraft(draft)
-            ? "A Roadmap phase edit is ready for review."
-            : isRoadmapPhaseMoveDraft(draft)
-              ? "A Roadmap phase move is ready for review."
-              : "A Roadmap draft is ready for review.",
+          : isRoadmapPhaseEditBatchDraft(draft)
+            ? `Roadmap edits to ${draft.edits.length} phases are ready for review.`
+            : isRoadmapPhaseMoveBatchDraft(draft)
+              ? `Roadmap moves for ${draft.moves.length} phases are ready for review.`
+              : isRoadmapPhaseEditDraft(draft)
+                ? "A Roadmap phase edit is ready for review."
+                : isRoadmapPhaseMoveDraft(draft)
+                  ? "A Roadmap phase move is ready for review."
+                  : "A Roadmap draft is ready for review.",
     eventVersion: state.eventVersion + (event ? 1 : 0),
   };
 }
 
 function isEditing(state: RoadmapPhaseDraftState): boolean {
-  return state.draft !== null && isRoadmapPhaseEditDraft(state.draft);
+  return (
+    state.draft !== null &&
+    (isRoadmapPhaseEditDraft(state.draft) || isRoadmapPhaseEditBatchDraft(state.draft))
+  );
 }
 
 function isMoving(state: RoadmapPhaseDraftState): boolean {
-  return state.draft !== null && isRoadmapPhaseMoveDraft(state.draft);
+  return (
+    state.draft !== null &&
+    (isRoadmapPhaseMoveDraft(state.draft) || isRoadmapPhaseMoveBatchDraft(state.draft))
+  );
+}
+
+/** True for edit and move batches, whose wording is plural ("these edits"). */
+function isBatch(state: RoadmapPhaseDraftState): boolean {
+  return (
+    state.draft !== null &&
+    (isRoadmapPhaseEditBatchDraft(state.draft) || isRoadmapPhaseMoveBatchDraft(state.draft))
+  );
+}
+
+/** "edit", "edits", "move" or "moves" for the current edit or move proposal. */
+function proposalNoun(state: RoadmapPhaseDraftState): string {
+  return `${isMoving(state) ? "move" : "edit"}${isBatch(state) ? "s" : ""}`;
+}
+
+/** The title a batch result names, so the user knows which phase blocked it. */
+function batchPhaseTitle(state: RoadmapPhaseDraftState, phaseId: string): string {
+  const draft = state.draft;
+  const items =
+    draft && isRoadmapPhaseEditBatchDraft(draft)
+      ? draft.edits
+      : draft && isRoadmapPhaseMoveBatchDraft(draft)
+        ? draft.moves
+        : [];
+  return items.find((item) => item.phaseId === phaseId)?.phaseTitle ?? "A phase";
 }
 
 function staleAnnouncement(draft: RoadmapPhaseDraft): string {
+  if (isRoadmapPhaseEditBatchDraft(draft)) {
+    return "Roadmap phase edits are out of date and cannot be applied.";
+  }
+  if (isRoadmapPhaseMoveBatchDraft(draft)) {
+    return "Roadmap phase moves are out of date and cannot be applied.";
+  }
   if (isRoadmapPhaseMoveDraft(draft)) {
     return "Roadmap phase move is out of date and cannot be applied.";
   }
@@ -215,6 +277,13 @@ const NOT_EDITABLE_ANNOUNCEMENTS: Record<RoadmapPhaseNotEditableReason, string> 
   archived: "This phase is now archived, so the edit cannot be applied. Nothing was saved.",
   deleted: "This phase was deleted, so the edit cannot be applied. Nothing was saved.",
   missing: "This phase no longer exists, so the edit cannot be applied. Nothing was saved.",
+};
+
+const BATCH_NOT_EDITABLE_REASONS: Record<RoadmapPhaseNotEditableReason, string> = {
+  done: "is now Done",
+  archived: "is now archived",
+  deleted: "was deleted",
+  missing: "no longer exists",
 };
 
 function markStale(state: RoadmapPhaseDraftState, announcement: string): RoadmapPhaseDraftState {
@@ -239,7 +308,9 @@ function applyApprovalResult(
         open: false,
         decision: "idle",
         error: null,
-        announcement: "Updated Roadmap phase.",
+        announcement: result.phaseIds
+          ? `Updated ${result.phaseIds.length} Roadmap phases.`
+          : "Updated Roadmap phase.",
       };
     case "moved":
       return {
@@ -248,9 +319,19 @@ function applyApprovalResult(
         open: false,
         decision: "idle",
         error: null,
-        announcement: "Moved Roadmap phase.",
+        announcement: result.phaseIds
+          ? `Moved ${result.phaseIds.length} Roadmap phases.`
+          : "Moved Roadmap phase.",
       };
     case "phase-changed":
+      if (isBatch(state)) {
+        return markStale(
+          state,
+          isMoving(state)
+            ? "The Roadmap order changed after these moves were proposed. Nothing was saved. Ask GG Coder for fresh moves."
+            : `${batchPhaseTitle(state, result.phaseId)} changed after these edits were proposed. Nothing was saved. Ask GG Coder for fresh edits.`,
+        );
+      }
       return markStale(
         state,
         isMoving(state)
@@ -258,6 +339,12 @@ function applyApprovalResult(
           : "This phase changed after the edit was proposed. Nothing was saved. Ask GG Coder for a fresh edit.",
       );
     case "phase-not-editable":
+      if (isBatch(state)) {
+        return markStale(
+          state,
+          `${batchPhaseTitle(state, result.phaseId)} ${BATCH_NOT_EDITABLE_REASONS[result.reason]}, so these ${proposalNoun(state)} cannot be applied. Nothing was saved.`,
+        );
+      }
       return markStale(
         state,
         (isMoving(state) ? NOT_MOVABLE_ANNOUNCEMENTS : NOT_EDITABLE_ANNOUNCEMENTS)[result.reason],
@@ -274,9 +361,11 @@ function applyApprovalResult(
     case "stale-revision":
       return markStale(
         state,
-        isEditing(state) || isMoving(state)
-          ? `This ${isMoving(state) ? "move" : "edit"} is based on revision ${result.expectedRevision}; Project Notes is now revision ${result.currentRevision}. Nothing was saved. Ask GG Coder for a fresh ${isMoving(state) ? "move" : "edit"}.`
-          : `This draft is based on revision ${result.expectedRevision}; Project Notes is now revision ${result.currentRevision}. Ask GG Coder for a fresh draft.`,
+        isBatch(state)
+          ? `These ${proposalNoun(state)} are based on revision ${result.expectedRevision}; Project Notes is now revision ${result.currentRevision}. Nothing was saved. Ask GG Coder for fresh ${proposalNoun(state)}.`
+          : isEditing(state) || isMoving(state)
+            ? `This ${isMoving(state) ? "move" : "edit"} is based on revision ${result.expectedRevision}; Project Notes is now revision ${result.currentRevision}. Nothing was saved. Ask GG Coder for a fresh ${isMoving(state) ? "move" : "edit"}.`
+            : `This draft is based on revision ${result.expectedRevision}; Project Notes is now revision ${result.currentRevision}. Ask GG Coder for a fresh draft.`,
       );
     case "already-decided":
       return {
@@ -326,11 +415,13 @@ function applyRejectionResult(
         open: false,
         decision: "idle",
         error: null,
-        announcement: isEditing(state)
-          ? "Roadmap phase edit rejected."
-          : isMoving(state)
-            ? "Roadmap phase move rejected."
-            : "Roadmap draft rejected.",
+        announcement: isBatch(state)
+          ? `Roadmap phase ${proposalNoun(state)} rejected.`
+          : isEditing(state)
+            ? "Roadmap phase edit rejected."
+            : isMoving(state)
+              ? "Roadmap phase move rejected."
+              : "Roadmap draft rejected.",
       };
     case "already-decided":
       return {
@@ -351,6 +442,9 @@ function alreadyDecidedAnnouncement(
   state: RoadmapPhaseDraftState,
   decision: "approved" | "rejected",
 ): string {
+  if (isBatch(state)) {
+    return `These Roadmap phase ${proposalNoun(state)} were already ${decision === "approved" ? "applied" : "rejected"}.`;
+  }
   if (isEditing(state)) {
     return decision === "approved"
       ? "This Roadmap phase edit was already applied."
@@ -367,11 +461,13 @@ function alreadyDecidedAnnouncement(
 }
 
 function clearUnavailableDraft(state: RoadmapPhaseDraftState): RoadmapPhaseDraftState {
-  const message = isEditing(state)
-    ? "This Roadmap phase edit is no longer available for this project."
-    : isMoving(state)
-      ? "This Roadmap phase move is no longer available for this project."
-      : "This Roadmap draft is no longer available for this project.";
+  const message = isBatch(state)
+    ? `These Roadmap phase ${proposalNoun(state)} are no longer available for this project.`
+    : isEditing(state)
+      ? "This Roadmap phase edit is no longer available for this project."
+      : isMoving(state)
+        ? "This Roadmap phase move is no longer available for this project."
+        : "This Roadmap draft is no longer available for this project.";
   return {
     ...state,
     draft: null,

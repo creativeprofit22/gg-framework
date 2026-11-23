@@ -6,6 +6,11 @@ import path from "node:path";
 // `...\Microsoft\WindowsApps`, which exits 49 without running anything, so the
 // first scripted edit fails. Filesystem-only, like platform-clis: nothing is spawned.
 
+// Local Fork: text-mode writes turn every newline into CRLF on Windows, so a
+// scripted replace silently converts a whole LF file.
+export const PYTHON_CRLF_NOTE =
+  'Python writes CRLF here, so pass `newline=""` to `open()` or `write_text()`';
+
 export interface PythonLookup {
   platform: NodeJS.Platform;
   pathEnv: string;

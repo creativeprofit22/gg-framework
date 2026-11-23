@@ -9,7 +9,7 @@ import {
   usesOneCommandChanges,
 } from "./tools/prompt-hints.js";
 import { listProjectFiles, type ProjectFileList } from "./core/project-files.js";
-import { pythonInsteadOfPython3 } from "./core/python-command.js";
+import { PYTHON_CRLF_NOTE, pythonInsteadOfPython3 } from "./core/python-command.js";
 import { ripgrepOnPath } from "./core/ripgrep-command.js";
 import { AUTO_LOADED_TOOL_NAMES } from "./tools/tool-tiers.js";
 import type { LanguageId } from "./core/language-detector.js";
@@ -408,7 +408,11 @@ function renderEnvironmentSection(
     pathEnv: process.env.PATH ?? "",
     pathExt: process.env.PATHEXT,
   });
-  const pythonNote = python ? ` (run \`${python}\`; \`python3\` won't run here)` : "";
+  const platformNotes = [
+    python ? `run \`${python}\`; \`python3\` won't run here` : null,
+    process.platform === "win32" ? PYTHON_CRLF_NOTE : null,
+  ].filter((note) => note !== null);
+  const pythonNote = platformNotes.length > 0 ? ` (${platformNotes.join("; ")})` : "";
   // Local Fork: the cached steering line names `rg`; say so when it is missing.
   const tools = reachableTools ?? DEFAULT_TOOL_NAMES;
   const rgNote =

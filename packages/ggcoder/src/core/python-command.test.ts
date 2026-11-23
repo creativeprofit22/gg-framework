@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { pythonInsteadOfPython3 } from "./python-command.js";
+import { PYTHON_CRLF_NOTE, pythonInsteadOfPython3 } from "./python-command.js";
 import { buildSystemPrompt } from "../system-prompt.js";
 
 const dirs: string[] = [];
@@ -51,9 +51,31 @@ it.runIf(process.platform === "win32")(
     process.env.PATH = `${store};${real};${previous ?? ""}`;
     try {
       const prompt = await buildSystemPrompt(real);
-      expect(prompt).toMatch(/^- Platform: win32 \(run `python`; `python3` won't run here\)$/m);
+      expect(prompt).toContain(
+        `- Platform: win32 (run \`python\`; \`python3\` won't run here; ${PYTHON_CRLF_NOTE})\n`,
+      );
     } finally {
       process.env.PATH = previous;
     }
   },
 );
+
+it.runIf(process.platform === "win32")(
+  "warns that Python writes CRLF on Windows even when python3 works",
+  async () => {
+    const real = binDir("Python313", ["python3.exe", "python.exe"]);
+    const previous = process.env.PATH;
+    process.env.PATH = `${real};${previous ?? ""}`;
+    try {
+      const prompt = await buildSystemPrompt(real);
+      expect(prompt).toContain(`- Platform: win32 (${PYTHON_CRLF_NOTE})\n`);
+    } finally {
+      process.env.PATH = previous;
+    }
+  },
+);
+
+it.runIf(process.platform !== "win32")("adds no CRLF note off Windows", async () => {
+  const prompt = await buildSystemPrompt(binDir("Python313", ["python3"]));
+  expect(prompt).not.toContain(PYTHON_CRLF_NOTE);
+});

@@ -47,6 +47,33 @@ export async function moveApprovedPhaseLeaseToFreshSession(input: {
   return latest.snapshot;
 }
 
+/**
+ * A failed approval hand-off returns to the previous session. Mark the fresh
+ * session's "approval-committed" record complete first so reopening that
+ * abandoned session never auto-launches the plan on a stale lease.
+ */
+export async function abandonFreshSessionApproval(input: {
+  session: {
+    getApprovedPlanConsumption(): { checkpointId: string; state: string } | undefined;
+    getState(): { sessionPath: string | null | undefined };
+    completeApprovedPlanConsumption(): Promise<void>;
+  };
+  checkpointId: string;
+  previousSessionPath: string;
+}): Promise<boolean> {
+  const { session } = input;
+  const orphan = session.getApprovedPlanConsumption();
+  if (
+    orphan?.checkpointId !== input.checkpointId ||
+    orphan.state !== "approval-committed" ||
+    session.getState().sessionPath === input.previousSessionPath
+  ) {
+    return false;
+  }
+  await session.completeApprovedPlanConsumption();
+  return true;
+}
+
 /** Persist the reviewed snapshot with explicit approval metadata.
  * An exact legacy copy is safe to migrate because its bytes are still proven by
  * the durable checkpoint; any other collision remains a hard failure. */

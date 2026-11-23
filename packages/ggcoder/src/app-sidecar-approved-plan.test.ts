@@ -12,7 +12,10 @@ import {
   AppSidecarPlanHandoff,
   type ApprovedPlanConsumptionIdentity,
 } from "./app-sidecar-plan-handoff.js";
-import { persistApprovedPlanSnapshot } from "./app-sidecar-approved-plan.js";
+import {
+  abandonFreshSessionApproval,
+  persistApprovedPlanSnapshot,
+} from "./app-sidecar-approved-plan.js";
 import {
   AppSidecarPlanGate,
   hashPlanContent,
@@ -239,5 +242,68 @@ describe("persistApprovedPlanSnapshot", () => {
     await expect(persistApprovedPlanSnapshot(root, plan)).rejects.toThrow(
       "Approved plan snapshot path contains different content",
     );
+  });
+});
+
+describe("abandonFreshSessionApproval", () => {
+  function fakeSession(sessionPath: string, state = "approval-committed") {
+    let consumption: { checkpointId: string; state: string } | undefined = {
+      checkpointId: "checkpoint-1",
+      state,
+    };
+    const complete = vi.fn(async () => {
+      consumption = undefined;
+    });
+    return {
+      complete,
+      session: {
+        getApprovedPlanConsumption: () => consumption,
+        getState: () => ({ sessionPath }),
+        completeApprovedPlanConsumption: complete,
+      },
+    };
+  }
+
+  it("completes the fresh session's pending approval so reopening it cannot auto-launch", async () => {
+    const { session, complete } = fakeSession("/sessions/fresh.jsonl");
+    const handoff = new AppSidecarPlanHandoff({
+      approve: async () => ({ status: "conflict", checkpoint: null }),
+      commitApproval: async () => {
+        throw new Error("unused");
+      },
+      currentConsumption: () =>
+        (session.getApprovedPlanConsumption() as ApprovedPlanConsumptionIdentity | undefined) ??
+        null,
+      launchImplementation: async () => {
+        throw new Error("must not launch an abandoned approval");
+      },
+    });
+    await expect(
+      abandonFreshSessionApproval({
+        session,
+        checkpointId: "checkpoint-1",
+        previousSessionPath: "/sessions/planning.jsonl",
+      }),
+    ).resolves.toBe(true);
+    expect(complete).toHaveBeenCalledOnce();
+    expect(handoff.resumePending()).toBe(false);
+  });
+
+  it("leaves other approvals, started work and the restored session alone", async () => {
+    for (const [sessionPath, state, checkpointId] of [
+      ["/sessions/fresh.jsonl", "approval-committed", "checkpoint-2"],
+      ["/sessions/fresh.jsonl", "implementation-prompt-started", "checkpoint-1"],
+      ["/sessions/planning.jsonl", "approval-committed", "checkpoint-1"],
+    ] as const) {
+      const { session, complete } = fakeSession(sessionPath, state);
+      await expect(
+        abandonFreshSessionApproval({
+          session,
+          checkpointId,
+          previousSessionPath: "/sessions/planning.jsonl",
+        }),
+      ).resolves.toBe(false);
+      expect(complete).not.toHaveBeenCalled();
+    }
   });
 });

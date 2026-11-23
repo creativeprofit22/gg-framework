@@ -439,6 +439,7 @@ import {
   type PersistedPlanReviewCheckpoint,
 } from "./app-sidecar-plan-gate.js";
 import {
+  abandonFreshSessionApproval,
   moveApprovedPhaseLeaseToFreshSession,
   persistApprovedPlanSnapshot,
 } from "./app-sidecar-approved-plan.js";
@@ -3830,6 +3831,17 @@ async function createSession(
         durablePlan,
         restorePreviousSession: previousPhaseSessionPath
           ? async () => {
+              // Leaving the fresh session behind: its "approval-committed" record
+              // would otherwise auto-launch on a stale lease when it is reopened.
+              await abandonFreshSessionApproval({
+                session,
+                checkpointId: checkpoint.checkpointId,
+                previousSessionPath: previousPhaseSessionPath,
+              }).catch((error: unknown) => {
+                log("WARN", "app-sidecar", "abandoned approval cleanup failed", {
+                  message: error instanceof Error ? error.message : String(error),
+                });
+              });
               await session.loadSessionCheckpoint(
                 previousPhaseSessionPath,
                 previousPhaseConversationId,

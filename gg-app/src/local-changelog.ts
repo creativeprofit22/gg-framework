@@ -53,10 +53,22 @@ export const CURRENT_LOCAL_RELEASE_NOTES = requireCurrentReleaseNotes(releaseNot
 /** Newest first. Maintained only by the Local Fork release flow. */
 export const LOCAL_CHANGELOG: LocalChangelogEntry[] = [
   {
-    id: "local-2026-11-22-branch-switcher",
+    id: "local-2026-11-23-upstream-01200-glm-54-browser",
     label: CURRENT_LOCAL_RELEASE_NOTES.label,
     date: CURRENT_LOCAL_RELEASE_NOTES.date,
     items: CURRENT_LOCAL_RELEASE_NOTES.sections.flatMap(({ items }) => items),
+  },
+  {
+    id: "local-2026-11-22-branch-switcher",
+    label: "Switch and create branches right from the Git panel",
+    date: "2026-11-22",
+    items: [
+      "Switch branches without leaving GG. Click the branch name at the top of the `Git` panel: your recent branches come first and `Search branches` finds the rest. GG never forces a switch. If your changes would clash, nothing changes, you see the files in the way, and `Commit first` is one click away. While a chat on the folder is working, switching waits so files don't change under it.",
+      "Need a fresh branch? Type a new name in that same search box and pick `Create branch`. GG makes it and moves you onto it right away.",
+      "When GG suggests changes to several Roadmap phases at once, you now review them together on one card. Edits show what changes in each phase before you `Apply` them, and moves show the new order before you `Move` the phases. Everything saves together or not at all, and if the Roadmap changed in the meantime, the card says so instead of saving.",
+      "`Open on GitHub` now opens the branch you're on, and tells you when it hasn't been pushed yet. If you point your project at a different repo, GitHub links, counts and checks follow it, and the branch shown refreshes when you come back to the window.",
+      "Smoother everyday use: editing a Notes task now wraps and grows like `New task` instead of scrolling sideways, picking a past session no longer fails after GG restarts a chat's engine, a failed Roadmap plan approval no longer leaves the phase stuck, Windows commands keep their backslashes, and file search stays quick even without extra search tools installed.",
+    ],
   },
   {
     id: "local-2026-11-18-supa-drivah-built-in",

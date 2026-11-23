@@ -113,7 +113,9 @@ describe("BranchSwitcher", () => {
   it("opens with the search focused and lists the pinned default and recent branches", async () => {
     const { trigger } = renderSwitcher();
     await openSwitcher(trigger);
-    expect(document.activeElement).toBe(screen.getByRole("combobox", { name: "Search branches" }));
+    expect(document.activeElement).toBe(
+      screen.getByRole("combobox", { name: "Search or create branch" }),
+    );
     expect(screen.getByRole("group", { name: "Default" })).toBeTruthy();
     expect(screen.getByRole("group", { name: "Recent" })).toBeTruthy();
     expect(screen.queryByRole("group", { name: "On GitHub only" })).toBeNull();
@@ -126,7 +128,7 @@ describe("BranchSwitcher", () => {
     );
     const { trigger } = renderSwitcher();
     await openSwitcher(trigger);
-    fireEvent.change(screen.getByRole("combobox", { name: "Search branches" }), {
+    fireEvent.change(screen.getByRole("combobox", { name: "Search or create branch" }), {
       target: { value: "rel" },
     });
     await waitFor(() =>
@@ -151,7 +153,7 @@ describe("BranchSwitcher", () => {
     });
     const { trigger, props } = renderSwitcher();
     await openSwitcher(trigger);
-    const input = screen.getByRole("combobox", { name: "Search branches" });
+    const input = screen.getByRole("combobox", { name: "Search or create branch" });
     fireEvent.keyDown(input, { key: "ArrowDown" });
     fireEvent.keyDown(input, { key: "ArrowDown" });
     const options = screen.getAllByRole("option");
@@ -167,7 +169,7 @@ describe("BranchSwitcher", () => {
   it("closes on Escape and returns focus to the branch button", async () => {
     const { trigger } = renderSwitcher();
     await openSwitcher(trigger);
-    fireEvent.keyDown(screen.getByRole("combobox", { name: "Search branches" }), {
+    fireEvent.keyDown(screen.getByRole("combobox", { name: "Search or create branch" }), {
       key: "Escape",
     });
     await waitFor(() => expect(screen.queryByRole("listbox", { name: "Branches" })).toBeNull());
@@ -214,7 +216,7 @@ describe("BranchSwitcher", () => {
     );
     const { trigger } = renderSwitcher();
     await openSwitcher(trigger);
-    fireEvent.change(screen.getByRole("combobox", { name: "Search branches" }), {
+    fireEvent.change(screen.getByRole("combobox", { name: "Search or create branch" }), {
       target: { value: "zzz" },
     });
     expect((await screen.findByText(/No branches match/)).textContent).toBe(
@@ -334,7 +336,7 @@ describe("truncated branch list", () => {
     const { trigger } = renderSwitcher();
     await openSwitcher(trigger);
     expect(screen.queryByText(NOTE)).toBeNull();
-    fireEvent.change(screen.getByRole("combobox", { name: "Search branches" }), {
+    fireEvent.change(screen.getByRole("combobox", { name: "Search or create branch" }), {
       target: { value: "fix" },
     });
     expect(await screen.findByText(NOTE)).toBeTruthy();
@@ -343,7 +345,7 @@ describe("truncated branch list", () => {
   it("does not note a search whose results were not cut", async () => {
     const { trigger } = renderSwitcher();
     await openSwitcher(trigger);
-    fireEvent.change(screen.getByRole("combobox", { name: "Search branches" }), {
+    fireEvent.change(screen.getByRole("combobox", { name: "Search or create branch" }), {
       target: { value: "fix" },
     });
     await waitFor(() =>
@@ -372,7 +374,7 @@ function searchMock() {
 }
 
 async function typeSearch(value: string) {
-  fireEvent.change(screen.getByRole("combobox", { name: "Search branches" }), {
+  fireEvent.change(screen.getByRole("combobox", { name: "Search or create branch" }), {
     target: { value },
   });
   await waitFor(() =>
@@ -497,7 +499,9 @@ describe("BranchSwitcher create row", () => {
     await waitFor(() => expect(createOption()?.getAttribute("data-check")).toBe("invalid"));
     expect(createOption()?.getAttribute("aria-disabled")).toBe("true");
     expect(screen.getByText("Branch names can't contain '..'.")).toBeTruthy();
-    fireEvent.keyDown(screen.getByRole("combobox", { name: "Search branches" }), { key: "Enter" });
+    fireEvent.keyDown(screen.getByRole("combobox", { name: "Search or create branch" }), {
+      key: "Enter",
+    });
     fireEvent.click(createOption()!);
     expect(createGitBranch).not.toHaveBeenCalled();
   });
@@ -545,7 +549,7 @@ describe("BranchSwitcher create row", () => {
     await openSwitcher(trigger);
     await typeSearch("feat/new");
     await waitFor(() => expect(createOption()?.getAttribute("data-check")).toBe("available"));
-    const input = screen.getByRole("combobox", { name: "Search branches" });
+    const input = screen.getByRole("combobox", { name: "Search or create branch" });
     expect(input.getAttribute("aria-activedescendant")).toBe(createOption()!.id);
     fireEvent.keyDown(input, { key: "Enter" });
     await waitFor(() => expect(props.onSwitched).toHaveBeenCalledTimes(1));
@@ -559,7 +563,7 @@ describe("BranchSwitcher create row", () => {
     const { trigger, props } = renderSwitcher();
     await openSwitcher(trigger);
     await typeSearch("fix");
-    const input = screen.getByRole("combobox", { name: "Search branches" });
+    const input = screen.getByRole("combobox", { name: "Search or create branch" });
     fireEvent.keyDown(input, { key: "ArrowUp" });
     expect(input.getAttribute("aria-activedescendant")).toBe(createOption()!.id);
     fireEvent.click(createOption()!);
@@ -587,7 +591,9 @@ describe("BranchSwitcher create row", () => {
     await typeSearch("feat/new");
     expect(createOption()?.getAttribute("aria-disabled")).toBe("true");
     fireEvent.click(createOption()!);
-    fireEvent.keyDown(screen.getByRole("combobox", { name: "Search branches" }), { key: "Enter" });
+    fireEvent.keyDown(screen.getByRole("combobox", { name: "Search or create branch" }), {
+      key: "Enter",
+    });
     expect(createGitBranch).not.toHaveBeenCalled();
   });
 
@@ -602,7 +608,9 @@ describe("BranchSwitcher create row", () => {
     fireEvent.click(createOption()!);
     expect(await screen.findByText(/was just created elsewhere/)).toBeTruthy();
     expect(createOption()?.getAttribute("aria-disabled")).toBe("true");
-    expect(document.activeElement).toBe(screen.getByRole("combobox", { name: "Search branches" }));
+    expect(document.activeElement).toBe(
+      screen.getByRole("combobox", { name: "Search or create branch" }),
+    );
   });
 
   it("titles a busy refusal as a create that changed nothing", async () => {
@@ -635,7 +643,7 @@ describe("BranchSwitcher create row", () => {
     expect(screen.queryByRole("button", { name: /^Stay on/ })).toBeNull();
     expect(screen.getByRole("button", { name: "Commit first" })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Back to branches" }));
-    const input = await screen.findByRole("combobox", { name: "Search branches" });
+    const input = await screen.findByRole("combobox", { name: "Search or create branch" });
     expect((input as HTMLInputElement).value).toBe("feat/new");
     expect(document.activeElement).toBe(input);
     expect(createOption()).toBeTruthy();
@@ -669,7 +677,7 @@ describe("BranchSwitcher create row", () => {
     fireEvent.click(createOption()!);
     expect(await screen.findByText("This folder isn't a git repository.")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Back to branches" }));
-    const input = await screen.findByRole("combobox", { name: "Search branches" });
+    const input = await screen.findByRole("combobox", { name: "Search or create branch" });
     expect((input as HTMLInputElement).value).toBe("feat/new");
     expect(document.activeElement).toBe(input);
     expect(createOption()).toBeTruthy();
@@ -679,7 +687,7 @@ describe("BranchSwitcher create row", () => {
     const { trigger } = renderSwitcher();
     await openSwitcher(trigger);
     await typeSearch("feat/new");
-    fireEvent.keyDown(screen.getByRole("combobox", { name: "Search branches" }), {
+    fireEvent.keyDown(screen.getByRole("combobox", { name: "Search or create branch" }), {
       key: "Escape",
     });
     await waitFor(() => expect(screen.queryByRole("listbox", { name: "Branches" })).toBeNull());

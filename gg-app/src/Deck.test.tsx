@@ -283,7 +283,7 @@ describe("Git panel branch switcher", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "feat/x, switch branch" }));
     await screen.findByRole("listbox", { name: "Branches" });
-    fireEvent.keyDown(screen.getByRole("combobox", { name: "Search branches" }), {
+    fireEvent.keyDown(screen.getByRole("combobox", { name: "Search or create branch" }), {
       key: "Escape",
     });
 

@@ -656,8 +656,8 @@ export function BranchSwitcher({
                     type="text"
                     role="combobox"
                     className="branch-switch-input"
-                    aria-label="Search branches"
-                    placeholder="Search branches"
+                    aria-label="Search or create branch"
+                    placeholder="Search or create branch"
                     autoComplete="off"
                     spellCheck={false}
                     aria-autocomplete="list"

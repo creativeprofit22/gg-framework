@@ -47,5 +47,11 @@ export { parseBuiltinMcpSettings } from "./builtin-settings.js";
 export type { BuiltinMcpSetting, BuiltinMcpSettings } from "./builtin-settings.js";
 export { parseMcpAddCommand } from "./parse-add-command.js";
 export type { ParsedAddCommand } from "./parse-add-command.js";
-export { McpToolGuard, hiddenToolMessage } from "./tool-guard.js";
+export {
+  McpToolGuard,
+  hiddenToolCallMessage,
+  hiddenToolMessage,
+  isHiddenMcpToolStub,
+  markHiddenMcpToolStub,
+} from "./tool-guard.js";
 export type { HiddenMcpTool } from "./tool-guard.js";

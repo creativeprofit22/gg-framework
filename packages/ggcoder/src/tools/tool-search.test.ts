@@ -238,3 +238,45 @@ describe("tool_search loadedTools", () => {
     expect(typeof result === "object" && result.loadedTools).toEqual(["steroids"]);
   });
 });
+
+describe("tool_search hidden MCP tools", () => {
+  const hidden = [
+    {
+      server: "drivah",
+      tool: "get",
+      rule: "rug-pull" as const,
+      reason: "description changed without a server version change (0.1.0)",
+    },
+  ];
+
+  it("names guard-hidden tools when the query mentions their server", async () => {
+    const catalog = new DeferredToolCatalog();
+    catalog.add([stub("mcp__drivah__click", "click a drivah control")]);
+    const tool = createToolSearchTool(
+      catalog,
+      () => {},
+      undefined,
+      () => true,
+      undefined,
+      () => hidden,
+    );
+    const result = await search(tool, "drivah");
+    expect(result).toContain("mcp__drivah__click");
+    expect(result).toContain("Hidden by GG Coder's MCP safety guard");
+    expect(result).toContain("- mcp__drivah__get: description changed");
+  });
+
+  it("stays quiet for unrelated queries", async () => {
+    const catalog = new DeferredToolCatalog();
+    catalog.add([stub("mcp__figma__get_screens", "fetch UI design screenshots")]);
+    const tool = createToolSearchTool(
+      catalog,
+      () => {},
+      undefined,
+      () => true,
+      undefined,
+      () => hidden,
+    );
+    expect(await search(tool, "figma")).not.toContain("Hidden by");
+  });
+});

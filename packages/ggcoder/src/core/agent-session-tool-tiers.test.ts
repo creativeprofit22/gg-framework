@@ -25,7 +25,11 @@ vi.mock("./mcp/index.js", async () => {
   return {
     ...actual,
     MCPClientManager: vi.fn(function MCPClientManagerMock() {
-      return { connectAll: vi.fn(async () => []), dispose: vi.fn(async () => {}) };
+      return {
+        connectAll: vi.fn(async () => []),
+        getHiddenTools: vi.fn(() => []),
+        dispose: vi.fn(async () => {}),
+      };
     }),
   };
 });
@@ -452,6 +456,38 @@ describe("AgentSession built-in tool tiering", () => {
         const output = tools.find((tool) => tool.name === "task_output");
         await output?.execute({ id, wait_ms: 5_000 }, context);
       }
+    } finally {
+      await session.dispose();
+    }
+  }, 20_000);
+
+  it("explains a direct call to a guard-hidden MCP tool without listing it", async () => {
+    const session = await createSession();
+    try {
+      (session as unknown as { mcpManager: unknown }).mcpManager = {
+        getHiddenTools: () => [
+          {
+            server: "drivah",
+            tool: "get",
+            rule: "rug-pull",
+            reason: "description changed without a server version change (1.0.0)",
+          },
+        ],
+        dispose: async () => {},
+      };
+      const resolve = (
+        session as unknown as { resolveToolByName(name: string): AgentTool | undefined }
+      ).resolveToolByName.bind(session);
+      const before = liveToolNames(session);
+
+      expect(resolve("mcp__drivah__other")).toBeUndefined();
+      const stub = resolve("mcp__drivah__get");
+      expect(stub?.name).toBe("mcp__drivah__get");
+      const context = { signal: new AbortController().signal, toolCallId: "hidden-call" };
+      expect(() => stub!.execute({ any: 1 }, context)).toThrow(
+        /MCP tool "get" from server "drivah" hidden: description changed without a server version change \(1\.0\.0\)\..*safety guard.*can't be called; tell the user \(the server must publish a new version\)/,
+      );
+      expect(liveToolNames(session)).toEqual(before);
     } finally {
       await session.dispose();
     }

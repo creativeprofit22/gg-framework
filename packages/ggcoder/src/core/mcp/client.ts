@@ -421,6 +421,11 @@ export class MCPClientManager {
     return current;
   }
 
+  /** Tools the guard hid on each server's latest connect. */
+  getHiddenTools(): HiddenMcpTool[] {
+    return [...this.hiddenTools.values()].flat();
+  }
+
   /** Is this server's connection currently live? Diagnostic/test use. */
   isServerRunning(name: string): boolean {
     return this.servers.some((s) => s.name === name);

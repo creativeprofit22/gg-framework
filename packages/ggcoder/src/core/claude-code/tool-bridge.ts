@@ -21,6 +21,7 @@ import {
   type ToolResultContent,
 } from "@kenkaiiii/gg-ai";
 import { ZodError, prettifyError } from "zod";
+import { isHiddenMcpToolStub } from "../mcp/tool-guard.js";
 
 export const CLAUDE_CODE_MCP_SERVER = "gg";
 const TOOL_PREFIX = `mcp__${CLAUDE_CODE_MCP_SERVER}__`;
@@ -166,7 +167,8 @@ export function createToolBridge(initial: ToolBridgeOptions): ToolBridge {
 
   const findTool = (name: string): AgentTool | undefined => {
     const tool = listTools().find((t) => t.name === name) ?? options.resolveTool?.(name);
-    if (tool) extraTools.set(tool.name, tool);
+    // A guard-hidden stub only answers this call; listing it would expose the tool.
+    if (tool && !isHiddenMcpToolStub(tool)) extraTools.set(tool.name, tool);
     return tool;
   };
 

@@ -5,6 +5,7 @@ import type { AgentEvent, AgentTool } from "@kenkaiiii/gg-agent";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 import { createEditTool } from "../../tools/edit.js";
+import { markHiddenMcpToolStub } from "../mcp/tool-guard.js";
 import {
   claudeCodeToolName,
   createToolBridge,
@@ -310,6 +311,26 @@ describe("createToolBridge", () => {
     expect(ended).toBe(1);
     const listed = (await request("tools/list")).result!.tools as { name: string }[];
     expect(listed.map((t) => t.name)).toContain("later");
+  });
+
+  it("reports a guard-hidden tool's reason without listing its stub", async () => {
+    const stub = markHiddenMcpToolStub<AgentTool>({
+      name: "mcp__drivah__get",
+      description: "",
+      parameters: z.record(z.string(), z.unknown()),
+      execute: () => {
+        throw new Error("hidden by GG Coder's safety guard");
+      },
+    });
+    const { call, request } = await connect({
+      tools: [echo],
+      resolveTool: (name) => (name === stub.name ? stub : undefined),
+    });
+    const res = await call(stub.name, {});
+    expect(res.result!.isError).toBe(true);
+    expect(JSON.stringify(res.result!.content)).toContain("safety guard");
+    const listed = (await request("tools/list")).result!.tools as { name: string }[];
+    expect(listed.map((t) => t.name)).not.toContain(stub.name);
   });
 
   it("tells Claude Code to re-list tools after tool_search promotes one", async () => {

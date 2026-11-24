@@ -189,8 +189,14 @@ import { applyAsyncSubagentPolicy } from "./subagent-policy.js";
 import { resolveStrictTools, type CodexShapeSetting } from "./codex-request-shape.js";
 import { subAgentDescription } from "../tools/subagent.js";
 import { z } from "zod";
-import { MCPClientManager, getAllMcpServers, usesZaiMcpServers } from "./mcp/index.js";
-import type { MCPElicitHandler } from "./mcp/index.js";
+import {
+  MCPClientManager,
+  getAllMcpServers,
+  hiddenToolCallMessage,
+  markHiddenMcpToolStub,
+  usesZaiMcpServers,
+} from "./mcp/index.js";
+import type { HiddenMcpTool, MCPElicitHandler } from "./mcp/index.js";
 import type { MCPServerConfig } from "./mcp/types.js";
 import type { SharedMcpClientLease, SharedMcpClientPool } from "./mcp/shared-client-pool.js";
 import type { HeavyCheckSlots } from "./machine-profile.js";
@@ -2376,8 +2382,21 @@ export class AgentSession {
           !this.unavailableToolNames.has(toolName) &&
           this.isToolCapabilityAllowed(toolName),
         this.contextLimits,
+        () => this.hiddenMcpTools(),
       ),
     );
+  }
+
+  private hiddenMcpTools(): HiddenMcpTool[] {
+    const managers = new Set([
+      this.mcpManager,
+      ...[...this.sharedMcpLeases.values()].map((l) => l.manager),
+    ]);
+    const byKey = new Map<string, HiddenMcpTool>();
+    for (const manager of managers) {
+      for (const h of manager?.getHiddenTools() ?? []) byKey.set(`${h.server}\0${h.tool}`, h);
+    }
+    return [...byKey.values()];
   }
 
   private mcpManagerForServer(serverName: string): MCPClientManager | undefined {
@@ -2580,7 +2599,7 @@ export class AgentSession {
       transformToolResult: flagUntrustedToolResult,
       ...(options.disableTools
         ? {}
-        : { resolveTool: (name: string) => this.promoteDeferredBuiltin(name) }),
+        : { resolveTool: (name: string) => this.resolveToolByName(name) }),
       getSteeringMessages: () => this.getHookSteeringMessages(),
       steeringAlreadyRead: (message) => this.askAnswerSteering.has(message),
       onSteeringAvailable: (listener) => {
@@ -2813,6 +2832,37 @@ export class AgentSession {
     }
     if (promoted.length > 0) this.registerTools(promoted);
     return promoted;
+  }
+
+  /** By-name fallback for the agent loop: deferred built-ins, else a guard-hidden MCP explanation. */
+  private resolveToolByName(name: string): AgentTool | undefined {
+    return this.promoteDeferredBuiltin(name) ?? this.hiddenMcpToolStub(name);
+  }
+
+  /**
+   * A one-call stub for a tool the MCP guard hid, so a direct call reports why
+   * instead of "Unknown tool". Never registered: this.tools stays untouched.
+   */
+  private hiddenMcpToolStub(name: string): AgentTool | undefined {
+    if (!name.startsWith("mcp__")) return undefined;
+    const hidden = this.hiddenMcpTools().find((h) => {
+      if (name === `mcp__${h.server}__${h.tool}`) return true;
+      try {
+        return createMcpToolIdentity(h.server, h.tool).providerName === name;
+      } catch {
+        return false;
+      }
+    });
+    if (!hidden) return undefined;
+    const message = hiddenToolCallMessage(hidden);
+    return markHiddenMcpToolStub({
+      name,
+      description: message,
+      parameters: z.record(z.string(), z.unknown()),
+      execute: () => {
+        throw new Error(message);
+      },
+    });
   }
 
   /** Resolve a deferred built-in called by name (append-only promotion). */
@@ -4500,7 +4550,7 @@ export class AgentSession {
         // instead of costing a turn on "Unknown tool" then tool_search.
         ...(options.disableTools
           ? {}
-          : { resolveTool: (name: string) => this.promoteDeferredBuiltin(name) }),
+          : { resolveTool: (name: string) => this.resolveToolByName(name) }),
         // Self-correction hooks (same as the TUI): loop-break + re-grounding are
         // polled mid-loop; the ideal review is polled when the agent would stop.
         getSteeringMessages: () => this.getHookSteeringMessages(),

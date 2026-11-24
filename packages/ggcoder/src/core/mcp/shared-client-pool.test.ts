@@ -55,6 +55,7 @@ function createProcessBackedPool(state: FakeManagerState): SharedMcpClientPool {
         return [tool];
       },
       whenConnected: async () => ({ ok: true as const }),
+      getHiddenTools: () => [],
       dispose: async () => {
         state.disposeCount += 1;
         const child = state.child;

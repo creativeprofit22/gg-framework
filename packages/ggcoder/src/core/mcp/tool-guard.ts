@@ -285,3 +285,24 @@ export class McpToolGuard {
 export function hiddenToolMessage(h: HiddenMcpTool): string {
   return `MCP tool "${h.tool}" from server "${h.server}" hidden: ${h.reason}.`;
 }
+
+const hiddenToolStubs = new WeakSet<object>();
+
+/** Tag a call-only stub for a hidden tool; hosts must never list it to the model. */
+export function markHiddenMcpToolStub<T extends object>(stub: T): T {
+  hiddenToolStubs.add(stub);
+  return stub;
+}
+
+export function isHiddenMcpToolStub(tool: object): boolean {
+  return hiddenToolStubs.has(tool);
+}
+
+/** What a direct call to a hidden tool returns, so the model tells the user instead of guessing. */
+export function hiddenToolCallMessage(h: HiddenMcpTool): string {
+  const fix =
+    h.rule === "rug-pull"
+      ? "the server must publish a new version"
+      : "the server must fix this tool's description";
+  return `${hiddenToolMessage(h)} It is blocked by GG Coder's MCP safety guard and can't be called; tell the user (${fix}).`;
+}

@@ -1,5 +1,5 @@
 import chalk from "chalk";
-import { ensureAppDirs } from "../config.js";
+import { ensureAppDirs, loadSavedSettings, projectScopeAllowed } from "../config.js";
 import { initLogger, log, closeLogger } from "../core/logger.js";
 import {
   MCPClientManager,
@@ -10,8 +10,14 @@ import {
   globalMcpPath,
   projectMcpPath,
   parseMcpAddCommand,
+  hiddenToolMessage,
+  McpOAuthStore,
+  isBuiltinServerName,
+  removeBuiltinServer,
+  withBuiltinServers,
   type MCPScope,
   type MCPServerConfig,
+  type ScopedServer,
 } from "../core/mcp/index.js";
 import {
   renderMcpDashboard,
@@ -56,8 +62,8 @@ export async function runMcp(): Promise<void> {
       await runRemove(rest, cwd);
       return;
     }
-    if (sub === "add") {
-      await runAdd(rest, cwd);
+    if (sub === "add" || sub === "add-json") {
+      await runAdd(sub, rest, cwd);
       return;
     }
     if (sub) {
@@ -82,6 +88,7 @@ Usage:
   ggcoder mcp list                         List servers with live connection status
   ggcoder mcp get <name>                   Show one server's config
   ggcoder mcp add <args…>                  Add a server (claude-compatible grammar)
+  ggcoder mcp add-json <name> '<json>'     Add a server from Claude-style JSON
   ggcoder mcp remove <name> [--scope s]    Remove a server
 
 Add examples:
@@ -93,27 +100,91 @@ Scopes:
   global   ~/.gg/mcp.json   (all GG Coder sessions)
   project  ./.gg/mcp.json   (the current project)
 
+Built-in:
+  drivah   Supa Drivah, started as "drivah mcp" when the program is found
+           (settings builtinMcpServers.drivah.path, PATH, or the local build).
+           "ggcoder mcp remove drivah" hides it for good; your own "drivah"
+           server can take its place. To restore the built-in, delete
+           builtinMcpServers.drivah.removed in ~/.gg/settings.json.
+
 Configs are stored in the same { "mcpServers": { … } } shape Claude Code uses.`);
+}
+
+/** Saved servers plus built-ins, with the trust rule sessions use. */
+async function loadWithBuiltins(cwd: string): Promise<{ scoped: ScopedServer[]; trust: boolean }> {
+  const settings = loadSavedSettings();
+  const trust = projectScopeAllowed(settings.trustProjectMcpServers, settings.trustedProjects, cwd);
+  const scoped = withBuiltinServers(await loadServers(cwd), settings.builtinMcpServers, {
+    allowProjectScope: trust,
+  });
+  return { scoped, trust };
+}
+
+export function serverScopeLabel(server: Pick<ScopedServer, "builtin" | "scope">): string {
+  return server.builtin ? "built-in" : server.scope;
+}
+
+/** One server by name: a saved entry (project wins), else a visible built-in. */
+async function findServer(name: string, cwd: string): Promise<ScopedServer | undefined> {
+  const saved = await getServer(name, cwd);
+  if (saved) return saved;
+  const { scoped } = await loadWithBuiltins(cwd);
+  return scoped.find((s) => s.builtin && s.config.name === name);
 }
 
 /** Connect each loaded server and join with its scope for display. */
 async function buildRows(cwd: string): Promise<McpServerRow[]> {
-  const scoped = await loadServers(cwd);
+  // Project-scope servers run repo-controlled commands; even listing them
+  // spawns the process to probe status. Unless the user trusts project MCP
+  // (trustProjectMcpServers), show those rows as blocked without connecting.
+  const { scoped, trust: trustProject } = await loadWithBuiltins(cwd);
   if (scoped.length === 0) return [];
+  const missing = scoped.filter((s) => s.unavailableReason);
+  const connectable = scoped.filter(
+    (s) => !s.unavailableReason && (trustProject || s.scope !== "project"),
+  );
+  const blocked = scoped.filter((s) => !trustProject && s.scope === "project");
 
   const manager = new MCPClientManager();
   try {
-    const results = await manager.connectAllDetailed(scoped.map((s) => s.config));
-    return scoped.map((s): McpServerRow => {
-      const result = results.find((r) => r.name === s.config.name);
-      return {
+    const results =
+      connectable.length > 0
+        ? await manager.connectAllDetailed(connectable.map((s) => s.config))
+        : [];
+    return [
+      ...connectable.map((s): McpServerRow => {
+        const result = results.find((r) => r.name === s.config.name);
+        return {
+          config: s.config,
+          scope: s.scope,
+          ok: result?.ok ?? false,
+          toolCount: result?.toolCount ?? 0,
+          error: result?.error,
+          ...(s.builtin ? { builtin: true } : {}),
+          ...(result?.hidden?.length
+            ? { warning: result.hidden.map(hiddenToolMessage).join("\n") }
+            : {}),
+        };
+      }),
+      ...blocked.map((s): McpServerRow => ({
         config: s.config,
         scope: s.scope,
-        ok: result?.ok ?? false,
-        toolCount: result?.toolCount ?? 0,
-        error: result?.error,
-      };
-    });
+        ok: false,
+        toolCount: 0,
+        error:
+          "Project-scope server not connected — this repo's .gg/mcp.json runs " +
+          "repo-controlled commands. Add or re-add a server in this project via " +
+          "the MCP modal to trust it.",
+      })),
+      ...missing.map((s): McpServerRow => ({
+        config: s.config,
+        scope: s.scope,
+        ok: false,
+        toolCount: 0,
+        error: s.unavailableReason,
+        builtin: true,
+      })),
+    ];
   } finally {
     await manager.dispose();
   }
@@ -129,9 +200,11 @@ async function runList(cwd: string): Promise<void> {
     const status = row.ok
       ? good(`🟢 ${row.toolCount} tool${row.toolCount === 1 ? "" : "s"}`)
       : bad(`🔴 ${row.error ?? "failed"}`);
+    const where = row.builtin ? "built-in" : row.scope;
     console.log(
-      `${primary(row.config.name)} ${dim(`(${row.scope})`)}  ${status}\n  ${dim(transportSummary(row.config))}`,
+      `${primary(row.config.name)} ${dim(`(${where})`)}  ${status}\n  ${dim(transportSummary(row.config))}`,
     );
+    if (row.warning) console.log(bad(`  ⚠ ${row.warning.split("\n").join("\n  ⚠ ")}`));
   }
 }
 
@@ -141,12 +214,13 @@ async function runGet(rest: string[], cwd: string): Promise<void> {
     process.stderr.write("Usage: ggcoder mcp get <name>\n");
     process.exit(1);
   }
-  const found = await getServer(name, cwd);
+  const found = await findServer(name, cwd);
   if (!found) {
     console.log(dim(`No server named "${name}".`));
     return;
   }
-  console.log(primary(found.config.name) + dim(` (${found.scope})`));
+  console.log(primary(found.config.name) + dim(` (${serverScopeLabel(found)})`));
+  if (found.unavailableReason) console.log(bad(`  ${found.unavailableReason}`));
   console.log(formatConfig(found.config));
 }
 
@@ -196,16 +270,31 @@ async function runRemove(rest: string[], cwd: string): Promise<void> {
   }
   const requested = parseScopeFlag(rest);
   const scope = requested ?? (await getServer(name, cwd))?.scope;
-  if (!scope) {
-    console.log(dim(`No server named "${name}".`));
-    return;
-  }
-  const removed = await removeServer(name, scope, cwd);
+  const removed = scope ? await removeServer(name, scope, cwd) : false;
   if (removed) {
     console.log(good(`✓ Removed "${name}" from ${scope} scope.`));
-  } else {
-    console.log(dim(`No server named "${name}" in ${scope} scope.`));
+    return;
   }
+  if (await hideBuiltinIfVisible(name, cwd)) {
+    console.log(
+      good(
+        `✓ Hid the built-in "${name}" server. Add your own "${name}" server to use one in its place.`,
+      ),
+    );
+    return;
+  }
+  console.log(
+    dim(scope ? `No server named "${name}" in ${scope} scope.` : `No server named "${name}".`),
+  );
+}
+
+/** Hide a built-in when nothing saved by that name was removed. True when it was hidden. */
+async function hideBuiltinIfVisible(name: string, cwd: string): Promise<boolean> {
+  if (!isBuiltinServerName(name)) return false;
+  const found = await findServer(name, cwd);
+  if (!found?.builtin) return false;
+  await removeBuiltinServer(name);
+  return true;
 }
 
 /** The token that is the value of --scope/-s, so we can exclude it as the name. */
@@ -214,8 +303,18 @@ function parseScopeArgValue(rest: string[]): string | undefined {
   return idx === -1 ? undefined : rest[idx + 1];
 }
 
-async function runAdd(rest: string[], cwd: string): Promise<void> {
-  const parsed = parseMcpAddCommand(rest.join(" "));
+/** Re-quote argv for the parser, so arguments with spaces or JSON survive. */
+function shellQuote(arg: string): string {
+  return /^[\w@%+=:,./-]+$/.test(arg) ? arg : `'${arg.replace(/'/g, "'\\''")}'`;
+}
+
+async function runAdd(sub: "add" | "add-json", rest: string[], cwd: string): Promise<void> {
+  const secretPrefix = process.env.MCP_CLIENT_SECRET
+    ? `MCP_CLIENT_SECRET=${shellQuote(process.env.MCP_CLIENT_SECRET)} `
+    : "";
+  const parsed = parseMcpAddCommand(
+    `${secretPrefix}ggcoder mcp ${sub} ${rest.map(shellQuote).join(" ")}`,
+  );
   if (!parsed.ok) {
     process.stderr.write(bad(`✗ ${parsed.error}\n`));
     process.exit(1);
@@ -238,6 +337,13 @@ async function runAdd(rest: string[], cwd: string): Promise<void> {
   if (!result.ok) {
     process.stderr.write(bad(`✗ ${result.error}\n`));
     process.exit(1);
+  }
+  if (config.oauth?.clientId) {
+    await new McpOAuthStore().setClient(
+      config.name,
+      config.oauth.clientId,
+      parsed.value.clientSecret,
+    );
   }
   const file = scope === "global" ? globalMcpPath() : projectMcpPath(cwd);
   console.log(good(`✓ Added "${config.name}" to ${scope} scope`) + dim(` (${file})`));
@@ -278,7 +384,9 @@ async function runDashboard(cwd: string): Promise<void> {
       continue;
     }
     if (action.kind === "remove") {
-      const removed = await removeServer(action.name, action.scope, cwd);
+      const removed =
+        (await removeServer(action.name, action.scope, cwd)) ||
+        (await hideBuiltinIfVisible(action.name, cwd));
       console.log(
         removed
           ? good(`✓ Removed "${action.name}".`)
@@ -287,10 +395,13 @@ async function runDashboard(cwd: string): Promise<void> {
       continue;
     }
     if (action.kind === "details") {
-      const found = await getServer(action.name, cwd);
+      const found = await findServer(action.name, cwd);
       if (found) {
         clearVisibleScreen();
-        console.log(bannerLines(CLI_VERSION, `${found.config.name} (${found.scope})`).join("\n"));
+        console.log(
+          bannerLines(CLI_VERSION, `${found.config.name} (${serverScopeLabel(found)})`).join("\n"),
+        );
+        if (found.unavailableReason) console.log(bad(`  ${found.unavailableReason}`));
         console.log("");
         console.log(formatConfig(found.config));
         console.log(dim("\n  Press Enter to return…"));
@@ -340,6 +451,13 @@ async function runInteractiveAdd(cwd: string): Promise<void> {
     console.log(bad(`✗ ${result.error}`));
     await pause();
     return;
+  }
+  if (config.oauth?.clientId) {
+    await new McpOAuthStore().setClient(
+      config.name,
+      config.oauth.clientId,
+      parsed.value.clientSecret,
+    );
   }
   console.log(good(`✓ Added "${config.name}" to ${scope} scope.`));
   console.log(dim("  Restart ggcoder to load the new server."));

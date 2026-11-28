@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { EventStream, StreamResult } from "./event-stream.js";
 import type { StreamEvent, StreamResponse } from "../types.js";
 
@@ -324,5 +324,129 @@ describe("StreamResult - stall regression tests", () => {
     }).rejects.toThrow("Aborted");
 
     await expect(result.response).rejects.toThrow("Aborted");
+  });
+});
+
+describe("StreamResult - backpressure release", () => {
+  const HIGH_WATER = 5_000;
+
+  interface Internals {
+    paused: boolean;
+    buffer: StreamEvent[];
+  }
+
+  function internals(result: StreamResult): Internals {
+    return result as unknown as Internals;
+  }
+
+  function deferred(): { promise: Promise<void>; resolve: () => void } {
+    let resolve!: () => void;
+    const promise = new Promise<void>((r) => {
+      resolve = r;
+    });
+    return { promise, resolve };
+  }
+
+  function trackedGenerator(limit = Infinity): {
+    gen: AsyncGenerator<StreamEvent, StreamResponse>;
+    state: { returned: boolean; finished: boolean };
+  } {
+    const state = { returned: false, finished: false };
+    async function* gen(): AsyncGenerator<StreamEvent, StreamResponse> {
+      let completed = false;
+      try {
+        for (let i = 0; i < limit; i++) {
+          yield makeEvent(String(i));
+        }
+        completed = true;
+        state.finished = true;
+        return makeResponse();
+      } finally {
+        if (!completed) state.returned = true;
+      }
+    }
+    return { gen: gen(), state };
+  }
+
+  it.each(["break", "throw"] as const)(
+    "reader that falls behind past HIGH_WATER then exits via %s stops the producer",
+    async (exit) => {
+      const { gen, state } = trackedGenerator();
+      const result = new StreamResult(gen);
+      const gate = deferred();
+
+      const reader = (async () => {
+        for await (const _event of result) {
+          await gate.promise;
+          if (exit === "break") break;
+          throw new Error("reader failed");
+        }
+      })();
+
+      await vi.waitFor(() => expect(internals(result).paused).toBe(true));
+      expect(internals(result).buffer.length).toBeGreaterThan(HIGH_WATER);
+      gate.resolve();
+
+      if (exit === "break") await reader;
+      else await expect(reader).rejects.toThrow("reader failed");
+
+      await vi.waitFor(() => expect(state.returned).toBe(true));
+      await expect(result.response).rejects.toMatchObject({ name: "AbortError" });
+      expect(internals(result).buffer).toHaveLength(0);
+      expect(internals(result).paused).toBe(false);
+    },
+  );
+
+  it("abort while paused ends the pause and rejects as AbortError", async () => {
+    const { gen, state } = trackedGenerator();
+    const ac = new AbortController();
+    const result = new StreamResult(gen, ac.signal);
+    result.response.catch(() => {});
+    const gate = deferred();
+
+    const reader = (async () => {
+      let count = 0;
+      for await (const _event of result) {
+        if (count++ === 0) await gate.promise;
+      }
+      return count;
+    })();
+
+    await vi.waitFor(() => expect(internals(result).paused).toBe(true));
+    ac.abort();
+
+    await expect(result.response).rejects.toMatchObject({ name: "AbortError" });
+    expect(internals(result).paused).toBe(false);
+    await vi.waitFor(() => expect(state.returned).toBe(true));
+
+    gate.resolve();
+    await expect(reader).rejects.toThrow("Aborted");
+  });
+
+  it("reader that lags past HIGH_WATER but reads to the end gets every event", async () => {
+    const total = 12_000;
+    const { gen, state } = trackedGenerator(total);
+    const result = new StreamResult(gen);
+    const gate = deferred();
+
+    const reader = (async () => {
+      const texts: string[] = [];
+      for await (const event of result) {
+        if (texts.length === 0) await gate.promise;
+        texts.push((event as unknown as { text: string }).text);
+      }
+      return texts;
+    })();
+
+    await vi.waitFor(() => expect(internals(result).paused).toBe(true));
+    gate.resolve();
+
+    const texts = await reader;
+    expect(texts).toHaveLength(total);
+    expect(texts.every((t, i) => t === String(i))).toBe(true);
+    await expect(result.response).resolves.toMatchObject({ stopReason: "end_turn" });
+    expect(state.finished).toBe(true);
+    expect(state.returned).toBe(false);
+    expect(internals(result).paused).toBe(false);
   });
 });

@@ -1,0 +1,339 @@
+<!doctype html>
+<!--
+  command-palette: a centered command / search palette opens, a query types
+  into the input (blinking caret), non-matching results collapse away, the
+  highlight steps to the chosen result and it is "pressed" (Enter).
+  Transparent background.
+  Params: --cp-w (palette width), --cp-x (center x), --cp-top (top y),
+  QUERY (typed text), PICK (index of the pressed row among the matches),
+  TYPE_AT / TYPE_CPS (typing start + characters per second), PRESS_AT.
+  Rows whose data-match is not "1" collapse when the query is typed.
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+  </head>
+  <body>
+    <div
+      id="command-palette-root"
+      data-composition-id="command-palette"
+      data-start="0"
+      data-duration="5"
+      data-width="1920"
+      data-height="1080"
+    >
+      <style>
+        [data-composition-id="command-palette"] {
+          --cp-w: 1120px;
+          --cp-x: 960px;
+          --cp-top: 230px;
+          --cp-row: 84px;
+          --cp-r: max(calc(var(--radius, 18px) * 1.3), 20px);
+          position: absolute;
+          inset: 0;
+          color: var(--ink, #111);
+          font-family: var(--text, sans-serif);
+        }
+        [data-composition-id="command-palette"] .cp-pal {
+          position: absolute;
+          left: calc(var(--cp-x) - var(--cp-w) / 2);
+          top: var(--cp-top);
+          width: var(--cp-w);
+          border-radius: var(--cp-r);
+          background: #fff;
+          overflow: hidden;
+          transform-origin: 50% 0%;
+          box-shadow:
+            0 0 0 1px color-mix(in srgb, var(--ink, #111) 8%, transparent),
+            0 1px 2px rgba(0, 0, 0, 0.06),
+            0 12px 32px rgba(0, 0, 0, 0.1),
+            0 50px 100px -30px color-mix(in srgb, var(--ink, #111) 30%, transparent);
+        }
+        [data-composition-id="command-palette"] .cp-input {
+          display: flex;
+          align-items: center;
+          gap: 24px;
+          height: 116px;
+          padding: 0 40px;
+          border-bottom: 1.5px solid color-mix(in srgb, var(--ink, #111) 8%, transparent);
+          font-size: 38px;
+          letter-spacing: -0.01em;
+        }
+        [data-composition-id="command-palette"] .cp-input svg {
+          flex: none;
+          color: var(--muted, #888);
+        }
+        [data-composition-id="command-palette"] .cp-field {
+          flex: 1;
+          position: relative;
+          display: flex;
+          align-items: center;
+          white-space: pre;
+        }
+        [data-composition-id="command-palette"] .cp-ph {
+          position: absolute;
+          left: 10px;
+          color: var(--muted, #888);
+        }
+        [data-composition-id="command-palette"] .cp-caret {
+          display: inline-block;
+          width: 3px;
+          height: 44px;
+          margin-left: 2px;
+          border-radius: 2px;
+          background: var(--accent, #2f5bff);
+        }
+        [data-composition-id="command-palette"] .cp-esc,
+        [data-composition-id="command-palette"] kbd {
+          font-family: var(--mono, monospace);
+          font-size: 20px;
+          color: var(--muted, #888);
+          padding: 6px 12px;
+          border-radius: 8px;
+          background: color-mix(in srgb, var(--ink, #111) 5%, #fff);
+          box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--ink, #111) 10%, transparent);
+        }
+        [data-composition-id="command-palette"] .cp-list {
+          position: relative;
+          padding: 14px 16px 16px;
+        }
+        [data-composition-id="command-palette"] .cp-group {
+          padding: 14px 24px 12px;
+          font-size: 24px;
+          color: var(--muted, #888);
+          letter-spacing: 0.01em;
+        }
+        [data-composition-id="command-palette"] .cp-rows {
+          position: relative;
+        }
+        [data-composition-id="command-palette"] .cp-hl {
+          position: absolute;
+          left: 0;
+          right: 0;
+          top: 0;
+          height: var(--cp-row);
+          border-radius: 16px;
+          background: color-mix(in srgb, var(--accent, #2f5bff) 10%, #fff);
+          box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--accent, #2f5bff) 16%, transparent);
+        }
+        [data-composition-id="command-palette"] .cp-row {
+          position: relative;
+          height: var(--cp-row);
+          overflow: hidden;
+        }
+        [data-composition-id="command-palette"] .cp-row-in {
+          height: var(--cp-row);
+          display: flex;
+          align-items: center;
+          gap: 24px;
+          padding: 0 24px;
+          position: relative;
+          font-size: 31px;
+          transform-origin: 50% 50%;
+        }
+        [data-composition-id="command-palette"] .cp-ic {
+          flex: none;
+          width: 52px;
+          height: 52px;
+          border-radius: 14px;
+          display: grid;
+          place-items: center;
+          color: var(--ink, #111);
+          background: color-mix(in srgb, var(--ink, #111) 6%, #fff);
+          box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--ink, #111) 8%, transparent);
+        }
+        [data-composition-id="command-palette"] .cp-label {
+          flex: 1;
+        }
+        [data-composition-id="command-palette"] .cp-label em {
+          font-style: normal;
+        }
+        [data-composition-id="command-palette"].cp-filtered .cp-label em {
+          font-weight: 650;
+          color: var(--accent, #2f5bff);
+        }
+        [data-composition-id="command-palette"].cp-pressed .cp-hl {
+          background: color-mix(in srgb, var(--accent, #2f5bff) 17%, #fff);
+          box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--accent, #2f5bff) 35%, transparent);
+        }
+        [data-composition-id="command-palette"] .cp-hint {
+          font-size: 24px;
+          color: var(--muted, #888);
+        }
+        [data-composition-id="command-palette"] .cp-enter {
+          position: absolute;
+          right: 24px;
+          display: flex;
+          align-items: center;
+          gap: 10px;
+          font-size: 24px;
+          color: var(--accent, #2f5bff);
+          opacity: 0;
+        }
+        [data-composition-id="command-palette"] .cp-foot {
+          display: flex;
+          align-items: center;
+          gap: 30px;
+          height: 76px;
+          padding: 0 40px;
+          border-top: 1.5px solid color-mix(in srgb, var(--ink, #111) 8%, transparent);
+          background: color-mix(in srgb, var(--field, #f3f4f6) 40%, #fff);
+          font-size: 23px;
+          color: var(--muted, #888);
+        }
+        [data-composition-id="command-palette"] .cp-foot span {
+          display: flex;
+          align-items: center;
+          gap: 10px;
+        }
+        [data-composition-id="command-palette"] .cp-foot kbd {
+          font-size: 18px;
+          padding: 4px 10px;
+        }
+      </style>
+      <div class="cp-pal" id="cp-pal">
+        <div class="cp-input">
+          <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="7" /><path d="M20 20l-3.5-3.5" /></svg>
+          <div class="cp-field">
+            <!-- edit: placeholder -->
+            <span class="cp-ph" id="cp-ph">Search or jump to…</span>
+            <span id="cp-typed"></span><span class="cp-caret" id="cp-caret"></span>
+          </div>
+          <span class="cp-esc">esc</span>
+        </div>
+        <div class="cp-list">
+          <!-- edit: group label -->
+          <div class="cp-group">Suggestions</div>
+          <div class="cp-rows" id="cp-rows">
+            <div class="cp-hl" id="cp-hl"></div>
+            <!-- edit: rows (data-match="1" = still shown after the query; data-hit = letters to emphasise) -->
+            <div class="cp-row" data-match="0">
+              <div class="cp-row-in">
+                <span class="cp-ic"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14" /></svg></span>
+                <span class="cp-label">Create new project</span><span class="cp-hint">⌘ N</span>
+              </div>
+            </div>
+            <div class="cp-row" data-match="1" data-hit="Inv">
+              <div class="cp-row-in">
+                <span class="cp-ic"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" /><circle cx="9" cy="7" r="4" /><path d="M19 8v6M22 11h-6" /></svg></span>
+                <span class="cp-label">Invite teammates</span><span class="cp-hint">⌘ I</span>
+              </div>
+            </div>
+            <div class="cp-row" data-match="0">
+              <div class="cp-row-in">
+                <span class="cp-ic"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="12" cy="12" r="3" /><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1L7 17M17 7l2.1-2.1" /></svg></span>
+                <span class="cp-label">Open settings</span><span class="cp-hint">⌘ ,</span>
+              </div>
+            </div>
+            <div class="cp-row" data-match="1" data-hit="Inv">
+              <div class="cp-row-in">
+                <span class="cp-ic"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 2h9l5 5v15H6z" /><path d="M14 2v6h6M9 13h8M9 17h5" /></svg></span>
+                <span class="cp-label">Invoices</span><span class="cp-hint">Billing</span>
+                <span class="cp-enter" id="cp-enter"><kbd>↵</kbd>Open</span>
+              </div>
+            </div>
+            <div class="cp-row" data-match="0">
+              <div class="cp-row-in">
+                <span class="cp-ic"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19V5a2 2 0 0 1 2-2h14v16H6a2 2 0 0 0-2 2 2 2 0 0 0 2 2h14" /></svg></span>
+                <span class="cp-label">Search docs</span><span class="cp-hint">⌘ D</span>
+              </div>
+            </div>
+            <div class="cp-row" data-match="0">
+              <div class="cp-row-in">
+                <span class="cp-ic"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 13A9 9 0 1 1 11 3a7 7 0 0 0 10 10z" /></svg></span>
+                <span class="cp-label">Toggle dark mode</span><span class="cp-hint">⌘ ⇧ L</span>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="cp-foot">
+          <span><kbd>↑</kbd><kbd>↓</kbd>Navigate</span>
+          <span><kbd>↵</kbd>Open</span>
+          <span><kbd>esc</kbd>Close</span>
+        </div>
+      </div>
+    </div>
+    <script>
+      (function () {
+        // edit: the typed query
+        const QUERY = "inv";
+        const PICK = 1;
+        const OPEN_AT = 0.15;
+        const TYPE_AT = 0.9;
+        const TYPE_CPS = 7;
+        const PRESS_AT = 3.0;
+        const DURATION = 5;
+
+        const root = document.querySelector('[data-composition-id="command-palette"]');
+        const typed = document.getElementById("cp-typed");
+        const ph = document.getElementById("cp-ph");
+        const caret = document.getElementById("cp-caret");
+        const hl = document.getElementById("cp-hl");
+        const rows = [...root.querySelectorAll(".cp-row")];
+        const matches = rows.filter((r) => r.dataset.match === "1");
+        const rowH = rows[0].offsetHeight;
+        const tl = gsap.timeline({ paused: true });
+
+        // Emphasise the matched letters in each surviving label (static markup, shown after typing).
+        matches.forEach((r) => {
+          const label = r.querySelector(".cp-label");
+          const hit = r.dataset.hit || "";
+          if (hit && label.textContent.toLowerCase().startsWith(hit.toLowerCase())) {
+            label.innerHTML = `<em>${label.textContent.slice(0, hit.length)}</em>${label.textContent.slice(hit.length)}`;
+          }
+        });
+        const ems = root.querySelectorAll(".cp-label em");
+
+        tl.fromTo("#cp-pal", { opacity: 0, scale: 0.94, y: -16 }, { opacity: 1, scale: 1, y: 0, duration: 0.45, ease: "back.out(1.6)" }, OPEN_AT);
+        tl.fromTo(rows, { opacity: 0, x: -14 }, { opacity: 1, x: 0, duration: 0.4, ease: "power3.out", stagger: 0.04 }, OPEN_AT + 0.12);
+
+        // Typing + caret blink as a pure function of time.
+        const typeEnd = TYPE_AT + QUERY.length / TYPE_CPS;
+        const FILTER_AT = typeEnd + 0.05;
+        const clock = { t: 0 };
+        tl.fromTo(
+          clock,
+          { t: 0 },
+          {
+            t: DURATION,
+            duration: DURATION,
+            ease: "none",
+            onUpdate: () => {
+              const t = clock.t;
+              const n = Math.max(0, Math.min(QUERY.length, Math.floor((t - TYPE_AT) * TYPE_CPS + 1e-6)));
+              typed.textContent = QUERY.slice(0, n);
+              ph.style.opacity = n > 0 ? "0" : "1";
+              const typing = t >= TYPE_AT && t < typeEnd + 0.3;
+              caret.style.opacity = typing || Math.floor(t * 2.2) % 2 === 0 ? "1" : "0";
+              root.classList.toggle("cp-filtered", t >= FILTER_AT);
+              root.classList.toggle("cp-pressed", t >= PRESS_AT);
+            },
+          },
+          0,
+        );
+
+        // Filter: non-matching rows collapse.
+        const gone = rows.filter((r) => r.dataset.match !== "1");
+        tl.to(gone, { height: 0, opacity: 0, duration: 0.45, ease: "power3.inOut" }, FILTER_AT);
+
+        // Highlight: sits on row 0, re-lands on the first match, then steps to PICK.
+        tl.to(hl, { opacity: 0.4, duration: 0.2 }, FILTER_AT);
+        tl.to(hl, { opacity: 1, duration: 0.25 }, FILTER_AT + 0.3);
+        const STEP_AT = FILTER_AT + 0.75;
+        tl.to(hl, { y: PICK * rowH, duration: 0.35, ease: "power3.out" }, STEP_AT);
+
+        // Press.
+        const picked = matches[PICK];
+        const inner = picked.querySelector(".cp-row-in");
+        tl.to([inner, hl], { scale: 0.975, duration: 0.1, ease: "power2.out" }, PRESS_AT);
+        tl.to([inner, hl], { scale: 1, duration: 0.45, ease: "back.out(3)" }, PRESS_AT + 0.1);
+        tl.to(picked.querySelector(".cp-hint"), { opacity: 0, duration: 0.15 }, PRESS_AT);
+        tl.fromTo("#cp-enter", { opacity: 0, x: 10 }, { opacity: 1, x: 0, duration: 0.3, ease: "power3.out" }, PRESS_AT + 0.05);
+
+        window.__timelines = window.__timelines || {};
+        window.__timelines["command-palette"] = tl;
+      })();
+    </script>
+  </body>
+</html>

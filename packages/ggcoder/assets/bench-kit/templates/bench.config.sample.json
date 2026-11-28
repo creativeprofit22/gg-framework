@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "kitVersion": "<kit version>",
+  "project": "<project summary>",
+  "studyKinds": ["code", "engine"],
+  "existingTools": [],
+  "services": {},
+  "prices": {},
+  "help": {
+    "studyKinds": "What this project expects to compare: code, library, engine, cli, service, agent, other.",
+    "existingTools": "Benchmark or measuring tools already in use (hyperfine, vitest bench, ffmpeg/vmaf, docker...). Studies call them; the kit does not replace them.",
+    "services": "Base URLs for the http adapter, by name: { \"staging\": \"http://127.0.0.1:8080\" }.",
+    "prices": "Only needed to ESTIMATE agent cost. Never guessed. Shape: { \"provider/model\": { \"inputPerMTok\": 0, \"outputPerMTok\": 0, \"cacheReadPerMTok\": 0, \"cacheWritePerMTok\": 0, \"source\": \"pricing page URL\", \"asOf\": \"YYYY-MM-DD\" } }, USD per million tokens."
+  }
+}

@@ -1,13 +1,30 @@
 {
   "name": "@kenkaiiii/gg-agent",
-  "version": "5.9.0",
+  "version": "6.0.2",
   "type": "module",
-  "description": "Agentic loop system with tool execution for LLMs",
-  "license": "MIT",
+  "description": "Agent loop for LLMs: runs your tools, feeds results back and loops until done, with retries, steering and cancellation. Works with every gg-ai provider.",
+  "author": "Ken Kai",
+  "keywords": [
+    "llm",
+    "ai",
+    "agent",
+    "agent-loop",
+    "tool-calling",
+    "anthropic",
+    "openai"
+  ],
+  "license": "AGPL-3.0-only",
+  "engines": {
+    "node": ">=24"
+  },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/kenkaiiii/gg-framework.git",
+    "url": "git+https://github.com/KenKaiii/gg-framework.git",
     "directory": "packages/gg-agent"
+  },
+  "homepage": "https://github.com/KenKaiii/gg-framework/tree/main/packages/gg-agent#readme",
+  "bugs": {
+    "url": "https://github.com/KenKaiii/gg-framework/issues"
   },
   "exports": {
     ".": {
@@ -20,7 +37,8 @@
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "files": [
-    "dist"
+    "dist",
+    "NOTICE"
   ],
   "scripts": {
     "build": "tsup",
@@ -29,7 +47,7 @@
   },
   "dependencies": {
     "@kenkaiiii/gg-ai": "workspace:*",
-    "zod": "^4.4.3"
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "typescript": "^6.0.3",

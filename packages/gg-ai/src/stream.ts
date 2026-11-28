@@ -1,23 +1,64 @@
-import type { Message, StreamOptions } from "./types.js";
+import type { Message, MessageProvenanceKind, StreamOptions } from "./types.js";
 import { GGAIError, VideoUnsupportedError } from "./errors.js";
 import type { StreamResult } from "./utils/event-stream.js";
 import { streamAnthropic } from "./providers/anthropic.js";
+import { streamAzureOpenAIResponses } from "./providers/azure-openai-responses.js";
 import { streamOpenAI } from "./providers/openai.js";
-import { streamOpenAICodex } from "./providers/openai-codex.js";
+import { streamOpenAIResponses } from "./providers/openai-responses.js";
+import { streamQwenCloud } from "./providers/qwen-cloud.js";
+import { streamXaiResponses } from "./providers/xai-responses.js";
 import { streamGemini } from "./providers/gemini.js";
-import { providerRegistry } from "./provider-registry.js";
+import { GEMINI_EMBED_BATCH_SIZE, embedGemini } from "./providers/gemini-embeddings.js";
+import {
+  embedOpenAICompatible,
+  rerankCohereCompatible,
+} from "./providers/openai-compat-retrieval.js";
+import { providerRegistry, type ProviderStreamFn } from "./provider-registry.js";
+import {
+  clampProviderContextImages,
+  dropInvalidToolCalls,
+  toolCallNameRuleFor,
+} from "./providers/transform.js";
+import { sanitizeMessagesForWire } from "./utils/well-formed.js";
+import { observePreparedContext } from "./utils/context-observation.js";
+import { planDeferredTools, usesDeferredToolLoading } from "./providers/transform.js";
+import { markContinuesTurn } from "./utils/turn-continuation.js";
+import { markCacheAnchor } from "./utils/cache-anchor.js";
+import { resolveFastModeModel } from "./fast-mode.js";
+import { localBearerKey } from "./local-api-key.js";
+import { GG_CODER_USER_AGENT } from "./user-agent.js";
 
-/** Z.AI coding API endpoint — the primary endpoint for all GLM models. */
-const GLM_CODING_BASE_URL = "https://api.z.ai/api/coding/paas/v4";
+/** OpenAI's documented cap: an embeddings `input` array may hold at most 2048 entries. */
+const OPENAI_EMBED_BATCH_SIZE = 2048;
 
 /**
- * User-Agent the Kimi For Coding endpoint requires to recognize ggcoder as a
- * coding agent. The endpoint gates solely on this header; the version is
- * overridable via KIMI_CODE_VERSION for forward compatibility.
+ * OpenRouter documents no per-request input cap for `/embeddings`, and it
+ * forwards to upstreams that have their own (Gemini: 100). 64 is a conservative
+ * default proven in production; callers can raise it with `batchSize`.
  */
-const KIMI_CODE_USER_AGENT = `kimi-code-cli/${process.env.KIMI_CODE_VERSION ?? "1.0.11"}`;
+const OPENROUTER_EMBED_BATCH_SIZE = 64;
+
+/** Local servers document no input cap; keep requests modest for small machines. */
+const LOCAL_EMBED_BATCH_SIZE = 64;
+
+const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
+
+/**
+ * Z.AI's standard pay-per-token endpoint. The Coding Plan endpoint is limited
+ * to the tools Z.AI lists, which GG Coder isn't one of.
+ */
+const GLM_BASE_URL = "https://api.z.ai/api/paas/v4";
 
 // ── Register built-in providers ────────────────────────────
+
+providerRegistry.register("qwen-cloud", {
+  // Only this dedicated runtime variable may supply ambient Token Plan auth.
+  stream: (options) =>
+    streamQwenCloud({
+      ...options,
+      apiKey: options.apiKey ?? process.env.QWEN_CLOUD_TOKEN_PLAN_KEY,
+    }),
+});
 
 providerRegistry.register("anthropic", {
   stream: (options) => streamAnthropic(options),
@@ -34,40 +75,51 @@ providerRegistry.register("xiaomi", {
 
 providerRegistry.register("openai", {
   stream: (options) => {
-    // Use codex endpoint for OAuth tokens (have accountId)
-    if (options.accountId) {
-      return streamOpenAICodex(options);
+    // OpenAI itself — the ChatGPT plan (accountId) or an API key — rides the
+    // Responses API; a custom OpenAI-compatible server stays on Chat Completions.
+    if (options.accountId || isOpenAIHost(options.baseUrl)) {
+      return streamOpenAIResponses(options);
     }
     return streamOpenAI(options);
   },
+  // OpenAI API-key auth only; the ChatGPT plan route has no embeddings API.
+  // OpenAI has no task/input-type parameter, so `inputType` is ignored.
+  embed: (request) =>
+    embedOpenAICompatible(request, {
+      provider: "openai",
+      baseUrl: request.baseUrl ?? "https://api.openai.com/v1",
+    }),
+  embedBatchSize: OPENAI_EMBED_BATCH_SIZE,
+});
+
+providerRegistry.register("azure", {
+  stream: (options) => streamAzureOpenAIResponses(options),
 });
 
 providerRegistry.register("gemini", {
   stream: (options) => streamGemini(options),
+  // Native Gemini API with an AI Studio key.
+  embed: (request) => embedGemini(request),
+  embedBatchSize: GEMINI_EMBED_BATCH_SIZE,
 });
 
 providerRegistry.register("glm", {
   stream: (options) =>
     streamOpenAI({
       ...options,
-      baseUrl: options.baseUrl ?? GLM_CODING_BASE_URL,
+      baseUrl: options.baseUrl ?? GLM_BASE_URL,
     }),
 });
 
 providerRegistry.register("moonshot", {
-  stream: (options) => {
-    const baseUrl = options.baseUrl ?? "https://api.moonshot.ai/v1";
-    // The Kimi For Coding (OAuth) endpoint at api.kimi.com gates access to
-    // recognized coding agents and 403s any request whose `User-Agent` isn't a
-    // known client (verified empirically: User-Agent alone is the gate). Inject
-    // it centrally here so EVERY stream — agent loop, compaction, title-gen,
-    // sub-agents — passes, instead of relying on each call site to thread
-    // headers. Caller-provided headers still win on collision.
-    const defaultHeaders = baseUrl.includes("api.kimi.com")
-      ? { "User-Agent": KIMI_CODE_USER_AGENT, ...options.defaultHeaders }
-      : options.defaultHeaders;
-    return streamOpenAI({ ...options, baseUrl, defaultHeaders });
-  },
+  // A Moonshot key goes to the public API; a Kimi Code plan key carries its
+  // own baseUrl (api.kimi.com / api.kimi.ai). Both get GG Coder's own identity.
+  stream: (options) =>
+    streamOpenAI({
+      ...options,
+      baseUrl: options.baseUrl ?? "https://api.moonshot.ai/v1",
+      defaultHeaders: { "User-Agent": GG_CODER_USER_AGENT, ...options.defaultHeaders },
+    }),
 });
 
 providerRegistry.register("deepseek", {
@@ -82,8 +134,83 @@ providerRegistry.register("openrouter", {
   stream: (options) =>
     streamOpenAI({
       ...options,
-      baseUrl: options.baseUrl ?? "https://openrouter.ai/api/v1",
+      baseUrl: options.baseUrl ?? OPENROUTER_BASE_URL,
     }),
+  embed: (request) =>
+    embedOpenAICompatible(request, {
+      provider: "openrouter",
+      baseUrl: request.baseUrl ?? OPENROUTER_BASE_URL,
+      inputTypeFields: (inputType) => ({
+        input_type: inputType === "query" ? "search_query" : "search_document",
+      }),
+    }),
+  embedBatchSize: OPENROUTER_EMBED_BATCH_SIZE,
+  rerank: (request) =>
+    rerankCohereCompatible(request, {
+      provider: "openrouter",
+      baseUrl: request.baseUrl ?? OPENROUTER_BASE_URL,
+    }),
+});
+
+providerRegistry.register("huggingface", {
+  // Hugging Face Inference Providers router — one HF token (hf.co/settings/tokens,
+  // "Make calls to Inference Providers" permission) routes to whichever hosted
+  // backend serves each open model. Chat Completions-compatible; model ids are
+  // Hub repo paths ("moonshotai/Kimi-K2.7-Code"), optionally with an
+  // ":auto"/":fastest"/":cheapest" provider-selection suffix. Billing follows
+  // each backend's per-token rates on the HF account (small free tier).
+  stream: (options) =>
+    streamOpenAI({
+      ...options,
+      baseUrl: options.baseUrl ?? "https://router.huggingface.co/v1",
+    }),
+});
+
+/**
+ * OpenCode model ids are namespaced by plan (`opencode-go/kimi-k3`,
+ * `opencode/kimi-k3`) because the gateway reuses the vendors' own ids, which
+ * the registry already holds for the first-party providers. The gateway only
+ * knows the bare id, so strip the prefix at the wire.
+ */
+export function openCodeWireModelId(id: string): string {
+  const match = /^opencode(?:-go)?\/(.+)$/.exec(id);
+  return match?.[1] ?? id;
+}
+
+/** Calls made outside a conversation (summaries, the prompt enhancer) share this id. */
+const OPENCODE_FALLBACK_SESSION = `ses_${crypto.randomUUID().replace(/-/g, "")}`;
+
+/**
+ * OpenCode asks every client for its own User-Agent and a stable session id
+ * per conversation; Go answers HTTP 400 without the session header
+ * (opencode.ai/docs/console/go#where-can-i-use-it).
+ */
+function openCodeStream(defaultBaseUrl: string): ProviderStreamFn {
+  return (options) => {
+    const session = options.transportSessionId;
+    return streamOpenAI({
+      ...options,
+      baseUrl: options.baseUrl ?? defaultBaseUrl,
+      model: openCodeWireModelId(options.model),
+      webSearch: false,
+      defaultHeaders: {
+        "User-Agent": GG_CODER_USER_AGENT,
+        "x-opencode-session":
+          session && /^[\w.:-]{1,128}$/.test(session) ? session : OPENCODE_FALLBACK_SESSION,
+        ...options.defaultHeaders,
+      },
+    });
+  };
+}
+
+// Chat Completions only: a Console model whose own API is Responses, Messages
+// or Gemini isn't reliably served here, so gg-core's catalog leaves those out.
+providerRegistry.register("opencode", {
+  stream: openCodeStream("https://opencode.ai/inference/openai/v1"),
+});
+
+providerRegistry.register("opencode-go", {
+  stream: openCodeStream("https://opencode.ai/inference/go/openai/v1"),
 });
 
 providerRegistry.register("sakana", {
@@ -96,6 +223,14 @@ providerRegistry.register("sakana", {
       ...options,
       baseUrl: options.baseUrl ?? "https://api.sakana.ai/v1",
     }),
+});
+
+providerRegistry.register("xai", {
+  // xAI API key on xAI's Responses API (see providers/xai-responses.ts): Chat
+  // Completions is deprecated for Grok reasoning models and can't carry the
+  // encrypted reasoning that keeps long tool loops coherent.
+  stream: (options) =>
+    streamXaiResponses({ ...options, baseUrl: options.baseUrl ?? "https://api.x.ai/v1" }),
 });
 
 providerRegistry.register("minimax", {
@@ -112,20 +247,93 @@ providerRegistry.register("minimax", {
     }),
 });
 
+/**
+ * Local model ids are namespaced by endpoint (`local/<endpointId>/<rawId>`) so
+ * the same model name served by two machines stays distinct in the registry.
+ * The server only knows the raw id, so strip the routing prefix here — at the
+ * one place that talks to the wire. Counterpart to gg-core's
+ * `formatLocalModelId`/`parseLocalModelId`.
+ */
+export function localWireModelId(id: string): string {
+  const match = /^local\/[^/]+\/(.+)$/.exec(id);
+  return match?.[1] ?? id;
+}
+
+providerRegistry.register("local", {
+  // Locally hosted OpenAI-compatible servers (Ollama, LM Studio, llama.cpp,
+  // vLLM). There is no default endpoint: the baseUrl comes from the endpoint
+  // credential the discovery layer wrote, so a missing one is a wiring bug, not
+  // something to paper over with a guess at someone else's port.
+  stream: (options) =>
+    streamOpenAI({
+      ...options,
+      baseUrl: requireLocalBaseUrl(options.baseUrl),
+      model: localWireModelId(options.model),
+      webSearch: false,
+    }),
+  // Every supported local server exposes OpenAI-compatible `/v1/embeddings`
+  // (the model must be an embedding model). None has an input-type parameter.
+  embed: (request) =>
+    embedOpenAICompatible(
+      { ...request, apiKey: localBearerKey(request.apiKey) },
+      {
+        provider: "local",
+        baseUrl: requireLocalBaseUrl(request.baseUrl),
+        wireModel: localWireModelId(request.model),
+      },
+    ),
+  embedBatchSize: LOCAL_EMBED_BATCH_SIZE,
+  // llama.cpp (`llama-server --rerank`) and vLLM serve `/v1/rerank`; Ollama and
+  // LM Studio don't, and answer with a 404 ProviderError.
+  rerank: (request) =>
+    rerankCohereCompatible(
+      { ...request, apiKey: localBearerKey(request.apiKey) },
+      {
+        provider: "local",
+        baseUrl: requireLocalBaseUrl(request.baseUrl),
+        wireModel: localWireModelId(request.model),
+      },
+    ),
+});
+
+function isOpenAIHost(baseUrl: string | undefined): boolean {
+  if (!baseUrl) return true;
+  try {
+    return new URL(baseUrl).hostname === "api.openai.com";
+  } catch {
+    return false;
+  }
+}
+
+function requireLocalBaseUrl(baseUrl: string | undefined): string {
+  if (!baseUrl) {
+    throw new GGAIError(
+      "Local provider requires a baseUrl (e.g. http://127.0.0.1:11434/v1). " +
+        "No local endpoint was resolved for this model — re-scan for local models.",
+    );
+  }
+  return baseUrl;
+}
+
 // ── Public API ─────────────────────────────────────────────
 
 /**
  * Unified streaming entry point. Returns a StreamResult that is both
  * an async iterable (for streaming events) and thenable (await for
- * the final response).
+ * the final response). Breaking out of `for await` early cancels the
+ * request and makes `response` reject with an `AbortError`.
  *
  * Providers are resolved via the provider registry. Built-in providers
  * (anthropic, openai, glm, moonshot) are registered at module load.
  * Extensions can register custom providers via `providerRegistry.register()`.
+ * The same registry backs `embed()` and `rerank()`: a provider entry may also
+ * carry `embed` / `rerank` functions (check `providerRegistry.supports(name,
+ * "embed")`), and `providerOptions` passes provider-specific body fields to all
+ * three.
  *
  * ```ts
  * // Stream events
- * for await (const event of stream({ provider: "anthropic", model: "claude-sonnet-5", messages })) {
+ * for await (const event of stream({ provider: "anthropic", model: "claude-sonnet-5-5", messages })) {
  *   if (event.type === "text_delta") process.stdout.write(event.text);
  * }
  *
@@ -133,7 +341,14 @@ providerRegistry.register("minimax", {
  * const response = await stream({ provider: "openai", model: "gpt-4.1", messages });
  * ```
  */
-export function stream(options: StreamOptions): StreamResult {
+export function stream(requested: StreamOptions): StreamResult {
+  // Fast-mode ids (`claude-opus-5-5-fast`, `gpt-6.2-sol-fast`) are the base
+  // model at a faster speed tier — rewrite here so every call site (agent
+  // loop, compaction, sub-agents) and every model-id check below sees the real id.
+  const fastMode = resolveFastModeModel(requested.provider, requested.model);
+  const options: StreamOptions = fastMode.fast
+    ? { ...requested, model: fastMode.model, speed: "fast" }
+    : requested;
   const entry = providerRegistry.get(options.provider);
   if (!entry) {
     throw new GGAIError(
@@ -147,7 +362,100 @@ export function stream(options: StreamOptions): StreamResult {
   if (options.supportsVideo !== true && messagesContainVideo(options.messages)) {
     throw new VideoUnsupportedError();
   }
-  return entry.stream(options);
+  const wireMessages = stripMessageProvenance(options.messages);
+  // Unpaired surrogates (split emoji in tool args, char-indexed truncation, odd
+  // shell bytes) make the JSON body unparseable for every provider — and stay in
+  // history, so retries and model switches fail identically. Scrub them here,
+  // the one place all providers pass through.
+  //
+  // Likewise a tool call whose name the target provider rejects (blank,
+  // invocation text in the name slot, over the length limit) would 400 every
+  // later request, so drop it and its results for this request only.
+  const sanitized = sanitizeMessagesForWire(wireMessages);
+  const replayable = dropInvalidToolCalls(
+    sanitized,
+    toolCallNameRuleFor(options.provider, {
+      accountId: options.accountId,
+      baseUrl: options.baseUrl,
+    }),
+  );
+  const messages = clampProviderContextImages(replayable, options.provider, options.supportsImages);
+  if (options.onContextPrepared) {
+    try {
+      // Image accounting is index-aligned, so observe against the post-drop
+      // list (dropping a malformed call can remove whole messages).
+      options.onContextPrepared(
+        observePreparedContext(
+          replayable === sanitized ? wireMessages : replayable,
+          messages,
+          observedTools(options, messages),
+        ),
+      );
+    } catch {
+      // Diagnostics must not change request behaviour or expose an exception containing prompts.
+    }
+  }
+  return entry.stream(messages === options.messages ? options : { ...options, messages });
+}
+
+/**
+ * The tools block as the wire sees it. With transcript tool loading a promoted
+ * tool does not change the block (live + whole deferred catalog), so
+ * diagnostics must not report a request_settings change for it.
+ */
+function observedTools(options: StreamOptions, messages: Message[]): StreamOptions["tools"] & {} {
+  if (!usesDeferredToolLoading(options)) return options.tools ?? [];
+  const plan = planDeferredTools(options.tools, options.deferredTools, messages);
+  return plan ? [...plan.live, ...plan.deferred] : (options.tools ?? []);
+}
+
+/**
+ * User-role messages injected into a run that is still going: runtime notices,
+ * the user's own mid-run steering, and the agent's runtime nudges (completion
+ * gates, re-grounding and stream-recovery continuations, loop-breaker and
+ * review follow-ups). They continue the current turn. Prompts, automations,
+ * model switches (the new model can't replay the old one's signed reasoning)
+ * and compaction messages still open a new turn.
+ */
+const MID_RUN_KINDS: ReadonlySet<MessageProvenanceKind> = new Set<MessageProvenanceKind>([
+  "notification",
+  "steering",
+  "completion_gate",
+  "continuation",
+  "review_follow_up",
+]);
+
+/** Clone metadata-bearing messages and remove internal metadata at the provider boundary. */
+function stripMessageProvenance(messages: Message[]): Message[] {
+  let stripped: Message[] | undefined;
+  for (let index = 0; index < messages.length; index++) {
+    const message = messages[index]!;
+    const hasImageResult =
+      message.role === "tool" && message.content.some((result) => result.imageResult !== undefined);
+    if (!message.provenance && message.cacheAnchor === undefined && !hasImageResult) continue;
+    stripped ??= messages.slice();
+    const { provenance, cacheAnchor, ...rest } = message;
+    let wireMessage = rest as Message;
+    if (wireMessage.role === "tool" && hasImageResult) {
+      wireMessage.content = wireMessage.content.map(
+        ({ imageResult: _imageResult, ...result }) => result,
+      );
+    }
+    // The cache-anchor hint travels as a wire-safe marker, like a turn continuation.
+    if (cacheAnchor === true && (message.role === "user" || message.role === "tool")) {
+      wireMessage = markCacheAnchor(wireMessage);
+    }
+    // A mid-run message continues the current turn; keep that one fact (as a
+    // wire-safe marker) so the Anthropic encoder doesn't treat it as a new turn
+    // and strip the run's reasoning, which rewrote the whole cached run. Live
+    // logs: mid-run steering and completion-gate messages caused 35 such
+    // rewrites in 5 days (~2.9M tokens), each the size of the run so far.
+    if (provenance && MID_RUN_KINDS.has(provenance.kind) && message.role === "user") {
+      wireMessage = markContinuesTurn(wireMessage);
+    }
+    stripped[index] = wireMessage;
+  }
+  return stripped ?? messages;
 }
 
 /** True if any message carries a video block, in user content or a tool result. */

@@ -1,0 +1,12 @@
+{
+  "id": "marquee-strip",
+  "name": "Marquee strip",
+  "kind": "type",
+  "description": "Two tilted bands of repeated uppercase text scrolling at constant speed in opposite directions: a solid ink band with field-colored type and an outlined band between hairlines. Position is a pure function of time (x = -speed*t mod set width), so it seeks exactly and loops forever. For energy beats, brand lists, feature tags, section breaks. Transparent.",
+  "tags": ["marquee", "ticker", "scrolling", "loop", "band", "tape", "banner", "outline", "tags", "energy"],
+  "fonts": [],
+  "duration": 5,
+  "previewAt": 2.5,
+  "license": "original",
+  "previewLook": "duotone-broadcast"
+}

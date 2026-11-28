@@ -1,0 +1,699 @@
+{
+  "_capture": "Recorded 2026-11-01 with gh api from supa's private repo (run of 2026-10-30, attempt 1); redacted to the fields github-ci.ts reads, slug replaced by owner/supa.",
+  "slug": "owner/supa",
+  "sha": "697ff5851a8b7d879ca62afe558d16084080bf6e",
+  "defaultBranch": "main",
+  "runsForSha": {
+    "total_count": 1,
+    "workflow_runs": [
+      {
+        "id": 41139224468,
+        "status": "completed",
+        "conclusion": "failure",
+        "workflow_id": 320079012,
+        "run_attempt": 1,
+        "head_sha": "697ff5851a8b7d879ca62afe558d16084080bf6e",
+        "head_branch": "main",
+        "created_at": "2026-10-30T22:36:16Z",
+        "run_started_at": "2026-10-30T22:36:16Z",
+        "updated_at": "2026-10-30T22:36:21Z"
+      }
+    ]
+  },
+  "lastSuccess": {
+    "total_count": 1,
+    "workflow_runs": [
+      {
+        "id": 34133582597,
+        "status": "completed",
+        "conclusion": "success",
+        "workflow_id": 320079012,
+        "run_attempt": 1,
+        "head_sha": "80a2cfead567c78b9f757297f2af7c940675f68b",
+        "head_branch": "main",
+        "created_at": "2026-09-07T14:33:18Z",
+        "run_started_at": "2026-09-07T14:33:18Z",
+        "updated_at": "2026-09-07T14:59:31Z"
+      }
+    ]
+  },
+  "branchRuns": {
+    "total_count": 10,
+    "workflow_runs": [
+      {
+        "id": 41233054025,
+        "status": "completed",
+        "conclusion": "failure",
+        "workflow_id": 320079012,
+        "run_attempt": 1,
+        "head_sha": "234911bf3a8b2c55a2da124745d0a3dc0d4cc2d6",
+        "head_branch": "main",
+        "created_at": "2026-10-31T19:11:43Z",
+        "run_started_at": "2026-10-31T19:11:43Z",
+        "updated_at": "2026-10-31T19:11:57Z"
+      },
+      {
+        "id": 41231938736,
+        "status": "completed",
+        "conclusion": "failure",
+        "workflow_id": 320079012,
+        "run_attempt": 1,
+        "head_sha": "d35a71af791a0a735f2a76af58be6d045a933054",
+        "head_branch": "main",
+        "created_at": "2026-10-31T18:58:09Z",
+        "run_started_at": "2026-10-31T18:58:09Z",
+        "updated_at": "2026-10-31T18:58:14Z"
+      },
+      {
+        "id": 41177749933,
+        "status": "completed",
+        "conclusion": "failure",
+        "workflow_id": 320079012,
+        "run_attempt": 1,
+        "head_sha": "651f81c48fdc7c0fb0b7031d6508e9fac73fb88a",
+        "head_branch": "main",
+        "created_at": "2026-10-31T06:43:17Z",
+        "run_started_at": "2026-10-31T06:43:17Z",
+        "updated_at": "2026-10-31T06:43:21Z"
+      },
+      {
+        "id": 41177277800,
+        "status": "completed",
+        "conclusion": "failure",
+        "workflow_id": 320079012,
+        "run_attempt": 1,
+        "head_sha": "b36446ba8cc3b0b4f2b03dfa29f78a7e59bb16cd",
+        "head_branch": "main",
+        "created_at": "2026-10-31T06:36:03Z",
+        "run_started_at": "2026-10-31T06:36:03Z",
+        "updated_at": "2026-10-31T06:36:09Z"
+      },
+      {
+        "id": 41150252375,
+        "status": "completed",
+        "conclusion": "failure",
+        "workflow_id": 320079012,
+        "run_attempt": 1,
+        "head_sha": "26e5b17e23f010269fb839bcdb438eb43c44b719",
+        "head_branch": "main",
+        "created_at": "2026-10-31T00:27:22Z",
+        "run_started_at": "2026-10-31T00:27:22Z",
+        "updated_at": "2026-10-31T00:27:35Z"
+      },
+      {
+        "id": 41139224468,
+        "status": "completed",
+        "conclusion": "failure",
+        "workflow_id": 320079012,
+        "run_attempt": 1,
+        "head_sha": "697ff5851a8b7d879ca62afe558d16084080bf6e",
+        "head_branch": "main",
+        "created_at": "2026-10-30T22:36:16Z",
+        "run_started_at": "2026-10-30T22:36:16Z",
+        "updated_at": "2026-10-30T22:36:21Z"
+      },
+      {
+        "id": 41082343488,
+        "status": "completed",
+        "conclusion": "failure",
+        "workflow_id": 320079012,
+        "run_attempt": 1,
+        "head_sha": "f680af95110af6387f9999a7a498347b0f9eaea0",
+        "head_branch": "main",
+        "created_at": "2026-10-30T15:36:57Z",
+        "run_started_at": "2026-10-30T15:36:57Z",
+        "updated_at": "2026-10-30T15:37:02Z"
+      },
+      {
+        "id": 41072964955,
+        "status": "completed",
+        "conclusion": "failure",
+        "workflow_id": 320079012,
+        "run_attempt": 1,
+        "head_sha": "3c2b6404f61c87b77238d175e497f60f66fca67c",
+        "head_branch": "main",
+        "created_at": "2026-10-30T14:35:42Z",
+        "run_started_at": "2026-10-30T14:35:42Z",
+        "updated_at": "2026-10-30T14:35:46Z"
+      },
+      {
+        "id": 41023575665,
+        "status": "completed",
+        "conclusion": "failure",
+        "workflow_id": 320079012,
+        "run_attempt": 1,
+        "head_sha": "fe283388b6cbe8c1a3d0c9329675dd1e27279227",
+        "head_branch": "main",
+        "created_at": "2026-10-30T08:00:30Z",
+        "run_started_at": "2026-10-30T08:00:30Z",
+        "updated_at": "2026-10-30T08:00:35Z"
+      },
+      {
+        "id": 41023281950,
+        "status": "completed",
+        "conclusion": "failure",
+        "workflow_id": 320079012,
+        "run_attempt": 1,
+        "head_sha": "afb9330adf4a4d30ab78609f807bb9d463134ca4",
+        "head_branch": "main",
+        "created_at": "2026-10-30T07:57:42Z",
+        "run_started_at": "2026-10-30T07:57:42Z",
+        "updated_at": "2026-10-30T07:57:47Z"
+      }
+    ]
+  },
+  "jobs": {
+    "41233054025.1": {
+      "total_count": 5,
+      "jobs": [
+        {
+          "id": 124631045726,
+          "status": "completed",
+          "conclusion": "failure",
+          "runner_id": 0,
+          "runner_name": "",
+          "steps": []
+        },
+        {
+          "id": 124631045814,
+          "status": "completed",
+          "conclusion": "failure",
+          "runner_id": 0,
+          "runner_name": "",
+          "steps": []
+        },
+        {
+          "id": 124631045837,
+          "status": "completed",
+          "conclusion": "failure",
+          "runner_id": 0,
+          "runner_name": "",
+          "steps": []
+        },
+        {
+          "id": 124631045857,
+          "status": "completed",
+          "conclusion": "failure",
+          "runner_id": 0,
+          "runner_name": "",
+          "steps": []
+        },
+        {
+          "id": 124631096932,
+          "status": "completed",
+          "conclusion": "skipped",
+          "runner_id": null,
+          "runner_name": null,
+          "steps": []
+        }
+      ]
+    },
+    "41231938736.1": {
+      "total_count": 5,
+      "jobs": [
+        {
+          "id": 124627796149,
+          "status": "completed",
+          "conclusion": "failure",
+          "runner_id": 0,
+          "runner_name": "",
+          "steps": []
+        },
+        {
+          "id": 124627796364,
+          "status": "completed",
+          "conclusion": "failure",
+          "runner_id": 0,
+          "runner_name": "",
+          "steps": []
+        },
+        {
+          "id": 124627796423,
+          "status": "completed",
+          "conclusion": "failure",
+          "runner_id": 0,
+          "runner_name": "",
+          "steps": []
+        },
+        {
+          "id": 124627796467,
+          "status": "completed",
+          "conclusion": "failure",
+          "runner_id": 0,
+          "runner_name": "",
+          "steps": []
+        },
+        {
+          "id": 124627809097,
+          "status": "completed",
+          "conclusion": "skipped",
+          "runner_id": null,
+          "runner_name": null,
+          "steps": []
+        }
+      ]
+    },
+    "41177749933.1": {
+      "total_count": 5,
+      "jobs": [
+        {
+          "id": 124468715473,
+          "status": "completed",
+          "conclusion": "failure",
+          "runner_id": 0,
+          "runner_name": "",
+          "steps": []
+        },
+        {
+          "id": 124468715624,
+          "status": "completed",
+          "conclusion": "failure",
+          "runner_id": 0,
+          "runner_name": "",
+          "steps": []
+        },
+        {
+          "id": 124468715637,
+          "status": "completed",
+          "conclusion": "failure",
+          "runner_id": 0,
+          "runner_name": "",
+          "steps": []
+        },
+        {
+          "id": 124468715654,
+          "status": "completed",
+          "conclusion": "failure",
+          "runner_id": 0,
+          "runner_name": "",
+          "steps": []
+        },
+        {
+          "id": 124468727637,
+          "status": "completed",
+          "conclusion": "skipped",
+          "runner_id": null,
+          "runner_name": null,
+          "steps": []
+        }
+      ]
+    },
+    "41177277800.1": {
+      "total_count": 5,
+      "jobs": [
+        {
+          "id": 124467331718,
+          "status": "completed",
+          "conclusion": "failure",
+          "runner_id": 0,
+          "runner_name": "",
+          "steps": []
+        },
+        {
+          "id": 124467331777,
+          "status": "completed",
+          "conclusion": "failure",
+          "runner_id": 0,
+          "runner_name": "",
+          "steps": []
+        },
+        {
+          "id": 124467331815,
+          "status": "completed",
+          "conclusion": "failure",
+          "runner_id": 0,
+          "runner_name": "",
+          "steps": []
+        },
+        {
+          "id": 124467331816,
+          "status": "completed",
+          "conclusion": "failure",
+          "runner_id": 0,
+          "runner_name": "",
+          "steps": []
+        },
+        {
+          "id": 124467348915,
+          "status": "completed",
+          "conclusion": "skipped",
+          "runner_id": null,
+          "runner_name": null,
+          "steps": []
+        }
+      ]
+    },
+    "41150252375.1": {
+      "total_count": 5,
+      "jobs": [
+        {
+          "id": 124384829453,
+          "status": "completed",
+          "conclusion": "failure",
+          "runner_id": 0,
+          "runner_name": "",
+          "steps": []
+        },
+        {
+          "id": 124384829655,
+          "status": "completed",
+          "conclusion": "failure",
+          "runner_id": 0,
+          "runner_name": "",
+          "steps": []
+        },
+        {
+          "id": 124384829737,
+          "status": "completed",
+          "conclusion": "failure",
+          "runner_id": 0,
+          "runner_name": "",
+          "steps": []
+        },
+        {
+          "id": 124384829838,
+          "status": "completed",
+          "conclusion": "failure",
+          "runner_id": 0,
+          "runner_name": "",
+          "steps": []
+        },
+        {
+          "id": 124384891866,
+          "status": "completed",
+          "conclusion": "skipped",
+          "runner_id": null,
+          "runner_name": null,
+          "steps": []
+        }
+      ]
+    },
+    "41139224468.1": {
+      "total_count": 5,
+      "jobs": [
+        {
+          "id": 124349121098,
+          "status": "completed",
+          "conclusion": "failure",
+          "runner_id": 0,
+          "runner_name": "",
+          "steps": []
+        },
+        {
+          "id": 124349121450,
+          "status": "completed",
+          "conclusion": "failure",
+          "runner_id": 0,
+          "runner_name": "",
+          "steps": []
+        },
+        {
+          "id": 124349121459,
+          "status": "completed",
+          "conclusion": "failure",
+          "runner_id": 0,
+          "runner_name": "",
+          "steps": []
+        },
+        {
+          "id": 124349121492,
+          "status": "completed",
+          "conclusion": "failure",
+          "runner_id": 0,
+          "runner_name": "",
+          "steps": []
+        },
+        {
+          "id": 124349142280,
+          "status": "completed",
+          "conclusion": "skipped",
+          "runner_id": null,
+          "runner_name": null,
+          "steps": []
+        }
+      ]
+    },
+    "41082343488.1": {
+      "total_count": 5,
+      "jobs": [
+        {
+          "id": 124154444565,
+          "status": "completed",
+          "conclusion": "failure",
+          "runner_id": 0,
+          "runner_name": "",
+          "steps": []
+        },
+        {
+          "id": 124154444993,
+          "status": "completed",
+          "conclusion": "failure",
+          "runner_id": 0,
+          "runner_name": "",
+          "steps": []
+        },
+        {
+          "id": 124154445003,
+          "status": "completed",
+          "conclusion": "failure",
+          "runner_id": 0,
+          "runner_name": "",
+          "steps": []
+        },
+        {
+          "id": 124154445801,
+          "status": "completed",
+          "conclusion": "failure",
+          "runner_id": 0,
+          "runner_name": "",
+          "steps": []
+        },
+        {
+          "id": 124154477281,
+          "status": "completed",
+          "conclusion": "skipped",
+          "runner_id": null,
+          "runner_name": null,
+          "steps": []
+        }
+      ]
+    },
+    "41072964955.1": {
+      "total_count": 5,
+      "jobs": [
+        {
+          "id": 124121553590,
+          "status": "completed",
+          "conclusion": "failure",
+          "runner_id": 0,
+          "runner_name": "",
+          "steps": []
+        },
+        {
+          "id": 124121553894,
+          "status": "completed",
+          "conclusion": "failure",
+          "runner_id": 0,
+          "runner_name": "",
+          "steps": []
+        },
+        {
+          "id": 124121553924,
+          "status": "completed",
+          "conclusion": "failure",
+          "runner_id": 0,
+          "runner_name": "",
+          "steps": []
+        },
+        {
+          "id": 124121553996,
+          "status": "completed",
+          "conclusion": "failure",
+          "runner_id": 0,
+          "runner_name": "",
+          "steps": []
+        },
+        {
+          "id": 124121586477,
+          "status": "completed",
+          "conclusion": "skipped",
+          "runner_id": null,
+          "runner_name": null,
+          "steps": []
+        }
+      ]
+    },
+    "41023575665.1": {
+      "total_count": 5,
+      "jobs": [
+        {
+          "id": 123956331025,
+          "status": "completed",
+          "conclusion": "failure",
+          "runner_id": 0,
+          "runner_name": "",
+          "steps": []
+        },
+        {
+          "id": 123956331321,
+          "status": "completed",
+          "conclusion": "failure",
+          "runner_id": 0,
+          "runner_name": "",
+          "steps": []
+        },
+        {
+          "id": 123956331404,
+          "status": "completed",
+          "conclusion": "failure",
+          "runner_id": 0,
+          "runner_name": "",
+          "steps": []
+        },
+        {
+          "id": 123956331449,
+          "status": "completed",
+          "conclusion": "failure",
+          "runner_id": 0,
+          "runner_name": "",
+          "steps": []
+        },
+        {
+          "id": 123956353586,
+          "status": "completed",
+          "conclusion": "skipped",
+          "runner_id": null,
+          "runner_name": null,
+          "steps": []
+        }
+      ]
+    },
+    "41023281950.1": {
+      "total_count": 5,
+      "jobs": [
+        {
+          "id": 123955383393,
+          "status": "completed",
+          "conclusion": "failure",
+          "runner_id": 0,
+          "runner_name": "",
+          "steps": []
+        },
+        {
+          "id": 123955383637,
+          "status": "completed",
+          "conclusion": "failure",
+          "runner_id": 0,
+          "runner_name": "",
+          "steps": []
+        },
+        {
+          "id": 123955383651,
+          "status": "completed",
+          "conclusion": "failure",
+          "runner_id": 0,
+          "runner_name": "",
+          "steps": []
+        },
+        {
+          "id": 123955383653,
+          "status": "completed",
+          "conclusion": "failure",
+          "runner_id": 0,
+          "runner_name": "",
+          "steps": []
+        },
+        {
+          "id": 123955408375,
+          "status": "completed",
+          "conclusion": "skipped",
+          "runner_id": null,
+          "runner_name": null,
+          "steps": []
+        }
+      ]
+    }
+  },
+  "annotations": {
+    "124631045726": [
+      {
+        "path": ".github",
+        "annotation_level": "failure",
+        "title": "",
+        "message": "The job was not started because recent account payments have failed or your spending limit needs to be increased. Please check the 'Billing & plans' section in your settings"
+      }
+    ],
+    "124627796149": [
+      {
+        "path": ".github",
+        "annotation_level": "failure",
+        "title": "",
+        "message": "The job was not started because recent account payments have failed or your spending limit needs to be increased. Please check the 'Billing & plans' section in your settings"
+      }
+    ],
+    "124468715473": [
+      {
+        "path": ".github",
+        "annotation_level": "failure",
+        "title": "",
+        "message": "The job was not started because recent account payments have failed or your spending limit needs to be increased. Please check the 'Billing & plans' section in your settings"
+      }
+    ],
+    "124467331718": [
+      {
+        "path": ".github",
+        "annotation_level": "failure",
+        "title": "",
+        "message": "The job was not started because recent account payments have failed or your spending limit needs to be increased. Please check the 'Billing & plans' section in your settings"
+      }
+    ],
+    "124384829453": [
+      {
+        "path": ".github",
+        "annotation_level": "failure",
+        "title": "",
+        "message": "The job was not started because recent account payments have failed or your spending limit needs to be increased. Please check the 'Billing & plans' section in your settings"
+      }
+    ],
+    "124349121098": [
+      {
+        "path": ".github",
+        "annotation_level": "failure",
+        "title": "",
+        "message": "The job was not started because recent account payments have failed or your spending limit needs to be increased. Please check the 'Billing & plans' section in your settings"
+      }
+    ],
+    "124154444565": [
+      {
+        "path": ".github",
+        "annotation_level": "failure",
+        "title": "",
+        "message": "The job was not started because recent account payments have failed or your spending limit needs to be increased. Please check the 'Billing & plans' section in your settings"
+      }
+    ],
+    "124121553590": [
+      {
+        "path": ".github",
+        "annotation_level": "failure",
+        "title": "",
+        "message": "The job was not started because recent account payments have failed or your spending limit needs to be increased. Please check the 'Billing & plans' section in your settings"
+      }
+    ],
+    "123956331025": [
+      {
+        "path": ".github",
+        "annotation_level": "failure",
+        "title": "",
+        "message": "The job was not started because recent account payments have failed or your spending limit needs to be increased. Please check the 'Billing & plans' section in your settings"
+      }
+    ],
+    "123955383393": [
+      {
+        "path": ".github",
+        "annotation_level": "failure",
+        "title": "",
+        "message": "The job was not started because recent account payments have failed or your spending limit needs to be increased. Please check the 'Billing & plans' section in your settings"
+      }
+    ]
+  }
+}

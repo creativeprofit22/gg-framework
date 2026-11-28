@@ -170,8 +170,7 @@ function hasRenderableText(text: string): boolean {
  * stripping markers to invisible whitespace.
  */
 export type DisplaySegment =
-  | { kind: "text"; text: string }
-  | { kind: "done"; stepNum: number; description: string };
+  { kind: "text"; text: string } | { kind: "done"; stepNum: number; description: string };
 
 /**
  * Split text on [DONE:N] markers, returning an array of segments. Empty/
@@ -233,4 +232,14 @@ export function markStepsCompleted(steps: PlanStep[], completed: Set<number>): P
     return s;
   });
   return changed ? result : steps;
+}
+
+// Steps run in order, so `[DONE:n]` also covers earlier steps the model forgot
+// to mark; counting only the markers left progress stuck behind (3/15 at step 9).
+export function stepsDoneThrough(markers: Iterable<number>, total: number): number[] {
+  let highest = 0;
+  for (const step of markers) {
+    if (Number.isInteger(step) && step <= total && step > highest) highest = step;
+  }
+  return Array.from({ length: highest }, (_, index) => index + 1);
 }

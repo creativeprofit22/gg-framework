@@ -68,6 +68,28 @@ const ENV_ALLOWLIST = new Set([
   "GG_BASH",
 ]);
 
+/** Never pass native Token Plan auth to external tools, including explicit MCP env overrides.
+ * Case-insensitive because Windows environment names are case-insensitive.
+ */
+export function withoutQwenRuntimeSecret(
+  sourceEnv: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  return Object.fromEntries(
+    Object.entries(sourceEnv).filter(
+      ([name]) => name.toUpperCase() !== "QWEN_CLOUD_TOKEN_PLAN_KEY",
+    ),
+  );
+}
+
+/** Only trusted ggcoder agent workers may inherit the dedicated inference credential. */
+export function getTrustedAgentEnv(sourceEnv: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const env = withoutQwenRuntimeSecret(sourceEnv);
+  if (sourceEnv.QWEN_CLOUD_TOKEN_PLAN_KEY !== undefined) {
+    env.QWEN_CLOUD_TOKEN_PLAN_KEY = sourceEnv.QWEN_CLOUD_TOKEN_PLAN_KEY;
+  }
+  return env;
+}
+
 export function getSafeToolEnv(sourceEnv: NodeJS.ProcessEnv = process.env): Record<string, string> {
   const env: Record<string, string> = { TERM: "dumb", GG_CODER: "true" };
   for (const key of ENV_ALLOWLIST) {

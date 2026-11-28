@@ -1,0 +1,54 @@
+/* Local Fork: /steroids table extras (rehype-tables.ts, Markdown.tsx). */
+
+/* A repo's country of origin as a small superscript at the upper right of
+   its name. The parentheses stay in the text for copying and screen readers. */
+.markdown .md-repo-name-row {
+  display: inline-flex;
+  align-items: flex-start;
+  gap: 0.2em;
+}
+.markdown .md-repo-country {
+  color: var(--text-muted);
+  font-size: 0.62em;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  line-height: 1;
+  white-space: nowrap;
+}
+.markdown .md-repo-paren {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* Licences coloured by how freely the code can be reused. The licence name
+   carries the meaning; the colour is a glance aid. */
+.markdown .md-licence {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--space-3);
+}
+.markdown .md-licence::before {
+  content: "";
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  transform: translateY(-1px);
+}
+.markdown .md-licence-permissive {
+  color: var(--success);
+}
+.markdown .md-licence-weak-copyleft {
+  color: var(--warning);
+}
+.markdown .md-licence-strong-copyleft {
+  color: var(--error);
+}
+.markdown .md-licence-unclear {
+  color: var(--text-muted);
+}

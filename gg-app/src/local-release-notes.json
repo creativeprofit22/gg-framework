@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-11-28",
+  "label": "Upstream 0.121.2, with cheaper long chats and safer branch switches",
+  "sections": [
+    {
+      "title": "New in your Local Fork",
+      "items": [
+        "Everything upstream added through `0.121.2` is here, except giving each window its own worktree: long chats cost less when you steer your agent `mid-run`, the `Security audit` hunts the bugs that cost small teams money, your `Claude` sign-in shows files taking shape as they are written, GG runs on `Node 24` with a better PDF reader, and stuck requests give up after `5 minutes` instead of spinning forever. The `Upstream` tab tells the full story.",
+        "Your Local Fork keeps its own branch switcher in the `Git` panel, because here several chats can share one window and one folder. To keep them safe, an agent can no longer switch branches by itself while another open chat, or the agent that started it as a helper, works in the same folder. It offers a separate worktree instead, or asks you first, so no chat's files change under it.",
+        "When you are just asking questions or thinking out loud, your agent answers and stops: no surprise question card and no \"want me to...?\" nudge. When it really needs your call, it still gives a short answer first, then shows the question card."
+      ]
+    }
+  ]
+}

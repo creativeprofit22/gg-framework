@@ -1,6 +1,10 @@
 import React from "react";
 import { Text, Box } from "ink";
 import type { ThinkingLevel } from "@kenkaiiii/gg-ai";
+import {
+  getQwenCloudCapability,
+  getQwenCloudThinkingLabel,
+} from "@kenkaiiii/gg-ai/qwen-cloud-policy";
 import { useTheme } from "../theme/theme.js";
 import { useTerminalSize } from "../hooks/useTerminalSize.js";
 import { getContextWindow, type ContextWindowOptions } from "../../core/model-registry.js";
@@ -42,23 +46,28 @@ interface FooterProps {
 
 // Model ID → short display name
 const MODEL_SHORT_NAMES: Record<string, string> = {
-  "claude-fable-5": "Fable",
+  "claude-fable-5-2": "Fable",
+  "claude-fable-5-2-fast": "Fable Fast",
   "claude-mythos-5": "Mythos",
-  "claude-opus-4-8": "Opus",
-  "claude-sonnet-5": "Sonnet",
-  "claude-haiku-4-5": "Haiku",
-  "claude-haiku-4-5-20251001": "Haiku",
-  "gpt-5.5": "GPT-5.5",
-  "gpt-5.4": "GPT-5.4",
-  "gpt-5.4-mini": "GPT-5.4 Mini",
-  "gpt-5.3-codex": "GPT-5.3 Codex",
+  "claude-opus-5-5": "Opus",
+  "claude-opus-5-5-fast": "Opus Fast",
+  "claude-sonnet-5-5": "Sonnet",
+  "claude-haiku-5-5": "Haiku",
+  "gpt-6.2-astra": "GPT-6.2 Astra",
+  "gpt-6.2-astra-fast": "GPT-6.2 Astra Fast",
+  "gpt-6.2-sol": "GPT-6.2 Sol",
+  "gpt-6.2-sol-fast": "GPT-6.2 Sol Fast",
+  "gpt-6.1-terra": "GPT-6.1 Terra",
+  "gpt-6.1-terra-fast": "GPT-6.1 Terra Fast",
+  "gpt-6-luna": "GPT-6 Luna",
+  "gpt-6-luna-fast": "GPT-6 Luna Fast",
 };
 
 function getShortModelName(model: string): string {
   return MODEL_SHORT_NAMES[model] ?? model;
 }
 
-function getContextPercent(
+export function getFooterContextPercent(
   model: string,
   tokensIn: number,
   options?: ContextWindowOptions,
@@ -125,7 +134,13 @@ const ShimmerLabel: React.FC<{
   );
 };
 
-export function getThinkingFooterLabel(thinkingLevel: ThinkingLevel | undefined): string {
+export function getThinkingFooterLabel(
+  thinkingLevel: ThinkingLevel | undefined,
+  model?: string,
+): string {
+  if (model && getQwenCloudCapability(model)) {
+    return getQwenCloudThinkingLabel(model, thinkingLevel ?? null);
+  }
   return thinkingLevel ? `Thinking ${thinkingLevel}` : "Thinking off";
 }
 
@@ -185,9 +200,9 @@ export function doesFooterFitOnOneLine({
   if (statusBelow) return false;
   const parts = cwd.split("/").filter(Boolean);
   const displayPath = parts.length > 0 ? parts[parts.length - 1] : cwd;
-  const contextPct = getContextPercent(model, tokensIn, contextWindowOptions);
+  const contextPct = getFooterContextPercent(model, tokensIn, contextWindowOptions);
   const modelName = getShortModelName(model);
-  const thinkingText = getThinkingFooterLabel(thinkingLevel);
+  const thinkingText = getThinkingFooterLabel(thinkingLevel, model);
   const planText = planMode ? "Plan on" : "Plan off";
   const leftLen = displayPath.length + 2 + (gitBranch ? gitBranch.length + 5 : 0);
   const rightLen = getFooterRightLength({
@@ -223,7 +238,7 @@ export function Footer({
   const parts = cwd.split("/").filter(Boolean);
   const displayPath = parts.length > 0 ? parts[parts.length - 1] : cwd;
 
-  const contextPct = getContextPercent(model, tokensIn, contextWindowOptions);
+  const contextPct = getFooterContextPercent(model, tokensIn, contextWindowOptions);
   const contextColor = getContextColor(contextPct, theme);
   const sep = <Text color={theme.border}>{" \u2502 "}</Text>;
 
@@ -257,9 +272,9 @@ export function Footer({
     }
   }
 
-  // Thinking labels. Show the actual thinking tier when on (`Thinking xhigh`) so users see what they're
-  // paying for. Off is the only state that stays generic.
-  const thinkingText = getThinkingFooterLabel(thinkingLevel);
+  // Effort models show their tier; binary Qwen models show on/off, not the
+  // internal token used to represent enabled thinking.
+  const thinkingText = getThinkingFooterLabel(thinkingLevel, model);
   const planText = planMode ? "Plan on" : "Plan off";
   const thinkingColor = getThinkingColor(thinkingLevel, theme);
   const reducedMotion = useReducedMotion();

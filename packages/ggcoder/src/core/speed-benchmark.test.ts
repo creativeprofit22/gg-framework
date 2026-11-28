@@ -3,6 +3,7 @@ import {
   runFullBenchmark,
   runBenchmark,
   createDefaultWorkload,
+  createVirtualBenchmarkClock,
   formatComparison,
   MockBenchmarkProvider,
   REALISTIC_TIMING,
@@ -11,7 +12,7 @@ import {
 
 describe("Speed Benchmark", () => {
   it("optimized should be faster than baseline on multi-turn workload", async () => {
-    const comparison = await runFullBenchmark();
+    const comparison = await runFullBenchmark({ clock: createVirtualBenchmarkClock() });
 
     // Print the full comparison table for visibility.
     const report = formatComparison(comparison);
@@ -27,7 +28,7 @@ describe("Speed Benchmark", () => {
 
     // TTFT improvement should be meaningful (> 5%).
     expect(comparison.ttftImprovement).toBeGreaterThan(5);
-  }, 30_000);
+  });
 
   it("baseline misses cache on turn after 5-min gap", async () => {
     const workload = createDefaultWorkload();
@@ -42,6 +43,7 @@ describe("Speed Benchmark", () => {
 
     const result = await runBenchmark(workload, baselineConfig, {
       name: "5min TTL",
+      clock: createVirtualBenchmarkClock(),
     });
 
     // Turn 4 has a 7-min delay — should be a cache miss with 5-min TTL.
@@ -68,6 +70,7 @@ describe("Speed Benchmark", () => {
     const result = await runBenchmark(workload, optimizedConfig, {
       name: "1h TTL",
       prewarm: true,
+      clock: createVirtualBenchmarkClock(),
     });
 
     // Turn 4 has a 7-min delay — should be a cache HIT with 1-h TTL.
@@ -91,18 +94,46 @@ describe("Speed Benchmark", () => {
     };
 
     // Without pre-warm.
-    const cold = await runBenchmark(workload, config, { name: "No prewarm" });
+    const cold = await runBenchmark(workload, config, {
+      name: "No prewarm",
+      clock: createVirtualBenchmarkClock(),
+    });
     expect(cold.turns[0].cacheHit).toBe(false);
 
     // With pre-warm.
     const warm = await runBenchmark(workload, config, {
       name: "With prewarm",
       prewarm: true,
+      clock: createVirtualBenchmarkClock(),
     });
     expect(warm.turns[0].cacheHit).toBe(true);
 
     // First-turn TTFT should be lower with pre-warm.
     expect(warm.turns[0].ttftMs).toBeLessThan(cold.turns[0].ttftMs);
+  });
+
+  it("uses the injected clock instead of real time", async () => {
+    const clock = createVirtualBenchmarkClock();
+    const realStart = performance.now();
+    const result = await runBenchmark(createDefaultWorkload(), REALISTIC_TIMING, {
+      name: "Unscaled",
+      clock,
+    });
+    const realElapsedMs = performance.now() - realStart;
+
+    // Every measured millisecond came from the fake clock.
+    expect(result.totalWallClockMs).toBeCloseTo(clock.now());
+    expect(result.totalWallClockMs).toBeGreaterThan(9_000);
+    expect(realElapsedMs).toBeLessThan(1_000);
+
+    const turn1 = result.turns[0];
+    expect(turn1).toBeDefined();
+    // The first event arrives after network + cold prefill + one output token.
+    expect(turn1.ttftMs).toBeCloseTo(
+      REALISTIC_TIMING.networkOverheadMs +
+        turn1.inputTokens * REALISTIC_TIMING.coldPrefillMsPerToken +
+        REALISTIC_TIMING.outputMsPerToken,
+    );
   });
 
   it("mock provider tracks stats correctly", () => {

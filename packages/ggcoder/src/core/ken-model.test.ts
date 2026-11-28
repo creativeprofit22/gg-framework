@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { validateKenModelPref, effectiveKenModel, type KenModelPref } from "./ken-model.js";
 
-const REGISTRY = new Set(["claude-opus-5", "gpt-5.5", "kimi-k2.7-code"]);
+const REGISTRY = new Set(["claude-opus-5-5", "gpt-5.5", "kimi-k2.7-code"]);
 const CONNECTED = new Set(["anthropic", "openai"]);
 
 const opts = {
@@ -36,12 +36,12 @@ describe("validateKenModelPref", () => {
 });
 
 describe("effectiveKenModel", () => {
-  const build = { provider: "anthropic" as const, model: "claude-opus-5" };
+  const build = { provider: "anthropic" as const, model: "claude-opus-5-5" };
 
   it("follows the build session when no override is set", () => {
     expect(effectiveKenModel(null, build)).toEqual({
       kenProvider: "anthropic",
-      kenModel: "claude-opus-5",
+      kenModel: "claude-opus-5-5",
       kenModelOverride: false,
     });
   });
@@ -55,9 +55,9 @@ describe("effectiveKenModel", () => {
   });
 
   it("pin identical to the build model still reports override=true (it survives GG switches)", () => {
-    expect(effectiveKenModel({ provider: "anthropic", model: "claude-opus-5" }, build)).toEqual({
+    expect(effectiveKenModel({ provider: "anthropic", model: "claude-opus-5-5" }, build)).toEqual({
       kenProvider: "anthropic",
-      kenModel: "claude-opus-5",
+      kenModel: "claude-opus-5-5",
       kenModelOverride: true,
     });
   });

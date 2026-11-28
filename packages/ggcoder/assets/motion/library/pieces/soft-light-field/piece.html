@@ -1,0 +1,83 @@
+<!doctype html>
+<!--
+  soft-light-field: airy cool-white field with a deep light pool rolling in
+  from one edge, like studio light falling off into a colored sky. The pool
+  drifts slowly so the frame never feels static.
+  Params: --slf-side (0 = pool on the left, 1 = right), --slf-strength
+  (0-1 pool opacity). Colors: --field (white), --field-2 (deep pool).
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+  </head>
+  <body>
+    <div
+      id="soft-light-field-root"
+      data-composition-id="soft-light-field"
+      data-start="0"
+      data-duration="6"
+      data-width="1920"
+      data-height="1080"
+    >
+      <style>
+        [data-composition-id="soft-light-field"] {
+          --slf-strength: 1;
+          position: absolute;
+          inset: 0;
+          overflow: hidden;
+          background: var(--field, #eef1f7);
+        }
+        [data-composition-id="soft-light-field"] .slf-pool {
+          position: absolute;
+          inset: -30%;
+          opacity: var(--slf-strength);
+          /* A large ellipse of light, dark outside: the pool is the
+             negative space around a soft white hotspot. */
+          background: radial-gradient(
+            58% 72% at var(--slf-x, 62%) 52%,
+            transparent 0%,
+            transparent 38%,
+            color-mix(in oklab, var(--field-2, #0b2a8f) 18%, transparent) 52%,
+            color-mix(in oklab, var(--field-2, #0b2a8f) 62%, transparent) 68%,
+            var(--field-2, #0b2a8f) 86%
+          );
+        }
+        [data-composition-id="soft-light-field"] .slf-hot {
+          position: absolute;
+          inset: 0;
+          background: radial-gradient(
+            40% 46% at var(--slf-x, 62%) 50%,
+            rgba(255, 255, 255, 0.85),
+            transparent 70%
+          );
+        }
+        [data-composition-id="soft-light-field"] .slf-grain {
+          position: absolute;
+          inset: 0;
+          opacity: 0.05;
+          background-image: radial-gradient(rgba(0, 0, 0, 0.6) 0.6px, transparent 0.8px);
+          background-size: 3px 3px;
+          mix-blend-mode: multiply;
+        }
+      </style>
+      <div class="slf-pool" id="slf-pool"></div>
+      <div class="slf-hot"></div>
+      <div class="slf-grain"></div>
+    </div>
+    <script>
+      (function () {
+        // 0 = hotspot sits right (pool enters from the left), 1 = mirrored.
+        const SIDE = 0;
+        const root = document.querySelector('[data-composition-id="soft-light-field"]');
+        const from = SIDE === 0 ? 64 : 36;
+        const to = SIDE === 0 ? 58 : 42;
+        const tl = gsap.timeline({ paused: true });
+        tl.fromTo(root, { "--slf-x": `${from}%` }, { "--slf-x": `${to}%`, duration: 6, ease: "sine.inOut" }, 0);
+        tl.fromTo("#slf-pool", { scale: 1.04 }, { scale: 1, duration: 6, ease: "sine.inOut" }, 0);
+        window.__timelines = window.__timelines || {};
+        window.__timelines["soft-light-field"] = tl;
+      })();
+    </script>
+  </body>
+</html>

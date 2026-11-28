@@ -1,0 +1,283 @@
+# Working in a Code-mode window
+
+## Contents
+
+- The composer
+- Mentioning files with @
+- Attaching images and files
+- Sending while GG is busy
+- Stopping a run
+- Running your own commands with !
+- Working across more than one folder
+- Live preview
+- Testing in a real browser
+- Slash commands
+- Schedules
+- Prompt enhancement
+- Plan mode and plan review
+- Autopilot
+- Tasks
+- Notes
+- Checklist and project health
+- Git in the title bar
+- CI indicator
+- Activity bar and working beam
+- Sub-agents
+- Notices in the transcript
+- Moving around the transcript
+- Common questions
+
+A Code-mode window is one session on one project folder. You type in the composer at the bottom. GG works in the transcript above it, and the deck holds the tools.
+
+## The composer
+
+- Enter sends. Shift+Enter adds a new line.
+- The placeholder reads "Type a message, / commands, @ files, @Ken for help". Every few seconds it rotates to another tip, such as **Start with ! to run a command, like !git status** or "Need a second opinion? Ask @Ken". While GG is working the tips change to ones like **Got another thought? Queue it here**.
+- Up and Down in an empty composer bring back prompts you sent earlier. In a multi-line draft they move the cursor as usual.
+- Esc stops the current run (or Ken) when no menu is open. With the slash menu open, Esc clears the input.
+- `/` opens the command menu, `@` opens the file picker and `!` opens the command picker. Each menu works with Up/Down, Tab or Enter to pick, and Esc to close.
+
+## Mentioning files with @
+
+- Type `@` and part of a file name to open the file picker. With nothing typed after `@`, it shows recent files.
+- Picking a file adds it as a chip above the input. GG gets the list of referenced files when you send (it isn't shown in your message bubble). Remove a chip to drop that file.
+
+## Attaching images and files
+
+- Click **Attach files** (the paperclip) to choose files. You can also drag files onto the composer or paste them from the clipboard.
+- Attachments show in a bar above the input, and each one can be removed. Click an image to open it.
+- Images and videos are recognised by type. Anything else, such as a PDF or a text file, is sent as a file.
+- All attachments in one message can add up to 100 MB. Above that you get "Attachments are too big to send" and nothing is sent.
+- If the current model can't watch video, the transcript notes that GG can still pull frames or audio out of it, and suggests switching to a video-capable model.
+- Send stays disabled while attachments are loading. Its tooltip reads **Loading attachments…**.
+
+## Sending while GG is busy
+
+- You can keep typing during a run. Enter queues the message instead of interrupting.
+- A queued message goes to GG at the next turn boundary, not after the whole run ends. It shows in the chat dimmed, with a **queued** label above it.
+- To cancel a queued message, click the x next to its label (**Cancel this queued message**). Each queued message has its own x. A message that is already being delivered can't be cancelled.
+
+## Stopping a run
+
+- During a run the round send button becomes **Stop the run**. Click it or press Esc to stop.
+- That button stops GG's run and also stops an Autopilot review in progress.
+
+## Running your own commands with !
+
+- Start the input with `!` to run a shell command in the project folder, for example `!git status`. This doesn't start an agent turn, and it works even while GG is running. The send button reads **Run command**.
+- Typing `!` opens a **commands** picker. It lists commands you've run here, most used first, then commands that fit the project.
+- The first time you run a command, GG asks **Run this command?** and shows the folder it will run in. You can choose:
+  - **Run once** (Enter): run it this time only.
+  - **Always allow in this project**: future commands in this project run without asking.
+  - **Cancel** (Esc): the transcript shows that it didn't run.
+- Once a project is trusted, the picker footer says **Commands run here without asking.**. Click **Ask first instead** to turn confirmation back on.
+- Output streams live, with errors in their own colour and an elapsed timer. Click **Stop** to end a running command. When it finishes you see the exit code and duration, and **Copy** copies the output. Long output folds behind a show-all control.
+- GG doesn't see the output right away. The block reads **GG will see this with your next message**, and after you send it reads **Shared with GG**.
+
+## Working across more than one folder
+
+- Click **Add folder** in the **More** panel (the ⋯ key on the bottom bar) and pick a folder. GG can then read and edit it as well as the project, and it's told about the folder before its next step.
+- It works in Code and Chat windows. The header shows how many extra folders are attached, and the title tooltip lists them.
+- You can add a folder while GG is working. A folder already inside the workspace can't be added twice, and the message says why.
+- Commands in the added folder's `.gg/commands` show up in the `/` menu.
+- To drop one again, click **Remove folder** (it appears right after **Add folder** once a folder is added). The **Added folders** panel lists each folder with its own **Remove** key.
+
+## Live preview
+
+- Click **Live preview** in the **More** panel (the ⋯ key on the bottom bar). GG finds this project's running dev server, whether GG started it or you ran it in your own terminal, opens the app in your normal browser and puts its chat at the bottom of the page. Nothing to install. The key's light is on while the preview runs.
+- If no dev server is running for the project, click **Start dev server**: GG starts it in the background and opens the preview. **Other address** lets you type one instead, for example `localhost:3000`. https dev servers aren't supported yet.
+- Each window previews only its own project, so several projects can each have a preview open at once. When a project runs more than one server, such as a site and its API, GG picks the one that serves a web page.
+- On the page, click the pointer key next to the message box, then click any element, or just right-click it (Shift+right-click keeps the browser's menu). Your message goes to GG with that element. Esc drops the picked element and lets you pick another; Esc again leaves pick mode. The minus key tucks the chat away.
+- The preview has its own chat, separate from the window's conversation. The panel shows the link with **Open** and **Stop**. Closing the window stops it.
+- You can also just ask GG to open the live preview.
+- The preview runs on its own port, so sign-in redirects and saved browser data from your dev server's port don't carry over.
+
+## Testing in a real browser
+
+- Ask GG to test your web app in the browser (for example "check the signup flow works"). It opens pages in its own browser, clicks, fills in forms and takes screenshots, and reports console errors and failed or slow requests.
+- It runs on this computer, so it can only reach pages this computer can reach, such as your local dev server.
+
+## Slash commands
+
+Type `/` to open the menu. You only see commands in a Code-mode window.
+
+- `/schedule` (or the short form /sched): run a prompt on a repeating schedule (see Schedules below).
+- `/init`: create or update the project's AGENTS.md / CLAUDE.md.
+- `/commit`: runs the project's checks and tests and fixes failures, has a helper review the diff, stages the changed files, commits with a one-line message and pushes if the branch has an upstream. If the review finds real issues, GG asks whether to fix them first or commit anyway. A project's own `.gg/commands/commit.md` takes precedence.
+- `/setup-commit`: writes a project-specific `.gg/commands/commit.md` with that project's checks.
+- `/expand`: researches similar products and reports a ranked table of user-facing features to add. Nothing is changed until you pick an option. Text after the command sets a focus.
+- `/steroids`: finds well-maintained repos like this project, shows them in a table, asks how many to index, then adds them to the Steroids index. It needs Agent Steroids installed.
+
+Custom commands: each Markdown file in the project's `.gg/commands/` folder becomes a `/<name>` command with its own description. Folders added with **Add folder** bring their `.gg/commands` too. A custom command can't take over a built-in name.
+
+## Schedules
+
+- Format: `/schedule <prompt> | <interval> [| <times>]`, for example `/schedule run the full test suite | 1h30m | 10`.
+- The interval uses minutes or hours: `15m`, `2h`, `1h30m`. Seconds aren't accepted. Leave out the run count to repeat until you stop it. A pipe inside the prompt is fine.
+- A hint above the composer shows each part as you type and flags a mistake before you send. Pressing Enter adds a transcript line starting "Scheduled ·", followed by something like "Every 15 min · until stopped".
+- Active schedules appear as an "N schedules" button. It opens **Schedules**, with each one's cadence, progress and next run, plus a **Stop** button. Schedules only run while that window stays open.
+
+## Prompt enhancement
+
+- To enhance a prompt, type a draft and click **Enhance**, the small key to the left of send. Its tooltip reads **Rewrite your prompt with clearer wording and the right terms**.
+- The key only shows when there is text in the composer. It hides while the slash or @ menu is open, while you're typing a `/schedule`, and once the current text is already enhanced.
+- While it works, the key reads **Enhancing…**. Your draft fades out, a shimmer holds its place, and the new text types itself in. You can't type during the animation. With reduced motion turned on in your system, the text is simply replaced.
+- What it does: it rewrites your draft into a clear request for GG. It keeps your intent (a question stays a question), keeps every path, name and number, and doesn't add scope. A clear draft can come back almost unchanged.
+- Technical terms it swaps in are highlighted. Hover one to see **you said:** with your original words and a short note. The highlight also stays on the sent message in the transcript.
+- It uses the model currently selected for this window, so it bills like any other request to that model.
+- Nothing is sent until you press Enter. You can edit the result first. Editing it removes the highlights and brings the Enhance key back.
+- There is no undo button. To get your original back, retype it or use the text editing undo in the field if your system supports it.
+- If enhancement fails, an error notice appears and your draft stays as it was.
+
+## Plan mode and plan review
+
+- In plan mode GG reads and plans but edits nothing. The deck shows a **Plan mode** flag.
+- There is no plan-mode switch for the user. GG enters plan mode itself for larger or riskier changes, and you can ask it to plan first.
+- When GG finishes a plan, a review opens in place of the composer, headed **Plan approval required**, with the plan below it. Only you can approve it.
+  - **Approve**: GG leaves plan mode and carries the plan out.
+  - **Feedback**: opens a box ("What should change about this plan?"). Write what to change and click **Send feedback** (or Cmd/Ctrl+Enter); Esc cancels. GG revises and shows the plan again.
+  - If a revision stalls, **Retry revision** asks again.
+- While Autopilot is on, Ken may review the plan as well. A line says Ken is reviewing and that you can still decide now; when he's done, your approval is still required.
+- During a run, the activity bar shows plan progress as "Plan: step X of Y".
+
+## Autopilot
+
+- Turn **Autopilot** on or off in the **More** panel (the ⋯ key on the bottom bar). After each run, Ken reviews the work and GG continues if it needs changes. Busywork such as commits or status checks is skipped.
+- You can't change the switch during a run or a review.
+
+## Tasks
+
+- **Tasks** in the deck lists the project's tasks. Each shows **Pending**, **Running** or **Done**.
+- You don't type tasks in yourself. Ask GG to add tasks, for example "add a task to fix the login bug". With none yet, the list says **No tasks yet**.
+- **Run** starts that task in a fresh session. **Run all** runs every pending task, one fresh session each. Both are disabled while GG is running.
+- The x (**Delete task**) removes a task.
+
+## Notes
+
+- **Notes** (pinned in the title bar) opens **Your notes**, the project's notes and roadmap. They are saved with the project, so GG can read them and keep them up to date when you ask.
+- The sections are **Overview** (**Current focus**, "What matters right now?", plus **Handoff notes** and the next tasks), **Roadmap**, **Reference** and **Archive**.
+- Notes tasks can be moved up or down (Alt+↑ / Alt+↓) or archived from each row's task actions. Finished ones collect in a completed group.
+- If the project's notes can't be read or saved, a banner says so (for example **Local fallback** while the app keeps a local copy) instead of losing your changes.
+
+## Roadmap
+
+- **Roadmap** lists the project's phases, each with a **Goal** and what it's **Done when**. **New phase** adds one.
+- Open a phase to see **Overview**, **References**, **Completion** and **Activity**. Phases can depend on other phases; starting one with unfinished prerequisites asks you to confirm first.
+- You can drag phases to reorder them. Done phases can't be moved.
+- **Delete phase** moves a phase to deleted phases; deleted phases are kept and **Recover** brings one back.
+- When GG drafts phases from your notes, a review opens: **Create phases with references** accepts them and **Reject draft** discards them. Edits and moves GG proposes are shown for your review the same way. When GG changes or reorders several phases at once, one review lists them all and they are saved together or not at all; **Reject edits** or **Reject moves** discards the whole set.
+- A due reminder shows **Roadmap reminder due** with **Open phase** and **Resume**.
+
+## Opportunities and Post-check
+
+- Next to the composer in Code windows is an action button. Press and hold it, then release on **Opportunities** or **Post-check**; it remembers your choice.
+- **Opportunities** opens a panel where GG looks for repeated work in the project that could become a command or a check, shows **What AI found**, and lets you review and run an idea. **Set up checks** prepares project checks for you to review.
+- **Post-check** runs /trace, then /parity, then /contract, each after the one before finishes.
+- If the project has its own check command, GG asks **Allow this project's check command?** before running it. Until you allow it, built-in checks are used.
+
+## Command palette
+
+- Cmd/Ctrl+K opens the command palette (**Search commands**) listing the commands from your command collections. Pick one to put it in the composer or send it straight away.
+
+## Checklist and project health
+
+- **Checklist** opens the project checklist: tests, CI, security, design and more. It shows how many items pass, and you can run a check on any item.
+- The project health badge shows a score and **Rescans every 2 min**. Click it for a breakdown and an option to have GG review project health. **Project Health** in the deck opens the full scores for file size, hygiene, safety and debt.
+
+## Git in the title bar
+
+- In a folder that isn't a git repository yet, the title bar shows **Initialize Git**. It opens a dialog that sets up git, creates a GitHub repository and configures CI for the stack.
+  - **Repository name** defaults to the folder name. If it needs cleaning up, the dialog shows the name it will use.
+  - Visibility: Private or Public.
+  - **Also set up**: **CI workflow + Dependabot**, **Branch protection** and **AGENTS.md**, each a checkbox.
+  - Click **Initialize** (or press Enter in the name field), and GG does the setup as a normal run. **Cancel** closes the dialog.
+- In a repository with uncommitted changes, the title bar shows **Commit** with the number of changed files. Clicking it runs `/commit`.
+- When there is nothing to commit it shows **Clean** (tooltip **Nothing to commit**).
+- These buttons are disabled while GG is running.
+- The deck's **Git** panel shows the branch, uncommitted files, and pull requests and issues for GitHub projects.
+- Click the branch name in the **Git** panel heading to switch branches. The list shows the **Default** branch and up to 5 **Recent** ones; type in **Search or create branch** to find any branch, including ones that exist **On GitHub only**.
+  - Uncommitted changes come with you when git allows it. If they would be overwritten, or a merge or rebase is unfinished, GG says **Couldn't switch to** the branch, lists the files and changes nothing. Pick **Stay on** the current branch or **Commit first**.
+  - To make a new branch, type its name in **Search or create branch** and pick **Create branch** at the bottom of the list. It starts from the current branch and your uncommitted changes come along. If the name isn't allowed or already exists, the row says why. If it matches a branch except for capital letters, the row offers **Switch to** that branch instead. If creating fails, use **Retry** or **Back to branches**, which keeps the name you typed.
+  - Switching and creating branches are paused while an agent works in this project. If another chat on the same folder is working, wait for it and use **Back to branches**.
+  - Every chat on the folder is told about the switch, so the agent knows which branch it is on.
+
+## CI indicator
+
+- When the project has GitHub Actions CI, an indicator shows the number of runs and their status: running, passed or failed. Running shimmers. Click it to open GitHub Actions.
+- A finished, passing result hides itself after about 10 seconds. A failure stays until you click **Dismiss CI failure**.
+- If the status can't be fetched it reads **CI unavailable**, and the last result may be out of date.
+
+## Activity bar and working beam
+
+- The activity bar above the composer shows what GG is doing. Idle, it shows lines like **Ready for work** or **Your move**. During a run it shows lines like **Working…** and a timer, then a short summary when it finishes.
+- A small pixel icon at the start of the bar shows the kind of step: thinking, writing, reading code, editing, running a command, running checks, agents and so on. A tick appears only when checks passed; a finished answer, edit or tool run shows its own icon instead.
+- On the right, the bar shows the elapsed time and the exact number of output tokens. The count rolls up each time the model reports a new total.
+- While GG, Ken or an Autopilot review is running, a light beam moves around the composer. It is decorative only.
+
+## Sub-agents
+
+- When GG sends out helpers, a "critter" feed tracks them: launched, still working, finished, failed or called back. Ken and Autopilot are covered in ken-and-autopilot.md.
+
+## Notices in the transcript
+
+- Compaction: when the context is compacted, a critter line shows it working and then done.
+- Hooks: when a project hook steps in, a shimmering pink critter line says what it's doing, for example "A critter is running the project's checks…". Others cover reviewing the work, re-checking new edits, checking that tests weren't weakened, breaking out of a loop, or re-reading the request after compaction. They are informational; no action is needed.
+
+## Moving around the transcript
+
+- After you scroll up, **Scroll to bottom** appears in the corner.
+- **You have new chats** jumps to new output that arrived below.
+- **You have a new question** jumps to a question from GG that is off screen and still needs an answer.
+
+## Common questions
+
+Q: How do I enhance my prompt?
+A: Type a draft, then click **Enhance** next to the send button. GG rewrites it with clearer wording using the current model, and you can edit it before pressing Enter.
+Q: Can I undo an enhancement?
+A: There is no undo button. Edit or retype the text; any change removes the enhancement highlights.
+Q: What are the highlighted words after enhancing?
+A: They are technical terms swapped in for your wording. Hover one to see what you originally said.
+Q: How do I commit my changes?
+A: Click **Commit** in the title bar, or type `/commit`. GG runs the checks, reviews the diff, commits and pushes.
+Q: Why does the title bar say Clean?
+A: There are no uncommitted changes in the project, so there is nothing to commit.
+Q: How do I put my project on GitHub?
+A: In a folder without git, click **Initialize Git**, pick a name and visibility, choose extras, and click **Initialize**.
+Q: How do I run a terminal command?
+A: Start the message with `!`, for example `!git status`, and press Enter. It runs in the project folder without starting an agent turn.
+Q: How do I stop being asked before every command?
+A: Choose **Always allow in this project** on the confirmation. To turn asking back on, click **Ask first instead** in the `!` picker.
+Q: How do I stop a command that's running?
+A: Click **Stop** on its output block.
+Q: Does GG see my command output?
+A: Yes, with your next message. The block shows **Shared with GG** once it has been sent.
+Q: Can I send a message while GG is working?
+A: Yes. It is queued and delivered at the next turn boundary. Click its x to cancel it.
+Q: How do I stop GG?
+A: Click the square send button (**Stop the run**) or press Esc.
+Q: How do I reference a file?
+A: Type `@` and part of the file name, then pick it with Enter or Tab.
+Q: How big can attachments be?
+A: Up to 100 MB in total per message.
+Q: How do I bring back something I typed earlier?
+A: Press Up in an empty composer to step through earlier prompts.
+Q: How do I make GG plan before changing code?
+A: Ask it to plan first. When the plan is ready, choose **Accept plan**, **Reject**, or type what to change.
+Q: How do I run something every hour?
+A: Use `/schedule <prompt> | 1h`. Add `| <times>` to limit the runs. The window must stay open.
+Q: How do I stop a schedule?
+A: Open the schedules button above the composer and click **Stop** next to it.
+Q: How do I add tasks and run them?
+A: Ask GG to add tasks, then open **Tasks** in the deck and click **Run** or **Run all**.
+Q: How do I add my own slash command?
+A: Put a Markdown file in the project's `.gg/commands/` folder. Its file name becomes the command, unless a `name:` line at the top sets another name.
+Q: How do I see my web app and talk to GG from it?
+A: Click **Live preview** in the **More** panel (the ⋯ key). If your dev server isn't running yet, click **Start dev server**. Your app opens in the browser with GG's chat on it; right-click an element to ask about it.
+Q: How do I work on two folders at once?
+A: Click **Add folder** in the **More** panel (the ⋯ key on the bottom bar) and pick the folder. To drop it, click **Remove folder** and then **Remove** next to it.
+Q: Where can I keep private notes?
+A: Open **Notes** in the deck. GG never sees them.
+Q: How do I switch branches?
+A: Click the branch name in the **Git** panel heading, then pick a branch or type to search. It's paused while an agent works in that project.
+Q: How do I create a branch?
+A: Click the branch name in the **Git** panel heading, type the new name, then pick **Create branch**. It's paused while an agent works in that project.

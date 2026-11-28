@@ -1,0 +1,122 @@
+<!doctype html>
+<!--
+  word-swap: a one-line sentence with a slot word that rolls vertically
+  through alternatives (slot-machine) and lands on the last one. The slot's
+  width eases to fit each word, so the centered sentence re-balances as it
+  rolls. Neighbouring words dim while they pass. Transparent background.
+  Params: --ws-size (font size), --ws-y (vertical center),
+  FIRST (time of the first roll), ROLL (seconds per roll), HOLD (seconds
+  each word rests), EASE.
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+  </head>
+  <body>
+    <div
+      id="word-swap-root"
+      data-composition-id="word-swap"
+      data-start="0"
+      data-duration="4"
+      data-width="1920"
+      data-height="1080"
+    >
+      <style>
+        [data-composition-id="word-swap"] {
+          --ws-size: 150px;
+          --ws-y: 540px;
+          position: absolute;
+          inset: 0;
+          color: var(--ink, #111);
+        }
+        [data-composition-id="word-swap"] .ws-line {
+          position: absolute;
+          left: 0;
+          right: 0;
+          top: var(--ws-y);
+          transform: translateY(-50%);
+          display: flex;
+          justify-content: center;
+          align-items: flex-start;
+          font-family: var(--display, sans-serif);
+          font-weight: var(--display-weight, 800);
+          font-stretch: var(--display-stretch, 100%);
+          letter-spacing: var(--display-tracking, -0.03em);
+          font-size: var(--ws-size);
+          line-height: 1.12;
+          white-space: pre;
+        }
+        [data-composition-id="word-swap"] .ws-slot {
+          position: relative;
+          overflow: hidden;
+          height: 1.12em;
+          color: var(--accent, currentColor);
+          -webkit-mask-image: linear-gradient(180deg, transparent 0%, #000 7%, #000 93%, transparent 100%);
+          mask-image: linear-gradient(180deg, transparent 0%, #000 7%, #000 93%, transparent 100%);
+        }
+        [data-composition-id="word-swap"] .ws-reel {
+          position: absolute;
+          left: 0;
+          top: 0;
+          white-space: normal;
+        }
+        [data-composition-id="word-swap"] .ws-word {
+          display: block;
+          height: 1.12em;
+          white-space: nowrap;
+        }
+      </style>
+      <div class="ws-line">
+        <!-- edit: text before the slot (keep the trailing space) -->
+        <span>We make it </span>
+        <span class="ws-slot"
+          ><span class="ws-reel">
+            <!-- edit: slot words, in order; the last one is where it lands (3–4 words) -->
+            <span class="ws-word">faster</span>
+            <span class="ws-word">simpler</span>
+            <span class="ws-word">clearer</span>
+            <span class="ws-word">yours</span>
+          </span></span
+        >
+        <!-- edit: text after the slot -->
+        <span>.</span>
+      </div>
+    </div>
+    <script>
+      (function () {
+        const FIRST = 0.8;
+        const ROLL = 0.55;
+        const HOLD = 0.4;
+        const EASE = "expo.inOut";
+        const q = (s) => document.querySelector('[data-composition-id="word-swap"] ' + s);
+        const slot = q(".ws-slot");
+        const reel = q(".ws-reel");
+        const words = Array.from(reel.querySelectorAll(".ws-word"));
+        const state = { p: 0 };
+        // Measured on every render (fonts may load after this script runs).
+        function draw() {
+          const widths = words.map((w) => w.scrollWidth);
+          const h = words[0].offsetHeight;
+          const i = Math.min(Math.floor(state.p), words.length - 1);
+          const f = state.p - i;
+          const next = widths[Math.min(i + 1, words.length - 1)];
+          slot.style.width = (widths[i] + (next - widths[i]) * f).toFixed(2) + "px";
+          reel.style.transform = `translateY(${(-state.p * h).toFixed(2)}px)`;
+          words.forEach((w, j) => {
+            w.style.opacity = String(1 - Math.min(1, Math.abs(state.p - j)) * 0.75);
+          });
+        }
+        const tl = gsap.timeline({ paused: true });
+        tl.fromTo(q(".ws-line"), { opacity: 0, y: 40 }, { opacity: 1, y: 0, duration: 0.7, ease: "expo.out" }, 0.1);
+        for (let k = 1; k < words.length; k++) {
+          tl.to(state, { p: k, duration: ROLL, ease: EASE, onUpdate: draw }, FIRST + (k - 1) * (ROLL + HOLD));
+        }
+        tl.to({}, { duration: Math.max(0, 4 - tl.duration()) });
+        draw();
+        window.__timelines = window.__timelines || {};
+        window.__timelines["word-swap"] = tl;
+      })();
+    </script>
+  </body>
+</html>

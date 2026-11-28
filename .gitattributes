@@ -1,0 +1,33 @@
+# Normalize line endings in the repository.
+#
+# Git for Windows defaults to core.autocrlf=true, which rewrites checked-out
+# files to CRLF. That silently breaks anything whose CONTENT is load-bearing:
+# the seeded agent fixtures in packages/ggcoder are content-hashed, and their
+# SHA-256 changed on Windows purely because of the line endings, failing
+# config.test.ts on every Windows CI run.
+#
+# `text=auto eol=lf` stores text as LF and checks it out as LF everywhere, so a
+# Windows contributor gets byte-identical files to CI and macOS. Editors have
+# handled LF for many years; the actual risk is the reverse.
+* text=auto eol=lf
+
+# Explicitly binary — never touch these, and don't diff them as text.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.icns binary
+*.webp binary
+*.mp3 binary
+*.wav binary
+*.woff binary
+*.woff2 binary
+*.zip binary
+*.gz binary
+*.node binary
+
+# Windows-only scripts that a native shell must be able to parse.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf

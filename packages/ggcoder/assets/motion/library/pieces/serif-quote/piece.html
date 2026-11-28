@@ -1,0 +1,145 @@
+<!doctype html>
+<!--
+  serif-quote: a large pull quote that builds word by word — each word rises,
+  fades and sharpens from a soft blur — with a hanging accent quote mark and
+  a mono attribution under a short rule. Wrap words in <em> to color them
+  --accent. Uses --display, so it turns editorial with a serif display look
+  and stays clean with a grotesk. Transparent background.
+  Params: --sq-size (quote size), --sq-x / --sq-y (top-left), --sq-w (measure),
+  START, STAGGER, BLUR (px).
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+  </head>
+  <body>
+    <div
+      id="serif-quote-root"
+      data-composition-id="serif-quote"
+      data-start="0"
+      data-duration="4"
+      data-width="1920"
+      data-height="1080"
+    >
+      <style>
+        [data-composition-id="serif-quote"] {
+          --sq-size: 112px;
+          --sq-x: 250px;
+          --sq-y: 300px;
+          --sq-w: 1440px;
+          position: absolute;
+          inset: 0;
+          color: var(--ink, #111);
+        }
+        [data-composition-id="serif-quote"] .sq-block {
+          position: absolute;
+          left: var(--sq-x);
+          top: var(--sq-y);
+          width: var(--sq-w);
+        }
+        [data-composition-id="serif-quote"] .sq-mark {
+          position: absolute;
+          left: -0.62em;
+          top: -0.2em;
+          font-family: var(--display, serif);
+          font-weight: var(--display-weight, 700);
+          font-size: calc(var(--sq-size) * 2.4);
+          line-height: 1;
+          color: var(--accent, currentColor);
+        }
+        [data-composition-id="serif-quote"] .sq-text {
+          margin: 0;
+          font-family: var(--display, serif);
+          font-weight: var(--display-weight, 700);
+          font-stretch: var(--display-stretch, 100%);
+          letter-spacing: var(--display-tracking, -0.02em);
+          font-size: var(--sq-size);
+          line-height: 1.1;
+          text-wrap: balance;
+        }
+        [data-composition-id="serif-quote"] .sq-text em {
+          font-style: normal;
+          color: var(--accent, currentColor);
+        }
+        [data-composition-id="serif-quote"] .sq-w {
+          display: inline-block;
+        }
+        [data-composition-id="serif-quote"] .sq-by {
+          display: flex;
+          align-items: center;
+          gap: 28px;
+          margin-top: 64px;
+          font-family: var(--mono, monospace);
+          font-size: 24px;
+          letter-spacing: 0.14em;
+          text-transform: uppercase;
+          color: var(--muted, rgba(0, 0, 0, 0.6));
+        }
+        [data-composition-id="serif-quote"] .sq-rule {
+          width: 72px;
+          height: 3px;
+          background: var(--ink, #111);
+          transform-origin: left center;
+        }
+      </style>
+      <div class="sq-block">
+        <div class="sq-mark" id="sq-mark">“</div>
+        <!-- edit: the quote; wrap emphasis words in <em>, <br /> for a deliberate break -->
+        <p class="sq-text" id="sq-text">The best interface is the one you stop noticing.<br /><em>It simply gets out of the way.</em></p>
+        <div class="sq-by" id="sq-by">
+          <span class="sq-rule" id="sq-rule"></span>
+          <!-- edit: attribution -->
+          <span>Maya Lindqvist, Head of Design</span>
+        </div>
+      </div>
+    </div>
+    <script>
+      (function () {
+        const START = 0.3;
+        const STAGGER = 0.055;
+        const BLUR = 14;
+        // Tiny deterministic splitter: wraps every word (inside any inline
+        // element too) in a span.sq-w, preserving the spaces between them.
+        function split(node) {
+          Array.from(node.childNodes).forEach((child) => {
+            if (child.nodeType === 1) return split(child);
+            if (child.nodeType !== 3) return;
+            const frag = document.createDocumentFragment();
+            child.textContent.split(/(\s+)/).forEach((part) => {
+              if (!part) return;
+              if (/^\s+$/.test(part)) return frag.appendChild(document.createTextNode(" "));
+              const w = document.createElement("span");
+              w.className = "sq-w";
+              w.textContent = part;
+              frag.appendChild(w);
+            });
+            node.replaceChild(frag, child);
+          });
+        }
+        const text = document.getElementById("sq-text");
+        split(text);
+        const words = text.querySelectorAll(".sq-w");
+        const tl = gsap.timeline({ paused: true });
+        tl.fromTo(
+          "#sq-mark",
+          { opacity: 0, y: 40, filter: `blur(${BLUR}px)` },
+          { opacity: 1, y: 0, filter: "blur(0px)", duration: 0.9, ease: "power3.out" },
+          START - 0.15,
+        );
+        tl.fromTo(
+          words,
+          { opacity: 0, y: 34, filter: `blur(${BLUR}px)` },
+          { opacity: 1, y: 0, filter: "blur(0px)", duration: 0.9, ease: "power3.out", stagger: STAGGER },
+          START,
+        );
+        const end = START + STAGGER * (words.length - 1) + 0.5;
+        tl.fromTo("#sq-rule", { scaleX: 0 }, { scaleX: 1, duration: 0.7, ease: "expo.out" }, end);
+        tl.fromTo("#sq-by span:last-child", { opacity: 0, x: -16 }, { opacity: 1, x: 0, duration: 0.7, ease: "expo.out" }, end + 0.1);
+        tl.to({}, { duration: Math.max(0, 4 - tl.duration()) });
+        window.__timelines = window.__timelines || {};
+        window.__timelines["serif-quote"] = tl;
+      })();
+    </script>
+  </body>
+</html>

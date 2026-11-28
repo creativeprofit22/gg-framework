@@ -1,0 +1,11 @@
+{
+  "id": "duotone-broadcast",
+  "name": "Duotone Broadcast",
+  "description": "One saturated color field and one dark ink. A huge condensed word, tiny mono labels in the corners, crop marks and a faint dot grid, like a broadcast graphics package. Scenes change by flipping the whole field color.",
+  "tags": ["two-color", "bold", "editorial", "kinetic-type", "showreel", "flat", "swiss"],
+  "fonts": ["Archivo", "Martian Mono"],
+  "bestFor": ["showreels", "dev tools", "explainers", "launch teasers", "concept videos"],
+  "pieces": ["broadcast-frame", "dot-grid-field", "slam-word", "ease-curve"],
+  "samplePieces": ["dot-grid-field", "slam-word", "ease-curve", "broadcast-frame"],
+  "previewAt": 2.2
+}

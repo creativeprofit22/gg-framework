@@ -5,18 +5,26 @@ import {
   type MutableRefObject,
   type SetStateAction,
 } from "react";
-import type { Message, Provider } from "@kenkaiiii/gg-ai";
+import type { Message, Provider, Usage } from "@kenkaiiii/gg-ai";
+import type { TransformContextOptions } from "@kenkaiiii/gg-agent";
+import { compact, shouldCompact } from "../../core/compaction/compactor.js";
+import { calculateActiveContextTokens } from "../../core/compaction/active-context.js";
 import {
-  compact,
-  shouldCompact,
-  getCompactionReserveTokens,
-} from "../../core/compaction/compactor.js";
-import { estimateConversationTokens } from "../../core/compaction/token-estimator.js";
+  pruneMinimumTokens,
+  pruneStaleToolResults,
+  shouldPruneToolResults,
+} from "../../core/compaction/tool-result-pruner.js";
+import { assessCacheExpiry, resolveCacheTtl, type CacheTouch } from "../../core/cache-expiry.js";
+import {
+  estimateConversationTokens,
+  calibrateEstimatorFromUsage,
+} from "../../core/compaction/token-estimator.js";
 import {
   getAuthStorageKeys,
   getContextWindow,
   type ContextWindowOptions,
 } from "../../core/model-registry.js";
+import { resolveCompactionPolicy } from "../../core/compaction/policy.js";
 import { log } from "../../core/logger.js";
 import type { AuthStorage } from "../../core/auth-storage.js";
 import type { SettingsManager } from "../../core/settings-manager.js";
@@ -26,27 +34,35 @@ import { toErrorItem } from "../error-item.js";
 interface UseContextCompactionOptions {
   currentModel: string;
   currentProvider: Provider;
-  maxTokens: number;
   authStorage?: AuthStorage;
   contextWindowOptions: ContextWindowOptions;
   activeApiKey: string | undefined;
   activeAccountId: string | undefined;
-  activeProjectId: string | undefined;
   activeBaseUrl: string | undefined;
   setLiveItems: Dispatch<SetStateAction<CompletedItem[]>>;
   getId: () => string;
   approvedPlanPathRef: MutableRefObject<string | undefined>;
   settingsRef: MutableRefObject<SettingsManager | null>;
   messagesRef: MutableRefObject<Message[]>;
-  lastActualTokensRef: MutableRefObject<number>;
-  lastActualTokensTimestampRef: MutableRefObject<number>;
   persistCompactedSession: (compactedMessages: readonly Message[]) => Promise<void>;
 }
 
 export interface ContextCompaction {
   compactionAbortRef: MutableRefObject<AbortController | null>;
   compactConversation: (messages: Message[], signal?: AbortSignal) => Promise<Message[]>;
-  transformContext: (messages: Message[], options?: { force?: boolean }) => Promise<Message[]>;
+  transformContext: (messages: Message[], options: TransformContextOptions) => Promise<Message[]>;
+  recordProviderUsage: (usage: Usage, messages: Message[]) => void;
+}
+
+function tuiCacheTtl(
+  provider: Provider,
+  model: string,
+  baseUrl: string | undefined,
+  accountId: string | undefined,
+) {
+  // The TUI sends no cacheRetention, so mirror gg-ai's per-provider default.
+  const cacheRetention = provider === "anthropic" ? "long" : "short";
+  return resolveCacheTtl({ provider, model, cacheRetention, baseUrl, accountId });
 }
 
 /**
@@ -58,24 +74,84 @@ export interface ContextCompaction {
 export function useContextCompaction({
   currentModel,
   currentProvider,
-  maxTokens,
   authStorage,
   contextWindowOptions,
   activeApiKey,
   activeAccountId,
-  activeProjectId,
   activeBaseUrl,
   setLiveItems,
   getId,
   approvedPlanPathRef,
   settingsRef,
   messagesRef,
-  lastActualTokensRef,
-  lastActualTokensTimestampRef,
   persistCompactedSession,
 }: UseContextCompactionOptions): ContextCompaction {
   const compactionAbortRef = useRef<AbortController | null>(null);
   const lastCompactionTimeRef = useRef(0);
+  const providerContextRef = useRef<{ usage: Usage; anchor: Message } | null>(null);
+  // The TUI has no AgentSession cache diagnostics, so track the last successful
+  // provider request here to tell a warm prompt cache from a cold one.
+  const lastCacheTouchRef = useRef<CacheTouch | null>(null);
+  const modelKey = `${currentProvider}:${currentModel}`;
+  const providerContextModelKeyRef = useRef(modelKey);
+  if (providerContextModelKeyRef.current !== modelKey) {
+    providerContextModelKeyRef.current = modelKey;
+    providerContextRef.current = null;
+  }
+
+  const noteCacheTouch = useCallback((): void => {
+    const policy = tuiCacheTtl(currentProvider, currentModel, activeBaseUrl, activeAccountId);
+    lastCacheTouchRef.current = policy
+      ? { at: Date.now(), provider: currentProvider, model: currentModel, policy }
+      : null;
+  }, [currentProvider, currentModel, activeBaseUrl, activeAccountId]);
+
+  const isCacheCold = useCallback(
+    (messages: Message[], prefixTokens: number): boolean => {
+      const status = assessCacheExpiry({
+        current: {
+          provider: currentProvider,
+          model: currentModel,
+          policy: tuiCacheTtl(currentProvider, currentModel, activeBaseUrl, activeAccountId),
+        },
+        lastTouch: lastCacheTouchRef.current,
+        now: Date.now(),
+        prefixTokens,
+        hasHistory: messages.some((m) => m.role === "user"),
+      });
+      return status?.expired ?? false;
+    },
+    [currentProvider, currentModel, activeBaseUrl, activeAccountId],
+  );
+
+  const rememberProviderUsage = useCallback(
+    (usage: Usage, messages: Message[], pendingMessages: Message[]): void => {
+      noteCacheTouch();
+      const anchorIndex = messages.length - pendingMessages.length - 1;
+      const anchor = messages[anchorIndex];
+      if (anchor?.role === "assistant") {
+        providerContextRef.current = { usage: { ...usage }, anchor };
+        // Feed the authoritative usage back into the token estimator so
+        // char-based estimates track this session's real tokenizer.
+        calibrateEstimatorFromUsage(messages.slice(0, anchorIndex), usage);
+      }
+    },
+    [noteCacheTouch],
+  );
+
+  const recordProviderUsage = useCallback(
+    (usage: Usage, messages: Message[]): void => {
+      noteCacheTouch();
+      for (let index = messages.length - 1; index >= 0; index--) {
+        const anchor = messages[index];
+        if (anchor?.role === "assistant") {
+          providerContextRef.current = { usage: { ...usage }, anchor };
+          return;
+        }
+      }
+    },
+    [noteCacheTouch],
+  );
 
   const compactConversation = useCallback(
     async (messages: Message[], signal?: AbortSignal): Promise<Message[]> => {
@@ -99,7 +175,6 @@ export function useContextCompaction({
         // Resolve fresh credentials for compaction too
         let compactApiKey = activeApiKey;
         let compactAccountId = activeAccountId;
-        let compactProjectId = activeProjectId;
         let compactBaseUrl = activeBaseUrl;
         if (authStorage) {
           const creds = await authStorage.resolveCredentials(currentProvider, {
@@ -107,7 +182,6 @@ export function useContextCompaction({
           });
           compactApiKey = creds.accessToken;
           compactAccountId = creds.accountId;
-          compactProjectId = creds.projectId;
           compactBaseUrl = creds.baseUrl ?? compactBaseUrl;
         }
 
@@ -116,7 +190,6 @@ export function useContextCompaction({
           model: currentModel,
           apiKey: compactApiKey,
           accountId: compactAccountId,
-          projectId: compactProjectId,
           baseUrl: compactBaseUrl,
           contextWindow,
           signal: compactionSignal,
@@ -124,6 +197,7 @@ export function useContextCompaction({
         });
 
         if (result.result.compacted) {
+          providerContextRef.current = null;
           // Replace spinner with completed notice
           setLiveItems((prev) =>
             prev.map((item) =>
@@ -140,9 +214,11 @@ export function useContextCompaction({
             ),
           );
         } else {
-          // Nothing was actually compacted — remove spinner silently
+          // Nothing was actually compacted — remove spinner silently and keep
+          // the original reference so the agent loop preserves its usage anchor.
           log("INFO", "compaction", `Compaction skipped: ${result.result.reason ?? "unknown"}`);
           setLiveItems((prev) => prev.filter((item) => item.id !== spinId));
+          return messages;
         }
 
         return result.messages;
@@ -173,7 +249,6 @@ export function useContextCompaction({
       currentProvider,
       activeApiKey,
       activeAccountId,
-      activeProjectId,
       activeBaseUrl,
       contextWindowOptions,
       authStorage,
@@ -184,13 +259,17 @@ export function useContextCompaction({
   );
 
   const transformContext = useCallback(
-    async (messages: Message[], options?: { force?: boolean }): Promise<Message[]> => {
+    async (messages: Message[], options: TransformContextOptions): Promise<Message[]> => {
+      if (options.usage) {
+        rememberProviderUsage(options.usage, messages, options.pendingMessages);
+      }
+
       const settings = settingsRef.current;
       const autoCompact = settings?.get("autoCompact") ?? true;
-      const threshold = settings?.get("compactThreshold") ?? 0.8;
+      const threshold = settings?.get("compactThreshold") ?? 0.85;
 
-      // Force-compact on context overflow regardless of settings
-      if (options?.force) {
+      // Force-compact on context overflow regardless of settings or cooldown.
+      if (options.force) {
         const result = await compactConversation(messages);
         if (result !== messages) {
           messagesRef.current = result;
@@ -202,18 +281,60 @@ export function useContextCompaction({
 
       if (!autoCompact) return messages;
 
-      // Time-based cooldown: skip if compaction ran within the last 30 seconds
+      const contextWindow = getContextWindow(currentModel, contextWindowOptions);
+      const policy = resolveCompactionPolicy({
+        provider: currentProvider,
+        model: currentModel,
+        contextWindow,
+        threshold,
+        compactAtTokens: settings?.get("compactAtTokens"),
+        accountId: contextWindowOptions.accountId,
+        approvedPlanPath: approvedPlanPathRef.current,
+      });
+      // Provider usage when there is some, else an estimate of the history.
+      let usage = options.usage;
+      let pendingMessages = options.pendingMessages;
+      if (!usage && providerContextRef.current) {
+        const anchorIndex = messages.lastIndexOf(providerContextRef.current.anchor);
+        if (anchorIndex >= 0) {
+          usage = providerContextRef.current.usage;
+          pendingMessages = messages.slice(anchorIndex + 1);
+        } else {
+          providerContextRef.current = null;
+        }
+      }
+      let activeTokens = calculateActiveContextTokens(messages, { usage, pendingMessages });
+
+      // Cheap stale-tool-output pruning before the expensive LLM compaction
+      // check, once the context is big enough for the freed tokens to be worth
+      // a cache rewrite. In-place mutation preserves the usage anchor's
+      // identity; drop the retained usage afterwards since it counted the
+      // pruned content.
+      if (shouldPruneToolResults(activeTokens, policy.targetTokens)) {
+        const cacheCold = isCacheCold(messages, activeTokens);
+        const pruneResult = pruneStaleToolResults(messages, {
+          minimumTokens: pruneMinimumTokens(activeTokens, cacheCold, policy.targetTokens),
+        });
+        if (pruneResult.pruned) {
+          providerContextRef.current = null;
+          log("INFO", "compaction", "Pruned stale tool outputs", {
+            prunedResults: String(pruneResult.prunedResults),
+            freedTokens: String(pruneResult.freedTokens),
+          });
+          // The turn's own usage also counted the pruned content — estimate the
+          // (now smaller) history so the freed tokens actually defer compaction.
+          activeTokens = calculateActiveContextTokens(messages, {
+            pendingMessages: options.pendingMessages,
+          });
+        }
+      }
+
+      // Time-based cooldown: skip if compaction ran within the last 30 seconds.
       if (Date.now() - lastCompactionTimeRef.current < 30_000) {
         log("INFO", "compaction", `Skipping compaction — cooldown active`);
         return messages;
       }
-
-      const contextWindow = getContextWindow(currentModel, contextWindowOptions);
-      const reserveTokens = getCompactionReserveTokens(maxTokens);
-      const tokensFresh = lastActualTokensTimestampRef.current > lastCompactionTimeRef.current;
-      const actualTokens =
-        lastActualTokensRef.current > 0 && tokensFresh ? lastActualTokensRef.current : undefined;
-      if (shouldCompact(messages, contextWindow, threshold, actualTokens, reserveTokens)) {
+      if (shouldCompact(messages, contextWindow, threshold, activeTokens, policy.targetTokens)) {
         const result = await compactConversation(messages);
         if (result !== messages) {
           messagesRef.current = result;
@@ -229,13 +350,17 @@ export function useContextCompaction({
       compactConversation,
       contextWindowOptions,
       persistCompactedSession,
-      maxTokens,
       settingsRef,
       messagesRef,
-      lastActualTokensRef,
-      lastActualTokensTimestampRef,
+      rememberProviderUsage,
+      isCacheCold,
     ],
   );
 
-  return { compactionAbortRef, compactConversation, transformContext };
+  return {
+    compactionAbortRef,
+    compactConversation,
+    transformContext,
+    recordProviderUsage,
+  };
 }

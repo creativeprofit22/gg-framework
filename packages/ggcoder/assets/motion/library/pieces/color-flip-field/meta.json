@@ -1,0 +1,12 @@
+{
+  "id": "color-flip-field",
+  "name": "Color flip field",
+  "kind": "background",
+  "description": "Duotone scene change: the --field background is swept by a slanted --field-2 panel on a beat (fast expo wipe), holds, then wipes off the far side. Fully flipped at 1.55s, back to --field at 3.15s.",
+  "tags": ["flat", "duotone", "wipe", "scene-change", "beat", "two-color", "broadcast"],
+  "fonts": [],
+  "duration": 4,
+  "previewAt": 1.27,
+  "license": "original",
+  "previewLook": "duotone-broadcast"
+}

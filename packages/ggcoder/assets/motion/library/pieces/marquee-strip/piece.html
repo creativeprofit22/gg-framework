@@ -1,0 +1,132 @@
+<!doctype html>
+<!--
+  marquee-strip: one or two tilted bands of repeated text scrolling at a
+  constant speed, the second in the opposite direction. Position is a pure
+  function of time: x = -(speed * t) mod setWidth, so any frame seeks
+  exactly. Band A is solid --ink with --field type; band B is outlined type
+  between hairlines. Delete .ms-band-b for a single strip. Transparent
+  background.
+  Params: --ms-size (type size), --ms-tilt (band rotation), --ms-ya / --ms-yb
+  (band centers); SPEED_A / SPEED_B (px per second, negative reverses),
+  COPIES (repeats of the set, enough to cover the frame twice).
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+  </head>
+  <body>
+    <div
+      id="marquee-strip-root"
+      data-composition-id="marquee-strip"
+      data-start="0"
+      data-duration="5"
+      data-width="1920"
+      data-height="1080"
+    >
+      <style>
+        [data-composition-id="marquee-strip"] {
+          --ms-size: 112px;
+          --ms-tilt: -3deg;
+          --ms-ya: 420px;
+          --ms-yb: 650px;
+          position: absolute;
+          inset: 0;
+          overflow: hidden;
+          color: var(--ink, #111);
+        }
+        [data-composition-id="marquee-strip"] .ms-band {
+          position: absolute;
+          left: -240px;
+          width: 2400px;
+          overflow: hidden;
+          transform: translateY(-50%) rotate(var(--ms-tilt));
+          font-family: var(--display, sans-serif);
+          font-weight: var(--display-weight, 800);
+          font-stretch: var(--display-stretch, 100%);
+          letter-spacing: var(--display-tracking, -0.02em);
+          font-size: var(--ms-size);
+          line-height: 1;
+          word-spacing: 0.12em;
+          text-transform: uppercase;
+          white-space: nowrap;
+        }
+        [data-composition-id="marquee-strip"] .ms-band-a {
+          top: var(--ms-ya);
+          background: var(--ink, #111);
+          color: var(--field, #fff);
+          padding: 0.2em 0 0.14em;
+        }
+        [data-composition-id="marquee-strip"] .ms-band-b {
+          top: var(--ms-yb);
+          color: var(--field, #fff);
+          -webkit-text-stroke: 2px var(--ink, #111);
+          border-top: 2px solid var(--line, rgba(0, 0, 0, 0.2));
+          border-bottom: 2px solid var(--line, rgba(0, 0, 0, 0.2));
+          padding: 0.18em 0 0.12em;
+        }
+        [data-composition-id="marquee-strip"] .ms-track {
+          display: flex;
+          width: max-content;
+        }
+        [data-composition-id="marquee-strip"] .ms-set {
+          display: flex;
+          align-items: center;
+        }
+        [data-composition-id="marquee-strip"] .ms-set > span {
+          padding: 0 0.32em;
+        }
+        [data-composition-id="marquee-strip"] .ms-set > i {
+          width: 0.2em;
+          height: 0.2em;
+          border-radius: 50%;
+          background: currentColor;
+          flex: none;
+        }
+        [data-composition-id="marquee-strip"] .ms-band-b .ms-set > i {
+          background: var(--ink, #111);
+        }
+      </style>
+      <div class="ms-band ms-band-a">
+        <div class="ms-track">
+          <!-- edit: band A items (one set; separators are the <i> dots) -->
+          <div class="ms-set"><span>Launch</span><i></i><span>Design</span><i></i><span>Motion</span><i></i><span>Ship it</span><i></i></div>
+        </div>
+      </div>
+      <div class="ms-band ms-band-b">
+        <div class="ms-track">
+          <!-- edit: band B items -->
+          <div class="ms-set"><span>Frame by frame</span><i></i><span>Made to move</span><i></i></div>
+        </div>
+      </div>
+    </div>
+    <script>
+      (function () {
+        const DURATION = 5;
+        const SPEED_A = 220;
+        const SPEED_B = -170;
+        const COPIES = 6;
+        const root = document.querySelector('[data-composition-id="marquee-strip"]');
+        const tracks = Array.from(root.querySelectorAll(".ms-track"));
+        const speeds = [SPEED_A, SPEED_B];
+        tracks.forEach((track) => {
+          const set = track.querySelector(".ms-set");
+          for (let i = 1; i < COPIES; i++) track.appendChild(set.cloneNode(true));
+        });
+        const state = { t: 0 };
+        function draw() {
+          tracks.forEach((track, i) => {
+            const w = track.firstElementChild.offsetWidth || 1;
+            const d = (((speeds[i] || 0) * state.t) % w + w) % w;
+            track.style.transform = `translateX(${(-d).toFixed(2)}px)`;
+          });
+        }
+        const tl = gsap.timeline({ paused: true });
+        tl.fromTo(state, { t: 0 }, { t: DURATION, duration: DURATION, ease: "none", onUpdate: draw }, 0);
+        draw();
+        window.__timelines = window.__timelines || {};
+        window.__timelines["marquee-strip"] = tl;
+      })();
+    </script>
+  </body>
+</html>

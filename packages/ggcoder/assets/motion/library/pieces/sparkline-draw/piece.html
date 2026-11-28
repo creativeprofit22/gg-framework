@@ -1,0 +1,204 @@
+<!doctype html>
+<!--
+  sparkline-draw: a line chart that draws itself left to right over a soft
+  area fill, a head dot riding the leading edge, then the last value is
+  flagged with a dot and a display label. Mono y-axis ticks and x labels.
+  Transparent background.
+  Params (top of script):
+    DATA     numbers, oldest first (8–16 points read best)
+    X_LABELS labels spread evenly under the plot (any count ≥ 2)
+    Y_MAX    top of the y axis; Y_TICKS how many steps (gridlines)
+    FMT      value -> text for ticks and the flag
+    DRAW     seconds for the line to cross the plot
+  CSS: --sd-x / --sd-y (top-left of the chart).
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+  </head>
+  <body>
+    <div
+      id="sparkline-draw-root"
+      data-composition-id="sparkline-draw"
+      data-start="0"
+      data-duration="5"
+      data-width="1920"
+      data-height="1080"
+    >
+      <style>
+        [data-composition-id="sparkline-draw"] {
+          --sd-x: 260px;
+          --sd-y: 215px;
+          position: absolute;
+          inset: 0;
+          color: var(--ink, #111);
+          font-family: var(--mono, monospace);
+        }
+        [data-composition-id="sparkline-draw"] svg {
+          position: absolute;
+          left: var(--sd-x);
+          top: var(--sd-y);
+          overflow: visible;
+        }
+        [data-composition-id="sparkline-draw"] text {
+          font-family: var(--mono, monospace);
+          font-size: 22px;
+          letter-spacing: 0.06em;
+          font-variant-numeric: tabular-nums;
+          fill: var(--muted, rgba(0, 0, 0, 0.6));
+        }
+        [data-composition-id="sparkline-draw"] .sd-title {
+          font-size: 24px;
+          letter-spacing: 0.12em;
+          fill: var(--ink, #111);
+        }
+        [data-composition-id="sparkline-draw"] .sd-grid line {
+          stroke: var(--line, rgba(0, 0, 0, 0.2));
+          stroke-width: 1.5;
+        }
+        [data-composition-id="sparkline-draw"] .sd-line {
+          fill: none;
+          stroke: var(--accent, #111);
+          stroke-width: 6;
+          stroke-linejoin: round;
+          stroke-linecap: round;
+        }
+        [data-composition-id="sparkline-draw"] .sd-stop {
+          stop-color: var(--accent, #111);
+        }
+        [data-composition-id="sparkline-draw"] .sd-flag-box {
+          fill: var(--accent, #111);
+        }
+        [data-composition-id="sparkline-draw"] .sd-flag-val {
+          font-family: var(--display, sans-serif);
+          font-weight: var(--display-weight, 800);
+          font-stretch: var(--display-stretch, 100%);
+          letter-spacing: var(--display-tracking, -0.02em);
+          font-size: 48px;
+          fill: var(--field, #fff);
+        }
+        [data-composition-id="sparkline-draw"] .sd-flag-sub {
+          font-size: 22px;
+          fill: var(--field, #fff);
+        }
+      </style>
+      <svg width="1500" height="700" viewBox="0 0 1500 700">
+        <defs>
+          <linearGradient id="sd-grad" x1="0" y1="0" x2="0" y2="1">
+            <stop class="sd-stop" offset="0" stop-opacity="0.32" />
+            <stop class="sd-stop" offset="1" stop-opacity="0" />
+          </linearGradient>
+          <clipPath id="sd-clip">
+            <rect id="sd-clip-rect" x="0" y="-40" width="0" height="760" />
+          </clipPath>
+        </defs>
+        <!-- edit: title -->
+        <text class="sd-title" x="0" y="24">WEEKLY ACTIVE USERS · 2026</text>
+        <g class="sd-grid" id="sd-grid"></g>
+        <g id="sd-yticks"></g>
+        <g id="sd-xticks"></g>
+        <g clip-path="url(#sd-clip)">
+          <path id="sd-area" fill="url(#sd-grad)" />
+          <path id="sd-line" class="sd-line" />
+        </g>
+        <circle id="sd-head" r="11" fill="var(--accent, #111)" />
+        <g id="sd-flag" opacity="0">
+          <line id="sd-stem" stroke="var(--accent, #111)" stroke-width="3" />
+          <circle id="sd-ring" r="20" fill="none" stroke="var(--accent, #111)" stroke-width="3" />
+          <rect class="sd-flag-box" id="sd-flag-box" width="230" height="104" rx="12" />
+          <text class="sd-flag-val" id="sd-flag-val"></text>
+          <!-- edit: flag sub-label -->
+          <text class="sd-flag-sub" id="sd-flag-sub">THIS WEEK</text>
+        </g>
+      </svg>
+    </div>
+    <script>
+      (function () {
+        // edit: series + axis
+        const DATA = [18, 22, 21, 27, 31, 29, 36, 42, 40, 51, 58, 55, 66, 74, 71, 84.2];
+        const X_LABELS = ["JAN", "MAR", "MAY", "JUL", "SEP"];
+        const Y_MAX = 100;
+        const Y_TICKS = 4;
+        const FMT = (v) => (v === 0 ? "0" : v.toFixed(v % 1 ? 1 : 0) + "K");
+        const DRAW = 2.4;
+
+        const NS = "http://www.w3.org/2000/svg";
+        const root = document.querySelector('[data-composition-id="sparkline-draw"]');
+        const $ = (id) => root.querySelector("#" + id);
+        const X0 = 110; // plot left (room for y ticks)
+        const X1 = 1300; // plot right (room for the flag)
+        const Y0 = 90; // plot top
+        const Y1 = 590; // plot bottom
+        const px = (i) => X0 + (i / (DATA.length - 1)) * (X1 - X0);
+        const py = (v) => Y1 - (v / Y_MAX) * (Y1 - Y0);
+        const pts = DATA.map((v, i) => [px(i), py(v)]);
+
+        const el = (tag, attrs, parent, text) => {
+          const n = document.createElementNS(NS, tag);
+          for (const k in attrs) n.setAttribute(k, attrs[k]);
+          if (text !== undefined) n.textContent = text;
+          parent.appendChild(n);
+          return n;
+        };
+        for (let t = 0; t <= Y_TICKS; t++) {
+          const v = (Y_MAX / Y_TICKS) * t;
+          const y = py(v);
+          el("line", { x1: X0, x2: X1 + 60, y1: y, y2: y }, $("sd-grid"));
+          el("text", { x: X0 - 24, y: y + 8, "text-anchor": "end" }, $("sd-yticks"), FMT(v));
+        }
+        X_LABELS.forEach((label, i) => {
+          const x = X0 + (i / (X_LABELS.length - 1)) * (X1 - X0);
+          el("text", { x, y: Y1 + 50, "text-anchor": i === 0 ? "start" : i === X_LABELS.length - 1 ? "end" : "middle" }, $("sd-xticks"), label);
+        });
+        el("line", { x1: X0, x2: X1 + 60, y1: Y1, y2: Y1, stroke: "currentColor", "stroke-width": 3 }, $("sd-grid"));
+
+        const d = "M" + pts.map((p) => p[0].toFixed(1) + " " + p[1].toFixed(1)).join(" L");
+        $("sd-line").setAttribute("d", d);
+        $("sd-area").setAttribute("d", d + ` L${X1} ${Y1} L${X0} ${Y1} Z`);
+
+        // Flag on the last point: box up-left of the dot so it never leaves the plot.
+        const [lx, ly] = pts[pts.length - 1];
+        $("sd-ring").setAttribute("cx", lx);
+        $("sd-ring").setAttribute("cy", ly);
+        const bx = lx - 230 + 70;
+        const by = ly - 104 - 56;
+        $("sd-stem").setAttribute("x1", lx);
+        $("sd-stem").setAttribute("x2", lx);
+        $("sd-stem").setAttribute("y1", ly - 20);
+        $("sd-stem").setAttribute("y2", by + 104);
+        $("sd-flag-box").setAttribute("x", bx);
+        $("sd-flag-box").setAttribute("y", by);
+        $("sd-flag-val").setAttribute("x", bx + 24);
+        $("sd-flag-val").setAttribute("y", by + 54);
+        $("sd-flag-sub").setAttribute("x", bx + 24);
+        $("sd-flag-sub").setAttribute("y", by + 88);
+        $("sd-flag-val").textContent = FMT(DATA[DATA.length - 1]);
+
+        const head = $("sd-head");
+        const clip = $("sd-clip-rect");
+        const state = { p: 0 };
+        function draw() {
+          const x = X0 + state.p * (X1 - X0);
+          clip.setAttribute("width", x);
+          const f = state.p * (pts.length - 1);
+          const i = Math.min(pts.length - 2, Math.floor(f));
+          const k = f - i;
+          head.setAttribute("cx", x);
+          head.setAttribute("cy", pts[i][1] + (pts[i + 1][1] - pts[i][1]) * k);
+        }
+
+        const tl = gsap.timeline({ paused: true });
+        tl.fromTo(root.querySelectorAll("#sd-grid line, #sd-yticks text, #sd-xticks text, .sd-title"), { opacity: 0 }, { opacity: 1, duration: 0.5, stagger: 0.03, ease: "none" }, 0);
+        tl.fromTo(head, { attr: { r: 0 } }, { attr: { r: 11 }, duration: 0.3, ease: "back.out(2)" }, 0.3);
+        tl.fromTo(state, { p: 0 }, { p: 1, duration: DRAW, ease: "power2.inOut", onUpdate: draw }, 0.4);
+        tl.fromTo($("sd-flag"), { opacity: 0, y: 16 }, { opacity: 1, y: 0, duration: 0.5, ease: "expo.out" }, 0.4 + DRAW - 0.05);
+        tl.fromTo($("sd-ring"), { attr: { r: 8 } }, { attr: { r: 20 }, duration: 0.6, ease: "expo.out" }, 0.4 + DRAW - 0.05);
+        tl.to({}, { duration: Math.max(0.1, 5 - tl.duration()) });
+        draw();
+        window.__timelines = window.__timelines || {};
+        window.__timelines["sparkline-draw"] = tl;
+      })();
+    </script>
+  </body>
+</html>

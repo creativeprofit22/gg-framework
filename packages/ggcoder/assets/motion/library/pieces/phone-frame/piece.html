@@ -1,0 +1,252 @@
+<!doctype html>
+<!--
+  phone-frame: a CSS phone (rounded body, dynamic island, side buttons,
+  subtle edge highlight) rises in with a gentle 3D tilt (CSS perspective)
+  and settles upright; then its default app screen builds in.
+  Transparent background.
+  The screen (.pf-screen) is a slot: drop a real screenshot in as an <img>
+  (see the comment inside it) and delete the default screen.
+  Params: --pf-h (phone height; width follows 9:19.5), --pf-x / --pf-y
+  (center), TILT_Y / TILT_X (entry rotation, deg), ENTER_AT (s).
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+  </head>
+  <body>
+    <div
+      id="phone-frame-root"
+      data-composition-id="phone-frame"
+      data-start="0"
+      data-duration="4"
+      data-width="1920"
+      data-height="1080"
+    >
+      <style>
+        [data-composition-id="phone-frame"] {
+          --pf-h: 900px;
+          --pf-w: calc(var(--pf-h) * 0.4865);
+          --pf-x: 960px;
+          --pf-y: 540px;
+          --pf-bezel: 14px;
+          position: absolute;
+          inset: 0;
+          color: var(--ink, #111);
+          font-family: var(--text, sans-serif);
+          perspective: 2200px;
+        }
+        [data-composition-id="phone-frame"] .pf-phone {
+          position: absolute;
+          left: calc(var(--pf-x) - var(--pf-w) / 2);
+          top: calc(var(--pf-y) - var(--pf-h) / 2);
+          width: var(--pf-w);
+          height: var(--pf-h);
+          box-sizing: border-box;
+          padding: var(--pf-bezel);
+          border-radius: calc(var(--pf-w) * 0.17);
+          background: linear-gradient(145deg, color-mix(in srgb, var(--ink, #111) 70%, #fff), var(--ink, #111) 40%, color-mix(in srgb, var(--ink, #111) 85%, #000));
+          box-shadow:
+            inset 0 0 0 2px rgba(255, 255, 255, 0.16),
+            inset 0 0 0 5px rgba(0, 0, 0, 0.5),
+            0 1px 2px rgba(0, 0, 0, 0.1),
+            0 20px 40px rgba(0, 0, 0, 0.14),
+            0 60px 120px -30px color-mix(in srgb, var(--ink, #111) 45%, transparent);
+          transform-style: preserve-3d;
+        }
+        /* side buttons */
+        [data-composition-id="phone-frame"] .pf-btn {
+          position: absolute;
+          width: 6px;
+          border-radius: 3px;
+          background: color-mix(in srgb, var(--ink, #111) 80%, #fff);
+        }
+        [data-composition-id="phone-frame"] .pf-btn.l1 { left: -5px; top: 17%; height: 5%; }
+        [data-composition-id="phone-frame"] .pf-btn.l2 { left: -5px; top: 25%; height: 9%; }
+        [data-composition-id="phone-frame"] .pf-btn.l3 { left: -5px; top: 36%; height: 9%; }
+        [data-composition-id="phone-frame"] .pf-btn.r1 { right: -5px; top: 28%; height: 13%; }
+        [data-composition-id="phone-frame"] .pf-screen {
+          position: relative;
+          width: 100%;
+          height: 100%;
+          border-radius: calc(var(--pf-w) * 0.17 - var(--pf-bezel));
+          overflow: hidden;
+          background: color-mix(in srgb, var(--field, #f3f4f6) 45%, #fff);
+        }
+        [data-composition-id="phone-frame"] .pf-screen img {
+          position: absolute;
+          inset: 0;
+          width: 100%;
+          height: 100%;
+          object-fit: cover;
+        }
+        [data-composition-id="phone-frame"] .pf-island {
+          position: absolute;
+          z-index: 3;
+          left: 50%;
+          top: 18px;
+          width: 32%;
+          height: 36px;
+          transform: translateX(-50%);
+          border-radius: 18px;
+          background: #000;
+        }
+        /* glass sheen */
+        [data-composition-id="phone-frame"] .pf-glare {
+          position: absolute;
+          inset: 0;
+          z-index: 4;
+          border-radius: inherit;
+          background: linear-gradient(115deg, rgba(255, 255, 255, 0) 38%, rgba(255, 255, 255, 0.22) 50%, rgba(255, 255, 255, 0) 62%);
+          background-size: 300% 100%;
+          pointer-events: none;
+        }
+        /* default screen */
+        [data-composition-id="phone-frame"] .pf-app {
+          position: absolute;
+          inset: 0;
+          padding: 84px 30px 30px;
+          display: flex;
+          flex-direction: column;
+          gap: 22px;
+        }
+        [data-composition-id="phone-frame"] .pf-status {
+          position: absolute;
+          top: 20px;
+          left: 42px;
+          right: 38px;
+          display: flex;
+          justify-content: space-between;
+          font-size: 22px;
+          font-weight: 600;
+        }
+        [data-composition-id="phone-frame"] .pf-hello {
+          font-size: 26px;
+          color: var(--muted, #888);
+        }
+        [data-composition-id="phone-frame"] .pf-big {
+          font-family: var(--display, sans-serif);
+          font-weight: var(--display-weight, 600);
+          letter-spacing: var(--display-tracking, -0.02em);
+          font-size: 40px;
+          line-height: 1.1;
+          margin-top: -12px;
+        }
+        [data-composition-id="phone-frame"] .pf-hero {
+          border-radius: 26px;
+          padding: 26px;
+          color: #fff;
+          background: var(--accent, #2f5bff);
+          box-shadow: 0 10px 24px color-mix(in srgb, var(--accent, #2f5bff) 30%, transparent);
+        }
+        [data-composition-id="phone-frame"] .pf-hero small {
+          font-size: 22px;
+          opacity: 0.8;
+        }
+        [data-composition-id="phone-frame"] .pf-hero strong {
+          display: block;
+          font-size: 48px;
+          font-weight: 650;
+          letter-spacing: -0.02em;
+          margin: 4px 0 16px;
+        }
+        [data-composition-id="phone-frame"] .pf-spark {
+          display: block;
+          width: 100%;
+          height: 70px;
+        }
+        [data-composition-id="phone-frame"] .pf-row {
+          display: flex;
+          align-items: center;
+          gap: 18px;
+          padding: 18px;
+          border-radius: 22px;
+          background: #fff;
+          box-shadow:
+            0 0 0 1.5px color-mix(in srgb, var(--ink, #111) 6%, transparent),
+            0 4px 12px rgba(0, 0, 0, 0.04);
+        }
+        [data-composition-id="phone-frame"] .pf-dot {
+          flex: none;
+          width: 54px;
+          height: 54px;
+          border-radius: 16px;
+          background: color-mix(in srgb, var(--accent, #2f5bff) 14%, #fff);
+        }
+        [data-composition-id="phone-frame"] .pf-lines {
+          flex: 1;
+          display: flex;
+          flex-direction: column;
+          gap: 10px;
+        }
+        [data-composition-id="phone-frame"] .pf-lines b {
+          font-size: 24px;
+          font-weight: 600;
+        }
+        [data-composition-id="phone-frame"] .pf-lines i {
+          display: block;
+          height: 12px;
+          width: 60%;
+          border-radius: 6px;
+          background: color-mix(in srgb, var(--ink, #111) 9%, #fff);
+        }
+        [data-composition-id="phone-frame"] .pf-amt {
+          font-size: 24px;
+          font-weight: 600;
+        }
+      </style>
+      <div class="pf-phone" id="pf-phone">
+        <i class="pf-btn l1"></i><i class="pf-btn l2"></i><i class="pf-btn l3"></i><i class="pf-btn r1"></i>
+        <div class="pf-screen">
+          <div class="pf-island"></div>
+          <div class="pf-glare" id="pf-glare"></div>
+          <!-- slot: replace .pf-app below with a real screenshot, e.g.
+               <img src="assets/app-screen.png" alt="" /> -->
+          <div class="pf-app">
+            <div class="pf-status"><span>9:41</span><span>●●●</span></div>
+            <!-- edit: greeting + headline -->
+            <div class="pf-hello pf-in">Good morning, Sam</div>
+            <div class="pf-big pf-in">Your week at a glance</div>
+            <div class="pf-hero pf-in">
+              <!-- edit: hero stat -->
+              <small>Balance</small>
+              <strong>$12,480</strong>
+              <svg class="pf-spark" viewBox="0 0 300 70" preserveAspectRatio="none">
+                <path id="pf-spark" d="M0 58 C30 52 45 60 70 46 S110 30 135 38 S175 22 200 24 S250 6 300 8" fill="none" stroke="#fff" stroke-width="4" stroke-linecap="round" />
+              </svg>
+            </div>
+            <!-- edit: list rows -->
+            <div class="pf-row pf-in"><span class="pf-dot"></span><span class="pf-lines"><b>Stripe payout</b><i></i></span><span class="pf-amt">+$840</span></div>
+            <div class="pf-row pf-in"><span class="pf-dot"></span><span class="pf-lines"><b>Figma</b><i style="width: 45%"></i></span><span class="pf-amt">−$45</span></div>
+            <div class="pf-row pf-in"><span class="pf-dot"></span><span class="pf-lines"><b>Northwind</b><i style="width: 70%"></i></span><span class="pf-amt">+$2.4k</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <script>
+      (function () {
+        const ENTER_AT = 0.1;
+        const TILT_Y = -28;
+        const TILT_X = 12;
+        const root = document.querySelector('[data-composition-id="phone-frame"]');
+        const tl = gsap.timeline({ paused: true });
+        const spark = root.querySelector("#pf-spark");
+        const len = spark.getTotalLength();
+
+        tl.fromTo("#pf-phone", { opacity: 0 }, { opacity: 1, duration: 0.4, ease: "power1.out" }, ENTER_AT);
+        tl.fromTo(
+          "#pf-phone",
+          { y: 220, rotationY: TILT_Y, rotationX: TILT_X, rotationZ: 4, scale: 0.9 },
+          { y: 0, rotationY: 0, rotationX: 0, rotationZ: 0, scale: 1, duration: 2.1, ease: "power3.out" },
+          ENTER_AT,
+        );
+        tl.fromTo("#pf-glare", { backgroundPosition: "100% 0" }, { backgroundPosition: "0% 0", duration: 1.8, ease: "power2.out" }, ENTER_AT);
+        tl.fromTo(root.querySelectorAll(".pf-in"), { opacity: 0, y: 24 }, { opacity: 1, y: 0, duration: 0.55, ease: "power3.out", stagger: 0.07 }, ENTER_AT + 0.55);
+        tl.fromTo(spark, { strokeDasharray: len, strokeDashoffset: len }, { strokeDashoffset: 0, duration: 1.1, ease: "power2.inOut" }, ENTER_AT + 0.9);
+        tl.to({}, { duration: 4 - tl.duration() });
+        window.__timelines = window.__timelines || {};
+        window.__timelines["phone-frame"] = tl;
+      })();
+    </script>
+  </body>
+</html>

@@ -1,0 +1,12 @@
+{
+  "id": "soft-light-field",
+  "name": "Soft light field",
+  "kind": "background",
+  "description": "Airy cool-white field with a deep colored light pool rolling in from one edge around a soft white hotspot, drifting slowly. The backdrop of calm premium product ads.",
+  "tags": ["light", "airy", "vignette", "light-pool", "soft", "premium", "ad", "backdrop"],
+  "fonts": [],
+  "duration": 6,
+  "previewAt": 3,
+  "license": "original",
+  "previewLook": "soft-light-ad"
+}

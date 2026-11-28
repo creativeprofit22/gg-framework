@@ -1,0 +1,132 @@
+{
+  "schema": 1,
+  "id": "video-engine",
+  "title": "Pick a video engine for the editor",
+  "question": "Which of three video engines should the editor use for decoding, seeking and export?",
+  "kind": "engine",
+  "repeats": 10,
+  "warmupRepeats": 1,
+  "seed": 20261020,
+  "timeoutMs": 600000,
+  "maxErrorRate": 0.1,
+  "candidates": [
+    {
+      "id": "engine-a",
+      "label": "Engine A (current)",
+      "adapter": {
+        "type": "cli",
+        "command": "node scripts/engine-a.mjs --input {input} --out {out}",
+        "prepare": "node scripts/clear-cache.mjs",
+        "cleanup": "node scripts/remove-temp.mjs {tmp}"
+      }
+    },
+    {
+      "id": "engine-b",
+      "label": "Engine B",
+      "adapter": {
+        "type": "cli",
+        "command": "node scripts/engine-b.mjs --input {input} --out {out}",
+        "prepare": "node scripts/clear-cache.mjs",
+        "cleanup": "node scripts/remove-temp.mjs {tmp}"
+      }
+    },
+    {
+      "id": "engine-c",
+      "label": "Engine C",
+      "adapter": {
+        "type": "cli",
+        "command": "node scripts/engine-c.mjs --input {input} --out {out}",
+        "prepare": "node scripts/clear-cache.mjs",
+        "cleanup": "node scripts/remove-temp.mjs {tmp}"
+      }
+    }
+  ],
+  "workload": {
+    "dir": "workload",
+    "items": [
+      {
+        "id": "clip-1080p-h264",
+        "input": "clips/1080p-h264.json",
+        "expectedFile": "reference/1080p-h264.y4m"
+      },
+      {
+        "id": "clip-4k-hevc",
+        "input": "clips/4k-hevc.json",
+        "expectedFile": "reference/4k-hevc.y4m"
+      },
+      {
+        "id": "timeline-mixed",
+        "input": "timelines/mixed.json",
+        "expectedFile": "reference/mixed.y4m"
+      }
+    ]
+  },
+  "gates": [
+    { "id": "exits-cleanly", "type": "exit-code", "scope": "sample", "expect": 0 },
+    {
+      "id": "frame-exact-seek",
+      "type": "command",
+      "scope": "sample",
+      "samples": "first",
+      "command": "node scripts/check-seek.mjs {out} {expected}"
+    },
+    {
+      "id": "vmaf-vs-reference",
+      "type": "quality",
+      "scope": "sample",
+      "command": "node scripts/vmaf.mjs --reference {expected} --distorted {out}",
+      "format": "vmaf-json",
+      "min": 93
+    },
+    {
+      "id": "platform-support",
+      "type": "command",
+      "scope": "candidate",
+      "command": "node scripts/check-platforms.mjs {candidate}"
+    },
+    {
+      "id": "licence-fit",
+      "type": "command",
+      "scope": "candidate",
+      "command": "node scripts/check-licence.mjs {candidate}"
+    }
+  ],
+  "metrics": [
+    { "id": "export_seconds", "type": "wall-time", "unit": "s", "better": "lower" },
+    {
+      "id": "decode_fps",
+      "type": "custom",
+      "unit": "fps",
+      "better": "higher",
+      "source": "stdout-json",
+      "field": "decodeFps"
+    },
+    {
+      "id": "seek_p95_ms",
+      "type": "custom",
+      "unit": "ms",
+      "better": "lower",
+      "source": "stdout-json",
+      "field": "seekP95Ms"
+    },
+    { "id": "peak_memory_mb", "type": "peak-memory", "unit": "MB", "better": "lower" }
+  ],
+  "decision": {
+    "reference": "engine-a",
+    "level": 0.95,
+    "primary": {
+      "metric": "export_seconds",
+      "better": "lower",
+      "statistic": "median",
+      "minRatio": 1.3,
+      "ciLowerAbove": 1.0
+    },
+    "secondary": [{ "metric": "seek_p95_ms", "better": "lower", "mustNotRegressBeyond": 1.1 }],
+    "tieBreak": ["simpler integration", "licence fit"],
+    "noise": { "requireAA": true }
+  },
+  "sandbox": { "type": "process" },
+  "unmeasured": [
+    { "what": "Picture quality as people see it", "how": "blind human A/B rating via `rate`" }
+  ]
+}

@@ -1,5 +1,4 @@
 import { LANGUAGE_DISPLAY_NAMES } from "../../core/language-detector.js";
-import { BLACK_CIRCLE } from "../constants/figures.js";
 import { formatDuration } from "../duration-format.js";
 import type {
   DurationItem,
@@ -7,9 +6,7 @@ import type {
   InfoItem,
   ModelTransitionItem,
   PlanEventItem,
-  PlanTransitionItem,
   QueuedItem,
-  SetupHintItem,
   StepDoneItem,
   StoppedItem,
   StylePackItem,
@@ -31,14 +28,6 @@ export interface StatusPresentation {
 export interface StylePackPresentation {
   headerLabel: string;
   names: string;
-  showSetupHint: boolean;
-  setupHint: string;
-}
-
-export interface SetupHintPresentation {
-  headerLabel: string;
-  body: string;
-  setupHint: string;
 }
 
 export interface ErrorPresentation {
@@ -78,16 +67,6 @@ export function presentStylePack(item: StylePackItem): StylePackPresentation {
   return {
     headerLabel: item.added.length > 1 ? "STYLE PACKS ACTIVE" : "STYLE PACK ACTIVE",
     names: item.added.map((id) => LANGUAGE_DISPLAY_NAMES[id] ?? id).join(", "),
-    showSetupHint: item.showSetupHint,
-    setupHint: " to audit this project against the active pack(s)",
-  };
-}
-
-export function presentSetupHint(_item?: SetupHintItem): SetupHintPresentation {
-  return {
-    headerLabel: "NO STYLE PACKS DETECTED",
-    body: "This directory has no recognized language manifest at its root.",
-    setupHint: " to audit project hygiene or bootstrap a new project from scratch",
   };
 }
 
@@ -106,10 +85,6 @@ export function presentInfo(item: InfoItem): StatusPresentation {
 
 export function presentTask(item: TaskItem): StatusPresentation {
   return { glyph: "▸ ", label: "Task: ", text: item.title, bold: true };
-}
-
-export function presentPlanTransition(item: PlanTransitionItem): StatusPresentation {
-  return { glyph: `${BLACK_CIRCLE} `, text: normalizeTranscriptStatusText(item.text), bold: true };
 }
 
 export function presentModelTransition(item: ModelTransitionItem): StatusPresentation {

@@ -1,0 +1,81 @@
+<!doctype html>
+<!--
+  color-flip-field: a duotone scene change. The frame is --field, then a
+  slanted --field-2 panel wipes across on a beat (fast expo), holds, and
+  wipes off the far side so --field returns. Put the "B" scene's content in
+  sync with FLIP_IN + WIPE (fully flipped) and the "A" return at FLIP_OUT + WIPE.
+  Params (top of script): FLIP_IN (s), FLIP_OUT (s), WIPE (wipe length, s),
+  SLANT (px the wipe edge leans; 0 = straight edge).
+  CSS: --cf-a (base field), --cf-b (flipped field).
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+  </head>
+  <body>
+    <div
+      id="color-flip-field-root"
+      data-composition-id="color-flip-field"
+      data-start="0"
+      data-duration="4"
+      data-width="1920"
+      data-height="1080"
+    >
+      <style>
+        [data-composition-id="color-flip-field"] {
+          --cf-a: var(--field, #d9774f);
+          --cf-b: var(--field-2, #0f1e3d);
+          position: absolute;
+          inset: 0;
+          overflow: hidden;
+          background: var(--cf-a);
+        }
+        [data-composition-id="color-flip-field"] .cf-panel {
+          position: absolute;
+          inset: 0;
+          background: var(--cf-b);
+        }
+        [data-composition-id="color-flip-field"] .cf-edge {
+          position: absolute;
+          inset: 0;
+          background: var(--line, rgba(0, 0, 0, 0.2));
+          opacity: 0.9;
+        }
+      </style>
+      <div class="cf-edge" id="cf-edge"></div>
+      <div class="cf-panel" id="cf-panel"></div>
+    </div>
+    <script>
+      (function () {
+        const FLIP_IN = 1.0;
+        const FLIP_OUT = 2.6;
+        const WIPE = 0.55;
+        const SLANT = 220;
+        const W = 1920;
+        const panel = document.getElementById("cf-panel");
+        const edge = document.getElementById("cf-edge");
+        // A slanted band [a, b] across the frame; the lead edge leans by SLANT.
+        const band = (a, b) =>
+          `polygon(${a + SLANT}px 0, ${b + SLANT}px 0, ${b}px 1080px, ${a}px 1080px)`;
+        const s = { lead: -SLANT, tail: -SLANT };
+        const L = -SLANT - 40;
+        const R = W + 40;
+        function draw() {
+          panel.style.clipPath = band(s.tail, s.lead);
+          // A thin hairline runs just ahead of each moving edge.
+          edge.style.clipPath = band(s.tail, Math.min(R, s.lead + 28));
+        }
+        const tl = gsap.timeline({ paused: true });
+        s.lead = L;
+        s.tail = L;
+        draw();
+        tl.fromTo(s, { lead: L }, { lead: R, duration: WIPE, ease: "expo.inOut", onUpdate: draw }, FLIP_IN);
+        tl.fromTo(s, { tail: L }, { tail: R, duration: WIPE, ease: "expo.inOut", onUpdate: draw }, FLIP_OUT);
+        tl.to({}, { duration: 4 - FLIP_OUT - WIPE });
+        window.__timelines = window.__timelines || {};
+        window.__timelines["color-flip-field"] = tl;
+      })();
+    </script>
+  </body>
+</html>

@@ -1,0 +1,51 @@
+{
+  "specVersion": 1,
+  "label": "baseline",
+  "commit": "df1a3531b867f11393ce98ea9af1d4b6f1d66ceb",
+  "sessions": [
+    "baseline-s1b-2026-10-10",
+    "baseline-s2-2026-10-10",
+    "baseline-cold-reboot-2026-10-11b"
+  ],
+  "excludedSessions": [
+    {
+      "session": "baseline-cold-reboot-2026-10-11",
+      "reason": "tree was read before the cold measurement (verify full)"
+    }
+  ],
+  "recorded_at": "2026-10-11T02:25:58.411Z",
+  "headlines": {
+    "H1": {
+      "metric": "calls_per_s",
+      "value": 19.101248006331936,
+      "launches": 10,
+      "sessions": 2,
+      "cv": 0.053634055948684416,
+      "description": "warm closed-wave calls/s at concurrency 100, agent mix, rg enabled, deadline on, UV 4"
+    },
+    "H2": {
+      "metric": "p99_latency_ms",
+      "value": 5015.962330000004,
+      "launches": 10,
+      "sessions": 2,
+      "cv": 0.0008774426211948388,
+      "description": "warm p99 latency at concurrency 16, agent mix, rg enabled, deadline on, UV 4"
+    },
+    "H3": {
+      "metric": "p50_latency_ms",
+      "value": 55.72165000000001,
+      "launches": 10,
+      "sessions": 2,
+      "cv": 0.22503563060606882,
+      "description": "warm p50 latency of Q2 in-process at concurrency 1, deadline on, UV 4"
+    },
+    "H4": {
+      "metric": "p50_latency_ms",
+      "value": 82.8813999999984,
+      "launches": 1,
+      "sessions": 1,
+      "cv": null,
+      "description": "cold p50 latency of the agent mix at concurrency 1, rg enabled, deadline on, UV 4"
+    }
+  }
+}

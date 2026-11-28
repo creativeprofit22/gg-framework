@@ -1,5 +1,11 @@
 import type { Provider } from "@kenkaiiii/gg-ai";
-import { getDefaultModel, getModel } from "./model-registry.js";
+import { getDefaultModel, getModel, getModelsForProvider } from "./model-registry.js";
+
+// Local Fork: Azure has models only when a deployment is configured; without
+// one it has no default, and choosing it crashed every new session.
+export function isStartableProvider(provider: Provider): boolean {
+  return provider !== "azure" || getModelsForProvider(provider).length > 0;
+}
 
 /** A resolved startup provider + model for an AgentSession. */
 export interface ResolvedStart {
@@ -36,15 +42,26 @@ export async function resolveStartOrFallback(
   preferred: Provider,
   savedModel: string | undefined,
 ): Promise<ResolvedStartResult> {
+  // Token Plan is explicit opt-in: never enter or leave it via startup fallback.
+  if (preferred === "qwen-cloud") {
+    const saved = savedModel ? getModel(savedModel) : undefined;
+    return {
+      provider: preferred,
+      model: saved?.provider === preferred ? saved.id : getDefaultModel(preferred).id,
+      loggedIn: await auth.hasProviderAuth(preferred),
+    };
+  }
   const loggedIn: Provider[] = [];
   for (const p of allProviders) {
-    if (await auth.hasProviderAuth(p)) loggedIn.push(p);
+    if (p !== "qwen-cloud" && isStartableProvider(p) && (await auth.hasProviderAuth(p)))
+      loggedIn.push(p);
   }
 
   if (loggedIn.length === 0) {
     // Logged-out fallback: boot with the preferred provider's default model so
     // the sidecar still starts and the login flow is reachable.
-    return { provider: preferred, model: getDefaultModel(preferred).id, loggedIn: false };
+    const provider = isStartableProvider(preferred) ? preferred : "anthropic";
+    return { provider, model: getDefaultModel(provider).id, loggedIn: false };
   }
 
   if (loggedIn.includes(preferred)) {

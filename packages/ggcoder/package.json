@@ -1,13 +1,31 @@
 {
   "name": "@kenkaiiii/ggcoder",
-  "version": "5.9.0",
+  "version": "6.0.2",
   "type": "module",
-  "description": "CLI coding agent with OAuth authentication for Anthropic, OpenAI, and Gemini",
-  "license": "MIT",
+  "description": "The engine and CLI behind the GG Coder desktop app: a lean coding agent for Claude, ChatGPT, Grok, Kimi, 12 providers and local models.",
+  "author": "Ken Kai",
+  "keywords": [
+    "coding-agent",
+    "ai",
+    "cli",
+    "llm",
+    "claude",
+    "openai",
+    "agent",
+    "terminal"
+  ],
+  "license": "AGPL-3.0-only",
+  "engines": {
+    "node": ">=24"
+  },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/kenkaiiii/gg-framework.git",
+    "url": "git+https://github.com/KenKaiii/gg-framework.git",
     "directory": "packages/ggcoder"
+  },
+  "homepage": "https://github.com/KenKaiii/gg-framework/tree/main/packages/ggcoder#readme",
+  "bugs": {
+    "url": "https://github.com/KenKaiii/gg-framework/issues"
   },
   "bin": {
     "ggcoder": "./dist/cli.js"
@@ -16,6 +34,10 @@
     ".": {
       "import": "./dist/index.js",
       "types": "./dist/index.d.ts"
+    },
+    "./dev-app-driver": {
+      "import": "./dist/dev-app-driver/index.js",
+      "types": "./dist/dev-app-driver/index.d.ts"
     },
     "./ui": {
       "import": "./dist/ui/components/index.js",
@@ -73,6 +95,10 @@
       "import": "./dist/ui/login.js",
       "types": "./dist/ui/login.d.ts"
     },
+    "./mcp": {
+      "import": "./dist/core/mcp/index.js",
+      "types": "./dist/core/mcp/index.d.ts"
+    },
     "./models": {
       "import": "./dist/core/model-registry.js",
       "types": "./dist/core/model-registry.d.ts"
@@ -81,70 +107,78 @@
       "import": "./dist/core/auth/index.js",
       "types": "./dist/core/auth/index.d.ts"
     },
+    "./web": {
+      "import": "./dist/web.js",
+      "types": "./dist/web.d.ts"
+    },
     "./utils/open-browser": {
       "import": "./dist/utils/open-browser.js",
       "types": "./dist/utils/open-browser.d.ts"
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "assets",
+    "NOTICE"
   ],
   "scripts": {
     "clean": "node --eval \"fs.rmSync('dist', { recursive: true, force: true })\"",
-    "build": "pnpm clean && tsc",
+    "build": "pnpm clean && tsc -p tsconfig.build.json",
     "check": "tsc --noEmit",
-    "test": "vitest run",
+    "lint:programmatic": "eslint \"src/core/programmatic/*.ts\" src/core/prompt-commands.ts src/core/prompt-commands.test.ts \"src/tools/programmatic-*.ts\" src/tools/index.ts src/tools/prompt-hints.ts src/tools/tool-tiers.ts",
+    "test": "node scripts/run-tests.mjs",
+    "test:parallel": "vitest run --exclude src/tools/bash-timeout.test.ts --exclude src/app-sidecar-auth-broadcast.test.ts --exclude src/core/subagent-manager.test.ts --exclude src/app-sidecar-chat-research-restoration.test.ts --exclude src/app-sidecar-plan-handoff.test.ts --exclude src/app-sidecar-queue-metadata.test.ts --exclude src/core/lsp/pool.test.ts --exclude src/core/persistent-shell.test.ts --exclude src/core/programmatic/command-verification.test.ts --exclude src/core/programmatic/setup.test.ts --exclude src/motion-agent/motion-helpers.test.ts --exclude src/modes/acp-mode.test.ts --exclude src/motion-agent/motion-review-frames.test.ts --exclude src/tools/bash.test.ts --exclude src/core/programmatic/execution.test.ts --exclude src/app-sidecar-ask-supersede.test.ts --exclude src/app-sidecar-attachments-http.test.ts --exclude src/app-sidecar-new-session-http.test.ts --exclude src/app-sidecar-programmatic-focus.test.ts --exclude src/app-sidecar-progress.test.ts --exclude src/app-sidecar-prompt-http.test.ts --exclude src/app-sidecar-prompt-supersession-http.test.ts --exclude src/app-sidecar-qwen-auth.test.ts --exclude src/app-sidecar-refusal-http.test.ts --exclude src/app-sidecar-restored-enhancements.test.ts --exclude src/app-sidecar-trophies-http.test.ts --tags-filter=!alone",
+    "test:windows-serial": "vitest run src/tools/bash-timeout.test.ts src/app-sidecar-auth-broadcast.test.ts src/core/subagent-manager.test.ts src/app-sidecar-chat-research-restoration.test.ts src/app-sidecar-plan-handoff.test.ts src/app-sidecar-queue-metadata.test.ts src/core/lsp/pool.test.ts src/core/persistent-shell.test.ts src/core/programmatic/command-verification.test.ts src/core/programmatic/setup.test.ts src/motion-agent/motion-helpers.test.ts src/modes/acp-mode.test.ts src/motion-agent/motion-review-frames.test.ts src/tools/bash.test.ts src/core/programmatic/execution.test.ts --no-file-parallelism --tags-filter=!alone",
     "bench:edit": "tsx src/core/hashline-edit-benchmark.ts",
     "bench:search": "tsx src/core/semantic-search-benchmark.ts",
-    "verify:goal:tests": "vitest run src/core/goal-controller.test.ts src/core/goal-engine.test.ts src/core/goal-store.test.ts src/core/goal-integration.test.ts src/core/goal-prerequisites.test.ts src/core/goal-verifier.test.ts src/core/goal-worker.test.ts src/core/goal-worker-dev-server-lifecycle.test.ts src/core/goal-worktree.test.ts src/core/goal-lifecycle-smoke.test.ts src/tools/goals.test.ts src/tools/goal-mode.test.ts src/ui/goal-events.test.ts src/ui/goal-lifecycle-orchestration.test.ts src/ui/goal-overlay.test.ts src/ui/goal-status-bar.test.ts src/system-prompt.test.ts",
-    "verify:goal:overhead": "tsx scripts/verify-goal-overhead-harness.ts",
-    "goal:overhead-audit": "tsx scripts/verify-goal-overhead-audit.ts",
-    "verify:goal:e2e": "pnpm dlx tsx scripts/verify-goal-e2e.ts"
+    "bench:context": "tsx src/core/context-policy-benchmark.ts",
+    "test:alone": "vitest run src/motion-agent/motion-helpers.test.ts src/tools/bash.test.ts src/core/persistent-shell.test.ts src/core/programmatic/contracts.test.ts --tags-filter=alone --no-file-parallelism",
+    "test:daemon-serial": "vitest run src/app-sidecar-ask-supersede.test.ts src/app-sidecar-attachments-http.test.ts src/app-sidecar-new-session-http.test.ts src/app-sidecar-programmatic-focus.test.ts src/app-sidecar-progress.test.ts src/app-sidecar-prompt-http.test.ts src/app-sidecar-prompt-supersession-http.test.ts src/app-sidecar-qwen-auth.test.ts src/app-sidecar-refusal-http.test.ts src/app-sidecar-restored-enhancements.test.ts src/app-sidecar-trophies-http.test.ts --no-file-parallelism"
   },
   "dependencies": {
-    "@jridgewell/trace-mapping": "^0.3.25",
+    "@anthropic-ai/sandbox-runtime": "0.0.83",
+    "@anthropic-ai/claude-agent-sdk": "0.3.329",
     "@kenkaiiii/agent-home-sdk": "^0.3.8",
     "@kenkaiiii/gg-agent": "workspace:*",
     "@kenkaiiii/gg-ai": "workspace:*",
     "@kenkaiiii/gg-core": "workspace:*",
-    "@kenkaiiii/kencode-search": "^0.1.17",
-    "@modelcontextprotocol/sdk": "^1.29.0",
-    "ansi-regex": "^6.2.2",
-    "chalk": "^5.6.2",
-    "cli-highlight": "^2.1.11",
-    "diff": "^8.0.3",
+    "@modelcontextprotocol/client": "^2.4.0",
+    "chalk": "^6.0.1",
+    "diff": "^8.0.4",
     "fast-glob": "^3.3.3",
-    "ignore": "^7.0.5",
+    "ignore": "^7.0.16",
     "ink": "npm:@kenkaiiii/ink@6.8.0-gg.2",
     "lowlight": "^3.3.0",
     "marked": "^15.0.12",
-    "marked-terminal": "^7.3.0",
     "opensrc": "^0.7.2",
-    "react": "^19.2.5",
-    "sharp": "^0.34.5",
-    "string-width": "^8.2.0",
+    "react": "^19.3.1",
+    "sharp": "^0.35.5",
+    "string-width": "^8.3.0",
     "strip-ansi": "^7.2.0",
+    "tslib": "2.9.1",
     "typescript": "^6.0.3",
-    "typescript-language-server": "^5.3.0",
-    "wrap-ansi": "^10.0.0",
-    "zod": "^4.4.3"
+    "typescript-language-server": "^6.1.0",
+    "wrap-ansi": "^10.0.2",
+    "zod": "^4.6.7"
   },
   "optionalDependencies": {
-    "@huggingface/transformers": "^3.6.0",
+    "@huggingface/transformers": "4.3.2",
     "@mozilla/readability": "^0.6.0",
-    "linkedom": "^0.18.12",
+    "hyperframes": "0.8.82",
+    "linkedom": "^0.18.15",
     "ogg-opus-decoder": "^1.6.13",
-    "playwright": "^1.50.0",
-    "turndown": "^7.2.4",
+    "playwright": "^1.65.1",
+    "turndown": "^7.2.5",
     "turndown-plugin-gfm": "^1.0.2",
-    "unpdf": "^1.6.2"
+    "unpdf": "^2.2.1"
   },
   "devDependencies": {
     "@types/hast": "^3.0.4",
-    "@types/node": "^25.6.0",
-    "@types/react": "^19.2.14",
+    "@types/node": "^26.6.6",
+    "@types/react": "^19.3.0",
     "@types/turndown": "^5.0.6",
-    "tsx": "^4.22.3",
+    "esbuild": "0.28.2",
+    "tsx": "^4.23.15",
     "vitest": "^4.1.4"
   },
   "publishConfig": {

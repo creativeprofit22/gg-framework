@@ -1,0 +1,1468 @@
+import { describe, expect, it } from "vitest";
+import type { Message } from "@kenkaiiii/gg-ai";
+import type { VerifyPlan } from "@kenkaiiii/gg-core/verify-plan";
+import {
+  SessionVerificationEvidenceLedger,
+  classifyVerificationCommand,
+  collectVerificationEvidence,
+  formatVerificationCommandDisplay,
+  extractStandaloneCheck,
+  VERIFICATION_PROBLEM_FAILED,
+  VERIFICATION_PROBLEM_MISSING,
+} from "./verification-evidence.js";
+
+const TEST_WORKSPACE = {
+  version: 1 as const,
+  repository: {
+    projectKey: "C:/project",
+    identityHash: "1".repeat(64),
+    rootCommit: "2".repeat(40),
+  },
+  headCommit: "3".repeat(40),
+  worktreeDigest: "4".repeat(64),
+  clean: true,
+};
+
+describe("command display redaction", () => {
+  it("keeps secret-like values out of command displays", () => {
+    const commands = [
+      "pnpm test -- --token=synthetic-token-4f93a8",
+      "pnpm test -- --password synthetic-password-8b27",
+      'pnpm test -- --header "Authorization: Bearer synthetic-header-6d51"',
+      "pnpm test -- API_KEY=synthetic-key-2c74",
+      "pnpm test -- --token='unterminated-synthetic-token",
+    ];
+    const displays = commands.map((command) => formatVerificationCommandDisplay(command));
+    expect(displays).toEqual([
+      "pnpm test -- --token=[REDACTED]",
+      "pnpm test -- --password [REDACTED]",
+      "pnpm test -- --header [REDACTED]",
+      "pnpm test -- API_KEY=[REDACTED]",
+      "Approved verification command",
+    ]);
+    expect(JSON.stringify(displays)).not.toMatch(/synthetic-(?:token|password|header|key)/);
+    expect(formatVerificationCommandDisplay("pnpm test -- TOKEN = synthetic-spaced-value")).toBe(
+      "Approved verification command",
+    );
+    expect(formatVerificationCommandDisplay("pnpm test -- -k synthetic-short-value")).toBe(
+      "pnpm test -- -k [REDACTED]",
+    );
+  });
+});
+
+describe("classifyVerificationCommand", () => {
+  it("only preserves prior evidence for the transcript's mixed check/help chain", () => {
+    expect(
+      classifyVerificationCommand(
+        "npm run lint && npm run format:check && npx tsx scripts/youtube/retention-inventory.mts --help",
+      ),
+    ).toMatchObject({
+      accepted: false,
+      snapshotEligible: true,
+      snapshotPreserveOnly: true,
+    });
+  });
+
+  it.each([
+    "npm run check && node script.mjs --help || true",
+    "npm run check; node script.mjs --help",
+    "cd ../other && npm run check && node script.mjs --help",
+    "npm run check && prettier --write .",
+  ])("does not preserve evidence for unsafe or mutating chains: %s", (command) => {
+    expect(classifyVerificationCommand(command).snapshotPreserveOnly).not.toBe(true);
+  });
+  it.each([
+    "pnpm build",
+    "npm run build",
+    "pnpm check && pnpm test && pnpm build",
+    "pnpm build && pnpm test",
+  ])("requires a host snapshot rather than accepting %s from transcript text", (command) => {
+    expect(classifyVerificationCommand(command)).toMatchObject({
+      accepted: false,
+      mayMutate: true,
+      snapshotEligible: true,
+    });
+  });
+  it.each([
+    "pnpm build --watch",
+    "pnpm build --write",
+    "pnpm build --help",
+    "pnpm build:watch",
+    "pnpm lint:fix && pnpm build",
+    "cd ../other && pnpm build",
+    "pnpm --dir ../other build",
+    "pnpm -C ../other build",
+    "pnpm -c ../other build",
+    "pnpm -w build",
+    "pnpm build || true",
+    "pnpm build; pnpm test",
+  ])("never grants the snapshot exception to %s", (command) => {
+    expect(classifyVerificationCommand(command).snapshotEligible).not.toBe(true);
+    expect(classifyVerificationCommand(command).accepted).toBe(false);
+  });
+
+  it.each([
+    "tsc --noEmit",
+    "pnpm exec tsc --noEmit --pretty false",
+    "pnpm --filter @kenkaiiii/gg-ai check",
+    "pnpm -w typecheck",
+    "vitest run src/foo.test.ts",
+    "pnpm vitest run src/foo.test.ts",
+    "pnpm --filter web vitest run",
+    "node --test verification.test.mjs",
+    "node --test --import tsx verification.test.ts",
+    "node.exe --test verification.test.mjs",
+    "python -m unittest",
+    "cd packages/app && npm test",
+    "git status --short && npm run test",
+    "git status && npm test",
+    "cd packages/app && git status --porcelain && npm test",
+    "pnpm test -- --runInBand",
+    "cargo fmt --check && cargo clippy",
+    "cargo test --manifest-path gg-app/src-tauri/Cargo.toml nested_repositories_are_rejected -- --exact",
+    "go test ./...",
+    "go.exe test ./...",
+    "./.tools/go/bin/go.exe test ./internal/architecture",
+    "C:\\tools\\go\\bin\\GO.ExE vet ./...",
+    "go.exe test ./... && go vet ./...",
+    "ruff format --check .",
+    "pnpm format:check",
+    "npm run format:check",
+    "yarn format:check",
+    "bun run format:check",
+    "pnpm format-check",
+    "pnpm check && pnpm lint && pnpm format:check && pnpm test",
+    "npm test 2>&1",
+    "npm test 2>/dev/null",
+    ".venv/bin/ruff check src 2>&1",
+    "python -m ruff check src",
+    ".venv/bin/python -m mypy src",
+  ])("accepts bounded check: %s", (command) => {
+    expect(classifyVerificationCommand(command)).toMatchObject({
+      accepted: true,
+      candidate: true,
+      mayMutate: false,
+    });
+  });
+
+  it.each([
+    ["go.exe test ./...", "go test ./..."],
+    ["./.tools/go/bin/go.exe vet ./...", "go vet ./..."],
+    ["C:\\tools\\go\\bin\\GO.ExE test ./...", "go test ./..."],
+  ])("classifies Windows Go command %s exactly like %s", (windowsCommand, unixCommand) => {
+    expect(classifyVerificationCommand(windowsCommand)).toEqual(
+      classifyVerificationCommand(unixCommand),
+    );
+  });
+
+  it("keeps unsupported Go subcommands unclassified", () => {
+    expect(classifyVerificationCommand("go.exe list ./...")).toEqual(
+      classifyVerificationCommand("go list ./..."),
+    );
+  });
+
+  it("rejects env-wrapped Windows Go commands", () => {
+    expect(classifyVerificationCommand("env CI=1 go.exe test ./...")).toMatchObject({
+      accepted: false,
+      candidate: true,
+    });
+  });
+
+  it.each([
+    ["go.exe test ./... | cat", "pipe stage can transform check results"],
+    ["go.exe test ./... || echo ignored", "shell control operator can hide a failed check"],
+    ["go.exe test ./...; echo ignored", "shell control operator can hide a failed check"],
+  ])("rejects Windows Go checks with unsafe control operators: %s", (command, reason) => {
+    expect(classifyVerificationCommand(command)).toMatchObject({
+      accepted: false,
+      candidate: true,
+      reason,
+    });
+  });
+
+  it.each([
+    ["node script.js --test", "must lead"],
+    ["node.exe script.js --test", "must lead"],
+    ["node -- script.js --test", "must lead"],
+    ["node --require --test script.js", "must lead"],
+    ["pnpm exec node script.js --test", "must lead"],
+    ["tsc --init", "mutating"],
+    ["tsc --build", "mutating"],
+    ["tsc --noEmit --incremental", "mutating"],
+    ["tsc --noEmit --tsBuildInfoFile cache.tsbuildinfo", "mutating"],
+    ["prettier --write src", "mutating"],
+    ["pnpm build", "artifact-producing"],
+    ["pnpm format", "mutating"],
+    ["pnpm format:write", "mutating"],
+    ["pnpm format:check:write", "mutating"],
+    ["pnpm format:check --write", "mutating"],
+    ["pnpm format:check --watch", "long-running"],
+    ["tsc --watch --noEmit", "long-running"],
+    ["vitest --watch", "long-running"],
+    ["pnpm vitest --watch", "long-running"],
+    ["pnpm eslint --fix src", "mutating"],
+    ["pnpm vitest run --listTests", "does not execute"],
+    ["pnpm dev", "long-running"],
+    ["tsc", "--noEmit"],
+    ["tsc --noEmit --noCheck", "does not prove"],
+    ["tsc --noEmit --listFilesOnly", "does not prove"],
+    ["tsc --showConfig", "does not prove"],
+    ["tsc --help", "does not prove"],
+    ["tsc --version", "does not prove"],
+    ["tsc --noEmit --generateTrace trace", "does not prove"],
+    ["tsc --noEmit --generateCpuProfile cpu.cpuprofile", "does not prove"],
+    ["tsc --noEmit > result.txt", "unsafe shell"],
+    ["npm test 2>&1 > result.txt", "unsafe shell"],
+    ["npm test 2> errors.log", "unsafe shell"],
+    ["python -m ruff check --fix src", "mutating"],
+    ["tsc --noEmit | sort", "pipe stage"],
+    ["tsc --noEmit || echo ignored", "control operator"],
+    ["tsc --noEmit; echo ignored", "control operator"],
+    ["tsc --noEmit && npm run clean", "mutating"],
+  ])("rejects non-evidence command: %s", (command, reason) => {
+    expect(classifyVerificationCommand(command)).toMatchObject({
+      accepted: false,
+      candidate: true,
+      reason: expect.stringContaining(reason),
+    });
+  });
+
+  it.each([
+    "git status --short && git status",
+    "git status --short && npm test || true",
+    "git status --short; npm test",
+    "git status --short | npm test",
+    "git status --short > status.txt && npm test",
+    "git -c core.fsmonitor=helper status --short && npm test",
+    "git reset --hard && npm test",
+    "git status --help && npm test",
+    "git status --short && echo done",
+  ])("does not let a status prelude bypass verification: %s", (command) => {
+    expect(classifyVerificationCommand(command).accepted).toBe(false);
+  });
+
+  it.each([
+    "git status --short && git diff --stat",
+    "rm -r scratch.html examples/ && git status --short && echo CLEAN",
+    "git status && git log -1",
+  ])("does not treat a status prelude as a check needing snapshot comparison: %s", (command) => {
+    const result = classifyVerificationCommand(command);
+    expect(result.accepted).toBe(false);
+    expect(result.candidate).toBe(false);
+    expect(result.snapshotEligible).not.toBe(true);
+  });
+
+  it("rejects unknown commands without mislabeling ordinary shell work as verification", () => {
+    expect(classifyVerificationCommand("git status --short")).toMatchObject({
+      accepted: false,
+      candidate: false,
+    });
+  });
+
+  it("accepts checks piped through pure output limiters (pipefail keeps the status)", () => {
+    expect(classifyVerificationCommand("pnpm vitest run src/a.test.ts | tail -20")).toMatchObject({
+      accepted: true,
+    });
+    expect(
+      classifyVerificationCommand("cd packages/ggcoder && pnpm test 2>&1 | tail -5"),
+    ).toMatchObject({ accepted: true });
+    expect(classifyVerificationCommand("npm test | head -3")).toMatchObject({
+      accepted: true,
+    });
+  });
+
+  it("rejects pipes whose stages can transform check results", () => {
+    // grep/tee/wc can filter, redirect, or replace what the check proved.
+    expect(classifyVerificationCommand("pnpm test | grep -q 'all passed'").accepted).toBe(false);
+    expect(classifyVerificationCommand("pnpm test | tee results.log").accepted).toBe(false);
+    expect(classifyVerificationCommand("pnpm test | wc -l").accepted).toBe(false);
+    // A limiter joined by && (not a pipe) runs AFTER the check and its own 0
+    // would mask the check's status — the pipe allowance must not leak to it.
+    expect(classifyVerificationCommand("pnpm test && tail -5").accepted).toBe(false);
+    // Output redirection into the pipe stage is not a pure limiter either.
+    expect(classifyVerificationCommand("pnpm test | tail -f log.txt").accepted).toBe(false);
+  });
+
+  // Shapes Haiku 5.5 actually wrote in the 2026-10-09 arena. Each left the run
+  // "Unverified" although the tests passed. They now qualify for the host's
+  // before/after workspace comparison, never for transcript-only acceptance.
+  it.each([
+    'cd /w && npm test 2>&1 | grep -E "^ℹ (tests|pass|fail)|✖|✔"',
+    "grep -rn getUserById . --exclude-dir=.git; npm run test 2>&1 | tail -15",
+    "cd /w && rg -n formatPrice . --glob '!.git' ; npm run test 2>&1 | tail -15",
+    "npm test && git diff --stat",
+    "cat -n src/a.js && echo ---- && cat -n src/b.js; npm test",
+    "npm test 2>&1 | grep -c pass",
+    "tsc --noEmit | cat",
+    // The 11 runs still "Unverified" after the first fix used these shapes.
+    'cd /w && rg -n "formatPrice" . --glob \'!.git\'; echo "remaining: $?"; npm run test 2>&1 | tail -15',
+    'cd /w && echo "remaining: $(grep -rn formatPrice --exclude-dir=.git . | wc -l)" && npm run test 2>&1 | tail -25',
+    'cd /w && (rg -n "formatPrice" . || echo "no formatPrice left") && npm run test 2>&1 | tail -15',
+    'cd /w && (rg -n "getUserById" --hidden -g \'!.git\' || echo "no old refs") && npm run test 2>&1 | grep -E "^ℹ (tests|pass|fail)"',
+    'grep -rn "getUserById" . --exclude-dir=.git; echo "refs-exit=$?"; npm test 2>&1 | grep -E "^ℹ"',
+  ])("counts a check with read-only commands around it, via snapshot: %s", (command) => {
+    // Only under bash with pipefail; a caller that does not know the shell
+    // (or the Windows cmd.exe fallback) gets the strict answer.
+    expect(classifyVerificationCommand(command).ambiguousFailure).toBeUndefined();
+    expect(classifyVerificationCommand(command, { posixShell: true })).toMatchObject({
+      accepted: false,
+      candidate: true,
+      mayMutate: false,
+      snapshotEligible: true,
+      ambiguousFailure: true,
+    });
+    expect(
+      classifyVerificationCommand(command, { posixShell: true }).snapshotPreserveOnly,
+    ).toBeUndefined();
+  });
+
+  it.each([
+    // A later status replaces the check's.
+    ["npm test; git diff --stat", "`;` after the check"],
+    ["npm test; echo done", "`;` after the check"],
+    ["npm test || true", "`||`"],
+    ["npm test && npm run test:other; echo ok", "`;` after a check"],
+    // Something in the chain can write files or run arbitrary code.
+    ["sed -i s/a/b/ src/a.js; npm test", "mutating prelude"],
+    ["npm test | tee out.log", "tee writes a file"],
+    ["npm test | sort", "filter that exists in cmd.exe (no pipefail there)"],
+    ["npm test && npm run clean", "mutating trailer"],
+    ['echo "$(rm -rf src)"; npm test', "command substitution"],
+    ["cat a.js; npm test > out.txt", "redirection"],
+    ["git -c core.fsmonitor=helper status; npm test", "git running a configured helper"],
+    ["git config core.pager x; npm test", "git writing config"],
+    ["(cd sub; npm test)", "subshell"],
+    ["! npm test", "negated status"],
+    ["npm test | tail -f log", "never-ending filter"],
+    ['npm test | grep "-o" x', "flag hidden in quotes"],
+    ["cat a.js \\; npm test", "escape"],
+    // A check skipped or masked by `||`; a cd not joined by `&&`.
+    ["cat a.js || npm test", "check only runs if cat fails"],
+    ["npm test || echo failed", "`||` after the check"],
+    ["cd /w; npm test", "cd joined by ;"],
+    // Expansions and groups that could run or hide something.
+    ['echo "$(sed -i s/a/b/ x.js)"; npm test', "substitution with a writer"],
+    ["(sed -i s/a/b/ x.js) && npm test", "group with a writer"],
+    ["(cat a) x && npm test", "text after a group"],
+    ["(npm test) && cat a", "check inside a group"],
+    ["grep $'\\x2do' x; npm test", "ANSI-C quoted flag"],
+    ["cat $HOME/x; npm test", "variable expansion"],
+    ["cat a\u0000read-only-group && npm test", "forged group marker"],
+    // Read-only commands that can run a helper program.
+    ["rg --pre ./x.sh TODO; npm test", "rg preprocessor"],
+    ["git diff --ext-diff; npm test", "git external diff"],
+    // No check at all.
+    ["cat a.js; git diff --stat", "no check"],
+  ])("does not count %s (%s)", (command) => {
+    const result = classifyVerificationCommand(command, { posixShell: true });
+    expect(result.accepted).toBe(false);
+    expect(result.ambiguousFailure).toBeUndefined();
+  });
+
+  it("marks file-rewriting rejections mayMutate, plain unrecognized checks not", () => {
+    // The gate bumps its mutation revision when a mayMutate check STARTS (the
+    // command can rewrite files). A green `make test` — a real check the
+    // classifier just cannot vouch for — must not poison the revision and
+    // re-arm the gate into every later question turn.
+    expect(classifyVerificationCommand("pnpm lint:fix").mayMutate).toBe(true);
+    expect(classifyVerificationCommand("pnpm format:check --write").mayMutate).toBe(true);
+    expect(classifyVerificationCommand("pnpm test --update").mayMutate).toBe(true);
+    expect(classifyVerificationCommand("pnpm build").mayMutate).toBe(true);
+    expect(classifyVerificationCommand("pnpm eslint --fix src/foo.ts").mayMutate).toBe(true);
+    expect(classifyVerificationCommand("tsc -p .").mayMutate).toBe(true); // emits JS files
+    expect(classifyVerificationCommand("cargo build").mayMutate).toBe(true);
+    expect(classifyVerificationCommand("pnpm build 2>&1 | tail -5").mayMutate).toBe(true);
+    // Non-mutating shapes: unrecognized runners and pure checks.
+    expect(classifyVerificationCommand("make test").mayMutate).toBe(false);
+    expect(classifyVerificationCommand("deno test").mayMutate).toBe(false);
+    expect(classifyVerificationCommand("pnpm test").mayMutate).toBe(false);
+    expect(classifyVerificationCommand("pnpm test | grep -q ok").mayMutate).toBe(false);
+  });
+});
+
+function bashExchange(
+  id: string,
+  command: string,
+  result: string,
+  args: Record<string, unknown> = {},
+): Message[] {
+  return [
+    {
+      role: "assistant",
+      content: [{ type: "tool_call", id, name: "bash", args: { command, ...args } }],
+    },
+    {
+      role: "tool",
+      content: [{ type: "tool_result", toolCallId: id, content: result }],
+    },
+  ];
+}
+
+// Shapes Claude Haiku 5.5 wrote in the 2026-10-18 arena runs: the tests passed,
+// but the command's exit status belonged to a later part, so none counted.
+describe("extractStandaloneCheck", () => {
+  it.each([
+    [
+      'cd /w && rg -n "getUserById" . ; npm run test 2>&1 | tail -15; node -e \'\nimport("./src/api.js").then(({handle}) => { console.log(handle("/users/1")); });\'',
+      "cd /w && npm run test",
+    ],
+    [
+      'npm run test 2>&1 | grep -E "^# |^ℹ (tests|pass|fail)"; echo "exit=${PIPESTATUS[0]}"',
+      "npm run test",
+    ],
+    [
+      "cat >> test/cache.test.js <<'EOF'\ntest(\"retries\", async () => { a; b || c; });\nEOF\nnpm test 2>&1 | tail -25",
+      "npm test",
+    ],
+    [
+      'cd /w && echo "refs: $(rg -c old . | wc -l)"; npm test 2>&1 | grep -E "^ℹ"; git show HEAD:src/m.js > /tmp/old.mjs && cat > /tmp/cmp.mjs <<\'EOF\'\nimport { f } from "/tmp/old.mjs"; console.log(f(1) === 1 ? "ok" : "MISMATCH");\nEOF\nnode /tmp/cmp.mjs; rm -f /tmp/cmp.mjs',
+      "cd /w && npm test",
+    ],
+    ["npm test && git stash -q && npm test | grep fail; git stash pop -q", "npm test"],
+  ])("recovers the check from %j", (command, expected) => {
+    expect(extractStandaloneCheck(command)).toBe(expected);
+  });
+
+  it.each([
+    ["a command that already counts", "cd /w && npm test 2>&1 | tail -15"],
+    ["no check", "rg -n old . ; echo done"],
+    ["a check only inside a substitution", 'echo "$(npm test)"; true'],
+    ["a check only inside a subshell", "(cd sub && npm test); true"],
+    ["a later cd", "cd /w && true; cd other; npm test; true"],
+    ["a filter stage", "echo x | npm test; true"],
+    ["an unterminated heredoc", "cat > a <<EOF\nnpm test; true"],
+    ["an unterminated quote", "echo 'x; npm test; true"],
+    ["a check that rewrites files", "npx biome check --write .; true"],
+  ])("returns null for %s", (_label, command) => {
+    expect(extractStandaloneCheck(command)).toBeNull();
+  });
+});
+
+describe("collectVerificationEvidence", () => {
+  it("records only successful bounded checks as passed evidence", () => {
+    const messages: Message[] = [
+      ...bashExchange("pass", "tsc --noEmit", "Exit code: 0\n"),
+      ...bashExchange("fail", "vitest run src/foo.test.ts", "Exit code: 1\n1 test failed"),
+      ...bashExchange("watch", "tsc --watch --noEmit", "Exit code: 0\nWatching"),
+      ...bashExchange("ordinary", "git status --short", "Exit code: 0\n"),
+      ...bashExchange("background", "vitest run", "Background process started.", {
+        run_in_background: true,
+      }),
+    ];
+
+    expect(collectVerificationEvidence(messages)).toEqual([
+      {
+        command: "tsc --noEmit",
+        status: "passed",
+        reason: "bounded TypeScript no-emit check",
+      },
+      {
+        command: "vitest run src/foo.test.ts",
+        status: "failed",
+        reason: "bounded check did not exit successfully",
+      },
+      {
+        command: "tsc --watch --noEmit",
+        status: "rejected",
+        reason: "long-running watch/debug mode",
+      },
+      {
+        command: "vitest run",
+        status: "rejected",
+        reason: "background or persistent commands are not bounded evidence",
+      },
+    ]);
+  });
+});
+
+describe("SessionVerificationEvidenceLedger", () => {
+  function record(
+    ledger: SessionVerificationEvidenceLedger,
+    executionId: string,
+    command: string,
+    exitCode = 0,
+  ) {
+    ledger.recordToolResult({
+      name: "bash",
+      args: { command },
+      isError: exitCode !== 0,
+      details: {
+        bashDiagnostics: {
+          executionId,
+          command,
+          cwd: "C:/project",
+          startedAt: Date.parse("2026-08-30T10:00:00.000Z"),
+          reason: "completed",
+          exitCode,
+        },
+      },
+    });
+  }
+
+  it.each([
+    [
+      "completed",
+      0,
+      "passed",
+      "command exited successfully; requirement coverage is not certified",
+    ],
+    ["nonZeroExit", 1, "failed", "failed (exit 1)"],
+    ["spawnError", null, "failed", "launch failed"],
+    ["timedOut", null, "failed", "timed out"],
+    ["aborted", null, "failed", "cancelled"],
+    ["inactive", null, "failed", "stopped after no output"],
+    [undefined, null, "unavailable", "execution outcome unavailable"],
+  ])("retains terminal diagnostics for %s", (reason, exitCode, status, explanation) => {
+    const ledger = new SessionVerificationEvidenceLedger();
+    ledger.recordToolResult({
+      name: "bash",
+      args: { command: "tsc --noEmit" },
+      isError: exitCode !== 0,
+      details: {
+        bashDiagnostics: {
+          executionId: "terminal",
+          command: "tsc --noEmit",
+          cwd: "C:/project",
+          startedAt: 1000,
+          reason,
+          exitCode,
+          signal: "SIGTERM",
+          elapsedMs: 123,
+          timeoutMs: 120000,
+          logPath: "C:/logs/terminal.log",
+          tail: "fixture debugging target timed out: fetch failed",
+        },
+      },
+    });
+    const evidence = ledger.snapshot().currentEvidence[0];
+    expect(evidence).toMatchObject({
+      status,
+      reason: explanation,
+      exitCode,
+      signal: "SIGTERM",
+      elapsedMs: 123,
+      timeoutMs: 120000,
+      logPath: "C:/logs/terminal.log",
+    });
+    expect(evidence).not.toHaveProperty("tail");
+  });
+
+  it.each([
+    ["inactive", "inactive"],
+    ["timedOut", "timedOut"],
+  ])("records %s as a terminal reason", (reason, terminalReason) => {
+    const ledger = new SessionVerificationEvidenceLedger();
+    ledger.recordToolResult({
+      name: "bash",
+      args: { command: "tsc --noEmit" },
+      isError: true,
+      details: {
+        bashDiagnostics: {
+          executionId: "terminal",
+          command: "tsc --noEmit",
+          cwd: "C:/project",
+          startedAt: 1000,
+          reason,
+          exitCode: null,
+          signal: null,
+          elapsedMs: 123,
+          timeoutMs: 0,
+          logPath: "C:/logs/terminal.log",
+        },
+      },
+    });
+    expect(ledger.snapshot().currentEvidence[0]).toMatchObject({ terminalReason });
+  });
+
+  it("treats a command handed off to the background as unavailable, never passed", () => {
+    const ledger = new SessionVerificationEvidenceLedger();
+    ledger.recordToolResult({
+      name: "bash",
+      args: { command: "tsc --noEmit" },
+      isError: false,
+      details: {
+        bashDiagnostics: {
+          executionId: "handed-off",
+          command: "tsc --noEmit",
+          cwd: "C:/project",
+          startedAt: 1000,
+          reason: "backgrounded",
+          exitCode: null,
+          signal: null,
+          elapsedMs: 120_000,
+          timeoutMs: 3_600_000,
+          logPath: "C:/logs/handed-off.log",
+          backgroundTaskId: "task-1",
+        },
+      },
+    });
+    const evidence = ledger.snapshot().currentEvidence[0];
+    expect(evidence).toMatchObject({
+      status: "unavailable",
+      reason: "handed off to background; final outcome not in this response",
+    });
+    expect(evidence).not.toHaveProperty("terminalReason");
+  });
+
+  describe("background hand-off completion via task_output", () => {
+    const handOff = (ledger: SessionVerificationEvidenceLedger): void => {
+      ledger.recordToolResult({
+        evidenceRevision: ledger.revision,
+        evidenceRun: ledger.runId,
+        name: "bash",
+        args: { command: "pnpm test" },
+        isError: false,
+        details: {
+          bashDiagnostics: {
+            executionId: "handed-off",
+            command: "pnpm test",
+            cwd: "C:/project",
+            startedAt: 1000,
+            reason: "backgrounded",
+            exitCode: null,
+            signal: null,
+            elapsedMs: 120_000,
+            timeoutMs: 3_600_000,
+            backgroundTaskId: "task-1",
+          },
+        },
+      });
+    };
+    const readTask = (
+      ledger: SessionVerificationEvidenceLedger,
+      taskOutput: Record<string, unknown>,
+    ): void => {
+      ledger.recordToolResult({
+        name: "task_output",
+        args: { id: "task-1" },
+        isError: false,
+        details: {
+          taskOutput: {
+            id: "task-1",
+            isRunning: false,
+            exitCode: 0,
+            signal: null,
+            completedAt: 301_000,
+            stopReason: null,
+            ...taskOutput,
+          },
+        },
+      });
+    };
+
+    it("does not count a handed-off check as run until it finishes", () => {
+      const ledger = new SessionVerificationEvidenceLedger();
+      ledger.beginRun();
+      handOff(ledger);
+      expect(ledger.runActivity().checked).toBe(false);
+      readTask(ledger, {});
+      expect(ledger.runActivity().checked).toBe(true);
+    });
+
+    it("does not count a finished non-verification background command as checked", () => {
+      const ledger = new SessionVerificationEvidenceLedger();
+      ledger.beginRun();
+      // No captured revision: the entry stays current, so only the candidate guard applies.
+      ledger.recordToolResult({
+        evidenceRun: ledger.runId,
+        name: "bash",
+        args: { command: "sleep 200" },
+        isError: false,
+        details: {
+          bashDiagnostics: {
+            executionId: "sleeper",
+            command: "sleep 200",
+            cwd: "C:/project",
+            startedAt: 1000,
+            reason: "backgrounded",
+            exitCode: null,
+            signal: null,
+            backgroundTaskId: "task-1",
+          },
+        },
+      });
+      readTask(ledger, {});
+      expect(ledger.snapshot().currentEvidence[0]).toMatchObject({ status: "passed" });
+      expect(ledger.runActivity().checked).toBe(false);
+    });
+
+    it("records exit code 0 as passed", () => {
+      const ledger = new SessionVerificationEvidenceLedger();
+      handOff(ledger);
+      readTask(ledger, {});
+      expect(ledger.snapshot().currentEvidence).toEqual([
+        expect.objectContaining({
+          executionId: "handed-off",
+          status: "passed",
+          terminalReason: "completed",
+          exitCode: 0,
+          elapsedMs: 300_000,
+        }),
+      ]);
+    });
+
+    it("records a non-zero exit as failed", () => {
+      const ledger = new SessionVerificationEvidenceLedger();
+      handOff(ledger);
+      readTask(ledger, { exitCode: 1 });
+      expect(ledger.snapshot().currentEvidence[0]).toMatchObject({
+        status: "failed",
+        reason: "failed (exit 1)",
+        terminalReason: "nonZeroExit",
+        exitCode: 1,
+      });
+    });
+
+    it.each([
+      ["inactive", "stopped after no output"],
+      ["timedOut", "timed out"],
+    ])("records stopReason %s as failed", (stopReason, reason) => {
+      const ledger = new SessionVerificationEvidenceLedger();
+      handOff(ledger);
+      readTask(ledger, { exitCode: null, signal: "SIGTERM", stopReason });
+      expect(ledger.snapshot().currentEvidence[0]).toMatchObject({
+        status: "failed",
+        reason,
+        terminalReason: stopReason,
+      });
+    });
+
+    it("keeps a still-running task unavailable", () => {
+      const ledger = new SessionVerificationEvidenceLedger();
+      ledger.beginRun();
+      handOff(ledger);
+      readTask(ledger, { isRunning: true, exitCode: null, completedAt: null });
+      expect(ledger.snapshot().currentEvidence[0]).toMatchObject({
+        status: "unavailable",
+        reason: "handed off to background; final outcome not in this response",
+      });
+      expect(ledger.runActivity().checked).toBe(false);
+      // A later terminal read still upgrades it.
+      readTask(ledger, {});
+      expect(ledger.snapshot().currentEvidence[0]).toMatchObject({ status: "passed" });
+    });
+
+    it("ignores task_output for unrelated task IDs", () => {
+      const ledger = new SessionVerificationEvidenceLedger();
+      handOff(ledger);
+      readTask(ledger, { id: "other-task" });
+      expect(ledger.snapshot().currentEvidence[0]).toMatchObject({ status: "unavailable" });
+    });
+
+    it("does not upgrade after an intervening workspace edit", () => {
+      const ledger = new SessionVerificationEvidenceLedger();
+      handOff(ledger);
+      ledger.recordToolResult({
+        name: "edit",
+        args: { file_path: "src/a.ts" },
+        isError: false,
+      });
+      readTask(ledger, {});
+      const snapshot = ledger.snapshot();
+      expect(snapshot.currentEvidence).toEqual([]);
+      expect(snapshot.staleEvidence).toEqual([
+        expect.objectContaining({ executionId: "handed-off", status: "unavailable" }),
+      ]);
+    });
+  });
+
+  it("accepts a successful path-qualified Windows Go test as ready evidence", () => {
+    const command =
+      "./.tools/go/bin/go.exe test ./internal/architecture -run '^TestProjectImportDAG$' -count=1";
+    const ledger = new SessionVerificationEvidenceLedger();
+    ledger.recordToolResult({
+      name: "bash",
+      args: { command },
+      isError: false,
+      details: {
+        bashDiagnostics: {
+          executionId: "windows-go-test",
+          command,
+          cwd: "C:/project",
+          startedAt: Date.parse("2026-08-30T10:00:00.000Z"),
+          reason: "completed",
+          exitCode: 0,
+        },
+      },
+      workspace: TEST_WORKSPACE,
+    });
+
+    const currentLedgerEvidence = ledger.snapshot().currentEvidence;
+    expect(currentLedgerEvidence).toEqual([
+      expect.objectContaining({
+        command,
+        executionId: "windows-go-test",
+        status: "passed",
+        reason: "command exited successfully; requirement coverage is not certified",
+      }),
+    ]);
+  });
+
+  it("keeps execution identities immutable across replay and conflicting diagnostics", () => {
+    const ledger = new SessionVerificationEvidenceLedger();
+    record(ledger, "immutable", "pnpm check");
+    const first = ledger.snapshot();
+    record(ledger, "immutable", "pnpm check");
+    expect(ledger.snapshot()).toEqual(first);
+
+    record(ledger, "immutable", "pnpm check", 1);
+    expect(ledger.snapshot().currentEvidence).toEqual([
+      expect.objectContaining({
+        executionId: "immutable",
+        command: "pnpm check",
+        status: "passed",
+      }),
+    ]);
+  });
+
+  it("bounds retained executions while preserving the newest evidence", () => {
+    const ledger = new SessionVerificationEvidenceLedger();
+    for (let index = 0; index <= 100; index += 1) {
+      record(ledger, `execution-${index}`, `vitest run src/case-${index}.test.ts`);
+    }
+
+    const evidence = ledger.snapshot().currentEvidence;
+    expect(evidence).toHaveLength(100);
+    expect(evidence.at(-1)?.command).toBe("vitest run src/case-100.test.ts");
+  });
+
+  it("does not retain oversized execution diagnostics", () => {
+    const ledger = new SessionVerificationEvidenceLedger();
+    record(ledger, "x".repeat(1_000), `vitest run ${"x".repeat(10_000)}`);
+
+    expect(ledger.snapshot()).toEqual({ currentEvidence: [], staleEvidence: [] });
+  });
+
+  it("does not promote a check started before an edit with a completion-time snapshot", () => {
+    const ledger = new SessionVerificationEvidenceLedger();
+    const evidenceRevision = ledger.revision;
+    ledger.recordToolResult({
+      name: "edit",
+      args: { file_path: "src/example.ts" },
+      isError: false,
+    });
+    ledger.recordToolResult({
+      name: "bash",
+      args: { command: "pnpm check" },
+      isError: false,
+      evidenceRevision,
+      workspace: TEST_WORKSPACE,
+      details: {
+        bashDiagnostics: {
+          executionId: "in-flight",
+          command: "pnpm check",
+          cwd: "C:/project",
+          startedAt: 1000,
+          reason: "completed",
+          exitCode: 0,
+        },
+      },
+    });
+    expect(ledger.snapshot()).toMatchObject({
+      currentEvidence: [],
+      staleEvidence: [{ executionId: "in-flight", status: "passed", workspace: TEST_WORKSPACE }],
+    });
+  });
+
+  it("keeps equal commands isolated by execution, cwd, and reset boundary", () => {
+    const ledger = new SessionVerificationEvidenceLedger();
+    for (const [executionId, cwd, exitCode] of [
+      ["one", "C:/one", 1],
+      ["two", "C:/two", 0],
+    ] as const) {
+      ledger.recordToolResult({
+        name: "bash",
+        args: { command: "pnpm check" },
+        isError: exitCode !== 0,
+        details: {
+          bashDiagnostics: {
+            executionId,
+            cwd,
+            exitCode,
+            command: "pnpm check",
+            startedAt: 1000,
+            reason: exitCode ? "nonZeroExit" : "completed",
+          },
+        },
+      });
+    }
+    expect(ledger.snapshot().currentEvidence).toMatchObject([
+      { executionId: "one", cwd: "C:/one", status: "failed" },
+      { executionId: "two", cwd: "C:/two", status: "passed" },
+    ]);
+    ledger.clear();
+    expect(ledger.snapshot()).toEqual({ currentEvidence: [], staleEvidence: [] });
+  });
+
+  it.each([
+    "gg-app/src/local-release-notes.json",
+    "gg-app/src/local-changelog.ts",
+    "tsconfig.json",
+  ])("conservatively stales backend evidence after editing %s", (file_path) => {
+    const ledger = new SessionVerificationEvidenceLedger();
+    record(ledger, "backend", "pnpm --filter @kenkaiiii/ggcoder exec tsc --noEmit");
+    ledger.recordToolResult({ name: "edit", args: { file_path }, isError: false });
+    expect(ledger.snapshot().currentEvidence).toEqual([]);
+    expect(ledger.snapshot().staleEvidence[0]).toMatchObject({
+      executionId: "backend",
+      status: "passed",
+    });
+  });
+
+  it("stales evidence after a multi-file edit with no top-level file_path", () => {
+    const ledger = new SessionVerificationEvidenceLedger();
+    record(ledger, "accepted", "pnpm check");
+    ledger.recordToolResult({
+      name: "edit",
+      args: {
+        files: [
+          { file_path: "src/a.ts", edits: [] },
+          { file_path: "src/b.ts", edits: [] },
+        ],
+      },
+      isError: false,
+    });
+
+    expect(ledger.snapshot().currentEvidence).toEqual([]);
+  });
+
+  it("moves accepted evidence to stale after a workspace mutation", () => {
+    const ledger = new SessionVerificationEvidenceLedger();
+    record(ledger, "accepted", "pnpm check");
+    ledger.recordToolResult({
+      name: "edit",
+      args: { file_path: "src/example.ts" },
+      isError: false,
+    });
+
+    expect(ledger.snapshot()).toMatchObject({
+      currentEvidence: [],
+      staleEvidence: [expect.objectContaining({ command: "pnpm check", status: "passed" })],
+    });
+  });
+
+  it.each([
+    "roadmap_status",
+    "roadmap_phase_draft",
+    "roadmap_phase_edit",
+    "roadmap_phase_move",
+    "roadmap_inspect",
+    "roadmap_bind",
+    "roadmap_checkpoint",
+  ])("retains evidence across %s metadata operations", (name) => {
+    const ledger = new SessionVerificationEvidenceLedger();
+    record(ledger, "accepted", "pnpm check");
+    ledger.recordToolResult({ name, args: {}, isError: false });
+    expect(ledger.snapshot()).toMatchObject({
+      currentEvidence: [expect.objectContaining({ executionId: "accepted" })],
+      staleEvidence: [],
+    });
+  });
+});
+
+describe("project checks and harmless commands", () => {
+  const plan: VerifyPlan = {
+    version: 1,
+    mode: "changed",
+    advice: [],
+    gates: [
+      {
+        id: "ts",
+        argv: ["node", "scripts/test-ts.mjs"],
+        cwd: ".",
+        covers: [],
+        fingerprint: null,
+        quietBudgetSeconds: null,
+        protectedPaths: [],
+      },
+      {
+        id: "native",
+        argv: ["node", "scripts/native.mjs"],
+        cwd: "apps/desktop",
+        covers: [],
+        fingerprint: null,
+        quietBudgetSeconds: null,
+        protectedPaths: [],
+      },
+      {
+        id: "watcher",
+        argv: ["node", "scripts/test-ts.mjs", "--watch"],
+        cwd: "web",
+        covers: [],
+        fingerprint: null,
+        quietBudgetSeconds: null,
+        protectedPaths: [],
+      },
+    ],
+  };
+
+  function run(ledger: SessionVerificationEvidenceLedger, executionId: string, command: string) {
+    ledger.recordToolResult({
+      name: "bash",
+      args: { command },
+      isError: false,
+      details: {
+        bashDiagnostics: {
+          executionId,
+          command,
+          cwd: "C:/project",
+          startedAt: Date.parse("2026-10-30T10:00:00.000Z"),
+          reason: "completed",
+          exitCode: 0,
+        },
+      },
+    });
+  }
+
+  it.each([
+    "pnpm verify --changed",
+    "pnpm verify:full",
+    "pnpm --dir apps/desktop test:native",
+    "pnpm -C apps/desktop test:native",
+    "pnpm test:unit",
+    "npm run verify",
+  ])("accepts the project script %j", (command) => {
+    expect(classifyVerificationCommand(command)).toMatchObject({ accepted: true });
+  });
+
+  it.each([
+    "pnpm test:watch",
+    "pnpm verify:fix",
+    "pnpm test:native --watch",
+    "pnpm test:update",
+    "pnpm dev",
+    "node scripts/test-ts.mjs",
+  ])("rejects %j", (command) => {
+    expect(classifyVerificationCommand(command).accepted).toBe(false);
+  });
+
+  it.each([
+    ["node scripts/test-ts.mjs", "project verify-plan gate ts"],
+    ["cd apps/desktop && node scripts/native.mjs", "project verify-plan gate native"],
+  ])("accepts the verify-plan gate %j", (command, reason) => {
+    expect(classifyVerificationCommand(command, { verifyPlan: plan })).toMatchObject({
+      accepted: true,
+      reason,
+    });
+  });
+
+  it.each([
+    "node scripts/test-ts.mjs --extra",
+    "node 'scripts/test-ts.mjs'",
+    "cd other && node scripts/native.mjs",
+    "node scripts/native.mjs",
+    "cd web && node scripts/test-ts.mjs --watch",
+  ])("does not accept the lookalike %j", (command) => {
+    expect(classifyVerificationCommand(command, { verifyPlan: plan }).accepted).toBe(false);
+  });
+
+  it("counts a verify-plan gate through the ledger's plan getter", () => {
+    const ledger = new SessionVerificationEvidenceLedger({ getVerifyPlan: () => plan });
+    run(ledger, "gate", "node scripts/test-ts.mjs");
+    expect(ledger.snapshot().currentEvidence).toEqual([
+      expect.objectContaining({ executionId: "gate", status: "passed" }),
+    ]);
+  });
+
+  it.each(["pnpm test > /tmp/fmt.log 2>&1", "pnpm test >/dev/null", "pnpm test >> /tmp/a/b.txt"])(
+    "lets the host snapshot count %j on a POSIX shell",
+    (command) => {
+      expect(classifyVerificationCommand(command, { posixShell: true })).toMatchObject({
+        accepted: false,
+        snapshotEligible: true,
+      });
+      expect(classifyVerificationCommand(command).snapshotEligible).toBeFalsy();
+    },
+  );
+
+  it.each([
+    "pnpm test > out.txt",
+    'pnpm test > "$LOG"',
+    "pnpm test > $LOG",
+    "pnpm test > /tmp/../repo/out.txt",
+    "pnpm test:update > /tmp/u.log",
+  ])("keeps refusing the redirect %j", (command) => {
+    const verdict = classifyVerificationCommand(command, { posixShell: true });
+    expect(verdict.accepted).toBe(false);
+    expect(verdict.snapshotEligible).toBeFalsy();
+  });
+
+  describe("redirected check through the ledger", () => {
+    const redirected = "pnpm test > /tmp/fmt.log 2>&1";
+    function runRedirected(
+      ledger: SessionVerificationEvidenceLedger,
+      { exitCode = 0, sourceUnchanged }: { exitCode?: number; sourceUnchanged: boolean },
+    ) {
+      ledger.recordToolResult({
+        name: "bash",
+        args: { command: redirected },
+        evidenceRevision: ledger.revision,
+        isError: exitCode !== 0,
+        details: {
+          bashDiagnostics: {
+            executionId: "redirected",
+            command: redirected,
+            cwd: "C:/project",
+            startedAt: Date.parse("2026-10-30T10:00:00.000Z"),
+            reason: exitCode === 0 ? "completed" : "nonZeroExit",
+            exitCode,
+            sourceUnchanged,
+          },
+        },
+      });
+    }
+    function editedLedger() {
+      const ledger = new SessionVerificationEvidenceLedger({ posixShell: true });
+      ledger.recordToolResult({ name: "edit", args: { file_path: "src/a.ts" }, isError: false });
+      return ledger;
+    }
+
+    it("counts a pass with unchanged inputs as current evidence", () => {
+      const ledger = editedLedger();
+      const revision = ledger.revision;
+      runRedirected(ledger, { sourceUnchanged: true });
+      expect(ledger.verificationProblem()).toBeNull();
+      expect(ledger.revision).toBe(revision);
+      expect(ledger.snapshot()).toMatchObject({
+        currentEvidence: [{ executionId: "redirected", status: "passed" }],
+        staleEvidence: [],
+      });
+    });
+
+    it("does not count a pass that changed inputs", () => {
+      const ledger = editedLedger();
+      const revision = ledger.revision;
+      runRedirected(ledger, { sourceUnchanged: false });
+      expect(ledger.verificationProblem()).toBe(VERIFICATION_PROBLEM_MISSING);
+      expect(ledger.revision).toBe(revision + 1);
+    });
+
+    it("does not record a redirected failure as the check's", () => {
+      const ledger = editedLedger();
+      const revision = ledger.revision;
+      runRedirected(ledger, { exitCode: 1, sourceUnchanged: true });
+      expect(ledger.verificationProblem()).toBe(VERIFICATION_PROBLEM_MISSING);
+      expect(ledger.revision).toBe(revision);
+      expect(ledger.snapshot().currentEvidence).toEqual([]);
+    });
+  });
+
+  it.each([
+    ["pnpm test > /tmp/fmt.log 2>&1; true", "pnpm test"],
+    ["pnpm test > out.txt; true", "pnpm test"],
+  ])("drops the redirect when recovering %j", (command, expected) => {
+    expect(extractStandaloneCheck(command)).toBe(expected);
+  });
+
+  // 2026-10-30 probe: one `git status` used to move a passing cargo test to stale.
+  it.each([
+    "git status --short",
+    "git diff",
+    "git log --oneline -5",
+    "git show HEAD",
+    "ls",
+    "cat src/a.ts",
+    "rg -n foo src",
+  ])("keeps a passing check current across %j", (command) => {
+    const ledger = new SessionVerificationEvidenceLedger();
+    ledger.recordToolResult({ name: "edit", args: { file_path: "src/a.ts" }, isError: false });
+    run(ledger, "cargo", "cargo test");
+    const before = ledger.snapshot();
+    run(ledger, "probe", command);
+    // The read-only command is not evidence itself, so it is listed as not current.
+    expect(ledger.snapshot().currentEvidence).toEqual(before.currentEvidence);
+    expect(before.currentEvidence).toEqual([
+      expect.objectContaining({ executionId: "cargo", status: "passed" }),
+    ]);
+  });
+
+  it.each(["rm x", "node script.mjs"])("still stales a pass after %j", (command) => {
+    const ledger = new SessionVerificationEvidenceLedger();
+    run(ledger, "cargo", "cargo test");
+    run(ledger, "other", command);
+    expect(ledger.snapshot().staleEvidence).toEqual([
+      expect.objectContaining({ executionId: "cargo", status: "passed" }),
+    ]);
+  });
+});
+
+describe("check coverage scoped by covered files", () => {
+  const FP_RUST = "a".repeat(64);
+  const FP_TREE = "b".repeat(64);
+  const rustScope = { kind: "plan" as const, root: "/repo", gateId: "rust", covers: ["crates/**"] };
+  const plan: VerifyPlan = {
+    version: 1,
+    mode: "changed",
+    gates: [
+      {
+        id: "rust",
+        argv: ["cargo", "test"],
+        cwd: ".",
+        covers: ["crates/**"],
+        fingerprint: null,
+        quietBudgetSeconds: null,
+        protectedPaths: [],
+      },
+    ],
+    advice: [{ gateId: "rust", kind: "reused-pass", reason: "unchanged", lastRun: "2026-10-29" }],
+  };
+
+  function newLedger() {
+    return new SessionVerificationEvidenceLedger({ getVerifyPlan: () => plan });
+  }
+
+  function check(
+    ledger: SessionVerificationEvidenceLedger,
+    executionId: string,
+    command: string,
+    options: { exitCode?: number; reason?: string; checkCoverage?: unknown } = {},
+  ) {
+    const exitCode = options.exitCode ?? 0;
+    ledger.recordToolResult({
+      evidenceRevision: ledger.revision,
+      name: "bash",
+      args: { command },
+      isError: exitCode !== 0,
+      sessionCwd: "/repo",
+      details: {
+        bashDiagnostics: {
+          executionId,
+          command,
+          cwd: "/repo",
+          startedAt: Date.parse("2026-10-30T10:00:00.000Z"),
+          reason: options.reason ?? (exitCode === 0 ? "completed" : "nonZeroExit"),
+          exitCode,
+          checkCoverage: options.checkCoverage,
+        },
+      },
+    });
+  }
+
+  function edit(ledger: SessionVerificationEvidenceLedger, filePath: string) {
+    ledger.recordToolResult({
+      name: "edit",
+      args: { file_path: filePath },
+      isError: false,
+      sessionCwd: "/repo",
+    });
+  }
+
+  const currentIds = (ledger: SessionVerificationEvidenceLedger) =>
+    ledger.snapshot().currentEvidence.map((evidence) => evidence.executionId);
+  const staleIds = (ledger: SessionVerificationEvidenceLedger) =>
+    ledger.snapshot().staleEvidence.map((evidence) => evidence.executionId);
+
+  it("keeps a plan-scoped Rust pass current across a TS edit, but owes a check for the TS change", () => {
+    const ledger = newLedger();
+    edit(ledger, "crates/core/src/lib.rs");
+    check(ledger, "rust-1", "cargo test", {
+      checkCoverage: { fingerprint: FP_RUST, scope: rustScope },
+    });
+    expect(ledger.verificationProblem()).toBeNull();
+    edit(ledger, "/repo/src/app.ts");
+    expect(currentIds(ledger)).toEqual(["rust-1"]);
+    expect(ledger.findPriorPass(FP_RUST)).toMatchObject({ current: true });
+    expect(ledger.verificationProblem()).toBe(VERIFICATION_PROBLEM_MISSING);
+    check(ledger, "ts-1", "tsc --noEmit");
+    expect(ledger.verificationProblem()).toBeNull();
+    expect(currentIds(ledger)).toEqual(["rust-1", "ts-1"]);
+    edit(ledger, "crates/core/src/lib.rs");
+    expect(currentIds(ledger)).toEqual([]);
+    expect(staleIds(ledger)).toEqual(["rust-1", "ts-1"]);
+    expect(ledger.findPriorPass(FP_RUST)).toMatchObject({
+      current: false,
+      record: { executionId: "rust-1", run: 0, status: "passed" },
+    });
+  });
+
+  it("stales a whole-tree pass on any edit", () => {
+    const ledger = newLedger();
+    check(ledger, "tree-1", "tsc --noEmit", {
+      checkCoverage: { fingerprint: FP_TREE, scope: { kind: "tree", root: "/repo" } },
+    });
+    expect(currentIds(ledger)).toEqual(["tree-1"]);
+    edit(ledger, "docs/readme.md");
+    expect(currentIds(ledger)).toEqual([]);
+    expect(staleIds(ledger)).toEqual(["tree-1"]);
+    expect(ledger.findPriorPass(FP_TREE)?.current).toBe(false);
+  });
+
+  function mutate(
+    ledger: SessionVerificationEvidenceLedger,
+    command: string,
+    changedFiles: unknown,
+  ) {
+    ledger.recordToolResult({
+      evidenceRevision: ledger.revision,
+      name: "bash",
+      args: { command },
+      isError: false,
+      sessionCwd: "/repo",
+      details: {
+        bashDiagnostics: {
+          executionId: "mutate",
+          command,
+          cwd: "/repo",
+          startedAt: Date.parse("2026-10-30T10:01:00.000Z"),
+          reason: "completed",
+          exitCode: 0,
+          changedFiles,
+        },
+      },
+    });
+  }
+
+  const comparedList = (paths: string[], complete = true) => ({
+    status: "compared",
+    root: "/repo",
+    paths: paths.map((file) => ({ path: file, kind: "modified" })),
+    complete,
+    headMoved: false,
+  });
+
+  // The mutating command is shell evidence itself; only the checks matter here.
+  const checkIds = (ids: readonly (string | undefined)[]) => ids.filter((id) => id !== "mutate");
+
+  it("narrows staleness to a bash command's compared changed-files list", () => {
+    const ledger = newLedger();
+    check(ledger, "rust-1", "cargo test", {
+      checkCoverage: { fingerprint: FP_RUST, scope: rustScope },
+    });
+    mutate(ledger, "node script.mjs", comparedList(["src/app.ts"]));
+    expect(checkIds(currentIds(ledger))).toEqual(["rust-1"]);
+    expect(ledger.findPriorPass(FP_RUST)?.current).toBe(true);
+    mutate(ledger, "node script.mjs", comparedList(["crates/core/src/lib.rs"]));
+    expect(checkIds(currentIds(ledger))).toEqual([]);
+    expect(checkIds(staleIds(ledger))).toEqual(["rust-1"]);
+  });
+
+  it.each([
+    ["a skipped list", "node script.mjs", { status: "skipped", reason: "read-only", limit: false }],
+    ["an incomplete list", "node script.mjs", comparedList(["src/app.ts"], false)],
+    ["no list", "node script.mjs", undefined],
+    ["a malformed list", "node script.mjs", { ...comparedList([]), paths: [{ path: 3 }] }],
+    ["an install", "npm install left-pad", comparedList([])],
+  ])("falls back to whole-tree staleness with %s", (_label, command, changedFiles) => {
+    const ledger = newLedger();
+    check(ledger, "rust-1", "cargo test", {
+      checkCoverage: { fingerprint: FP_RUST, scope: rustScope },
+    });
+    mutate(ledger, command, changedFiles);
+    expect(checkIds(currentIds(ledger))).toEqual([]);
+    expect(checkIds(staleIds(ledger))).toEqual(["rust-1"]);
+  });
+
+  it("still stales a whole-tree pass after a bash command that changed nothing tracked", () => {
+    const ledger = newLedger();
+    check(ledger, "tree-1", "tsc --noEmit", {
+      checkCoverage: { fingerprint: FP_TREE, scope: { kind: "tree", root: "/repo" } },
+    });
+    mutate(ledger, "node script.mjs", comparedList([]));
+    expect(checkIds(currentIds(ledger))).toEqual([]);
+  });
+
+  it("stales a plan-scoped pass on edits it cannot place", () => {
+    const ledger = newLedger();
+    check(ledger, "rust-1", "cargo test", {
+      checkCoverage: { fingerprint: FP_RUST, scope: rustScope },
+    });
+    ledger.recordToolResult({ name: "edit", args: { file_path: "src/a.ts" }, isError: false });
+    expect(currentIds(ledger)).toEqual([]);
+    check(ledger, "rust-2", "cargo test", {
+      checkCoverage: { fingerprint: FP_RUST, scope: rustScope },
+    });
+    edit(ledger, "/elsewhere/a.ts");
+    expect(currentIds(ledger)).toEqual([]);
+  });
+
+  it("keeps a scoped failure across an unrelated edit until the same check passes", () => {
+    const ledger = newLedger();
+    edit(ledger, "crates/core/src/lib.rs");
+    check(ledger, "rust-fail", "cargo test", {
+      exitCode: 1,
+      checkCoverage: { fingerprint: FP_RUST, scope: rustScope },
+    });
+    expect(ledger.verificationProblem()).toBe(VERIFICATION_PROBLEM_FAILED);
+    edit(ledger, "src/app.ts");
+    check(ledger, "ts-1", "tsc --noEmit");
+    expect(ledger.verificationProblem()).toBe(VERIFICATION_PROBLEM_FAILED);
+    expect(ledger.findPriorPass(FP_RUST)).toBeNull();
+    check(ledger, "rust-pass", "cargo test", {
+      checkCoverage: { fingerprint: FP_RUST, scope: rustScope },
+    });
+    expect(ledger.verificationProblem()).toBeNull();
+  });
+
+  it("remembers only conclusive outcomes with a stable fingerprint", () => {
+    const ledger = newLedger();
+    check(ledger, "unknown", "cargo test", {
+      exitCode: 0,
+      reason: "weird",
+      checkCoverage: { fingerprint: FP_RUST, scope: rustScope },
+    });
+    expect(ledger.findPriorPass(FP_RUST)).toBeNull();
+    check(ledger, "unstable", "cargo test");
+    expect(ledger.findPriorPass(FP_RUST)).toBeNull();
+    check(ledger, "malformed", "cargo test", {
+      checkCoverage: { fingerprint: "not-a-hash", scope: rustScope },
+    });
+    expect(ledger.findPriorPass("not-a-hash")).toBeNull();
+    check(ledger, "stable", "cargo test", {
+      checkCoverage: { fingerprint: FP_RUST, scope: rustScope },
+    });
+    expect(ledger.findPriorPass(FP_RUST)).toMatchObject({
+      current: true,
+      record: { executionId: "stable" },
+    });
+    ledger.clear();
+    expect(ledger.findPriorPass(FP_RUST)).toBeNull();
+  });
+
+  it("never turns project-reported reuse into evidence or coverage", () => {
+    const ledger = newLedger();
+    edit(ledger, "crates/core/src/lib.rs");
+    expect(ledger.verificationProblem()).toBe(VERIFICATION_PROBLEM_MISSING);
+    expect(ledger.snapshot()).toEqual({ currentEvidence: [], staleEvidence: [] });
+    expect(ledger.workspaceEvidence()).toEqual([]);
+  });
+
+  it("settles a handed-off check's fingerprint and scope from the host", () => {
+    const ledger = newLedger();
+    ledger.recordToolResult({
+      evidenceRevision: ledger.revision,
+      name: "bash",
+      args: { command: "cargo test" },
+      isError: false,
+      sessionCwd: "/repo",
+      details: {
+        bashDiagnostics: {
+          executionId: "bg-1",
+          command: "cargo test",
+          cwd: "/repo",
+          startedAt: 1000,
+          reason: "backgrounded",
+          exitCode: null,
+          backgroundTaskId: "task-1",
+          checkCoverage: { fingerprint: FP_RUST, scope: rustScope },
+        },
+      },
+    });
+    expect(ledger.findPriorPass(FP_RUST)).toBeNull();
+    ledger.recordToolResult({
+      name: "task_output",
+      args: { id: "task-1" },
+      isError: false,
+      sessionCwd: "/repo",
+      settledCoverage: { fingerprint: FP_RUST, scope: rustScope },
+      details: {
+        taskOutput: { id: "task-1", isRunning: false, exitCode: 0, signal: null, stopReason: null },
+      },
+    });
+    expect(ledger.findPriorPass(FP_RUST)).toMatchObject({
+      current: true,
+      record: { executionId: "bg-1" },
+    });
+    edit(ledger, "src/app.ts");
+    expect(currentIds(ledger)).toEqual(["bg-1"]);
+  });
+});

@@ -1,0 +1,16 @@
+{
+  "id": "dock-magnify",
+  "name": "Dock magnify",
+  "kind": "ui",
+  "description": "A glassy macOS-style dock: a cursor glides along it and every icon's size is computed from its distance to the cursor each frame (smooth magnification wave), then it clicks one app, which bounces and gets a running dot. Converted from Magic UI's Dock.",
+  "tags": ["dock", "macos", "magnify", "cursor", "apps", "icons", "hover", "saas", "magic-ui"],
+  "fonts": [],
+  "duration": 5,
+  "previewAt": 2.7,
+  "license": "MIT",
+  "source": {
+    "url": "https://github.com/magicuidesign/magicui/blob/main/apps/www/registry/magicui/dock.tsx",
+    "author": "Magic UI"
+  },
+  "previewLook": "soft-light-ad"
+}

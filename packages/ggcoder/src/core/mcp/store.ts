@@ -1,5 +1,7 @@
 import path from "node:path";
 import fs from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { withFileLock } from "@kenkaiiii/gg-core";
 import { z } from "zod";
 import { getAppPaths } from "../../config.js";
 import { log } from "../logger.js";
@@ -16,7 +18,8 @@ export type MCPScope = "global" | "project";
 /**
  * On-disk entry shape. Accepts both Claude's `.mcp.json` fields
  * (`type`, `url`, `headers`, `command`, `args`, `env`, `timeout`) and our
- * extra (`enabled`) so configs are portable in both directions.
+ * extras (`enabled`, `shared`, `keepAlive`, `maxTotalTimeout`) so configs are portable
+ * in both directions.
  */
 const StoredServerEntrySchema = z
   .object({
@@ -27,11 +30,35 @@ const StoredServerEntrySchema = z
     args: z.array(z.string()).optional(),
     env: z.record(z.string(), z.string()).optional(),
     timeout: z.number().optional(),
+    maxTotalTimeout: z.number().optional(),
     enabled: z.boolean().optional(),
+    shared: z.boolean().optional(),
+    keepAlive: z.boolean().optional(),
+    oauth: z
+      .object({
+        clientId: z.string().optional(),
+        callbackPort: z.number().int().min(1).max(65535).optional(),
+      })
+      .passthrough()
+      .optional(),
   })
   .passthrough();
 
 export type StoredServerEntry = z.infer<typeof StoredServerEntrySchema>;
+
+/** Validate one Claude-style server entry (e.g. the JSON in `claude mcp add-json`). */
+export function parseStoredEntry(
+  raw: unknown,
+): { ok: true; value: StoredServerEntry } | { ok: false; error: string } {
+  const parsed = StoredServerEntrySchema.safeParse(raw);
+  if (parsed.success) return { ok: true, value: parsed.data };
+  const issue = parsed.error.issues[0];
+  const where = issue?.path.length ? ` at "${issue.path.join(".")}"` : "";
+  return {
+    ok: false,
+    error: `The server JSON is invalid${where}: ${issue?.message ?? "bad shape"}.`,
+  };
+}
 
 const McpFileSchema = z.object({
   mcpServers: z.record(z.string(), StoredServerEntrySchema).default({}),
@@ -43,6 +70,10 @@ export type McpFile = z.infer<typeof McpFileSchema>;
 export interface ScopedServer {
   config: MCPServerConfig;
   scope: MCPScope;
+  /** Shipped with GG Coder (see builtin.ts), not read from an mcp.json file. */
+  builtin?: true;
+  /** Why a built-in server can't start (its program is missing); never spawned. */
+  unavailableReason?: string;
 }
 
 export function globalMcpPath(): string {
@@ -54,30 +85,61 @@ export function projectMcpPath(cwd: string): string {
 }
 
 /**
- * Read + validate one mcp.json file. On missing file → empty. On malformed
- * JSON/schema → log + treat as empty (don't crash), matching SettingsManager.
+ * Read + validate one mcp.json file. A genuinely missing file is empty; every
+ * other read/parse/schema failure is surfaced so management cannot report a
+ * broken config as a successful empty list.
  */
 async function readMcpFile(filePath: string): Promise<McpFile> {
   let content: string;
   try {
     content = await fs.readFile(filePath, "utf-8");
-  } catch {
-    return { mcpServers: {} };
+  } catch (err) {
+    if (
+      typeof err === "object" &&
+      err !== null &&
+      "code" in err &&
+      (err as { code?: unknown }).code === "ENOENT"
+    ) {
+      return { mcpServers: {} };
+    }
+    throw new Error(`Could not read MCP config at ${filePath}.`, { cause: err });
   }
   try {
     const raw: unknown = JSON.parse(content);
     return McpFileSchema.parse(raw);
   } catch (err) {
-    log("WARN", "mcp", `Ignoring malformed MCP config at ${filePath}`, {
+    log("WARN", "mcp", `Malformed MCP config at ${filePath}`, {
       error: err instanceof Error ? err.message : String(err),
     });
-    return { mcpServers: {} };
+    throw new Error(`MCP config at ${filePath} is malformed. Fix the file, then retry.`, {
+      cause: err,
+    });
   }
 }
 
 async function writeMcpFile(filePath: string, file: McpFile): Promise<void> {
   await fs.mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
-  await fs.writeFile(filePath, JSON.stringify(file, null, 2) + "\n", "utf-8");
+  const tempPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    await fs.writeFile(tempPath, JSON.stringify(file, null, 2) + "\n", {
+      encoding: "utf-8",
+      mode: 0o600,
+      flag: "wx",
+    });
+    await fs.rename(tempPath, filePath);
+  } finally {
+    await fs.rm(tempPath, { force: true }).catch(() => {});
+  }
+}
+
+/**
+ * Every server-config mutation, across global and project scopes, uses the
+ * same process-safe lock. Callers must re-read their target file inside it.
+ */
+async function withMcpMutationLock<T>(mutation: () => Promise<T>): Promise<T> {
+  const lockTarget = globalMcpPath();
+  await fs.mkdir(path.dirname(lockTarget), { recursive: true, mode: 0o700 });
+  return withFileLock(lockTarget, mutation);
 }
 
 /** Map an on-disk entry to a runtime MCPServerConfig. */
@@ -91,13 +153,23 @@ export function fromStoredEntry(name: string, entry: StoredServerEntry): MCPServ
     // Streamable HTTP or go straight to legacy SSE.
     if (entry.type === "sse") config.transport = "sse";
     else if (entry.type === "http" || entry.type === "streamable-http") config.transport = "http";
+    const { clientId, callbackPort } = entry.oauth ?? {};
+    if (clientId || callbackPort) {
+      config.oauth = {
+        ...(clientId ? { clientId } : {}),
+        ...(callbackPort ? { callbackPort } : {}),
+      };
+    }
   } else if (entry.command) {
     config.command = entry.command;
     if (entry.args) config.args = entry.args;
     if (entry.env) config.env = entry.env;
   }
   if (typeof entry.timeout === "number") config.timeout = entry.timeout;
+  if (typeof entry.maxTotalTimeout === "number") config.maxTotalTimeout = entry.maxTotalTimeout;
   if (typeof entry.enabled === "boolean") config.enabled = entry.enabled;
+  if (typeof entry.shared === "boolean") config.shared = entry.shared;
+  if (typeof entry.keepAlive === "boolean") config.keepAlive = entry.keepAlive;
   return config;
 }
 
@@ -108,6 +180,7 @@ export function toStoredEntry(config: MCPServerConfig): StoredServerEntry {
     entry.type = config.transport ?? "http";
     entry.url = config.url;
     if (config.headers) entry.headers = config.headers;
+    if (config.oauth) entry.oauth = config.oauth;
   } else if (config.command) {
     entry.type = "stdio";
     entry.command = config.command;
@@ -115,7 +188,10 @@ export function toStoredEntry(config: MCPServerConfig): StoredServerEntry {
     if (config.env) entry.env = config.env;
   }
   if (typeof config.timeout === "number") entry.timeout = config.timeout;
+  if (typeof config.maxTotalTimeout === "number") entry.maxTotalTimeout = config.maxTotalTimeout;
   if (typeof config.enabled === "boolean") entry.enabled = config.enabled;
+  if (typeof config.shared === "boolean") entry.shared = config.shared;
+  if (typeof config.keepAlive === "boolean") entry.keepAlive = config.keepAlive;
   return entry;
 }
 
@@ -153,26 +229,30 @@ export async function addServer(
   overwrite = false,
 ): Promise<{ ok: true } | { ok: false; error: string }> {
   const filePath = scope === "global" ? globalMcpPath() : projectMcpPath(cwd);
-  const file = await readMcpFile(filePath);
-  if (file.mcpServers[entry.name] && !overwrite) {
-    return {
-      ok: false,
-      error: `A "${entry.name}" server already exists in ${scope} scope. Remove it first or use a different name.`,
-    };
-  }
-  file.mcpServers[entry.name] = toStoredEntry(entry);
-  await writeMcpFile(filePath, file);
-  return { ok: true };
+  return withMcpMutationLock(async () => {
+    const file = await readMcpFile(filePath);
+    if (file.mcpServers[entry.name] && !overwrite) {
+      return {
+        ok: false as const,
+        error: `A "${entry.name}" server already exists in ${scope} scope. Remove it first or use a different name.`,
+      };
+    }
+    file.mcpServers[entry.name] = toStoredEntry(entry);
+    await writeMcpFile(filePath, file);
+    return { ok: true as const };
+  });
 }
 
 /** Remove a server from a scope. Returns true if it existed. */
 export async function removeServer(name: string, scope: MCPScope, cwd: string): Promise<boolean> {
   const filePath = scope === "global" ? globalMcpPath() : projectMcpPath(cwd);
-  const file = await readMcpFile(filePath);
-  if (!file.mcpServers[name]) return false;
-  delete file.mcpServers[name];
-  await writeMcpFile(filePath, file);
-  return true;
+  return withMcpMutationLock(async () => {
+    const file = await readMcpFile(filePath);
+    if (!file.mcpServers[name]) return false;
+    delete file.mcpServers[name];
+    await writeMcpFile(filePath, file);
+    return true;
+  });
 }
 
 /** Look up a single server across both scopes (project wins). */

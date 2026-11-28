@@ -1,0 +1,12 @@
+{
+  "id": "scale-through-word",
+  "name": "Scale through word",
+  "kind": "type",
+  "description": "A big uppercase word rises in, then the camera dives through one of its letters: the word scales ~1 to 48x around the letter's counter, which floods with --field-2 until it fills the frame and becomes the next scene's background. A type-driven scene transition; cut to a --field-2 scene right after.",
+  "tags": ["zoom", "scale", "transition", "zoom-through", "counter", "handoff", "field-cut", "dive", "kinetic", "headline"],
+  "fonts": [],
+  "duration": 3,
+  "previewAt": 2.05,
+  "license": "original",
+  "previewLook": "soft-light-ad"
+}

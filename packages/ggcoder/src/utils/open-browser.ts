@@ -1,3 +1,4 @@
+import { withoutQwenRuntimeSecret } from "../tools/safe-env.js";
 import { spawn } from "node:child_process";
 import { platform } from "node:os";
 
@@ -19,6 +20,7 @@ export function openBrowser(url: string): void {
   const args = isWin ? ["url.dll,FileProtocolHandler", url] : [url];
   try {
     const child = spawn(cmd, args, {
+      env: withoutQwenRuntimeSecret(),
       detached: true,
       stdio: "ignore",
       windowsHide: true,

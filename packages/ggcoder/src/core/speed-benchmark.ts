@@ -9,9 +9,12 @@
  *   - Output streaming: at a configurable token rate
  *   - Cache TTL: configurable (5 min baseline vs 1 h optimized)
  *
- * No real API calls are made — the mock uses real `setTimeout` for prefill and
- * output-token latency (so wall-clock measurements are meaningful) but a
- * virtual clock for inter-turn delays (so multi-minute gaps are instant).
+ * No real API calls are made. Prefill and output-token latency go through an
+ * injectable `BenchmarkClock`: the default real clock sleeps with `setTimeout`
+ * and reads `Date.now()`, while `createVirtualBenchmarkClock()` advances a
+ * counter instantly so tests measure the exact simulated times without waiting.
+ * Inter-turn delays always use a separate virtual clock (multi-minute gaps are
+ * instant).
  *
  * Run via vitest:  npx vitest run src/core/speed-benchmark.test.ts
  * Or as a script:  npx tsx src/core/speed-benchmark.ts
@@ -58,6 +61,38 @@ interface CacheEntry {
   tokenCount: number;
 }
 
+// ── Clock ───────────────────────────────────────────────────
+
+/** Time source for simulated latency and its measurement. Both must use the
+ *  same clock, or a fake sleep would measure as ~0 ms. */
+export interface BenchmarkClock {
+  now(): number;
+  sleep(ms: number): Promise<void>;
+}
+
+export const realBenchmarkClock: BenchmarkClock = {
+  now: () => Date.now(),
+  sleep: (ms) => sleep(ms),
+};
+
+/** Fake clock: `sleep` advances `now()` by `ms` without waiting in real time. */
+export function createVirtualBenchmarkClock(): BenchmarkClock {
+  let current = 0;
+  return {
+    now: () => current,
+    sleep: (ms) => {
+      if (ms <= 0) return Promise.resolve();
+      // Advance when the wait ends (next macrotask), like a real timer.
+      return new Promise((resolve) =>
+        setImmediate(() => {
+          current += ms;
+          resolve();
+        }),
+      );
+    },
+  };
+}
+
 // ── Mock Provider Implementation ────────────────────────────
 
 /**
@@ -70,7 +105,7 @@ export class MockBenchmarkProvider {
   private config: MockTimingConfig;
   /** Virtual clock — lets the benchmark simulate multi-minute gaps between
    *  turns without actually sleeping. The cache TTL check uses this, not
-   *  Date.now(). Only prefill/output latency uses real setTimeout. */
+   *  the injected clock. Only prefill/output latency uses `clock`. */
   private virtualNow = 0;
   readonly stats = {
     cacheHits: 0,
@@ -83,8 +118,11 @@ export class MockBenchmarkProvider {
     turns: 0,
   };
 
-  constructor(config: Partial<MockTimingConfig> = {}) {
+  private readonly clock: BenchmarkClock;
+
+  constructor(config: Partial<MockTimingConfig> = {}, clock: BenchmarkClock = realBenchmarkClock) {
     this.config = { ...REALISTIC_TIMING, ...config };
+    this.clock = clock;
   }
 
   /** Update config (e.g., switch TTL for baseline vs optimized run). */
@@ -182,7 +220,7 @@ export class MockBenchmarkProvider {
 
     // Wait for TTFT (network + prefill).
     const ttft = cfg.networkOverheadMs + prefillMs;
-    await sleep(ttft);
+    await this.clock.sleep(ttft);
 
     // Update cache after the request is processed.
     // On a miss: write a fresh entry. On a hit: refresh the TTL and update
@@ -202,7 +240,7 @@ export class MockBenchmarkProvider {
 
     let textAccum = "";
     for (let i = 0; i < outputTokens; i++) {
-      await sleep(cfg.outputMsPerToken);
+      await this.clock.sleep(cfg.outputMsPerToken);
       const chunk = "x";
       textAccum += chunk;
       yield { type: "text_delta" as const, text: chunk };
@@ -281,9 +319,10 @@ export interface BenchmarkResult {
 export async function runBenchmark(
   workload: Workload,
   config: MockTimingConfig,
-  options: { prewarm?: boolean; name?: string } = {},
+  options: { prewarm?: boolean; name?: string; clock?: BenchmarkClock } = {},
 ): Promise<BenchmarkResult> {
-  const provider = new MockBenchmarkProvider(config);
+  const clock = options.clock ?? realBenchmarkClock;
+  const provider = new MockBenchmarkProvider(config, clock);
 
   // Build mock tools.
   const tools = workload.toolNames.map((name) => ({
@@ -320,7 +359,7 @@ export async function runBenchmark(
     // Add user message.
     messages.push({ role: "user", content: turn.prompt });
 
-    const turnStart = Date.now();
+    const turnStart = clock.now();
 
     // Measure TTFT.
     let ttftMs = 0;
@@ -338,7 +377,7 @@ export async function runBenchmark(
 
     for await (const _event of result) {
       if (firstEvent) {
-        ttftMs = Date.now() - turnStart;
+        ttftMs = clock.now() - turnStart;
         firstEvent = false;
       }
     }
@@ -348,7 +387,7 @@ export async function runBenchmark(
     const inputTokens = response.usage.inputTokens + (response.usage.cacheRead ?? 0);
     const outputTokens = response.usage.outputTokens;
 
-    const wallClockMs = Date.now() - turnStart;
+    const wallClockMs = clock.now() - turnStart;
 
     turnMetrics.push({
       turnNumber: i + 1,
@@ -549,7 +588,9 @@ function formatDuration(ms: number): string {
 
 /** Run baseline vs optimized and return the comparison. Uses scaled-down
  *  timing (10× faster than real) so the benchmark completes in seconds. */
-export async function runFullBenchmark(): Promise<ComparisonResult> {
+export async function runFullBenchmark(
+  options: { clock?: BenchmarkClock } = {},
+): Promise<ComparisonResult> {
   const workload = createDefaultWorkload();
 
   // Scale timing down 10× for fast test runs — ratios are preserved.
@@ -569,6 +610,7 @@ export async function runFullBenchmark(): Promise<ComparisonResult> {
     { ...baseConfig, cacheTtlMs: 5 * 60 * 1000 },
     {
       name: "BASELINE (5min TTL, no prewarm)",
+      clock: options.clock,
     },
   );
 
@@ -576,8 +618,23 @@ export async function runFullBenchmark(): Promise<ComparisonResult> {
   const optimized = await runBenchmark(
     workload,
     { ...baseConfig, cacheTtlMs: 60 * 60 * 1000 },
-    { name: "OPTIMIZED (1h TTL + prewarm)", prewarm: true },
+    { name: "OPTIMIZED (1h TTL + prewarm)", prewarm: true, clock: options.clock },
   );
 
   return compareResults(baseline, optimized);
+}
+
+// Run when executed directly (not when imported by tests).
+const isDirectRun =
+  process.argv[1]?.endsWith("speed-benchmark.ts") ||
+  process.argv[1]?.endsWith("speed-benchmark.js") ||
+  process.argv[1]?.endsWith("speed-benchmark");
+
+if (isDirectRun) {
+  runFullBenchmark()
+    .then((comparison) => console.log(formatComparison(comparison)))
+    .catch((err: unknown) => {
+      console.error("Benchmark failed:", err);
+      process.exit(1);
+    });
 }

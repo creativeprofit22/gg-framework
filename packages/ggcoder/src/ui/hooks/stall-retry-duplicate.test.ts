@@ -15,9 +15,7 @@ import { describe, it, expect } from "vitest";
 // sequence that `useAgentLoop`'s `for await` loop processes.
 
 type Event =
-  | { type: "text_delta"; text: string }
-  | { type: "retry"; silent: boolean }
-  | { type: "turn_end" };
+  { type: "text_delta"; text: string } | { type: "retry"; silent: boolean } | { type: "turn_end" };
 
 interface Buffers {
   textVisible: string;

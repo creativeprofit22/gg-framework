@@ -384,7 +384,7 @@ function createPackagePruneFixture() {
     ".yarn/plugins/plugin.cjs",
     ".yarn/versions/version.yml",
   ]);
-  createVersionedPackage(nodeModules, "@anthropic-ai/sandbox-runtime", "0.0.82", [
+  createVersionedPackage(nodeModules, "@anthropic-ai/sandbox-runtime", "0.0.83", [
     "LICENSE",
     "dist/cli.js",
     "vendor/java-proxy-agent/build.ts",

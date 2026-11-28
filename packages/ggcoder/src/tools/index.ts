@@ -175,6 +175,8 @@ export interface CreateToolsOptions {
    * When omitted, no network restriction is applied.
    */
   getNetworkPolicy?: GetNetworkPolicy;
+  /** Who else works in the git checkout rooted at a path (other windows, a parent agent). */
+  getCheckoutSharers?: (root: string) => Promise<string | null>;
   /** Lazily read the OS command-sandbox mode and allowed network domains. */
   getSandboxPolicy?: () => SandboxPolicy;
   /** Lazily read bash yield / inactivity / hard-limit settings. Defaults apply when omitted. */
@@ -400,6 +402,7 @@ export async function createTools(
       opts?.getConcurrencySettings,
       opts?.getHeavySlotOwner,
       toolWrites,
+      opts?.getCheckoutSharers,
     ),
     createTauriPackageTool(cwd, processManager, {
       operations: ops,

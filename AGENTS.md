@@ -57,7 +57,7 @@ pnpm monorepo for GG Coder: a multi-provider coding agent shipped as the `ggcode
 - App-visible agent errors go through `broadcastError` in `app-sidecar.ts`, never a raw provider string.
 - Passing `skills` to `AgentSession` disables skill discovery; Motion relies on this, so keep `assets/motion/skills` out of `assets/skills`.
 - Rust: resolve `~/.gg` paths with `paths::home_dir()` and spawn children through `hide_console`; anything else breaks only on Windows.
-- The packaged sidecar runs Node 22.12.0, not your dev Node. A new native, WASM, lazily loaded or spawned package must be externalized in `bundle-sidecar.mjs` (peers in `RUNTIME_PEERS`). Both fail only in installed builds.
+- The packaged sidecar runs Node 24.22.3, not your dev Node. A new native, WASM, lazily loaded or spawned package must be externalized in `bundle-sidecar.mjs` (peers in `RUNTIME_PEERS`). Both fail only in installed builds.
 - App logs are in `~/.gg/gg-app-sidecar.log`, not `debug.log`.
 
 ## Prompt cache

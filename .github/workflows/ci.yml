@@ -30,7 +30,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        node: [22.x]
+        node: [24.x]
     steps:
       - uses: actions/checkout@v7
 
@@ -190,6 +190,24 @@ jobs:
           ffmpeg -version
           ffprobe -version
 
+      # Motion's render and cue tests launch HyperFrames' browser. Without its
+      # pinned chrome-headless-shell they fall back to the runner's system
+      # Chrome, which moves with every image update (Windows Chrome 158 never
+      # started headless on the 23 Nov 2026 image). `browser ensure` downloads
+      # the pinned build even when a system Chrome exists (`--force` hangs
+      # after downloading in hyperframes 0.8.82); fail if it is not what we get.
+      - name: Ensure HyperFrames' pinned Chrome for Motion tests
+        shell: bash
+        run: |
+          hf="packages/ggcoder/assets/motion/bin/hyperframes.mjs"
+          node "$hf" browser ensure
+          chrome="$(node "$hf" browser path | tail -n 1)"
+          echo "HyperFrames browser: $chrome"
+          case "$(basename "$chrome")" in
+            chrome-headless-shell|chrome-headless-shell.exe) ;;
+            *) echo "Expected HyperFrames' pinned chrome-headless-shell, got: $chrome" >&2; exit 1 ;;
+          esac
+
       # Blocking on every OS, Windows included. This started as a 72-failure
       # Windows backlog that had been invisible because the default PowerShell
       # shell swallowed it (see above); it is now zero, so the leg is a real
@@ -222,7 +240,7 @@ jobs:
 
       - uses: actions/setup-node@v7
         with:
-          node-version: 22.x
+          node-version: 24.x
           cache: pnpm
 
       - uses: dtolnay/rust-toolchain@stable
@@ -319,6 +337,9 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
 
+      # Blocking: the initial JavaScript is what every window loads before it
+      # can render. Past baseline + max(2%, 10KB) the step fails; re-baseline
+      # with `--update --only frontend:initial` only for intended growth.
       - name: Frontend build + initial JavaScript size gate
         shell: bash
         run: |

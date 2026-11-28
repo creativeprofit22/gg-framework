@@ -22,6 +22,32 @@ export interface ChangelogEntry {
 /** Newest first. Prepended by the `/release` flow. */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.121.2",
+    date: "2026-11-27",
+    items: [
+      "Your `Security audit` just got a serious upgrade. I now hunt the bugs that actually cost small teams money: unsigned webhooks, coupons and credits spent twice, private pages a CDN can cache for strangers, and sign-ins that hijack accounts by email. Anything I cannot prove from your code alone goes on a separate `needs validation` list with the exact check to run, so your report stays real findings only.",
+      "Running me on your `Claude` sign-in? You now watch files take shape live as I write them, just like on every other model.",
+    ],
+  },
+  {
+    version: "0.121.1",
+    date: "2026-11-27",
+    items: [
+      'I finally learned when to just talk. While you are asking questions or thinking out loud, I answer and let you lead: no surprise `question cards`, no "want me to...?" nudges and no jumping into `plan mode` before you are ready. You decide when it is time to build.',
+    ],
+  },
+  {
+    version: "0.121.0",
+    date: "2026-11-24",
+    items: [
+      "Every window can now live on its own branch. Open the `Branches` tab in the Git panel and pick one: if another window shares the folder, I give this window its own worktree with your `.env` files copied over, so nobody steps on anyone. Home lists your worktrees, and I always ask before removing one that would lose work.",
+      "Long sessions just got cheaper. When you steer me `mid-run`, I keep going instead of re-sending the whole conversation, and I stopped warming up history that was about to be trimmed anyway. Less waste on every big chat.",
+      "I moved GG onto `Node 24` and upgraded my PDF reader, so documents full of images and Asian-language text come through cleaner, and TypeScript checks now run on the newest language server.",
+      "No more endless spinners. If the engine ever gets stuck, the app lets go after `5 minutes` instead of waiting forever, and Settings opens snappier because the `About` page only loads when you visit it.",
+      "After a long chat gets compacted, I still remember the calls you made when I asked you questions, and I never mistake `Autopilot` answers for your own.",
+    ],
+  },
+  {
     version: "0.120.0",
     date: "2026-11-23",
     items: [

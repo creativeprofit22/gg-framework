@@ -275,7 +275,8 @@ describe("buildSystemPrompt", () => {
     // Local Fork: hashes pin the merged Replies section, which keeps the fork's
     // status list, ADHD reply style and interjection lines on top of upstream's.
     [[], "59de80cdafd0191d88eaa4a881b26c7f2671df86ad5ca9cba4d0834e0e96cffa"],
-    [["ask_user"], "e444706b65a053f57f75ed44332ee729940681c3cbf3d03ead55a4ef6ed985f3"],
+    // The ask_user hash also pins upstream 0.121's "while discussing, answer and stop" line.
+    [["ask_user"], "cd896d3a004e26d5bfb8e03d4000533bc6fd43e68d4d27d46a7efeb0a9f3b2c1"],
   ] as const)(
     "preserves the paragraph-first response policy with tools %j",
     async (toolNames, hash) => {
@@ -360,6 +361,11 @@ describe("buildSystemPrompt", () => {
     // lead-in fixes that without turning every question into a full report.
     expect(prompt).toContain(
       "Before the card, write just enough to choose: the direct answer or what you found, in one to three plain sentences",
+    );
+    // Optional offers on cards turned every discussion reply into a question
+    // and a plan before the user had finished talking it through.
+    expect(prompt).toContain(
+      'While the user is asking or discussing, answer and stop: no question card, no "want me to…?" offer and no plan',
     );
     expect(prompt).toContain("No question? Just end.");
     expect(prompt).not.toContain("is the last line");

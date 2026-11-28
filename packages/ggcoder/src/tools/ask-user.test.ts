@@ -84,6 +84,7 @@ describe("ask_user", () => {
     const prompt = await buildSystemPrompt(os.tmpdir(), undefined, false, undefined, ["ask_user"]);
     expect(prompt).toContain("offer a next step as one plain sentence, not a question");
     expect(prompt).toContain("A real question is an `ask_user` call");
+    expect(prompt).toContain("While the user is asking or discussing, answer and stop");
     // …and never manufactures a question when none exists.
     expect(prompt).toContain("No question? Just end.");
     // The old blocked-only scoping must be gone, not merely softened.

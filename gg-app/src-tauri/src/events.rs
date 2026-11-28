@@ -110,6 +110,30 @@ pub(crate) fn drain_sse_frames(buf: &mut Vec<u8>) -> Vec<String> {
     frames
 }
 
+/// Run `emit` only while the pane identity `(label, pane_id, generation,
+/// session_id)` is still current; says whether it ran. The registry is
+/// unlocked BEFORE `emit`: handing a frame to the webview is not instant, and
+/// holding the registry across it made every proxy command wait on stream
+/// traffic (upstream a6247356).
+pub(crate) fn emit_to_current_pane(
+    map: &Mutex<PaneRegistry>,
+    label: &str,
+    pane_id: &str,
+    generation: u64,
+    session_id: &str,
+    emit: impl FnOnce(),
+) -> bool {
+    let current = {
+        let registry = map.lock_or_recover();
+        pane_identity_is_current(&registry, label, pane_id, generation, session_id)
+    };
+    if !current {
+        return false;
+    }
+    emit();
+    true
+}
+
 /// Connect to exactly one pane identity's SSE stream. The bridge remains valid
 /// only while `(owner label, pane id, generation, session id)` still matches the
 /// registry. Sidecar payload identity is untrusted: frames for any other session
@@ -122,10 +146,9 @@ pub(crate) fn start_event_bridge(
     port: u16,
     session_id: String,
 ) {
-    // Reuse the app's shared HTTP client (cheap Arc clone) so the SSE connect
-    // shares the connection pool with the proxy commands. Reconnects back off
-    // while the daemon stays unreachable.
-    let client = app.state::<reqwest::Client>().inner().clone();
+    // Its own client, not the shared proxy one: that bounds every request
+    // (`SIDECAR_REQUEST_TIMEOUT`), and this stream is long-lived by design.
+    let client = app.state::<EventStreamClient>().inner().0.clone();
     tauri::async_runtime::spawn(async move {
         let mut retry_delay = SSE_RETRY_MIN;
         loop {
@@ -241,18 +264,23 @@ pub(crate) fn start_event_bridge(
             // and never deliver an old session's disconnect to its replacement.
             {
                 let state: State<Windows> = app.state();
-                let registry = state.map.lock_or_recover();
-                if !resolve_owned_pane(&registry, &label, &pane_id).is_some_and(|pane| {
-                    pane.generation == generation && pane.session_id.as_deref() == Some(&session_id)
-                }) {
+                if !emit_to_current_pane(
+                    &state.map,
+                    &label,
+                    &pane_id,
+                    generation,
+                    &session_id,
+                    || {
+                        if let Some(trusted) = connection_lost_envelope(&pane_id, &session_id) {
+                            let _ = app.emit_to(
+                                EventTarget::webview_window(label.clone()),
+                                "agent-event",
+                                trusted,
+                            );
+                        }
+                    },
+                ) {
                     return;
-                }
-                if let Some(trusted) = connection_lost_envelope(&pane_id, &session_id) {
-                    let _ = app.emit_to(
-                        EventTarget::webview_window(label.clone()),
-                        "agent-event",
-                        trusted,
-                    );
                 }
             }
             tokio::time::sleep(retry_delay).await;
@@ -286,6 +314,89 @@ mod tests {
             seen.push(delay.as_secs());
         }
         assert_eq!(seen, [1, 2, 4, 8, 16, 30, 30, 30, 30]);
+    }
+
+    // ── Frame delivery (emit_to_current_pane) ────────────────────────────────
+
+    fn registry(session_id: Option<&str>) -> (Mutex<PaneRegistry>, u64) {
+        let mut registry = PaneRegistry::default();
+        let generation = record_pane_target(
+            &mut registry,
+            "main",
+            PRIMARY_PANE_ID,
+            WorkspaceMode::Code,
+            ChatAgent::General,
+            std::path::PathBuf::from("/work"),
+            None,
+        );
+        registry
+            .get_mut("main")
+            .unwrap()
+            .get_mut(PRIMARY_PANE_ID)
+            .unwrap()
+            .session_id = session_id.map(str::to_string);
+        (Mutex::new(registry), generation)
+    }
+
+    #[test]
+    fn a_frame_is_emitted_with_the_registry_unlocked() {
+        let (map, generation) = registry(Some("sid-1"));
+        let mut emitted = false;
+        assert!(emit_to_current_pane(
+            &map,
+            "main",
+            PRIMARY_PANE_ID,
+            generation,
+            "sid-1",
+            || {
+                assert!(
+                    map.try_lock().is_ok(),
+                    "the pane registry is locked while a frame is handed to the webview"
+                );
+                emitted = true;
+            }
+        ));
+        assert!(emitted);
+    }
+
+    #[test]
+    fn a_frame_for_a_pane_that_changed_session_or_generation_is_dropped() {
+        let (map, generation) = registry(Some("sid-2"));
+        // The pane moved to another session mid-run: the old stream's frames
+        // must not land in the new one.
+        assert!(!emit_to_current_pane(
+            &map,
+            "main",
+            PRIMARY_PANE_ID,
+            generation,
+            "sid-1",
+            || panic!("a frame for a retired session was emitted")
+        ));
+        assert!(!emit_to_current_pane(
+            &map,
+            "main",
+            PRIMARY_PANE_ID,
+            generation + 1,
+            "sid-2",
+            || panic!("a frame for a stale generation was emitted")
+        ));
+        let (empty, empty_generation) = registry(None);
+        assert!(!emit_to_current_pane(
+            &empty,
+            "main",
+            PRIMARY_PANE_ID,
+            empty_generation,
+            "sid-1",
+            || panic!("a frame was emitted for a pane without a session")
+        ));
+        assert!(!emit_to_current_pane(
+            &map,
+            "closed",
+            PRIMARY_PANE_ID,
+            generation,
+            "sid-2",
+            || panic!("a frame was emitted for a window that is gone")
+        ));
     }
 
     // ── SSE frame decoding (drain_sse_frames) ────────────────────────────────

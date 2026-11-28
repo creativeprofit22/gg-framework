@@ -35,6 +35,7 @@ vi.mock("./mcp/index.js", async () => {
       return {
         connectAll: vi.fn(async () => []),
         whenConnected: vi.fn(async () => ({ ok: true as const })),
+        getHiddenTools: vi.fn(() => []),
         dispose: vi.fn(async () => {}),
       };
     }),
@@ -384,6 +385,7 @@ describe("AgentSession MCP identity boundary", () => {
     const manager = (tools: AgentTool[], dispose: () => Promise<void>) => ({
       connectAll: vi.fn(async () => tools),
       whenConnected: vi.fn(async () => ({ ok: true as const })),
+      getHiddenTools: vi.fn(() => []),
       dispose,
     });
 

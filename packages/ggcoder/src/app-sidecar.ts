@@ -212,6 +212,7 @@ import {
 } from "./core/model-registry.js";
 import { resolveStartOrFallback } from "./core/resolve-start.js";
 import { isGitRepo } from "./utils/git.js";
+import { checkoutRoot } from "./core/shared-checkout-guard.js";
 import { createCINotStartedNotify, type GitHubCI } from "./utils/github-ci.js";
 import type { ProjectHealthScan } from "./core/project-health-scan.js";
 import { scoreProjectHealth, type ProjectHealth } from "./core/project-health-score.js";
@@ -910,6 +911,19 @@ async function main(): Promise<void> {
         noteBranchChange: (from, to) => ctx.session.noteBranchChange(from, to),
       }));
   };
+  /**
+   * Who else works in the checkout rooted at `root`, for the bash tool's
+   * branch-switch guard: other live panes whose folder is inside that checkout.
+   */
+  const checkoutSharersFor =
+    (selfId: string) =>
+    async (root: string): Promise<string | null> => {
+      const others = [...sessions.values()].filter((ctx) => ctx.id !== selfId);
+      const roots = await Promise.all(others.map((ctx) => checkoutRoot(ctx.cwd)));
+      const count = roots.filter((found) => found === root).length;
+      if (count === 0) return null;
+      return count === 1 ? "1 other open GG Coder pane" : `${count} other open GG Coder panes`;
+    };
   /** Folders with a branch switch running; one at a time per folder. */
   const gitSwitchesInFlight = new Set<string>();
   const gitBranchSnapshots = new GitBranchSnapshotCache();
@@ -1034,6 +1048,7 @@ async function main(): Promise<void> {
         sessionIdsAt,
         busyAt,
         gitPeersAt,
+        checkoutSharers: checkoutSharersFor(id),
         gitSwitchesInFlight,
         gitBranchSnapshots,
         renameLiveSession,
@@ -1588,6 +1603,8 @@ async function createSession(
     busyAt: (cwd: string) => boolean;
     /** Every live window session in `cwd` (resolved), for a branch switch. */
     gitPeersAt: (cwd: string) => GitSwitchPeer[];
+    /** Who else works in a git checkout root (bash branch-switch guard). */
+    checkoutSharers: (root: string) => Promise<string | null>;
     /** Daemon-wide folders with a branch switch running. */
     gitSwitchesInFlight: Set<string>;
     /** Daemon-wide branch lists, reused while the switcher searches. */
@@ -1636,6 +1653,7 @@ async function createSession(
     sessionIdsAt,
     busyAt,
     gitPeersAt,
+    checkoutSharers,
     gitSwitchesInFlight,
     gitBranchSnapshots,
     renameLiveSession,
@@ -1981,6 +1999,7 @@ async function createSession(
     provider,
     model,
     cwd,
+    getCheckoutSharers: checkoutSharers,
     thinkingLevel,
     sessionId: resumeSessionPath,
     signal: abort.signal,

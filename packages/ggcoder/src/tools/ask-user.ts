@@ -98,7 +98,8 @@ export function createAskUserTool(ask: AskUserHandler): AgentTool<typeof AskUser
       "NEVER answer the user's question with a question. When they ask something, answer it; " +
       "if it is ambiguous, answer the likeliest reading and state your assumption. This tool " +
       "REPLACES only the asking line — still write your answer and findings in the reply. Only for " +
-      "decisions you can't continue without, never permission to do more after a requested answer.",
+      "decisions you can't continue without, never while they are asking or discussing, and never " +
+      "permission to do more after a requested answer.",
     parameters: AskUserParams,
     // The turn is blocked on a human; nothing else in the batch may run first.
     executionMode: "sequential",

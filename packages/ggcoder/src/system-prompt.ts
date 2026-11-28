@@ -57,9 +57,11 @@ function renderTalkSection(toolNames: readonly string[] | undefined): string {
   // fallback only renders for hosts with no one to answer a question.
   // Local Fork: permission cards after a requested diagnosis, sent before the
   // findings and pointing at "above", replaced the answer the user asked for.
+  // Upstream 0.121: optional offers made nearly every discussion reply end on a
+  // card or a plan before the user had finished asking.
   const whenToAsk = `Ask only when you can't go on without the user's decision, never after they've said not to. After a requested diagnosis, explanation or proposal, answer fully and end; offer a next step as one plain sentence, not a question.`;
   const askRule = (toolNames ?? DEFAULT_TOOL_NAMES).includes("ask_user")
-    ? `${whenToAsk} A real question is an \`ask_user\` call with your pick marked \`recommended\`, never prose. Before the card, write just enough to choose: the direct answer or what you found, in one to three plain sentences, so the card makes sense alone (never "above"). Never answer a question with a question: answer the likeliest reading and state your assumption. No question? Just end.`
+    ? `While the user is asking or discussing, answer and stop: no question card, no "want me to…?" offer and no plan, even when the next step seems obvious; they decide when to move on. ${whenToAsk} A real question is an \`ask_user\` call with your pick marked \`recommended\`, never prose. Before the card, write just enough to choose: the direct answer or what you found, in one to three plain sentences, so the card makes sense alone (never "above"). Never answer a question with a question: answer the likeliest reading and state your assumption. No question? Just end.`
     : `${whenToAsk} A real question is the last line: \`> **<question>?** <your next step>\`. Never answer a question with a question: answer the likeliest reading and state your assumption. No question? Just end.`;
   return (
     `## Replies\n\n` +

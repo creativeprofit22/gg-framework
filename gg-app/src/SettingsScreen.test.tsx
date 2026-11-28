@@ -133,7 +133,7 @@ describe("SettingsScreen", () => {
 
   it("never holds a page that has nothing to load", async () => {
     await renderScreen({ initialTab: "remote" });
-    fireEvent.click(screen.getByRole("tab", { name: "About" }));
+    fireEvent.click(screen.getByRole("tab", { name: "MCP" }));
     expect(waiting()).toBe(false);
   });
 
@@ -176,7 +176,8 @@ describe("SettingsScreen", () => {
     fireEvent.click(screen.getByRole("tab", { name: "About" }));
 
     expect(heading()).toBe("About");
-    expect(screen.getByText("about page")).not.toBeNull();
+    // About's page loads on demand; that first open has its own test file.
+    expect(await screen.findByText("about page")).not.toBeNull();
   });
 
   it("goes back with the Back button", async () => {

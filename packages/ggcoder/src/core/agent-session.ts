@@ -255,6 +255,7 @@ import {
   pruneMinimumTokens,
   pruneStaleToolResults,
   shouldPruneToolResults,
+  stablePrefixEnd,
 } from "./compaction/tool-result-pruner.js";
 import { discoverAgents, type AgentDefinition } from "./agents.js";
 import { enhancePrompt, type EnhanceResult } from "../utils/prompt-enhancer.js";
@@ -282,7 +283,11 @@ import {
   detectTextRepetition,
   type CycleDetection,
 } from "./loop-breaker.js";
-import { buildRegroundingMessage, requestTextForRegrounding } from "./regrounding.js";
+import {
+  buildRegroundingMessage,
+  recordUserDecision,
+  requestTextForRegrounding,
+} from "./regrounding.js";
 import {
   buildSemanticLoopJudgePrompt,
   buildSemanticLoopMessage,
@@ -475,6 +480,12 @@ export interface AgentSessionOptions {
   model: string;
   cwd: string;
   baseUrl?: string;
+  /**
+   * Who else works in the git checkout rooted at a path: other app windows, or
+   * a worker's parent agent. Lets the bash tool refuse a branch switch that
+   * would move them too (core/shared-checkout-guard.ts). Unset in a lone CLI.
+   */
+  getCheckoutSharers?: (root: string) => Promise<string | null>;
   /** Replaces the whole system prompt — nothing else is rendered. */
   systemPrompt?: string;
   /**
@@ -510,6 +521,12 @@ export interface AgentSessionOptions {
    */
   maxTurnExtensions?: number;
   thinkingLevel?: ThinkingLevel;
+  /**
+   * Whether Claude Code sessions return a readable summary of the model's
+   * thinking ("summarized") or none ("omitted", Claude Code's default). For
+   * hosts that show reasoning; GG Coder's own UI doesn't.
+   */
+  thinkingDisplay?: "summarized" | "omitted";
   signal?: AbortSignal;
   /** Prefix used for provider prompt-cache routing keys. */
   promptCacheKeyPrefix?: string;
@@ -1097,9 +1114,15 @@ export class AgentSession {
   private deferredCompactionPending = false;
   /** Latest provider count, anchored to the assistant response it measured. */
   private providerContext: { usage: Usage; anchor: Message } | null = null;
+  /** Where the last prune made history stable; becomes the cache anchor on the next step. */
+  private pendingCacheAnchor: Message | null = null;
+  /** The message currently carrying `cacheAnchor` (see applyPendingCacheAnchor). */
+  private cacheAnchored: Message | null = null;
   /** See {@link toolDefinitionChars}. */
   private toolCharsCache: { count: number; chars: number } | null = null;
   private originalRequest = "";
+  /** The user's own ask_user answers this run; they scope the pinned request. */
+  private runUserDecisions: string[] = [];
   // Messages queued by the user while a run is in flight. Drained at the
   // mid-loop steering boundary (user steering wins over the hooks), mirroring
   // the TUI's getSteeringMessages. Each entry carries its own attachments so a
@@ -1201,6 +1224,7 @@ export class AgentSession {
   private baseUrl?: string;
   private maxTokens: number;
   private thinkingLevel?: ThinkingLevel;
+  private readonly thinkingDisplay?: "summarized" | "omitted";
   private customSystemPrompt?: string;
   /** Sub-agent definition body composed into the standard prompt scaffolding. */
   private agentPrompt?: string;
@@ -1313,6 +1337,7 @@ export class AgentSession {
     this.baseUrl = options.baseUrl;
     this.maxTokens = this.resolveMaxTokens(options.model);
     this.thinkingLevel = options.thinkingLevel;
+    this.thinkingDisplay = options.thinkingDisplay;
     this.customSystemPrompt = options.systemPrompt;
     this.agentPrompt = options.agentPrompt;
     this.approvedPlanHydrationDeferred = options.deferApprovedPlanHydration ?? false;
@@ -1518,6 +1543,7 @@ export class AgentSession {
       getVerifyPlan: this.getVerifyPlan,
       findPriorPass: (fingerprint) => this.verificationEvidenceLedger.findPriorPass(fingerprint),
       getBashPath: () => this.settingsManager.get("bashPath"),
+      getCheckoutSharers: this.opts.getCheckoutSharers,
       getNetworkPolicy: () => ({
         mode: this.settingsManager.get("networkMode"),
         allow: this.settingsManager.get("networkAllow"),
@@ -2487,18 +2513,7 @@ export class AgentSession {
         accountId: creds?.accountId,
         approvedPlanPath: this.approvedPlanPath,
       });
-      let activeTokens: number | undefined;
-      if (this.providerContext) {
-        const anchorIndex = this.messages.lastIndexOf(this.providerContext.anchor);
-        if (anchorIndex >= 0) {
-          activeTokens = calculateActiveContextTokens(this.messages, {
-            usage: this.providerContext.usage,
-            pendingMessages: this.messages.slice(anchorIndex + 1),
-          });
-        } else {
-          this.providerContext = null;
-        }
-      }
+      const activeTokens = this.idleActiveContextTokens();
       log("INFO", "compaction", "Pre-run compaction decision", {
         provider: this.provider,
         model: this.model,
@@ -2519,8 +2534,7 @@ export class AgentSession {
         try {
           await this.compact(creds, "automatic");
           if (this.lastCompactionCompacted) {
-            // Re-grounding hook keys off this — the context was just summarized.
-            this.compactionOccurred = true;
+            this.markCompacted();
             this.compactionRetryAfter = 0;
           } else {
             this.compactionRetryAfter = Date.now() + 30_000;
@@ -2610,6 +2624,7 @@ export class AgentSession {
       claudeCode: {
         ...process,
         maxSeedChars: CLAUDE_CODE_SEED_CHARS,
+        ...(this.thinkingDisplay ? { thinkingDisplay: this.thinkingDisplay } : {}),
         ...(resume ? { resume } : {}),
         ...(title ? { title } : {}),
         onSessionId: (id) => {
@@ -3515,6 +3530,13 @@ export class AgentSession {
       this.compactionOccurred = true;
     }
     this.originalRequest = originalRequest;
+    this.runUserDecisions = [];
+  }
+
+  /** The context was just summarized: arm a fresh re-ground note, even if one already ran this run. */
+  private markCompacted(): void {
+    this.compactionOccurred = true;
+    this.regroundingInjected = false;
   }
 
   /**
@@ -3590,6 +3612,9 @@ export class AgentSession {
           // Upstream saves completion-review state whenever verification state
           // changes; the evidence ledger replaced that save point here.
           if (verificationCandidate) await this.persistCompletionReviewState();
+        }
+        if (name === "ask_user" && !event.isError) {
+          this.runUserDecisions = recordUserDecision(this.runUserDecisions, event.result);
         }
         this.hookStats.toolCalls += 1;
         if (event.isError) this.hookStats.toolFailures += 1;
@@ -3942,7 +3967,7 @@ export class AgentSession {
     if (!this.regroundingInjected && this.compactionOccurred) {
       this.regroundingInjected = true;
       this.eventBus.emit("hook", { kind: "regrounding" });
-      return [buildRegroundingMessage(this.originalRequest)];
+      return [buildRegroundingMessage(this.originalRequest, this.runUserDecisions)];
     }
     return null;
   }
@@ -4619,32 +4644,21 @@ export class AgentSession {
             let activeTokens = measureActiveTokens();
 
             // Cheap stale-tool-output pruning before the expensive LLM
-            // compaction check, once the context is big enough for the freed
-            // tokens to be worth a cache rewrite. In-place mutation preserves
-            // anchors; drop the retained usage afterwards since it counted the
-            // pruned content.
-            if (shouldPruneToolResults(activeTokens, policy.targetTokens)) {
-              const cacheCold = this.getCacheExpiryStatus()?.expired ?? false;
-              const pruneResult = pruneStaleToolResults(messages, {
-                minimumTokens: pruneMinimumTokens(activeTokens, cacheCold, policy.targetTokens),
-              });
-              if (pruneResult.pruned) {
-                this.cacheDiagnostics.noteEdit("tool_prune", pruneResult.freedTokens);
-                this.providerContext = null;
-                log("INFO", "compaction", "Pruned stale tool outputs", {
-                  prunedResults: String(pruneResult.prunedResults),
-                  compactedToolCalls: String(pruneResult.compactedToolCalls),
-                  freedTokens: String(pruneResult.freedTokens),
-                });
-                // The measured size counted the pruned content, so take the
-                // freed tokens off it. Never swap the provider's count for a
-                // whole-history estimate here: that estimate rides a shared
-                // chars-per-token ratio, and it once read a 234K-token MiMo
-                // context (23% of 1M) as ~400K and compacted it against a 340K
-                // trigger.
-                activeTokens = Math.max(0, activeTokens - pruneResult.freedTokens);
-              }
-            }
+            // compaction check (see pruneToolOutputsIfDue). First move the
+            // cache anchor the last prune left pending, never in the request
+            // that pruned: that one still reads through the previous anchor.
+            // The new anchor's cache entry is created by reading the previous
+            // request's tail, so a prune in this same step (which edits history
+            // before that tail) waits one step.
+            const freedTokens = this.applyPendingCacheAnchor(messages)
+              ? 0
+              : this.pruneToolOutputsIfDue(messages, activeTokens, policy.targetTokens);
+            // The measured size counted the pruned content, so take the freed
+            // tokens off it. Never swap the provider's count for a
+            // whole-history estimate here: that estimate rides a shared
+            // chars-per-token ratio, and it once read a 234K-token MiMo context
+            // (23% of 1M) as ~400K and compacted it against a 340K trigger.
+            activeTokens = Math.max(0, activeTokens - freedTokens);
 
             if (Date.now() < this.compactionRetryAfter) return messages;
             // An approved plan runs as ONE run, so step boundaries are only
@@ -4706,7 +4720,7 @@ export class AgentSession {
           }
 
           this.compactionRetryAfter = 0;
-          this.compactionOccurred = true;
+          this.markCompacted();
           return this.messages;
         },
       });
@@ -7745,6 +7759,119 @@ export class AgentSession {
     null;
 
   /**
+   * Context size between runs: the last provider usage plus messages appended
+   * after it, or undefined when there is no usable sample (callers estimate).
+   * Same measurement the pre-run compaction check makes.
+   */
+  private idleActiveContextTokens(): number | undefined {
+    if (!this.providerContext) return undefined;
+    const anchorIndex = this.messages.lastIndexOf(this.providerContext.anchor);
+    if (anchorIndex < 0) {
+      this.providerContext = null;
+      return undefined;
+    }
+    return calculateActiveContextTokens(this.messages, {
+      usage: this.providerContext.usage,
+      pendingMessages: this.messages.slice(anchorIndex + 1),
+    });
+  }
+
+  /**
+   * Prune stale tool outputs in place once the context is big enough for the
+   * freed tokens to be worth a cache rewrite (a larger share on a warm cache,
+   * see pruneMinimumTokens). In-place mutation preserves usage anchors; the
+   * retained usage is dropped since it counted the pruned content. Shared by
+   * the in-flight context transform and prewarm so both send the same prefix.
+   * Returns the freed tokens (0 when nothing was pruned).
+   */
+  private pruneToolOutputsIfDue(
+    messages: Message[],
+    activeTokens: number,
+    targetTokens: number,
+  ): number {
+    if (!shouldPruneToolResults(activeTokens, targetTokens)) return 0;
+    const cacheCold = this.getCacheExpiryStatus()?.expired ?? false;
+    const pruneResult = pruneStaleToolResults(messages, {
+      minimumTokens: pruneMinimumTokens(activeTokens, cacheCold, targetTokens),
+    });
+    if (!pruneResult.pruned) return 0;
+    this.cacheDiagnostics.noteEdit("tool_prune", pruneResult.freedTokens);
+    this.providerContext = null;
+    this.pendingCacheAnchor = stablePrefixEnd(messages) ?? null;
+    log("INFO", "compaction", "Pruned stale tool outputs", {
+      prunedResults: String(pruneResult.prunedResults),
+      compactedToolCalls: String(pruneResult.compactedToolCalls),
+      freedTokens: String(pruneResult.freedTokens),
+    });
+    return pruneResult.freedTokens;
+  }
+
+  /**
+   * Mark where the last prune made history stable (`Message.cacheAnchor`), so
+   * the provider can keep a cache breakpoint there. Without it every prune on a
+   * 5-min route re-sent everything after the last entry the tail's lookback
+   * finds; in live sessions a prune freed ~24K tokens and re-wrote ~400K. gg-ai
+   * decides per route whether the hint is used (not on 1-h routes). Returns
+   * true when the anchor moved.
+   */
+  private applyPendingCacheAnchor(messages: Message[]): boolean {
+    const next = this.pendingCacheAnchor;
+    this.pendingCacheAnchor = null;
+    if (!next || next === this.cacheAnchored || !messages.includes(next)) return false;
+    if (this.cacheAnchored) delete this.cacheAnchored.cacheAnchor;
+    next.cacheAnchor = true;
+    this.cacheAnchored = next;
+    return true;
+  }
+
+  /**
+   * Apply the next request's context policy before warming: report when its
+   * pre-run check will compact, otherwise prune now exactly as its first model
+   * step would. The cache is cold here (prewarm only runs once it has lapsed),
+   * so the prune uses the cold-cache floor, as the request would without the
+   * prewarm; afterwards the warm cache's larger floor keeps that request from
+   * pruning again. Prewarm is Anthropic-only, so the cached account id never
+   * changes the window.
+   */
+  private prepareContextForPrewarm(): "compaction_due" | "ready" {
+    if (!this.settingsManager.get("autoCompact")) return "ready";
+    // A post-turn compaction is about to replace this history.
+    if (this.postTurnCompaction) return "compaction_due";
+    const contextWindow = getContextWindow(this.model, {
+      provider: this.provider,
+      accountId: this.lastAccountId,
+    });
+    const policy = resolveCompactionPolicy({
+      provider: this.provider,
+      model: this.model,
+      contextWindow,
+      threshold: this.settingsManager.get("compactThreshold"),
+      compactAtTokens: this.settingsManager.get("compactAtTokens"),
+      accountId: this.lastAccountId,
+      approvedPlanPath: this.approvedPlanPath,
+    });
+    const activeTokens = this.idleActiveContextTokens();
+    if (
+      Date.now() >= this.compactionRetryAfter &&
+      shouldCompact(
+        this.messages,
+        contextWindow,
+        policy.threshold,
+        activeTokens,
+        policy.targetTokens,
+      )
+    ) {
+      return "compaction_due";
+    }
+    this.pruneToolOutputsIfDue(
+      this.messages,
+      activeTokens ?? calculateActiveContextTokens(this.messages),
+      policy.targetTokens,
+    );
+    return "ready";
+  }
+
+  /**
    * Best-effort Anthropic prompt-cache prewarm before the user's next turn
    * (desktop app calls this on the first keystroke after opening a chat or an
    * idle pause). Sends the exact request prefix the next real turn will use —
@@ -7776,6 +7903,16 @@ export class AgentSession {
     // The await above yields: re-check that no run or other prewarm began.
     if (this.runLoopDepth > 0) return { ok: false, reason: "run_active" };
     if (this.prewarmController) return { ok: false, reason: "in_flight" };
+    // Warm what the next request will actually send. Its pre-run check compacts
+    // an over-trigger history (rewriting the whole prefix, so warming now is
+    // waste), and its first model step prunes stale tool outputs when due:
+    // apply that same in-place prune now, so the request finds nothing left to
+    // prune and the warmed prefix matches it. Measured with a live A/B: a 700K
+    // session wrote its full history at the 1-h price here, then rewrote it on
+    // the very next request.
+    if (this.prepareContextForPrewarm() === "compaction_due") {
+      return { ok: false, reason: "compaction_due" };
+    }
     // End at the last user/tool message: the next real turn appends a new user
     // message after the trailing assistant reply, and its cache lookback hits
     // the entry written at this boundary. A request must end on a user turn.
@@ -8337,12 +8474,14 @@ export class AgentSession {
     // Transient sessions (subagent spawns) have no session file — skip.
     if (!this.sessionPath) return;
     const entryId = crypto.randomUUID();
+    // The cache-anchor hint only holds for the live run; never store it.
+    const { cacheAnchor: _cacheAnchor, ...stored } = message;
     const entry: MessageEntry = {
       type: "message",
       id: entryId,
       parentId: this.currentLeafId,
       timestamp: new Date().toISOString(),
-      message,
+      message: stored as Message,
     };
     if (required) {
       await this.sessionManager.appendRequiredMessage(this.sessionPath, entry);

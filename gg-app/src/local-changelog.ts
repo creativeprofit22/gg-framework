@@ -53,10 +53,19 @@ export const CURRENT_LOCAL_RELEASE_NOTES = requireCurrentReleaseNotes(releaseNot
 /** Newest first. Maintained only by the Local Fork release flow. */
 export const LOCAL_CHANGELOG: LocalChangelogEntry[] = [
   {
-    id: "local-2026-11-23-upstream-01200-glm-54-browser",
+    id: "local-2026-11-28-upstream-01212-branch-guard",
     label: CURRENT_LOCAL_RELEASE_NOTES.label,
     date: CURRENT_LOCAL_RELEASE_NOTES.date,
     items: CURRENT_LOCAL_RELEASE_NOTES.sections.flatMap(({ items }) => items),
+  },
+  {
+    id: "local-2026-11-23-upstream-01200-glm-54-browser",
+    label: "Upstream 0.120.0, with GLM-5.4 and a real browser",
+    date: "2026-11-23",
+    items: [
+      "Everything upstream added through `0.120.0` is here: `GLM-5.4`, testing your app in a real `browser`, `Continue with ChatGPT` for any account or workspace, and a calmer message box. The `Upstream` tab tells the full story.",
+      "The activity bar now wears upstream's pixel icons and exact, rolling token count, while still leading with a plain word for what your agent is doing, like `Working`. And when your agent needs to ask you something, it gives a short answer of one to three sentences first, then shows the question card.",
+    ],
   },
   {
     id: "local-2026-11-22-branch-switcher",

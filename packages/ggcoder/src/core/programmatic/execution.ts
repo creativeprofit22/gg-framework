@@ -12,6 +12,7 @@ import { renderResearchPolicy } from "../research-policy.js";
 import { withCorpusSourceRecording } from "../research-sources.js";
 import { TauriPackageParams, TAURI_PACKAGE_BUILD_TIMEOUT_MS } from "../../tools/tauri-package.js";
 import { canonicalRepositoryRoot } from "../tauri-package/paths.js";
+import { parentCheckoutSharers } from "../shared-checkout-guard.js";
 import { accessProgrammaticExecutionRecord, settleProgrammaticExecutionRecord } from "./lifecycle.js";
 import { resolveProgrammaticSpecialist, resolveDirectCommand, type ResolvedDirectCommand, type ResolvedSpecialist } from "./routes.js";
 import { executionResultV1Schema, directCommandResultV1Schema, directExecutionPolicyV1Schema, type DirectCommandSelection, type DirectCommandResult } from "./contracts.js";
@@ -290,6 +291,8 @@ async function executeSelectedCommand(options: ExecutionOptions): Promise<Progra
       agentContext: "project", projectCustomization: false, globalSubagents: false,
       coderSlashCommands: false, selfCorrectionHooks: false, loadExtensions: false,
       orchestrationPrompt: false, subagentWorker: true,
+      // The pane that started this run shares its checkout: refuse branch switches in it.
+      getCheckoutSharers: parentCheckoutSharers([root]),
       allowedTools, allowedMcpServers: APPROVED_RESEARCH_MCP_SERVERS, mcpEnabled: false,
       maxTurns: 30, maxTurnExtensions: 0,
       onEnterPlan: snapshot.task.mutates ? async () => { await session!.setPlanMode(true); } : undefined,

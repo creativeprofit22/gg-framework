@@ -20,6 +20,9 @@ import { z } from "zod";
 import type { AgentTool, ToolContext } from "@kenkaiiii/gg-agent";
 import { useFakeHome } from "../../test-support/fake-home.js";
 import { AgentSession } from "../agent-session.js";
+import type { AgentSessionOptions } from "../agent-session.js";
+import { checkoutRoot } from "../shared-checkout-guard.js";
+import { execFileSync } from "node:child_process";
 import * as bashTool from "../../tools/bash.js";
 import { getPromptCommand } from "../prompt-commands.js";
 import { discoverTauriPackages } from "../tauri-package/discover.js";
@@ -1153,6 +1156,43 @@ describe("real transient specialist execution (mocked provider HTTP only)", () =
     expect(result.status).toBe("failed");
     expect(asks).toBe(2);
     await expect(fs.stat(path.join(root, "not-approved.txt"))).rejects.toThrow();
+  });
+
+  it("guards branch switches in the shared checkout for a mutating specialist", async () => {
+    await fs.writeFile(
+      path.join(home, ".gg/commands/setup-sweep.md"),
+      "---\nname: setup-sweep\ndescription: fixture\n---\nWrite only after approval.\n",
+    );
+    const seeded = await state();
+    seeded.records.forEach((record) => {
+      record.opportunity.route = { status: "routable", specialistCommand: "setup-sweep" };
+    });
+    await json(path.join(root, PROGRAMMATIC_STATE_PATH), seeded);
+    const file = path.join(root, ".gg/programmatic/profile.json");
+    const profile = JSON.parse(await fs.readFile(file, "utf8"));
+    profile.profile.scanners[0].specialistCommand = "setup-sweep";
+    await json(file, profile);
+    provider(() => textResponse());
+    let sharers: ((root: string) => Promise<string | null>) | undefined;
+    let tools: readonly string[] | undefined;
+    const initialize = AgentSession.prototype.initialize;
+    vi.spyOn(AgentSession.prototype, "initialize").mockImplementation(async function (
+      this: AgentSession,
+    ) {
+      const opts = (this as unknown as { opts: AgentSessionOptions }).opts;
+      sharers = opts.getCheckoutSharers;
+      tools = opts.allowedTools;
+      await initialize.call(this);
+    });
+    await executeProgrammaticOpportunity(options());
+    expect(tools).toContain("bash");
+    expect(sharers).toBeTypeOf("function");
+    // Sharers resolve lazily, so the checkout can become a git repo after the run.
+    execFileSync("git", ["init", "-q"], { cwd: root });
+    const checkout = await checkoutRoot(root);
+    expect(checkout).not.toBeNull();
+    expect(await sharers!(checkout!)).toContain("the agent that started you");
+    expect(await sharers!(path.join(checkout!, "elsewhere"))).toBeNull();
   });
 
   it("separately approves real Tauri setup, calibration and packaging while preserving evidence gates", async () => {
